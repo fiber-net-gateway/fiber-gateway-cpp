@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <netinet/in.h>
 #include <utility>
 
 #include <sys/socket.h>
@@ -33,6 +34,69 @@ void record_callback(void *raw_ctx, fiber::common::IoErr err) noexcept {
     auto *ctx = static_cast<CallbackResult *>(raw_ctx);
     ++ctx->calls;
     ctx->err = err;
+}
+
+bool create_connected_tcp_sockets(int &server_fd, int &client_fd) {
+    server_fd = -1;
+    client_fd = -1;
+    int listener_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (listener_fd < 0) {
+        return false;
+    }
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::bind(listener_fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0 ||
+        ::listen(listener_fd, 1) != 0) {
+        (void) ::close(listener_fd);
+        return false;
+    }
+
+    socklen_t address_len = sizeof(address);
+    if (::getsockname(listener_fd, reinterpret_cast<sockaddr *>(&address), &address_len) != 0) {
+        (void) ::close(listener_fd);
+        return false;
+    }
+
+    client_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (client_fd < 0 || ::connect(client_fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        if (client_fd >= 0) {
+            (void) ::close(client_fd);
+            client_fd = -1;
+        }
+        (void) ::close(listener_fd);
+        return false;
+    }
+
+    server_fd = ::accept4(listener_fd, nullptr, nullptr, SOCK_CLOEXEC);
+    (void) ::close(listener_fd);
+    if (server_fd < 0) {
+        (void) ::close(client_fd);
+        client_fd = -1;
+        return false;
+    }
+    return true;
+}
+
+struct HalfCloseCallbackCtx {
+    fiber::net::detail::RWFd *rwfd = nullptr;
+    int read_calls = 0;
+    int terminal_calls = 0;
+    bool saw_eof = false;
+};
+
+void on_half_close_read(void *raw_ctx, fiber::common::IoErr err) noexcept {
+    auto *ctx = static_cast<HalfCloseCallbackCtx *>(raw_ctx);
+    ++ctx->read_calls;
+    char byte = 0;
+    ctx->saw_eof = err == fiber::common::IoErr::None && ::recv(ctx->rwfd->fd(), &byte, 1, 0) == 0;
+    (void) ctx->rwfd->clear_read_callback(&on_half_close_read, ctx);
+}
+
+void on_half_close_terminal(void *raw_ctx, fiber::common::IoErr) noexcept {
+    auto *ctx = static_cast<HalfCloseCallbackCtx *>(raw_ctx);
+    ++ctx->terminal_calls;
 }
 
 struct PersistentReadCallbackCtx {
@@ -160,6 +224,95 @@ TEST(RWFdTest, CloseCancelsRegisteredCallbacks) {
     EXPECT_EQ(read_result.err, fiber::common::IoErr::Canceled);
     EXPECT_EQ(write_result.calls, 1);
     EXPECT_EQ(write_result.err, fiber::common::IoErr::Canceled);
+}
+
+TEST(RWFdTest, PeerWriteHalfCloseIsReadableButNotTerminal) {
+    int server_fd = -1;
+    int client_fd = -1;
+    ASSERT_TRUE(create_connected_tcp_sockets(server_fd, client_fd));
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, server_fd);
+    HalfCloseCallbackCtx ctx{&rwfd};
+    fiber::common::IoErr set_read_err = fiber::common::IoErr::Invalid;
+    fiber::common::IoErr set_terminal_err = fiber::common::IoErr::Invalid;
+    fiber::common::IoErr clear_terminal_err = fiber::common::IoErr::Invalid;
+    bool terminal_before_close = true;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        set_read_err = rwfd.set_read_callback(&on_half_close_read, &ctx);
+        set_terminal_err = rwfd.set_terminal_callback(&on_half_close_terminal, &ctx);
+        if (::shutdown(client_fd, SHUT_WR) != 0) {
+            rwfd.close();
+            (void) ::close(client_fd);
+            client_fd = -1;
+            loop.stop();
+            co_return;
+        }
+        for (int i = 0; i < 100 && ctx.read_calls == 0; ++i) {
+            co_await fiber::async::sleep(1ms);
+        }
+        co_await fiber::async::sleep(10ms);
+        terminal_before_close = rwfd.terminal();
+        clear_terminal_err = rwfd.clear_terminal_callback(&on_half_close_terminal, &ctx);
+        rwfd.close();
+        (void) ::close(client_fd);
+        client_fd = -1;
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_EQ(set_read_err, fiber::common::IoErr::None);
+    EXPECT_EQ(set_terminal_err, fiber::common::IoErr::None);
+    EXPECT_EQ(clear_terminal_err, fiber::common::IoErr::None);
+    EXPECT_EQ(ctx.read_calls, 1);
+    EXPECT_TRUE(ctx.saw_eof);
+    EXPECT_EQ(ctx.terminal_calls, 0);
+    EXPECT_FALSE(terminal_before_close);
+}
+
+TEST(RWFdTest, PeerResetMarksTerminalAndNotifiesOnce) {
+    int server_fd = -1;
+    int client_fd = -1;
+    ASSERT_TRUE(create_connected_tcp_sockets(server_fd, client_fd));
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, server_fd);
+    CallbackResult terminal_result;
+    fiber::common::IoErr set_terminal_err = fiber::common::IoErr::Invalid;
+    bool reset_sent = false;
+    bool terminal_before_close = false;
+    int calls_before_close = 0;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        set_terminal_err = rwfd.set_terminal_callback(&record_callback, &terminal_result);
+        linger reset_linger{1, 0};
+        if (::setsockopt(client_fd, SOL_SOCKET, SO_LINGER, &reset_linger, sizeof(reset_linger)) == 0) {
+            reset_sent = true;
+            (void) ::close(client_fd);
+            client_fd = -1;
+        }
+        for (int i = 0; i < 100 && terminal_result.calls == 0; ++i) {
+            co_await fiber::async::sleep(1ms);
+        }
+        terminal_before_close = rwfd.terminal();
+        calls_before_close = terminal_result.calls;
+        rwfd.close();
+        if (client_fd >= 0) {
+            (void) ::close(client_fd);
+            client_fd = -1;
+        }
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_EQ(set_terminal_err, fiber::common::IoErr::None);
+    EXPECT_TRUE(reset_sent);
+    EXPECT_EQ(calls_before_close, 1);
+    EXPECT_TRUE(terminal_before_close);
+    EXPECT_EQ(terminal_result.calls, 1);
 }
 
 TEST(RWFdTest, ClearCallbackRequiresMatchingPair) {

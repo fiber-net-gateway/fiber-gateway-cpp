@@ -2,6 +2,7 @@
 #define FIBER_HTTP_HTTP_EXCHANGE_H
 
 #include <chrono>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -15,6 +16,7 @@
 #include "../common/NonMovable.h"
 #include "../common/mem/BufPool.h"
 #include "../common/mem/IoBufChain.h"
+#include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
 #include "../net/TcpSocketOptions.h"
 #include "../net/TlsOptions.h"
@@ -78,6 +80,8 @@ struct HttpResponseStats {
 
 class HttpExchange : public common::NonCopyable, public common::NonMovable {
 public:
+    class ResponseChannelClosedAwaiter;
+
     struct RequestHeaderRefs {
         const HttpHeaders::HeaderField *host = nullptr;
         const HttpHeaders::HeaderField *content_type = nullptr;
@@ -110,6 +114,10 @@ public:
     mem::BufPool &pool() noexcept { return pool_; }
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept { return remote_addr_; }
     [[nodiscard]] const HttpResponseStats &response_stats() const noexcept { return response_stats_; }
+    // This is response-direction state: request EOF/END_STREAM alone does not
+    // close the channel while the peer can still receive a response.
+    [[nodiscard]] bool response_channel_closed() const noexcept;
+    [[nodiscard]] ResponseChannelClosedAwaiter wait_response_channel_closed() noexcept;
 
     fiber::async::Task<common::IoResult<mem::IoBufChain>>
     read_body(std::size_t max_bytes, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -164,6 +172,44 @@ private:
     bool request_close_ = false;
     bool request_keep_alive_ = false;
     HttpExchangeIo *io_ = nullptr;
+    ResponseChannelClosedAwaiter *response_channel_waiter_ = nullptr;
+};
+
+class HttpExchange::ResponseChannelClosedAwaiter : public common::NonCopyable, public common::NonMovable {
+public:
+    explicit ResponseChannelClosedAwaiter(HttpExchange &exchange) noexcept;
+    ~ResponseChannelClosedAwaiter() noexcept;
+
+    bool await_ready() noexcept;
+    bool await_suspend(std::coroutine_handle<> continuation) noexcept;
+    common::IoResult<void> await_resume() noexcept;
+    [[nodiscard]] bool completed() const noexcept { return completed_; }
+
+private:
+    enum class State : std::uint8_t {
+        Created,
+        Arming,
+        Armed,
+        ResumeQueued,
+        Ready,
+        Completed,
+        Abandoned,
+    };
+
+    static void on_response_channel_closed(void *ctx) noexcept;
+    static void on_resume(ResponseChannelClosedAwaiter *awaiter) noexcept;
+
+    void detach_waiter() noexcept;
+    void make_ready(common::IoErr error) noexcept;
+
+    HttpExchange *exchange_ = nullptr;
+    HttpExchangeIo *registered_io_ = nullptr;
+    event::EventLoop *loop_ = nullptr;
+    std::coroutine_handle<> continuation_{};
+    event::EventLoop::DeferEntry resume_entry_{};
+    common::IoErr result_error_ = common::IoErr::None;
+    State state_ = State::Created;
+    bool completed_ = false;
 };
 
 using HttpHandler = std::function<fiber::async::Task<void>(HttpExchange &)>;

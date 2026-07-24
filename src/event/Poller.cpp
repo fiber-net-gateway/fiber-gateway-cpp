@@ -48,6 +48,9 @@ std::uint32_t to_epoll_events(Poller::Event events, Poller::Mode mode) {
     if (bits & to_mask(Poller::Event::Write)) {
         mask |= EPOLLOUT;
     }
+    if (bits & to_mask(Poller::Event::Terminal)) {
+        mask |= EPOLLERR | EPOLLHUP;
+    }
     if (mask) {
         mask |= EPOLLERR | EPOLLHUP;
         auto mode_bits = to_mask(mode);

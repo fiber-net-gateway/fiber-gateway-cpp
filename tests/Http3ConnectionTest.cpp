@@ -553,6 +553,83 @@ TEST(Http3ConnectionTest, StartsOverOpenQuicConnection) {
     group.join();
 }
 
+TEST(Http3ConnectionTest, ServerResponseChannelWaitCompletesOnStopSending) {
+    struct ResponseChannelOutcome {
+        fiber::common::IoResult<void> wait_result = std::unexpected(fiber::common::IoErr::Invalid);
+        bool initial_closed = true;
+        bool final_closed = false;
+    };
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto handler_started = std::make_shared<std::promise<void>>();
+    auto started_future = handler_started->get_future();
+    auto outcome_promise = std::make_shared<std::promise<ResponseChannelOutcome>>();
+    auto outcome_future = outcome_promise->get_future();
+    ctx.handler = [handler_started, outcome_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        ResponseChannelOutcome outcome;
+        outcome.initial_closed = exchange.response_channel_closed();
+        handler_started->set_value();
+        outcome.wait_result = co_await exchange.wait_response_channel_closed();
+        outcome.final_closed = exchange.response_channel_closed();
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/response-channel-stop"},
+    };
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        feed_stream(quic, 0, request, true);
+        feed_done.set_value();
+        co_return;
+    });
+
+    ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(started_future.wait_for(2s), std::future_status::ready);
+
+    auto stop_result = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
+    auto stop_future = stop_result->get_future();
+    fiber::async::spawn(group.at(0), [&quic, stop_result]() -> fiber::async::DetachedTask {
+        fiber::quic::QuicStopSendingFrame stop{};
+        stop.id = 0;
+        stop.error_code = 42;
+        stop_result->set_value(quic.recv_stop_sending_frame(stop));
+        co_return;
+    });
+
+    ASSERT_EQ(stop_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(stop_future.get().has_value());
+    ASSERT_EQ(outcome_future.wait_for(2s), std::future_status::ready);
+    ResponseChannelOutcome outcome = outcome_future.get();
+    EXPECT_FALSE(outcome.initial_closed);
+    EXPECT_TRUE(outcome.wait_result.has_value());
+    EXPECT_TRUE(outcome.final_closed);
+
+    h3.close();
+    group.stop();
+    group.join();
+}
+
 TEST(Http3ConnectionTest, ClientStopsAcceptingRequestsWhenQuicShutdownBegins) {
     fiber::event::EventLoopGroup group(1);
     group.start();

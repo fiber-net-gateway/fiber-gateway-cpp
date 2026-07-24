@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "HttpTransportStub.h"
+#include "async/Sleep.h"
 #include "async/Spawn.h"
 #include "async/Task.h"
 #include "common/IoError.h"
@@ -125,6 +126,11 @@ public:
     [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_; }
 
+    void simulate_terminal(fiber::common::IoErr err = fiber::common::IoErr::ConnReset) noexcept {
+        notify_terminal(err);
+    }
+    [[nodiscard]] bool response_wait_registered() const noexcept { return terminal_callback_registered(); }
+
 private:
     void record_write() {
         metrics_.events.push_back(TransportEvent::Write);
@@ -195,6 +201,51 @@ TEST(Http1ConnectionTest, WaitsBeforeFirstReadUsesHeaderTimeoutAndSkipsWaitForPi
     ASSERT_NE(wait_pos, metrics.events.end());
     ASSERT_NE(read_pos, metrics.events.end());
     EXPECT_LT(wait_pos, read_pos);
+}
+
+TEST(Http1ConnectionTest, ResponseChannelWaitUsesTransportTerminalCallback) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    auto wait_result = std::make_shared<fiber::common::IoResult<void>>(std::unexpected(fiber::common::IoErr::Invalid));
+    auto initial_closed = std::make_shared<bool>(true);
+    auto final_closed = std::make_shared<bool>(false);
+    std::promise<void> done_promise;
+    auto done_future = done_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        TransportMetrics metrics;
+        auto transport = std::make_unique<RecordingHttp1Transport>(
+                group.at(0), metrics, "GET /wait HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n");
+        RecordingHttp1Transport *transport_ptr = transport.get();
+
+        fiber::http::HttpHandler handler = [wait_result, initial_closed, final_closed](
+                                                   fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            *initial_closed = exchange.response_channel_closed();
+            *wait_result = co_await exchange.wait_response_channel_closed();
+            *final_closed = exchange.response_channel_closed();
+            co_return;
+        };
+
+        fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+        fiber::async::spawn([transport_ptr]() -> fiber::async::DetachedTask {
+            while (!transport_ptr->response_wait_registered()) {
+                co_await fiber::async::sleep(1ms);
+            }
+            transport_ptr->simulate_terminal();
+        });
+        co_await connection.run();
+        done_promise.set_value();
+        co_return;
+    });
+
+    ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+
+    EXPECT_FALSE(*initial_closed);
+    EXPECT_TRUE(wait_result->has_value());
+    EXPECT_TRUE(*final_closed);
 }
 
 } // namespace

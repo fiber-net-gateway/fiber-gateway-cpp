@@ -39,7 +39,19 @@ struct OutgoingHeaderBlockView {
 
 class HttpExchangeIo {
 public:
+    using ResponseChannelClosedCallback = void (*)(void *ctx) noexcept;
+
     virtual ~HttpExchangeIo() = default;
+
+    // One-shot notification that this exchange can no longer deliver response
+    // bytes. Normal completion of the request receive direction is not enough.
+    // Registration invokes callback synchronously when already closed. Clear
+    // removes only the matching callback/context pair.
+    [[nodiscard]] virtual bool response_channel_closed() const noexcept = 0;
+    virtual common::IoErr set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                               void *ctx) noexcept = 0;
+    virtual common::IoErr clear_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                                 void *ctx) noexcept = 0;
 
     virtual fiber::async::Task<common::IoResult<mem::IoBufChain>>
     read_body(HttpExchange &exchange, size_t max_bytes, std::chrono::milliseconds timeout) noexcept = 0;

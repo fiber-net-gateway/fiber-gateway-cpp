@@ -39,6 +39,12 @@ public:
 
     void start_read_loop(event::EventLoop &loop) noexcept;
 
+    [[nodiscard]] bool response_channel_closed() const noexcept override { return stream_.send_aborted(); }
+    common::IoErr set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                       void *ctx) noexcept override;
+    common::IoErr clear_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                         void *ctx) noexcept override;
+
     fiber::async::Task<common::IoResult<mem::IoBufChain>>
     read_body(HttpExchange &exchange, std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept override;
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,

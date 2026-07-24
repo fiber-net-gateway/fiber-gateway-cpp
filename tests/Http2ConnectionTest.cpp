@@ -19,6 +19,7 @@
 
 #include "async/Sleep.h"
 #include "async/Spawn.h"
+#include "async/Timeout.h"
 #include "common/IoError.h"
 #include "event/EventLoopGroup.h"
 
@@ -5211,6 +5212,73 @@ TEST(Http2ConnectionTest, ServerReadBodyReturnsCanceledWhenPeerResetsStreamWhile
     ASSERT_TRUE(outcome.result.has_value());
     ASSERT_FALSE(read_result->has_value());
     EXPECT_EQ(read_result->error(), fiber::common::IoErr::Canceled);
+}
+
+TEST(Http2ConnectionTest, ServerResponseChannelWaitObservesPeerResetBeforeHandlerDispatch) {
+    std::string first = std::string(kClientConnectionPreface);
+    first += make_frame(0, 0x4, 0x0, 0, {});
+    first += build_headers_frame_bytes(1,
+                                       {
+                                               {":method", "GET"},
+                                               {":scheme", "https"},
+                                               {":path", "/response-channel-reset"},
+                                               {":authority", "example.com"},
+                                       },
+                                       false);
+
+    std::string rst_payload(4, '\0');
+    std::string second = make_frame(4, 0x3, 0x0, 1, rst_payload);
+
+    auto initial_closed = std::make_shared<bool>(true);
+    auto final_closed = std::make_shared<bool>(false);
+    auto wait_result = std::make_shared<fiber::common::IoResult<void>>(std::unexpected(fiber::common::IoErr::Invalid));
+    fiber::http::HttpHandler handler = [initial_closed, final_closed,
+                                        wait_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *initial_closed = exchange.response_channel_closed();
+        *wait_result = co_await exchange.wait_response_channel_closed();
+        *final_closed = exchange.response_channel_closed();
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(first), std::move(second)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_TRUE(*initial_closed);
+    EXPECT_TRUE(wait_result->has_value());
+    EXPECT_TRUE(*final_closed);
+}
+
+TEST(Http2ConnectionTest, PeerEndStreamDoesNotCloseResponseChannel) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/request-finished"},
+                                                 {":authority", "example.com"},
+                                         },
+                                         true);
+
+    auto closed_before = std::make_shared<bool>(true);
+    auto closed_after = std::make_shared<bool>(true);
+    auto wait_result = std::make_shared<fiber::common::IoResult<void>>(std::unexpected(fiber::common::IoErr::Invalid));
+    fiber::http::HttpHandler handler = [closed_before, closed_after,
+                                        wait_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *closed_before = exchange.response_channel_closed();
+        *wait_result = co_await fiber::async::timeout_for(
+                [&exchange]() { return exchange.wait_response_channel_closed(); }, std::chrono::milliseconds(1));
+        *closed_after = exchange.response_channel_closed();
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    EXPECT_FALSE(*closed_before);
+    ASSERT_FALSE(wait_result->has_value());
+    EXPECT_EQ(wait_result->error(), fiber::common::IoErr::TimedOut);
+    EXPECT_FALSE(*closed_after);
 }
 
 TEST(Http2ConnectionTest, ServerReadBodyReplenishesStreamWindowAfterCrossingLowWatermark) {
