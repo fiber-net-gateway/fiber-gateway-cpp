@@ -3,7 +3,9 @@
 #include "../src/protocol/TokenUsage.h"
 #include "../src/provider/ProviderErrorClassifier.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <string>
 #include <string_view>
 
@@ -14,6 +16,18 @@ namespace {
 
 std::string_view view(const mem::IoBuf &buffer) {
     return {reinterpret_cast<const char *>(buffer.readable_data()), buffer.readable()};
+}
+
+mem::IoBuf make_buffer(std::string_view input) {
+    mem::IoBuf buffer = mem::IoBuf::allocate(std::max<std::size_t>(input.size(), 1));
+    if (!buffer) {
+        return {};
+    }
+    if (!input.empty()) {
+        std::memcpy(buffer.writable_data(), input.data(), input.size());
+        buffer.commit(input.size());
+    }
+    return buffer;
 }
 
 TEST(LlmProtocolTest, EncodesProtocolSpecificErrors) {
@@ -79,31 +93,145 @@ TEST(LlmProtocolTest, ExtractsAnthropicResponseAndPartialEventUsage) {
     EXPECT_EQ(event->output, 7);
 }
 
-TEST(LlmProtocolTest, ParsesSseAcrossChunksAndNormalizesCrLf) {
-    SseParser parser(LlmWireProtocol::AnthropicMessages);
-    ASSERT_TRUE(parser.feed("event: message_start\r\ndata: {\"type\":", false));
+TEST(LlmProtocolTest, ParsesSseAcrossChunksAndAssemblesSplitData) {
+    SseParser parser;
+    mem::IoBuf first = make_buffer("event: message_start\r\ndata: {\"type\":");
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(parser.feed(first));
     EXPECT_EQ(parser.next(), SseParseStatus::NeedMore);
-    ASSERT_TRUE(parser.feed("\"message_start\"}\r\n\r\n", false));
+
+    mem::IoBuf second = make_buffer("\"message_start\"}\r\n\r\n");
+    ASSERT_TRUE(second);
+    ASSERT_TRUE(parser.feed(second));
     ASSERT_EQ(parser.next(), SseParseStatus::Event);
-    EXPECT_EQ(parser.event().event_type, "message_start");
     EXPECT_EQ(parser.event().data, R"({"type":"message_start"})");
-    EXPECT_EQ(parser.event().encoded, "event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
     EXPECT_EQ(parser.next(), SseParseStatus::NeedMore);
-    ASSERT_TRUE(parser.feed({}, true));
+    ASSERT_TRUE(parser.finish());
     EXPECT_EQ(parser.next(), SseParseStatus::Complete);
 }
 
-TEST(LlmProtocolTest, EmitsOnlyOneOpenAiDoneMarker) {
-    SseParser parser(LlmWireProtocol::OpenAiChatCompletions);
-    ASSERT_TRUE(parser.feed("data: {\"id\":1}\n\ndata: [DONE]\n\n"
-                            "data: [DONE]\n\n",
-                            true));
+TEST(LlmProtocolTest, BorrowsContiguousEventData) {
+    constexpr std::string_view input = "event: delta\r\ndata: {\"id\":1}\r\n\r\n";
+    mem::IoBuf buffer = make_buffer(input);
+    ASSERT_TRUE(buffer);
+    const std::string_view bytes = view(buffer);
+
+    SseParser parser;
+    ASSERT_TRUE(parser.feed(buffer));
+    ASSERT_EQ(parser.next(), SseParseStatus::Event);
+    EXPECT_EQ(parser.event().data, R"({"id":1})");
+    EXPECT_EQ(parser.event().data.data(), bytes.data() + bytes.find(R"({"id":1})"));
+}
+
+TEST(LlmProtocolTest, RetainsContiguousDataWhenOnlyEventEndIsSplit) {
+    mem::IoBuf data = make_buffer("data: retained\n");
+    mem::IoBuf event_end = make_buffer("\n");
+    ASSERT_TRUE(data);
+    ASSERT_TRUE(event_end);
+    const std::string_view input = view(data);
+    const char *expected = input.data() + input.find("retained");
+
+    SseParser parser;
+    ASSERT_TRUE(parser.feed(data));
+    EXPECT_EQ(parser.next(), SseParseStatus::NeedMore);
+    ASSERT_TRUE(parser.feed(event_end));
+    ASSERT_EQ(parser.next(), SseParseStatus::Event);
+    EXPECT_EQ(parser.event().data, "retained");
+    EXPECT_EQ(parser.event().data.data(), expected);
+}
+
+TEST(LlmProtocolTest, PreservesEveryDoneDataEvent) {
+    mem::IoBuf buffer = make_buffer("data: {\"id\":1}\n\ndata: [DONE]\n\ndata: [DONE]\n\n");
+    ASSERT_TRUE(buffer);
+    SseParser parser;
+    ASSERT_TRUE(parser.feed(buffer));
     ASSERT_EQ(parser.next(), SseParseStatus::Event);
     EXPECT_EQ(parser.event().data, R"({"id":1})");
     ASSERT_EQ(parser.next(), SseParseStatus::Event);
-    EXPECT_TRUE(parser.event().terminal);
+    EXPECT_EQ(parser.event().data, "[DONE]");
+    ASSERT_EQ(parser.next(), SseParseStatus::Event);
+    EXPECT_EQ(parser.event().data, "[DONE]");
+    EXPECT_EQ(parser.next(), SseParseStatus::NeedMore);
+    ASSERT_TRUE(parser.finish());
     EXPECT_EQ(parser.next(), SseParseStatus::Complete);
-    EXPECT_TRUE(parser.done_seen());
+}
+
+TEST(LlmProtocolTest, JoinsMultipleDataLinesAndIgnoresOtherFields) {
+    mem::IoBuf buffer = make_buffer(": ping\r\nid: 7\r\nevent: delta\r\ndata: first\r\ndata: second\r\n\r\n");
+    ASSERT_TRUE(buffer);
+    SseParser parser;
+    ASSERT_TRUE(parser.feed(buffer));
+    ASSERT_EQ(parser.next(), SseParseStatus::Event);
+    EXPECT_EQ(parser.event().data, "first\nsecond");
+}
+
+TEST(LlmProtocolTest, ParsesAnEventAcrossEveryByteSplit) {
+    constexpr std::string_view input = "event: delta\r\ndata: {\"message\":\"hello\"}\r\n\r\n";
+    for (std::size_t split = 1; split < input.size(); ++split) {
+        SCOPED_TRACE(split);
+        SseParser parser;
+        mem::IoBuf first = make_buffer(input.substr(0, split));
+        mem::IoBuf second = make_buffer(input.substr(split));
+        ASSERT_TRUE(first);
+        ASSERT_TRUE(second);
+        std::size_t event_count = 0;
+        ASSERT_TRUE(parser.feed(first));
+        SseParseStatus status = parser.next();
+        while (status == SseParseStatus::Event) {
+            EXPECT_EQ(parser.event().data, R"({"message":"hello"})");
+            ++event_count;
+            status = parser.next();
+        }
+        ASSERT_EQ(status, SseParseStatus::NeedMore);
+        ASSERT_TRUE(parser.feed(second));
+        status = parser.next();
+        while (status == SseParseStatus::Event) {
+            EXPECT_EQ(parser.event().data, R"({"message":"hello"})");
+            ++event_count;
+            status = parser.next();
+        }
+        EXPECT_EQ(event_count, 1u);
+        EXPECT_EQ(status, SseParseStatus::NeedMore);
+        ASSERT_TRUE(parser.finish());
+        EXPECT_EQ(parser.next(), SseParseStatus::Complete);
+    }
+}
+
+TEST(LlmProtocolTest, ValidatesUtf8AcrossChunksAndRejectsIncompleteInput) {
+    const std::string input = "data: 你好\n\n";
+    const std::string_view bytes = input;
+    mem::IoBuf first = make_buffer(bytes.substr(0, 8));
+    mem::IoBuf second = make_buffer(bytes.substr(8));
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+
+    SseParser parser;
+    ASSERT_TRUE(parser.feed(first));
+    EXPECT_EQ(parser.next(), SseParseStatus::NeedMore);
+    ASSERT_TRUE(parser.feed(second));
+    ASSERT_EQ(parser.next(), SseParseStatus::Event);
+    EXPECT_EQ(parser.event().data, "你好");
+    EXPECT_EQ(parser.next(), SseParseStatus::NeedMore);
+    ASSERT_TRUE(parser.finish());
+    EXPECT_EQ(parser.next(), SseParseStatus::Complete);
+
+    mem::IoBuf truncated = make_buffer(std::string_view(input).substr(0, 8));
+    ASSERT_TRUE(truncated);
+    SseParser invalid;
+    ASSERT_TRUE(invalid.feed(truncated));
+    EXPECT_EQ(invalid.next(), SseParseStatus::NeedMore);
+    EXPECT_FALSE(invalid.finish());
+    EXPECT_EQ(invalid.error(), SseParseError::InvalidUtf8);
+    EXPECT_EQ(invalid.next(), SseParseStatus::Error);
+}
+
+TEST(LlmProtocolTest, RejectsOversizedLogicalData) {
+    mem::IoBuf buffer = make_buffer("data: 12345\n\n");
+    ASSERT_TRUE(buffer);
+    SseParser parser(4);
+    ASSERT_TRUE(parser.feed(buffer));
+    EXPECT_EQ(parser.next(), SseParseStatus::Error);
+    EXPECT_EQ(parser.error(), SseParseError::DataTooLarge);
 }
 
 TEST(LlmProtocolTest, ClassifiesTokenAndProviderFailures) {

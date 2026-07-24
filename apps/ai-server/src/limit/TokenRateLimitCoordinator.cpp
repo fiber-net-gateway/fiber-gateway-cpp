@@ -111,18 +111,28 @@ TokenRateLimitCoordinator::check(std::string_view user_id, const CompiledModelRo
 
 void TokenRateLimitCoordinator::settle(RateLimitNode owner, std::string_view user_id, std::string_view model_name,
                                        TokenRateLimitTicket ticket, std::int64_t tokens, bool count_usage,
-                                       std::int64_t now_millis) noexcept {
+                                       std::int64_t now_millis, RateLimitSettleCompletion completion) noexcept {
     if (!initialized_ || stopping_.load(std::memory_order_acquire)) {
+        LOG(LOG_RATE_LIMIT, WARN) << "token rate limit settle rejected while stopping owner="
+                                  << log::quoted(owner.node_id);
+        completion.notify(RateLimitSettleOutcome::Error);
         return;
     }
     if (owner.local) {
-        (void) local_service_->settle(user_id, model_name, ticket, tokens, count_usage, now_millis);
+        const TokenRateLimitSettleResult result =
+                local_service_->settle(user_id, model_name, ticket, tokens, count_usage, now_millis);
+        if (!result.applied) {
+            LOG(LOG_RATE_LIMIT, WARN) << "stale local token rate limit settle ignored owner="
+                                      << log::quoted(owner.node_id);
+        }
+        completion.notify(result.applied ? RateLimitSettleOutcome::Applied : RateLimitSettleOutcome::Stale);
         return;
     }
     remote_settles_.add();
     async::spawn([this, owner = std::move(owner), user_id = std::string(user_id), model_name = std::string(model_name),
-                  ticket, tokens, count_usage]() mutable {
-        return settle_remote(std::move(owner), std::move(user_id), std::move(model_name), ticket, tokens, count_usage);
+                  ticket, tokens, count_usage, completion]() mutable {
+        return settle_remote(std::move(owner), std::move(user_id), std::move(model_name), ticket, tokens, count_usage,
+                             completion);
     });
 }
 
@@ -137,6 +147,14 @@ TokenRateLimitCoordinator::settle_and_wait(RateLimitNode owner, std::string_view
         co_return to_http_response(
                 local_service_->settle(user_id, model_name, ticket, tokens, count_usage, now_millis));
     }
+    co_return co_await settle_remote_and_wait(owner, user_id, model_name, ticket, tokens, count_usage);
+}
+
+async::Task<std::expected<RateLimitSettleResponse, RateLimitCoordinatorError>>
+TokenRateLimitCoordinator::settle_remote_and_wait(const RateLimitNode &owner, std::string_view user_id,
+                                                  std::string_view model_name, TokenRateLimitTicket ticket,
+                                                  std::int64_t tokens, bool count_usage) noexcept {
+    FIBER_ASSERT(!owner.local);
     auto response = co_await remote_client_->settle(
             owner, RateLimitSettleRequest{
                            .user_id = user_id,
@@ -159,16 +177,21 @@ TokenRateLimitCoordinator::settle_and_wait(RateLimitNode owner, std::string_view
 
 async::DetachedTask TokenRateLimitCoordinator::settle_remote(RateLimitNode owner, std::string user_id,
                                                              std::string model_name, TokenRateLimitTicket ticket,
-                                                             std::int64_t tokens, bool count_usage) noexcept {
+                                                             std::int64_t tokens, bool count_usage,
+                                                             RateLimitSettleCompletion completion) noexcept {
     FIBER_ASSERT(!owner.local);
-    auto result = co_await settle_and_wait(owner, user_id, model_name, ticket, tokens, count_usage, 0);
+    auto result = co_await settle_remote_and_wait(owner, user_id, model_name, ticket, tokens, count_usage);
+    RateLimitSettleOutcome outcome = RateLimitSettleOutcome::Applied;
     if (!result) {
         LOG(LOG_RATE_LIMIT, WARN) << "remote token rate limit settle failed owner=" << log::quoted(owner.node_id)
                                   << " error=" << static_cast<int>(result.error().code)
                                   << " io_error=" << common::io_err_name(result.error().remote.io_error);
-    } else if (result->stale) {
+        outcome = RateLimitSettleOutcome::Error;
+    } else if (result->stale || !result->applied) {
         LOG(LOG_RATE_LIMIT, WARN) << "stale token rate limit settle ignored owner=" << log::quoted(owner.node_id);
+        outcome = RateLimitSettleOutcome::Stale;
     }
+    completion.notify(outcome);
     remote_settles_.done();
 }
 

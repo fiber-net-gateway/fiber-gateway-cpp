@@ -38,6 +38,23 @@ struct CoordinatedRateLimitCheck {
     std::optional<RateLimitNode> owner;
 };
 
+enum class RateLimitSettleOutcome : std::uint8_t {
+    Applied,
+    Stale,
+    Error,
+};
+
+struct RateLimitSettleCompletion {
+    void *context = nullptr;
+    void (*callback)(void *, RateLimitSettleOutcome) noexcept = nullptr;
+
+    void notify(RateLimitSettleOutcome outcome) const noexcept {
+        if (callback != nullptr) {
+            callback(context, outcome);
+        }
+    }
+};
+
 class TokenRateLimitCoordinator final : public common::NonCopyable, public common::NonMovable {
 public:
     TokenRateLimitCoordinator(TokenRateLimitService &local_service, RateLimitShardRing &ring,
@@ -52,7 +69,8 @@ public:
     check(std::string_view user_id, const CompiledModelRoute &model, std::int64_t now_millis) noexcept;
 
     void settle(RateLimitNode owner, std::string_view user_id, std::string_view model_name, TokenRateLimitTicket ticket,
-                std::int64_t tokens, bool count_usage, std::int64_t now_millis) noexcept;
+                std::int64_t tokens, bool count_usage, std::int64_t now_millis,
+                RateLimitSettleCompletion completion) noexcept;
 
     [[nodiscard]] async::Task<std::expected<RateLimitSettleResponse, RateLimitCoordinatorError>>
     settle_and_wait(RateLimitNode owner, std::string_view user_id, std::string_view model_name,
@@ -60,9 +78,13 @@ public:
                     std::int64_t now_millis) noexcept;
 
 private:
+    [[nodiscard]] async::Task<std::expected<RateLimitSettleResponse, RateLimitCoordinatorError>>
+    settle_remote_and_wait(const RateLimitNode &owner, std::string_view user_id, std::string_view model_name,
+                           TokenRateLimitTicket ticket, std::int64_t tokens, bool count_usage) noexcept;
+
     [[nodiscard]] async::DetachedTask settle_remote(RateLimitNode owner, std::string user_id, std::string model_name,
-                                                    TokenRateLimitTicket ticket, std::int64_t tokens,
-                                                    bool count_usage) noexcept;
+                                                    TokenRateLimitTicket ticket, std::int64_t tokens, bool count_usage,
+                                                    RateLimitSettleCompletion completion) noexcept;
 
     TokenRateLimitService *local_service_ = nullptr;
     RateLimitShardRing *ring_ = nullptr;

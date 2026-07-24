@@ -1,12 +1,12 @@
 #ifndef FIBER_AI_SERVER_SSE_PARSER_H
 #define FIBER_AI_SERVER_SSE_PARSER_H
 
-#include "LlmBody.h"
-
 #include <cstddef>
 #include <cstdint>
-#include <string>
 #include <string_view>
+
+#include <common/mem/IoBuf.h>
+#include <http/SseCursor.h>
 
 namespace fiber::ai_server {
 
@@ -18,45 +18,69 @@ enum class SseParseStatus : std::uint8_t {
 };
 
 enum class SseParseError : std::uint8_t {
-    EventTooLarge,
+    DataTooLarge,
     InvalidUtf8,
-    FeedAfterFinal,
+    NoMemory,
+    InvalidState,
 };
 
 struct SseEventView {
-    std::string_view encoded;
     std::string_view data;
-    std::string_view event_type;
-    bool terminal = false;
 };
 
 class SseParser {
 public:
-    explicit SseParser(LlmWireProtocol protocol, std::size_t max_event_bytes = 1024 * 1024) noexcept :
-        protocol_(protocol), max_event_bytes_(max_event_bytes) {}
+    explicit SseParser(std::size_t max_data_bytes = 1024 * 1024) noexcept : max_data_bytes_(max_data_bytes) {}
 
-    [[nodiscard]] bool feed(std::string_view chunk, bool final) noexcept;
+    // The input must remain alive until next() returns NeedMore, Complete, or
+    // Error. A completed event borrows the input until the following next().
+    [[nodiscard]] bool feed(const mem::IoBuf &chunk) noexcept;
+    [[nodiscard]] bool finish() noexcept;
     [[nodiscard]] SseParseStatus next() noexcept;
 
     [[nodiscard]] const SseEventView &event() const noexcept { return event_; }
     [[nodiscard]] SseParseError error() const noexcept { return error_; }
-    [[nodiscard]] bool done_seen() const noexcept { return done_seen_; }
 
 private:
-    [[nodiscard]] std::size_t find_event_end() const noexcept;
-    [[nodiscard]] bool parse_event(std::string_view input) noexcept;
+    enum class DataStorage : std::uint8_t {
+        None,
+        BorrowedInput,
+        RetainedSlice,
+        Assembled,
+    };
 
-    LlmWireProtocol protocol_ = LlmWireProtocol::OpenAiChatCompletions;
-    std::size_t max_event_bytes_ = 0;
-    std::string pending_;
-    std::string encoded_;
-    std::string data_;
-    std::string event_type_;
+    [[nodiscard]] bool validate_utf8(std::string_view input) noexcept;
+    [[nodiscard]] bool is_data_field() const noexcept;
+    [[nodiscard]] bool start_data_line() noexcept;
+    [[nodiscard]] bool append_data(std::string_view fragment) noexcept;
+    [[nodiscard]] bool append_data_separator() noexcept;
+    [[nodiscard]] bool ensure_assembled(std::size_t required) noexcept;
+    void retain_borrowed_data() noexcept;
+    void reset_line() noexcept;
+    void reset_event() noexcept;
+    void publish_event() noexcept;
+
+    std::size_t max_data_bytes_ = 0;
+    http::SseCursor cursor_;
+    const mem::IoBuf *current_input_ = nullptr;
+    mem::IoBuf retained_data_;
+    mem::IoBuf assembled_data_;
+    std::string_view data_view_;
     SseEventView event_;
-    SseParseError error_ = SseParseError::EventTooLarge;
+    std::size_t data_size_ = 0;
+    std::size_t field_name_size_ = 0;
+    std::uint32_t utf8_codepoint_ = 0;
+    std::uint32_t utf8_minimum_ = 0;
+    std::uint8_t utf8_remaining_ = 0;
+    DataStorage data_storage_ = DataStorage::None;
+    SseParseError error_ = SseParseError::InvalidState;
+    bool field_name_matches_data_ = true;
+    bool field_colon_seen_ = false;
+    bool current_line_data_ = false;
+    bool event_has_data_ = false;
+    bool event_pending_ = false;
     bool final_ = false;
     bool failed_ = false;
-    bool done_seen_ = false;
 };
 
 } // namespace fiber::ai_server

@@ -222,8 +222,6 @@ async::Task<void> AiServer::shutdown_and_wait() {
     FIBER_ASSERT(accept_loop_->in_loop());
     co_await server_.shutdown_and_wait();
     co_await detach_cat_workers();
-    metrics_.stop_collecting();
-    co_await metrics_.wait_for_idle();
     if (config_workers_started_ && !config_workers_stopping_) {
         config_workers_stopping_ = true;
         config_stop_publisher_->publish(true);
@@ -232,6 +230,8 @@ async::Task<void> AiServer::shutdown_and_wait() {
     co_await sweep_tasks_.join();
     co_await rate_limit_coordinator_.shutdown();
     co_await provider_connections_.shutdown();
+    metrics_.stop_collecting();
+    co_await metrics_.wait_for_idle();
 }
 
 int AiServer::fd() const noexcept { return server_.fd(); }

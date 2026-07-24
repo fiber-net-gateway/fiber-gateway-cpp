@@ -23,6 +23,8 @@ namespace {
 
 using fiber::ai_server::CompiledModelRateLimitRule;
 using fiber::ai_server::CompiledModelRoute;
+using fiber::ai_server::RateLimitSettleCompletion;
+using fiber::ai_server::RateLimitSettleOutcome;
 using fiber::ai_server::TokenRateLimiterManager;
 using fiber::ai_server::TokenRateLimitService;
 using fiber::ai_server::WindowTokenRateLimiter;
@@ -43,6 +45,17 @@ CompiledModelRoute route(std::int64_t revision, std::string model_name, std::int
     return route;
 }
 
+struct SettleObservation {
+    std::size_t calls = 0;
+    RateLimitSettleOutcome outcome = RateLimitSettleOutcome::Error;
+};
+
+void observe_settle(void *context, RateLimitSettleOutcome outcome) noexcept {
+    auto *observation = static_cast<SettleObservation *>(context);
+    ++observation->calls;
+    observation->outcome = outcome;
+}
+
 fiber::async::DetachedTask exercise_local_coordinator(fiber::ai_server::TokenRateLimitCoordinator *coordinator,
                                                       const CompiledModelRoute *model,
                                                       std::promise<bool> *done) noexcept {
@@ -59,6 +72,47 @@ fiber::async::DetachedTask exercise_local_coordinator(fiber::ai_server::TokenRat
         ok = denied && !denied->result.allowed && denied->result.used_tokens == 100;
     }
     co_await coordinator->shutdown();
+    done->set_value(ok);
+}
+
+fiber::async::DetachedTask exercise_observed_local_settle(fiber::ai_server::TokenRateLimitCoordinator *coordinator,
+                                                          const CompiledModelRoute *model,
+                                                          std::promise<bool> *done) noexcept {
+    auto checked = co_await coordinator->check("u1", *model, 10'000);
+    bool ok = checked && checked->result.allowed && checked->result.has_ticket && checked->owner;
+    if (!ok) {
+        co_await coordinator->shutdown();
+        done->set_value(false);
+        co_return;
+    }
+
+    const fiber::ai_server::RateLimitNode owner = *checked->owner;
+    SettleObservation applied;
+    coordinator->settle(owner, "u1", "m1", checked->result.ticket, 80, true, 10'001,
+                        RateLimitSettleCompletion{
+                                .context = &applied,
+                                .callback = observe_settle,
+                        });
+    ok = applied.calls == 1 && applied.outcome == RateLimitSettleOutcome::Applied;
+
+    SettleObservation stale;
+    fiber::ai_server::TokenRateLimitTicket stale_ticket = checked->result.ticket;
+    ++stale_ticket.generation;
+    coordinator->settle(owner, "u1", "m1", stale_ticket, 0, false, 10'002,
+                        RateLimitSettleCompletion{
+                                .context = &stale,
+                                .callback = observe_settle,
+                        });
+    ok = ok && stale.calls == 1 && stale.outcome == RateLimitSettleOutcome::Stale;
+
+    co_await coordinator->shutdown();
+    SettleObservation stopped;
+    coordinator->settle(owner, "u1", "m1", checked->result.ticket, 0, false, 10'003,
+                        RateLimitSettleCompletion{
+                                .context = &stopped,
+                                .callback = observe_settle,
+                        });
+    ok = ok && stopped.calls == 1 && stopped.outcome == RateLimitSettleOutcome::Error;
     done->set_value(ok);
 }
 
@@ -279,6 +333,30 @@ TEST(LlmRateLimitTest, CoordinatorBypassesPinnedRouteWithoutRuleBeforeRingLookup
     auto completed = done.get_future();
     workers.start();
     fiber::async::spawn(workers.at(0), [&]() { return exercise_bypass_coordinator(&coordinator, &model, &done); });
+
+    ASSERT_EQ(completed.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(completed.get());
+    workers.stop();
+    workers.join();
+}
+
+TEST(LlmRateLimitTest, CoordinatorReportsBestEffortSettlementOutcomeExactlyOnce) {
+    fiber::event::EventLoopGroup workers(1);
+    TokenRateLimitService service(1);
+    const CompiledModelRoute model = route(1, "m1", 60'000, 100);
+
+    fiber::ai_server::RateLimitShardRing ring;
+    ASSERT_TRUE(ring.update(1, {
+                                       {.node_id = "0100007f901f", .host = "127.0.0.1", .port = 8080, .local = true},
+                               }));
+    fiber::ai_server::TokenRateLimitRemoteClient remote(workers);
+    fiber::ai_server::TokenRateLimitCoordinator coordinator(service, ring, remote);
+    ASSERT_TRUE(coordinator.init());
+
+    std::promise<bool> done;
+    auto completed = done.get_future();
+    workers.start();
+    fiber::async::spawn(workers.at(0), [&]() { return exercise_observed_local_settle(&coordinator, &model, &done); });
 
     ASSERT_EQ(completed.wait_for(2s), std::future_status::ready);
     EXPECT_TRUE(completed.get());

@@ -282,10 +282,10 @@ std::string bearer_token_name(std::string_view authorization) {
 
 class ProxyFixture {
 public:
-    ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies) :
-        group_(&group), replies_(std::move(replies)), rate_limiters_(1), rate_limit_handler_(rate_limiters_),
-        remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_), connections_(group),
-        provider_client_(connections_), metrics_(group),
+    ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies, bool fail_settle) :
+        group_(&group), replies_(std::move(replies)), fail_settle_(fail_settle), rate_limiters_(1),
+        rate_limit_handler_(rate_limiters_), remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_),
+        connections_(group), provider_client_(connections_), metrics_(group),
         provider_server_(group.at(0),
                          [this](fiber::http::HttpExchange &exchange) { return handle_provider(exchange); }),
         entry_server_(group.at(0), [this](fiber::http::HttpExchange &exchange) { return handle_entry(exchange); }) {}
@@ -341,8 +341,6 @@ public:
 
     fiber::async::DetachedTask shutdown(std::promise<void> *promise) noexcept {
         provider_server_.close();
-        metrics_.stop_collecting();
-        co_await metrics_.wait_for_idle();
         if (initialized_) {
             co_await coordinator_.shutdown();
             co_await connections_.shutdown();
@@ -351,6 +349,8 @@ public:
         entry_server_.close();
         co_await entry_server_.shutdown_and_wait();
         co_await provider_server_.shutdown_and_wait();
+        metrics_.stop_collecting();
+        co_await metrics_.wait_for_idle();
         promise->set_value();
     }
 
@@ -360,6 +360,18 @@ public:
                 token_name, fiber::event::EventLoop::current().now() + after);
         promise->set_value(available);
         co_return;
+    }
+
+    fiber::async::DetachedTask
+    collect_settlement_metrics(std::promise<fiber::common::IoResult<std::string>> *promise) noexcept {
+        co_await coordinator_.shutdown();
+        auto collected = co_await metrics_.collect(fiber::event::EventLoop::current().io_buf_node_pool(),
+                                                   rate_limiters_.stats(), 1);
+        if (!collected) {
+            promise->set_value(std::unexpected(collected.error()));
+        } else {
+            promise->set_value(consume_chain(std::move(*collected)));
+        }
     }
 
     std::vector<ObservedProviderRequest> observed() const {
@@ -514,6 +526,10 @@ private:
             co_return;
         }
         if (exchange.uri().path == "/internal/llm/rate-limit/settle") {
+            if (fail_settle_) {
+                (void) exchange.abort(fiber::common::IoErr::Canceled);
+                co_return;
+            }
             co_await rate_limit_handler_.handle_settle(exchange);
             co_return;
         }
@@ -534,6 +550,7 @@ private:
     std::vector<ObservedProviderRequest> observed_;
     std::size_t reply_index_ = 0;
     std::atomic<int> entry_calls_{0};
+    bool fail_settle_ = false;
     fiber::ai_server::TokenRateLimitService rate_limiters_;
     fiber::ai_server::TokenRateLimitHttpHandler rate_limit_handler_;
     fiber::ai_server::RateLimitShardRing ring_;
@@ -551,8 +568,8 @@ private:
 
 class FixtureHarness {
 public:
-    explicit FixtureHarness(std::vector<MockReply> replies) :
-        fixture_(std::make_unique<ProxyFixture>(group_, std::move(replies))) {
+    explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false) :
+        fixture_(std::make_unique<ProxyFixture>(group_, std::move(replies), fail_settle)) {
         group_.start();
         std::promise<FixturePorts> promise;
         auto future = promise.get_future();
@@ -587,6 +604,17 @@ public:
             return fixture_->token_available(std::move(token_name), after, &promise);
         });
         return future.wait_for(5s) == std::future_status::ready && future.get();
+    }
+
+    fiber::common::IoResult<std::string> settlement_metrics() {
+        std::promise<fiber::common::IoResult<std::string>> promise;
+        auto future = promise.get_future();
+        fiber::async::spawn(group_.at(0),
+                            [this, &promise]() { return fixture_->collect_settlement_metrics(&promise); });
+        if (future.wait_for(5s) != std::future_status::ready) {
+            return std::unexpected(fiber::common::IoErr::TimedOut);
+        }
+        return future.get();
     }
 
 private:
@@ -643,15 +671,19 @@ TEST(LlmProxyIntegrationTest, RetriesTransportAuthRateLimitAndFallbackFromOrigin
     EXPECT_TRUE(fixture.token_available(rate_limited, 121s));
 }
 
-TEST(LlmProxyIntegrationTest, RelaysSseAddsOneDoneAndNeverRetriesAfterResponseStart) {
+TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterResponseStart) {
+    constexpr std::string_view expected =
+            ": ping\r\nid: 7\r\ndata:{\"choices\":[],\"usage\":{\"prompt_tokens\":2"
+            ",\"completion_tokens\":3,\"total_tokens\":5}}\r\n\r\ndata: [DONE]\r\n\r\ndata: [DONE]\n\n";
     FixtureHarness fixture({
             MockReply{
                     .status = 200,
                     .content_type = "text/event-stream",
                     .chunks =
                             {
-                                    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2",
-                                    ",\"completion_tokens\":3,\"total_tokens\":5}}\r\n\r\n",
+                                    ": ping\r\nid: 7\r\ndata:{\"choices\":[],\"usage\":{\"prompt_tokens\":2",
+                                    ",\"completion_tokens\":3,\"total_tokens\":5}}\r\n\r\ndata: [DONE]\r\n\r\n"
+                                    "data: [DONE]\n\n",
                             },
                     .stream = true,
             },
@@ -675,16 +707,56 @@ TEST(LlmProxyIntegrationTest, RelaysSseAddsOneDoneAndNeverRetriesAfterResponseSt
     const RawHttpResponse success = post_json(fixture.entry_port(), token, request);
     EXPECT_EQ(success.status, 200);
     EXPECT_TRUE(success.complete);
-    EXPECT_NE(success.body.find("\"total_tokens\":5"), std::string::npos);
-    const std::size_t done = success.body.find("data: [DONE]\n\n");
-    ASSERT_NE(done, std::string::npos);
-    EXPECT_EQ(success.body.find("data: [DONE]\n\n", done + 1), std::string::npos);
+    EXPECT_EQ(success.body, expected);
 
     const RawHttpResponse truncated = post_json(fixture.entry_port(), token, request);
     EXPECT_EQ(truncated.status, 200);
     EXPECT_TRUE(truncated.complete);
     EXPECT_EQ(truncated.body.find("data: [DONE]"), std::string::npos);
     EXPECT_EQ(fixture.observed().size(), 2u);
+}
+
+TEST(LlmProxyIntegrationTest, SettlementFailureDoesNotChangeProviderResponse) {
+    constexpr std::string_view buffered_body =
+            R"({"id":"ok","usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}})";
+    constexpr std::string_view sse_body =
+            ": ping\r\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,"
+            "\"total_tokens\":10}}\r\n\r\n";
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .body = std::string(buffered_body),
+                    },
+                    MockReply{
+                            .status = 200,
+                            .content_type = "text/event-stream",
+                            .chunks = {std::string(sse_body)},
+                            .stream = true,
+                    },
+            },
+            true);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse buffered =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":false,"messages":[]})");
+    EXPECT_EQ(buffered.system_error, 0);
+    EXPECT_EQ(buffered.status, 200);
+    EXPECT_TRUE(buffered.complete);
+    EXPECT_EQ(buffered.body, buffered_body);
+
+    const RawHttpResponse streamed =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":true,"messages":[]})");
+    EXPECT_EQ(streamed.system_error, 0);
+    EXPECT_EQ(streamed.status, 200);
+    EXPECT_TRUE(streamed.complete);
+    EXPECT_EQ(streamed.body, sse_body);
+
+    auto metrics = fixture.settlement_metrics();
+    ASSERT_TRUE(metrics);
+    EXPECT_NE(metrics->find("ai_server_rate_limit_settlements_total{result=\"error\"} 2"), std::string::npos);
 }
 
 } // namespace

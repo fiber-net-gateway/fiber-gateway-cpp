@@ -128,7 +128,9 @@ CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配�
 - 客户端断开会中止上游 exchange，损坏的连接不会回到连接池；
 - 请求 pin 住进入时的不可变配置快照，认证、授权、限流和 Provider 选择不会跨刷新
   混用配置；
-- 成功响应必须先完成 token usage settle；远端 owner 不可用时 fail closed。
+- Provider 执行后的 token usage settle 为 tracked best effort；失败只进入固定指标和
+  WARN 日志，不替换同步响应，也不中止已经开始的 SSE。模型执行前的限流 check 仍然
+  fail closed。
 
 Provider 只执行与入站相同的协议。C++ 版本有意不实现 OpenAI/Anthropic 隐式协议
 桥接；缺少同协议候选时返回 `provider_protocol_unsupported`。

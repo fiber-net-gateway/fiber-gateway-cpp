@@ -85,7 +85,7 @@ LLM 入口严格按以下顺序：
 10. 生成有限且不可扩张的 Provider 尝试计划；
 11. 每次尝试从原始正文改写上游模型、调用 Provider；
 12. 仅在响应尚未开始且错误可重试时进入下一尝试；
-13. 成功响应提取 usage，并等待限流 settle；
+13. 成功响应提取 usage，并提交 tracked best-effort 限流 settle；
 14. 写回同步响应或转发 SSE，提交审计、指标和 CAT transaction。
 
 没有有效 BT1 的错误优先于 405/415。Content-Length 已知且大于上限时不读取正文即
@@ -179,12 +179,15 @@ SSE 路径先读取并验证上游最终 header。非 2xx 仍按同步错误正�
 客户端 header，此刻设置 `response_started=true`。之后任何读取、SSE 解析或写出错误
 只终止当前流，不再重试。
 
-SSE parser 处理跨 chunk 的 CRLF、多个 `data:` 行、注释和空行边界。直通事件重新
-封装为规范 SSE：
+SSE parser 借助 `http::SseCursor` 处理跨 chunk 的 CRLF、多个 `data:` 行、注释和
+空行边界。每次读取上游 body chain 后，先扫描完其中所有节点并提取完整 data event
+的 usage，再把原始 `IoBufChain` 节点移动给客户端：
 
-- OpenAI 正常结束保证一个 `data: [DONE]\n\n`；
-- Anthropic 保留事件类型和 data；
-- usage collector 只解析 data JSON 的少量 usage 路径；
+- 单个连续 data 借用输入；仅在 data 跨节点或包含多个 `data:` 行时拼装；
+- CRLF、字段空格、注释、event/id/retry 和未知字段均保持原始字节；
+- OpenAI `[DONE]` 不补充、不去重，信任上游合法输出；
+- usage collector 只旁路解析 data JSON 的少量 usage 路径，提取失败不改变响应；
+- 每次下游 chain write 完成后才继续读取上游，保持背压；
 - 客户端断开立即 abort 上游 exchange，lease 不回到可复用池。
 
 ## 8. token 限流
@@ -201,8 +204,11 @@ SSE parser 处理跨 chunk 的 CRLF、多个 `data:` 行、注释和空行边界
 - owner 按 `username + model + rule revision` 保存多个版本的状态，ticket 包含
   rule revision、state generation 和 window start；
 - 成功 usage settle 计数，其余路径 settleNoUsage；
-- 同步成功在写客户端响应前等待本地或远端 settle；远端 owner 不可用时返回 503；
-- SSE 在响应已开始后等待 settle，失败时中止当前流且不再重试；
+- Provider 执行后的 settle 为 tracked best effort：同步响应和 SSE 都不等待远端
+  settle，结算失败不会替换或中止 Provider 响应；
+- settle 完成后记录 usage/no_usage/error 固定指标，stale、远端错误和 shutdown
+  拒绝同时写 WARN 日志；
+- shutdown 先排空已经接受的远端 settle，再停止 metrics 和限流远端 client；
 - 超额按 Java 公式延长 recoverAt；
 - 配置刷新后旧 revision 的在途 ticket 仍结算到旧状态，不写入新规则；
 - 无 in-flight、超过 recoverAt 且空闲 10 分钟后清理。
