@@ -40,6 +40,7 @@
 #include "provider/ProviderHttpClient.h"
 #include "provider/ProviderRuntime.h"
 #include "server/LlmRequestHandler.h"
+#include "server/TokenRateLimitHttpHandler.h"
 
 namespace {
 
@@ -47,6 +48,7 @@ using namespace std::chrono_literals;
 using fiber::ai_server::AiServerMetrics;
 using fiber::ai_server::Bt1Key;
 using fiber::ai_server::Bt1KeySnapshot;
+using fiber::ai_server::CompiledModelRateLimitRule;
 using fiber::ai_server::CompiledModelRoute;
 using fiber::ai_server::ConfigMetadata;
 using fiber::ai_server::LlmConfigSnapshot;
@@ -281,9 +283,9 @@ std::string bearer_token_name(std::string_view authorization) {
 class ProxyFixture {
 public:
     ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies) :
-        group_(&group), replies_(std::move(replies)), rate_limiters_(1), remote_client_(group),
-        coordinator_(rate_limiters_, ring_, remote_client_), connections_(group), provider_client_(connections_),
-        metrics_(group),
+        group_(&group), replies_(std::move(replies)), rate_limiters_(1), rate_limit_handler_(rate_limiters_),
+        remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_), connections_(group),
+        provider_client_(connections_), metrics_(group),
         provider_server_(group.at(0),
                          [this](fiber::http::HttpExchange &exchange) { return handle_provider(exchange); }),
         entry_server_(group.at(0), [this](fiber::http::HttpExchange &exchange) { return handle_entry(exchange); }) {}
@@ -311,7 +313,6 @@ public:
         ports.provider = *provider_port;
         config_ = make_config(*provider_port);
         runtime_.reconcile(*config_->project);
-        rate_limiters_.update_project(config_->project);
 
         if (!entry_server_.bind(address, {})) {
             promise->set_value(ports);
@@ -323,15 +324,23 @@ public:
             co_return;
         }
         ports.entry = *entry_port;
+        if (!ring_.update(1, {
+                                     {
+                                             .node_id = "remote-owner",
+                                             .host = "127.0.0.1",
+                                             .port = ports.entry,
+                                     },
+                             })) {
+            promise->set_value({});
+            co_return;
+        }
         fiber::async::spawn([this]() { return provider_server_.serve(); });
         fiber::async::spawn([this]() { return entry_server_.serve(); });
         promise->set_value(ports);
     }
 
     fiber::async::DetachedTask shutdown(std::promise<void> *promise) noexcept {
-        entry_server_.close();
         provider_server_.close();
-        co_await entry_server_.shutdown_and_wait();
         metrics_.stop_collecting();
         co_await metrics_.wait_for_idle();
         if (initialized_) {
@@ -339,6 +348,8 @@ public:
             co_await connections_.shutdown();
             initialized_ = false;
         }
+        entry_server_.close();
+        co_await entry_server_.shutdown_and_wait();
         co_await provider_server_.shutdown_and_wait();
         promise->set_value();
     }
@@ -408,6 +419,11 @@ private:
         route.fallback_provider = fallback;
         route.load_balance.max_primary_attempts = 1;
         route.load_balance.fallback_enabled = true;
+        route.rate_limit = CompiledModelRateLimitRule{
+                .revision = 17,
+                .window_duration_millis = 60'000,
+                .max_tokens_per_window = 1'000,
+        };
 
         std::vector<std::shared_ptr<const ProjectProvider>> providers{primary, fallback};
         std::vector<CompiledModelRoute> routes;
@@ -493,6 +509,14 @@ private:
     }
 
     fiber::async::Task<void> handle_entry(fiber::http::HttpExchange &exchange) noexcept {
+        if (exchange.uri().path == "/internal/llm/rate-limit/check") {
+            co_await rate_limit_handler_.handle_check(exchange);
+            co_return;
+        }
+        if (exchange.uri().path == "/internal/llm/rate-limit/settle") {
+            co_await rate_limit_handler_.handle_settle(exchange);
+            co_return;
+        }
         entry_calls_.fetch_add(1, std::memory_order_release);
         AiServerMetrics::Worker &metrics = metrics_.worker(0);
         metrics.request_started(LlmWireProtocol::OpenAiChatCompletions);
@@ -511,6 +535,7 @@ private:
     std::size_t reply_index_ = 0;
     std::atomic<int> entry_calls_{0};
     fiber::ai_server::TokenRateLimitService rate_limiters_;
+    fiber::ai_server::TokenRateLimitHttpHandler rate_limit_handler_;
     fiber::ai_server::RateLimitShardRing ring_;
     fiber::ai_server::TokenRateLimitRemoteClient remote_client_;
     fiber::ai_server::TokenRateLimitCoordinator coordinator_;

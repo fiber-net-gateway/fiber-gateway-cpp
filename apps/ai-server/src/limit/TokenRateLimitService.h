@@ -19,11 +19,8 @@ class TokenRateLimitService final : public common::NonCopyable, public common::N
 public:
     explicit TokenRateLimitService(std::size_t shard_count);
 
-    void update_project(std::shared_ptr<const LlmProjectSnapshot> project) noexcept;
-    [[nodiscard]] bool has_rule(std::string_view model_name) const noexcept;
-
     [[nodiscard]] TokenRateLimitCheckResult check(std::string_view user_id, std::string_view model_name,
-                                                  std::int64_t now_millis);
+                                                  const CompiledModelRateLimitRule &rule, std::int64_t now_millis);
     [[nodiscard]] TokenRateLimitSettleResult settle(std::string_view user_id, std::string_view model_name,
                                                     TokenRateLimitTicket ticket, std::int64_t tokens, bool count_usage,
                                                     std::int64_t now_millis) noexcept;
@@ -40,8 +37,6 @@ private:
     [[nodiscard]] Shard &shard_for(std::string_view user_id, std::string_view model_name) noexcept;
     [[nodiscard]] const Shard &shard_for(std::string_view user_id, std::string_view model_name) const noexcept;
 
-    mutable std::mutex project_mutex_;
-    std::shared_ptr<const LlmProjectSnapshot> project_;
     std::vector<std::unique_ptr<Shard>> shards_;
 };
 

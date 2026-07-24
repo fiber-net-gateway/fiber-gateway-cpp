@@ -39,7 +39,8 @@
 
 `/ready` 只有在 worker 已安装完整配置快照且限流成员环非空时返回 `200`；否则返回
 `503`。内部限流接口和指标接口没有应用层认证，生产部署必须通过监听地址、防火墙、
-sidecar 或服务网格限制访问。
+sidecar 或服务网格限制访问。内部 check 会携带请求快照中的限流规则版本和参数，
+owner 会直接信任这些字段；因此限流节点还必须运行兼容协议并处在同一信任边界内。
 
 ## 构建与运行
 
@@ -125,6 +126,8 @@ CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配�
 - 401/403/429、配置的 retryable status 和传输错误可在响应开始前重试；
 - SSE header 写给客户端后不再切换 token、Provider 或 fallback；
 - 客户端断开会中止上游 exchange，损坏的连接不会回到连接池；
+- 请求 pin 住进入时的不可变配置快照，认证、授权、限流和 Provider 选择不会跨刷新
+  混用配置；
 - 成功响应必须先完成 token usage settle；远端 owner 不可用时 fail closed。
 
 Provider 只执行与入站相同的协议。C++ 版本有意不实现 OpenAI/Anthropic 隐式协议

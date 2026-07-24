@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
-#include <memory>
 #include <string>
 #include <string_view>
 
@@ -16,6 +15,7 @@
 namespace fiber::ai_server {
 
 struct TokenRateLimitTicket {
+    std::int64_t rule_revision = 0;
     std::uint64_t generation = 0;
     std::int64_t window_start_millis = 0;
 };
@@ -82,11 +82,8 @@ public:
     explicit TokenRateLimiterManager(std::int64_t idle_ttl_millis = 10 * 60 * 1000) noexcept :
         idle_ttl_millis_(idle_ttl_millis) {}
 
-    void update_project(std::shared_ptr<const LlmProjectSnapshot> project) noexcept;
-    [[nodiscard]] bool has_rule(std::string_view model_name) const noexcept;
-
     [[nodiscard]] TokenRateLimitCheckResult check(std::string_view user_id, std::string_view model_name,
-                                                  std::int64_t now_millis);
+                                                  const CompiledModelRateLimitRule &rule, std::int64_t now_millis);
     [[nodiscard]] TokenRateLimitSettleResult settle(std::string_view user_id, std::string_view model_name,
                                                     TokenRateLimitTicket ticket, std::int64_t tokens, bool count_usage,
                                                     std::int64_t now_millis) noexcept;
@@ -99,11 +96,13 @@ private:
     struct RateLimitKey {
         std::string user_id;
         std::string model_name;
+        std::int64_t rule_revision = 0;
     };
 
     struct RateLimitKeyView {
         std::string_view user_id;
         std::string_view model_name;
+        std::int64_t rule_revision = 0;
     };
 
     struct RateLimitKeyLess {
@@ -116,7 +115,6 @@ private:
 
     struct LimiterState {
         WindowTokenRateLimiter limiter;
-        std::uint64_t rule_version = 0;
         std::int64_t window_duration_millis = 0;
         std::int64_t max_tokens_per_window = 0;
         std::uint64_t generation = 0;
@@ -124,12 +122,10 @@ private:
         std::size_t in_flight_count = 0;
     };
 
-    [[nodiscard]] const ModelRateLimitConfig *find_rule(std::string_view model_name) const noexcept;
-    [[nodiscard]] bool rule_changed(const LimiterState &state, const ModelRateLimitConfig &rule) const noexcept;
-    [[nodiscard]] LimiterState create_state(const ModelRateLimitConfig &rule,
+    [[nodiscard]] bool rule_changed(const LimiterState &state, const CompiledModelRateLimitRule &rule) const noexcept;
+    [[nodiscard]] LimiterState create_state(const CompiledModelRateLimitRule &rule,
                                             const LimiterState *old_state) const noexcept;
 
-    std::shared_ptr<const LlmProjectSnapshot> project_;
     std::map<RateLimitKey, LimiterState, RateLimitKeyLess> limiters_;
     std::int64_t idle_ttl_millis_ = 10 * 60 * 1000;
 };

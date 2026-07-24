@@ -5,10 +5,13 @@
 #include <common/json/JsonStructDecode.h>
 
 FIBER_JSON_STRUCT(fiber::ai_server::RateLimitCheckRequest, FIBER_JSON_NAMED_FIELD(user_id, "userId"),
-                  FIBER_JSON_NAMED_FIELD(model_name, "modelName"));
+                  FIBER_JSON_NAMED_FIELD(model_name, "modelName"),
+                  FIBER_JSON_NAMED_FIELD(rule_revision, "ruleRevision"),
+                  FIBER_JSON_NAMED_FIELD(window_duration_millis, "windowDurationMillis"),
+                  FIBER_JSON_NAMED_FIELD(max_tokens_per_window, "maxTokensPerWindow"));
 
-FIBER_JSON_STRUCT(fiber::ai_server::RateLimitTicketPayload, FIBER_JSON_FIELD(generation),
-                  FIBER_JSON_NAMED_FIELD(window_start_millis, "windowStartMillis"));
+FIBER_JSON_STRUCT(fiber::ai_server::RateLimitTicketPayload, FIBER_JSON_NAMED_FIELD(rule_revision, "ruleRevision"),
+                  FIBER_JSON_FIELD(generation), FIBER_JSON_NAMED_FIELD(window_start_millis, "windowStartMillis"));
 
 FIBER_JSON_STRUCT(fiber::ai_server::RateLimitCheckResponse, FIBER_JSON_NAMED_FIELD(rule_matched, "ruleMatched"),
                   FIBER_JSON_FIELD(allowed), FIBER_JSON_NAMED_FIELD(used_tokens, "usedTokens"),
@@ -97,6 +100,12 @@ json::Generator::Result encode_ticket(json::Generator &generator, const std::opt
     }
     auto result = generator.map_open();
     if (ok(result)) {
+        result = generator.string("ruleRevision", 12);
+    }
+    if (ok(result)) {
+        result = generator.integer(ticket->rule_revision);
+    }
+    if (ok(result)) {
         result = generator.string("generation", 10);
     }
     if (ok(result)) {
@@ -138,10 +147,11 @@ decode_rate_limit_check_request(std::string_view body, mem::BufPool &pool) noexc
     if (!decoded) {
         return decoded;
     }
-    if (decoded->user_id.empty() || decoded->model_name.empty()) {
+    if (decoded->user_id.empty() || decoded->model_name.empty() || decoded->window_duration_millis <= 0 ||
+        decoded->max_tokens_per_window < 0) {
         return std::unexpected(RateLimitPayloadError{
                 .code = RateLimitPayloadErrorCode::InvalidValue,
-                .message = "userId and modelName must not be empty",
+                .message = "invalid rate limit check",
         });
     }
     return decoded;
@@ -191,6 +201,24 @@ std::expected<std::string, RateLimitPayloadError> encode_rate_limit_check_reques
     }
     if (ok(result)) {
         result = text(generator, value.model_name);
+    }
+    if (ok(result)) {
+        result = key(generator, "ruleRevision");
+    }
+    if (ok(result)) {
+        result = generator.integer(value.rule_revision);
+    }
+    if (ok(result)) {
+        result = key(generator, "windowDurationMillis");
+    }
+    if (ok(result)) {
+        result = generator.integer(value.window_duration_millis);
+    }
+    if (ok(result)) {
+        result = key(generator, "maxTokensPerWindow");
+    }
+    if (ok(result)) {
+        result = generator.integer(value.max_tokens_per_window);
     }
     if (ok(result)) {
         result = generator.map_close();
@@ -327,6 +355,7 @@ RateLimitCheckResponse to_http_response(const TokenRateLimitCheckResult &value) 
     };
     if (value.has_ticket) {
         output.ticket = RateLimitTicketPayload{
+                .rule_revision = value.ticket.rule_revision,
                 .generation = value.ticket.generation,
                 .window_start_millis = value.ticket.window_start_millis,
         };

@@ -211,7 +211,14 @@ async::Task<void> TokenRateLimitHttpHandler::handle_check(http::HttpExchange &ex
         co_await send_payload_error(exchange, request.error());
         co_return;
     }
-    const TokenRateLimitCheckResult result = service_->check(request->user_id, request->model_name, wall_now_millis());
+    const TokenRateLimitCheckResult result =
+            service_->check(request->user_id, request->model_name,
+                            CompiledModelRateLimitRule{
+                                    .revision = request->rule_revision,
+                                    .window_duration_millis = request->window_duration_millis,
+                                    .max_tokens_per_window = request->max_tokens_per_window,
+                            },
+                            wall_now_millis());
     auto encoded = encode_rate_limit_check_response(to_http_response(result));
     if (!encoded) {
         co_await send_json(exchange, 500, R"({"ok":false,"message":"process request failed"})");
@@ -233,6 +240,7 @@ async::Task<void> TokenRateLimitHttpHandler::handle_settle(http::HttpExchange &e
     const TokenRateLimitSettleResult result =
             service_->settle(request->user_id, request->model_name,
                              TokenRateLimitTicket{
+                                     .rule_revision = request->ticket->rule_revision,
                                      .generation = request->ticket->generation,
                                      .window_start_millis = request->ticket->window_start_millis,
                              },

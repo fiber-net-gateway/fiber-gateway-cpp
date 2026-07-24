@@ -49,7 +49,7 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] async::Task<std::expected<CoordinatedRateLimitCheck, RateLimitCoordinatorError>>
-    check(std::string_view user_id, std::string_view model_name, std::int64_t now_millis) noexcept;
+    check(std::string_view user_id, const CompiledModelRoute &model, std::int64_t now_millis) noexcept;
 
     void settle(RateLimitNode owner, std::string_view user_id, std::string_view model_name, TokenRateLimitTicket ticket,
                 std::int64_t tokens, bool count_usage, std::int64_t now_millis) noexcept;

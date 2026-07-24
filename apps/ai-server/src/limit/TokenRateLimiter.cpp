@@ -5,6 +5,8 @@
 #include <tuple>
 #include <utility>
 
+#include <common/Assert.h>
+
 namespace fiber::ai_server {
 namespace {
 
@@ -90,48 +92,35 @@ bool WindowTokenRateLimiter::settle(std::int64_t window_start_millis, std::int64
 
 bool TokenRateLimiterManager::RateLimitKeyLess::operator()(const RateLimitKey &left,
                                                            const RateLimitKey &right) const noexcept {
-    return std::tie(left.user_id, left.model_name) < std::tie(right.user_id, right.model_name);
+    return std::tie(left.user_id, left.model_name, left.rule_revision) <
+           std::tie(right.user_id, right.model_name, right.rule_revision);
 }
 
 bool TokenRateLimiterManager::RateLimitKeyLess::operator()(const RateLimitKey &left,
                                                            RateLimitKeyView right) const noexcept {
-    return std::pair<std::string_view, std::string_view>(left.user_id, left.model_name) <
-           std::pair(right.user_id, right.model_name);
+    return std::tuple<std::string_view, std::string_view, std::int64_t>(left.user_id, left.model_name,
+                                                                        left.rule_revision) <
+           std::tuple(right.user_id, right.model_name, right.rule_revision);
 }
 
 bool TokenRateLimiterManager::RateLimitKeyLess::operator()(RateLimitKeyView left,
                                                            const RateLimitKey &right) const noexcept {
-    return std::pair(left.user_id, left.model_name) <
-           std::pair<std::string_view, std::string_view>(right.user_id, right.model_name);
+    return std::tuple(left.user_id, left.model_name, left.rule_revision) <
+           std::tuple<std::string_view, std::string_view, std::int64_t>(right.user_id, right.model_name,
+                                                                        right.rule_revision);
 }
 
-void TokenRateLimiterManager::update_project(std::shared_ptr<const LlmProjectSnapshot> project) noexcept {
-    project_ = std::move(project);
-}
-
-const ModelRateLimitConfig *TokenRateLimiterManager::find_rule(std::string_view model_name) const noexcept {
-    if (!project_) {
-        return nullptr;
-    }
-    const CompiledModelRoute *model = project_->find_model(model_name);
-    return model && model->rate_limit ? &*model->rate_limit : nullptr;
-}
-
-bool TokenRateLimiterManager::has_rule(std::string_view model_name) const noexcept {
-    return find_rule(model_name) != nullptr;
-}
-
-bool TokenRateLimiterManager::rule_changed(const LimiterState &state, const ModelRateLimitConfig &rule) const noexcept {
-    return !project_ || state.rule_version != project_->generation() ||
-           state.window_duration_millis != rule.window_duration_millis ||
+bool TokenRateLimiterManager::rule_changed(const LimiterState &state,
+                                           const CompiledModelRateLimitRule &rule) const noexcept {
+    return state.window_duration_millis != rule.window_duration_millis ||
            state.max_tokens_per_window != rule.max_tokens_per_window;
 }
 
 TokenRateLimiterManager::LimiterState
-TokenRateLimiterManager::create_state(const ModelRateLimitConfig &rule, const LimiterState *old_state) const noexcept {
+TokenRateLimiterManager::create_state(const CompiledModelRateLimitRule &rule,
+                                      const LimiterState *old_state) const noexcept {
     LimiterState state;
-    (void) state.limiter.init(rule.window_duration_millis, rule.max_tokens_per_window);
-    state.rule_version = project_ ? project_->generation() : 0;
+    FIBER_ASSERT(state.limiter.init(rule.window_duration_millis, rule.max_tokens_per_window));
     state.window_duration_millis = rule.window_duration_millis;
     state.max_tokens_per_window = rule.max_tokens_per_window;
     state.generation = next_generation(old_state ? old_state->generation : 0);
@@ -139,21 +128,25 @@ TokenRateLimiterManager::create_state(const ModelRateLimitConfig &rule, const Li
 }
 
 TokenRateLimitCheckResult TokenRateLimiterManager::check(std::string_view user_id, std::string_view model_name,
+                                                         const CompiledModelRateLimitRule &rule,
                                                          std::int64_t now_millis) {
-    const ModelRateLimitConfig *rule = find_rule(model_name);
-    if (!rule) {
-        return {};
-    }
-
-    const RateLimitKeyView key{.user_id = user_id, .model_name = model_name};
+    const RateLimitKeyView key{
+            .user_id = user_id,
+            .model_name = model_name,
+            .rule_revision = rule.revision,
+    };
     auto found = limiters_.find(key);
     if (found == limiters_.end()) {
-        auto inserted =
-                limiters_.emplace(RateLimitKey{.user_id = std::string(user_id), .model_name = std::string(model_name)},
-                                  create_state(*rule, nullptr));
+        auto inserted = limiters_.emplace(
+                RateLimitKey{
+                        .user_id = std::string(user_id),
+                        .model_name = std::string(model_name),
+                        .rule_revision = rule.revision,
+                },
+                create_state(rule, nullptr));
         found = inserted.first;
-    } else if (rule_changed(found->second, *rule)) {
-        found->second = create_state(*rule, &found->second);
+    } else if (rule_changed(found->second, rule)) {
+        found->second = create_state(rule, &found->second);
     }
 
     LimiterState &state = found->second;
@@ -170,6 +163,7 @@ TokenRateLimitCheckResult TokenRateLimiterManager::check(std::string_view user_i
         ++state.in_flight_count;
         output.has_ticket = true;
         output.ticket = TokenRateLimitTicket{
+                .rule_revision = rule.revision,
                 .generation = state.generation,
                 .window_start_millis = result.window_start_millis,
         };
@@ -183,7 +177,11 @@ TokenRateLimitSettleResult TokenRateLimiterManager::settle(std::string_view user
     if (tokens < 0 || (!count_usage && tokens != 0)) {
         return {};
     }
-    const RateLimitKeyView key{.user_id = user_id, .model_name = model_name};
+    const RateLimitKeyView key{
+            .user_id = user_id,
+            .model_name = model_name,
+            .rule_revision = ticket.rule_revision,
+    };
     const auto found = limiters_.find(key);
     if (found == limiters_.end() || found->second.generation != ticket.generation) {
         return {};

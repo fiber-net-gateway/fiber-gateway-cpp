@@ -21,35 +21,32 @@
 
 namespace {
 
+using fiber::ai_server::CompiledModelRateLimitRule;
 using fiber::ai_server::CompiledModelRoute;
-using fiber::ai_server::ConfigMetadata;
-using fiber::ai_server::LlmProjectSnapshot;
-using fiber::ai_server::ModelRateLimitConfig;
 using fiber::ai_server::TokenRateLimiterManager;
 using fiber::ai_server::TokenRateLimitService;
 using fiber::ai_server::WindowTokenRateLimiter;
 
 using namespace std::chrono_literals;
 
-std::shared_ptr<const LlmProjectSnapshot> project(std::uint64_t generation, std::string model_name,
-                                                  std::int64_t window_millis, std::int64_t max_tokens,
-                                                  bool with_rule = true) {
+CompiledModelRoute route(std::int64_t revision, std::string model_name, std::int64_t window_millis,
+                         std::int64_t max_tokens, bool with_rule = true) {
     CompiledModelRoute route;
     route.model_name = std::move(model_name);
     if (with_rule) {
-        route.rate_limit = ModelRateLimitConfig{
+        route.rate_limit = CompiledModelRateLimitRule{
+                .revision = revision,
                 .window_duration_millis = window_millis,
                 .max_tokens_per_window = max_tokens,
         };
     }
-    return std::make_shared<LlmProjectSnapshot>(ConfigMetadata{}, generation,
-                                                std::vector<std::shared_ptr<const fiber::ai_server::ProjectProvider>>{},
-                                                std::vector<CompiledModelRoute>{std::move(route)});
+    return route;
 }
 
 fiber::async::DetachedTask exercise_local_coordinator(fiber::ai_server::TokenRateLimitCoordinator *coordinator,
+                                                      const CompiledModelRoute *model,
                                                       std::promise<bool> *done) noexcept {
-    auto checked = co_await coordinator->check("u1", "m1", 10'000);
+    auto checked = co_await coordinator->check("u1", *model, 10'000);
     bool ok =
             checked && checked->result.allowed && checked->result.has_ticket && checked->owner && checked->owner->local;
     if (ok) {
@@ -58,9 +55,19 @@ fiber::async::DetachedTask exercise_local_coordinator(fiber::ai_server::TokenRat
         ok = settled && settled->applied && settled->usage_counted && settled->used_tokens == 100;
     }
     if (ok) {
-        auto denied = co_await coordinator->check("u1", "m1", 10'002);
+        auto denied = co_await coordinator->check("u1", *model, 10'002);
         ok = denied && !denied->result.allowed && denied->result.used_tokens == 100;
     }
+    co_await coordinator->shutdown();
+    done->set_value(ok);
+}
+
+fiber::async::DetachedTask exercise_bypass_coordinator(fiber::ai_server::TokenRateLimitCoordinator *coordinator,
+                                                       const CompiledModelRoute *model,
+                                                       std::promise<bool> *done) noexcept {
+    auto checked = co_await coordinator->check("u1", *model, 10'000);
+    const bool ok = checked && !checked->result.rule_matched && checked->result.allowed &&
+                    !checked->result.has_ticket && !checked->owner;
     co_await coordinator->shutdown();
     done->set_value(ok);
 }
@@ -108,9 +115,13 @@ TEST(LlmRateLimitTest, RejectsStaleWindowTicketAndZeroLimitImmediately) {
 
 TEST(LlmRateLimitTest, ManagerChecksAndSettlesPerUserModelKey) {
     TokenRateLimiterManager manager;
-    manager.update_project(project(1, "m1", 60'000, 100));
+    const CompiledModelRateLimitRule rule{
+            .revision = 1,
+            .window_duration_millis = 60'000,
+            .max_tokens_per_window = 100,
+    };
 
-    auto first = manager.check("u1", "m1", 10'000);
+    auto first = manager.check("u1", "m1", rule, 10'000);
     ASSERT_TRUE(first.rule_matched);
     ASSERT_TRUE(first.allowed);
     ASSERT_TRUE(first.has_ticket);
@@ -121,45 +132,55 @@ TEST(LlmRateLimitTest, ManagerChecksAndSettlesPerUserModelKey) {
     EXPECT_TRUE(settled.usage_counted);
     EXPECT_EQ(settled.used_tokens, 80);
 
-    auto same = manager.check("u1", "m1", 10'002);
+    auto same = manager.check("u1", "m1", rule, 10'002);
     EXPECT_TRUE(same.allowed);
     EXPECT_EQ(same.used_tokens, 80);
 
-    auto other_user = manager.check("u2", "m1", 10'002);
+    auto other_user = manager.check("u2", "m1", rule, 10'002);
     EXPECT_TRUE(other_user.allowed);
     EXPECT_EQ(other_user.used_tokens, 0);
-
-    auto bypass = manager.check("u1", "m2", 10'002);
-    EXPECT_FALSE(bypass.rule_matched);
-    EXPECT_TRUE(bypass.allowed);
-    EXPECT_FALSE(bypass.has_ticket);
 }
 
-TEST(LlmRateLimitTest, RuleRefreshMakesOldTicketStale) {
+TEST(LlmRateLimitTest, PinnedRuleRevisionKeepsOldTicketSettleable) {
     TokenRateLimiterManager manager;
-    manager.update_project(project(1, "m1", 60'000, 100));
-    auto first = manager.check("u1", "m1", 10'000);
+    const CompiledModelRateLimitRule first_rule{
+            .revision = 1,
+            .window_duration_millis = 60'000,
+            .max_tokens_per_window = 100,
+    };
+    const CompiledModelRateLimitRule second_rule{
+            .revision = 2,
+            .window_duration_millis = 120'000,
+            .max_tokens_per_window = 200,
+    };
+    auto first = manager.check("u1", "m1", first_rule, 10'000);
     ASSERT_TRUE(first.has_ticket);
 
-    manager.update_project(project(2, "m1", 120'000, 200));
-    auto second = manager.check("u1", "m1", 10'001);
+    auto second = manager.check("u1", "m1", second_rule, 10'001);
     ASSERT_TRUE(second.has_ticket);
-    EXPECT_NE(second.ticket.generation, first.ticket.generation);
+    EXPECT_NE(second.ticket.rule_revision, first.ticket.rule_revision);
 
-    auto stale = manager.settle("u1", "m1", first.ticket, 30, true, 10'002);
-    EXPECT_FALSE(stale.applied);
-    EXPECT_FALSE(stale.usage_counted);
+    auto old = manager.settle("u1", "m1", first.ticket, 30, true, 10'002);
+    EXPECT_TRUE(old.applied);
+    EXPECT_TRUE(old.usage_counted);
 
     auto current = manager.settle("u1", "m1", second.ticket, 40, true, 10'003);
     EXPECT_TRUE(current.applied);
     EXPECT_TRUE(current.usage_counted);
     EXPECT_EQ(current.used_tokens, 40);
+
+    EXPECT_EQ(manager.check("u1", "m1", first_rule, 10'004).used_tokens, 30);
+    EXPECT_EQ(manager.check("u1", "m1", second_rule, 10'004).used_tokens, 40);
 }
 
 TEST(LlmRateLimitTest, NoUsageSettlementReleasesInFlightAndSweepHonorsIdleTtl) {
     TokenRateLimiterManager manager(5'000);
-    manager.update_project(project(1, "m1", 1'000, 100));
-    auto check = manager.check("u1", "m1", 10'000);
+    const CompiledModelRateLimitRule rule{
+            .revision = 1,
+            .window_duration_millis = 1'000,
+            .max_tokens_per_window = 100,
+    };
+    auto check = manager.check("u1", "m1", rule, 10'000);
     ASSERT_TRUE(check.has_ticket);
     EXPECT_EQ(manager.stats().in_flight_count, 1u);
 
@@ -174,21 +195,27 @@ TEST(LlmRateLimitTest, NoUsageSettlementReleasesInFlightAndSweepHonorsIdleTtl) {
     EXPECT_EQ(manager.stats().limiter_count, 0u);
 }
 
-TEST(LlmRateLimitTest, RemovedAndReaddedRuleCreatesFreshState) {
+TEST(LlmRateLimitTest, DifferentRuleRevisionsKeepIndependentState) {
     TokenRateLimiterManager manager;
-    manager.update_project(project(1, "m1", 60'000, 100));
-    auto first = manager.check("u1", "m1", 10'000);
+    const CompiledModelRateLimitRule first_rule{
+            .revision = 1,
+            .window_duration_millis = 60'000,
+            .max_tokens_per_window = 100,
+    };
+    const CompiledModelRateLimitRule readded_rule{
+            .revision = 3,
+            .window_duration_millis = 60'000,
+            .max_tokens_per_window = 100,
+    };
+    auto first = manager.check("u1", "m1", first_rule, 10'000);
     ASSERT_TRUE(first.has_ticket);
     EXPECT_TRUE(manager.settle("u1", "m1", first.ticket, 90, true, 10'001).usage_counted);
 
-    manager.update_project(project(2, "m1", 0, 0, false));
-    EXPECT_FALSE(manager.check("u1", "m1", 10'002).rule_matched);
-
-    manager.update_project(project(3, "m1", 60'000, 100));
-    auto recreated = manager.check("u1", "m1", 10'003);
+    auto recreated = manager.check("u1", "m1", readded_rule, 10'003);
     EXPECT_TRUE(recreated.rule_matched);
     EXPECT_TRUE(recreated.allowed);
     EXPECT_EQ(recreated.used_tokens, 0);
+    EXPECT_EQ(manager.check("u1", "m1", first_rule, 10'004).used_tokens, 90);
 }
 
 TEST(LlmRateLimitTest, MurmurHashMatchesJavaGoldenValues) {
@@ -198,22 +225,26 @@ TEST(LlmRateLimitTest, MurmurHashMatchesJavaGoldenValues) {
 
 TEST(LlmRateLimitTest, SharedServiceKeepsOneKeyConsistentAcrossWorkers) {
     TokenRateLimitService service(4);
-    service.update_project(project(1, "m1", 60'000, 100));
+    const CompiledModelRateLimitRule rule{
+            .revision = 1,
+            .window_duration_millis = 60'000,
+            .max_tokens_per_window = 100,
+    };
 
-    auto first = service.check("u1", "m1", 10'000);
+    auto first = service.check("u1", "m1", rule, 10'000);
     ASSERT_TRUE(first.has_ticket);
     EXPECT_TRUE(service.settle("u1", "m1", first.ticket, 100, true, 10'001).usage_counted);
 
-    auto denied = service.check("u1", "m1", 10'002);
+    auto denied = service.check("u1", "m1", rule, 10'002);
     EXPECT_FALSE(denied.allowed);
     EXPECT_EQ(denied.used_tokens, 100);
-    EXPECT_TRUE(service.check("u2", "m1", 10'002).allowed);
+    EXPECT_TRUE(service.check("u2", "m1", rule, 10'002).allowed);
 }
 
 TEST(LlmRateLimitTest, CoordinatorWaitsForLocalSettlement) {
     fiber::event::EventLoopGroup workers(1);
     TokenRateLimitService service(1);
-    service.update_project(project(1, "m1", 60'000, 100));
+    const CompiledModelRoute model = route(1, "m1", 60'000, 100);
 
     fiber::ai_server::RateLimitShardRing ring;
     ASSERT_TRUE(ring.update(1, {
@@ -226,7 +257,28 @@ TEST(LlmRateLimitTest, CoordinatorWaitsForLocalSettlement) {
     std::promise<bool> done;
     auto completed = done.get_future();
     workers.start();
-    fiber::async::spawn(workers.at(0), [&]() { return exercise_local_coordinator(&coordinator, &done); });
+    fiber::async::spawn(workers.at(0), [&]() { return exercise_local_coordinator(&coordinator, &model, &done); });
+
+    ASSERT_EQ(completed.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(completed.get());
+    workers.stop();
+    workers.join();
+}
+
+TEST(LlmRateLimitTest, CoordinatorBypassesPinnedRouteWithoutRuleBeforeRingLookup) {
+    fiber::event::EventLoopGroup workers(1);
+    TokenRateLimitService service(1);
+    const CompiledModelRoute model = route(1, "m1", 60'000, 100, false);
+
+    fiber::ai_server::RateLimitShardRing ring;
+    fiber::ai_server::TokenRateLimitRemoteClient remote(workers);
+    fiber::ai_server::TokenRateLimitCoordinator coordinator(service, ring, remote);
+    ASSERT_TRUE(coordinator.init());
+
+    std::promise<bool> done;
+    auto completed = done.get_future();
+    workers.start();
+    fiber::async::spawn(workers.at(0), [&]() { return exercise_bypass_coordinator(&coordinator, &model, &done); });
 
     ASSERT_EQ(completed.wait_for(2s), std::future_status::ready);
     EXPECT_TRUE(completed.get());
@@ -275,6 +327,23 @@ TEST(LlmRateLimitTest, ConsistentHashRingRejectsDuplicateNodes) {
 }
 
 TEST(LlmRateLimitTest, InternalHttpPayloadsRoundTrip) {
+    fiber::ai_server::RateLimitCheckRequest check_request{
+            .user_id = "alice",
+            .model_name = "model-a",
+            .rule_revision = -17,
+            .window_duration_millis = 60'000,
+            .max_tokens_per_window = 100,
+    };
+    auto encoded_check_request = fiber::ai_server::encode_rate_limit_check_request(check_request);
+    ASSERT_TRUE(encoded_check_request);
+    fiber::mem::BufPool check_request_pool;
+    auto decoded_check_request =
+            fiber::ai_server::decode_rate_limit_check_request(*encoded_check_request, check_request_pool);
+    ASSERT_TRUE(decoded_check_request);
+    EXPECT_EQ(decoded_check_request->rule_revision, -17);
+    EXPECT_EQ(decoded_check_request->window_duration_millis, 60'000);
+    EXPECT_EQ(decoded_check_request->max_tokens_per_window, 100);
+
     fiber::ai_server::RateLimitCheckResponse check{
             .rule_matched = true,
             .allowed = true,
@@ -283,6 +352,7 @@ TEST(LlmRateLimitTest, InternalHttpPayloadsRoundTrip) {
             .recover_at_millis = 12345,
             .ticket =
                     fiber::ai_server::RateLimitTicketPayload{
+                            .rule_revision = -17,
                             .generation = 9,
                             .window_start_millis = 12000,
                     },
@@ -296,6 +366,7 @@ TEST(LlmRateLimitTest, InternalHttpPayloadsRoundTrip) {
     EXPECT_TRUE(decoded_check->allowed);
     EXPECT_EQ(decoded_check->used_tokens, 7);
     ASSERT_TRUE(decoded_check->ticket);
+    EXPECT_EQ(decoded_check->ticket->rule_revision, -17);
     EXPECT_EQ(decoded_check->ticket->generation, 9u);
 
     fiber::ai_server::RateLimitSettleRequest settle{
@@ -303,6 +374,7 @@ TEST(LlmRateLimitTest, InternalHttpPayloadsRoundTrip) {
             .model_name = "model-a",
             .ticket =
                     fiber::ai_server::RateLimitTicketPayload{
+                            .rule_revision = -17,
                             .generation = 9,
                             .window_start_millis = 12000,
                     },
@@ -316,8 +388,20 @@ TEST(LlmRateLimitTest, InternalHttpPayloadsRoundTrip) {
     ASSERT_TRUE(decoded_settle);
     EXPECT_EQ(decoded_settle->user_id, "alice");
     EXPECT_EQ(decoded_settle->model_name, "model-a");
+    ASSERT_TRUE(decoded_settle->ticket);
+    EXPECT_EQ(decoded_settle->ticket->rule_revision, -17);
     EXPECT_EQ(decoded_settle->tokens, 33);
     EXPECT_TRUE(decoded_settle->count_usage);
+}
+
+TEST(LlmRateLimitTest, InternalHttpPayloadsRejectInvalidPinnedRule) {
+    fiber::mem::BufPool pool;
+    auto decoded = fiber::ai_server::decode_rate_limit_check_request(
+            R"({"userId":"alice","modelName":"m","ruleRevision":1,"windowDurationMillis":0,"maxTokensPerWindow":10})",
+            pool);
+
+    ASSERT_FALSE(decoded);
+    EXPECT_EQ(decoded.error().code, fiber::ai_server::RateLimitPayloadErrorCode::InvalidValue);
 }
 
 TEST(LlmRateLimitTest, InternalHttpPayloadsRejectInvalidSettlement) {
