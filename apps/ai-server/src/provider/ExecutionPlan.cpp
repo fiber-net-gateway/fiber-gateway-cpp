@@ -1,5 +1,7 @@
 #include "ExecutionPlan.h"
 
+#include "../discovery/LoadBalancer.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -37,7 +39,7 @@ ProviderProtocolType provider_protocol_type(LlmWireProtocol protocol) noexcept {
 
 bool service_ready(const ProjectProvider &provider) noexcept {
     return !provider.config->base_url.starts_with("service://") ||
-           (provider.service && !provider.service->endpoints.empty());
+           (provider.service && provider.service->initialized() && provider.service->configured_instance_count() != 0);
 }
 
 std::size_t attempt_capacity(std::span<const std::shared_ptr<const ProjectProvider>> providers) noexcept {
@@ -98,7 +100,7 @@ CandidateGroup build_candidates(std::span<const std::shared_ptr<const ProjectPro
         }
         const ProjectProvider &provider = *provider_handle;
         ProviderRuntimeState &runtime = registry.state_for(provider.name);
-        if (!service_ready(provider) || !runtime.available(now)) {
+        if (!service_ready(provider) || (!provider.service && !runtime.available(now))) {
             group.unavailable = true;
             continue;
         }

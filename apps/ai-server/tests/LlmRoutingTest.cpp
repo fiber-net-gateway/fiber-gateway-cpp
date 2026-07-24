@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "discovery/LoadBalancer.h"
 #include "provider/ExecutionPlan.h"
 #include "provider/ProviderEndpoint.h"
 #include "provider/ProviderRuntime.h"
@@ -60,9 +61,7 @@ std::shared_ptr<const ProjectProvider> make_provider(std::string name, std::vect
     if (!service_ready) {
         auto mutable_config = std::const_pointer_cast<ProviderConfigSnapshot>(provider->config);
         mutable_config->base_url = "service://empty";
-        auto endpoints = std::make_shared<fiber::ai_server::ServiceEndpointSnapshot>();
-        endpoints->service_name = "empty";
-        provider->service = std::move(endpoints);
+        provider->service = std::make_shared<fiber::ai_server::LoadBalancer>();
     }
     return provider;
 }

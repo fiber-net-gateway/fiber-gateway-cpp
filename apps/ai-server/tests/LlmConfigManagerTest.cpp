@@ -19,6 +19,7 @@
 
 #include "AiServer.h"
 #include "config/LlmConfigManager.h"
+#include "discovery/LoadBalancer.h"
 
 namespace {
 
@@ -412,7 +413,7 @@ TEST(LlmConfigManagerTest, ModelsCandidateRetainsActiveTreeUntilDependenciesAreR
     EXPECT_TRUE(completed);
 }
 
-TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesDeepImmutableEndpoints) {
+TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBalancer) {
     fiber::event::EventLoop loop;
     FakeConfigService service;
     FakeNamingService naming;
@@ -465,8 +466,14 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesDeepImmutableEndpoin
         const auto *first_provider = first->project->find_provider("routed");
         EXPECT_NE(first_provider, nullptr);
         EXPECT_NE(first_provider->service, nullptr);
-        EXPECT_EQ(first_provider->service->endpoints.size(), 1u);
-        EXPECT_EQ(first_provider->service->endpoints[0].ip, "10.0.0.1");
+        EXPECT_EQ(first_provider->service->configured_instance_count(), 1u);
+        auto selected_a = first_provider->service->load_balance();
+        EXPECT_TRUE(selected_a);
+        if (selected_a) {
+            EXPECT_EQ(selected_a->service_name(), "backend-a");
+            EXPECT_EQ(selected_a->address().ip().to_string(), "10.0.0.1");
+            first_provider->service->report(std::move(*selected_a), fiber::ai_server::InstanceReportOutcome::Neutral);
+        }
 
         service.push("ploto.ai-llm.provider.routed",
                      R"({"version":2,"data":{
@@ -514,13 +521,17 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesDeepImmutableEndpoin
         EXPECT_NE(second_provider, nullptr);
         EXPECT_NE(second_provider->service, nullptr);
         EXPECT_EQ(second_provider->config->metadata.version, 2);
-        EXPECT_EQ(second_provider->service->service_name, "backend-b");
-        EXPECT_EQ(second_provider->service->endpoints.size(), 1u);
-        EXPECT_EQ(second_provider->service->endpoints[0].ip, "10.0.0.2");
+        EXPECT_EQ(second_provider->service->configured_instance_count(), 1u);
+        auto selected_b = second_provider->service->load_balance();
+        EXPECT_TRUE(selected_b);
+        if (selected_b) {
+            EXPECT_EQ(selected_b->service_name(), "backend-b");
+            EXPECT_EQ(selected_b->address().ip().to_string(), "10.0.0.2");
+            second_provider->service->report(std::move(*selected_b), fiber::ai_server::InstanceReportOutcome::Neutral);
+        }
         EXPECT_EQ(manager.service_subscription_count(), 1u);
         EXPECT_EQ(first_provider->config->metadata.version, 1);
-        EXPECT_EQ(first_provider->service->service_name, "backend-a");
-        EXPECT_EQ(first_provider->service->endpoints[0].ip, "10.0.0.1");
+        EXPECT_EQ(first_provider->service->configured_instance_count(), 1u);
 
         fiber::nacos::ServiceInfo empty_backend_b;
         empty_backend_b.name = "backend-b";
@@ -532,8 +543,10 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesDeepImmutableEndpoin
 
         auto empty = snapshots.current().value;
         EXPECT_NE(empty, nullptr);
-        EXPECT_TRUE(empty->project->find_provider("routed")->service->endpoints.empty());
-        EXPECT_EQ(second_provider->service->endpoints.size(), 1u);
+        EXPECT_EQ(empty, second);
+        EXPECT_EQ(empty->project->find_provider("routed")->service->configured_instance_count(), 0u);
+        EXPECT_EQ(second_provider->service->configured_instance_count(), 0u);
+        EXPECT_EQ(first_provider->service->configured_instance_count(), 1u);
 
         co_await manager.shutdown();
         completed = true;

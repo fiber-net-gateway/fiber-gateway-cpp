@@ -248,6 +248,7 @@ TEST(LlmProtocolTest, ClassifiesTokenAndProviderFailures) {
     auto token = classify_provider_response(LlmWireProtocol::OpenAiChatCompletions, 400, "7",
                                             R"({"error":{"type":"insufficient_quota"}})", load_balance, false, pool);
     EXPECT_EQ(token.scope, ProviderErrorScope::ApiToken);
+    EXPECT_EQ(token.instance_outcome, InstanceReportOutcome::Neutral);
     EXPECT_TRUE(token.retryable);
     EXPECT_EQ(token.unavailable_ttl, std::chrono::seconds(7));
 
@@ -255,10 +256,12 @@ TEST(LlmProtocolTest, ClassifiesTokenAndProviderFailures) {
     auto provider = classify_provider_response(LlmWireProtocol::AnthropicMessages, 503, {}, {}, load_balance, false,
                                                status_pool);
     EXPECT_EQ(provider.scope, ProviderErrorScope::Provider);
+    EXPECT_EQ(provider.instance_outcome, InstanceReportOutcome::Failure);
     EXPECT_TRUE(provider.retryable);
 
     auto started = classify_provider_transport_error(true);
     EXPECT_EQ(started.scope, ProviderErrorScope::Provider);
+    EXPECT_EQ(started.instance_outcome, InstanceReportOutcome::Failure);
     EXPECT_FALSE(started.retryable);
 }
 

@@ -1,11 +1,11 @@
 #include "LlmConfigManager.h"
 
+#include "../discovery/ServiceDiscovery.h"
 #include "../limit/RateLimitHash.h"
 #include "ConfigNodePool.h"
 
 #include <algorithm>
 #include <bit>
-#include <cmath>
 #include <functional>
 #include <limits>
 #include <map>
@@ -44,34 +44,6 @@ void log_config_rejection(bool serving_ready, std::string_view data_id, std::str
 }
 
 class ConfigGraph;
-
-class ServiceNode final : public common::NonCopyable, public common::NonMovable {
-public:
-    using Key = std::string;
-    using CreateError = nacos::NamingServiceError;
-
-    ServiceNode(ConfigGraph &graph, Key key, nacos::Subscription<nacos::ServiceInfo> subscription);
-
-    [[nodiscard]] const Key &key() const noexcept { return key_; }
-    [[nodiscard]] const std::shared_ptr<const ServiceEndpointSnapshot> &current() const noexcept { return current_; }
-
-    void start(std::shared_ptr<ServiceNode> self);
-    void request_stop() noexcept;
-
-private:
-    [[nodiscard]] static async::DetachedTask run(std::shared_ptr<ServiceNode> self) noexcept;
-    void apply(const nacos::ServiceInfo &info);
-
-    ConfigGraph *graph_ = nullptr;
-    Key key_;
-    nacos::Subscription<nacos::ServiceInfo> subscription_;
-    std::shared_ptr<const ServiceEndpointSnapshot> current_;
-    async::Watch<bool> stop_{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher_;
-    bool stopping_ = false;
-};
-
-using ServiceNodePool = ConfigNodePool<ServiceNode>;
 
 class GroupNode final : public common::NonCopyable, public common::NonMovable {
 public:
@@ -113,21 +85,21 @@ public:
 
     void start(std::shared_ptr<ProviderNode> self);
     void request_stop() noexcept;
-    [[nodiscard]] bool on_service_changed(const ServiceNode &service);
+    [[nodiscard]] bool on_service_initialized(const LoadBalancer &service);
 
 private:
     struct Generation {
         std::shared_ptr<const ProviderConfigSnapshot> config;
-        std::optional<ServiceNodePool::Ref> service;
+        std::optional<ServiceDiscovery::Handle> service;
 
-        [[nodiscard]] bool ready() const noexcept { return !service || service->node().current() != nullptr; }
+        [[nodiscard]] bool ready() const noexcept { return !service || service->load_balancer().initialized(); }
     };
 
     [[nodiscard]] static async::DetachedTask run(std::shared_ptr<ProviderNode> self) noexcept;
     void apply(const nacos::ConfigData &data);
     void activate_candidate();
     void rebuild_current();
-    [[nodiscard]] static bool references(const Generation &generation, const ServiceNode &service) noexcept;
+    [[nodiscard]] static bool references(const Generation &generation, const LoadBalancer &service) noexcept;
 
     ConfigGraph *graph_ = nullptr;
     Key key_;
@@ -206,9 +178,10 @@ private:
 class ConfigGraph final : public common::NonCopyable, public common::NonMovable {
 public:
     ConfigGraph(event::EventLoop &loop, nacos::ConfigService &config_service, nacos::NamingService &naming_service) :
-        loop_(&loop), config_service_(&config_service), naming_service_(&naming_service),
-        services_(this, &ConfigGraph::create_service_node), providers_(this, &ConfigGraph::create_provider_node),
-        groups_(this, &ConfigGraph::create_group_node) {
+        loop_(&loop), config_service_(&config_service),
+        services_(loop, naming_service,
+                  ServiceDiscoveryObserver{.context = this, .on_update = &ConfigGraph::service_updated}),
+        providers_(this, &ConfigGraph::create_provider_node), groups_(this, &ConfigGraph::create_group_node) {
         snapshot_publisher_ = snapshots_.acquire_publisher();
         FIBER_ASSERT(snapshot_publisher_.has_value());
     }
@@ -243,7 +216,7 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] ProviderNodePool &providers() noexcept { return providers_; }
     [[nodiscard]] GroupNodePool &groups() noexcept { return groups_; }
-    [[nodiscard]] ServiceNodePool &services() noexcept { return services_; }
+    [[nodiscard]] ServiceDiscovery &services() noexcept { return services_; }
 
     void task_started() { tasks_.add(); }
     void task_done() noexcept { tasks_.done(); }
@@ -253,14 +226,13 @@ public:
     void on_models_changed();
     void on_provider_changed(ProviderNode &provider);
     void on_group_changed(GroupNode &group);
-    void on_service_changed(ServiceNode &service);
+    void on_service_initialized(LoadBalancer &service);
 
     void report_failure(std::string_view data_id, std::string_view md5, LlmConfigError error);
     void report_not_found(std::string_view data_id);
 
 private:
-    [[nodiscard]] static std::expected<std::shared_ptr<ServiceNode>, nacos::NamingServiceError>
-    create_service_node(void *context, std::string key);
+    static void service_updated(void *context, LoadBalancer &service, bool first_update);
     [[nodiscard]] static std::expected<std::shared_ptr<ProviderNode>, nacos::ConfigServiceError>
     create_provider_node(void *context, std::string key);
     [[nodiscard]] static std::expected<std::shared_ptr<GroupNode>, nacos::ConfigServiceError>
@@ -270,9 +242,8 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     nacos::ConfigService *config_service_ = nullptr;
-    nacos::NamingService *naming_service_ = nullptr;
     async::WaitGroup tasks_;
-    ServiceNodePool services_;
+    ServiceDiscovery services_;
     ProviderNodePool providers_;
     GroupNodePool groups_;
     std::shared_ptr<Bt1Node> bt1_;
@@ -286,91 +257,6 @@ private:
     std::uint64_t failed_updates_ = 0;
     bool ready_ = false;
 };
-
-ServiceNode::ServiceNode(ConfigGraph &graph, Key key, nacos::Subscription<nacos::ServiceInfo> subscription) :
-    graph_(&graph), key_(std::move(key)), subscription_(std::move(subscription)) {
-    stop_publisher_ = stop_.acquire_publisher();
-    FIBER_ASSERT(stop_publisher_.has_value());
-}
-
-void ServiceNode::start(std::shared_ptr<ServiceNode> self) {
-    FIBER_ASSERT(graph_->loop().in_loop());
-    graph_->task_started();
-    async::spawn([self = std::move(self)]() mutable { return run(std::move(self)); });
-}
-
-void ServiceNode::request_stop() noexcept {
-    FIBER_ASSERT(graph_->loop().in_loop());
-    if (!stopping_) {
-        stopping_ = true;
-        stop_publisher_->publish(true);
-    }
-}
-
-async::DetachedTask ServiceNode::run(std::shared_ptr<ServiceNode> self) noexcept {
-    auto stop = self->stop_.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = self->subscription_.subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
-        }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                if (!self->stopping_) {
-                    LOG(LOG_CONFIG, WARN) << "NamingService subscription closed service=" << log::quoted(self->key_);
-                }
-                break;
-            }
-            if (snapshot.value->data) {
-                self->apply(*snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
-    }
-    self->subscription_.close();
-    self->graph_->task_done();
-}
-
-void ServiceNode::apply(const nacos::ServiceInfo &info) {
-    FIBER_ASSERT(graph_->loop().in_loop());
-    if (!graph_->services().contains(*this)) {
-        return;
-    }
-
-    auto next = std::make_shared<ServiceEndpointSnapshot>();
-    next->service_name = key_;
-    next->group = info.group_name.empty() ? std::string(kDefaultNamingGroup) : info.group_name;
-    next->last_ref_time = info.last_ref_time;
-    next->checksum = info.checksum;
-    next->endpoints.reserve(info.hosts.size());
-    for (const nacos::Instance &host: info.hosts) {
-        if (!host.enabled || !host.healthy || !std::isfinite(host.weight) || host.weight <= 0.0 || host.ip.empty() ||
-            host.port == 0) {
-            continue;
-        }
-        next->endpoints.push_back(ServiceEndpoint{
-                .ip = host.ip,
-                .port = host.port,
-                .weight = host.weight,
-                .cluster_name = host.cluster_name,
-        });
-    }
-    current_ = std::move(next);
-    LOG(LOG_CONFIG, DEBUG) << "NamingService endpoints updated service=" << log::quoted(key_)
-                           << " endpoints=" << current_->endpoints.size();
-    graph_->accepted_update();
-    graph_->on_service_changed(*this);
-}
 
 GroupNode::GroupNode(ConfigGraph &graph, Key key, nacos::Subscription<nacos::ConfigData> subscription) :
     graph_(&graph), key_(std::move(key)), subscription_(std::move(subscription)) {
@@ -525,7 +411,8 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
     next.config = std::make_shared<const ProviderConfigSnapshot>(std::move(*parsed));
     constexpr std::string_view service_prefix = "service://";
     if (next.config->base_url.starts_with(service_prefix)) {
-        auto service = graph_->services().acquire(next.config->base_url.substr(service_prefix.size()));
+        auto service = graph_->services().acquire(next.config->base_url.substr(service_prefix.size()),
+                                                  std::string(kDefaultNamingGroup));
         if (!service) {
             graph_->report_failure(data_id, data.md5,
                                    LlmConfigError{
@@ -551,18 +438,14 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
     }
 }
 
-bool ProviderNode::references(const Generation &generation, const ServiceNode &service) noexcept {
-    return generation.service && &generation.service->node() == &service;
+bool ProviderNode::references(const Generation &generation, const LoadBalancer &service) noexcept {
+    return generation.service && &generation.service->load_balancer() == &service;
 }
 
-bool ProviderNode::on_service_changed(const ServiceNode &service) {
+bool ProviderNode::on_service_initialized(const LoadBalancer &service) {
     FIBER_ASSERT(graph_->loop().in_loop());
     if (candidate_ && references(*candidate_, service) && candidate_->ready()) {
         activate_candidate();
-        return true;
-    }
-    if (active_ && references(*active_, service)) {
-        rebuild_current();
         return true;
     }
     return false;
@@ -577,10 +460,9 @@ void ProviderNode::activate_candidate() {
 
 void ProviderNode::rebuild_current() {
     FIBER_ASSERT(active_ && active_->ready());
-    std::shared_ptr<const ServiceEndpointSnapshot> service;
+    std::shared_ptr<LoadBalancer> service;
     if (active_->service) {
-        service = active_->service->node().current();
-        FIBER_ASSERT(service != nullptr);
+        service = active_->service->shared_load_balancer();
     }
     current_ = std::make_shared<const ProjectProvider>(ProjectProvider{
             .name = key_,
@@ -981,20 +863,10 @@ async::Task<void> ConfigGraph::shutdown() noexcept {
     FIBER_ASSERT(providers_.empty());
     FIBER_ASSERT(groups_.empty());
     FIBER_ASSERT(services_.empty());
+    co_await services_.shutdown();
     state_ = LlmConfigManagerState::Stopped;
     LOG(LOG_CONFIG, INFO) << "LLM config graph stopped successful_updates=" << successful_updates_
                           << " failed_updates=" << failed_updates_;
-}
-
-std::expected<std::shared_ptr<ServiceNode>, nacos::NamingServiceError>
-ConfigGraph::create_service_node(void *context, std::string key) {
-    auto &graph = *static_cast<ConfigGraph *>(context);
-    FIBER_ASSERT(graph.loop_->in_loop());
-    auto subscription = graph.naming_service_->subscribe(key, kDefaultNamingGroup);
-    if (!subscription) {
-        return std::unexpected(std::move(subscription.error()));
-    }
-    return std::make_shared<ServiceNode>(graph, std::move(key), std::move(*subscription));
 }
 
 std::expected<std::shared_ptr<ProviderNode>, nacos::ConfigServiceError>
@@ -1051,14 +923,22 @@ void ConfigGraph::on_group_changed(GroupNode &group) {
     }
 }
 
-void ConfigGraph::on_service_changed(ServiceNode &service) {
+void ConfigGraph::service_updated(void *context, LoadBalancer &service, bool first_update) {
+    auto &graph = *static_cast<ConfigGraph *>(context);
+    graph.accepted_update();
+    if (first_update) {
+        graph.on_service_initialized(service);
+    }
+}
+
+void ConfigGraph::on_service_initialized(LoadBalancer &service) {
     FIBER_ASSERT(loop_->in_loop());
-    if (!services_.contains(service) || !models_) {
+    if (!models_) {
         return;
     }
     std::vector<std::string> changed;
     providers_.for_each([&](ProviderNode &provider) {
-        if (provider.on_service_changed(service)) {
+        if (provider.on_service_initialized(service)) {
             changed.push_back(provider.key());
         }
     });

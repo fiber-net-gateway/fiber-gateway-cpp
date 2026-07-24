@@ -1,6 +1,7 @@
 #ifndef FIBER_AI_SERVER_PROVIDER_CONNECTION_MANAGER_H
 #define FIBER_AI_SERVER_PROVIDER_CONNECTION_MANAGER_H
 
+#include "../discovery/LoadBalancer.h"
 #include "ExecutionPlan.h"
 #include "ProviderEndpoint.h"
 #include "WorkerDnsService.h"
@@ -38,11 +39,26 @@ struct ProviderConnectionError {
     const char *message = nullptr;
 };
 
+struct ProviderLoadBalanceLease {
+    std::shared_ptr<LoadBalancer> load_balancer;
+    LoadBalancer::Instance instance;
+
+    [[nodiscard]] bool valid() const noexcept { return load_balancer != nullptr && instance.valid(); }
+    void report(InstanceReportOutcome outcome) noexcept {
+        if (!valid()) {
+            return;
+        }
+        load_balancer->report(std::move(instance), outcome);
+        load_balancer.reset();
+    }
+};
+
 struct ProviderConnectionLease {
     http::LocalHttp1ConnectionPoolSet::Lease lease;
     http::Http1ClientConnection *connection = nullptr;
     std::string host_header;
     std::string target;
+    ProviderLoadBalanceLease load_balance;
 };
 
 class ProviderConnectionManager final : public common::NonCopyable, public common::NonMovable {
@@ -54,8 +70,7 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] async::Task<std::expected<ProviderConnectionLease, ProviderConnectionError>>
-    acquire(const ResolvedProviderAttempt &attempt, std::string_view route_key,
-            std::chrono::milliseconds connect_timeout) noexcept;
+    acquire(const ResolvedProviderAttempt &attempt, std::chrono::milliseconds connect_timeout) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 

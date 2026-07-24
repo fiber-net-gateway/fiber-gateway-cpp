@@ -42,6 +42,7 @@ struct BufferedProviderResponse {
     std::string retry_after;
     std::string request_id;
     mem::IoBuf body;
+    ProviderLoadBalanceLease load_balance;
 };
 
 class ProviderHttpResponseStream {
@@ -63,6 +64,8 @@ public:
     [[nodiscard]] async::Task<common::IoResult<mem::IoBufChain>>
     read_body(std::size_t max_bytes, std::chrono::milliseconds timeout = std::chrono::seconds(300)) noexcept;
     common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
+    void report_instance(InstanceReportOutcome outcome) noexcept { connection_.load_balance.report(outcome); }
+    [[nodiscard]] ProviderLoadBalanceLease take_load_balance() noexcept { return std::move(connection_.load_balance); }
 
 private:
     ProviderHttpResponseStream(ProviderConnectionLease connection, std::unique_ptr<http::ClientHttp1Exchange> upstream,
@@ -88,13 +91,12 @@ public:
     explicit ProviderHttpClient(ProviderConnectionManager &connections) noexcept : connections_(&connections) {}
 
     [[nodiscard]] async::Task<std::expected<ProviderHttpResponseStream, ProviderHttpError>>
-    start(const ResolvedProviderAttempt &attempt, std::string_view route_key, bool stream, mem::IoBufChain request_body,
+    start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
           mem::BufPool &request_pool) noexcept;
 
     [[nodiscard]] async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>>
-    execute_buffered(const ResolvedProviderAttempt &attempt, std::string_view route_key, bool stream,
-                     mem::IoBufChain request_body, mem::BufPool &request_pool,
-                     std::size_t max_response_bytes = 32 * 1024 * 1024) noexcept;
+    execute_buffered(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
+                     mem::BufPool &request_pool, std::size_t max_response_bytes = 32 * 1024 * 1024) noexcept;
 
 private:
     ProviderConnectionManager *connections_ = nullptr;
