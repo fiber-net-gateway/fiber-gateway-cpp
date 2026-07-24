@@ -59,6 +59,8 @@ fiber::event::EventLoop &TcpStream::loop() const noexcept { return stream_.loop(
 
 const SocketAddress &TcpStream::remote_addr() const noexcept { return remote_addr_; }
 
+bool TcpStream::terminal() const noexcept { return stream_.terminal(); }
+
 fiber::common::IoErr TcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
     return detail::apply_tcp_socket_options(fd(), options);
 }
@@ -75,12 +77,20 @@ fiber::common::IoErr TcpStream::set_write_callback(ReadyCallback callback, void 
     return stream_.set_write_callback(callback, ctx);
 }
 
+fiber::common::IoErr TcpStream::set_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_terminal_callback(callback, ctx);
+}
+
 fiber::common::IoErr TcpStream::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_read_callback(callback, ctx);
 }
 
 fiber::common::IoErr TcpStream::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_write_callback(callback, ctx);
+}
+
+fiber::common::IoErr TcpStream::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_terminal_callback(callback, ctx);
 }
 
 TcpStream::IoTask TcpStream::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {

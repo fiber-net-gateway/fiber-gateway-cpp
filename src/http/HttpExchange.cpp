@@ -42,11 +42,157 @@ HttpExchange::HttpExchange(mem::IoBufNodePool &node_pool, const HttpServerOption
     (void) options;
 }
 
-HttpExchange::~HttpExchange() = default;
+HttpExchange::~HttpExchange() { FIBER_ASSERT(response_channel_waiter_ == nullptr); }
 
 std::string_view HttpExchange::header(std::string_view name) const noexcept { return request_headers_.get(name); }
 
-void HttpExchange::set_io(HttpExchangeIo *io) noexcept { io_ = io; }
+void HttpExchange::set_io(HttpExchangeIo *io) noexcept {
+    if (io != nullptr) {
+        FIBER_ASSERT(io_ == nullptr);
+        FIBER_ASSERT(response_channel_waiter_ == nullptr);
+    } else {
+        FIBER_ASSERT(response_channel_waiter_ == nullptr);
+    }
+    io_ = io;
+}
+
+bool HttpExchange::response_channel_closed() const noexcept {
+    FIBER_ASSERT(io_ != nullptr);
+    return io_ == nullptr || io_->response_channel_closed();
+}
+
+HttpExchange::ResponseChannelClosedAwaiter HttpExchange::wait_response_channel_closed() noexcept {
+    return ResponseChannelClosedAwaiter(*this);
+}
+
+HttpExchange::ResponseChannelClosedAwaiter::ResponseChannelClosedAwaiter(HttpExchange &exchange) noexcept :
+    exchange_(&exchange) {}
+
+HttpExchange::ResponseChannelClosedAwaiter::~ResponseChannelClosedAwaiter() noexcept {
+    if (resume_entry_.is_in_queue()) {
+        FIBER_ASSERT(loop_ != nullptr);
+        FIBER_ASSERT(loop_->in_loop());
+        loop_->cancel<ResponseChannelClosedAwaiter, &ResponseChannelClosedAwaiter::resume_entry_>(*this);
+    }
+    if (registered_io_ != nullptr) {
+        FIBER_ASSERT(loop_ != nullptr);
+        FIBER_ASSERT(loop_->in_loop());
+        common::IoErr err = registered_io_->clear_response_channel_closed_callback(
+                &ResponseChannelClosedAwaiter::on_response_channel_closed, this);
+        FIBER_ASSERT(err == common::IoErr::None);
+        registered_io_ = nullptr;
+    }
+    detach_waiter();
+    if (state_ != State::Completed) {
+        state_ = State::Abandoned;
+    }
+}
+
+bool HttpExchange::ResponseChannelClosedAwaiter::await_ready() noexcept {
+    FIBER_ASSERT(state_ == State::Created);
+    FIBER_ASSERT(exchange_ != nullptr);
+
+    loop_ = event::EventLoop::current_or_null();
+    if (loop_ == nullptr || exchange_->io_ == nullptr) {
+        make_ready(common::IoErr::Invalid);
+        return true;
+    }
+    if (exchange_->response_channel_waiter_ != nullptr) {
+        make_ready(common::IoErr::Busy);
+        return true;
+    }
+    if (exchange_->io_->response_channel_closed()) {
+        make_ready(common::IoErr::None);
+        return true;
+    }
+    return false;
+}
+
+bool HttpExchange::ResponseChannelClosedAwaiter::await_suspend(std::coroutine_handle<> continuation) noexcept {
+    FIBER_ASSERT(state_ == State::Created);
+    FIBER_ASSERT(exchange_ != nullptr);
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(exchange_->io_ != nullptr);
+
+    if (exchange_->response_channel_waiter_ != nullptr) {
+        make_ready(common::IoErr::Busy);
+        return false;
+    }
+
+    continuation_ = continuation;
+    registered_io_ = exchange_->io_;
+    exchange_->response_channel_waiter_ = this;
+    state_ = State::Arming;
+
+    common::IoErr err = registered_io_->set_response_channel_closed_callback(
+            &ResponseChannelClosedAwaiter::on_response_channel_closed, this);
+    if (err != common::IoErr::None) {
+        FIBER_ASSERT(state_ == State::Arming);
+        registered_io_ = nullptr;
+        detach_waiter();
+        make_ready(err);
+        return false;
+    }
+    if (state_ == State::Arming) {
+        state_ = State::Armed;
+    } else {
+        FIBER_ASSERT(state_ == State::ResumeQueued);
+    }
+    return true;
+}
+
+common::IoResult<void> HttpExchange::ResponseChannelClosedAwaiter::await_resume() noexcept {
+    FIBER_ASSERT(state_ == State::Ready);
+    FIBER_ASSERT(completed_);
+    FIBER_ASSERT(registered_io_ == nullptr);
+    state_ = State::Completed;
+    continuation_ = {};
+    detach_waiter();
+    exchange_ = nullptr;
+    if (result_error_ != common::IoErr::None) {
+        return std::unexpected(result_error_);
+    }
+    return {};
+}
+
+void HttpExchange::ResponseChannelClosedAwaiter::on_response_channel_closed(void *ctx) noexcept {
+    auto *awaiter = static_cast<ResponseChannelClosedAwaiter *>(ctx);
+    FIBER_ASSERT(awaiter != nullptr);
+    FIBER_ASSERT(awaiter->loop_ != nullptr);
+    FIBER_ASSERT(awaiter->loop_->in_loop());
+    FIBER_ASSERT(awaiter->state_ == State::Arming || awaiter->state_ == State::Armed);
+
+    awaiter->registered_io_ = nullptr;
+    awaiter->state_ = State::ResumeQueued;
+    awaiter->loop_->post_local<ResponseChannelClosedAwaiter, &ResponseChannelClosedAwaiter::resume_entry_,
+                               &ResponseChannelClosedAwaiter::on_resume>(*awaiter);
+}
+
+void HttpExchange::ResponseChannelClosedAwaiter::on_resume(ResponseChannelClosedAwaiter *awaiter) noexcept {
+    FIBER_ASSERT(awaiter != nullptr);
+    FIBER_ASSERT(awaiter->loop_ != nullptr);
+    FIBER_ASSERT(awaiter->loop_->in_loop());
+    FIBER_ASSERT(awaiter->state_ == State::ResumeQueued);
+
+    awaiter->make_ready(common::IoErr::None);
+    std::coroutine_handle<> continuation = awaiter->continuation_;
+    awaiter->continuation_ = {};
+    FIBER_ASSERT(continuation);
+    continuation.resume();
+}
+
+void HttpExchange::ResponseChannelClosedAwaiter::detach_waiter() noexcept {
+    if (exchange_ != nullptr && exchange_->response_channel_waiter_ == this) {
+        exchange_->response_channel_waiter_ = nullptr;
+    }
+}
+
+void HttpExchange::ResponseChannelClosedAwaiter::make_ready(common::IoErr error) noexcept {
+    result_error_ = error;
+    completed_ = true;
+    state_ = State::Ready;
+}
 
 void HttpExchange::record_io_error(common::IoErr error) noexcept {
     if (response_stats_.terminal_error == common::IoErr::None) {

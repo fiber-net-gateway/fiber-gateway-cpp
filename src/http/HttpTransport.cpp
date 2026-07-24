@@ -108,12 +108,20 @@ common::IoErr TcpTransport::set_write_callback(ReadyCallback callback, void *ctx
     return stream_.set_write_callback(callback, ctx);
 }
 
+common::IoErr TcpTransport::set_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_terminal_callback(callback, ctx);
+}
+
 common::IoErr TcpTransport::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_read_callback(callback, ctx);
 }
 
 common::IoErr TcpTransport::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_write_callback(callback, ctx);
+}
+
+common::IoErr TcpTransport::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_terminal_callback(callback, ctx);
 }
 
 common::IoErr TcpTransport::poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept {
@@ -279,6 +287,8 @@ void TcpTransport::close() { stream_.close(); }
 
 bool TcpTransport::valid() const noexcept { return stream_.valid(); }
 
+bool TcpTransport::terminal() const noexcept { return stream_.terminal(); }
+
 int TcpTransport::fd() const noexcept { return stream_.fd(); }
 
 std::string_view TcpTransport::negotiated_alpn() const noexcept { return {}; }
@@ -355,12 +365,20 @@ common::IoErr TlsTransport::set_write_callback(ReadyCallback callback, void *ctx
     return stream_.set_write_callback(callback, ctx);
 }
 
+common::IoErr TlsTransport::set_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_terminal_callback(callback, ctx);
+}
+
 common::IoErr TlsTransport::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_read_callback(callback, ctx);
 }
 
 common::IoErr TlsTransport::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_write_callback(callback, ctx);
+}
+
+common::IoErr TlsTransport::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_terminal_callback(callback, ctx);
 }
 
 common::IoErr TlsTransport::poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept {
@@ -746,6 +764,8 @@ void TlsTransport::close() {
 }
 
 bool TlsTransport::valid() const noexcept { return stream_.valid(); }
+
+bool TlsTransport::terminal() const noexcept { return stream_.terminal(); }
 
 bool TlsTransport::has_pending_read() const noexcept { return stream_.has_pending_read(); }
 

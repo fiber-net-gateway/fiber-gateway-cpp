@@ -60,18 +60,25 @@ public:
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
+    [[nodiscard]] bool terminal() const noexcept { return terminal_; }
+    [[nodiscard]] fiber::common::IoErr terminal_error() const noexcept { return terminal_error_; }
 
     fiber::common::IoErr attach(int fd) noexcept;
     int release_fd() noexcept;
     void close();
 
-    // Callbacks receive None on readiness and Canceled when the fd is closed. They
-    // may update callback registration, but must keep this RWFd alive until event
-    // dispatch returns. Clear operations only remove the matching callback and ctx.
+    // Read/write callbacks receive None on readiness and Canceled when the fd is
+    // closed. The terminal callback is one-shot and independent from both
+    // directions; it observes ERR/HUP or an explicit terminal syscall error, but
+    // not RDHUP/EOF. Callers must keep this RWFd alive until dispatch returns.
+    // Clear operations only remove the matching callback and ctx.
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
+    void mark_terminal(fiber::common::IoErr error) noexcept;
 
     [[nodiscard]] WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -100,6 +107,10 @@ private:
     void *read_callback_ctx_ = nullptr;
     ReadyCallback write_callback_ = nullptr;
     void *write_callback_ctx_ = nullptr;
+    ReadyCallback terminal_callback_ = nullptr;
+    void *terminal_callback_ctx_ = nullptr;
+    fiber::common::IoErr terminal_error_ = fiber::common::IoErr::None;
+    bool terminal_ = false;
 };
 
 struct RWFdCrossThreadWaiter : RWFdWaiterBase {
