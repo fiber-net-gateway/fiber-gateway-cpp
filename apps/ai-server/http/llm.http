@@ -1,0 +1,37 @@
+### GET request to example server
+GET https://examples.http-client.intellij.net/get
+    ?generated-in=CLion
+
+###
+POST http://127.0.0.1:8080/v1/messages
+Authorization: Bearer BT1.dbg1.emhhbmd3YW5n.1794620808.IWwaVhCCNXedKyA76lSoQg.gwbneykB0KTSLRyrN8GHyFeFBIhsh36R0RXKO6bs6lw
+Content-Type: application/json
+
+{
+  "model": "volces-glm5",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "role": "user",
+      "content": "重庆是美国的哪座城市"
+    }
+  ],
+  "stream": true
+}
+
+###
+POST http://127.0.0.1:8080/v1/messages
+Authorization: Bearer BT1.dbg1.emhhbmd3YW5n.1794620808.IWwaVhCCNXedKyA76lSoQg.gwbneykB0KTSLRyrN8GHyFeFBIhsh36R0RXKO6bs6lw
+Content-Type: application/json
+
+{
+  "model": "volces-glm5",
+  "max_tokens": 10240,
+  "messages": [
+    {
+      "role": "user",
+      "content": "重庆是美国的哪座城市"
+    }
+  ],
+  "stream": false
+}
