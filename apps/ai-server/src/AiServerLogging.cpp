@@ -16,7 +16,7 @@ log::LogConfigResult<log::LogConfig> make_log_config() {
 
     auto root = builder.set_root_logger(
             {
-                    .level = log::LogLevel::Info,
+                    .level = log::LogLevel::Debug,
             },
             {*stderr_appender});
     if (!root) {
