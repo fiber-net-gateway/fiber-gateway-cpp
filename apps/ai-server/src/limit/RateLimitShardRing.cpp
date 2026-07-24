@@ -25,7 +25,11 @@ bool valid_node(const RateLimitNode &node) noexcept {
 } // namespace
 
 RateLimitShardRing::RateLimitShardRing() noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     current_.store(std::make_shared<const RateLimitRingSnapshot>(), std::memory_order_release);
+#else
+    std::atomic_store_explicit(&current_, std::make_shared<const RateLimitRingSnapshot>(), std::memory_order_release);
+#endif
 }
 
 std::expected<void, RateLimitRingError> RateLimitShardRing::update(std::uint64_t version,
@@ -83,12 +87,21 @@ std::expected<void, RateLimitRingError> RateLimitShardRing::update(std::uint64_t
                   }
                   return next->nodes[left.node_index].node_id < next->nodes[right.node_index].node_id;
               });
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     current_.store(std::move(next), std::memory_order_release);
+#else
+    std::shared_ptr<const RateLimitRingSnapshot> published = std::move(next);
+    std::atomic_store_explicit(&current_, std::move(published), std::memory_order_release);
+#endif
     return {};
 }
 
 std::shared_ptr<const RateLimitRingSnapshot> RateLimitShardRing::snapshot() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     return current_.load(std::memory_order_acquire);
+#else
+    return std::atomic_load_explicit(&current_, std::memory_order_acquire);
+#endif
 }
 
 std::optional<RateLimitNode> RateLimitShardRing::locate(std::string_view user_id, std::string_view model_name) const {
