@@ -31,15 +31,7 @@ public:
     BodyReadAwaiter(BodyReadAwaiter &&) = delete;
     BodyReadAwaiter &operator=(BodyReadAwaiter &&) = delete;
 
-    ~BodyReadAwaiter() {
-        if (!state_) {
-            return;
-        }
-        state_->cancel_waiter(this);
-        if (loop_ && timer_entry_.is_in_heap()) {
-            loop_->cancel<BodyReadAwaiter, &BodyReadAwaiter::timer_entry_>(*this);
-        }
-    }
+    ~BodyReadAwaiter() { cleanup(); }
 
     bool await_ready() noexcept {
         if (!state_) {
@@ -95,11 +87,7 @@ public:
             FIBER_ASSERT(result.kind != PollResult::Kind::Wait);
         }
 
-        state_ = nullptr;
-        handle_ = {};
-        loop_ = nullptr;
-        timed_out_ = false;
-        resume_posted_ = false;
+        cleanup();
         return result;
     }
 
@@ -120,7 +108,16 @@ private:
         if (awaiter->state_ && awaiter->state_->waiter_ == awaiter) {
             awaiter->state_->waiter_ = nullptr;
         }
-        awaiter->resume();
+        awaiter->post_resume();
+    }
+
+    void post_resume() noexcept {
+        if (!loop_ || resume_posted_) {
+            return;
+        }
+        FIBER_ASSERT(loop_->in_loop());
+        resume_posted_ = true;
+        loop_->post_local<BodyReadAwaiter, &BodyReadAwaiter::resume_entry_, &BodyReadAwaiter::on_notify>(*this);
     }
 
     void resume() noexcept {
@@ -131,13 +128,32 @@ private:
         }
     }
 
+    void cleanup() noexcept {
+        if (state_) {
+            state_->cancel_waiter(this);
+        }
+        if (loop_) {
+            if (timer_entry_.is_in_heap()) {
+                loop_->cancel<BodyReadAwaiter, &BodyReadAwaiter::timer_entry_>(*this);
+            }
+            if (resume_entry_.is_in_queue()) {
+                loop_->cancel<BodyReadAwaiter, &BodyReadAwaiter::resume_entry_>(*this);
+            }
+        }
+        state_ = nullptr;
+        handle_ = {};
+        loop_ = nullptr;
+        timed_out_ = false;
+        resume_posted_ = false;
+    }
+
     bool has_timer() const noexcept { return timeout_.count() > 0 && timeout_ != std::chrono::milliseconds::max(); }
 
     Http2BodyRecvState *state_ = nullptr;
     std::chrono::milliseconds timeout_{};
     fiber::event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
-    fiber::event::EventLoop::NotifyEntry notify_entry_{};
+    fiber::event::EventLoop::DeferEntry resume_entry_{};
     fiber::event::EventLoop::TimerEntry timer_entry_{};
     bool timed_out_ = false;
     bool resume_posted_ = false;
@@ -247,11 +263,10 @@ void Http2BodyRecvState::cancel_waiter(BodyReadAwaiter *awaiter) noexcept {
 }
 
 void Http2BodyRecvState::notify_waiter() noexcept {
-    if (!waiter_ || waiter_->resume_posted_ || waiter_->loop_ == nullptr) {
+    if (!waiter_) {
         return;
     }
-    waiter_->resume_posted_ = true;
-    waiter_->loop_->post<BodyReadAwaiter, &BodyReadAwaiter::notify_entry_, &BodyReadAwaiter::on_notify>(*waiter_);
+    waiter_->post_resume();
 }
 
 } // namespace fiber::http::detail
