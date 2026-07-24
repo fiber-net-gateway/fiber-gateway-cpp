@@ -603,7 +603,7 @@ public:
     RateLimitSession(TokenRateLimitCoordinator &manager, RateLimitNode owner, std::string_view user,
                      std::string_view model, TokenRateLimitTicket ticket, AiServerMetrics::Worker &metrics) noexcept :
         manager_(&manager), owner_(std::move(owner)), user_(user), model_(model), ticket_(ticket), metrics_(&metrics) {}
-    ~RateLimitSession() { settle_no_usage(); }
+    ~RateLimitSession() { settle_async(std::nullopt); }
 
     RateLimitSession(const RateLimitSession &) = delete;
     RateLimitSession &operator=(const RateLimitSession &) = delete;
@@ -617,7 +617,7 @@ public:
         if (this == &other) {
             return *this;
         }
-        settle_no_usage();
+        settle_async(std::nullopt);
         manager_ = other.manager_;
         owner_ = std::move(other.owner_);
         user_ = other.user_;
@@ -629,34 +629,36 @@ public:
         return *this;
     }
 
-    async::Task<bool> settle(std::optional<std::int64_t> total_tokens) noexcept {
+    void settle_async(std::optional<std::int64_t> total_tokens) noexcept {
         if (!manager_) {
-            co_return true;
+            return;
         }
         TokenRateLimitCoordinator *manager = manager_;
         AiServerMetrics::Worker *metrics = metrics_;
         manager_ = nullptr;
         metrics_ = nullptr;
-        auto result =
-                co_await manager->settle_and_wait(std::move(owner_), user_, model_, ticket_, total_tokens.value_or(0),
-                                                  total_tokens.has_value(), wall_now_millis());
-        metrics->rate_limit_settle(
-                result ? (total_tokens.has_value() ? RateLimitSettleMetric::Usage : RateLimitSettleMetric::NoUsage)
-                       : RateLimitSettleMetric::Error);
-        co_return result.has_value();
-    }
-
-    void settle_no_usage() noexcept {
-        if (!manager_) {
-            return;
-        }
-        manager_->settle(std::move(owner_), user_, model_, ticket_, 0, false, wall_now_millis());
-        metrics_->rate_limit_settle(RateLimitSettleMetric::NoUsage);
-        manager_ = nullptr;
-        metrics_ = nullptr;
+        manager->settle(
+                std::move(owner_), user_, model_, ticket_, total_tokens.value_or(0), total_tokens.has_value(),
+                wall_now_millis(),
+                RateLimitSettleCompletion{
+                        .context = metrics,
+                        .callback = total_tokens.has_value() ? settle_usage_completed : settle_no_usage_completed,
+                });
     }
 
 private:
+    static void settle_usage_completed(void *context, RateLimitSettleOutcome outcome) noexcept {
+        auto *metrics = static_cast<AiServerMetrics::Worker *>(context);
+        metrics->rate_limit_settle(outcome == RateLimitSettleOutcome::Applied ? RateLimitSettleMetric::Usage
+                                                                              : RateLimitSettleMetric::Error);
+    }
+
+    static void settle_no_usage_completed(void *context, RateLimitSettleOutcome outcome) noexcept {
+        auto *metrics = static_cast<AiServerMetrics::Worker *>(context);
+        metrics->rate_limit_settle(outcome == RateLimitSettleOutcome::Applied ? RateLimitSettleMetric::NoUsage
+                                                                              : RateLimitSettleMetric::Error);
+    }
+
     TokenRateLimitCoordinator *manager_ = nullptr;
     RateLimitNode owner_;
     std::string_view user_;
@@ -732,14 +734,50 @@ enum class SseRelayResult : std::uint8_t {
     Success,
     ProviderError,
     ClientError,
-    RateLimitError,
 };
+
+common::IoErr sse_parser_io_error(SseParseError error) noexcept {
+    switch (error) {
+        case SseParseError::DataTooLarge:
+            return common::IoErr::MessageTooLarge;
+        case SseParseError::NoMemory:
+            return common::IoErr::NoMem;
+        case SseParseError::InvalidUtf8:
+        case SseParseError::InvalidState:
+            return common::IoErr::Invalid;
+    }
+    return common::IoErr::Invalid;
+}
 
 async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttpResponseStream &upstream,
                                       LlmWireProtocol protocol, RateLimitSession &rate_limit,
                                       std::optional<LlmTokenUsage> &usage) noexcept {
-    SseParser parser(protocol);
+    SseParser parser;
     mem::BufPool usage_pool;
+    auto drain_parser = [&]() noexcept -> SseParseStatus {
+        for (;;) {
+            const SseParseStatus status = parser.next();
+            if (status != SseParseStatus::Event) {
+                return status;
+            }
+            const std::string_view data = parser.event().data;
+            if (data.empty() ||
+                (protocol == LlmWireProtocol::OpenAiChatCompletions && data == std::string_view("[DONE]"))) {
+                continue;
+            }
+            usage_pool.reset();
+            auto extracted = extract_token_usage(protocol, data, true, usage_pool);
+            if (!extracted) {
+                continue;
+            }
+            if (usage) {
+                usage->merge(*extracted);
+            } else {
+                usage = *extracted;
+            }
+        }
+    };
+
     for (;;) {
         auto chunk = co_await upstream.read_body(kBodyChunkBytes, kProviderTimeout);
         if (!chunk) {
@@ -747,96 +785,58 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
             co_return SseRelayResult::ProviderError;
         }
         const bool complete = chunk->complete();
-        while (const mem::IoBuf *part = chunk->first_readable()) {
-            const std::string_view bytes(reinterpret_cast<const char *>(part->readable_data()), part->readable());
-            if (!parser.feed(bytes, false)) {
-                (void) upstream.abort(common::IoErr::Invalid);
-                (void) exchange.abort(common::IoErr::Invalid);
+        const std::size_t expected_bytes = chunk->readable_bytes();
+        mem::IoBufChain relay_chunk(chunk->node_pool());
+        while (mem::IoBufNode *node = chunk->pop_front_node()) {
+            const bool appended = relay_chunk.append_node(node);
+            FIBER_ASSERT(appended);
+            if (node->buf.readable() == 0) {
+                continue;
+            }
+            if (!parser.feed(node->buf)) {
+                const common::IoErr error = sse_parser_io_error(parser.error());
+                (void) upstream.abort(error);
+                (void) exchange.abort(error);
                 co_return SseRelayResult::ProviderError;
             }
-            chunk->consume_and_compact(part->readable());
-            for (;;) {
-                const SseParseStatus status = parser.next();
-                if (status == SseParseStatus::NeedMore) {
-                    break;
-                }
-                if (status == SseParseStatus::Error) {
-                    (void) upstream.abort(common::IoErr::Invalid);
-                    (void) exchange.abort(common::IoErr::Invalid);
-                    co_return SseRelayResult::ProviderError;
-                }
-                if (status == SseParseStatus::Complete) {
-                    break;
-                }
-                const SseEventView &event = parser.event();
-                if (!event.data.empty() && !event.terminal) {
-                    usage_pool.reset();
-                    auto extracted = extract_token_usage(protocol, event.data, true, usage_pool);
-                    if (extracted) {
-                        if (usage) {
-                            usage->merge(*extracted);
-                        } else {
-                            usage = *extracted;
-                        }
-                    }
-                }
-                auto written = co_await exchange.write_body(
-                        reinterpret_cast<const std::uint8_t *>(event.encoded.data()), event.encoded.size(), false);
-                if (!written || *written != event.encoded.size()) {
-                    (void) upstream.abort(written ? common::IoErr::Invalid : written.error());
-                    co_return SseRelayResult::ClientError;
-                }
-            }
-        }
-        if (!complete) {
-            continue;
-        }
-        if (!parser.feed({}, true)) {
-            (void) upstream.abort(common::IoErr::Invalid);
-            (void) exchange.abort(common::IoErr::Invalid);
-            co_return SseRelayResult::ProviderError;
-        }
-        for (;;) {
-            const SseParseStatus status = parser.next();
-            if (status == SseParseStatus::Complete) {
-                break;
-            }
-            if (status == SseParseStatus::Error || status == SseParseStatus::NeedMore) {
-                (void) exchange.abort(common::IoErr::Invalid);
+            const SseParseStatus status = drain_parser();
+            if (status != SseParseStatus::NeedMore) {
+                const common::IoErr error =
+                        status == SseParseStatus::Error ? sse_parser_io_error(parser.error()) : common::IoErr::Invalid;
+                (void) upstream.abort(error);
+                (void) exchange.abort(error);
                 co_return SseRelayResult::ProviderError;
-            }
-            const SseEventView &event = parser.event();
-            if (!event.data.empty() && !event.terminal) {
-                usage_pool.reset();
-                auto extracted = extract_token_usage(protocol, event.data, true, usage_pool);
-                if (extracted) {
-                    if (usage) {
-                        usage->merge(*extracted);
-                    } else {
-                        usage = *extracted;
-                    }
-                }
-            }
-            auto written = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(event.encoded.data()),
-                                                        event.encoded.size(), false);
-            if (!written || *written != event.encoded.size()) {
-                (void) upstream.abort(written ? common::IoErr::Invalid : written.error());
-                co_return SseRelayResult::ClientError;
             }
         }
 
-        if (!co_await rate_limit.settle(usage ? usage->total : std::optional<std::int64_t>{})) {
-            (void) exchange.abort(common::IoErr::Canceled);
-            co_return SseRelayResult::RateLimitError;
+        if (complete) {
+            if (!parser.finish()) {
+                const common::IoErr error = sse_parser_io_error(parser.error());
+                (void) exchange.abort(error);
+                co_return SseRelayResult::ProviderError;
+            }
+            const SseParseStatus status = drain_parser();
+            if (status != SseParseStatus::Complete) {
+                const common::IoErr error =
+                        status == SseParseStatus::Error ? sse_parser_io_error(parser.error()) : common::IoErr::Invalid;
+                (void) exchange.abort(error);
+                co_return SseRelayResult::ProviderError;
+            }
+            rate_limit.settle_async(usage ? usage->total : std::optional<std::int64_t>{});
+            relay_chunk.mark_complete();
         }
-        if (protocol == LlmWireProtocol::OpenAiChatCompletions && !parser.done_seen()) {
-            constexpr std::string_view done = "data: [DONE]\n\n";
-            auto written = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(done.data()),
-                                                        done.size(), true);
-            co_return written && *written == done.size() ? SseRelayResult::Success : SseRelayResult::ClientError;
+
+        if (expected_bytes == 0 && !complete) {
+            continue;
         }
-        auto completed = co_await exchange.write_body(nullptr, 0, true);
-        co_return completed ? SseRelayResult::Success : SseRelayResult::ClientError;
+        auto written = co_await exchange.write_body(std::move(relay_chunk));
+        if (!written || *written != expected_bytes) {
+            (void) upstream.abort(written ? common::IoErr::Invalid : written.error());
+            co_return SseRelayResult::ClientError;
+        }
+        if (complete) {
+            co_return SseRelayResult::Success;
+        }
     }
 }
 
@@ -1099,11 +1099,10 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                                   event::EventLoop::current().now(), *metrics_, protocol);
                 }
             }
-            const std::string_view outcome =
-                    relay_result == SseRelayResult::Success         ? std::string_view("success")
-                    : relay_result == SseRelayResult::ProviderError ? std::string_view("stream_error")
-                    : relay_result == SseRelayResult::ClientError   ? std::string_view("client_stream_error")
-                                                                    : std::string_view("rate_limit_settle_error");
+            const std::string_view outcome = relay_result == SseRelayResult::Success ? std::string_view("success")
+                                             : relay_result == SseRelayResult::ProviderError
+                                                     ? std::string_view("stream_error")
+                                                     : std::string_view("client_stream_error");
             audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
@@ -1148,18 +1147,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
                                    false, false, "success");
-            if (!co_await rate_limit.settle(usage ? usage->total : std::optional<std::int64_t>{})) {
-                co_await send_error(exchange, protocol,
-                                    LlmError{
-                                            .status_code = 503,
-                                            .code = "rate_limit_unavailable",
-                                            .type = protocol == LlmWireProtocol::OpenAiChatCompletions
-                                                            ? std::string_view("server_error")
-                                                            : std::string_view("api_error"),
-                                            .message = "token rate limit service is unavailable",
-                                    });
-                co_return;
-            }
+            rate_limit.settle_async(usage ? usage->total : std::optional<std::int64_t>{});
             co_await send_body(exchange, response->status_code, response->content_type, response->body,
                                response->request_id);
             co_return;
