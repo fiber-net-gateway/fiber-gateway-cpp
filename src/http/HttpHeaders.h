@@ -12,7 +12,7 @@
 
 namespace fiber::http {
 
-inline void to_lowercase(std::string_view name, char *dst) {
+inline void to_lowercase(std::string_view name, char *dst) noexcept {
     for (size_t i = 0; i < name.size(); ++i) {
         unsigned char lower = static_cast<unsigned char>(name[i]);
         if (lower >= 'A' && lower <= 'Z') {
@@ -42,19 +42,23 @@ public:
         std::string_view value_view() const noexcept { return {value, value_len}; }
     };
 
-    explicit HttpHeaders(mem::BufPool &pool);
+    explicit HttpHeaders(mem::BufPool &pool) noexcept;
 
-    HeaderField *add(std::string_view name, std::string_view value);
-    HeaderField *add(std::string_view name, std::string_view value, const char *lowcase_name, uint64_t hash);
-    HeaderField *add_prehashed(std::string_view name, std::string_view value, uint64_t hash);
-    HeaderField *set(std::string_view name, std::string_view value);
-    HeaderField *set(std::string_view name, std::string_view value, const char *lowcase_name, uint64_t hash);
+    [[nodiscard]] mem::BufPool &pool() noexcept { return pool_; }
+
+    HeaderField *add(std::string_view name, std::string_view value) noexcept;
+    HeaderField *add(std::string_view name, std::string_view value, const char *lowcase_name, uint64_t hash) noexcept;
+    HeaderField *add_prehashed(std::string_view name, std::string_view value, uint64_t hash) noexcept;
+    HeaderField *set(std::string_view name, std::string_view value) noexcept;
+    HeaderField *set(std::string_view name, std::string_view value, const char *lowcase_name, uint64_t hash) noexcept;
     // add_view/set_view keep external pointers; caller guarantees lifetime.
     // For correct lowcase-key lookups, prefer add_view with lowcase_name or pass lowercase name.
-    HeaderField *add_view(std::string_view name, std::string_view value);
-    HeaderField *add_view(std::string_view name, std::string_view value, const char *lowcase_name, uint64_t hash);
-    HeaderField *set_view(std::string_view name, std::string_view value);
-    HeaderField *set_view(std::string_view name, std::string_view value, const char *lowcase_name, uint64_t hash);
+    HeaderField *add_view(std::string_view name, std::string_view value) noexcept;
+    HeaderField *add_view(std::string_view name, std::string_view value, const char *lowcase_name,
+                          uint64_t hash) noexcept;
+    HeaderField *set_view(std::string_view name, std::string_view value) noexcept;
+    HeaderField *set_view(std::string_view name, std::string_view value, const char *lowcase_name,
+                          uint64_t hash) noexcept;
     std::string_view get(std::string_view name) const noexcept;
     bool contains(std::string_view name) const noexcept;
     // Pre-hashed lookups require the lowercase name and its http_header_name_hash().
@@ -73,28 +77,29 @@ public:
         using pointer = const HeaderField *;
         using reference = const HeaderField &;
 
-        MatchIterator() = default;
-        MatchIterator(const HttpHeaders *headers, std::string_view key, uint64_t hash, const HeaderField *node) :
-            headers_(headers), key_(key), hash_(hash), node_(node) {}
+        MatchIterator() noexcept = default;
+        MatchIterator(const HttpHeaders *headers, std::string_view key, uint64_t hash, const HeaderField *node) noexcept
+            : headers_(headers), key_(key), hash_(hash), node_(node) {}
         MatchIterator(const HttpHeaders *headers, std::string_view key, uint64_t hash, MatchMode mode,
-                      const HeaderField *node) : headers_(headers), key_(key), hash_(hash), mode_(mode), node_(node) {}
+                      const HeaderField *node) noexcept :
+            headers_(headers), key_(key), hash_(hash), mode_(mode), node_(node) {}
 
-        reference operator*() const { return *node_; }
-        pointer operator->() const { return node_; }
-        MatchIterator &operator++() {
+        reference operator*() const noexcept { return *node_; }
+        pointer operator->() const noexcept { return node_; }
+        MatchIterator &operator++() noexcept {
             if (!headers_ || !node_) {
                 return *this;
             }
             node_ = headers_->next_match_node(node_, key_, hash_, mode_);
             return *this;
         }
-        MatchIterator operator++(int) {
+        MatchIterator operator++(int) noexcept {
             MatchIterator copy = *this;
             ++(*this);
             return copy;
         }
-        bool operator==(const MatchIterator &other) const { return node_ == other.node_; }
-        bool operator!=(const MatchIterator &other) const { return !(*this == other); }
+        bool operator==(const MatchIterator &other) const noexcept { return node_ == other.node_; }
+        bool operator!=(const MatchIterator &other) const noexcept { return !(*this == other); }
 
     private:
         friend class HttpHeaders;
@@ -108,10 +113,10 @@ public:
 
     class MatchRange {
     public:
-        MatchRange() = default;
-        MatchRange(const HttpHeaders *headers, std::string_view key, uint64_t hash) :
+        MatchRange() noexcept = default;
+        MatchRange(const HttpHeaders *headers, std::string_view key, uint64_t hash) noexcept :
             headers_(headers), key_(key), hash_(hash) {}
-        MatchRange(const HttpHeaders *headers, std::string_view key, uint64_t hash, MatchMode mode) :
+        MatchRange(const HttpHeaders *headers, std::string_view key, uint64_t hash, MatchMode mode) noexcept :
             headers_(headers), key_(key), hash_(hash), mode_(mode) {}
 
         MatchIterator begin() const noexcept {
@@ -147,24 +152,24 @@ public:
         using pointer = const HeaderField *;
         using reference = const HeaderField &;
 
-        ConstIterator() = default;
-        explicit ConstIterator(const HeaderField *node) : node_(node) {}
+        ConstIterator() noexcept = default;
+        explicit ConstIterator(const HeaderField *node) noexcept : node_(node) {}
 
-        reference operator*() const { return *node_; }
-        pointer operator->() const { return node_; }
-        ConstIterator &operator++() {
+        reference operator*() const noexcept { return *node_; }
+        pointer operator->() const noexcept { return node_; }
+        ConstIterator &operator++() noexcept {
             if (node_) {
                 node_ = node_->next_all;
             }
             return *this;
         }
-        ConstIterator operator++(int) {
+        ConstIterator operator++(int) noexcept {
             ConstIterator copy = *this;
             ++(*this);
             return copy;
         }
-        bool operator==(const ConstIterator &other) const { return node_ == other.node_; }
-        bool operator!=(const ConstIterator &other) const { return !(*this == other); }
+        bool operator==(const ConstIterator &other) const noexcept { return node_ == other.node_; }
+        bool operator!=(const ConstIterator &other) const noexcept { return !(*this == other); }
 
     private:
         friend class HttpHeaders;
@@ -198,17 +203,17 @@ private:
     size_t remove_matching(std::string_view key, uint64_t hash, MatchMode mode) noexcept;
     bool unlink_field(HeaderField *field) noexcept;
     void unlink_field(HeaderField *field, HeaderField *prev_bucket) noexcept;
-    const char *copy_to_pool(std::string_view data);
+    const char *copy_to_pool(std::string_view data) noexcept;
     HeaderField *prepare_owned_field(std::string_view name, std::string_view value, const char *lowcase_name,
-                                     uint64_t hash, bool hash_ready);
+                                     uint64_t hash, bool hash_ready) noexcept;
     HeaderField *prepare_view_field(std::string_view name, std::string_view value, const char *lowcase_name,
-                                    uint64_t hash);
+                                    uint64_t hash) noexcept;
     HeaderField *alloc_field() noexcept {
-        return static_cast<HeaderField *>(pool_->alloc(sizeof(HeaderField), alignof(HeaderField)));
+        return static_cast<HeaderField *>(pool_.alloc(sizeof(HeaderField), alignof(HeaderField)));
     }
     HeaderField *link_field(HeaderField *field) noexcept;
 
-    mem::BufPool *pool_ = nullptr;
+    mem::BufPool &pool_;
     HeaderField **buckets_ = nullptr;
     size_t bucket_count_ = 0;
     HeaderField *all_head_ = nullptr;
