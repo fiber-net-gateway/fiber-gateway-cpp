@@ -1,0 +1,16 @@
+{
+  "name": "fiber-http-parser-codegen",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node --import tsx generate_header_line_parser.ts",
+    "check": "node --import tsx generate_header_line_parser.ts --check"
+  },
+  "dependencies": {
+    "llparse": "7.3.1"
+  },
+  "devDependencies": {
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  }
+}
