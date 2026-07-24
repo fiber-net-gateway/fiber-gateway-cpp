@@ -61,7 +61,11 @@ public:
     [[nodiscard]] std::optional<RateLimitNode> locate(std::string_view user_id, std::string_view model_name) const;
 
 private:
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const RateLimitRingSnapshot>> current_;
+#else
+    std::shared_ptr<const RateLimitRingSnapshot> current_;
+#endif
 };
 
 [[nodiscard]] std::optional<std::string> java_self_service_node_id(std::string_view ipv4, std::uint16_t port);
