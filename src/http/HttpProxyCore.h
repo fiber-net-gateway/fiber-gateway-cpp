@@ -153,6 +153,54 @@ inline std::string_view request_target_view(const fiber::http::HttpUri &uri, std
     return scratch;
 }
 
+inline bool valid_origin_form_path(std::string_view path) noexcept {
+    if (path.empty() || path.front() != '/') {
+        return false;
+    }
+
+    auto is_hex = [](unsigned char ch) noexcept {
+        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+    };
+    auto is_unreserved = [](unsigned char ch) noexcept {
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' ||
+               ch == '.' || ch == '_' || ch == '~';
+    };
+    auto is_sub_delim = [](unsigned char ch) noexcept {
+        switch (ch) {
+            case '!':
+            case '$':
+            case '&':
+            case '\'':
+            case '(':
+            case ')':
+            case '*':
+            case '+':
+            case ',':
+            case ';':
+            case '=':
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        const auto ch = static_cast<unsigned char>(path[i]);
+        if (ch == '%') {
+            if (i + 2 >= path.size() || !is_hex(static_cast<unsigned char>(path[i + 1])) ||
+                !is_hex(static_cast<unsigned char>(path[i + 2]))) {
+                return false;
+            }
+            i += 2;
+            continue;
+        }
+        if (!is_unreserved(ch) && !is_sub_delim(ch) && ch != '/' && ch != ':' && ch != '@') {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline int map_upstream_error_status(fiber::common::IoErr err) noexcept {
     return err == fiber::common::IoErr::TimedOut ? 504 : 502;
 }

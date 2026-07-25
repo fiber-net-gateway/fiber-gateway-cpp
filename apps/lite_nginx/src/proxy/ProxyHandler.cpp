@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "async/TaskSelect.h"
+#include "async/WhenAny.h"
 #include "common/IoError.h"
 #include "event/EventLoop.h"
 #include "http/ClientHttp1Exchange.h"
@@ -53,7 +55,25 @@ void record_upstream_error(logging::RequestLogContext &context, fiber::common::I
                          << " error=" << fiber::common::io_err_name(error);
 }
 
-bool location_has_template_headers(const runtime::LocationRuntime &location) noexcept {
+void record_client_abort(logging::RequestLogContext &context) noexcept {
+    context.client_aborted = true;
+    LOG(LOG_PROXY, INFO) << "request_id=" << context.request_id << " upstream="
+                         << fiber::log::quoted(context.upstream_host.empty() ? std::string_view("-")
+                                                                             : context.upstream_host)
+                         << " port=" << context.upstream_port << " phase=client_abort";
+}
+
+struct ResolvedProxyValues {
+    std::vector<std::string> header_values;
+    std::string rewritten_path;
+    std::string request_target_storage;
+    std::string_view request_target;
+};
+
+bool location_has_proxy_templates(const runtime::LocationRuntime &location) noexcept {
+    if (location.rewrite_path.kind == runtime::RewritePathKind::Template) {
+        return true;
+    }
     for (const auto &header: location.set_headers) {
         if (header.template_script) {
             return true;
@@ -62,20 +82,32 @@ bool location_has_template_headers(const runtime::LocationRuntime &location) noe
     return false;
 }
 
-// Evaluates all ${...} template header values for this request into `resolved` (index-aligned
-// with location.set_headers; only template entries are filled). Returns false on abort /
-// exception / non-String so the caller can respond 500. Builds a per-request GcHeap +
-// ScriptExchangeCtx (route vars + services attached) only when the location has templates.
-bool evaluate_template_headers(fiber::http::HttpExchange &exchange, const runtime::LocationRuntime &location,
-                               const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-                               fiber::http_script::HttpScriptServices *services,
-                               fiber::http_script::ScriptConnectionInfo connection,
-                               std::vector<std::string> &resolved) {
-    fiber::script::GcHeap heap;
+bool evaluate_proxy_templates(fiber::http::HttpExchange &exchange, const runtime::LocationRuntime &location,
+                              const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+                              fiber::http_script::HttpScriptServices *services,
+                              fiber::http_script::ScriptConnectionInfo connection, ResolvedProxyValues &resolved) {
+    fiber::script::GcHeap heap(exchange.pool());
     fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, connection};
     ctx.set_path_vars(path_vars);
     ctx.set_services(services);
-    resolved.resize(location.set_headers.size());
+    resolved.header_values.resize(location.set_headers.size());
+
+    if (location.rewrite_path.kind == runtime::RewritePathKind::Template) {
+        if (!location.rewrite_path.template_script) {
+            return false;
+        }
+        auto result =
+                location.rewrite_path.template_script->exec_sync(fiber::script::JsValue::make_undefined(), &ctx, heap);
+        if (!result.is_success()) {
+            return false;
+        }
+        std::string_view view;
+        if (!fiber::script::std_lib::string_utf8_view(result.value(), view)) {
+            return false;
+        }
+        resolved.rewritten_path.assign(view.data(), view.size());
+    }
+
     for (std::size_t i = 0; i < location.set_headers.size(); ++i) {
         const auto &header = location.set_headers[i];
         if (!header.template_script) {
@@ -89,8 +121,51 @@ bool evaluate_template_headers(fiber::http::HttpExchange &exchange, const runtim
         if (!fiber::script::std_lib::string_utf8_view(result.value(), view)) {
             return false; // non-String result
         }
-        resolved[i].assign(view.data(), view.size());
+        resolved.header_values[i].assign(view.data(), view.size());
     }
+    return true;
+}
+
+std::string_view raw_query_suffix(const fiber::http::HttpUri &uri) noexcept {
+    if (!uri.unparsed_uri.empty()) {
+        const std::size_t query = uri.unparsed_uri.find('?');
+        if (query != std::string_view::npos) {
+            const std::size_t fragment = uri.unparsed_uri.find('#', query + 1);
+            const std::size_t end = fragment == std::string_view::npos ? uri.unparsed_uri.size() : fragment;
+            return uri.unparsed_uri.substr(query, end - query);
+        }
+    }
+    return {};
+}
+
+bool resolve_request_target(const fiber::http::HttpExchange &exchange, const runtime::LocationRuntime &location,
+                            ResolvedProxyValues &resolved) {
+    if (location.rewrite_path.kind == runtime::RewritePathKind::Preserve) {
+        resolved.request_target = request_target_view(exchange.uri(), resolved.request_target_storage);
+        return !resolved.request_target.empty();
+    }
+
+    const std::string_view path = location.rewrite_path.kind == runtime::RewritePathKind::Literal
+                                          ? std::string_view(location.rewrite_path.literal)
+                                          : std::string_view(resolved.rewritten_path);
+    if (!valid_origin_form_path(path)) {
+        return false;
+    }
+
+    std::string_view query_suffix = raw_query_suffix(exchange.uri());
+    if (query_suffix.empty() && exchange.uri().query.empty()) {
+        resolved.request_target = path;
+        return true;
+    }
+
+    resolved.request_target_storage.assign(path.data(), path.size());
+    if (!query_suffix.empty()) {
+        resolved.request_target_storage.append(query_suffix.data(), query_suffix.size());
+    } else if (!exchange.uri().query.empty()) {
+        resolved.request_target_storage.push_back('?');
+        resolved.request_target_storage.append(exchange.uri().query.data(), exchange.uri().query.size());
+    }
+    resolved.request_target = resolved.request_target_storage;
     return true;
 }
 
@@ -159,7 +234,13 @@ bool build_upstream_request_headers(const runtime::LocationRuntime &location, co
         headers.set_view(header.name, value, header.lowercase_name.data(), header.name_hash);
     }
     remove_request_framing_headers(headers);
-    return !websocket.active() || prepare_upstream_websocket_headers(exchange, websocket, headers);
+    if (websocket.active()) {
+        return prepare_upstream_websocket_headers(exchange, websocket, headers);
+    }
+    if (!location.reuse_connection) {
+        headers.set("Connection", "close");
+    }
+    return true;
 }
 
 void build_downstream_response_headers(const fiber::http::Http1ResponseHead &upstream_head,
@@ -174,12 +255,11 @@ void build_downstream_response_headers(const fiber::http::Http1ResponseHead &ups
     apply_http3_alt_svc(listener, headers);
 }
 
-fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchange,
-                                               const runtime::LocationRuntime &location,
-                                               fiber::http::Http1ClientConnection &conn,
-                                               const runtime::ListenerRuntime &listener,
-                                               const std::vector<std::string> &resolved_template_values,
-                                               logging::RequestLogContext &log_context) {
+fiber::async::Task<void>
+proxy_over_connection(fiber::http::HttpExchange &exchange, const runtime::LocationRuntime &location,
+                      fiber::http::Http1ClientConnection &conn, const runtime::ListenerRuntime &listener,
+                      const std::vector<std::string> &resolved_template_values, std::string_view request_target,
+                      logging::RequestLogContext &log_context) {
     WebSocketHandshake websocket{
             .downstream = detect_websocket_downstream(exchange),
     };
@@ -203,10 +283,9 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
         request_end_stream = true;
     }
 
-    std::string target_scratch;
     fiber::http::Http1RequestHead request_head;
     request_head.method = websocket.active() ? fiber::http::HttpMethod::Get : exchange.method();
-    request_head.target = request_target_view(exchange.uri(), target_scratch);
+    request_head.target = request_target;
     request_head.headers = &request_headers;
     request_head.body = request_body;
 
@@ -330,7 +409,9 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
     }
 
     if (no_response_body) {
-        (void) co_await upstream_exchange.discard_response_body(location.read_timeout);
+        if (location.reuse_connection) {
+            (void) co_await upstream_exchange.discard_response_body(location.read_timeout);
+        }
         co_return;
     }
 
@@ -351,6 +432,42 @@ fiber::async::Task<void> proxy_over_connection(fiber::http::HttpExchange &exchan
             break;
         }
     }
+}
+
+fiber::async::Task<void> run_proxy_request(fiber::http::HttpExchange &exchange,
+                                           const runtime::ListenerRuntime &listener,
+                                           const runtime::LocationRuntime &location,
+                                           const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+                                           fiber::http_script::HttpScriptServices *services,
+                                           logging::RequestLogContext &log_context, upstream::ConnectionPool &pool,
+                                           runtime::DnsService &dns, const runtime::UpstreamPeerRuntime &peer,
+                                           upstream::AcquiredUpstreamConnection &acquired) {
+    ResolvedProxyValues resolved;
+    if (location_has_proxy_templates(location) &&
+        !evaluate_proxy_templates(exchange, location, path_vars, services, log_context.connection, resolved)) {
+        co_await send_plain_response(exchange, 500, kScriptErrorBody, listener);
+        co_return;
+    }
+    if (!resolve_request_target(exchange, location, resolved)) {
+        co_await send_plain_response(exchange, 500, kScriptErrorBody, listener);
+        co_return;
+    }
+
+    const std::string_view sni = peer.connection_key->is_name() ? peer.connection_key->host_name() : std::string_view{};
+    const auto reuse_policy = location.reuse_connection ? upstream::ConnectionReusePolicy::Pooled
+                                                        : upstream::ConnectionReusePolicy::Transient;
+    auto acquired_result = co_await upstream::acquire_and_connect(pool, dns, *peer.connection_key, sni,
+                                                                  location.connect_timeout, reuse_policy);
+    if (!acquired_result) {
+        record_upstream_error(log_context, acquired_result.error(), "connect");
+        co_await send_plain_response(exchange, map_upstream_error_status(acquired_result.error()),
+                                     map_upstream_error_body(acquired_result.error()), listener);
+        co_return;
+    }
+    acquired = std::move(*acquired_result);
+
+    co_await proxy_over_connection(exchange, location, *acquired.conn, listener, resolved.header_values,
+                                   resolved.request_target, log_context);
 }
 
 } // namespace
@@ -386,32 +503,38 @@ ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::Listene
     log_context.upstream_started_at = fiber::event::EventLoop::current().now();
     log_context.upstream_started = true;
 
-    // Evaluate ${...} template header values before acquiring the upstream connection so a
-    // template failure returns 500 without wasting a connection checkout. Static-header
-    // locations skip this entirely (no GcHeap / ScriptExchangeCtx).
-    std::vector<std::string> resolved_template_values;
-    if (location_has_template_headers(location)) {
-        if (!evaluate_template_headers(exchange, location, path_vars, services, log_context.connection,
-                                       resolved_template_values)) {
-            co_await send_plain_response(exchange, 500, kScriptErrorBody, listener);
-            co_return;
-        }
-    }
-
-    // SNI uses the configured host name for HTTPS peers; IP-literal peers send nothing.
-    const std::string_view sni =
-            peer->connection_key->is_name() ? peer->connection_key->host_name() : std::string_view{};
-    auto acquired =
-            co_await upstream::acquire_and_connect(*pool_, *dns_, *peer->connection_key, sni, location.connect_timeout);
-    if (!acquired) {
-        record_upstream_error(log_context, acquired.error(), "connect");
-        co_await send_plain_response(exchange, map_upstream_error_status(acquired.error()),
-                                     map_upstream_error_body(acquired.error()), listener);
+    upstream::AcquiredUpstreamConnection acquired;
+    if (!location.close_on_client_abort) {
+        co_await run_proxy_request(exchange, listener, location, path_vars, services, log_context, *pool_, *dns_, *peer,
+                                   acquired);
         co_return;
     }
 
-    co_await proxy_over_connection(exchange, location, *acquired->conn, listener, resolved_template_values,
-                                   log_context);
+    auto completed = co_await fiber::async::when_any([&exchange]() { return exchange.wait_response_channel_closed(); },
+                                                     [&]() {
+                                                         return run_proxy_request(exchange, listener, location,
+                                                                                  path_vars, services, log_context,
+                                                                                  *pool_, *dns_, *peer, acquired)
+                                                                 .select();
+                                                     });
+    if (completed.is<1>()) {
+        completed.get<1>();
+        co_return;
+    }
+
+    auto close_result = std::move(completed).get<0>();
+    if (!close_result) {
+        record_upstream_error(log_context, close_result.error(), "client_abort_monitor");
+        if (!exchange.response_channel_closed()) {
+            co_await send_plain_response(exchange, 500, kScriptErrorBody, listener);
+        }
+        co_return;
+    }
+
+    record_client_abort(log_context);
+    if (acquired.conn != nullptr && acquired.conn->valid()) {
+        acquired.conn->close();
+    }
 }
 
 } // namespace fiber::lite_nginx::proxy
