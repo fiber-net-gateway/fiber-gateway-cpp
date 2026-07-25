@@ -104,6 +104,10 @@ CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配�
 
 `service://<service-name>` Provider 还会订阅 `DEFAULT_GROUP` 下的 NamingService
 实例。只有 enabled、healthy、正权重、有效 IP/port 的实例进入快照。
+服务实例默认使用平滑加权轮询；模型的 `load-balance` 配置
+`service-instance-policy: weighted-rendezvous` 后，改用基于 route key 和 Nacos
+权重的 Rendezvous Hash。实例级失败后的同 Provider 重试会排除本次请求已经失败的
+实例。
 
 初次启动必须得到 BT1 keys、models 以及全部被引用 Provider/user-group 的有效首个
 值；完成前不启动对外服务。运行期非法或缺失更新会被拒绝，并继续使用最后一个完整

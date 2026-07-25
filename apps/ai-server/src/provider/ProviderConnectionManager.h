@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <expected>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -37,6 +38,13 @@ struct ProviderConnectionError {
     ProviderConnectionErrorCode code = ProviderConnectionErrorCode::InvalidEndpoint;
     common::IoErr io_error = common::IoErr::None;
     const char *message = nullptr;
+    std::uint64_t failed_service_peer_id = 0;
+};
+
+struct ProviderServiceSelection {
+    ServiceInstancePolicy policy = ServiceInstancePolicy::SmoothWeightedRoundRobin;
+    std::uint64_t rendezvous_key = 0;
+    std::span<const std::uint64_t> excluded_peer_ids;
 };
 
 struct ProviderLoadBalanceLease {
@@ -44,6 +52,7 @@ struct ProviderLoadBalanceLease {
     LoadBalancer::Instance instance;
 
     [[nodiscard]] bool valid() const noexcept { return load_balancer != nullptr && instance.valid(); }
+    [[nodiscard]] std::uint64_t peer_id() const noexcept { return valid() ? instance.peer_id() : 0; }
     void report(InstanceReportOutcome outcome) noexcept {
         if (!valid()) {
             return;
@@ -70,7 +79,8 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] async::Task<std::expected<ProviderConnectionLease, ProviderConnectionError>>
-    acquire(const ResolvedProviderAttempt &attempt, std::chrono::milliseconds connect_timeout) noexcept;
+    acquire(const ResolvedProviderAttempt &attempt, std::chrono::milliseconds connect_timeout,
+            ProviderServiceSelection service_selection = {}) noexcept;
 
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 

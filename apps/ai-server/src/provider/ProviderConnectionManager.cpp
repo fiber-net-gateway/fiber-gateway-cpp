@@ -27,11 +27,13 @@ struct DialTarget {
 };
 
 ProviderConnectionError error(ProviderConnectionErrorCode code, const char *message,
-                              common::IoErr io_error = common::IoErr::None) noexcept {
+                              common::IoErr io_error = common::IoErr::None,
+                              std::uint64_t failed_service_peer_id = 0) noexcept {
     return ProviderConnectionError{
             .code = code,
             .io_error = io_error,
             .message = message,
+            .failed_service_peer_id = failed_service_peer_id,
     };
 }
 
@@ -135,8 +137,8 @@ async::Task<void> ProviderConnectionManager::shutdown() noexcept {
 }
 
 async::Task<std::expected<ProviderConnectionLease, ProviderConnectionError>>
-ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt,
-                                   std::chrono::milliseconds connect_timeout) noexcept {
+ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::chrono::milliseconds connect_timeout,
+                                   ProviderServiceSelection service_selection) noexcept {
     if (!initialized_ || !attempt.provider || !attempt.provider->config || !attempt.protocol) {
         co_return std::unexpected(
                 error(ProviderConnectionErrorCode::InvalidEndpoint, "provider attempt is incomplete"));
@@ -155,7 +157,10 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt,
             co_return std::unexpected(error(ProviderConnectionErrorCode::NoServiceEndpoint,
                                             "provider service discovery is unavailable", common::IoErr::NotFound));
         }
-        auto selected = attempt.provider->service->load_balance();
+        auto selected = service_selection.policy == ServiceInstancePolicy::WeightedRendezvous
+                                ? attempt.provider->service->load_balance(service_selection.rendezvous_key,
+                                                                          service_selection.excluded_peer_ids)
+                                : attempt.provider->service->load_balance();
         if (!selected) {
             co_return std::unexpected(error(ProviderConnectionErrorCode::NoServiceEndpoint,
                                             "provider service has no usable endpoint", common::IoErr::NotFound));
@@ -247,9 +252,13 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt,
         last_error = connected.error();
         output.lease.reset();
     }
-    output.load_balance.report(last_error == common::IoErr::NoMem ? InstanceReportOutcome::Neutral
-                                                                  : InstanceReportOutcome::Failure);
-    co_return std::unexpected(error(ProviderConnectionErrorCode::Connect, "provider connection failed", last_error));
+    const InstanceReportOutcome outcome =
+            last_error == common::IoErr::NoMem ? InstanceReportOutcome::Neutral : InstanceReportOutcome::Failure;
+    const std::uint64_t failed_service_peer_id =
+            outcome == InstanceReportOutcome::Failure ? output.load_balance.peer_id() : 0;
+    output.load_balance.report(outcome);
+    co_return std::unexpected(error(ProviderConnectionErrorCode::Connect, "provider connection failed", last_error,
+                                    failed_service_peer_id));
 }
 
 } // namespace fiber::ai_server

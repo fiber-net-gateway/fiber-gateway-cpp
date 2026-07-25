@@ -34,6 +34,7 @@ struct ProviderHttpError {
     ProviderHttpErrorCode code = ProviderHttpErrorCode::Connect;
     common::IoErr io_error = common::IoErr::None;
     const char *message = nullptr;
+    std::uint64_t failed_service_peer_id = 0;
 };
 
 struct BufferedProviderResponse {
@@ -60,6 +61,7 @@ public:
     [[nodiscard]] std::string_view retry_after() const noexcept { return retry_after_; }
     [[nodiscard]] std::string_view request_id() const noexcept { return request_id_; }
     [[nodiscard]] bool valid() const noexcept { return upstream_ != nullptr; }
+    [[nodiscard]] std::uint64_t service_peer_id() const noexcept { return connection_.load_balance.peer_id(); }
 
     [[nodiscard]] async::Task<common::IoResult<mem::IoBufChain>>
     read_body(std::size_t max_bytes, std::chrono::milliseconds timeout = std::chrono::seconds(300)) noexcept;
@@ -91,12 +93,13 @@ public:
     explicit ProviderHttpClient(ProviderConnectionManager &connections) noexcept : connections_(&connections) {}
 
     [[nodiscard]] async::Task<std::expected<ProviderHttpResponseStream, ProviderHttpError>>
-    start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
-          mem::BufPool &request_pool) noexcept;
+    start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body, mem::BufPool &request_pool,
+          ProviderServiceSelection service_selection = {}) noexcept;
 
     [[nodiscard]] async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>>
     execute_buffered(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
-                     mem::BufPool &request_pool, std::size_t max_response_bytes = 32 * 1024 * 1024) noexcept;
+                     mem::BufPool &request_pool, std::size_t max_response_bytes = 32 * 1024 * 1024,
+                     ProviderServiceSelection service_selection = {}) noexcept;
 
 private:
     ProviderConnectionManager *connections_ = nullptr;

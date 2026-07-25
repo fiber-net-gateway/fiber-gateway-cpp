@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 
 #include <async/Spawn.h>
+#include <common/Assert.h>
 #include <common/IoError.h>
 #include <event/EventLoop.h>
 #include <event/EventLoopGroup.h>
@@ -51,15 +52,20 @@ using fiber::ai_server::Bt1KeySnapshot;
 using fiber::ai_server::CompiledModelRateLimitRule;
 using fiber::ai_server::CompiledModelRoute;
 using fiber::ai_server::ConfigMetadata;
+using fiber::ai_server::DiscoveredInstance;
+using fiber::ai_server::DiscoveredService;
+using fiber::ai_server::InstanceReportOutcome;
 using fiber::ai_server::LlmConfigSnapshot;
 using fiber::ai_server::LlmProjectSnapshot;
 using fiber::ai_server::LlmRequestHandler;
 using fiber::ai_server::LlmWireProtocol;
+using fiber::ai_server::LoadBalancer;
 using fiber::ai_server::ProjectProvider;
 using fiber::ai_server::ProviderApiToken;
 using fiber::ai_server::ProviderConfigSnapshot;
 using fiber::ai_server::ProviderProtocol;
 using fiber::ai_server::ProviderProtocolType;
+using fiber::ai_server::ServiceInstancePolicy;
 
 constexpr std::string_view kBt1Kid = "test1";
 constexpr std::string_view kBt1Secret = "integration-test-secret";
@@ -282,12 +288,16 @@ std::string bearer_token_name(std::string_view authorization) {
 
 class ProxyFixture {
 public:
-    ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies, bool fail_settle) :
-        group_(&group), replies_(std::move(replies)), fail_settle_(fail_settle), rate_limiters_(1),
-        rate_limit_handler_(rate_limiters_), remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_),
-        connections_(group), provider_client_(connections_), metrics_(group),
+    ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies, bool fail_settle,
+                 bool service_rendezvous) :
+        group_(&group), replies_(std::move(replies)), fail_settle_(fail_settle),
+        service_rendezvous_(service_rendezvous), rate_limiters_(1), rate_limit_handler_(rate_limiters_),
+        remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_), connections_(group),
+        provider_client_(connections_), metrics_(group),
         provider_server_(group.at(0),
                          [this](fiber::http::HttpExchange &exchange) { return handle_provider(exchange); }),
+        failing_provider_server_(
+                group.at(0), [this](fiber::http::HttpExchange &exchange) { return handle_failing_provider(exchange); }),
         entry_server_(group.at(0), [this](fiber::http::HttpExchange &exchange) { return handle_entry(exchange); }) {}
 
     ~ProxyFixture() = default;
@@ -311,7 +321,20 @@ public:
             co_return;
         }
         ports.provider = *provider_port;
-        config_ = make_config(*provider_port);
+        std::uint16_t failing_provider_port = 0;
+        if (service_rendezvous_) {
+            if (!failing_provider_server_.bind(address, {})) {
+                promise->set_value(ports);
+                co_return;
+            }
+            auto failed_port = bound_port(failing_provider_server_.fd());
+            if (!failed_port) {
+                promise->set_value(ports);
+                co_return;
+            }
+            failing_provider_port = *failed_port;
+        }
+        config_ = make_config(*provider_port, failing_provider_port);
         runtime_.reconcile(*config_->project);
 
         if (!entry_server_.bind(address, {})) {
@@ -335,12 +358,18 @@ public:
             co_return;
         }
         fiber::async::spawn([this]() { return provider_server_.serve(); });
+        if (service_rendezvous_) {
+            fiber::async::spawn([this]() { return failing_provider_server_.serve(); });
+        }
         fiber::async::spawn([this]() { return entry_server_.serve(); });
         promise->set_value(ports);
     }
 
     fiber::async::DetachedTask shutdown(std::promise<void> *promise) noexcept {
         provider_server_.close();
+        if (service_rendezvous_) {
+            failing_provider_server_.close();
+        }
         if (initialized_) {
             co_await coordinator_.shutdown();
             co_await connections_.shutdown();
@@ -349,6 +378,9 @@ public:
         entry_server_.close();
         co_await entry_server_.shutdown_and_wait();
         co_await provider_server_.shutdown_and_wait();
+        if (service_rendezvous_) {
+            co_await failing_provider_server_.shutdown_and_wait();
+        }
         metrics_.stop_collecting();
         co_await metrics_.wait_for_idle();
         promise->set_value();
@@ -380,20 +412,38 @@ public:
     }
 
     [[nodiscard]] int entry_calls() const noexcept { return entry_calls_.load(std::memory_order_acquire); }
+    [[nodiscard]] int failing_provider_calls() const noexcept {
+        return failing_provider_calls_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] std::string_view rendezvous_route_key() const noexcept { return rendezvous_route_key_; }
 
 private:
-    std::shared_ptr<const LlmConfigSnapshot> make_config(std::uint16_t provider_port) {
+    static DiscoveredInstance make_discovered_instance(std::string id, std::uint16_t port) {
+        const fiber::net::IpAddress ip = fiber::net::IpAddress::loopback_v4();
+        return DiscoveredInstance{
+                .instance_id = std::move(id),
+                .address = fiber::net::SocketAddress(ip, port),
+                .connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+                        ip, port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+                .host_header = "127.0.0.1:" + std::to_string(port),
+                .weight = 1.0,
+                .cluster_name = "primary",
+        };
+    }
+
+    std::shared_ptr<const LlmConfigSnapshot> make_config(std::uint16_t provider_port,
+                                                         std::uint16_t failing_provider_port) {
         auto keys = std::make_shared<Bt1KeySnapshot>();
         keys->keys.push_back(Bt1Key{
                 .kid = std::string(kBt1Kid),
                 .secret = std::string(kBt1Secret),
         });
 
-        const std::string base_url = "http://127.0.0.1:" + std::to_string(provider_port);
+        const std::string direct_base_url = "http://127.0.0.1:" + std::to_string(provider_port);
         auto primary_config = std::make_shared<ProviderConfigSnapshot>();
         primary_config->metadata.version = 11;
         primary_config->name = "primary";
-        primary_config->base_url = base_url;
+        primary_config->base_url = service_rendezvous_ ? "service://mock-provider" : direct_base_url;
         primary_config->api_tokens = {
                 {.name = "token-a", .token = "token-a"},
                 {.name = "token-b", .token = "token-b"},
@@ -408,7 +458,7 @@ private:
         auto fallback_config = std::make_shared<ProviderConfigSnapshot>();
         fallback_config->metadata.version = 12;
         fallback_config->name = "fallback";
-        fallback_config->base_url = base_url;
+        fallback_config->base_url = direct_base_url;
         fallback_config->api_tokens = {
                 {.name = "token-f", .token = "token-f"},
         };
@@ -421,6 +471,33 @@ private:
         auto primary = std::make_shared<ProjectProvider>();
         primary->name = "primary";
         primary->config = std::move(primary_config);
+        if (service_rendezvous_) {
+            primary->service = std::make_shared<LoadBalancer>();
+            (void) primary->service->update_instances(DiscoveredService{
+                    .service_name = "mock-provider",
+                    .group = "DEFAULT_GROUP",
+                    .checksum = "service-v1",
+                    .instances =
+                            {
+                                    make_discovered_instance("healthy", provider_port),
+                                    make_discovered_instance("failing", failing_provider_port),
+                            },
+            });
+            for (std::size_t i = 0; i < 1024; ++i) {
+                std::string candidate = "service-route-" + std::to_string(i);
+                const std::uint64_t key = fiber::ai_server::rendezvous_score(candidate, primary->name);
+                auto selected = primary->service->load_balance(key, {}, LoadBalancer::TimePoint{});
+                FIBER_ASSERT(selected.has_value());
+                const bool selects_failing = selected->address().port() == failing_provider_port;
+                primary->service->report(std::move(*selected), InstanceReportOutcome::Neutral,
+                                         LoadBalancer::TimePoint{});
+                if (selects_failing) {
+                    rendezvous_route_key_ = std::move(candidate);
+                    break;
+                }
+            }
+            FIBER_ASSERT(!rendezvous_route_key_.empty());
+        }
         auto fallback = std::make_shared<ProjectProvider>();
         fallback->name = "fallback";
         fallback->config = std::move(fallback_config);
@@ -431,6 +508,9 @@ private:
         route.fallback_provider = fallback;
         route.load_balance.max_primary_attempts = 1;
         route.load_balance.fallback_enabled = true;
+        if (service_rendezvous_) {
+            route.load_balance.service_instance_policy = ServiceInstancePolicy::WeightedRendezvous;
+        }
         route.rate_limit = CompiledModelRateLimitRule{
                 .revision = 17,
                 .window_duration_millis = 60'000,
@@ -520,6 +600,12 @@ private:
         }
     }
 
+    fiber::async::Task<void> handle_failing_provider(fiber::http::HttpExchange &exchange) noexcept {
+        failing_provider_calls_.fetch_add(1, std::memory_order_release);
+        (void) exchange.abort(fiber::common::IoErr::Canceled);
+        co_return;
+    }
+
     fiber::async::Task<void> handle_entry(fiber::http::HttpExchange &exchange) noexcept {
         if (exchange.uri().path == "/internal/llm/rate-limit/check") {
             co_await rate_limit_handler_.handle_check(exchange);
@@ -550,7 +636,10 @@ private:
     std::vector<ObservedProviderRequest> observed_;
     std::size_t reply_index_ = 0;
     std::atomic<int> entry_calls_{0};
+    std::atomic<int> failing_provider_calls_{0};
     bool fail_settle_ = false;
+    bool service_rendezvous_ = false;
+    std::string rendezvous_route_key_;
     fiber::ai_server::TokenRateLimitService rate_limiters_;
     fiber::ai_server::TokenRateLimitHttpHandler rate_limit_handler_;
     fiber::ai_server::RateLimitShardRing ring_;
@@ -562,14 +651,15 @@ private:
     fiber::ai_server::ProviderRuntimeRegistry runtime_;
     std::shared_ptr<const LlmConfigSnapshot> config_;
     fiber::http::Http1Server provider_server_;
+    fiber::http::Http1Server failing_provider_server_;
     fiber::http::Http1Server entry_server_;
     bool initialized_ = false;
 };
 
 class FixtureHarness {
 public:
-    explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false) :
-        fixture_(std::make_unique<ProxyFixture>(group_, std::move(replies), fail_settle)) {
+    explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false, bool service_rendezvous = false) :
+        fixture_(std::make_unique<ProxyFixture>(group_, std::move(replies), fail_settle, service_rendezvous)) {
         group_.start();
         std::promise<FixturePorts> promise;
         auto future = promise.get_future();
@@ -596,6 +686,8 @@ public:
     [[nodiscard]] std::vector<ObservedProviderRequest> observed() const { return fixture_->observed(); }
 
     [[nodiscard]] int entry_calls() const noexcept { return fixture_->entry_calls(); }
+    [[nodiscard]] int failing_provider_calls() const noexcept { return fixture_->failing_provider_calls(); }
+    [[nodiscard]] std::string rendezvous_route_key() const { return std::string(fixture_->rendezvous_route_key()); }
 
     bool token_available(std::string token_name, std::chrono::seconds after) {
         std::promise<bool> promise;
@@ -669,6 +761,34 @@ TEST(LlmProxyIntegrationTest, RetriesTransportAuthRateLimitAndFallbackFromOrigin
     EXPECT_NE(auth_failed, rate_limited);
     EXPECT_FALSE(fixture.token_available(auth_failed, 121s));
     EXPECT_TRUE(fixture.token_available(rate_limited, 121s));
+}
+
+TEST(LlmProxyIntegrationTest, WeightedRendezvousRetryExcludesFailedServiceInstance) {
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"ok","usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}})",
+                    },
+            },
+            false, true);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+    const std::string route_key = fixture.rendezvous_route_key();
+    ASSERT_FALSE(route_key.empty());
+    const std::string request = R"({"model":"logical","stream":false,"metadata":{"route_key":")" + route_key +
+                                R"("},"messages":[{"role":"user","content":"hello"}]})";
+
+    const RawHttpResponse response = post_json(fixture.entry_port(), token, request);
+
+    EXPECT_EQ(response.system_error, 0);
+    EXPECT_EQ(response.status, 200);
+    EXPECT_TRUE(response.complete);
+    EXPECT_EQ(fixture.failing_provider_calls(), 1);
+    const auto observed = fixture.observed();
+    ASSERT_EQ(observed.size(), 1u);
+    EXPECT_NE(observed[0].body.find(R"("model":"upstream-primary")"), std::string::npos);
 }
 
 TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterResponseStart) {

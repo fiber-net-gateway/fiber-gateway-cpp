@@ -77,6 +77,116 @@ TEST(LoadBalancerTest, SmoothWeightedRoundRobinUsesNormalizedNginxSequence) {
     EXPECT_EQ(load_balancer.stats().success_reports, 70u);
 }
 
+TEST(LoadBalancerTest, WeightedRendezvousIsStableAndSupportsRequestExclusions) {
+    LoadBalancer load_balancer;
+    const auto now = LoadBalancer::TimePoint{};
+    EXPECT_EQ(load_balancer.update_instances(make_service("v1", {make_instance("a", "10.0.0.1", 8080, 5.0),
+                                                                 make_instance("b", "10.0.0.2", 8080, 1.0),
+                                                                 make_instance("c", "10.0.0.3", 8080, 1.0)})),
+              LoadBalancerUpdateResult::Applied);
+
+    auto first = load_balancer.load_balance(42, {}, now);
+    ASSERT_TRUE(first);
+    const std::string first_name(first->instance_id());
+    const std::uint64_t first_peer_id = first->peer_id();
+    load_balancer.report(std::move(*first), InstanceReportOutcome::Neutral, now);
+
+    for (std::size_t i = 0; i < 10; ++i) {
+        auto repeated = load_balancer.load_balance(42, {}, now);
+        ASSERT_TRUE(repeated);
+        EXPECT_EQ(repeated->instance_id(), first_name);
+        EXPECT_EQ(repeated->peer_id(), first_peer_id);
+        load_balancer.report(std::move(*repeated), InstanceReportOutcome::Neutral, now);
+    }
+
+    const std::array<std::uint64_t, 1> excluded{first_peer_id};
+    auto second = load_balancer.load_balance(42, excluded, now);
+    ASSERT_TRUE(second);
+    EXPECT_NE(second->instance_id(), first_name);
+    load_balancer.report(std::move(*second), InstanceReportOutcome::Neutral, now);
+}
+
+TEST(LoadBalancerTest, WeightedRendezvousUsesNacosBaseWeightDistribution) {
+    LoadBalancer load_balancer;
+    const auto now = LoadBalancer::TimePoint{};
+    EXPECT_EQ(load_balancer.update_instances(make_service("v1", {make_instance("a", "10.0.0.1", 8080, 5.0),
+                                                                 make_instance("b", "10.0.0.2", 8080, 1.0),
+                                                                 make_instance("c", "10.0.0.3", 8080, 1.0)})),
+              LoadBalancerUpdateResult::Applied);
+
+    constexpr std::size_t kSelections = 70'000;
+    std::map<std::string, std::size_t> selected;
+    for (std::uint64_t key = 0; key < kSelections; ++key) {
+        auto instance = load_balancer.load_balance(key, {}, now);
+        ASSERT_TRUE(instance);
+        ++selected[std::string(instance->instance_id())];
+        load_balancer.report(std::move(*instance), InstanceReportOutcome::Neutral, now);
+    }
+
+    EXPECT_NEAR(static_cast<double>(selected["a"]), 50'000.0, 1'000.0);
+    EXPECT_NEAR(static_cast<double>(selected["b"]), 10'000.0, 600.0);
+    EXPECT_NEAR(static_cast<double>(selected["c"]), 10'000.0, 600.0);
+}
+
+TEST(LoadBalancerTest, WeightedRendezvousKeepsBaseWeightAffinityUntilCircuitOpens) {
+    LoadBalancer load_balancer(LoadBalancer::Options{
+            .max_fails = 2,
+            .fail_timeout = 10s,
+    });
+    const auto now = LoadBalancer::TimePoint{};
+    EXPECT_EQ(load_balancer.update_instances(make_service(
+                      "v1", {make_instance("a", "10.0.0.1", 8080, 1.0), make_instance("b", "10.0.0.2", 8080, 1.0)})),
+              LoadBalancerUpdateResult::Applied);
+
+    auto first = load_balancer.load_balance(7, {}, now);
+    ASSERT_TRUE(first);
+    const std::string first_name(first->instance_id());
+    load_balancer.report(std::move(*first), InstanceReportOutcome::Failure, now);
+
+    auto before_open = load_balancer.load_balance(7, {}, now + 1ms);
+    ASSERT_TRUE(before_open);
+    EXPECT_EQ(before_open->instance_id(), first_name);
+    load_balancer.report(std::move(*before_open), InstanceReportOutcome::Failure, now + 1ms);
+
+    auto after_open = load_balancer.load_balance(7, {}, now + 2ms);
+    ASSERT_TRUE(after_open);
+    EXPECT_NE(after_open->instance_id(), first_name);
+    load_balancer.report(std::move(*after_open), InstanceReportOutcome::Neutral, now + 2ms);
+}
+
+TEST(LoadBalancerTest, WeightedRendezvousOnlyMovesKeysToAnAddedPeer) {
+    LoadBalancer load_balancer;
+    const auto now = LoadBalancer::TimePoint{};
+    EXPECT_EQ(load_balancer.update_instances(make_service(
+                      "v1", {make_instance("a", "10.0.0.1", 8080, 1.0), make_instance("b", "10.0.0.2", 8080, 1.0)})),
+              LoadBalancerUpdateResult::Applied);
+
+    constexpr std::size_t kKeys = 1'000;
+    std::array<std::string, kKeys> before;
+    for (std::uint64_t key = 0; key < kKeys; ++key) {
+        auto selected = load_balancer.load_balance(key, {}, now);
+        ASSERT_TRUE(selected);
+        before[key] = selected->instance_id();
+        load_balancer.report(std::move(*selected), InstanceReportOutcome::Neutral, now);
+    }
+
+    EXPECT_EQ(load_balancer.update_instances(make_service("v2", {make_instance("a", "10.0.0.1", 8080, 1.0),
+                                                                 make_instance("b", "10.0.0.2", 8080, 1.0),
+                                                                 make_instance("c", "10.0.0.3", 8080, 1.0)})),
+              LoadBalancerUpdateResult::Applied);
+    std::size_t moved = 0;
+    for (std::uint64_t key = 0; key < kKeys; ++key) {
+        auto selected = load_balancer.load_balance(key, {}, now);
+        ASSERT_TRUE(selected);
+        if (selected->instance_id() != before[key]) {
+            ++moved;
+            EXPECT_EQ(selected->instance_id(), "c");
+        }
+        load_balancer.report(std::move(*selected), InstanceReportOutcome::Neutral, now);
+    }
+    EXPECT_GT(moved, 0u);
+}
+
 TEST(LoadBalancerTest, AtomicGenerationReplacementKeepsSelectedInstanceMemoryAlive) {
     LoadBalancer load_balancer;
     const auto now = LoadBalancer::TimePoint{};
