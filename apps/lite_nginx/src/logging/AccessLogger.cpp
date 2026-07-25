@@ -21,6 +21,9 @@ std::atomic<std::uint64_t> g_next_request_id{1};
 
 std::string_view access_outcome(const fiber::http::HttpResponseStats &stats,
                                 const RequestLogContext &context) noexcept {
+    if (context.client_aborted) {
+        return "client_aborted";
+    }
     if (context.upstream_error != fiber::common::IoErr::None) {
         return "upstream_error";
     }

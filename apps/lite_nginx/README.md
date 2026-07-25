@@ -14,8 +14,8 @@ is intentional and affects both supported syntax and matching behavior.
   forwarding are implemented.
 - The current executable can bind configured listeners, select `server` by
   exact `Host`, match `location`, and proxy to upstream HTTP/1.1 backends.
-- Named upstreams support round-robin peer selection and optional keepalive
-  pooling.
+- Named upstreams support round-robin peer selection. Direct and named targets
+  use the global keepalive connection pool by default.
 
 ## Build
 
@@ -76,10 +76,14 @@ Validate a custom config file:
   exactly that path, `:name` captures one segment, and `*name`/`*` is a trailing
   wildcard.
 - Support upstream groups with round-robin selection.
-- Support direct static upstream targets such as `http://127.0.0.1:9001`.
-- Support named upstream targets such as `http://backend`.
-- Support upstream keepalive connection pooling for named upstreams with
-  `keepalive <n>;`.
+- Support direct static upstream targets such as `http://127.0.0.1:9001` and
+  `https://example.com`.
+- Support named upstream targets such as `upstream://backend`.
+- Use the global keepalive connection pool by default; a location can opt out
+  with `reuse_connection off;`.
+- Rewrite the upstream request path independently with `rewrite_path`.
+- Optionally close the active upstream connection when the downstream response
+  channel is aborted.
 - Support request/response streaming instead of whole-body buffering.
 - Map upstream connect/read/write failures into standard gateway errors.
 
@@ -144,8 +148,9 @@ Top level:
 - `listen <ip:port> ssl quic;`
 - `upstream <name> { ... }`
 - `connection_pool { ... }` — global keepalive pool shared across all upstreams and script
-  targets (keyed by peer). `keepalive_size <n>;` (idle per peer; 0 disables pooling, falling
-  back to transient connections), `keepalive_timeout <duration>;`, and `steal on|off|auto;`
+  targets (keyed by peer). The block is optional and defaults to 32 idle connections per peer.
+  `keepalive_size <n>;` (idle per peer; 0 disables pooling globally, falling back to transient
+  connections), `keepalive_timeout <duration>;`, and `steal on|off|auto;`
   (cross-loop idle-connection sharing: `auto` = on when `worker_processes > 1`). `steal on` uses
   one pool whose idle connections can be borrowed across worker loops; `steal off` gives each
   worker loop its own local pool (no cross-loop reuse). `max_idle_total <n>;` caps the total
@@ -176,16 +181,22 @@ Top level:
 - `proxy_read_timeout <duration>;`
 - `proxy_send_timeout <duration>;`
 - `proxy_set_header <name> <literal>;`
+- `proxy_close_on_client_abort on|off;` - inherited by proxy locations; default `off`.
 
 `location` block:
 
 - `access_log <logger-name> "<script-template>";` or `access_log off;`
-- `proxy_pass http://<upstream_name>;`
-- `proxy_pass http://<host:port>;`
+- `proxy_pass upstream://<upstream_name>;`
+- `proxy_pass http://<host>[:port];`
+- `proxy_pass https://<host>[:port];`
+- `rewrite_path <literal-or-template>;` - replace only the upstream path; the original
+  query string is preserved.
+- `reuse_connection on|off;` - use or bypass the global pool for this location; default `on`.
 - `proxy_connect_timeout <duration>;`
 - `proxy_read_timeout <duration>;`
 - `proxy_send_timeout <duration>;`
 - `proxy_set_header <name> <literal>;`
+- `proxy_close_on_client_abort on|off;`
 - `proxy_buffering off;`
 - `script_file <path>;` - handle the request with a compiled script instead of proxying
   (mutually exclusive with `proxy_pass`).
@@ -288,9 +299,9 @@ at runtime -- see `conf/scripts/vars.js`):
 Absent `$query`/`$header`/`$cookie` values resolve to `null` (not an error). `$path.<name>`
 is always present for a matched route (the pattern captured it).
 
-Upstream HTTP (async, require a `connection_pool` block for keepalive reuse). The upstream host
-is bound once at compile time with a directive; `svc.request` / `svc.proxyPass` are the only
-entry points (flat `http.request` / `http.proxyPass` are not available):
+Upstream HTTP is pooled by default. The upstream host is bound once at compile time with a
+directive; `svc.request` / `svc.proxyPass` are the only entry points (flat `http.request` /
+`http.proxyPass` are not available):
 
 ```
 directive svc = http "@backend";          // or http "http://1.2.3.4:8080"
@@ -318,7 +329,11 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
 ## Explicit V1 Restrictions
 
 - `proxy_set_header` accepts literal values or synchronous `${...}` templates.
-- `proxy_pass` accepts only static targets.
+- `proxy_pass` accepts only a static connection target. Named targets use
+  `upstream://name`; direct targets use `http://authority` or `https://authority`.
+  A direct target cannot contain a path, query, fragment, or userinfo.
+- `rewrite_path` accepts a literal absolute path or a synchronous `${...}` template.
+  Its result must be a valid absolute URI path and cannot contain `?` or `#`.
 - Script constants in `${...}` are supported only by directives documented as templates; nginx
   variables are not interpreted.
 - `listen` is only valid in the `http` block.
@@ -334,10 +349,8 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
 - `server_name` uses exact match only.
 - `location` uses `RoutePathMatcher` syntax and semantics (a bare pattern matches
   exactly; `:name`/`*` are matched as written), not nginx `location` precedence rules.
-- Only `http://` upstream targets are supported in V1 (for `proxy_pass`).
-- Upstream peers must be configured with IP literals in the current runtime. Script
-  directive `http(s)://host` targets accept hostnames (resolved via DNS) or IP literals; the
-  `url` call option is the request path?query, not a host.
+- Direct `proxy_pass` and upstream peers accept hostnames (resolved via DNS) or IP
+  literals. The script `url` call option is the request path plus optional query, not a host.
 - `proxy_buffering` only accepts `off`.
 - A single global keepalive pool is shared across all upstreams and script targets; per-upstream
   `keepalive` sizing is not available (use `connection_pool { keepalive_size ...; }`).
@@ -349,8 +362,11 @@ location /ready { ... }
 location /api/:id { ... }
 location /files/*tail { ... }
 location /api/* { ... }
-proxy_pass http://backend;
+proxy_pass upstream://backend;
 proxy_pass http://127.0.0.1:9001;
+proxy_pass https://example.com;
+rewrite_path "/v2/items/${$path.id}";
+reuse_connection off;
 proxy_set_header Host backend.internal;
 ```
 
@@ -359,7 +375,9 @@ Examples that are not valid in V1:
 ```nginx
 proxy_set_header Host $host;
 proxy_set_header X-Forwarded-For $remote_addr;
-proxy_pass http://backend$request_uri;
+proxy_pass upstream://backend$request_uri;
+proxy_pass http://example.com/api;
+rewrite_path relative/path;
 location ~ ^/api/ { }
 location @named { }
 rewrite ^/a/(.*)$ /b/$1 last;
@@ -387,11 +405,19 @@ rewrite ^/a/(.*)$ /b/$1 last;
 ## Proxy Semantics
 
 - The original downstream request method is forwarded unchanged.
-- The original downstream request URI is forwarded unchanged.
+- The original downstream request target is forwarded unchanged unless
+  `rewrite_path` is configured. Rewriting replaces only the path and preserves
+  the original query string byte-for-byte.
 - Request bodies are streamed to upstream.
 - Response bodies are streamed back to downstream.
 - Hop-by-hop headers are filtered and never forwarded upstream or downstream.
 - If `proxy_set_header` overrides a header, the configured literal value wins.
+- `reuse_connection on` (the default) checks out and returns an upstream
+  connection through the global pool. `off` opens a transient connection,
+  sends `Connection: close`, and never inserts it into the pool.
+- With `proxy_close_on_client_abort on`, an HTTP/1 transport abort/reset or an
+  HTTP/2/HTTP/3 response-stream reset cancels proxy work and closes the checked-out
+  upstream connection so it cannot return to the pool. The default is `off`.
 - WebSocket requests need no extra directives: HTTP/1.1 Upgrade is forwarded as an
   upstream HTTP/1.1 Upgrade, while HTTP/2 and HTTP/3 Extended CONNECT are translated
   to an upstream HTTP/1.1 Upgrade. A successful upstream `101` becomes downstream
@@ -417,7 +443,7 @@ Default behavior in V1:
 
 - If `Host` is not overridden with `proxy_set_header`, upstream `Host` uses the
   static target host from `proxy_pass`, or the named upstream's configured name
-  for `proxy_pass http://<upstream_name>;`.
+  for `proxy_pass upstream://<upstream_name>;`.
 - No automatic variable-based forwarding headers are added.
 
 ## Error Mapping
@@ -487,26 +513,33 @@ http {
     listen 8080;
     listen 8443 ssl http3;
 
+    connection_pool {
+        keepalive_size 32;
+        keepalive_timeout 30s;
+    }
+
     upstream backend {
         server 127.0.0.1:9001;
         server 127.0.0.1:9002;
-        keepalive 32;
     }
 
     server {
         server_name localhost;
+        proxy_close_on_client_abort on;
 
         location /ready {
             proxy_pass http://127.0.0.1:9009;
+            reuse_connection off;
         }
 
         location /api/:id {
-            proxy_pass http://backend;
+            proxy_pass upstream://backend;
+            rewrite_path "/v2/api/${$path.id}";
             proxy_set_header Host backend.internal;
         }
 
         location /files/*tail {
-            proxy_pass http://backend;
+            proxy_pass upstream://backend;
             proxy_buffering off;
         }
     }

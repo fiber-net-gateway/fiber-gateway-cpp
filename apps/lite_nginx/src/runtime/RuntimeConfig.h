@@ -50,7 +50,7 @@ struct AccessLogRuntime {
 // resolution of PoolSteal::Auto (true when worker_processes > 1): true -> StealableHttp1ConnectionPoolSet
 // (idle connections shared across worker loops), false -> LocalHttp1ConnectionPoolSet (per-loop).
 struct ConnectionPoolRuntime {
-    std::size_t keepalive_size = 0;
+    std::size_t keepalive_size = 32;
     std::chrono::milliseconds keepalive_timeout{30000};
     bool steal = false;
     std::size_t max_idle_total = 0; // 0 => derive (keepalive_size * 64)
@@ -70,6 +70,18 @@ struct ProxyHeaderRuntime {
     std::uint64_t name_hash = 0;
     // Non-null when `value` is a ${...} template compiled at runtime-build; evaluated per
     // request against a ScriptExchangeCtx to produce the header value. Null => use `value`.
+    std::shared_ptr<fiber::script::Script> template_script;
+};
+
+enum class RewritePathKind : std::uint8_t {
+    Preserve,
+    Literal,
+    Template,
+};
+
+struct RewritePathRuntime {
+    RewritePathKind kind = RewritePathKind::Preserve;
+    std::string literal;
     std::shared_ptr<fiber::script::Script> template_script;
 };
 
@@ -97,6 +109,7 @@ struct LocationRuntime {
     // is the catch-all and `/` matches only the root path).
     std::string pattern;
     std::string default_host_header;
+    RewritePathRuntime rewrite_path;
     fiber::http::HeaderMap<std::uint8_t> skip_headers;
     std::vector<ProxyHeaderRuntime> set_headers;
     std::chrono::milliseconds connect_timeout{10000};
@@ -106,6 +119,8 @@ struct LocationRuntime {
     AccessLogId access_log = kDisabledAccessLog;
     bool proxy_buffering = false;
     bool host_header_overridden = false;
+    bool reuse_connection = true;
+    bool close_on_client_abort = false;
     // Non-null when this location runs a script (kind == Script) instead of proxying.
     std::shared_ptr<fiber::script::Script> script;
 };

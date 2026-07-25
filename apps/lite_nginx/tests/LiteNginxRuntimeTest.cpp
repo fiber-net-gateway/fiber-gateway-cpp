@@ -568,6 +568,109 @@ private:
     std::thread thread_{};
 };
 
+class AbortAwareUpstream {
+public:
+    AbortAwareUpstream(std::promise<void> *accepted_promise, std::promise<bool> *closed_promise) :
+        accepted_promise_(accepted_promise), closed_promise_(closed_promise) {
+        listener_fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        EXPECT_GE(listener_fd_, 0);
+        if (listener_fd_ < 0) {
+            publish(false);
+            return;
+        }
+
+        int yes = 1;
+        ::setsockopt(listener_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(0);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (::bind(listener_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 ||
+            ::listen(listener_fd_, 16) != 0) {
+            ADD_FAILURE() << "abort-aware upstream listen failed: " << errno;
+            ::close(listener_fd_);
+            listener_fd_ = -1;
+            publish(false);
+            return;
+        }
+
+        sockaddr_in bound{};
+        socklen_t len = sizeof(bound);
+        if (::getsockname(listener_fd_, reinterpret_cast<sockaddr *>(&bound), &len) != 0) {
+            ADD_FAILURE() << "abort-aware upstream getsockname failed: " << errno;
+            ::close(listener_fd_);
+            listener_fd_ = -1;
+            publish(false);
+            return;
+        }
+        port_ = ntohs(bound.sin_port);
+
+        thread_ = std::thread([this]() {
+            const int client = ::accept4(listener_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+            if (client < 0) {
+                publish(false);
+                return;
+            }
+            client_fd_.store(client, std::memory_order_release);
+            if (accepted_promise_) {
+                accepted_promise_->set_value();
+                accepted_promise_ = nullptr;
+            }
+
+            timeval tv{};
+            tv.tv_sec = 5;
+            ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            (void) read_http_request(client);
+
+            char byte = 0;
+            const ssize_t rc = ::recv(client, &byte, 1, 0);
+            publish(rc == 0);
+
+            if (client_fd_.exchange(-1, std::memory_order_acq_rel) == client) {
+                ::shutdown(client, SHUT_RDWR);
+                ::close(client);
+            }
+        });
+    }
+
+    ~AbortAwareUpstream() {
+        if (listener_fd_ >= 0) {
+            ::shutdown(listener_fd_, SHUT_RDWR);
+            ::close(listener_fd_);
+        }
+        const int client = client_fd_.exchange(-1, std::memory_order_acq_rel);
+        if (client >= 0) {
+            ::shutdown(client, SHUT_RDWR);
+            ::close(client);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        publish(false);
+    }
+
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+private:
+    void publish(bool closed) {
+        if (accepted_promise_) {
+            accepted_promise_->set_value();
+            accepted_promise_ = nullptr;
+        }
+        if (closed_promise_) {
+            closed_promise_->set_value(closed);
+            closed_promise_ = nullptr;
+        }
+    }
+
+    int listener_fd_ = -1;
+    std::atomic<int> client_fd_{-1};
+    std::uint16_t port_ = 0;
+    std::promise<void> *accepted_promise_ = nullptr;
+    std::promise<bool> *closed_promise_ = nullptr;
+    std::thread thread_{};
+};
+
 class KeepAliveUpstream {
 public:
     KeepAliveUpstream(std::array<std::string, 2> responses,
@@ -1084,6 +1187,167 @@ http {
     EXPECT_EQ(proxied_request.find("Connection: close\r\n"), std::string::npos);
 }
 
+TEST(LiteNginxRuntimeTest, RewritePathSupportsLiteralAndTemplateWhilePreservingQuery) {
+    std::promise<std::string> literal_upstream_request;
+    std::promise<std::string> template_upstream_request;
+    auto literal_future = literal_upstream_request.get_future();
+    auto template_future = template_upstream_request.get_future();
+    SingleRequestUpstream literal_upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", &literal_upstream_request);
+    SingleRequestUpstream template_upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+                                            &template_upstream_request);
+    ASSERT_NE(literal_upstream.port(), 0);
+    ASSERT_NE(template_upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /literal/*tail {
+            proxy_pass http://127.0.0.1:LITERAL_PORT;
+            rewrite_path /v2/static;
+        }
+        location /template/*tail {
+            proxy_pass http://127.0.0.1:TEMPLATE_PORT;
+            rewrite_path "/v3/${$path.tail}";
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("LITERAL_PORT"), sizeof("LITERAL_PORT") - 1,
+                        std::to_string(literal_upstream.port()));
+    config_text.replace(config_text.find("TEMPLATE_PORT"), sizeof("TEMPLATE_PORT") - 1,
+                        std::to_string(template_upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "rewrite_path.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kLiteralRequest =
+            "GET /literal/ignored?first=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kLiteralRequest));
+    const std::string literal_response = recv_http_response(client);
+    ::close(client);
+
+    client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kTemplateRequest =
+            "GET /template/a/b?x=%2F&empty= HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kTemplateRequest));
+    const std::string template_response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(literal_future.wait_for(3s), std::future_status::ready);
+    ASSERT_EQ(template_future.wait_for(3s), std::future_status::ready);
+    const std::string literal_request = literal_future.get();
+    const std::string template_request = template_future.get();
+
+    EXPECT_NE(literal_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << literal_response;
+    EXPECT_NE(template_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << template_response;
+    EXPECT_NE(literal_request.find("GET /v2/static?first=1 HTTP/1.1\r\n"), std::string::npos) << literal_request;
+    EXPECT_NE(template_request.find("GET /v3/a/b?x=%2F&empty= HTTP/1.1\r\n"), std::string::npos) << template_request;
+}
+
+TEST(LiteNginxRuntimeTest, RejectsInvalidDynamicRewriteBeforeConnectingUpstream) {
+    std::promise<std::string> upstream_request;
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location / {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+            rewrite_path "${$header.x_path}";
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "invalid_rewrite_path.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kRequest =
+            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Path: relative\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kRequest));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 500 Internal Server Error\r\n"), std::string::npos) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ClosesUpstreamWhenClientAbortsIfConfigured) {
+    std::promise<void> upstream_accepted;
+    std::promise<bool> upstream_closed;
+    auto accepted_future = upstream_accepted.get_future();
+    auto closed_future = upstream_closed.get_future();
+    AbortAwareUpstream upstream(&upstream_accepted, &upstream_closed);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        proxy_close_on_client_abort on;
+        location /* {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "client_abort.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    EXPECT_TRUE(runtime->servers[0].locations[0].close_on_client_abort);
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kRequest = "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kRequest));
+    if (accepted_future.wait_for(3s) != std::future_status::ready) {
+        const std::string response = recv_http_response(client);
+        FAIL() << "upstream was not connected; downstream response: " << response;
+    }
+
+    linger reset_on_close{1, 0};
+    ASSERT_EQ(::setsockopt(client, SOL_SOCKET, SO_LINGER, &reset_on_close, sizeof(reset_on_close)), 0);
+    ::close(client);
+
+    ASSERT_EQ(closed_future.wait_for(3s), std::future_status::ready);
+    EXPECT_TRUE(closed_future.get());
+}
+
 TEST(LiteNginxRuntimeTest, ProxiesHttp1WebSocketUpgradeByDefault) {
     std::promise<std::string> upstream_request;
     std::promise<std::string> upstream_body;
@@ -1566,7 +1830,7 @@ http {
     server {
         server_name api.local;
         location /files/*tail {
-            proxy_pass http://backend;
+            proxy_pass upstream://backend;
         }
     }
 
@@ -1781,7 +2045,7 @@ http {
     server {
         server_name localhost;
         location /* {
-            proxy_pass http://backend;
+            proxy_pass upstream://backend;
         }
     }
 }
@@ -1851,7 +2115,7 @@ http {
     server {
         server_name localhost;
         location /* {
-            proxy_pass http://backend;
+            proxy_pass upstream://backend;
         }
     }
 }
@@ -1871,6 +2135,45 @@ http {
     const char request[] = "GET /secure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
     std::string response = recv_http_response(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("\r\n\r\nsecure"), std::string::npos) << response;
+}
+
+TEST(LiteNginxRuntimeTest, ProxiesDirectHttpsTargetOverTls) {
+    TlsSingleRequestUpstream upstream;
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            proxy_pass https://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "direct_https_upstream.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kRequest = "GET /secure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kRequest));
+    const std::string response = recv_http_response(client);
     ::close(client);
 
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
@@ -1916,7 +2219,7 @@ http {
     server {
         server_name localhost;
         location /* {
-            proxy_pass http://backend;
+            proxy_pass upstream://backend;
         }
     }
 }
@@ -1995,7 +2298,7 @@ http {
     EXPECT_EQ(runtime->connection_pool.initial_group_capacity, 8u);
 }
 
-TEST(LiteNginxRuntimeTest, DoesNotPoolDirectProxyPassTargets) {
+TEST(LiteNginxRuntimeTest, PoolsDirectProxyPassTargetsByDefault) {
     std::promise<std::string> first_upstream_request;
     std::promise<std::string> second_upstream_request;
     auto first_future = first_upstream_request.get_future();
@@ -2063,6 +2366,84 @@ http {
 
     EXPECT_NE(first_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
     EXPECT_NE(second_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_EQ(upstream.accept_count(), 1);
+}
+
+TEST(LiteNginxRuntimeTest, ReuseConnectionOffBypassesPoolForDirectTargets) {
+    std::promise<std::string> first_upstream_request;
+    std::promise<std::string> second_upstream_request;
+    auto first_future = first_upstream_request.get_future();
+    auto second_future = second_upstream_request.get_future();
+    KeepAliveUpstream upstream(
+            {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\nConnection: "
+                    "keep-alive\r\n\r\nfirst",
+                    "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nContent-Type: text/plain\r\nConnection: "
+                    "keep-alive\r\n\r\nsecond",
+            },
+            {&first_upstream_request, &second_upstream_request});
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    server {
+        server_name localhost;
+        location /* {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+            reuse_connection off;
+        }
+    }
+}
+)";
+    std::size_t marker = config_text.find("LISTEN_PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("LISTEN_PORT") - 1, std::to_string(port));
+
+    marker = config_text.find("UPSTREAM_PORT");
+    ASSERT_NE(marker, std::string::npos);
+    config_text.replace(marker, sizeof("UPSTREAM_PORT") - 1, std::to_string(upstream.port()));
+
+    auto config =
+            fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "runtime_direct_no_reuse.conf");
+    ASSERT_TRUE(config.has_value());
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    EXPECT_FALSE(runtime->servers[0].locations[0].reuse_connection);
+
+    RuntimeHarness harness(*runtime);
+
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char first_request[] = "GET /first HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, first_request, sizeof(first_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(first_request) - 1));
+    std::string first_response = recv_http_response(client);
+    ::close(client);
+
+    client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char second_request[] = "GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, second_request, sizeof(second_request) - 1, 0),
+              static_cast<ssize_t>(sizeof(second_request) - 1));
+    std::string second_response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(first_future.wait_for(3s), std::future_status::ready);
+    ASSERT_EQ(second_future.wait_for(3s), std::future_status::ready);
+
+    const std::string first_proxy_request = first_future.get();
+    const std::string second_proxy_request = second_future.get();
+    EXPECT_NE(first_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(second_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(first_proxy_request.find("Connection: close\r\n"), std::string::npos);
+    EXPECT_NE(second_proxy_request.find("Connection: close\r\n"), std::string::npos);
     EXPECT_EQ(upstream.accept_count(), 2);
 }
 
@@ -2101,7 +2482,7 @@ http {
     server {
         server_name localhost;
         location /* {
-            proxy_pass http://backend;
+            proxy_pass upstream://backend;
         }
     }
 }
