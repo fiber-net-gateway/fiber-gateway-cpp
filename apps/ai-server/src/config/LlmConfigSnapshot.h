@@ -76,12 +76,18 @@ struct ProviderConfigSnapshot {
     [[nodiscard]] const ProviderProtocol *find_protocol(ProviderProtocolType type) const noexcept;
 };
 
+enum class ServiceInstancePolicy : std::uint8_t {
+    SmoothWeightedRoundRobin,
+    WeightedRendezvous,
+};
+
 struct LoadBalanceConfig {
     static constexpr std::int32_t kDefaultPrefixMaxBytes = 2048;
 
     std::int32_t prefix_max_bytes = kDefaultPrefixMaxBytes;
     std::int32_t max_primary_attempts = 0;
     bool fallback_enabled = true;
+    ServiceInstancePolicy service_instance_policy = ServiceInstancePolicy::SmoothWeightedRoundRobin;
     std::vector<std::int32_t> retryable_statuses{429, 502, 503, 504};
 
     [[nodiscard]] bool is_retryable_status(std::int32_t status) const noexcept;

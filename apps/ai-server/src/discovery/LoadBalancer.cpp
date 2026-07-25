@@ -65,6 +65,26 @@ using PeerEntry = detail::PeerEntry;
 using PeerRuntime = detail::PeerRuntime;
 using RoundRobin = detail::RoundRobin;
 
+std::uint64_t mix_rendezvous_hash(std::uint64_t key, std::uint64_t peer_hash) noexcept {
+    std::uint64_t value = key ^ (peer_hash + 0x9e3779b97f4a7c15ULL);
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31U;
+    return value;
+}
+
+double weighted_rendezvous_cost(std::uint64_t hash, std::int64_t weight) noexcept {
+    constexpr double kInverseHashRange = 1.0 / 9007199254740992.0;
+    const double uniform = (static_cast<double>(hash >> 11U) + 0.5) * kInverseHashRange;
+    return -std::log(uniform) / static_cast<double>(weight);
+}
+
+bool excluded_peer(std::span<const std::uint64_t> excluded_peer_ids, std::uint64_t peer_id) noexcept {
+    return std::find(excluded_peer_ids.begin(), excluded_peer_ids.end(), peer_id) != excluded_peer_ids.end();
+}
+
 int compare_address(const net::SocketAddress &left, const net::SocketAddress &right) noexcept {
     if (left.family() != right.family()) {
         return left.family() < right.family() ? -1 : 1;
@@ -245,6 +265,11 @@ std::uint64_t LoadBalancer::Instance::generation() const noexcept {
     return owner_->generation;
 }
 
+std::uint64_t LoadBalancer::Instance::peer_id() const noexcept {
+    FIBER_ASSERT(valid());
+    return peer_epoch_;
+}
+
 void LoadBalancer::Instance::release_neutral() noexcept {
     LoadBalancer::complete_instance(*this, InstanceReportOutcome::Neutral, TimePoint{});
 }
@@ -313,6 +338,76 @@ std::expected<LoadBalancer::Instance, LoadBalanceError> LoadBalancer::load_balan
     }
 
     best->current_weight -= total;
+    if (now - best->checked > core_->options.fail_timeout) {
+        best->checked = now;
+    }
+    FIBER_ASSERT(best->in_flight != std::numeric_limits<std::size_t>::max());
+    ++best->in_flight;
+    core_->selections.fetch_add(1, std::memory_order_relaxed);
+    return Instance(std::move(current), best_index, best->peer_epoch);
+}
+
+std::expected<LoadBalancer::Instance, LoadBalanceError>
+LoadBalancer::load_balance(std::uint64_t key, std::span<const std::uint64_t> excluded_peer_ids) noexcept {
+    return load_balance(key, excluded_peer_ids, event::EventLoop::current().now());
+}
+
+std::expected<LoadBalancer::Instance, LoadBalanceError>
+LoadBalancer::load_balance(std::uint64_t key, std::span<const std::uint64_t> excluded_peer_ids,
+                           TimePoint now) noexcept {
+    std::lock_guard guard(core_->mutex);
+    if (core_->shutdown) {
+        return std::unexpected(LoadBalanceError::Shutdown);
+    }
+    std::shared_ptr<RoundRobin> current = current_.load(std::memory_order_acquire);
+    if (!current) {
+        return std::unexpected(LoadBalanceError::Uninitialized);
+    }
+    if (current->peers.empty()) {
+        core_->unavailable.fetch_add(1, std::memory_order_relaxed);
+        return std::unexpected(LoadBalanceError::NoAvailableInstance);
+    }
+
+    PeerRuntime *best = nullptr;
+    std::size_t best_index = 0;
+    double best_cost = 0;
+    for (std::size_t i = 0; i < current->peers.size(); ++i) {
+        PeerEntry &peer = current->peers[i];
+        PeerRuntime &runtime = *peer.runtime;
+        if (runtime.retired) {
+            continue;
+        }
+        if (core_->options.max_fails != 0 && runtime.fails >= core_->options.max_fails &&
+            now - runtime.checked <= core_->options.fail_timeout) {
+            continue;
+        }
+        if (runtime.effective_weight < runtime.base_weight) {
+            ++runtime.effective_weight;
+        }
+        if (excluded_peer(excluded_peer_ids, runtime.peer_epoch)) {
+            continue;
+        }
+
+        const double cost = weighted_rendezvous_cost(mix_rendezvous_hash(key, peer.instance.connection_key.hash()),
+                                                     peer.normalized_weight);
+        if (!best || cost < best_cost || (cost == best_cost && compare_entry(peer, current->peers[best_index]) < 0)) {
+            best = &runtime;
+            best_index = i;
+            best_cost = cost;
+        }
+    }
+
+    if (!best) {
+        if (core_->options.fail_open_when_single && current->peers.size() == 1 && !current->peers[0].runtime->retired &&
+            !excluded_peer(excluded_peer_ids, current->peers[0].runtime->peer_epoch)) {
+            best = current->peers[0].runtime.get();
+            best_index = 0;
+        } else {
+            core_->unavailable.fetch_add(1, std::memory_order_relaxed);
+            return std::unexpected(LoadBalanceError::NoAvailableInstance);
+        }
+    }
+
     if (now - best->checked > core_->options.fail_timeout) {
         best->checked = now;
     }

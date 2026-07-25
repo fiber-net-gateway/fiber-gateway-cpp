@@ -150,10 +150,13 @@ token 删除时清理对应状态：
 - 连续 3 次失败后 Provider 熔断 30 秒；
 - 成功清除 Provider 连续失败并恢复成功 token。
 
-固定 `http(s)://` 地址在 worker DNS resolver 上解析全部 A/AAAA，再依序连接；
-`service://` 地址从配置快照中的健康实例按 route key 做稳定选择。连接池 key 包含
-scheme、host/IP 和 port；HTTPS name 地址保留 SNI。连接、收发总超时遵循 300 秒
-Provider 上限，并保留较短的 connect timeout。
+固定 `http(s)://` 地址在 worker DNS resolver 上解析全部 A/AAAA，再依序连接。
+`service://` 默认按 Nacos 权重执行平滑加权轮询；模型配置
+`service-instance-policy: weighted-rendezvous` 后，以 Provider-scoped route key 和
+实例 endpoint 计算带权 Rendezvous score，使用 Nacos 基础权重稳定选择实例。同一次
+Provider 的实例级失败会加入请求级排除集合，后续 token 尝试选择下一实例。连接池 key
+仍只包含 scheme、host/IP 和 port，不包含 route key；HTTPS name 地址保留 SNI。
+连接、收发总超时遵循 300 秒 Provider 上限，并保留较短的 connect timeout。
 
 每次上游请求只构造固定头：
 

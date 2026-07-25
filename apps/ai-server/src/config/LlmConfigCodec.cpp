@@ -249,6 +249,23 @@ std::expected<LoadBalanceConfig, LlmConfigError> parse_load_balance(const JsonAn
         // Java normalizes every unsupported source to the only implemented one.
     }
 
+    auto service_policy = optional_text(object, {"service-instance-policy", "serviceInstancePolicy"},
+                                        std::string(base_path) + ".service-instance-policy");
+    if (!service_policy) {
+        return std::unexpected(std::move(service_policy.error()));
+    }
+    if (*service_policy) {
+        const std::string normalized = normalize_option(**service_policy);
+        if (normalized == "smooth-weighted-round-robin" || normalized == "smooth-round-robin") {
+            config.service_instance_policy = ServiceInstancePolicy::SmoothWeightedRoundRobin;
+        } else if (normalized == "weighted-rendezvous" || normalized == "weighted-rendezvous-hash") {
+            config.service_instance_policy = ServiceInstancePolicy::WeightedRendezvous;
+        } else {
+            return std::unexpected(invalid_field(std::string(base_path) + ".service-instance-policy",
+                                                 "unsupported service instance policy"));
+        }
+    }
+
     auto prefix = optional_integer(object, {"prefix-max-bytes", "prefixMaxBytes"},
                                    std::string(base_path) + ".prefix-max-bytes");
     if (!prefix) {

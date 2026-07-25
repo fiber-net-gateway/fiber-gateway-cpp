@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -100,6 +101,7 @@ public:
         [[nodiscard]] double configured_weight() const noexcept;
         [[nodiscard]] std::int64_t normalized_weight() const noexcept;
         [[nodiscard]] std::uint64_t generation() const noexcept;
+        [[nodiscard]] std::uint64_t peer_id() const noexcept;
 
     private:
         friend class LoadBalancer;
@@ -120,6 +122,10 @@ public:
 
     [[nodiscard]] std::expected<Instance, LoadBalanceError> load_balance() noexcept;
     [[nodiscard]] std::expected<Instance, LoadBalanceError> load_balance(TimePoint now) noexcept;
+    [[nodiscard]] std::expected<Instance, LoadBalanceError>
+    load_balance(std::uint64_t key, std::span<const std::uint64_t> excluded_peer_ids = {}) noexcept;
+    [[nodiscard]] std::expected<Instance, LoadBalanceError>
+    load_balance(std::uint64_t key, std::span<const std::uint64_t> excluded_peer_ids, TimePoint now) noexcept;
 
     void report(Instance &instance, bool success) noexcept;
     void report(Instance &instance, bool success, TimePoint now) noexcept;
@@ -142,7 +148,7 @@ private:
     struct Core;
     static void complete_instance(Instance &instance, InstanceReportOutcome outcome, TimePoint now) noexcept;
 
-    // Core is stable across generations, so all workers and updates share one SWRR/circuit lock domain.
+    // Core is stable across generations, so all workers and updates share one selection/circuit lock domain.
     std::shared_ptr<Core> core_;
     std::atomic<std::shared_ptr<detail::RoundRobin>> current_;
 };

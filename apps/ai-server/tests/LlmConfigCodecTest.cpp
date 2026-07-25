@@ -12,6 +12,7 @@ using fiber::ai_server::parse_models_config;
 using fiber::ai_server::parse_provider_config;
 using fiber::ai_server::parse_user_group_config;
 using fiber::ai_server::ProviderProtocolType;
+using fiber::ai_server::ServiceInstancePolicy;
 
 TEST(LlmConfigCodecTest, ParsesBt1EnvelopeAndDecodesSecrets) {
     constexpr std::string_view input = R"({
@@ -87,6 +88,7 @@ TEST(LlmConfigCodecTest, ParsesModelsWithJavaDefaultsAndAliases) {
             "fallbackProvider": "backup",
             "allowUserGroups": ["staff", "staff"],
             "loadBalance": {
+                "serviceInstancePolicy": " weighted-rendezvous-hash ",
                 "prefixMaxBytes": 4096,
                 "maxPrimaryAttempts": 2,
                 "fallbackEnabled": false,
@@ -110,6 +112,7 @@ TEST(LlmConfigCodecTest, ParsesModelsWithJavaDefaultsAndAliases) {
     ASSERT_TRUE(model.fallback_provider);
     EXPECT_EQ(*model.fallback_provider, "backup");
     EXPECT_EQ(model.allow_user_groups, std::vector<std::string>({"staff"}));
+    EXPECT_EQ(model.load_balance.service_instance_policy, ServiceInstancePolicy::WeightedRendezvous);
     EXPECT_EQ(model.load_balance.prefix_max_bytes, 4096);
     EXPECT_EQ(model.load_balance.max_primary_attempts, 2);
     EXPECT_FALSE(model.load_balance.fallback_enabled);
@@ -128,6 +131,12 @@ TEST(LlmConfigCodecTest, ValidatesDynamicConfigNamesAndRelationships) {
             R"({"data":[{"model-name":"chat","providers":["openai"],"fallback-provider":"openai"}]})", "models-md5");
     ASSERT_FALSE(duplicate_fallback);
     EXPECT_EQ(duplicate_fallback.error().code, LlmConfigErrorCode::DuplicateValue);
+
+    auto invalid_service_policy = parse_models_config(
+            R"({"data":[{"model-name":"chat","providers":["openai"],"load-balance":{"service-instance-policy":"random"}}]})",
+            "models-md5");
+    ASSERT_FALSE(invalid_service_policy);
+    EXPECT_EQ(invalid_service_policy.error().field, "data[0].load-balance.service-instance-policy");
 }
 
 } // namespace

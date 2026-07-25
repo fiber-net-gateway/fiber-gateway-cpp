@@ -597,6 +597,59 @@ void apply_observed_provider_error(const ResolvedProviderAttempt &attempt, const
     }
 }
 
+class ServiceInstanceRetryState {
+public:
+    [[nodiscard]] bool init(ServiceInstancePolicy policy, std::string_view route_key, std::size_t maximum_attempts,
+                            mem::BufPool &pool) noexcept {
+        policy_ = policy;
+        route_key_ = route_key;
+        capacity_ = maximum_attempts;
+        if (policy_ == ServiceInstancePolicy::WeightedRendezvous && capacity_ > 1) {
+            excluded_peer_ids_ = pool.alloc<std::uint64_t>(capacity_);
+            return excluded_peer_ids_ != nullptr;
+        }
+        return true;
+    }
+
+    [[nodiscard]] ProviderServiceSelection selection(const ResolvedProviderAttempt &attempt) noexcept {
+        if (policy_ != ServiceInstancePolicy::WeightedRendezvous) {
+            return {};
+        }
+        if (provider_ != attempt.provider) {
+            provider_ = attempt.provider;
+            excluded_size_ = 0;
+            rendezvous_key_ =
+                    attempt.provider ? rendezvous_score(route_key_, attempt.provider->name) : std::uint64_t{0};
+        }
+        return ProviderServiceSelection{
+                .policy = policy_,
+                .rendezvous_key = rendezvous_key_,
+                .excluded_peer_ids = std::span(excluded_peer_ids_, excluded_size_),
+        };
+    }
+
+    void exclude(std::uint64_t peer_id) noexcept {
+        if (policy_ != ServiceInstancePolicy::WeightedRendezvous || peer_id == 0 || !excluded_peer_ids_) {
+            return;
+        }
+        if (std::find(excluded_peer_ids_, excluded_peer_ids_ + excluded_size_, peer_id) !=
+            excluded_peer_ids_ + excluded_size_) {
+            return;
+        }
+        FIBER_ASSERT(excluded_size_ < capacity_);
+        excluded_peer_ids_[excluded_size_++] = peer_id;
+    }
+
+private:
+    ServiceInstancePolicy policy_ = ServiceInstancePolicy::SmoothWeightedRoundRobin;
+    const ProjectProvider *provider_ = nullptr;
+    std::string_view route_key_;
+    std::uint64_t rendezvous_key_ = 0;
+    std::uint64_t *excluded_peer_ids_ = nullptr;
+    std::size_t excluded_size_ = 0;
+    std::size_t capacity_ = 0;
+};
+
 class RateLimitSession {
 public:
     RateLimitSession() noexcept = default;
@@ -683,11 +736,13 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
     for (;;) {
         auto chunk = co_await upstream.read_body(kBodyChunkBytes, kProviderTimeout);
         if (!chunk) {
+            const std::uint64_t failed_service_peer_id = upstream.service_peer_id();
             upstream.report_instance(InstanceReportOutcome::Failure);
             co_return std::unexpected(ProviderHttpError{
                     .code = ProviderHttpErrorCode::ReadBody,
                     .io_error = chunk.error(),
                     .message = "failed to read provider response body",
+                    .failed_service_peer_id = failed_service_peer_id,
             });
         }
         const bool complete = chunk->complete();
@@ -965,9 +1020,21 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         co_return;
     }
 
+    ServiceInstanceRetryState service_instances;
+    if (!service_instances.init(plan->load_balance.service_instance_policy, plan->route_key, plan->attempts.size(),
+                                exchange.pool())) {
+        co_await send_error(exchange, protocol,
+                            plan_error(protocol, ExecutionPlanError{
+                                                         .code = ExecutionPlanErrorCode::OutOfMemory,
+                                                         .message = "failed to allocate service retry state",
+                                                 }));
+        co_return;
+    }
+
     const bool stream = routing.stream.is_present() && *routing.stream;
     for (std::size_t index = 0; index < plan->attempts.size(); ++index) {
         const ResolvedProviderAttempt &attempt = plan->attempts[index];
+        const ProviderServiceSelection service_selection = service_instances.selection(attempt);
         auto rewritten =
                 parsed->rewrite(attempt.protocol->model,
                                 routing.stream.is_present() ? std::optional<bool>(*routing.stream) : std::nullopt,
@@ -980,8 +1047,10 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         if (stream) {
             metrics_->provider_attempt(protocol);
             const auto attempt_started = event::EventLoop::current().now();
-            auto started = co_await provider_client_->start(attempt, true, std::move(*rewritten), exchange.pool());
+            auto started = co_await provider_client_->start(attempt, true, std::move(*rewritten), exchange.pool(),
+                                                            service_selection);
             if (!started) {
+                service_instances.exclude(started.error().failed_service_peer_id);
                 metrics_->provider_failure(protocol);
                 const ProviderErrorDecision decision = classify_provider_transport_error(false);
                 apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_,
@@ -1010,6 +1079,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 const int upstream_status = started->status_code();
                 auto buffered = co_await buffer_started_response(std::move(*started), kMaxProviderErrorBytes);
                 if (!buffered) {
+                    service_instances.exclude(buffered.error().failed_service_peer_id);
                     metrics_->provider_failure(protocol);
                     const ProviderErrorDecision decision = classify_provider_transport_error(false);
                     apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_,
@@ -1036,6 +1106,9 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 const ProviderErrorDecision decision = classify_provider_response(
                         protocol, buffered->status_code, buffered->retry_after, io_buf_view(buffered->body),
                         plan->load_balance, false, exchange.pool());
+                if (decision.instance_outcome == InstanceReportOutcome::Failure) {
+                    service_instances.exclude(buffered->load_balance.peer_id());
+                }
                 buffered->load_balance.report(decision.instance_outcome);
                 apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_,
                                               protocol);
@@ -1121,9 +1194,10 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
 
         metrics_->provider_attempt(protocol);
         const auto attempt_started = event::EventLoop::current().now();
-        auto response = co_await provider_client_->execute_buffered(attempt, false, std::move(*rewritten),
-                                                                    exchange.pool(), kMaxProviderResponseBytes);
+        auto response = co_await provider_client_->execute_buffered(
+                attempt, false, std::move(*rewritten), exchange.pool(), kMaxProviderResponseBytes, service_selection);
         if (!response) {
+            service_instances.exclude(response.error().failed_service_peer_id);
             metrics_->provider_failure(protocol);
             const ProviderErrorDecision decision = classify_provider_transport_error(false);
             apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_, protocol);
@@ -1166,6 +1240,9 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         const ProviderErrorDecision decision =
                 classify_provider_response(protocol, response->status_code, response->retry_after,
                                            io_buf_view(response->body), plan->load_balance, false, exchange.pool());
+        if (decision.instance_outcome == InstanceReportOutcome::Failure) {
+            service_instances.exclude(response->load_balance.peer_id());
+        }
         response->load_balance.report(decision.instance_outcome);
         apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_, protocol);
         metrics_->provider_failure(protocol);
