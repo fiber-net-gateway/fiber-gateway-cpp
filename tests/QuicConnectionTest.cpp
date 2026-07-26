@@ -84,6 +84,15 @@ struct StreamCallbackState {
     fiber::quic::QuicStream::Lease lease{};
 };
 
+struct SendAbortedCallbackState {
+    std::uint32_t calls = 0;
+};
+
+void on_send_aborted(void *ctx) noexcept {
+    auto *state = static_cast<SendAbortedCallbackState *>(ctx);
+    ++state->calls;
+}
+
 struct EarlyDataRejectState {
     bool called = false;
 };
@@ -1710,6 +1719,9 @@ TEST(QuicConnectionTest, RemoteStopSendingQueuesResetStreamFrame) {
     ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
     auto *stream = conn.find_stream(0);
     ASSERT_NE(stream, nullptr);
+    SendAbortedCallbackState callback_state;
+    ASSERT_EQ(stream->set_send_aborted_callback(&on_send_aborted, &callback_state), fiber::common::IoErr::None);
+    EXPECT_FALSE(stream->send_aborted());
     ASSERT_TRUE(stream->try_write(fiber::mem::IoBuf{}, true).has_value());
     fiber::quic::QuicStopSendingFrame stop{};
     stop.id = 0;
@@ -1718,6 +1730,8 @@ TEST(QuicConnectionTest, RemoteStopSendingQueuesResetStreamFrame) {
     auto stopped = conn.recv_stop_sending_frame(stop);
 
     ASSERT_TRUE(stopped.has_value());
+    EXPECT_TRUE(stream->send_aborted());
+    EXPECT_EQ(callback_state.calls, 1U);
     auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
     const fiber::quic::QuicOutputFrame *reset_frame = nullptr;
     for (const fiber::quic::QuicOutputFrame *pending = space.pending_frames.front(); pending != nullptr;
@@ -1734,6 +1748,7 @@ TEST(QuicConnectionTest, RemoteStopSendingQueuesResetStreamFrame) {
 
     auto duplicate = conn.recv_stop_sending_frame(stop);
     EXPECT_TRUE(duplicate.has_value());
+    EXPECT_EQ(callback_state.calls, 1U);
     EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ResetStream), 1U);
 }
 
@@ -2276,6 +2291,7 @@ TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {
     // RESET_STREAM ends the recv side of this bidi stream but does not retire it
     // (the send side is still open). close() retires it.
     ASSERT_NE(conn.find_stream(0), nullptr);
+    EXPECT_FALSE(conn.find_stream(0)->send_aborted());
     conn.find_stream(0)->close();
     EXPECT_EQ(conn.find_stream(0), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);

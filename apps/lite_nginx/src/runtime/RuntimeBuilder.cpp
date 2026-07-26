@@ -28,7 +28,7 @@ constexpr std::uint8_t kSkipHeaderValue = 1;
 
 enum class ScriptCompileScope : std::uint8_t {
     RouteScript,
-    ProxyHeaderTemplate,
+    ProxyTemplate,
     AccessLogTemplate,
 };
 
@@ -136,8 +136,9 @@ std::string make_http3_alt_svc(std::uint16_t port) {
     return value;
 }
 
-std::string direct_upstream_key(std::string_view host, std::uint16_t port) {
-    std::string key(host);
+std::string direct_upstream_key(std::string_view host, std::uint16_t port, bool tls) {
+    std::string key(tls ? "https|" : "http|");
+    key.append(host);
     key.push_back(':');
     key.append(std::to_string(port));
     return key;
@@ -368,11 +369,12 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 inherited_send = upstream.send_timeout;
                 default_host_header = location.proxy_pass.upstream_name;
             } else {
-                const std::string key = direct_upstream_key(location.proxy_pass.host, location.proxy_pass.port);
+                const std::string key = direct_upstream_key(location.proxy_pass.host, location.proxy_pass.port,
+                                                            location.proxy_pass.tls);
                 auto it = direct_upstream_indices.find(key);
                 if (it == direct_upstream_indices.end()) {
                     auto peer_result = make_peer_runtime(location.proxy_pass.location, location.proxy_pass.host,
-                                                         location.proxy_pass.port, 1, false);
+                                                         location.proxy_pass.port, 1, location.proxy_pass.tls);
                     if (!peer_result) {
                         return std::unexpected(peer_result.error());
                     }
@@ -404,6 +406,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                     resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
             runtime_location.upstream_index = upstream_index;
             runtime_location.proxy_buffering = location.proxy.proxy_buffering;
+            runtime_location.reuse_connection = location.reuse_connection;
+            runtime_location.close_on_client_abort = location.proxy.close_on_client_abort;
             runtime_location.skip_headers = make_default_skip_headers();
             // Add the route first so the matcher extracts the pattern's path variable names
             // (e.g. /api/:id -> ["id"]) into path_var_names; template header values are then
@@ -428,18 +432,40 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             }
             runtime_location.access_log = *location_access_log;
 
-            // Compile ${...} template header values with the shared route extension. Static-only
+            // Compile ${...} proxy templates with the shared route extension. Static-only
             // locations pay no script compilation cost.
-            bool has_template_header = false;
+            bool has_proxy_template = location.rewrite_path && location.rewrite_path->is_template;
             for (const auto &header: location.proxy.set_headers) {
                 if (header.is_template) {
-                    has_template_header = true;
+                    has_proxy_template = true;
                     break;
                 }
             }
-            if (has_template_header) {
+            if (has_proxy_template) {
                 ensure_script_library(runtime);
-                set_script_compile_context(runtime, path_var_names, ScriptCompileScope::ProxyHeaderTemplate);
+                set_script_compile_context(runtime, path_var_names, ScriptCompileScope::ProxyTemplate);
+            }
+
+            if (location.rewrite_path) {
+                if (!location.rewrite_path->is_template) {
+                    runtime_location.rewrite_path.kind = RewritePathKind::Literal;
+                    runtime_location.rewrite_path.literal = location.rewrite_path->source;
+                } else {
+                    auto compiled = fiber::script::compile_template_string(*runtime.script_library,
+                                                                           location.rewrite_path->source);
+                    if (!compiled) {
+                        return std::unexpected(
+                                make_error(location.rewrite_path->location,
+                                           "rewrite_path template compile error: " + compiled.error().message));
+                    }
+                    if (compiled->contains_async()) {
+                        return std::unexpected(make_error(location.rewrite_path->location,
+                                                          "rewrite_path template must be synchronous"));
+                    }
+                    runtime_location.rewrite_path.kind = RewritePathKind::Template;
+                    runtime_location.rewrite_path.template_script =
+                            std::make_shared<fiber::script::Script>(std::move(*compiled));
+                }
             }
 
             runtime_location.set_headers.reserve(location.proxy.set_headers.size());

@@ -12,7 +12,7 @@ namespace fiber::http {
 namespace {
 
 void init_field(HttpHeaders::HeaderField *field, const char *name_ptr, uint32_t name_len, const char *lowcase_ptr,
-                const char *value_ptr, uint32_t value_len, uint64_t hash) {
+                const char *value_ptr, uint32_t value_len, uint64_t hash) noexcept {
     field->name = name_ptr;
     field->name_len = name_len;
     field->lowcase_name = lowcase_ptr;
@@ -26,9 +26,9 @@ void init_field(HttpHeaders::HeaderField *field, const char *name_ptr, uint32_t 
 
 } // namespace
 
-HttpHeaders::HttpHeaders(mem::BufPool &pool) : pool_(&pool) {}
+HttpHeaders::HttpHeaders(mem::BufPool &pool) noexcept : pool_(pool) {}
 
-HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_view value) {
+HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_view value) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -40,7 +40,7 @@ HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_vi
 }
 
 HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_view value, const char *lowcase_name,
-                                           uint64_t hash) {
+                                           uint64_t hash) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -51,7 +51,8 @@ HttpHeaders::HeaderField *HttpHeaders::add(std::string_view name, std::string_vi
     return link_field(field);
 }
 
-HttpHeaders::HeaderField *HttpHeaders::add_prehashed(std::string_view name, std::string_view value, uint64_t hash) {
+HttpHeaders::HeaderField *HttpHeaders::add_prehashed(std::string_view name, std::string_view value,
+                                                     uint64_t hash) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -62,7 +63,7 @@ HttpHeaders::HeaderField *HttpHeaders::add_prehashed(std::string_view name, std:
     return link_field(field);
 }
 
-HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_view value) {
+HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_view value) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -75,7 +76,7 @@ HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_vi
 }
 
 HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_view value, const char *lowcase_name,
-                                           uint64_t hash) {
+                                           uint64_t hash) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -87,7 +88,7 @@ HttpHeaders::HeaderField *HttpHeaders::set(std::string_view name, std::string_vi
     return link_field(field);
 }
 
-HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::string_view value) {
+HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::string_view value) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -104,7 +105,7 @@ HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::stri
 }
 
 HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::string_view value, const char *lowcase_name,
-                                                uint64_t hash) {
+                                                uint64_t hash) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -115,7 +116,7 @@ HttpHeaders::HeaderField *HttpHeaders::add_view(std::string_view name, std::stri
     return link_field(field);
 }
 
-HttpHeaders::HeaderField *HttpHeaders::set_view(std::string_view name, std::string_view value) {
+HttpHeaders::HeaderField *HttpHeaders::set_view(std::string_view name, std::string_view value) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -133,7 +134,7 @@ HttpHeaders::HeaderField *HttpHeaders::set_view(std::string_view name, std::stri
 }
 
 HttpHeaders::HeaderField *HttpHeaders::set_view(std::string_view name, std::string_view value, const char *lowcase_name,
-                                                uint64_t hash) {
+                                                uint64_t hash) noexcept {
     if (!ensure_buckets()) {
         return nullptr;
     }
@@ -279,7 +280,7 @@ bool HttpHeaders::rehash_buckets(size_t new_count) noexcept {
     }
 
     auto **new_buckets =
-            static_cast<HeaderField **>(pool_->alloc(new_count * sizeof(HeaderField *), alignof(HeaderField *)));
+            static_cast<HeaderField **>(pool_.alloc(new_count * sizeof(HeaderField *), alignof(HeaderField *)));
     if (!new_buckets) {
         return false;
     }
@@ -410,11 +411,11 @@ void HttpHeaders::unlink_field(HeaderField *field, HeaderField *prev_bucket) noe
     --size_;
 }
 
-const char *HttpHeaders::copy_to_pool(std::string_view data) {
+const char *HttpHeaders::copy_to_pool(std::string_view data) noexcept {
     if (data.empty()) {
         return "";
     }
-    char *ptr = static_cast<char *>(pool_->alloc(data.size(), alignof(char)));
+    char *ptr = static_cast<char *>(pool_.alloc(data.size(), alignof(char)));
     if (!ptr) {
         return nullptr;
     }
@@ -423,7 +424,8 @@ const char *HttpHeaders::copy_to_pool(std::string_view data) {
 }
 
 HttpHeaders::HeaderField *HttpHeaders::prepare_owned_field(std::string_view name, std::string_view value,
-                                                           const char *lowcase_name, uint64_t hash, bool hash_ready) {
+                                                           const char *lowcase_name, uint64_t hash,
+                                                           bool hash_ready) noexcept {
     if (name.size() > std::numeric_limits<uint32_t>::max() || value.size() > std::numeric_limits<uint32_t>::max() ||
         name.size() > std::numeric_limits<size_t>::max() / 2) {
         return nullptr;
@@ -433,7 +435,7 @@ HttpHeaders::HeaderField *HttpHeaders::prepare_owned_field(std::string_view name
     const char *name_ptr = "";
     const char *lowcase_ptr = "";
     if (name_len > 0) {
-        char *names = static_cast<char *>(pool_->alloc(name.size() * 2, alignof(char)));
+        char *names = static_cast<char *>(pool_.alloc(name.size() * 2, alignof(char)));
         if (!names) {
             return nullptr;
         }
@@ -466,7 +468,7 @@ HttpHeaders::HeaderField *HttpHeaders::prepare_owned_field(std::string_view name
 }
 
 HttpHeaders::HeaderField *HttpHeaders::prepare_view_field(std::string_view name, std::string_view value,
-                                                          const char *lowcase_name, uint64_t hash) {
+                                                          const char *lowcase_name, uint64_t hash) noexcept {
     if (name.size() > std::numeric_limits<uint32_t>::max() || value.size() > std::numeric_limits<uint32_t>::max() ||
         (!name.empty() && !lowcase_name)) {
         return nullptr;

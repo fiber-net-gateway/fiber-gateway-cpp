@@ -52,6 +52,19 @@ ssize_t sendv_no_sigpipe(int fd, const struct iovec *iov, int iovcnt) noexcept {
 #endif
 }
 
+bool is_terminal_socket_error(fiber::common::IoErr err) noexcept {
+    switch (err) {
+        case fiber::common::IoErr::ConnAborted:
+        case fiber::common::IoErr::ConnReset:
+        case fiber::common::IoErr::TimedOut:
+        case fiber::common::IoErr::NotConnected:
+        case fiber::common::IoErr::BrokenPipe:
+            return true;
+        default:
+            return false;
+    }
+}
+
 } // namespace
 
 StreamFd::StreamFd(fiber::event::EventLoop &loop, int fd) : rwfd_(loop, fd) {}
@@ -87,12 +100,20 @@ fiber::common::IoErr StreamFd::set_write_callback(ReadyCallback callback, void *
     return rwfd_.set_write_callback(callback, ctx);
 }
 
+fiber::common::IoErr StreamFd::set_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.set_terminal_callback(callback, ctx);
+}
+
 fiber::common::IoErr StreamFd::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return rwfd_.clear_read_callback(callback, ctx);
 }
 
 fiber::common::IoErr StreamFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
     return rwfd_.clear_write_callback(callback, ctx);
+}
+
+fiber::common::IoErr StreamFd::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return rwfd_.clear_terminal_callback(callback, ctx);
 }
 
 StreamFd::IoTask StreamFd::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
@@ -230,7 +251,11 @@ fiber::common::IoErr StreamFd::read_once(void *buf, size_t len, size_t &out) noe
         if (err == EAGAIN || err == EWOULDBLOCK) {
             return fiber::common::IoErr::WouldBlock;
         }
-        return fiber::common::io_err_from_errno(err);
+        fiber::common::IoErr io_err = fiber::common::io_err_from_errno(err);
+        if (is_terminal_socket_error(io_err)) {
+            rwfd_.mark_terminal(io_err);
+        }
+        return io_err;
     }
 }
 
@@ -253,7 +278,11 @@ fiber::common::IoErr StreamFd::write_once(const void *buf, size_t len, size_t &o
         if (err == EAGAIN || err == EWOULDBLOCK) {
             return fiber::common::IoErr::WouldBlock;
         }
-        return fiber::common::io_err_from_errno(err);
+        fiber::common::IoErr io_err = fiber::common::io_err_from_errno(err);
+        if (is_terminal_socket_error(io_err)) {
+            rwfd_.mark_terminal(io_err);
+        }
+        return io_err;
     }
 }
 
@@ -276,7 +305,11 @@ fiber::common::IoErr StreamFd::readv_once(const struct iovec *iov, int iovcnt, s
         if (err == EAGAIN || err == EWOULDBLOCK) {
             return fiber::common::IoErr::WouldBlock;
         }
-        return fiber::common::io_err_from_errno(err);
+        fiber::common::IoErr io_err = fiber::common::io_err_from_errno(err);
+        if (is_terminal_socket_error(io_err)) {
+            rwfd_.mark_terminal(io_err);
+        }
+        return io_err;
     }
 }
 
@@ -299,7 +332,11 @@ fiber::common::IoErr StreamFd::writev_once(const struct iovec *iov, int iovcnt, 
         if (err == EAGAIN || err == EWOULDBLOCK) {
             return fiber::common::IoErr::WouldBlock;
         }
-        return fiber::common::io_err_from_errno(err);
+        fiber::common::IoErr io_err = fiber::common::io_err_from_errno(err);
+        if (is_terminal_socket_error(io_err)) {
+            rwfd_.mark_terminal(io_err);
+        }
+        return io_err;
     }
 }
 

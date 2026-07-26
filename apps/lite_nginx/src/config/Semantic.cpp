@@ -7,6 +7,7 @@
 #include <unordered_set>
 
 #include "PathResolve.h"
+#include "http/HttpProxyCore.h"
 #include "log/LogConfig.h"
 
 namespace fiber::lite_nginx::config {
@@ -56,6 +57,7 @@ struct ProxySettingsBuilder {
     std::optional<std::chrono::milliseconds> connect_timeout;
     std::optional<std::chrono::milliseconds> read_timeout;
     std::optional<std::chrono::milliseconds> send_timeout;
+    std::optional<bool> close_on_client_abort;
     std::vector<HeaderOverride> set_headers;
     bool proxy_buffering = false;
 };
@@ -300,6 +302,60 @@ std::expected<HostPort, ConfigError> parse_host_port(const DirectiveNode &direct
     return host_port;
 }
 
+struct ProxyAuthority {
+    std::string host;
+    std::uint16_t port = 0;
+};
+
+std::expected<ProxyAuthority, ConfigError> parse_proxy_authority(const DirectiveNode &directive, std::string_view value,
+                                                                 std::uint16_t default_port) {
+    if (value.empty()) {
+        return std::unexpected(make_error(directive, "proxy_pass authority must not be empty"));
+    }
+    if (value.find_first_of("/?#@") != std::string_view::npos) {
+        return std::unexpected(make_error(
+                directive, "proxy_pass direct target must not contain a path, query, fragment, or userinfo"));
+    }
+
+    ProxyAuthority authority;
+    authority.port = default_port;
+    if (value.front() == '[') {
+        const std::size_t close = value.find(']');
+        if (close == std::string_view::npos || close == 1) {
+            return std::unexpected(make_error(directive, "proxy_pass has an invalid bracketed host"));
+        }
+        authority.host = std::string(value.substr(1, close - 1));
+        if (close + 1 == value.size()) {
+            return authority;
+        }
+        if (value[close + 1] != ':' || close + 2 >= value.size()) {
+            return std::unexpected(make_error(directive, "proxy_pass must use [host] or [host]:port form"));
+        }
+        auto port = parse_port(directive, value.substr(close + 2), "proxy_pass");
+        if (!port) {
+            return std::unexpected(port.error());
+        }
+        authority.port = *port;
+        return authority;
+    }
+
+    const std::size_t colon = value.rfind(':');
+    if (colon == std::string_view::npos) {
+        authority.host = std::string(value);
+        return authority;
+    }
+    if (colon == 0 || colon + 1 >= value.size() || value.find(':') != colon) {
+        return std::unexpected(make_error(directive, "proxy_pass IPv6 literals must use [host] or [host]:port form"));
+    }
+    authority.host = std::string(value.substr(0, colon));
+    auto port = parse_port(directive, value.substr(colon + 1), "proxy_pass");
+    if (!port) {
+        return std::unexpected(port.error());
+    }
+    authority.port = *port;
+    return authority;
+}
+
 std::expected<ListenAddress, ConfigError> parse_listen_address(const DirectiveNode &directive) {
     if (directive.args.empty() || directive.args.size() > 3) {
         return std::unexpected(make_error(directive, "listen expects '<port|ip:port> [ssl] [http3]'"));
@@ -378,6 +434,7 @@ ProxySettings finalize_proxy_settings(const ProxySettingsBuilder &builder) {
     settings.send_timeout = builder.send_timeout;
     settings.set_headers = builder.set_headers;
     settings.proxy_buffering = builder.proxy_buffering;
+    settings.close_on_client_abort = builder.close_on_client_abort.value_or(false);
     return settings;
 }
 
@@ -387,6 +444,8 @@ ProxySettings merge_proxy_settings(const ProxySettingsBuilder &base, const Proxy
     settings.read_timeout = overrides.read_timeout ? overrides.read_timeout : base.read_timeout;
     settings.send_timeout = overrides.send_timeout ? overrides.send_timeout : base.send_timeout;
     settings.proxy_buffering = overrides.proxy_buffering;
+    settings.close_on_client_abort =
+            overrides.close_on_client_abort.value_or(base.close_on_client_abort.value_or(false));
 
     settings.set_headers = base.set_headers;
     for (const auto &header: overrides.set_headers) {
@@ -445,46 +504,69 @@ std::expected<void, ConfigError> apply_proxy_timeout(ProxySettingsBuilder &build
     return {};
 }
 
+std::expected<void, ConfigError> apply_proxy_close_on_client_abort(ProxySettingsBuilder &builder,
+                                                                   const DirectiveNode &directive) {
+    if (builder.close_on_client_abort.has_value()) {
+        return std::unexpected(make_error(directive, "proxy_close_on_client_abort must not be repeated"));
+    }
+    auto value = parse_on_off(directive, "proxy_close_on_client_abort");
+    if (!value) {
+        return std::unexpected(value.error());
+    }
+    builder.close_on_client_abort = *value;
+    return {};
+}
+
 std::expected<ProxyPassTarget, ConfigError> parse_proxy_pass(const DirectiveNode &directive) {
-    if (!directive.has_block && directive.args.size() != 1) {
+    if (directive.has_block || directive.args.size() != 1) {
         return std::unexpected(make_error(directive, "proxy_pass expects exactly one argument"));
     }
     if (contains_variable(directive.args[0])) {
-        return std::unexpected(make_error(directive, "proxy_pass does not support variables in V1"));
-    }
-    if (!directive.args[0].starts_with("http://")) {
-        return std::unexpected(make_error(directive, "proxy_pass only supports http:// targets in V1"));
+        return std::unexpected(make_error(directive, "proxy_pass does not support variables"));
     }
 
-    std::string_view target = directive.args[0];
-    target.remove_prefix(7);
-    if (target.empty()) {
-        return std::unexpected(make_error(directive, "proxy_pass target must not be empty"));
-    }
-    if (target.find('/') != std::string_view::npos || target.find('?') != std::string_view::npos ||
-        target.find('#') != std::string_view::npos) {
-        return std::unexpected(make_error(directive, "proxy_pass path rewriting is not supported in V1"));
-    }
+    constexpr std::string_view kNamedPrefix = "upstream://";
+    constexpr std::string_view kHttpPrefix = "http://";
+    constexpr std::string_view kHttpsPrefix = "https://";
+    const std::string_view raw = directive.args[0];
 
-    auto host_port_result = parse_host_port(directive, target, "proxy_pass");
-    if (host_port_result) {
+    if (raw.starts_with(kNamedPrefix)) {
+        const std::string_view name = raw.substr(kNamedPrefix.size());
+        if (name.empty() || name.find_first_of("/?:#@") != std::string_view::npos) {
+            return std::unexpected(
+                    make_error(directive, "proxy_pass upstream target must contain only an upstream name"));
+        }
         ProxyPassTarget proxy_pass;
-        proxy_pass.kind = ProxyPassKind::Direct;
-        proxy_pass.raw = directive.args[0];
-        proxy_pass.host = std::move(host_port_result->host);
-        proxy_pass.port = host_port_result->port;
+        proxy_pass.kind = ProxyPassKind::NamedUpstream;
+        proxy_pass.upstream_name = std::string(name);
         proxy_pass.location = directive.location;
         return proxy_pass;
     }
 
-    if (target.find(':') != std::string_view::npos) {
-        return std::unexpected(host_port_result.error());
+    bool tls = false;
+    std::uint16_t default_port = 0;
+    std::string_view authority_text;
+    if (raw.starts_with(kHttpPrefix)) {
+        default_port = 80;
+        authority_text = raw.substr(kHttpPrefix.size());
+    } else if (raw.starts_with(kHttpsPrefix)) {
+        tls = true;
+        default_port = 443;
+        authority_text = raw.substr(kHttpsPrefix.size());
+    } else {
+        return std::unexpected(
+                make_error(directive, "proxy_pass target must start with upstream://, http://, or https://"));
     }
 
+    auto authority = parse_proxy_authority(directive, authority_text, default_port);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
     ProxyPassTarget proxy_pass;
-    proxy_pass.kind = ProxyPassKind::NamedUpstream;
-    proxy_pass.raw = directive.args[0];
-    proxy_pass.upstream_name = std::string(target);
+    proxy_pass.kind = ProxyPassKind::Direct;
+    proxy_pass.host = std::move(authority->host);
+    proxy_pass.port = authority->port;
+    proxy_pass.tls = tls;
     proxy_pass.location = directive.location;
     return proxy_pass;
 }
@@ -987,6 +1069,8 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     bool has_proxy_pass = false;
     bool has_script_file = false;
     bool seen_access_log = false;
+    bool seen_rewrite_path = false;
+    bool seen_reuse_connection = false;
 
     for (const auto &child: directive.children) {
         if (child.has_block) {
@@ -994,6 +1078,9 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
         }
 
         if (child.name == "proxy_pass") {
+            if (has_proxy_pass) {
+                return std::unexpected(make_error(child, "proxy_pass must not be repeated in location"));
+            }
             auto target = parse_proxy_pass(child);
             if (!target) {
                 return std::unexpected(target.error());
@@ -1014,9 +1101,47 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
             has_script_file = true;
             continue;
         }
+        if (child.name == "rewrite_path") {
+            if (child.args.size() != 1) {
+                return std::unexpected(make_error(child, "rewrite_path expects exactly one argument"));
+            }
+            if (seen_rewrite_path) {
+                return std::unexpected(make_error(child, "rewrite_path must not be repeated in location"));
+            }
+            const bool is_template = child.args[0].find("${") != std::string::npos;
+            if (!is_template && !fiber::http::proxy_core::valid_origin_form_path(child.args[0])) {
+                return std::unexpected(make_error(child, "rewrite_path literal must be a valid absolute URI path"));
+            }
+            location.rewrite_path = RewritePathConfig{
+                    .location = child.location,
+                    .source = child.args[0],
+                    .is_template = is_template,
+            };
+            seen_rewrite_path = true;
+            continue;
+        }
+        if (child.name == "reuse_connection") {
+            if (seen_reuse_connection) {
+                return std::unexpected(make_error(child, "reuse_connection must not be repeated in location"));
+            }
+            auto value = parse_on_off(child, "reuse_connection");
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            location.reuse_connection = *value;
+            seen_reuse_connection = true;
+            continue;
+        }
         if (child.name == "proxy_connect_timeout" || child.name == "proxy_read_timeout" ||
             child.name == "proxy_send_timeout") {
             auto apply_result = apply_proxy_timeout(location_proxy_defaults, child);
+            if (!apply_result) {
+                return std::unexpected(apply_result.error());
+            }
+            continue;
+        }
+        if (child.name == "proxy_close_on_client_abort") {
+            auto apply_result = apply_proxy_close_on_client_abort(location_proxy_defaults, child);
             if (!apply_result) {
                 return std::unexpected(apply_result.error());
             }
@@ -1058,6 +1183,12 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     }
     if (!has_proxy_pass && !has_script_file) {
         return std::unexpected(make_error(directive, "location must define proxy_pass or script_file"));
+    }
+    if (has_script_file && seen_rewrite_path) {
+        return std::unexpected(make_error(directive, "rewrite_path requires proxy_pass"));
+    }
+    if (has_script_file && seen_reuse_connection) {
+        return std::unexpected(make_error(directive, "reuse_connection requires proxy_pass"));
     }
     location.proxy = merge_proxy_settings(server_proxy_defaults, location_proxy_defaults);
     return location;
@@ -1127,6 +1258,14 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
         if (child.name == "proxy_connect_timeout" || child.name == "proxy_read_timeout" ||
             child.name == "proxy_send_timeout") {
             auto apply_result = apply_proxy_timeout(proxy_defaults, child);
+            if (!apply_result) {
+                return std::unexpected(apply_result.error());
+            }
+            continue;
+        }
+
+        if (child.name == "proxy_close_on_client_abort") {
+            auto apply_result = apply_proxy_close_on_client_abort(proxy_defaults, child);
             if (!apply_result) {
                 return std::unexpected(apply_result.error());
             }

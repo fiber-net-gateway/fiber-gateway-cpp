@@ -37,6 +37,7 @@ struct RequestLogContext {
     fiber::http_script::ScriptConnectionInfo connection;
     std::vector<std::pair<std::string_view, std::string_view>> path_vars;
     bool upstream_started = false;
+    bool client_aborted = false;
 };
 
 [[nodiscard]] std::uint64_t next_request_id() noexcept;

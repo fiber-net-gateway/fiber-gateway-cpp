@@ -394,7 +394,51 @@ void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {
     if (abort_reason_ == common::IoErr::None) {
         abort_reason_ = reason;
     }
+    mark_response_channel_closed();
     request_body_recv_.abort(abort_reason_);
+}
+
+common::IoErr ServerHttp2Request::set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                                       void *ctx) noexcept {
+    if (callback == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    if (response_channel_closed_callback_ != nullptr) {
+        return common::IoErr::Busy;
+    }
+    if (response_channel_closed_) {
+        callback(ctx);
+        return common::IoErr::None;
+    }
+    response_channel_closed_callback_ = callback;
+    response_channel_closed_callback_ctx_ = ctx;
+    return common::IoErr::None;
+}
+
+common::IoErr ServerHttp2Request::clear_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                                         void *ctx) noexcept {
+    if (callback == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    if (response_channel_closed_callback_ == callback && response_channel_closed_callback_ctx_ == ctx) {
+        response_channel_closed_callback_ = nullptr;
+        response_channel_closed_callback_ctx_ = nullptr;
+    }
+    return common::IoErr::None;
+}
+
+void ServerHttp2Request::mark_response_channel_closed() noexcept {
+    if (response_channel_closed_) {
+        return;
+    }
+    response_channel_closed_ = true;
+    ResponseChannelClosedCallback callback = response_channel_closed_callback_;
+    void *ctx = response_channel_closed_callback_ctx_;
+    response_channel_closed_callback_ = nullptr;
+    response_channel_closed_callback_ctx_ = nullptr;
+    if (callback != nullptr) {
+        callback(ctx);
+    }
 }
 
 fiber::async::Task<common::IoResult<mem::IoBufChain>>

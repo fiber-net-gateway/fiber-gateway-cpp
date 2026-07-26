@@ -43,7 +43,14 @@ int RWFd::fd() const noexcept { return efd_.fd(); }
 
 fiber::event::EventLoop &RWFd::loop() const noexcept { return efd_.loop(); }
 
-fiber::common::IoErr RWFd::attach(int fd) noexcept { return efd_.attach(fd); }
+fiber::common::IoErr RWFd::attach(int fd) noexcept {
+    fiber::common::IoErr err = efd_.attach(fd);
+    if (err == fiber::common::IoErr::None) {
+        terminal_ = false;
+        terminal_error_ = fiber::common::IoErr::None;
+    }
+    return err;
+}
 
 int RWFd::release_fd() noexcept {
     FIBER_ASSERT(!has_callbacks());
@@ -67,12 +74,23 @@ void RWFd::close() {
     void *read_callback_ctx = read_callback_ctx_;
     ReadyCallback write_callback = write_callback_;
     void *write_callback_ctx = write_callback_ctx_;
+    ReadyCallback terminal_callback = terminal_callback_;
+    void *terminal_callback_ctx = terminal_callback_ctx_;
     read_callback_ = nullptr;
     read_callback_ctx_ = nullptr;
     write_callback_ = nullptr;
     write_callback_ctx_ = nullptr;
+    terminal_callback_ = nullptr;
+    terminal_callback_ctx_ = nullptr;
+    if (!terminal_) {
+        terminal_ = true;
+        terminal_error_ = fiber::common::IoErr::Canceled;
+    }
     efd_.close_fd();
 
+    if (terminal_callback) {
+        terminal_callback(terminal_callback_ctx, terminal_error_);
+    }
     if (read_callback) {
         read_callback(read_callback_ctx, fiber::common::IoErr::Canceled);
     }
@@ -117,6 +135,28 @@ fiber::common::IoErr RWFd::set_write_callback(ReadyCallback callback, void *ctx)
     return err;
 }
 
+fiber::common::IoErr RWFd::set_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    FIBER_ASSERT(loop().in_loop());
+    if (!callback) {
+        return fiber::common::IoErr::Invalid;
+    }
+    if (terminal_callback_) {
+        return fiber::common::IoErr::Busy;
+    }
+    if (terminal_) {
+        callback(ctx, terminal_error_);
+        return fiber::common::IoErr::None;
+    }
+    terminal_callback_ = callback;
+    terminal_callback_ctx_ = ctx;
+    fiber::common::IoErr err = sync_interest();
+    if (err != fiber::common::IoErr::None) {
+        terminal_callback_ = nullptr;
+        terminal_callback_ctx_ = nullptr;
+    }
+    return err;
+}
+
 fiber::common::IoErr RWFd::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
     FIBER_ASSERT(loop().in_loop());
     if (!callback) {
@@ -131,6 +171,43 @@ fiber::common::IoErr RWFd::clear_read_callback(ReadyCallback callback, void *ctx
         read_callback_ctx_ = ctx;
     }
     return err;
+}
+
+fiber::common::IoErr RWFd::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    FIBER_ASSERT(loop().in_loop());
+    if (!callback) {
+        return fiber::common::IoErr::Invalid;
+    }
+    if (!remove_callback(fiber::event::IoEvent::Terminal, callback, ctx)) {
+        return fiber::common::IoErr::None;
+    }
+    fiber::common::IoErr err = sync_interest();
+    if (err != fiber::common::IoErr::None) {
+        terminal_callback_ = callback;
+        terminal_callback_ctx_ = ctx;
+    }
+    return err;
+}
+
+void RWFd::mark_terminal(fiber::common::IoErr error) noexcept {
+    FIBER_ASSERT(loop().in_loop());
+    if (terminal_) {
+        return;
+    }
+    terminal_ = true;
+    terminal_error_ = error == fiber::common::IoErr::None ? fiber::common::IoErr::Unknown : error;
+
+    ReadyCallback callback = terminal_callback_;
+    void *ctx = terminal_callback_ctx_;
+    terminal_callback_ = nullptr;
+    terminal_callback_ctx_ = nullptr;
+    if (valid()) {
+        fiber::common::IoErr sync_err = sync_interest();
+        FIBER_ASSERT(sync_err == fiber::common::IoErr::None);
+    }
+    if (callback) {
+        callback(ctx, terminal_error_);
+    }
 }
 
 fiber::common::IoErr RWFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
@@ -204,10 +281,13 @@ bool RWFd::remove_callback(fiber::event::IoEvent event, ReadyCallback callback, 
     if (event == fiber::event::IoEvent::Read) {
         callback_slot = &read_callback_;
         ctx_slot = &read_callback_ctx_;
-    } else {
-        FIBER_ASSERT(event == fiber::event::IoEvent::Write);
+    } else if (event == fiber::event::IoEvent::Write) {
         callback_slot = &write_callback_;
         ctx_slot = &write_callback_ctx_;
+    } else {
+        FIBER_ASSERT(event == fiber::event::IoEvent::Terminal);
+        callback_slot = &terminal_callback_;
+        ctx_slot = &terminal_callback_ctx_;
     }
     if (*callback_slot != callback || *ctx_slot != ctx) {
         return false;
@@ -235,6 +315,8 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
     void *read_callback_ctx = nullptr;
     ReadyCallback write_callback = nullptr;
     void *write_callback_ctx = nullptr;
+    ReadyCallback terminal_callback = nullptr;
+    void *terminal_callback_ctx = nullptr;
 
     if (fiber::event::any(events & fiber::event::IoEvent::Read)) {
         read_callback = read_callback_;
@@ -244,11 +326,25 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
         write_callback = write_callback_;
         write_callback_ctx = write_callback_ctx_;
     }
+    if (fiber::event::any(events & fiber::event::IoEvent::Terminal)) {
+        terminal_ = true;
+        terminal_error_ = fiber::common::IoErr::Unknown;
+        terminal_callback = terminal_callback_;
+        terminal_callback_ctx = terminal_callback_ctx_;
+        terminal_callback_ = nullptr;
+        terminal_callback_ctx_ = nullptr;
+    }
 
     fiber::event::IoEvent old_watching = efd_.watching();
     fiber::common::IoErr consume_err = efd_.consume_ready(old_watching);
     FIBER_ASSERT(consume_err == fiber::common::IoErr::None);
 
+    if (terminal_callback) {
+        terminal_callback(terminal_callback_ctx, terminal_error_);
+        if (!valid()) {
+            return;
+        }
+    }
     if (read_callback && read_callback_ == read_callback && read_callback_ctx_ == read_callback_ctx) {
         read_callback(read_callback_ctx, fiber::common::IoErr::None);
         if (!valid()) {
@@ -269,7 +365,9 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
     }
 }
 
-bool RWFd::has_callbacks() const noexcept { return read_callback_ != nullptr || write_callback_ != nullptr; }
+bool RWFd::has_callbacks() const noexcept {
+    return read_callback_ != nullptr || write_callback_ != nullptr || terminal_callback_ != nullptr;
+}
 
 fiber::event::IoEvent RWFd::active_events() const noexcept {
     fiber::event::IoEvent events = fiber::event::IoEvent::None;
@@ -278,6 +376,9 @@ fiber::event::IoEvent RWFd::active_events() const noexcept {
     }
     if (write_callback_) {
         events |= fiber::event::IoEvent::Write;
+    }
+    if (terminal_callback_) {
+        events |= fiber::event::IoEvent::Terminal;
     }
     return events;
 }

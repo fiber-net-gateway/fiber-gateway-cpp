@@ -12,6 +12,7 @@
 #include "../common/mem/IoBuf.h"
 #include "HttpCommon.h"
 #include "HttpUriParse.h"
+#include "generated/Http1HeaderLineParser.h"
 
 namespace fiber::http {
 
@@ -161,10 +162,10 @@ public:
         uint32_t lowcase_index = 0;
     };
 
-    HeaderLineParser() = default;
-    HeaderLineParser(const HttpServerOptions &options);
+    HeaderLineParser() noexcept;
+    explicit HeaderLineParser(const HttpServerOptions &options) noexcept;
 
-    void reset();
+    void reset() noexcept;
 
     ParseCode execute(mem::IoBuf *buffer);
     // replace the pointers in HeaderLineState.
@@ -172,23 +173,10 @@ public:
     ParseCode replace_buf_ptr(mem::IoBuf *old_chain, mem::IoBuf *new_chain) noexcept;
     const HeaderLineState &state() const noexcept { return line_; }
 
-    enum class State {
-        Start,
-        Name,
-        SpaceBeforeValue,
-        Value,
-        SpaceAfterValue,
-        IgnoreLine,
-        AlmostDone,
-        HeaderAlmostDone
-    };
-
 private:
-    static constexpr size_t kInvalidPos = std::numeric_limits<size_t>::max();
-
-    const HttpServerOptions *options_ = nullptr;
-    State state_ = State::Start;
+    fiber_http1_header_line_t parser_{};
     HeaderLineState line_{};
+    bool started_ = false;
 };
 
 class ChunkedBodyParser : public common::NonCopyable, public common::NonMovable {

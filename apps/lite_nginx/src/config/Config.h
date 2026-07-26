@@ -85,7 +85,7 @@ enum class PoolSteal : unsigned char {
 };
 
 struct ConnectionPoolConfig {
-    std::size_t keepalive_size = 0; // max idle connections per peer group
+    std::size_t keepalive_size = 32; // max idle connections per peer group; 0 disables pooling globally
     std::chrono::milliseconds keepalive_timeout{30000}; // idle timeout
     PoolSteal steal = PoolSteal::Auto;
     // 0 => derive from keepalive_size (keepalive_size * 64, the historical default). Caps the
@@ -110,6 +110,7 @@ struct ProxySettings {
     std::optional<std::chrono::milliseconds> send_timeout;
     std::vector<HeaderOverride> set_headers;
     bool proxy_buffering = false;
+    bool close_on_client_abort = false;
 };
 
 struct ListenAddress {
@@ -143,11 +144,17 @@ enum class ProxyPassKind : unsigned char {
 
 struct ProxyPassTarget {
     ProxyPassKind kind = ProxyPassKind::NamedUpstream;
-    std::string raw;
     std::string upstream_name;
     std::string host;
     std::uint16_t port = 0;
+    bool tls = false;
     SourceLocation location;
+};
+
+struct RewritePathConfig {
+    SourceLocation location;
+    std::string source;
+    bool is_template = false;
 };
 
 enum class AccessLogKind : unsigned char {
@@ -175,8 +182,10 @@ struct LocationConfig {
     std::string pattern;
     LocationKind kind = LocationKind::Proxy;
     ProxyPassTarget proxy_pass;
+    std::optional<RewritePathConfig> rewrite_path;
     std::string script_file;
     ProxySettings proxy;
+    bool reuse_connection = true;
     // nullopt inherits the enclosing server; Off explicitly disables an inherited log.
     std::optional<AccessLogConfig> access_log;
 };

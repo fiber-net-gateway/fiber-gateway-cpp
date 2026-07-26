@@ -119,7 +119,7 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
                 }
 
                 location /api/ {
-                    proxy_pass http://backend;
+                    proxy_pass upstream://backend;
                     proxy_set_header X-Forwarded-Proto http;
                 }
             }
@@ -180,6 +180,137 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     ASSERT_EQ(api.proxy.set_headers.size(), 2u);
     EXPECT_EQ(api.proxy.set_headers[0].name, "Host");
     EXPECT_EQ(api.proxy.set_headers[1].name, "X-Forwarded-Proto");
+}
+
+TEST(LiteNginxConfigTest, ParsesProxyTargetRewriteAndConnectionPolicies) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+
+            upstream backend {
+                server 127.0.0.1:9001;
+            }
+
+            server {
+                server_name localhost;
+                proxy_close_on_client_abort on;
+
+                location /api/*tail {
+                    proxy_pass https://example.com;
+                    rewrite_path "/v2/${$path.tail}";
+                    reuse_connection off;
+                }
+
+                location /named {
+                    proxy_pass upstream://backend;
+                    rewrite_path /health;
+                    proxy_close_on_client_abort off;
+                }
+            }
+        }
+    )",
+                                                        "proxy_options.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    const auto &config = *config_result;
+    EXPECT_EQ(config.http.connection_pool.keepalive_size, 32u);
+
+    ASSERT_EQ(config.http.servers.size(), 1u);
+    const auto &server = config.http.servers[0];
+    ASSERT_EQ(server.locations.size(), 2u);
+
+    const auto &api = server.locations[0];
+    EXPECT_EQ(api.proxy_pass.kind, ProxyPassKind::Direct);
+    EXPECT_EQ(api.proxy_pass.host, "example.com");
+    EXPECT_EQ(api.proxy_pass.port, 443u);
+    EXPECT_TRUE(api.proxy_pass.tls);
+    ASSERT_TRUE(api.rewrite_path.has_value());
+    EXPECT_EQ(api.rewrite_path->source, "/v2/${$path.tail}");
+    EXPECT_TRUE(api.rewrite_path->is_template);
+    EXPECT_FALSE(api.reuse_connection);
+    EXPECT_TRUE(api.proxy.close_on_client_abort);
+
+    const auto &named = server.locations[1];
+    EXPECT_EQ(named.proxy_pass.kind, ProxyPassKind::NamedUpstream);
+    EXPECT_EQ(named.proxy_pass.upstream_name, "backend");
+    ASSERT_TRUE(named.rewrite_path.has_value());
+    EXPECT_EQ(named.rewrite_path->source, "/health");
+    EXPECT_FALSE(named.rewrite_path->is_template);
+    EXPECT_TRUE(named.reuse_connection);
+    EXPECT_FALSE(named.proxy.close_on_client_abort);
+}
+
+TEST(LiteNginxConfigTest, RejectsProxyPassPathAndUnsupportedTargetForms) {
+    static constexpr std::string_view kTargets[] = {
+            "http://example.com/path", "https://example.com?query=1", "http://user@example.com",
+            "upstream://backend/path", "ftp://example.com",           "http://[::1",
+    };
+
+    for (std::string_view target: kTargets) {
+        std::string config_text = R"(
+            http {
+                listen 8080;
+                server {
+                    server_name localhost;
+                    location / {
+                        proxy_pass PROXY_TARGET;
+                    }
+                }
+            }
+        )";
+        config_text.replace(config_text.find("PROXY_TARGET"), sizeof("PROXY_TARGET") - 1, target);
+
+        auto config_result = ConfigLoader::load_from_string(config_text, "bad_proxy_target.conf");
+        EXPECT_FALSE(config_result.has_value()) << target;
+    }
+}
+
+TEST(LiteNginxConfigTest, RejectsInvalidRewriteAndReuseDirectives) {
+    static constexpr std::string_view kDirectives[] = {
+            "rewrite_path relative;",
+            "rewrite_path \"/rewritten?query=1\";",
+            "reuse_connection maybe;",
+            "rewrite_path /first; rewrite_path /second;",
+            "reuse_connection on; reuse_connection off;",
+    };
+
+    for (std::string_view directive: kDirectives) {
+        std::string config_text = R"(
+            http {
+                listen 8080;
+                server {
+                    server_name localhost;
+                    location / {
+                        proxy_pass http://127.0.0.1:9001;
+                        LOCATION_DIRECTIVE
+                    }
+                }
+            }
+        )";
+        config_text.replace(config_text.find("LOCATION_DIRECTIVE"), sizeof("LOCATION_DIRECTIVE") - 1, directive);
+
+        auto config_result = ConfigLoader::load_from_string(config_text, "bad_location_directive.conf");
+        EXPECT_FALSE(config_result.has_value()) << directive;
+    }
+}
+
+TEST(LiteNginxConfigTest, RejectsProxyOnlyDirectivesInScriptLocation) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / {
+                    script_file /tmp/handler.js;
+                    rewrite_path /rewritten;
+                }
+            }
+        }
+    )",
+                                                        "script_rewrite.conf");
+
+    ASSERT_FALSE(config_result.has_value());
+    EXPECT_NE(config_result.error().message.find("rewrite_path"), std::string::npos);
 }
 
 TEST(LiteNginxConfigTest, RejectsVariableInHeaderName) {
@@ -353,7 +484,7 @@ TEST(LiteNginxConfigTest, ParsesUpstreamServerSchemePrefix) {
                 server https://example.com:443 weight=1;
                 server http://127.0.0.1:9002;
             }
-            server { server_name localhost; location / { proxy_pass http://mixed; } }
+            server { server_name localhost; location / { proxy_pass upstream://mixed; } }
         }
     )",
                                                         "scheme.conf");
@@ -406,7 +537,7 @@ TEST(LiteNginxConfigTest, RejectsInvalidConnectionPoolSize) {
             server {
                 server_name localhost;
                 location / {
-                    proxy_pass http://backend;
+                    proxy_pass upstream://backend;
                 }
             }
         }
@@ -424,7 +555,7 @@ TEST(LiteNginxConfigTest, RejectsUnknownNamedUpstream) {
             server {
                 server_name localhost;
                 location / {
-                    proxy_pass http://missing_backend;
+                    proxy_pass upstream://missing_backend;
                 }
             }
         }
@@ -611,7 +742,7 @@ worker_processes 1;
 http {
     listen 8080;
     include upstreams.conf;
-    server { server_name localhost; location / { proxy_pass http://backend; } }
+    server { server_name localhost; location / { proxy_pass upstream://backend; } }
 }
 )");
 
@@ -631,7 +762,7 @@ TEST(LiteNginxConfigTest, IncludeResolvesRelativeToIncludingFile) {
 http {
     listen 8080;
     include sub/inner.conf;
-    server { server_name localhost; location / { proxy_pass http://inner; } }
+    server { server_name localhost; location / { proxy_pass upstream://inner; } }
 }
 )");
 
@@ -652,7 +783,7 @@ TEST(LiteNginxConfigTest, NestedIncludeResolvesRelativeToIncluder) {
 http {
     listen 8080;
     include b/b.conf;
-    server { server_name localhost; location / { proxy_pass http://deep; } }
+    server { server_name localhost; location / { proxy_pass upstream://deep; } }
 }
 )");
 

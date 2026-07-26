@@ -793,6 +793,16 @@ async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease le
     co_return;
 }
 
+common::IoErr ServerHttp3Request::set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                                       void *ctx) noexcept {
+    return stream_.set_send_aborted_callback(callback, ctx);
+}
+
+common::IoErr ServerHttp3Request::clear_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                                         void *ctx) noexcept {
+    return stream_.clear_send_aborted_callback(callback, ctx);
+}
+
 Http3ParseStatus ServerHttp3Request::parse_frame_header_once() noexcept {
     const std::size_t before = inbound_buf_.readable_bytes();
     Http3ParseStatus status = frame_parser_.parse(inbound_buf_);

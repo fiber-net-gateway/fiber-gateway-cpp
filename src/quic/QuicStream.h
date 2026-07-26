@@ -48,6 +48,7 @@ inline constexpr std::uint64_t kQuicUnassignedStreamId = UINT64_MAX;
 class QuicStream : public common::NonCopyable, public common::NonMovable {
 public:
     using DestroyCallback = void (*)(void *owner, QuicStream &stream) noexcept;
+    using SendAbortedCallback = void (*)(void *ctx) noexcept;
 
     class Lease {
     public:
@@ -124,6 +125,7 @@ public:
     [[nodiscard]] bool reset_received() const noexcept { return recv_queue_.reset_received(); }
     [[nodiscard]] bool stop_sending() const noexcept { return recv_queue_.stop_sending(); }
     [[nodiscard]] bool recv_closed() const noexcept { return recv_queue_.finished(); }
+    [[nodiscard]] bool send_aborted() const noexcept { return send_aborted_; }
     [[nodiscard]] bool attached_to_connection() const noexcept { return attached_to_connection_; }
     [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
     [[nodiscard]] void *owner() noexcept { return destroy_owner_; }
@@ -146,6 +148,8 @@ public:
     write(mem::IoBufChain &chain, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] common::IoResult<void> stop_read(std::uint64_t error_code = 0) noexcept;
     [[nodiscard]] common::IoResult<void> reset(std::uint64_t error_code = 0) noexcept;
+    common::IoErr set_send_aborted_callback(SendAbortedCallback callback, void *ctx) noexcept;
+    common::IoErr clear_send_aborted_callback(SendAbortedCallback callback, void *ctx) noexcept;
     void close(std::uint64_t error_code = 0) noexcept;
 
     // Compatibility shim for callers that still use the old connection-close
@@ -187,6 +191,7 @@ private:
     void maybe_report_write_flow_blocked() noexcept;
     [[nodiscard]] bool should_retransmit_stream_data_blocked(std::uint64_t limit) const noexcept;
     [[nodiscard]] common::IoErr terminal_write_error() const noexcept;
+    void mark_send_aborted() noexcept;
     void notify_write_waiter(common::IoErr result = common::IoErr::None) noexcept;
     void cancel_write_waiter(WriteAwaiter *awaiter) noexcept;
 
@@ -200,11 +205,14 @@ private:
     std::uint64_t last_stream_data_blocked_limit_ = 0;
     std::uint32_t ref_count_ = 1;
     common::IoErr terminal_error_ = common::IoErr::None;
+    SendAbortedCallback send_aborted_callback_ = nullptr;
+    void *send_aborted_callback_ctx_ = nullptr;
     bool attached_to_connection_ = false;
     bool local_initiated_ = false;
     QuicStreamEarlyDataMode early_data_mode_ = QuicStreamEarlyDataMode::OneRttOnly;
     bool created_during_early_data_ = false;
     bool closed_ = false;
+    bool send_aborted_ = false;
     bool stream_send_pending_ = false;
     bool stream_data_blocked_reported_ = false;
     void *destroy_owner_ = nullptr;

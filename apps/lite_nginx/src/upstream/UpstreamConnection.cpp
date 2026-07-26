@@ -12,9 +12,11 @@ namespace fiber::lite_nginx::upstream {
 fiber::async::Task<fiber::common::IoResult<AcquiredUpstreamConnection>>
 acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService &dns,
                     const fiber::http::Http1ConnectionGroupKey &key, std::string_view tls_server_name,
-                    std::chrono::milliseconds connect_timeout) noexcept {
+                    std::chrono::milliseconds connect_timeout, ConnectionReusePolicy reuse_policy) noexcept {
     AcquiredUpstreamConnection out;
-    out.lease = co_await pool.acquire(key);
+    if (reuse_policy == ConnectionReusePolicy::Pooled) {
+        out.lease = co_await pool.acquire(key);
+    }
 
     // Pool hit: reuse the idle connection directly (zero DNS, zero dial).
     if (out.lease.valid() && out.lease.has_connection()) {
@@ -44,6 +46,7 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
         fiber::http::Http1ClientConnectionOptions opts;
         opts.peer_addr = fiber::net::SocketAddress(ip, key.port());
         if (key.scheme() == fiber::http::Http1ConnectionGroupKey::Scheme::Https) {
+            opts.tls.enabled = true;
             opts.tls.server_name = std::string(tls_server_name);
         }
         return opts;
@@ -52,7 +55,8 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
     fiber::common::IoErr last_err = fiber::common::IoErr::NotFound;
 
     if (!out.lease.valid()) {
-        // No pool configured (keepalive_size == 0): open a transient connection per attempt.
+        // Pooling is globally disabled or bypassed for this request: open a transient connection
+        // per attempt.
         for (std::size_t i = 0; i < addresses.size(); ++i) {
             out.transient = std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current(),
                                                                                  build_opts(addresses[i]));

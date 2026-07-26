@@ -8,6 +8,7 @@
 #include <string>
 #include <system_error>
 
+#include "../common/Assert.h"
 #include "Http1Connection.h"
 #include "Http1HeaderParseBuffer.h"
 #include "HttpExchange.h"
@@ -221,6 +222,72 @@ Http1ExchangeIo::Http1ExchangeIo(Http1Connection &connection, const HttpExchange
         return;
     }
     body_parser_.set_content_length(body_spec.content_length());
+}
+
+Http1ExchangeIo::~Http1ExchangeIo() {
+    FIBER_ASSERT(response_channel_closed_callback_ == nullptr);
+    FIBER_ASSERT(!transport_terminal_callback_registered_);
+}
+
+bool Http1ExchangeIo::response_channel_closed() const noexcept {
+    FIBER_ASSERT(connection_ != nullptr);
+    return connection_->transport().terminal();
+}
+
+common::IoErr Http1ExchangeIo::set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                                    void *ctx) noexcept {
+    if (callback == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    if (response_channel_closed_callback_ != nullptr) {
+        return common::IoErr::Busy;
+    }
+
+    response_channel_closed_callback_ = callback;
+    response_channel_closed_callback_ctx_ = ctx;
+    transport_terminal_callback_registered_ = true;
+    common::IoErr err = connection_->transport().set_terminal_callback(&Http1ExchangeIo::on_transport_terminal, this);
+    if (err != common::IoErr::None) {
+        FIBER_ASSERT(transport_terminal_callback_registered_);
+        transport_terminal_callback_registered_ = false;
+        response_channel_closed_callback_ = nullptr;
+        response_channel_closed_callback_ctx_ = nullptr;
+    }
+    return err;
+}
+
+common::IoErr Http1ExchangeIo::clear_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                                      void *ctx) noexcept {
+    if (callback == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    if (response_channel_closed_callback_ != callback || response_channel_closed_callback_ctx_ != ctx) {
+        return common::IoErr::None;
+    }
+
+    FIBER_ASSERT(transport_terminal_callback_registered_);
+    common::IoErr err = connection_->transport().clear_terminal_callback(&Http1ExchangeIo::on_transport_terminal, this);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    transport_terminal_callback_registered_ = false;
+    response_channel_closed_callback_ = nullptr;
+    response_channel_closed_callback_ctx_ = nullptr;
+    return common::IoErr::None;
+}
+
+void Http1ExchangeIo::on_transport_terminal(void *ctx, common::IoErr) noexcept {
+    auto *io = static_cast<Http1ExchangeIo *>(ctx);
+    FIBER_ASSERT(io != nullptr);
+    FIBER_ASSERT(io->transport_terminal_callback_registered_);
+    FIBER_ASSERT(io->response_channel_closed_callback_ != nullptr);
+
+    ResponseChannelClosedCallback callback = io->response_channel_closed_callback_;
+    void *callback_ctx = io->response_channel_closed_callback_ctx_;
+    io->transport_terminal_callback_registered_ = false;
+    io->response_channel_closed_callback_ = nullptr;
+    io->response_channel_closed_callback_ctx_ = nullptr;
+    callback(callback_ctx);
 }
 
 common::IoResult<void> Http1ExchangeIo::ensure_read_buf_writable(std::size_t min_writable) noexcept {

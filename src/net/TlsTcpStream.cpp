@@ -26,6 +26,8 @@ bool TlsTcpStream::handshake_done() const noexcept { return stream_.handshake_do
 
 bool TlsTcpStream::has_pending_read() const noexcept { return stream_.has_pending_read(); }
 
+bool TlsTcpStream::terminal() const noexcept { return stream_.terminal(); }
+
 fiber::common::IoErr TlsTcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
     return detail::apply_tcp_socket_options(fd(), options);
 }
@@ -40,12 +42,20 @@ fiber::common::IoErr TlsTcpStream::set_write_callback(ReadyCallback callback, vo
     return stream_.set_write_callback(callback, ctx);
 }
 
+fiber::common::IoErr TlsTcpStream::set_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.set_terminal_callback(callback, ctx);
+}
+
 fiber::common::IoErr TlsTcpStream::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_read_callback(callback, ctx);
 }
 
 fiber::common::IoErr TlsTcpStream::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_write_callback(callback, ctx);
+}
+
+fiber::common::IoErr TlsTcpStream::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+    return stream_.clear_terminal_callback(callback, ctx);
 }
 
 TlsTcpStream::IoTask TlsTcpStream::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {

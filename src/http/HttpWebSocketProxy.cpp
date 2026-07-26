@@ -7,11 +7,10 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
-#include "../async/Spawn.h"
-#include "../async/WaitGroup.h"
+#include "../async/TaskSelect.h"
+#include "../async/WhenAny.h"
 #include "../common/IoError.h"
 #include "../common/util/Base64.h"
-#include "../event/EventLoop.h"
 #include "ClientHttp1Exchange.h"
 #include "ClientHttp1Types.h"
 #include "HttpExchange.h"
@@ -57,7 +56,6 @@ bool build_expected_websocket_accept(std::string_view key, std::string &out) noe
 struct WebSocketTunnelState {
     HttpExchange *downstream = nullptr;
     ClientHttp1Exchange *upstream = nullptr;
-    fiber::async::WaitGroup downlink;
     bool stopped = false;
 
     void stop(fiber::common::IoErr reason) noexcept {
@@ -74,36 +72,40 @@ struct WebSocketTunnelState {
     }
 };
 
-fiber::async::DetachedTask relay_websocket_downlink(WebSocketTunnelState *state, std::chrono::milliseconds read_timeout,
-                                                    std::chrono::milliseconds write_timeout) noexcept {
-    struct DoneGuard {
-        fiber::async::WaitGroup *group = nullptr;
-        ~DoneGuard() {
-            if (group != nullptr) {
-                group->done();
-            }
-        }
-    } done{state != nullptr ? &state->downlink : nullptr};
-
-    if (state == nullptr || state->downstream == nullptr || state->upstream == nullptr) {
-        co_return;
-    }
-
+fiber::async::Task<fiber::common::IoErr> relay_websocket_downlink(HttpExchange &downstream,
+                                                                  ClientHttp1Exchange &upstream,
+                                                                  std::chrono::milliseconds read_timeout,
+                                                                  std::chrono::milliseconds write_timeout) noexcept {
     for (;;) {
-        auto body_result = co_await state->upstream->read_body(kBodyChunkSize, read_timeout);
+        auto body_result = co_await upstream.read_body(kBodyChunkSize, read_timeout);
         if (!body_result) {
-            state->stop(body_result.error());
-            co_return;
+            co_return body_result.error();
         }
         const bool last = body_result->complete();
-        auto write_result = co_await state->downstream->write_body(std::move(*body_result), write_timeout);
+        auto write_result = co_await downstream.write_body(std::move(*body_result), write_timeout);
         if (!write_result) {
-            state->stop(write_result.error());
-            co_return;
+            co_return write_result.error();
         }
         if (last) {
-            state->stop(fiber::common::IoErr::Canceled);
-            co_return;
+            co_return fiber::common::IoErr::Canceled;
+        }
+    }
+}
+
+fiber::async::Task<fiber::common::IoErr> relay_websocket_uplink(HttpExchange &downstream, ClientHttp1Exchange &upstream,
+                                                                std::chrono::milliseconds write_timeout) noexcept {
+    for (;;) {
+        auto body_result = co_await downstream.read_body(kBodyChunkSize);
+        if (!body_result) {
+            co_return body_result.error();
+        }
+        const bool last = body_result->complete();
+        auto write_result = co_await upstream.write_body(std::move(*body_result), write_timeout);
+        if (!write_result) {
+            co_return write_result.error();
+        }
+        if (last) {
+            co_return fiber::common::IoErr::Canceled;
         }
     }
 }
@@ -227,30 +229,17 @@ fiber::async::Task<void> relay_websocket_tunnel(HttpExchange &downstream, Client
             .downstream = &downstream,
             .upstream = &upstream,
     };
-    state.downlink.add();
-    fiber::async::spawn(fiber::event::EventLoop::current(), [&state, read_timeout, write_timeout]() {
-        return relay_websocket_downlink(&state, read_timeout, write_timeout);
-    });
 
-    for (;;) {
-        auto body_result = co_await downstream.read_body(kBodyChunkSize);
-        if (!body_result) {
-            state.stop(body_result.error());
-            break;
-        }
-        const bool last = body_result->complete();
-        auto write_result = co_await upstream.write_body(std::move(*body_result), write_timeout);
-        if (!write_result) {
-            state.stop(write_result.error());
-            break;
-        }
-        if (last) {
-            state.stop(fiber::common::IoErr::Canceled);
-            break;
-        }
+    auto completed = co_await fiber::async::when_any(
+            [&]() { return relay_websocket_downlink(downstream, upstream, read_timeout, write_timeout).select(); },
+            [&]() { return relay_websocket_uplink(downstream, upstream, write_timeout).select(); });
+    fiber::common::IoErr reason;
+    if (completed.is<0>()) {
+        reason = std::move(completed).get<0>();
+    } else {
+        reason = std::move(completed).get<1>();
     }
-
-    co_await state.downlink.join();
+    state.stop(reason);
 }
 
 } // namespace fiber::http::proxy_core

@@ -32,6 +32,12 @@ public:
     [[nodiscard]] HttpExchange &exchange() noexcept { return exchange_; }
     [[nodiscard]] const HttpExchange &exchange() const noexcept { return exchange_; }
 
+    [[nodiscard]] bool response_channel_closed() const noexcept override { return response_channel_closed_; }
+    common::IoErr set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                       void *ctx) noexcept override;
+    common::IoErr clear_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                         void *ctx) noexcept override;
+
     fiber::async::Task<common::IoResult<mem::IoBufChain>>
     read_body(HttpExchange &exchange, std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept override;
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
@@ -97,6 +103,7 @@ private:
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
     [[nodiscard]] bool cancel_queued_send() noexcept;
     void on_stream_aborted(common::IoErr reason) noexcept;
+    void mark_response_channel_closed() noexcept;
 
     [[maybe_unused]] Http2Connection *conn_ = nullptr;
     const HttpHandler *handler_ = nullptr;
@@ -104,6 +111,8 @@ private:
     HttpExchange exchange_;
     detail::Http2BodyRecvState request_body_recv_;
     common::IoErr abort_reason_ = common::IoErr::None;
+    ResponseChannelClosedCallback response_channel_closed_callback_ = nullptr;
+    void *response_channel_closed_callback_ctx_ = nullptr;
     bool reading_trailers_ = false;
     bool saw_regular_header_in_block_ = false;
     bool request_head_received_ = false;
@@ -111,6 +120,7 @@ private:
     bool handler_done_ = false;
     bool response_headers_sent_ = false;
     bool response_finished_ = false;
+    bool response_channel_closed_ = false;
     bool protocol_seen_ = false;
     int response_status_code_ = 0;
     std::string_view response_reason_;

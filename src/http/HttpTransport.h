@@ -41,8 +41,10 @@ public:
     // use callback and awaitable modes at the same time.
     virtual common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept = 0;
     virtual common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept = 0;
+    virtual common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept = 0;
     virtual common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept = 0;
     virtual common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept = 0;
+    virtual common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept = 0;
 
     // poll_* performs one non-suspending transport operation. wait_event is set
     // only when WouldBlock is returned. For TLS it may be the opposite physical
@@ -72,6 +74,7 @@ public:
     virtual void abandon_pending_io() noexcept {}
     virtual void close() = 0;
     [[nodiscard]] virtual bool valid() const noexcept = 0;
+    [[nodiscard]] virtual bool terminal() const noexcept = 0;
     [[nodiscard]] virtual int fd() const noexcept = 0;
     // Borrowed view into the transport. Invalidated by close() or destruction.
     [[nodiscard]] virtual std::string_view negotiated_alpn() const noexcept = 0;
@@ -90,8 +93,10 @@ public:
     [[nodiscard]] bool has_pending_read() const noexcept override { return false; }
     common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept override;
+    common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept override;
+    common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept override;
     common::IoErr poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
     common::IoErr poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept override;
@@ -110,6 +115,7 @@ public:
                                                         std::chrono::milliseconds timeout) override;
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
+    [[nodiscard]] bool terminal() const noexcept override;
     [[nodiscard]] int fd() const noexcept override;
     [[nodiscard]] std::string_view negotiated_alpn() const noexcept override;
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept override;
@@ -138,8 +144,10 @@ public:
     [[nodiscard]] bool requires_stable_read_buffer_on_retry() const noexcept override { return true; }
     common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept override;
+    common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept override;
+    common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept override;
     common::IoErr poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
     common::IoErr poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept override;
@@ -159,6 +167,7 @@ public:
     void abandon_pending_io() noexcept override;
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
+    [[nodiscard]] bool terminal() const noexcept override;
     [[nodiscard]] int fd() const noexcept override;
     [[nodiscard]] std::string_view negotiated_alpn() const noexcept override;
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept override;
