@@ -17,6 +17,17 @@ public:
         return set_callback(write_callback_, write_callback_ctx_, callback, ctx);
     }
 
+    common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept override {
+        if (!callback) {
+            return common::IoErr::Invalid;
+        }
+        if (terminal_) {
+            callback(ctx, terminal_error_);
+            return common::IoErr::None;
+        }
+        return set_callback(terminal_callback_, terminal_callback_ctx_, callback, ctx);
+    }
+
     common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept override {
         return clear_callback(read_callback_, read_callback_ctx_, callback, ctx);
     }
@@ -24,6 +35,12 @@ public:
     common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept override {
         return clear_callback(write_callback_, write_callback_ctx_, callback, ctx);
     }
+
+    common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept override {
+        return clear_callback(terminal_callback_, terminal_callback_ctx_, callback, ctx);
+    }
+
+    [[nodiscard]] bool terminal() const noexcept override { return terminal_; }
 
     common::IoErr poll_read(void *, std::size_t, std::size_t &out, event::IoEvent &wait_event) noexcept override {
         return not_supported(out, wait_event);
@@ -51,6 +68,8 @@ public:
     }
 
 protected:
+    [[nodiscard]] bool terminal_callback_registered() const noexcept { return terminal_callback_ != nullptr; }
+
     void notify_read_ready(common::IoErr err = common::IoErr::None) noexcept {
         if (read_callback_) {
             read_callback_(read_callback_ctx_, err);
@@ -60,6 +79,21 @@ protected:
     void notify_write_ready(common::IoErr err = common::IoErr::None) noexcept {
         if (write_callback_) {
             write_callback_(write_callback_ctx_, err);
+        }
+    }
+
+    void notify_terminal(common::IoErr err = common::IoErr::Unknown) noexcept {
+        if (terminal_) {
+            return;
+        }
+        terminal_ = true;
+        terminal_error_ = err;
+        ReadyCallback callback = terminal_callback_;
+        void *ctx = terminal_callback_ctx_;
+        terminal_callback_ = nullptr;
+        terminal_callback_ctx_ = nullptr;
+        if (callback) {
+            callback(ctx, err);
         }
     }
 
@@ -99,6 +133,10 @@ private:
     void *read_callback_ctx_ = nullptr;
     ReadyCallback write_callback_ = nullptr;
     void *write_callback_ctx_ = nullptr;
+    ReadyCallback terminal_callback_ = nullptr;
+    void *terminal_callback_ctx_ = nullptr;
+    common::IoErr terminal_error_ = common::IoErr::None;
+    bool terminal_ = false;
 };
 
 } // namespace fiber::test

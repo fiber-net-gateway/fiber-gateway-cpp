@@ -23,6 +23,13 @@ enum class ResponsePhase : std::uint8_t {
 class Http1ExchangeIo final : public HttpExchangeIo {
 public:
     Http1ExchangeIo(Http1Connection &connection, const HttpExchange &exchange);
+    ~Http1ExchangeIo() override;
+
+    [[nodiscard]] bool response_channel_closed() const noexcept override;
+    common::IoErr set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                       void *ctx) noexcept override;
+    common::IoErr clear_response_channel_closed_callback(ResponseChannelClosedCallback callback,
+                                                         void *ctx) noexcept override;
 
     fiber::async::Task<common::IoResult<mem::IoBufChain>>
     read_body(HttpExchange &exchange, size_t max_bytes, std::chrono::milliseconds timeout) noexcept override;
@@ -44,6 +51,8 @@ public:
     [[nodiscard]] bool should_keep_alive(const HttpExchange &exchange) const noexcept;
 
 private:
+    static void on_transport_terminal(void *ctx, common::IoErr err) noexcept;
+
     fiber::async::Task<common::IoResult<size_t>> read_more(std::size_t max_bytes,
                                                            std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<common::IoResult<ParseCode>> advance_chunked_body(std::size_t max_bytes, bool allow_read,
@@ -77,6 +86,8 @@ private:
     [[nodiscard]] std::size_t body_input_readable() const noexcept;
 
     Http1Connection *connection_ = nullptr;
+    ResponseChannelClosedCallback response_channel_closed_callback_ = nullptr;
+    void *response_channel_closed_callback_ctx_ = nullptr;
     BodyParser body_parser_;
     mem::IoBuf read_buf_;
     bool read_call_used_io_ = false;
@@ -90,6 +101,7 @@ private:
     HttpBodySpec response_body_spec_{};
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
     size_t response_content_length_ = 0;
+    bool transport_terminal_callback_registered_ = false;
 };
 
 } // namespace fiber::http

@@ -15,10 +15,7 @@
 namespace fiber::cat::detail {
 
 struct HeartbeatInfo {
-    std::string_view app_key;
-    std::string_view hostname;
     std::string_view ip;
-    std::string_view client_version;
     std::uint64_t timestamp_millis = 0;
     std::uint64_t process_id = 0;
     std::uint64_t process_start_millis = 0;

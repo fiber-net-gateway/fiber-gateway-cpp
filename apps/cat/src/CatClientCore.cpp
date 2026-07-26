@@ -565,10 +565,7 @@ void CatClientCore::submit_heartbeat() noexcept {
         }
     }
     HeartbeatInfo info{
-            .app_key = config_.app_key(),
-            .hostname = config_.hostname(),
             .ip = config_.ip(),
-            .client_version = "fiber2-cat/1.0",
             .process_id = static_cast<std::uint64_t>(::getpid()),
             .process_start_millis = process_start_wall_millis_,
             .uptime_millis = uptime.count() < 0 ? 0 : static_cast<std::uint64_t>(uptime.count()),

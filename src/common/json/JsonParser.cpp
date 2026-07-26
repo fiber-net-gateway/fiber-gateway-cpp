@@ -21,6 +21,7 @@ void JsonParser::reset() noexcept {
     input_len_ = 0;
     input_offset_ = 0;
     current_offset_ = 0;
+    current_end_offset_ = 0;
     input_active_ = false;
     final_ = false;
     has_current_token_ = false;
@@ -112,6 +113,7 @@ JsonParser::Status JsonParser::next() noexcept {
         }
 
         current_offset_ = lex_token.offset;
+        current_end_offset_ = lexer_.stream_offset() + input_offset_;
         has_current_token_ = true;
         return Status::Token;
     }
@@ -120,6 +122,8 @@ JsonParser::Status JsonParser::next() noexcept {
 const Token *JsonParser::current_token() const noexcept { return has_current_token_ ? &current_token_ : nullptr; }
 
 std::size_t JsonParser::current_offset() const noexcept { return current_offset_; }
+
+std::size_t JsonParser::current_end_offset() const noexcept { return current_end_offset_; }
 
 const ParseError &JsonParser::error() const noexcept { return error_; }
 

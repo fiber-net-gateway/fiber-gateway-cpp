@@ -501,10 +501,14 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
     if (result.ready && first && second && registered) {
         auto &subscriber = first->subscriber();
         auto current = subscriber.current();
-        auto pushed = co_await fiber::async::timeout_for(
-                [&subscriber, version = current.version]() { return subscriber.next(version); }, 2s);
-        result.pushed = pushed && pushed->value && pushed->value->kind == fiber::nacos::ResultKind::Success &&
-                        pushed->value->data && pushed->value->data->name == "service";
+        result.pushed = current.value && current.value->kind == fiber::nacos::ResultKind::Success &&
+                        current.value->data && current.value->data->name == "service";
+        if (!result.pushed) {
+            auto pushed = co_await fiber::async::timeout_for(
+                    [&subscriber, version = current.version]() { return subscriber.next(version); }, 2s);
+            result.pushed = pushed && pushed->value && pushed->value->kind == fiber::nacos::ResultKind::Success &&
+                            pushed->value->data && pushed->value->data->name == "service";
+        }
 
         const std::size_t queries_before = server->query_count();
         auto cached = co_await service->get("service", "group");

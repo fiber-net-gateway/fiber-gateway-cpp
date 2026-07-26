@@ -2,8 +2,8 @@
 // Demonstrates the `directive svc = http "<target>";` binding and its svc.request / svc.proxyPass
 // calls (the host is bound once at compile time; the call options only carry path/query/headers).
 //
-// Requires an upstream block named `backend` (or a reachable ad-hoc URL) and a
-// `connection_pool { keepalive_size N; ... }` block under `http` for keepalive reuse.
+// Requires an upstream block named `backend` (or a reachable ad-hoc URL). Keepalive reuse uses
+// the default global pool; add a `connection_pool` block only to override its sizing or policy.
 
 // directive binds the name `svc` to a fixed upstream target (a named upstream, or an
 // http(s)://host[:port] URL). The target is resolved once at compile time; svc.request /

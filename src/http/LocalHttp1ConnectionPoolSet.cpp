@@ -51,11 +51,22 @@ public:
         remaining_.store(shard_count, std::memory_order_release);
         ops_ = std::make_unique<ShardOp[]>(shard_count);
         auto *current = event::EventLoop::current_or_null();
+
+        // Run the caller's shard first. If it is the only shard, completing
+        // inline avoids queuing a wakeup to the event loop that is currently
+        // executing this await_suspend().
+        if (current && current->group() == &set_->group() && current->has_group_index()) {
+            Http1ConnectionPoolCore &core = set_->core_at(current->group_index());
+            run_core(core);
+            if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                handle_ = {};
+                return false;
+            }
+        }
+
         for (std::size_t i = 0; i < shard_count; ++i) {
             Http1ConnectionPoolCore &core = set_->core_at(i);
             if (current == &core.loop()) {
-                run_core(core);
-                on_shard_done();
                 continue;
             }
             ops_[i].awaiter = this;

@@ -14,7 +14,14 @@ namespace fiber::event {
 
 class Poller {
 public:
-    enum class Event : std::uint32_t { None = 0, Read = 1u << 0, Write = 1u << 1 };
+    enum class Event : std::uint32_t {
+        None = 0,
+        Read = 1u << 0,
+        Write = 1u << 1,
+        // EPOLLERR/EPOLLHUP only. Deliberately excludes EPOLLRDHUP so a peer
+        // that half-closes its write side can continue receiving data.
+        Terminal = 1u << 2,
+    };
     enum class Mode : std::uint32_t { None = 0, Edge = 1u << 0, OneShot = 1u << 1 };
 
     struct Item : common::NonCopyable, common::NonMovable {

@@ -32,13 +32,18 @@ public:
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     [[nodiscard]] RWFd &rwfd() noexcept;
+    [[nodiscard]] bool terminal() const noexcept { return rwfd_.terminal(); }
+    [[nodiscard]] fiber::common::IoErr terminal_error() const noexcept { return rwfd_.terminal_error(); }
     int release_fd() noexcept;
     void close();
 
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
+    void mark_terminal(fiber::common::IoErr error) noexcept { rwfd_.mark_terminal(error); }
 
     [[nodiscard]] IoTask read(void *buf, size_t len,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;

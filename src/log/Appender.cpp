@@ -35,6 +35,11 @@ std::chrono::steady_clock::time_point current_steady_time() noexcept {
     return std::chrono::steady_clock::now();
 }
 
+std::mutex &console_write_mutex() noexcept {
+    static std::mutex mutex;
+    return mutex;
+}
+
 void report_raw_error(std::atomic<std::uint64_t> &last_report_second, std::string_view message) noexcept {
     const auto now =
             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -259,8 +264,26 @@ ConsoleAppender::ConsoleAppender(AppenderId id, ConsoleAppenderOptions options) 
     fd_(options.stream == ConsoleStream::Stdout ? STDOUT_FILENO : STDERR_FILENO) {}
 
 void ConsoleAppender::append(FormattedLogLine line, LogContext &) noexcept {
-    const ssize_t written = ::write(fd_, line.bytes.data(), line.bytes.size());
-    if (written != static_cast<ssize_t>(line.bytes.size())) {
+    std::size_t offset = 0;
+    {
+        std::lock_guard<std::mutex> guard(console_write_mutex());
+        while (offset < line.bytes.size()) {
+            const ssize_t written = ::write(fd_, line.bytes.data() + offset, line.bytes.size() - offset);
+            if (written > 0) {
+                offset += static_cast<std::size_t>(written);
+                continue;
+            }
+            if (written < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+    }
+
+    if (offset != line.bytes.size()) {
+        if (offset > 0) {
+            record_write(offset, 0);
+        }
         record_write_error(1);
         return;
     }

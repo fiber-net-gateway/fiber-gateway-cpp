@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -161,6 +162,77 @@ class LoggingScope {
 public:
     LoggingScope() { fiber::log::LoggerManager::global().shutdown(); }
     ~LoggingScope() { fiber::log::LoggerManager::global().shutdown(); }
+};
+
+class StderrPipeCapture {
+public:
+    StderrPipeCapture() = default;
+    ~StderrPipeCapture() { finish(); }
+
+    StderrPipeCapture(const StderrPipeCapture &) = delete;
+    StderrPipeCapture &operator=(const StderrPipeCapture &) = delete;
+
+    [[nodiscard]] bool start() {
+        int pipe_fds[2];
+        if (::pipe(pipe_fds) != 0) {
+            return false;
+        }
+        saved_stderr_ = ::dup(STDERR_FILENO);
+        if (saved_stderr_ < 0) {
+            ::close(pipe_fds[0]);
+            ::close(pipe_fds[1]);
+            return false;
+        }
+        if (::dup2(pipe_fds[1], STDERR_FILENO) < 0) {
+            ::close(saved_stderr_);
+            saved_stderr_ = -1;
+            ::close(pipe_fds[0]);
+            ::close(pipe_fds[1]);
+            return false;
+        }
+        ::close(pipe_fds[1]);
+        read_fd_ = pipe_fds[0];
+        active_ = true;
+        reader_ = std::thread([this]() {
+            char buffer[8192];
+            for (;;) {
+                const ssize_t size = ::read(read_fd_, buffer, sizeof(buffer));
+                if (size > 0) {
+                    output_.append(buffer, static_cast<std::size_t>(size));
+                    continue;
+                }
+                if (size < 0 && errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            ::close(read_fd_);
+            read_fd_ = -1;
+        });
+        return true;
+    }
+
+    void finish() {
+        if (!active_) {
+            return;
+        }
+        (void) ::dup2(saved_stderr_, STDERR_FILENO);
+        ::close(saved_stderr_);
+        saved_stderr_ = -1;
+        if (reader_.joinable()) {
+            reader_.join();
+        }
+        active_ = false;
+    }
+
+    [[nodiscard]] const std::string &output() const noexcept { return output_; }
+
+private:
+    std::thread reader_;
+    std::string output_;
+    int saved_stderr_ = -1;
+    int read_fd_ = -1;
+    bool active_ = false;
 };
 
 fiber::async::DetachedTask wait_for_timer_flush(std::string path, std::promise<bool> *result) {
@@ -903,4 +975,59 @@ TEST(LogSystemTest, MultipleThreadsAppendCompleteRecordsToSharedFile) {
 
     const std::string content = read_file(output.path());
     EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), kThreads * kRecordsPerThread);
+}
+
+TEST(LogSystemTest, MultipleThreadsWriteCompleteLongRecordsToConsolePipe) {
+    LoggingScope scope;
+    StderrPipeCapture capture;
+    ASSERT_TRUE(capture.start());
+
+    fiber::log::LogConfigBuilder builder;
+    auto output_id = builder.add_console_appender({
+            .name = "concurrent_console",
+            .stream = fiber::log::ConsoleStream::Stderr,
+    });
+    ASSERT_TRUE(output_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    ASSERT_TRUE(fiber::log::LoggerManager::global().initialize(std::move(*config)));
+
+    constexpr int kThreads = 4;
+    constexpr int kRecordsPerThread = 20;
+    constexpr std::size_t kPayloadSize = 6000;
+    std::vector<std::thread> threads;
+    for (int thread = 0; thread < kThreads; ++thread) {
+        threads.emplace_back([thread]() {
+            const std::string payload(kPayloadSize, static_cast<char>('a' + thread));
+            for (int record = 0; record < kRecordsPerThread; ++record) {
+                LOG(LOG_TEST_CONCURRENT, INFO) << "record=[" << thread << ':' << record << "] " << payload;
+            }
+        });
+    }
+    for (auto &thread: threads) {
+        thread.join();
+    }
+    fiber::log::LoggerManager::global().shutdown();
+    capture.finish();
+
+    const std::string &output = capture.output();
+    EXPECT_EQ(std::count(output.begin(), output.end(), '\n'), kThreads * kRecordsPerThread);
+    for (int thread = 0; thread < kThreads; ++thread) {
+        for (int record = 0; record < kRecordsPerThread; ++record) {
+            const std::string marker = "record=[" + std::to_string(thread) + ':' + std::to_string(record) + "] ";
+            const std::size_t marker_pos = output.find(marker);
+            ASSERT_NE(marker_pos, std::string::npos) << marker;
+            EXPECT_EQ(output.find(marker, marker_pos + marker.size()), std::string::npos) << marker;
+
+            const std::size_t payload_pos = marker_pos + marker.size();
+            const std::size_t line_end = output.find('\n', payload_pos);
+            ASSERT_NE(line_end, std::string::npos) << marker;
+            ASSERT_EQ(line_end - payload_pos, kPayloadSize) << marker;
+            EXPECT_TRUE(std::all_of(output.begin() + static_cast<std::ptrdiff_t>(payload_pos),
+                                    output.begin() + static_cast<std::ptrdiff_t>(line_end),
+                                    [thread](char ch) { return ch == static_cast<char>('a' + thread); }))
+                    << marker;
+        }
+    }
 }

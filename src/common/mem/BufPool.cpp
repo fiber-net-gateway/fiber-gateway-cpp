@@ -15,7 +15,7 @@ namespace fiber::mem {
 
 namespace {
 
-size_t page_size() {
+size_t page_size() noexcept {
     static size_t size = 0;
     if (size != 0) {
         return size;
@@ -37,7 +37,7 @@ size_t page_size() {
     return size;
 }
 
-void *system_alloc(size_t size, size_t align) {
+void *system_alloc(size_t size, size_t align) noexcept {
 #if defined(_WIN32)
     return _aligned_malloc(size, align);
 #else
@@ -49,7 +49,7 @@ void *system_alloc(size_t size, size_t align) {
 #endif
 }
 
-void system_free(void *ptr) {
+void system_free(void *ptr) noexcept {
 #if defined(_WIN32)
     _aligned_free(ptr);
 #else
@@ -69,13 +69,13 @@ bool checked_add(size_t lhs, size_t rhs, size_t &out) noexcept {
 
 size_t BufPool::psz = page_size();
 
-BufPool::BufPool(size_t block_size) : block_size_(block_size) {
+BufPool::BufPool(size_t block_size) noexcept : block_size_(block_size) {
     if (block_size_ <= sizeof(Block)) {
         block_size_ = 4096;
     }
 }
 
-BufPool::~BufPool() { reset(); }
+BufPool::~BufPool() noexcept { reset(); }
 
 void BufPool::reset() noexcept {
     LargeBlock *large = large_head_;
@@ -96,7 +96,7 @@ void BufPool::reset() noexcept {
     current_ = nullptr;
 }
 
-void *BufPool::alloc(size_t size, size_t align) {
+void *BufPool::alloc(size_t size, size_t align) noexcept {
     if (size == 0) {
         return nullptr;
     }
@@ -109,7 +109,7 @@ void *BufPool::alloc(size_t size, size_t align) {
     return alloc_large(size, align);
 }
 
-void *BufPool::alloc_from_blocks(size_t size, size_t align) {
+void *BufPool::alloc_from_blocks(size_t size, size_t align) noexcept {
     size_t requested_cap = 0;
     if (!checked_add(size, align, requested_cap)) {
         return nullptr;
@@ -138,7 +138,7 @@ void *BufPool::alloc_from_blocks(size_t size, size_t align) {
     }
 }
 
-void *BufPool::alloc_large(size_t size, size_t align) {
+void *BufPool::alloc_large(size_t size, size_t align) noexcept {
     void *data = system_alloc(size, align);
     if (!data) {
         return nullptr;
@@ -154,7 +154,7 @@ void *BufPool::alloc_large(size_t size, size_t align) {
     return data;
 }
 
-BufPool::Block *BufPool::allocate_block(size_t payload_cap) {
+BufPool::Block *BufPool::allocate_block(size_t payload_cap) noexcept {
     size_t alloc_size = 0;
     if (!checked_add(sizeof(Block), payload_cap, alloc_size)) {
         return nullptr;

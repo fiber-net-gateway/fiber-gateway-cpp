@@ -192,7 +192,7 @@ common::IoResult<void> ConfigServiceImpl::start() noexcept {
         return std::unexpected(common::IoErr::Already);
     }
     lifecycle_publisher_->publish(NacosServiceState::Running);
-    async::spawn(*loop_, [this]() { return run(); });
+    async::spawn([this]() { return run(); });
     return {};
 }
 
@@ -472,7 +472,7 @@ void ConfigServiceImpl::schedule_query(const EntryPtr &entry) {
     entry->proto.dirty = false;
     const std::uint64_t sequence = ++entry->proto.query_sequence;
     tasks_.add();
-    async::spawn(*loop_, [this, entry, sequence]() { return query_and_sync(entry, sequence); });
+    async::spawn([this, entry, sequence]() { return query_and_sync(entry, sequence); });
 }
 
 async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint64_t sequence) noexcept {
@@ -540,7 +540,7 @@ void ConfigServiceImpl::schedule_registration(std::vector<EntryPtr> entries, boo
         return;
     }
     tasks_.add();
-    async::spawn(*loop_, [this, entries = std::move(scheduled), listen]() mutable {
+    async::spawn([this, entries = std::move(scheduled), listen]() mutable {
         return register_entries(std::move(entries), listen);
     });
 }
@@ -748,7 +748,7 @@ ConfigServiceImpl::run_attempt(NacosRpcEndpoint endpoint, const NacosBiRequestHa
     async::WaitGroup run_done;
     std::optional<NacosRpcCloseResult> close;
     run_done.add();
-    async::spawn(*loop_, [&rpc, &handlers, &run_done, &close]() -> async::DetachedTask {
+    async::spawn([&rpc, &handlers, &run_done, &close]() -> async::DetachedTask {
         close = co_await rpc.run(handlers);
         run_done.done();
     });

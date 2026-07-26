@@ -1,0 +1,252 @@
+#include "ProviderHttpClient.h"
+
+#include <algorithm>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <new>
+#include <utility>
+
+#include <http/ClientHttp1Exchange.h>
+#include <http/ClientHttp1Types.h>
+#include <http/HttpBodySpec.h>
+#include <http/HttpHeaderHash.h>
+#include <http/HttpHeaders.h>
+
+namespace fiber::ai_server {
+namespace {
+
+constexpr std::chrono::seconds kProviderTimeout{300};
+constexpr std::chrono::seconds kConnectTimeout{10};
+constexpr std::size_t kResponseChunkSize = 64 * 1024;
+constexpr std::string_view kBearerPrefix = "Bearer ";
+constexpr std::string_view kAuthorizationName = "Authorization";
+constexpr std::string_view kAuthorizationLowcaseName = "authorization";
+constexpr std::uint64_t kAuthorizationHash = http::http_header_name_hash(kAuthorizationLowcaseName);
+
+ProviderHttpError error(ProviderHttpErrorCode code, common::IoErr io_error, const char *message,
+                        std::uint64_t failed_service_peer_id = 0) noexcept {
+    return ProviderHttpError{
+            .code = code,
+            .io_error = io_error,
+            .message = message,
+            .failed_service_peer_id = failed_service_peer_id,
+    };
+}
+
+bool ensure_capacity(mem::IoBuf &buffer, std::size_t required, std::size_t max_capacity) noexcept {
+    if (buffer && buffer.capacity() >= required) {
+        return true;
+    }
+    std::size_t capacity = buffer ? buffer.capacity() : 0;
+    capacity = std::max<std::size_t>(capacity, 4096);
+    while (capacity < required) {
+        const std::size_t next = capacity > max_capacity / 2 ? max_capacity : capacity * 2;
+        if (next <= capacity) {
+            return false;
+        }
+        capacity = next;
+    }
+    mem::IoBuf replacement = mem::IoBuf::allocate(capacity);
+    if (!replacement) {
+        return false;
+    }
+    if (buffer && buffer.readable() > 0) {
+        std::memcpy(replacement.writable_data(), buffer.readable_data(), buffer.readable());
+        replacement.commit(buffer.readable());
+    }
+    buffer = std::move(replacement);
+    return true;
+}
+
+bool append_chain(mem::IoBuf &buffer, mem::IoBufChain &chunk, std::size_t max_bytes) noexcept {
+    const std::size_t bytes = chunk.readable_bytes();
+    if (bytes > max_bytes || (buffer && buffer.readable() > max_bytes - bytes)) {
+        return false;
+    }
+    const std::size_t required = (buffer ? buffer.readable() : 0) + bytes;
+    if (!ensure_capacity(buffer, std::max<std::size_t>(required, 1), max_bytes)) {
+        return false;
+    }
+    while (const mem::IoBuf *part = chunk.first_readable()) {
+        const std::size_t size = part->readable();
+        std::memcpy(buffer.writable_data(), part->readable_data(), size);
+        buffer.commit(size);
+        chunk.consume_and_compact(size);
+    }
+    return true;
+}
+
+common::IoResult<void> build_request_headers(const ProviderConnectionLease &connection,
+                                             const ResolvedProviderAttempt &attempt, bool stream,
+                                             http::HttpHeaders &headers) noexcept {
+    if (!headers.set("Host", connection.host_header) || !headers.set_view("Content-Type", "application/json") ||
+        !headers.set_view("Accept", stream ? "text/event-stream" : "application/json")) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (!attempt.api_token) {
+        return {};
+    }
+
+    const std::string &token = attempt.api_token->token;
+    if (token.size() > std::numeric_limits<std::size_t>::max() - kBearerPrefix.size()) {
+        return std::unexpected(common::IoErr::MessageTooLarge);
+    }
+    const std::size_t authorization_size = kBearerPrefix.size() + token.size();
+    auto *authorization = headers.pool().alloc<char>(authorization_size);
+    if (!authorization) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    std::memcpy(authorization, kBearerPrefix.data(), kBearerPrefix.size());
+    std::memcpy(authorization + kBearerPrefix.size(), token.data(), token.size());
+
+    if (!headers.set_view(kAuthorizationName, std::string_view(authorization, authorization_size),
+                          kAuthorizationLowcaseName.data(), kAuthorizationHash)) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    return {};
+}
+
+std::string header_copy(const http::HttpHeaders &headers, std::string_view name) {
+    const std::string_view value = headers.get(name);
+    return std::string(value);
+}
+
+} // namespace
+
+async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>>
+ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
+                                     mem::BufPool &request_pool, std::size_t max_response_bytes,
+                                     ProviderServiceSelection service_selection) noexcept {
+    auto started = co_await start(attempt, stream, std::move(request_body), request_pool, service_selection);
+    if (!started) {
+        co_return std::unexpected(started.error());
+    }
+    ProviderHttpResponseStream upstream = std::move(*started);
+    BufferedProviderResponse response{
+            .status_code = upstream.status_code(),
+            .content_type = std::string(upstream.content_type()),
+            .retry_after = std::string(upstream.retry_after()),
+            .request_id = std::string(upstream.request_id()),
+    };
+    for (;;) {
+        auto chunk = co_await upstream.read_body(kResponseChunkSize, kProviderTimeout);
+        if (!chunk) {
+            const std::uint64_t failed_service_peer_id = upstream.service_peer_id();
+            upstream.report_instance(InstanceReportOutcome::Failure);
+            co_return std::unexpected(error(ProviderHttpErrorCode::ReadBody, chunk.error(),
+                                            "failed to read provider response body", failed_service_peer_id));
+        }
+        const bool complete = chunk->complete();
+        if (chunk->readable_bytes() > max_response_bytes ||
+            (response.body && response.body.readable() > max_response_bytes - chunk->readable_bytes())) {
+            (void) upstream.abort(common::IoErr::MessageTooLarge);
+            upstream.report_instance(InstanceReportOutcome::Neutral);
+            co_return std::unexpected(error(ProviderHttpErrorCode::ResponseTooLarge, common::IoErr::MessageTooLarge,
+                                            "provider response body is too large"));
+        }
+        if (!append_chain(response.body, *chunk, max_response_bytes)) {
+            (void) upstream.abort(common::IoErr::NoMem);
+            upstream.report_instance(InstanceReportOutcome::Neutral);
+            co_return std::unexpected(error(ProviderHttpErrorCode::ReadBody, common::IoErr::NoMem,
+                                            "failed to buffer provider response body"));
+        }
+        if (complete) {
+            break;
+        }
+    }
+    response.load_balance = upstream.take_load_balance();
+    co_return std::move(response);
+}
+
+async::Task<std::expected<ProviderHttpResponseStream, ProviderHttpError>>
+ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
+                          mem::BufPool &request_pool, ProviderServiceSelection service_selection) noexcept {
+    auto acquired = co_await connections_->acquire(attempt, kConnectTimeout, service_selection);
+    if (!acquired) {
+        co_return std::unexpected(error(ProviderHttpErrorCode::Connect, acquired.error().io_error,
+                                        acquired.error().message, acquired.error().failed_service_peer_id));
+    }
+    ProviderConnectionLease connection = std::move(*acquired);
+
+    auto upstream = std::unique_ptr<http::ClientHttp1Exchange>(
+            new (std::nothrow) http::ClientHttp1Exchange(*connection.connection, request_pool));
+    if (!upstream) {
+        co_return std::unexpected(
+                error(ProviderHttpErrorCode::Connect, common::IoErr::NoMem, "failed to allocate provider exchange"));
+    }
+    http::HttpHeaders request_headers(request_pool);
+    auto built_headers = build_request_headers(connection, attempt, stream, request_headers);
+    if (!built_headers) {
+        co_return std::unexpected(error(ProviderHttpErrorCode::SendHeader, built_headers.error(),
+                                        "failed to build provider request headers"));
+    }
+    const std::size_t request_size = request_body.readable_bytes();
+    http::Http1RequestHead request_head{
+            .method = http::HttpMethod::Post,
+            .target = connection.target,
+            .headers = &request_headers,
+            .body = http::HttpBodySpec::ContentLength(request_size),
+    };
+    auto sent_header = co_await upstream->send_header(request_head, request_size == 0, kProviderTimeout);
+    if (!sent_header) {
+        const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
+        connection.load_balance.report(InstanceReportOutcome::Failure);
+        co_return std::unexpected(error(ProviderHttpErrorCode::SendHeader, sent_header.error(),
+                                        "failed to send provider headers", failed_service_peer_id));
+    }
+    if (request_size > 0) {
+        auto sent_body = co_await upstream->write_body(std::move(request_body), kProviderTimeout);
+        if (!sent_body || *sent_body != request_size) {
+            const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
+            connection.load_balance.report(InstanceReportOutcome::Failure);
+            co_return std::unexpected(error(ProviderHttpErrorCode::SendBody,
+                                            sent_body ? common::IoErr::Invalid : sent_body.error(),
+                                            "failed to send provider request body", failed_service_peer_id));
+        }
+    }
+
+    const http::Http1ResponseHead *response_head = nullptr;
+    for (;;) {
+        auto received = co_await upstream->read_header(kProviderTimeout);
+        if (!received) {
+            const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
+            connection.load_balance.report(InstanceReportOutcome::Failure);
+            co_return std::unexpected(error(ProviderHttpErrorCode::ReadHeader, received.error(),
+                                            "failed to read provider response headers", failed_service_peer_id));
+        }
+        if (!(*received)->is_informational()) {
+            response_head = *received;
+            break;
+        }
+    }
+    if (!response_head || response_head->status_code < 100 || response_head->status_code > 999) {
+        (void) upstream->abort(common::IoErr::Invalid);
+        const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
+        connection.load_balance.report(InstanceReportOutcome::Failure);
+        co_return std::unexpected(error(ProviderHttpErrorCode::InvalidResponse, common::IoErr::Invalid,
+                                        "invalid provider response status", failed_service_peer_id));
+    }
+
+    co_return ProviderHttpResponseStream(std::move(connection), std::move(upstream), response_head->status_code,
+                                         header_copy(response_head->headers, "content-type"),
+                                         header_copy(response_head->headers, "retry-after"),
+                                         header_copy(response_head->headers, "x-request-id"));
+}
+
+async::Task<common::IoResult<mem::IoBufChain>>
+ProviderHttpResponseStream::read_body(std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept {
+    if (!upstream_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await upstream_->read_body(max_bytes, timeout);
+}
+
+common::IoResult<void> ProviderHttpResponseStream::abort(common::IoErr reason) noexcept {
+    if (!upstream_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return upstream_->abort(reason);
+}
+
+} // namespace fiber::ai_server

@@ -105,7 +105,7 @@ common::IoResult<void> NacosClientImpl::start() noexcept {
     }
     state_ = NacosClientState::Running;
     task_group_.add();
-    async::spawn(*loop_, [this]() { return run_auth(); });
+    async::spawn([this]() { return run_auth(); });
     return {};
 }
 

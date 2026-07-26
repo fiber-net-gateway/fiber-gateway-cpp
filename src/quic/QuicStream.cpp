@@ -257,7 +257,7 @@ QuicStream::QuicStream(void *destroy_owner, DestroyCallback on_destroy) noexcept
     FIBER_ASSERT(on_destroy_ != nullptr);
 }
 
-QuicStream::~QuicStream() = default;
+QuicStream::~QuicStream() { FIBER_ASSERT(send_aborted_callback_ == nullptr); }
 
 std::uint64_t QuicStream::sequence() const noexcept {
     FIBER_ASSERT(stream_id_assigned());
@@ -481,18 +481,50 @@ common::IoResult<void> QuicStream::reset(std::uint64_t error_code) noexcept {
     if (!attached_to_connection_ || !send_queue_.initialized()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (send_queue_.reset_sent() || send_queue_.fin_acked()) {
+    if (send_queue_.reset_sent()) {
+        mark_send_aborted();
+        return {};
+    }
+    if (send_queue_.fin_acked()) {
         return {};
     }
     auto final_size = send_queue_.reset(error_code);
     if (!final_size) {
         return std::unexpected(final_size.error());
     }
+    mark_send_aborted();
     notify_write_waiter(common::IoErr::BrokenPipe);
     if (conn_ == nullptr) {
         return {};
     }
     return conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
+}
+
+common::IoErr QuicStream::set_send_aborted_callback(SendAbortedCallback callback, void *ctx) noexcept {
+    if (callback == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    if (send_aborted_callback_ != nullptr) {
+        return common::IoErr::Busy;
+    }
+    if (send_aborted_) {
+        callback(ctx);
+        return common::IoErr::None;
+    }
+    send_aborted_callback_ = callback;
+    send_aborted_callback_ctx_ = ctx;
+    return common::IoErr::None;
+}
+
+common::IoErr QuicStream::clear_send_aborted_callback(SendAbortedCallback callback, void *ctx) noexcept {
+    if (callback == nullptr) {
+        return common::IoErr::Invalid;
+    }
+    if (send_aborted_callback_ == callback && send_aborted_callback_ctx_ == ctx) {
+        send_aborted_callback_ = nullptr;
+        send_aborted_callback_ctx_ = nullptr;
+    }
+    return common::IoErr::None;
 }
 
 void QuicStream::close(std::uint64_t error_code) noexcept {
@@ -511,10 +543,15 @@ void QuicStream::close(std::uint64_t error_code) noexcept {
     recv_queue_.stop_receiving(error_code);
     sync_recv_state_from_queue();
 
-    if (!send_queue_.reset_sent() && !send_queue_.fin_acked()) {
+    if (send_queue_.reset_sent()) {
+        mark_send_aborted();
+    } else if (!send_queue_.fin_acked()) {
         auto final_size = send_queue_.reset(error_code);
         if (can_send_control && final_size) {
             (void) conn_->queue_reset_stream_frame(stream_id_, error_code, *final_size);
+        }
+        if (final_size) {
+            mark_send_aborted();
         }
     }
 
@@ -548,6 +585,20 @@ common::IoResult<std::uint64_t> QuicStream::on_remote_reset(std::uint64_t error_
 
 common::IoResult<void> QuicStream::on_remote_stop_sending(std::uint64_t error_code) noexcept {
     return reset(error_code);
+}
+
+void QuicStream::mark_send_aborted() noexcept {
+    if (send_aborted_) {
+        return;
+    }
+    send_aborted_ = true;
+    SendAbortedCallback callback = send_aborted_callback_;
+    void *ctx = send_aborted_callback_ctx_;
+    send_aborted_callback_ = nullptr;
+    send_aborted_callback_ctx_ = nullptr;
+    if (callback != nullptr) {
+        callback(ctx);
+    }
 }
 
 void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {

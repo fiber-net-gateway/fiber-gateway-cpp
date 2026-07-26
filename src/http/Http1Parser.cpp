@@ -941,15 +941,19 @@ done:
     return ParseCode::Ok;
 }
 
-HeaderLineParser::HeaderLineParser(const HttpServerOptions &options) : options_(&options) {}
+HeaderLineParser::HeaderLineParser() noexcept { reset(); }
 
-void HeaderLineParser::reset() {
-    state_ = State::Start;
+HeaderLineParser::HeaderLineParser(const HttpServerOptions &) noexcept : HeaderLineParser() {}
+
+void HeaderLineParser::reset() noexcept {
     line_ = HeaderLineState{};
+    started_ = false;
+    fiber_http1_header_line_init(&parser_);
+    parser_.data = &line_;
 }
 
 ParseCode HeaderLineParser::replace_buf_ptr(mem::IoBuf *old_chain, mem::IoBuf *new_chain) noexcept {
-    FIBER_ASSERT(state_ != State::Start);
+    FIBER_ASSERT(started_);
     FIBER_ASSERT(old_chain->readable_data() > line_.header_name_start && old_chain->data() <= line_.header_name_start);
     std::uint8_t *new_buf_start = new_chain->writable_data();
     std::uint8_t *old = line_.header_name_start;
@@ -974,204 +978,44 @@ ParseCode HeaderLineParser::replace_buf_ptr(mem::IoBuf *old_chain, mem::IoBuf *n
     return ParseCode::Ok;
 }
 
-
 ParseCode HeaderLineParser::execute(mem::IoBuf *buffer) {
     if (!buffer || buffer->readable() == 0) {
         return ParseCode::Again;
     }
 
-    for (;;) {
-        auto *begin = buffer->readable_data();
-        auto *p = begin;
-        auto *end = buffer->writable_data();
-        State state = state_;
-        uint32_t hash = line_.header_hash;
-        uint32_t i = line_.lowcase_index;
-        for (; p < end; ++p) {
-            unsigned char ch = *p;
-            unsigned char c;
-            switch (state) {
-                case State::Start:
-                    hash = 0;
-                    i = 0;
-                    line_.header_name_start = p;
-                    line_.header_name_end = nullptr;
-                    line_.header_start = nullptr;
-                    line_.header_end = nullptr;
-                    line_.invalid_header = false;
-                    switch (ch) {
-                        case '\r':
-                            line_.header_end = p;
-                            state = State::HeaderAlmostDone;
-                            break;
-                        case '\n':
-                            line_.header_end = p;
-                            goto header_done;
-                        default:
-                            state = State::Name;
-                            c = detail::kLowcase[ch];
-                            if (c) {
-                                hash = hash * 31 + c;
-                                line_.lowcase_header[0] = c;
-                                i = 1;
-                                break;
-                            }
-                            if (ch == '_') {
-                                hash = hash * 31 + ch;
-                                line_.lowcase_header[0] = ch;
-                                i = 1;
-                                break;
-                            }
-                            if (ch <= 0x20 || ch == 0x7f || ch == ':') {
-                                line_.header_end = p;
-                                return ParseCode::InvalidHeader;
-                            }
-                            hash = 0;
-                            i = 0;
-                            line_.invalid_header = true;
-                            break;
-                    }
-                    break;
-
-                case State::Name:
-                    c = detail::kLowcase[ch];
-                    if (c) {
-                        hash = hash * 31 + c;
-                        line_.lowcase_header[i++] = c;
-                        i &= (kLowcaseHeaderLen - 1);
-                        break;
-                    }
-                    if (ch == '_') {
-                        hash = hash * 31 + ch;
-                        line_.lowcase_header[i++] = ch;
-                        i &= (kLowcaseHeaderLen - 1);
-                        break;
-                    }
-                    if (ch == ':') {
-                        line_.header_name_end = p;
-                        state = State::SpaceBeforeValue;
-                        break;
-                    }
-                    if (ch == '\r') {
-                        line_.header_name_end = p;
-                        line_.header_start = p;
-                        line_.header_end = p;
-                        state = State::AlmostDone;
-                        break;
-                    }
-                    if (ch == '\n') {
-                        line_.header_name_end = p;
-                        line_.header_start = p;
-                        line_.header_end = p;
-                        goto done;
-                    }
-                    if (ch <= 0x20 || ch == 0x7f) {
-                        line_.header_end = p;
-                        return ParseCode::InvalidHeader;
-                    }
-                    line_.invalid_header = true;
-                    break;
-
-                case State::SpaceBeforeValue:
-                    switch (ch) {
-                        case ' ':
-                            break;
-                        case '\r':
-                            line_.header_start = p;
-                            line_.header_end = p;
-                            state = State::AlmostDone;
-                            break;
-                        case '\n':
-                            line_.header_start = p;
-                            line_.header_end = p;
-                            goto done;
-                        case '\0':
-                            line_.header_end = p;
-                            return ParseCode::InvalidHeader;
-                        default:
-                            line_.header_start = p;
-                            state = State::Value;
-                            break;
-                    }
-                    break;
-
-                case State::Value:
-                    switch (ch) {
-                        case ' ':
-                            line_.header_end = p;
-                            state = State::SpaceAfterValue;
-                            break;
-                        case '\r':
-                            line_.header_end = p;
-                            state = State::AlmostDone;
-                            break;
-                        case '\n':
-                            line_.header_end = p;
-                            goto done;
-                        case '\0':
-                            line_.header_end = p;
-                            return ParseCode::InvalidHeader;
-                        default:
-                            break;
-                    }
-                    break;
-
-                case State::SpaceAfterValue:
-                    switch (ch) {
-                        case ' ':
-                            break;
-                        case '\r':
-                            state = State::AlmostDone;
-                            break;
-                        case '\n':
-                            goto done;
-                        case '\0':
-                            line_.header_end = p;
-                            return ParseCode::InvalidHeader;
-                        default:
-                            state = State::Value;
-                            break;
-                    }
-                    break;
-
-                case State::IgnoreLine:
-                    if (ch == '\n') {
-                        state = State::Start;
-                    }
-                    break;
-
-                case State::AlmostDone:
-                    if (ch == '\n') {
-                        goto done;
-                    }
-                    return ParseCode::InvalidHeader;
-
-                case State::HeaderAlmostDone:
-                    if (ch == '\n') {
-                        goto header_done;
-                    }
-                    return ParseCode::InvalidHeader;
-            }
-        }
-
-        buffer->consume(static_cast<std::size_t>(p - begin));
-        state_ = state;
-        line_.header_hash = hash;
-        line_.lowcase_index = i;
-        return ParseCode::Again;
-
-    done:
-        buffer->consume(static_cast<std::size_t>((p + 1) - begin));
-        state_ = State::Start;
-        line_.header_hash = hash;
-        line_.lowcase_index = i;
-        return ParseCode::Ok;
-
-    header_done:
-        buffer->consume(static_cast<std::size_t>((p + 1) - begin));
-        state_ = State::Start;
-        return ParseCode::HeaderDone;
+    auto *begin = buffer->readable_data();
+    auto *end = buffer->writable_data();
+    if (!started_) {
+        line_ = HeaderLineState{};
+        fiber_http1_header_line_init(&parser_);
+        parser_.data = &line_;
+        line_.header_name_start = begin;
+        started_ = true;
     }
+
+    int code = fiber_http1_header_line_execute(&parser_, reinterpret_cast<const char *>(begin),
+                                               reinterpret_cast<const char *>(end));
+    if (code == 0) {
+        buffer->consume(static_cast<std::size_t>(end - begin));
+        return ParseCode::Again;
+    }
+
+    if (code == FIBER_HTTP1_HEADER_LINE_INVALID) {
+        auto *error_pos = reinterpret_cast<std::uint8_t *>(const_cast<char *>(parser_.error_pos));
+        if (line_.header_end == nullptr || (error_pos < end && *error_pos == '\0')) {
+            line_.header_end = error_pos;
+        }
+        return ParseCode::InvalidHeader;
+    }
+
+    FIBER_ASSERT(code == FIBER_HTTP1_HEADER_LINE_COMPLETE || code == FIBER_HTTP1_HEADER_LINE_HEADERS_COMPLETE);
+    auto *line_after = reinterpret_cast<std::uint8_t *>(const_cast<char *>(parser_.error_pos));
+    FIBER_ASSERT(begin < line_after && line_after <= end);
+    buffer->consume(static_cast<std::size_t>(line_after - begin));
+    started_ = false;
+    fiber_http1_header_line_init(&parser_);
+    parser_.data = &line_;
+    return code == FIBER_HTTP1_HEADER_LINE_COMPLETE ? ParseCode::Ok : ParseCode::HeaderDone;
 }
 
 void ChunkedBodyParser::reset() noexcept {
@@ -1493,3 +1337,73 @@ ParseCode BodyParser::execute(mem::IoBuf *buffer) noexcept {
 }
 
 } // namespace fiber::http
+
+int fiber_http1_header_line_on_name(fiber_http1_header_line_t *parser, const unsigned char *p,
+                                    const unsigned char *endp) {
+    auto *line = static_cast<fiber::http::HeaderLineParser::HeaderLineState *>(parser->data);
+    FIBER_ASSERT(line != nullptr);
+
+    std::uint32_t hash = line->header_hash;
+    std::uint32_t index = line->lowcase_index;
+    for (; p < endp; ++p) {
+        unsigned char lowercase = fiber::http::detail::kLowcase[*p];
+        if (lowercase != 0) {
+            hash = hash * 31 + lowercase;
+            line->lowcase_header[index++] = lowercase;
+            index &= fiber::http::HeaderLineParser::kLowcaseHeaderLen - 1;
+        } else if (*p == '_') {
+            hash = hash * 31 + *p;
+            line->lowcase_header[index++] = *p;
+            index &= fiber::http::HeaderLineParser::kLowcaseHeaderLen - 1;
+        } else {
+            line->invalid_header = true;
+        }
+    }
+    line->header_hash = hash;
+    line->lowcase_index = index;
+    return 0;
+}
+
+int fiber_http1_header_line_on_value(fiber_http1_header_line_t *parser, const unsigned char *p,
+                                     const unsigned char *endp) {
+    auto *line = static_cast<fiber::http::HeaderLineParser::HeaderLineState *>(parser->data);
+    FIBER_ASSERT(line != nullptr);
+
+    if (line->header_start == nullptr) {
+        line->header_start = reinterpret_cast<std::uint8_t *>(const_cast<unsigned char *>(p));
+    }
+    const unsigned char *value_end = endp;
+    while (value_end > p && value_end[-1] == ' ') {
+        --value_end;
+    }
+    if (value_end > p) {
+        line->header_end = reinterpret_cast<std::uint8_t *>(const_cast<unsigned char *>(value_end));
+    }
+    return 0;
+}
+
+int fiber_http1_header_line_on_name_end(fiber_http1_header_line_t *parser, const unsigned char *p,
+                                        const unsigned char *) {
+    auto *line = static_cast<fiber::http::HeaderLineParser::HeaderLineState *>(parser->data);
+    FIBER_ASSERT(line != nullptr);
+    line->header_name_end = reinterpret_cast<std::uint8_t *>(const_cast<unsigned char *>(p));
+    return 0;
+}
+
+int fiber_http1_header_line_on_empty_value(fiber_http1_header_line_t *parser, const unsigned char *p,
+                                           const unsigned char *) {
+    auto *line = static_cast<fiber::http::HeaderLineParser::HeaderLineState *>(parser->data);
+    FIBER_ASSERT(line != nullptr);
+    auto *position = reinterpret_cast<std::uint8_t *>(const_cast<unsigned char *>(p));
+    line->header_start = position;
+    line->header_end = position;
+    return 0;
+}
+
+int fiber_http1_header_line_on_header_end(fiber_http1_header_line_t *parser, const unsigned char *p,
+                                          const unsigned char *) {
+    auto *line = static_cast<fiber::http::HeaderLineParser::HeaderLineState *>(parser->data);
+    FIBER_ASSERT(line != nullptr);
+    line->header_end = reinterpret_cast<std::uint8_t *>(const_cast<unsigned char *>(p));
+    return 0;
+}

@@ -85,9 +85,7 @@ public:
                detail(key, {number.data(), static_cast<std::size_t>(result.ptr - number.data())});
     }
 
-    bool detail(std::string_view key, bool value) noexcept {
-        return detail(key, value ? std::string_view("true") : std::string_view("false"));
-    }
+    bool detail(std::string_view key, bool value) noexcept { return detail(key, static_cast<std::uint64_t>(value)); }
 
     bool decimal_detail(std::string_view key, double value) noexcept {
         if (!std::isfinite(value)) {
@@ -235,9 +233,7 @@ std::expected<mem::IoBuf, EncodeError> encode_heartbeat_nt1(const ClientEncodeCo
     std::array<char, kHeartbeatStorageCapacity> storage{};
     XmlWriter writer(storage.data(), max_data_bytes, max_fields);
     const CatClientStats &stats = info.stats;
-    if (!writer.text("<status><extension id=\"fiber2.cat\">") || !writer.detail("app.key", info.app_key) ||
-        !writer.detail("host.name", info.hostname) || !writer.detail("host.ip", info.ip) ||
-        !writer.detail("client.version", info.client_version) || !writer.detail("process.id", info.process_id) ||
+    if (!writer.text("<status><extension id=\"fiber2.cat\">") || !writer.detail("process.id", info.process_id) ||
         !writer.detail("process.start.millis", info.process_start_millis) ||
         !writer.detail("process.uptime.millis", info.uptime_millis) ||
         !writer.detail("event.loop.count", info.event_loop_count) ||

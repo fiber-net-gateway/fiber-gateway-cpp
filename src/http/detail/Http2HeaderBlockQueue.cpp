@@ -26,15 +26,7 @@ public:
     HeaderReadAwaiter(Http2HeaderBlockQueue &queue, std::chrono::milliseconds timeout) noexcept :
         queue_(&queue), timeout_(timeout) {}
 
-    ~HeaderReadAwaiter() {
-        if (!queue_) {
-            return;
-        }
-        queue_->cancel_waiter(this);
-        if (loop_ && timer_entry_.is_in_heap()) {
-            loop_->cancel<HeaderReadAwaiter, &HeaderReadAwaiter::timer_entry_>(*this);
-        }
-    }
+    ~HeaderReadAwaiter() { cleanup(); }
 
     bool await_ready() noexcept {
         if (!queue_) {
@@ -86,11 +78,7 @@ public:
             result = queue_->poll();
             FIBER_ASSERT(result.kind != PollResult::Kind::Wait);
         }
-        queue_ = nullptr;
-        loop_ = nullptr;
-        handle_ = {};
-        timed_out_ = false;
-        resume_posted_ = false;
+        cleanup();
         return result;
     }
 
@@ -111,7 +99,16 @@ private:
         if (awaiter->queue_ && awaiter->queue_->waiter_ == awaiter) {
             awaiter->queue_->waiter_ = nullptr;
         }
-        awaiter->resume();
+        awaiter->post_resume();
+    }
+
+    void post_resume() noexcept {
+        if (!loop_ || resume_posted_) {
+            return;
+        }
+        FIBER_ASSERT(loop_->in_loop());
+        resume_posted_ = true;
+        loop_->post_local<HeaderReadAwaiter, &HeaderReadAwaiter::resume_entry_, &HeaderReadAwaiter::on_notify>(*this);
     }
 
     void resume() noexcept {
@@ -122,6 +119,25 @@ private:
         }
     }
 
+    void cleanup() noexcept {
+        if (queue_) {
+            queue_->cancel_waiter(this);
+        }
+        if (loop_) {
+            if (timer_entry_.is_in_heap()) {
+                loop_->cancel<HeaderReadAwaiter, &HeaderReadAwaiter::timer_entry_>(*this);
+            }
+            if (resume_entry_.is_in_queue()) {
+                loop_->cancel<HeaderReadAwaiter, &HeaderReadAwaiter::resume_entry_>(*this);
+            }
+        }
+        queue_ = nullptr;
+        loop_ = nullptr;
+        handle_ = {};
+        timed_out_ = false;
+        resume_posted_ = false;
+    }
+
     [[nodiscard]] bool has_timer() const noexcept {
         return timeout_.count() > 0 && timeout_ != std::chrono::milliseconds::max();
     }
@@ -130,7 +146,7 @@ private:
     std::chrono::milliseconds timeout_{};
     fiber::event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
-    fiber::event::EventLoop::NotifyEntry notify_entry_{};
+    fiber::event::EventLoop::DeferEntry resume_entry_{};
     fiber::event::EventLoop::TimerEntry timer_entry_{};
     bool timed_out_ = false;
     bool resume_posted_ = false;
@@ -239,11 +255,10 @@ void Http2HeaderBlockQueue::cancel_waiter(HeaderReadAwaiter *awaiter) noexcept {
 }
 
 void Http2HeaderBlockQueue::notify_waiter() noexcept {
-    if (!waiter_ || waiter_->resume_posted_ || waiter_->loop_ == nullptr) {
+    if (!waiter_) {
         return;
     }
-    waiter_->resume_posted_ = true;
-    waiter_->loop_->post<HeaderReadAwaiter, &HeaderReadAwaiter::notify_entry_, &HeaderReadAwaiter::on_notify>(*waiter_);
+    waiter_->post_resume();
 }
 
 } // namespace fiber::http::detail

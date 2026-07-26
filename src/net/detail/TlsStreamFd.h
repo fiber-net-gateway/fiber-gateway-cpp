@@ -40,12 +40,15 @@ public:
     [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
+    [[nodiscard]] bool terminal() const noexcept { return stream_fd_.terminal(); }
     void close();
 
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
 
     [[nodiscard]] IoTask read(void *buf, size_t len,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -69,6 +72,7 @@ private:
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr write_once(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
+    fiber::common::IoErr fail_terminal(fiber::common::IoErr error) noexcept;
 
     StreamFd stream_fd_;
     SSL *ssl_ = nullptr;

@@ -1,0 +1,31 @@
+$ORIGIN dns-bench.test.
+$TTL 300
+
+@ IN SOA ns.dns-bench.test. hostmaster.dns-bench.test. (
+    2026072401 ; serial
+    1          ; refresh
+    1          ; retry
+    30         ; expire
+    1          ; negative TTL
+)
+
+@ 300 IN NS ns.dns-bench.test.
+ns 300 IN A 127.0.0.53
+
+backend-long 300 IN A 127.0.0.1
+backend-short 1 IN A 127.0.0.1
+backend-switch 1 IN A 127.0.0.1
+
+; Stop backend B to make the first address fail and exercise address fallback.
+backend-fallback 1 IN A 127.0.0.2
+backend-fallback 1 IN A 127.0.0.1
+
+cname-1 1 IN CNAME backend-long.dns-bench.test.
+cname-2 1 IN CNAME cname-1.dns-bench.test.
+cname-3 1 IN CNAME cname-2.dns-bench.test.
+cname-4 1 IN CNAME cname-3.dns-bench.test.
+cname-5 1 IN CNAME cname-4.dns-bench.test.
+cname-6 1 IN CNAME cname-5.dns-bench.test.
+cname-7 1 IN CNAME cname-6.dns-bench.test.
+cname-8 1 IN CNAME cname-7.dns-bench.test.
+cname-9 1 IN CNAME cname-8.dns-bench.test.
