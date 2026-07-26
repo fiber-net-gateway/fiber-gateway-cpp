@@ -21,7 +21,9 @@
 - 延迟绑定、请求排空和跨 EventLoop 有序关闭。
 
 完整设计见 [`docs/architecture.md`](docs/architecture.md)，JSON 字段能力见
-[`docs/json-field-transform.md`](docs/json-field-transform.md)。
+[`docs/json-field-transform.md`](docs/json-field-transform.md)。配置控制台的前端需求、
+交互、配置后台接口和发布模型见
+[`docs/config-console-requirements.md`](docs/config-console-requirements.md)。
 
 ## 路由
 
