@@ -17,7 +17,7 @@
 - 单次遍历 JSONPath 抽取、任意已存在字段的原始区间改写，以及 ai-server
   `model`/`stream` 重试快路径；
 - 集群 token 限流、内部 check/settle 协议和 Nacos 成员环；
-- 固定 schema Prometheus 指标、无正文审计日志和可选 CAT transaction；
+- 固定 schema Prometheus 指标、专用对话审计日志和可选 CAT transaction；
 - 延迟绑定、请求排空和跨 EventLoop 有序关闭。
 
 完整设计见 [`docs/architecture.md`](docs/architecture.md)，JSON 字段能力见
@@ -78,7 +78,6 @@ LLM 审计：
 
 - `AI_SERVER_AUDIT_LOG_PATH`：默认 `ai-server-audit.ndjson`；
 - `AI_SERVER_AUDIT_MAX_RECORD_BYTES`：默认 128 MiB；
-- `AI_SERVER_AUDIT_MAX_PENDING_RECORDS`：默认 256；
 - `AI_SERVER_AUDIT_ROTATE_BYTES`：默认 1 GiB，`0` 禁用轮转；
 - `AI_SERVER_AUDIT_MAX_ARCHIVES`：默认 30。
 
@@ -169,8 +168,10 @@ ai-server 在静态初始化边界编译 OpenAI/Anthropic 路径。请求只解�
 
 常规运行日志固定输出 stderr/INFO，主要 category 为 `ai_server.lifecycle`、
 `ai_server.config`、`ai_server.http`、`ai_server.llm` 和 `ai_server.rate_limit`。
-LLM 对话审计不经过 stderr logger，而由独立 EventLoop 线程写入专用 NDJSON 文件；
-文件以 `0600` 打开，每个完成的请求严格对应一条无前缀 JSON 记录。
+LLM 对话审计使用独立的 `ai_server.audit` logger，不向 stderr 传播。请求 worker
+直接生成 JSON 并构造一条 `audit_json=<json>` 日志记录，随后投递给进程共享的异步
+日志线程；文件中的每行因此是常规日志前缀加稳定标记 `audit_json=` 和一个完整 JSON，
+采集端应从该标记后解析 JSON。
 
 当前审计 schema 为 `schema_version=3`。`request.body` 是入站 body 的唯一完整副本：
 合法 UTF-8 以 `body_encoding=json_text` 保存，非法 UTF-8 以 base64 保存；图片 URL、
@@ -182,14 +183,17 @@ usage 等信息与它位于同一对象。
 同步和 SSE 共用同一个 `llm.output` 聚合器。SSE delta 在转发前依次追加，最终
 `role/content/tool_names/tool_arguments/finish_reason` 的形态与同步响应一致；
 `complete` 表示 Provider 流完整结束，`canonical_complete` 还要求解析和聚合均成功。
-内容不做截断。记录超过 `AI_SERVER_AUDIT_MAX_RECORD_BYTES`、队列满、分配失败或 writer
-不健康时会 fail closed：网关不会继续发起或成功交付一段无法完整审计的模型对话。
+内容不做截断。审计是 best effort：记录超过 `AI_SERVER_AUDIT_MAX_RECORD_BYTES`、
+内存分配/JSON 生成失败、日志 backlog 满或文件写入失败时，丢弃受影响的审计记录，
+不会改变 HTTP 状态、Provider 调用、同步正文或 SSE 转发结果。ai-server 把日志系统
+配置为 `DropNewest`，请求线程不等待日志容量，也不读取投递结果。
 
-writer 只在记录边界轮转，绝不拆分一条 JSON；启动时会删除活动文件末尾由崩溃留下的
-不完整行，优雅停机则先排空 HTTP 请求，再 drain 全部已提交记录。Authorization、
-Provider token 值、BT1 secret 和 Nacos 凭据不会作为独立字段写入，但完整 request
-body 和模型输出本身可能包含任意业务秘密，生产环境必须严格限制文件读取、采集、
-传输和保留权限。
+审计 FileAppender 只在记录边界轮转，绝不拆分一条日志；启动和 reopen 时会删除活动
+文件末尾由崩溃留下的不完整行。文件拒绝符号链接和非普通文件，并强制为 `0600`。
+优雅停机先排空 HTTP 请求和业务 EventLoop，再由日志系统 drain 全部已提交记录。
+Authorization、Provider token 值、BT1 secret 和 Nacos 凭据不会作为独立字段写入，
+但完整 request body 和模型输出本身可能包含任意业务秘密，生产环境必须严格限制文件
+读取、采集、传输和保留权限。
 
 `usage` 将两种协议统一为 `in_cache`、`in_nocache`、`out` 和派生的
 `total_tokens`。OpenAI 的 `in_cache` 来自 `cached_tokens`，`in_nocache` 为
@@ -209,6 +213,12 @@ Prometheus 输出两个累计 Counter family：
 原始 model 或 token 名放入 label。请求和 Provider 尝试继续生成 CAT transaction，
 但 Provider 尝试不额外写独立的 audit 日志行。
 
+审计指标区分请求线程生成与日志线程写入：`ai_server_audit_generated_records_total`、
+`ai_server_audit_generation_failures_total`、`ai_server_audit_capture_incomplete_total`，
+以及 written records/bytes、dropped records、write/reopen/rotation/retention failures
+和 active file bytes。它们用于发现 best-effort 审计缺口，不参与请求成功判定或
+`/ready`。
+
 ## 所有权与关闭
 
 - accept EventLoop 拥有 listener；
@@ -217,11 +227,11 @@ Prometheus 输出两个累计 Counter family：
   `username + model` 在多 worker 下只有一份状态；
 - Nacos EventLoop 拥有 client、config/naming service、配置图、实例注册和成员订阅；
 - 可选 CAT EventLoop 独占 sender；
-- audit EventLoop 是审计文件的唯一 writer。
+- 进程共享的 log EventLoop 是 stderr 和审计文件的唯一正常写入者。
 
 收到 `SIGINT` 或 `SIGTERM` 后，进程依次停止 listener/排空 HTTP、等待 metrics 和
-限流结算、关闭 Provider pool/DNS、排空并关闭审计 writer、停止 CAT、注销成员并
-关闭配置/Nacos 服务，最后停止各 EventLoopGroup。
+限流结算、关闭 Provider pool/DNS、停止 CAT、注销成员并关闭配置/Nacos 服务，停止
+各业务 EventLoopGroup，最后由日志系统排空并关闭共享 log worker。
 
 ## 测试
 

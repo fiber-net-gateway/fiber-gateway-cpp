@@ -1,7 +1,6 @@
 #ifndef FIBER_AI_SERVER_METRICS_H
 #define FIBER_AI_SERVER_METRICS_H
 
-#include "../audit/LlmAuditWriter.h"
 #include "../limit/TokenRateLimiter.h"
 #include "../protocol/TokenUsage.h"
 
@@ -24,6 +23,7 @@
 #include <fiber/prometheus/Histogram.h>
 #include <fiber/prometheus/MetricsRegistry.h>
 #include <http/HttpExchange.h>
+#include <log/Appender.h>
 
 namespace fiber::ai_server {
 
@@ -67,6 +67,9 @@ public:
         void rate_limit_check(RateLimitCheckMetric result) noexcept;
         void rate_limit_settle(RateLimitSettleMetric result) noexcept;
         void sse_failure(LlmWireProtocol protocol) noexcept;
+        void audit_generated() noexcept;
+        void audit_generation_failed() noexcept;
+        void audit_capture_incomplete() noexcept;
         void token_usage(std::string_view username, std::string_view provider_name, LlmWireProtocol protocol,
                          const LlmTokenUsage &usage) noexcept;
 
@@ -86,6 +89,9 @@ public:
         std::array<prometheus::CounterRef, static_cast<std::size_t>(RateLimitCheckMetric::Count)> rate_limit_checks_;
         std::array<prometheus::CounterRef, static_cast<std::size_t>(RateLimitSettleMetric::Count)> rate_limit_settles_;
         std::array<prometheus::CounterRef, kProtocolCount> sse_failures_;
+        prometheus::CounterRef audit_generated_;
+        prometheus::CounterRef audit_generation_failures_;
+        prometheus::CounterRef audit_capture_incomplete_;
         std::unique_ptr<WorkerTokenUsageCache> token_usage_cache_;
         AiServerMetrics *owner_ = nullptr;
     };
@@ -99,7 +105,7 @@ public:
     void set_config_generation(std::uint64_t generation) noexcept;
     [[nodiscard]] async::Task<common::IoResult<mem::IoBufChain>>
     collect(mem::IoBufNodePool &node_pool, TokenRateLimiterStats limiter_stats, std::size_t cluster_nodes,
-            const LlmAuditWriterStats *audit_stats = nullptr) noexcept;
+            const log::AppenderStats *audit_stats = nullptr) noexcept;
 
     void stop_collecting() noexcept;
     [[nodiscard]] async::Task<void> wait_for_idle() noexcept;

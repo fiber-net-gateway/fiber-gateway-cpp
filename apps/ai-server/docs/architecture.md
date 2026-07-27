@@ -53,6 +53,10 @@ Nacos EventLoop
 
 CAT EventLoop
 └── CatClient sender ownership
+
+log EventLoop
+├── stderr Appender
+└── audit FileAppender
 ```
 
 核心约束：
@@ -67,7 +71,7 @@ CAT EventLoop
 - 请求 pin 住进入时的配置快照，刷新不改变执行中的认证、授权、限流规则和
   Provider 集合；
 - shutdown 顺序为 listener/drain -> metrics/limit/provider runtime -> CAT ->
-  config manager/registration -> Nacos services -> EventLoopGroup。
+  config manager/registration -> Nacos services -> 业务 EventLoopGroup -> log drain。
 
 ## 3. 入口流水线
 
@@ -86,7 +90,7 @@ LLM 入口严格按以下顺序：
 11. 每次尝试从原始正文改写上游模型、调用 Provider；
 12. 仅在响应尚未开始且错误可重试时进入下一尝试；
 13. 成功响应提取 usage，并提交 tracked best-effort 限流 settle；
-14. 写回同步响应或转发 SSE，提交审计、指标和 CAT transaction。
+14. 写回同步响应或转发 SSE，best-effort 提交审计，并完成指标和 CAT transaction。
 
 没有有效 BT1 的错误优先于 405/415。Content-Length 已知且大于上限时不读取正文即
 返回 413；chunked/未知长度在累计读取时执行同一上限。
@@ -230,8 +234,10 @@ owner，settle 用 ticket 回到同一版本状态。远端调用 64 KiB 内部 
 和是否可重试。序列化器按入站协议生成 OpenAI 或 Anthropic 外观，绝不把 C++ 错误、
 Provider token、BT1 token 或配置 secret 写入响应。
 
-请求审计由请求级 RAII owner 聚合。请求结束时把 `schema_version=3` 对象编码成一条
-无日志前缀的 NDJSON 记录，再提交给独立 audit EventLoop；该线程是文件的唯一 writer。
+请求审计由请求级 RAII owner 聚合。请求结束时，当前 HTTP worker 把
+`schema_version=3` 对象直接编码到一条 `ai_server.audit` 日志记录中，消息格式为
+`audit_json=<json>`。记录随后提交给进程共享的 log EventLoop，该线程是 stderr 和
+审计文件的唯一正常 writer；审计 logger 关闭 additive，不会复制到 stderr。
 同一对象包含：
 
 - audit ID、采集是否完整及稳定的采集错误；
@@ -256,17 +262,24 @@ CAT `LLMTokenUsage` 子 Event。
 request body 只写一次，不再构造或输出 `llm.input.prompt_parts`。UTF-8 body 作为
 JSON string 保留原始字节，非 UTF-8 body 使用 base64；因此多模态 URL、base64 和音频
 字段也属于完整审计内容。同步/流式输出不截断；stream delta 在转发给客户端之前追加，
-聚合形态与同步 `llm.output` 一致。记录上限、内存分配、队列准入或磁盘 writer 失败时
-fail closed，不允许继续产生一段无法完整审计的 LLM 对话。
+聚合形态与同步 `llm.output` 一致。记录上限、内存分配、JSON 生成、日志准入或磁盘
+writer 失败时只丢弃对应审计并增加指标，不改变认证、路由、Provider 调用、HTTP
+状态、同步正文或 SSE 字节。日志系统使用 `DropNewest`，请求线程不等待 backlog，
+也不读取投递结果。
 
-专用文件以 `0600` 和 append 模式打开；writer 仅在记录之间轮转，进程启动时截掉
-活动文件末尾的不完整 NDJSON 行，停机时在 HTTP drain 之后等待全部已提交记录落盘。
+专用文件以 `0600` 和 append 模式打开，拒绝符号链接和非普通文件；FileAppender
+仅在记录之间轮转，进程启动和 reopen 时截掉活动文件末尾的不完整行，停机时在业务
+EventLoop 全部结束后 drain 已提交记录。文件中的每行带常规日志前缀，采集端从稳定的
+`audit_json=` 标记后解析 JSON。
 Authorization、Provider token 值、BT1 token 和配置 secret 不作为独立字段输出，
 但 body/prompt/模型输出本身可能携带任意业务敏感信息，部署必须设置严格的读取、
 采集、传输和保留策略。
 
 Prometheus 的常规运行指标继续使用固定低基数 label，包含请求数/延迟/在途、
 Provider 尝试与失败、重试、熔断、限流准入/拒绝/settle、配置代际和 SSE 中途失败。
+审计另有 generated/generation failure/capture incomplete，以及 FileAppender 的
+written/dropped/write/reopen/rotation/retention/active-bytes 指标，用于观测
+best-effort 链路，不作为请求或 readiness 条件。
 token usage 另有两个累计 Counter family：
 `ai_server_user_token_usage_total{username,token_type}` 和
 `ai_server_provider_token_usage_total{provider_name,protocol,token_type}`，
@@ -276,8 +289,8 @@ token usage 另有两个累计 Counter family：
 轻量消息。
 
 listener 只在完整首个配置安装到所有 worker 后绑定；服务注册和初始本机限流节点
-建立后才启动 accept。`/ready` 还会实时检查配置快照、非空成员环和 audit writer；
-任一条件失效时返回 503，限流与审计准入均 fail closed。
+建立后才启动 accept。`/ready` 实时检查配置快照和非空成员环；审计运行状态不影响
+readiness。
 
 ## 10. 完成标准
 

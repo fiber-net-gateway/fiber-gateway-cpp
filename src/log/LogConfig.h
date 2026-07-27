@@ -79,6 +79,10 @@ struct FileAppenderOptions {
     LogLevel min_level = LogLevel::Trace;
     LogLevel max_level = LogLevel::Fatal;
     std::optional<FileRotationOptions> rotation;
+    bool no_follow = false;
+    bool regular_file_only = false;
+    bool enforce_file_mode = false;
+    bool truncate_incomplete_tail = false;
 };
 
 struct ConsoleAppenderOptions {

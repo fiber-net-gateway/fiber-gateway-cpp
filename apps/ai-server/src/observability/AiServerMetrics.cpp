@@ -332,6 +332,12 @@ void AiServerMetrics::Worker::sse_failure(LlmWireProtocol protocol) noexcept {
     sse_failures_[protocol_index(protocol)].inc();
 }
 
+void AiServerMetrics::Worker::audit_generated() noexcept { audit_generated_.inc(); }
+
+void AiServerMetrics::Worker::audit_generation_failed() noexcept { audit_generation_failures_.inc(); }
+
+void AiServerMetrics::Worker::audit_capture_incomplete() noexcept { audit_capture_incomplete_.inc(); }
+
 void AiServerMetrics::Worker::token_usage(std::string_view username, std::string_view provider_name,
                                           LlmWireProtocol protocol, const LlmTokenUsage &usage) noexcept {
     FIBER_ASSERT(owner_ != nullptr);
@@ -377,8 +383,22 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                                                    "Token rate limit settlements.", kResultLabel);
     auto sse_failures = registry_.register_counter("ai_server_sse_failures_total", "SSE failures after response start.",
                                                    kProtocolLabel);
+    auto audit_generated =
+            registry_.register_counter("ai_server_audit_generated_records_total", "LLM audit records generated.");
+    auto audit_generation_failures = registry_.register_counter("ai_server_audit_generation_failures_total",
+                                                                "LLM audit records discarded during generation.");
+    auto audit_capture_incomplete = registry_.register_counter(
+            "ai_server_audit_capture_incomplete_total", "LLM audit records with incomplete request observations.");
     if (!requests || !duration || !inflight || !provider_attempts || !provider_failures || !provider_retries ||
-        !provider_circuit_opens || !rate_checks || !rate_settles || !sse_failures) {
+        !provider_circuit_opens || !rate_checks || !rate_settles || !sse_failures || !audit_generated ||
+        !audit_generation_failures || !audit_capture_incomplete) {
+        return false;
+    }
+
+    auto audit_generated_series = registry_.register_series(*audit_generated);
+    auto audit_generation_failure_series = registry_.register_series(*audit_generation_failures);
+    auto audit_capture_incomplete_series = registry_.register_series(*audit_capture_incomplete);
+    if (!audit_generated_series || !audit_generation_failure_series || !audit_capture_incomplete_series) {
         return false;
     }
 
@@ -464,6 +484,15 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         }
         Worker &worker = workers_[worker_index];
         worker.owner_ = this;
+        auto audit_generated_value = shard->counter(*audit_generated_series);
+        auto audit_generation_failure_value = shard->counter(*audit_generation_failure_series);
+        auto audit_capture_incomplete_value = shard->counter(*audit_capture_incomplete_series);
+        if (!audit_generated_value || !audit_generation_failure_value || !audit_capture_incomplete_value) {
+            return false;
+        }
+        worker.audit_generated_ = *audit_generated_value;
+        worker.audit_generation_failures_ = *audit_generation_failure_value;
+        worker.audit_capture_incomplete_ = *audit_capture_incomplete_value;
         for (std::size_t protocol = 0; protocol < kProtocolNames.size(); ++protocol) {
             for (std::size_t result = 0; result < kRequestResults.size(); ++result) {
                 auto value = shard->counter(request_series[protocol][result]);
@@ -531,7 +560,7 @@ void AiServerMetrics::set_config_generation(std::uint64_t generation) noexcept {
 
 async::Task<common::IoResult<mem::IoBufChain>>
 AiServerMetrics::collect(mem::IoBufNodePool &node_pool, TokenRateLimiterStats limiter_stats, std::size_t cluster_nodes,
-                         const LlmAuditWriterStats *audit_stats) noexcept {
+                         const log::AppenderStats *audit_stats) noexcept {
     auto collected = co_await registry_.collect_text(node_pool, prometheus::CollectOptions{
                                                                         .max_output_bytes = kMaxMetricsOutputBytes,
                                                                 });
@@ -550,25 +579,24 @@ AiServerMetrics::collect(mem::IoBufNodePool &node_pool, TokenRateLimiterStats li
         !token_usage_store_->append_text(output)) {
         co_return std::unexpected(output.error());
     }
-    if (audit_stats &&
-        (!append_counter(output, "ai_server_audit_submitted_records_total", "LLM audit records submitted.",
-                         audit_stats->submitted_records) ||
-         !append_counter(output, "ai_server_audit_written_records_total", "LLM audit records written.",
-                         audit_stats->written_records) ||
-         !append_counter(output, "ai_server_audit_written_bytes_total", "LLM audit bytes written.",
-                         audit_stats->written_bytes) ||
-         !append_counter(output, "ai_server_audit_write_failures_total", "LLM audit write failures.",
-                         audit_stats->write_failures) ||
-         !append_counter(output, "ai_server_audit_rotations_total", "LLM audit log rotations.",
-                         audit_stats->rotations) ||
-         !append_counter(output, "ai_server_audit_rotation_failures_total", "LLM audit rotation failures.",
-                         audit_stats->rotation_failures) ||
-         !append_counter(output, "ai_server_audit_admission_rejections_total", "LLM audit admission rejections.",
-                         audit_stats->admission_rejections) ||
-         !append_gauge(output, "ai_server_audit_outstanding_records", "LLM audit records retained or queued.",
-                       audit_stats->outstanding_records) ||
-         !append_gauge(output, "ai_server_audit_healthy", "Whether the LLM audit writer accepts requests.",
-                       audit_stats->healthy ? 1 : 0))) {
+    if (audit_stats && (!append_counter(output, "ai_server_audit_written_records_total", "LLM audit records written.",
+                                        audit_stats->written_records) ||
+                        !append_counter(output, "ai_server_audit_written_bytes_total", "LLM audit bytes written.",
+                                        audit_stats->written_bytes) ||
+                        !append_counter(output, "ai_server_audit_dropped_records_total", "LLM audit records dropped.",
+                                        audit_stats->dropped_records) ||
+                        !append_counter(output, "ai_server_audit_write_failures_total", "LLM audit write failures.",
+                                        audit_stats->write_errors) ||
+                        !append_counter(output, "ai_server_audit_rotations_total", "LLM audit log rotations.",
+                                        audit_stats->rotations) ||
+                        !append_counter(output, "ai_server_audit_rotation_failures_total",
+                                        "LLM audit rotation failures.", audit_stats->rotation_errors) ||
+                        !append_counter(output, "ai_server_audit_reopen_failures_total", "LLM audit reopen failures.",
+                                        audit_stats->reopen_errors) ||
+                        !append_counter(output, "ai_server_audit_retention_failures_total",
+                                        "LLM audit retention failures.", audit_stats->retention_errors) ||
+                        !append_gauge(output, "ai_server_audit_active_file_bytes", "Current LLM audit file size.",
+                                      audit_stats->active_file_bytes))) {
         co_return std::unexpected(output.error());
     }
     co_return std::move(*collected);

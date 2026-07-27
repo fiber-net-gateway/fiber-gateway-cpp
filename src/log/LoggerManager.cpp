@@ -327,6 +327,14 @@ bool LoggerManager::submit(OwnedLogRecord *record) noexcept {
     }
     if (record->failed()) {
         record_allocation_failure();
+        if (runtime_) {
+            for (std::uint32_t i = 0; i < record->target_count(); ++i) {
+                const AppenderId id = record->targets()[i];
+                if (id < runtime_->appenders.size()) {
+                    runtime_->appenders[id]->record_drop();
+                }
+            }
+        }
         delete record;
         return false;
     }
@@ -336,6 +344,12 @@ bool LoggerManager::submit(OwnedLogRecord *record) noexcept {
         return success;
     }
     if (!runtime_->worker->backlog().admit(*record)) {
+        for (std::uint32_t i = 0; i < record->target_count(); ++i) {
+            const AppenderId id = record->targets()[i];
+            if (id < runtime_->appenders.size()) {
+                runtime_->appenders[id]->record_drop();
+            }
+        }
         delete record;
         return false;
     }

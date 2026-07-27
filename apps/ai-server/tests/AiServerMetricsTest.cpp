@@ -15,7 +15,6 @@ namespace {
 
 using namespace std::chrono_literals;
 using fiber::ai_server::AiServerMetrics;
-using fiber::ai_server::LlmAuditWriterStats;
 using fiber::ai_server::LlmTokenUsage;
 using fiber::ai_server::LlmWireProtocol;
 using fiber::ai_server::RateLimitCheckMetric;
@@ -41,6 +40,9 @@ fiber::async::DetachedTask record_worker_metrics(AiServerMetrics::Worker *worker
     worker->rate_limit_check(RateLimitCheckMetric::Allowed);
     worker->rate_limit_settle(RateLimitSettleMetric::Usage);
     worker->sse_failure(protocol);
+    worker->audit_generated();
+    worker->audit_generation_failed();
+    worker->audit_capture_incomplete();
     const LlmTokenUsage usage =
             protocol == LlmWireProtocol::OpenAiChatCompletions
                     ? LlmTokenUsage{
@@ -63,16 +65,16 @@ fiber::async::DetachedTask record_worker_metrics(AiServerMetrics::Worker *worker
 
 fiber::async::DetachedTask collect_metrics(AiServerMetrics *metrics,
                                            std::promise<fiber::common::IoResult<std::string>> *done) noexcept {
-    const LlmAuditWriterStats audit_stats{
-            .submitted_records = 17,
+    const fiber::log::AppenderStats audit_stats{
             .written_records = 13,
             .written_bytes = 4096,
-            .write_failures = 2,
+            .dropped_records = 4,
+            .write_errors = 2,
+            .reopen_errors = 5,
             .rotations = 3,
-            .rotation_failures = 1,
-            .admission_rejections = 4,
-            .outstanding_records = 4,
-            .healthy = true,
+            .rotation_errors = 1,
+            .retention_errors = 6,
+            .active_file_bytes = 2048,
     };
     auto collected = co_await metrics->collect(fiber::event::EventLoop::current().io_buf_node_pool(),
                                                fiber::ai_server::TokenRateLimiterStats{
@@ -157,15 +159,18 @@ TEST(AiServerMetricsTest, AggregatesRuntimeAndDynamicTokenUsageMetrics) {
     EXPECT_NE(result->find("ai_server_rate_limit_entries 3"), std::string::npos);
     EXPECT_NE(result->find("ai_server_rate_limit_inflight 1"), std::string::npos);
     EXPECT_NE(result->find("ai_server_rate_limit_cluster_nodes 2"), std::string::npos);
-    EXPECT_NE(result->find("ai_server_audit_submitted_records_total 17"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_audit_generated_records_total 2"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_audit_generation_failures_total 2"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_audit_capture_incomplete_total 2"), std::string::npos);
     EXPECT_NE(result->find("ai_server_audit_written_records_total 13"), std::string::npos);
     EXPECT_NE(result->find("ai_server_audit_written_bytes_total 4096"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_audit_dropped_records_total 4"), std::string::npos);
     EXPECT_NE(result->find("ai_server_audit_write_failures_total 2"), std::string::npos);
     EXPECT_NE(result->find("ai_server_audit_rotations_total 3"), std::string::npos);
     EXPECT_NE(result->find("ai_server_audit_rotation_failures_total 1"), std::string::npos);
-    EXPECT_NE(result->find("ai_server_audit_admission_rejections_total 4"), std::string::npos);
-    EXPECT_NE(result->find("ai_server_audit_outstanding_records 4"), std::string::npos);
-    EXPECT_NE(result->find("ai_server_audit_healthy 1"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_audit_reopen_failures_total 5"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_audit_retention_failures_total 6"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_audit_active_file_bytes 2048"), std::string::npos);
 
     std::promise<void> stopped;
     auto stopped_future = stopped.get_future();

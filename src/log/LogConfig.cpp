@@ -151,6 +151,10 @@ LogConfigResult<AppenderId> LogConfigBuilder::add_file_appender(FileAppenderOpti
     if (options.flush_interval.count() < 0) {
         return std::unexpected(make_error(LogConfigErrorCode::InvalidBufferOptions, "negative flush interval"));
     }
+    if (options.truncate_incomplete_tail && (!options.regular_file_only || options.buffer_size != 0)) {
+        return std::unexpected(make_error(LogConfigErrorCode::InvalidBufferOptions,
+                                          "incomplete-tail recovery requires an unbuffered regular file"));
+    }
     if (options.buffer_size > static_cast<std::size_t>(std::numeric_limits<ssize_t>::max())) {
         return std::unexpected(make_error(LogConfigErrorCode::InvalidBufferOptions, "buffer size exceeds write limit"));
     }

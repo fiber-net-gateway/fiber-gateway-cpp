@@ -41,7 +41,6 @@ CAT_ROUTER_ADDRESSES=127.0.0.10:8080,[2001:db8::10]:8081
 CAT_COLLECTOR_ADDRESSES=127.0.0.11:2280
 AI_SERVER_AUDIT_LOG_PATH=/tmp/custom-ai-audit.ndjson
 AI_SERVER_AUDIT_MAX_RECORD_BYTES=67108864
-AI_SERVER_AUDIT_MAX_PENDING_RECORDS=64
 AI_SERVER_AUDIT_ROTATE_BYTES=268435456
 AI_SERVER_AUDIT_MAX_ARCHIVES=7
 AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
@@ -76,11 +75,10 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
     EXPECT_EQ(result->cat_config()->routers()[1].host, "2001:db8::10");
     ASSERT_EQ(result->cat_config()->bootstrap_collectors().size(), 1u);
     EXPECT_EQ(result->cat_config()->bootstrap_collectors()[0].to_string(), "127.0.0.11:2280");
-    EXPECT_EQ(result->audit_writer_options().path, "/tmp/custom-ai-audit.ndjson");
-    EXPECT_EQ(result->audit_writer_options().max_record_bytes, 67108864u);
-    EXPECT_EQ(result->audit_writer_options().max_pending_records, 64u);
-    EXPECT_EQ(result->audit_writer_options().rotate_bytes, 268435456u);
-    EXPECT_EQ(result->audit_writer_options().max_archives, 7u);
+    EXPECT_EQ(result->audit_log_options().path, "/tmp/custom-ai-audit.ndjson");
+    EXPECT_EQ(result->audit_log_options().max_record_bytes, 67108864u);
+    EXPECT_EQ(result->audit_log_options().rotate_bytes, 268435456u);
+    EXPECT_EQ(result->audit_log_options().max_archives, 7u);
 }
 
 TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
@@ -98,7 +96,7 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_EQ(result->service_name(), "ploto-ai-server");
     EXPECT_EQ(result->service_group(), "DEFAULT_GROUP");
     EXPECT_FALSE(result->cat_config());
-    EXPECT_EQ(result->audit_writer_options().path, "ai-server-audit.ndjson");
+    EXPECT_EQ(result->audit_log_options().path, "ai-server-audit.ndjson");
 }
 
 TEST(AiServerConfigTest, RequiresNacosServerAddresses) {
@@ -194,10 +192,9 @@ TEST(AiServerRuntimeTest, CreateDoesNotBindListener) {
     fiber::event::EventLoop accept_loop;
     fiber::event::EventLoop nacos_loop;
     fiber::event::EventLoop cat_loop;
-    fiber::event::EventLoop audit_loop;
     fiber::event::EventLoopGroup workers(1);
-    auto runtime =
-            fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_loop, cat_loop, audit_loop, workers, *config);
+    auto runtime = fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_loop, cat_loop, workers, *config,
+                                                             fiber::log::kInvalidAppenderId);
 
     ASSERT_TRUE(runtime);
     EXPECT_EQ((*runtime)->state(), fiber::ai_server::AiServerRuntimeState::Created);

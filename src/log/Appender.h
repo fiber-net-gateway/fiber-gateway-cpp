@@ -117,6 +117,10 @@ private:
     };
 
     [[nodiscard]] bool initialize_rotation(int &system_error) noexcept;
+    [[nodiscard]] int open_flags() const noexcept;
+    [[nodiscard]] bool validate_open_file(int fd, std::uint64_t &active_bytes, int &system_error) const noexcept;
+    [[nodiscard]] bool recover_incomplete_tail(int fd, std::uint64_t file_size, std::uint64_t &active_bytes,
+                                               int &system_error) const noexcept;
     [[nodiscard]] bool should_rotate(std::size_t incoming_size) const noexcept;
     [[nodiscard]] bool rotate() noexcept;
     void cleanup_archives(std::chrono::steady_clock::time_point now) noexcept;
@@ -132,6 +136,10 @@ private:
     std::size_t buffer_size_ = 0;
     std::chrono::milliseconds flush_interval_{0};
     std::optional<FileRotationOptions> rotation_;
+    bool no_follow_ = false;
+    bool regular_file_only_ = false;
+    bool enforce_file_mode_ = false;
+    bool truncate_incomplete_tail_ = false;
     std::vector<ArchiveEntry> archives_;
     std::chrono::steady_clock::time_point rotation_retry_after_{};
     std::chrono::steady_clock::time_point cleanup_retry_after_{};

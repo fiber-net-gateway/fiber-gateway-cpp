@@ -12,6 +12,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
@@ -530,6 +531,111 @@ TEST(LogSystemTest, EscapesControlCharactersWithoutTruncatingLongMessages) {
     EXPECT_NE(content.find(long_message), std::string::npos);
     EXPECT_EQ(content.find("<truncated>"), std::string::npos);
     EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), 3);
+}
+
+TEST(LogSystemTest, RawAppendPreservesBytesAndDiscardCancelsTheRecord) {
+    LoggingScope scope;
+    TempLogFile output;
+    ASSERT_TRUE(output.valid());
+
+    fiber::log::LogConfigBuilder builder;
+    auto output_id = builder.add_file_appender({.name = "raw_output", .path = output.path()});
+    ASSERT_TRUE(output_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    auto &manager = fiber::log::LoggerManager::global();
+    ASSERT_TRUE(manager.initialize(std::move(*config)));
+
+    std::string raw = "audit_json={\"control\":\"";
+    raw.push_back('\x7f');
+    raw.append("\"}");
+    {
+        fiber::log::LogLine line(LOG_TEST_OTHER.get(), fiber::log::LogLevel::Info, __FILE__, __LINE__, __func__);
+        ASSERT_TRUE(line.append_raw(raw));
+        ASSERT_TRUE(line.good());
+    }
+    {
+        fiber::log::LogLine line(LOG_TEST_OTHER.get(), fiber::log::LogLevel::Info, __FILE__, __LINE__, __func__);
+        ASSERT_TRUE(line.append_raw("discarded-partial-json"));
+        line.discard();
+    }
+    manager.flush();
+    EXPECT_EQ(manager.appender_stats(*output_id).written_records, 1u);
+    manager.shutdown();
+
+    const std::string content = read_file(output.path());
+    EXPECT_NE(content.find(raw), std::string::npos);
+    EXPECT_EQ(content.find("discarded-partial-json"), std::string::npos);
+    EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), 1);
+}
+
+TEST(LogSystemTest, SecureFileAppenderRecoversTailAndEnforcesMode) {
+    LoggingScope scope;
+    TempLogFile output;
+    ASSERT_TRUE(output.valid());
+    {
+        std::ofstream file(output.path(), std::ios::binary | std::ios::trunc);
+        file << "complete\npartial";
+    }
+    ASSERT_EQ(::chmod(output.path().c_str(), 0666), 0);
+
+    fiber::log::LogConfigBuilder builder;
+    auto output_id = builder.add_file_appender({
+            .name = "secure_output",
+            .path = output.path(),
+            .file_mode = 0600,
+            .no_follow = true,
+            .regular_file_only = true,
+            .enforce_file_mode = true,
+            .truncate_incomplete_tail = true,
+    });
+    ASSERT_TRUE(output_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    auto &manager = fiber::log::LoggerManager::global();
+    ASSERT_TRUE(manager.initialize(std::move(*config)));
+    EXPECT_EQ(manager.appender_stats(*output_id).active_file_bytes, 9u);
+    manager.shutdown();
+
+    EXPECT_EQ(read_file(output.path()), "complete\n");
+    struct stat file_stat{};
+    ASSERT_EQ(::stat(output.path().c_str(), &file_stat), 0);
+    EXPECT_EQ(file_stat.st_mode & 0777, 0600);
+}
+
+TEST(LogSystemTest, SecureFileAppenderRejectsSymbolicLink) {
+    LoggingScope scope;
+    TempLogDirectory output;
+    ASSERT_TRUE(output.valid());
+    const std::string target = output.path() + "/target.log";
+    {
+        std::ofstream file(target, std::ios::binary);
+        file << "target\n";
+    }
+    ASSERT_EQ(::symlink(target.c_str(), output.log_path().c_str()), 0);
+
+    fiber::log::LogConfigBuilder builder;
+    auto output_id = builder.add_file_appender({
+            .name = "no_follow_output",
+            .path = output.log_path(),
+            .file_mode = 0600,
+            .no_follow = true,
+            .regular_file_only = true,
+            .enforce_file_mode = true,
+            .truncate_incomplete_tail = true,
+    });
+    ASSERT_TRUE(output_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+
+    auto initialized = fiber::log::LoggerManager::global().initialize(std::move(*config));
+    ASSERT_FALSE(initialized);
+    EXPECT_EQ(initialized.error().code, fiber::log::LogConfigErrorCode::OpenFailed);
+    EXPECT_EQ(initialized.error().system_error, ELOOP);
+    EXPECT_EQ(read_file(target), "target\n");
 }
 
 TEST(LogSystemTest, FormatsOnceAndFlushesAllAppenderBuffersOnWriterThread) {

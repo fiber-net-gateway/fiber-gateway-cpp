@@ -1,6 +1,6 @@
 #include "LlmRequestHandler.h"
 
-#include "../audit/LlmAuditWriter.h"
+#include "../audit/LlmAuditLog.h"
 #include "../auth/LlmRequestAuthenticator.h"
 #include "../protocol/LlmError.h"
 #include "../protocol/SseParser.h"
@@ -48,6 +48,7 @@ namespace fiber::ai_server {
 namespace {
 
 DEFINE_LOGGER(LOG_LLM, "ai_server.llm");
+DEFINE_LOGGER(LOG_LLM_AUDIT, "ai_server.audit");
 
 constexpr std::size_t kMaxRequestBodyBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaxProviderErrorBytes = 4 * 1024 * 1024;
@@ -221,16 +222,26 @@ std::size_t json_string_content_size(std::string_view value) noexcept {
     return size;
 }
 
-class AuditJsonSink final : public json::OutputSink {
+class AuditLogSink final : public json::OutputSink {
 public:
-    explicit AuditJsonSink(LlmAuditBuffer &output) noexcept : output_(&output) {}
+    AuditLogSink(log::LogLine &line, std::size_t max_bytes) noexcept : line_(&line), max_bytes_(max_bytes) {}
 
-    [[nodiscard]] bool write(const char *data, std::size_t size) override { return output_->append(data, size); }
-
-    [[nodiscard]] std::size_t size() const noexcept { return output_->size(); }
+    [[nodiscard]] bool write(const char *data, std::size_t size) override {
+        if ((data == nullptr && size != 0) || size_ > max_bytes_ || size > max_bytes_ - size_ ||
+            (size != 0 && (std::memchr(data, '\n', size) != nullptr || std::memchr(data, '\r', size) != nullptr))) {
+            return false;
+        }
+        if (size != 0 && !line_->append_raw(std::string_view(data, size))) {
+            return false;
+        }
+        size_ += size;
+        return true;
+    }
 
 private:
-    LlmAuditBuffer *output_ = nullptr;
+    log::LogLine *line_ = nullptr;
+    std::size_t max_bytes_ = 0;
+    std::size_t size_ = 0;
 };
 
 struct Base64AuditCursor {
@@ -284,12 +295,11 @@ bool next_base64_audit_chunk(void *opaque, const char *&data, std::size_t &size,
 
 class AuditJsonWriter {
 public:
-    explicit AuditJsonWriter(LlmAuditBuffer &output) noexcept : sink_(output), generator_(sink_) {
+    explicit AuditJsonWriter(json::OutputSink &output) noexcept : generator_(output) {
         generator_.set_option(json::Generator::Option::ValidateUtf8);
     }
 
     [[nodiscard]] bool good() const noexcept { return good_; }
-    [[nodiscard]] std::size_t size() const noexcept { return sink_.size(); }
 
     void object_open() noexcept { apply(generator_.map_open()); }
     void object_close() noexcept { apply(generator_.map_close()); }
@@ -363,7 +373,6 @@ private:
         }
     }
 
-    AuditJsonSink sink_;
     json::Generator generator_;
     bool good_ = true;
 };
@@ -672,20 +681,11 @@ struct ProviderAttemptAudit {
 class LlmRequestAudit {
 public:
     LlmRequestAudit(http::HttpExchange &exchange, LlmWireProtocol protocol, cat::CatClient *cat_client,
-                    LlmAuditWriter *writer) noexcept :
+                    AiServerMetrics::Worker &metrics, std::size_t max_record_bytes) noexcept :
         exchange_(&exchange), protocol_(protocol), started_(event::EventLoop::current().now()),
-        started_at_ms_(wall_now_millis()), writer_(writer),
-        output_(writer ? writer->max_record_bytes() : std::size_t{0}) {
-        if (writer_) {
-            acquired_ = writer_->try_acquire();
-            if (acquired_) {
-                record_ = writer_->make_record();
-                if (!record_) {
-                    writer_->release_acquired();
-                    acquired_ = false;
-                }
-            }
-        }
+        started_at_ms_(wall_now_millis()), metrics_(&metrics), max_record_bytes_(max_record_bytes),
+        output_(max_record_bytes),
+        audit_enabled_(max_record_bytes != 0 && LOG_LLM_AUDIT.get().enabled(log::LogLevel::Info)) {
         static std::atomic<std::uint64_t> sequence{0};
         const std::uint64_t next = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
         const int length = std::snprintf(request_id_storage_.data(), request_id_storage_.size(), "%llx-%llx",
@@ -726,8 +726,6 @@ public:
         }
     }
 
-    [[nodiscard]] bool available() const noexcept { return writer_ == nullptr || acquired_; }
-
     void pin_config(std::shared_ptr<const LlmConfigSnapshot> config) noexcept { config_ = std::move(config); }
 
     void auth_allowed(const Bt1Principal &principal) noexcept {
@@ -747,27 +745,26 @@ public:
         auth_reason_name_ = auth_failure_reason_name(error.reason);
     }
 
-    [[nodiscard]] bool request_body(const mem::IoBuf &body) noexcept {
-        request_body_ = body;
+    void request_body(const mem::IoBuf &body) noexcept {
+        if (!audit_enabled_) {
+            return;
+        }
         body_size_ = body ? body.readable() : 0;
         const std::string_view body_view =
                 body ? std::string_view(reinterpret_cast<const char *>(body.readable_data()), body.readable())
                      : std::string_view{};
-        assign_sha256(body_view, body_hash_);
         body_is_utf8_ = is_valid_utf8(body_view);
         const std::size_t body_encoded_size =
                 body_is_utf8_ ? json_string_content_size(body_view) : saturating_add(body_size_, 2) / 3 * 4;
-        if (!writer_) {
-            return true;
-        }
-        const std::size_t maximum = writer_->max_record_bytes();
         const std::size_t required = saturating_add(body_encoded_size, kAuditRecordMetadataReserveBytes);
-        if (required > maximum) {
+        if (required > max_record_bytes_) {
             capture_error_ = "audit_record_too_large";
-            return false;
+            generation_disabled_ = true;
+            return;
         }
-        output_.set_max_encoded_bytes(maximum - required);
-        return true;
+        request_body_ = body;
+        assign_sha256(body_view, body_hash_);
+        output_.set_max_encoded_bytes(max_record_bytes_ - required);
     }
 
     void input(const LlmRoutingData &routing) noexcept {
@@ -777,26 +774,27 @@ public:
         tools_count_ = routing.tools_count;
     }
 
-    [[nodiscard]] bool output(std::string_view json, bool streaming) noexcept {
-        return !writer_ || output_.observe(protocol_, json, streaming);
+    void output(std::string_view json, bool streaming) noexcept {
+        if (audit_enabled_ && !generation_disabled_) {
+            (void) output_.observe(protocol_, json, streaming);
+        }
     }
 
     void output_complete(bool complete) noexcept { output_.complete(complete); }
 
-    [[nodiscard]] bool reserve_provider_attempts(std::size_t capacity) noexcept {
-        if (capacity == 0) {
-            return true;
+    void reserve_provider_attempts(std::size_t capacity) noexcept {
+        if (!audit_enabled_ || generation_disabled_ || capacity == 0) {
+            return;
         }
         attempts_ = exchange_->pool().alloc<ProviderAttemptAudit>(capacity);
         if (!attempts_) {
             capture_error_ = "audit_allocation_failed";
-            return false;
+            return;
         }
         for (std::size_t i = 0; i < capacity; ++i) {
             std::construct_at(attempts_ + i);
         }
         attempts_capacity_ = capacity;
-        return true;
     }
 
     void model(std::string_view requested, std::string_view resolved) noexcept {
@@ -847,24 +845,26 @@ public:
     void provider_attempt(const ResolvedProviderAttempt &attempt, std::size_t index, std::size_t total, int status,
                           std::chrono::microseconds duration, bool retryable, bool response_started,
                           std::string_view outcome) noexcept {
-        ++attempts_observed_;
-        if (attempts_size_ < attempts_capacity_) {
-            ProviderAttemptAudit &record = attempts_[attempts_size_++];
-            record.provider = attempt.provider->name;
-            record.token_name = attempt.api_token ? std::string_view(attempt.api_token->name) : std::string_view{};
-            record.upstream_model = attempt.protocol->model;
-            record.path = attempt.protocol->path;
-            record.outcome = outcome;
-            record.index = index + 1;
-            record.total = total;
-            record.provider_config_version = attempt.provider->config->metadata.version;
-            record.status = status;
-            record.latency_us = std::max<std::int64_t>(duration.count(), 0);
-            record.fallback = attempt.fallback;
-            record.retryable = retryable;
-            record.response_started = response_started;
-        } else {
-            capture_error_ = "audit_attempt_overflow";
+        if (audit_enabled_ && !generation_disabled_) {
+            ++attempts_observed_;
+            if (attempts_size_ < attempts_capacity_) {
+                ProviderAttemptAudit &record = attempts_[attempts_size_++];
+                record.provider = attempt.provider->name;
+                record.token_name = attempt.api_token ? std::string_view(attempt.api_token->name) : std::string_view{};
+                record.upstream_model = attempt.protocol->model;
+                record.path = attempt.protocol->path;
+                record.outcome = outcome;
+                record.index = index + 1;
+                record.total = total;
+                record.provider_config_version = attempt.provider->config->metadata.version;
+                record.status = status;
+                record.latency_us = std::max<std::int64_t>(duration.count(), 0);
+                record.fallback = attempt.fallback;
+                record.retryable = retryable;
+                record.response_started = response_started;
+            } else {
+                capture_error_ = "audit_attempt_overflow";
+            }
         }
         if (cat_transaction_ && cat_transaction_->valid()) {
             std::string data;
@@ -899,15 +899,13 @@ public:
     }
 
 private:
-    [[nodiscard]] bool encode(const http::HttpResponseStats &response, std::int64_t duration_us) noexcept {
-        if (!record_) {
-            return false;
-        }
-        AuditJsonWriter json(record_->bytes());
+    [[nodiscard]] bool encode(AuditJsonWriter &json, const http::HttpResponseStats &response,
+                              std::int64_t duration_us) noexcept {
         const std::string_view output_error = output_.capture_error();
         const std::string_view capture_error = !capture_error_.empty() ? capture_error_ : output_error;
         const bool capture_complete =
                 capture_error.empty() && attempts_observed_ == attempts_size_ && !output_.incomplete();
+        capture_incomplete_ = !capture_complete;
 
         json.object_open();
         json.field("schema_version", 3);
@@ -1050,27 +1048,37 @@ private:
 
         json.field("duration_us", duration_us);
         json.object_close();
-        return json.good() && record_->bytes().append('\n');
+        return json.good();
     }
 
     void emit(const http::HttpResponseStats &response) noexcept {
-        if (emitted_ || !writer_ || !acquired_) {
+        if (emitted_ || !audit_enabled_) {
             return;
         }
         emitted_ = true;
-        const auto duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started_);
-        if (!encode(response, std::max<std::int64_t>(duration.count(), 0))) {
-            writer_->release_acquired();
-            acquired_ = false;
-            record_.reset();
-            LOG(LOG_LLM, ERROR) << "LLM audit record encoding failed audit_id=" << log::quoted(request_id_);
+        if (generation_disabled_) {
+            metrics_->audit_generation_failed();
             return;
         }
-        if (!writer_->submit(std::move(record_))) {
-            LOG(LOG_LLM, ERROR) << "LLM audit record submission failed audit_id=" << log::quoted(request_id_);
+        const auto duration =
+                std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started_);
+        log::LogLine line(LOG_LLM_AUDIT.get(), log::LogLevel::Info, __FILE__, __LINE__, __func__);
+        if (!line.append_raw("audit_json=")) {
+            line.discard();
+            metrics_->audit_generation_failed();
+            return;
         }
-        acquired_ = false;
+        AuditLogSink sink(line, max_record_bytes_);
+        AuditJsonWriter json(sink);
+        if (!encode(json, response, std::max<std::int64_t>(duration.count(), 0)) || !line.good()) {
+            line.discard();
+            metrics_->audit_generation_failed();
+            return;
+        }
+        metrics_->audit_generated();
+        if (capture_incomplete_) {
+            metrics_->audit_capture_incomplete();
+        }
     }
 
     http::HttpExchange *exchange_ = nullptr;
@@ -1105,14 +1113,16 @@ private:
     std::int64_t rate_max_ = 0;
     std::int64_t rate_recover_at_ = 0;
     LlmTokenUsage usage_;
-    LlmAuditWriter *writer_ = nullptr;
-    std::unique_ptr<LlmAuditRecord> record_;
+    AiServerMetrics::Worker *metrics_ = nullptr;
+    std::size_t max_record_bytes_ = 0;
     LlmAuditOutputCapture output_;
     std::optional<cat::MessageTrace> cat_trace_;
     std::optional<cat::Transaction> cat_transaction_;
     bool cat_usage_emitted_ = false;
     bool emitted_ = false;
-    bool acquired_ = false;
+    bool audit_enabled_ = false;
+    bool generation_disabled_ = false;
+    bool capture_incomplete_ = false;
 };
 
 enum class ReadRequestBodyError : std::uint8_t {
@@ -1633,7 +1643,6 @@ enum class SseRelayResult : std::uint8_t {
     Success,
     ProviderError,
     ClientError,
-    AuditError,
 };
 
 common::IoErr sse_parser_io_error(SseParseError error) noexcept {
@@ -1653,7 +1662,6 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
                                       std::optional<LlmTokenUsage> &usage, LlmRequestAudit &audit) noexcept {
     SseParser parser;
     mem::BufPool usage_pool;
-    bool audit_failed = false;
     auto drain_parser = [&]() noexcept -> SseParseStatus {
         for (;;) {
             const SseParseStatus status = parser.next();
@@ -1665,10 +1673,7 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
                 (protocol == LlmWireProtocol::OpenAiChatCompletions && data == std::string_view("[DONE]"))) {
                 continue;
             }
-            if (!audit.output(data, true)) {
-                audit_failed = true;
-                return SseParseStatus::Error;
-            }
+            audit.output(data, true);
             usage_pool.reset();
             auto extracted = extract_token_usage(protocol, data, true, usage_pool);
             if (!extracted) {
@@ -1705,11 +1710,6 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
             }
             const SseParseStatus status = drain_parser();
             if (status != SseParseStatus::NeedMore) {
-                if (audit_failed) {
-                    (void) upstream.abort(common::IoErr::Invalid);
-                    (void) exchange.abort(common::IoErr::Invalid);
-                    co_return SseRelayResult::AuditError;
-                }
                 const common::IoErr error =
                         status == SseParseStatus::Error ? sse_parser_io_error(parser.error()) : common::IoErr::Invalid;
                 (void) upstream.abort(error);
@@ -1726,10 +1726,6 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
             }
             const SseParseStatus status = drain_parser();
             if (status != SseParseStatus::Complete) {
-                if (audit_failed) {
-                    (void) exchange.abort(common::IoErr::Invalid);
-                    co_return SseRelayResult::AuditError;
-                }
                 const common::IoErr error =
                         status == SseParseStatus::Error ? sse_parser_io_error(parser.error()) : common::IoErr::Invalid;
                 (void) exchange.abort(error);
@@ -1757,17 +1753,7 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
 
 async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWireProtocol protocol,
                                             std::shared_ptr<const LlmConfigSnapshot> config) noexcept {
-    LlmRequestAudit audit(exchange, protocol, cat_client_, audit_writer_);
-    if (!audit.available()) {
-        co_await send_error(exchange, protocol,
-                            LlmError{
-                                    .status_code = 503,
-                                    .code = "audit_unavailable",
-                                    .type = "server_error",
-                                    .message = "audit service is unavailable",
-                            });
-        co_return;
-    }
+    LlmRequestAudit audit(exchange, protocol, cat_client_, *metrics_, audit_max_record_bytes_);
     audit.pin_config(config);
     auto authenticated = authenticate_llm_request(exchange.request_headers(), std::move(config), wall_now_seconds());
     if (!authenticated) {
@@ -1806,16 +1792,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         }
         co_return;
     }
-    if (!audit.request_body(*raw_body)) {
-        co_await send_error(exchange, protocol,
-                            LlmError{
-                                    .status_code = 503,
-                                    .code = "audit_record_too_large",
-                                    .type = "server_error",
-                                    .message = "request cannot be captured by the audit service",
-                            });
-        co_return;
-    }
+    audit.request_body(*raw_body);
 
     auto parsed = ParsedLlmBody::parse(protocol, std::move(*raw_body), exchange.pool());
     if (!parsed) {
@@ -1895,16 +1872,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         co_await send_error(exchange, protocol, plan_error(protocol, plan.error()));
         co_return;
     }
-    if (!audit.reserve_provider_attempts(plan->attempts.size())) {
-        co_await send_error(exchange, protocol,
-                            LlmError{
-                                    .status_code = 503,
-                                    .code = "audit_unavailable",
-                                    .type = "server_error",
-                                    .message = "audit service is unavailable",
-                            });
-        co_return;
-    }
+    audit.reserve_provider_attempts(plan->attempts.size());
 
     ServiceInstanceRetryState service_instances;
     if (!service_instances.init(plan->load_balance.service_instance_policy, plan->route_key, plan->attempts.size(),
@@ -2068,11 +2036,10 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                     started->report_instance(InstanceReportOutcome::Neutral);
                 }
             }
-            const std::string_view outcome =
-                    relay_result == SseRelayResult::Success         ? std::string_view("success")
-                    : relay_result == SseRelayResult::ProviderError ? std::string_view("stream_error")
-                    : relay_result == SseRelayResult::AuditError    ? std::string_view("audit_capture_error")
-                                                                    : std::string_view("client_stream_error");
+            const std::string_view outcome = relay_result == SseRelayResult::Success ? std::string_view("success")
+                                             : relay_result == SseRelayResult::ProviderError
+                                                     ? std::string_view("stream_error")
+                                                     : std::string_view("client_stream_error");
             audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
@@ -2116,21 +2083,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         if (response->status_code >= 200 && response->status_code < 300) {
             mem::BufPool usage_pool;
             auto usage = extract_token_usage(protocol, io_buf_view(response->body), false, usage_pool);
-            if (!audit.output(io_buf_view(response->body), false)) {
-                response->load_balance.report(InstanceReportOutcome::Neutral);
-                audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,
-                                       std::chrono::duration_cast<std::chrono::microseconds>(
-                                               event::EventLoop::current().now() - attempt_started),
-                                       false, false, "audit_capture_error");
-                co_await send_error(exchange, protocol,
-                                    LlmError{
-                                            .status_code = 503,
-                                            .code = "audit_capture_failed",
-                                            .type = "server_error",
-                                            .message = "provider response could not be captured by the audit service",
-                                    });
-                co_return;
-            }
+            audit.output(io_buf_view(response->body), false);
             audit.output_complete(true);
             response->load_balance.report(InstanceReportOutcome::Success);
             attempt.runtime->record_success(attempt.api_token ? attempt.api_token->name : std::string_view{});
