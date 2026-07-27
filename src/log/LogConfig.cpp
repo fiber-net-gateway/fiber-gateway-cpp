@@ -156,8 +156,8 @@ LogConfigResult<AppenderId> LogConfigBuilder::add_file_appender(FileAppenderOpti
     }
     if (options.rotation) {
         const FileRotationOptions &rotation = *options.rotation;
-        if (rotation.max_file_size < kMaxFormattedLogLineSize || rotation.max_file_size < options.buffer_size ||
-            rotation.max_archives == 0 || rotation.max_archives > kMaxRetainedLogArchives) {
+        if (rotation.max_file_size == 0 || rotation.max_file_size < options.buffer_size || rotation.max_archives == 0 ||
+            rotation.max_archives > kMaxRetainedLogArchives) {
             return std::unexpected(
                     make_error(LogConfigErrorCode::InvalidRotationOptions, "invalid file rotation options"));
         }
@@ -268,6 +268,21 @@ LogConfigResult<void> LogConfigBuilder::set_root_logger(RootLoggerOptions option
     config_.root_ = options;
     config_.root_appenders_ = std::move(appenders);
     config_.has_root_ = true;
+    return {};
+}
+
+LogConfigResult<void> LogConfigBuilder::set_async_options(AsyncLogOptions options) {
+    if (auto result = ensure_building(); !result) {
+        return result;
+    }
+    if (options.backlog_capacity == 0 || options.backlog_capacity == std::numeric_limits<std::size_t>::max()) {
+        return std::unexpected(make_error(LogConfigErrorCode::InvalidBufferOptions,
+                                          "log backlog capacity must be positive and fit the admission state"));
+    }
+    if (options.full_policy != LogQueueFullPolicy::Block && options.full_policy != LogQueueFullPolicy::DropNewest) {
+        return std::unexpected(make_error(LogConfigErrorCode::InvalidBufferOptions, "invalid log queue full policy"));
+    }
+    config_.async_ = options;
     return {};
 }
 

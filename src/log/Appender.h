@@ -6,20 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <sys/types.h>
 #include <vector>
 
-#include "FormattedLogLine.h"
+#include "FormattedLogRecord.h"
 #include "LogConfig.h"
 
 namespace fiber::log {
-
-class LogContext;
-class LoggerManager;
-struct LogBuffer;
 
 struct AppenderStats {
     std::uint64_t written_records = 0;
@@ -31,6 +26,7 @@ struct AppenderStats {
     std::uint64_t rotation_errors = 0;
     std::uint64_t retention_errors = 0;
     std::uint64_t active_file_bytes = 0;
+    std::uint64_t writer_thread_id = 0;
 };
 
 class Appender {
@@ -50,9 +46,14 @@ public:
     }
     [[nodiscard]] AppenderStats stats() const noexcept;
 
-    virtual void append(FormattedLogLine line, LogContext &context) noexcept = 0;
-    virtual void flush(LogContext &context) noexcept = 0;
+    virtual void append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point now) noexcept = 0;
+    virtual void flush() noexcept = 0;
     [[nodiscard]] virtual bool reopen() noexcept = 0;
+    [[nodiscard]] virtual std::chrono::steady_clock::time_point flush_deadline() const noexcept {
+        return std::chrono::steady_clock::time_point::max();
+    }
+
+    void record_drop() noexcept;
 
 protected:
     Appender(AppenderId id, std::string name, LogLevel min_level, LogLevel max_level) noexcept;
@@ -79,6 +80,7 @@ private:
     std::atomic<std::uint64_t> rotation_errors_{0};
     std::atomic<std::uint64_t> retention_errors_{0};
     std::atomic<std::uint64_t> active_file_bytes_{0};
+    std::atomic<std::uint64_t> writer_thread_id_{0};
     std::atomic<std::uint64_t> last_diagnostic_second_{std::numeric_limits<std::uint64_t>::max()};
 };
 
@@ -86,8 +88,8 @@ class ConsoleAppender final : public Appender {
 public:
     ConsoleAppender(AppenderId id, ConsoleAppenderOptions options) noexcept;
 
-    void append(FormattedLogLine line, LogContext &context) noexcept override;
-    void flush(LogContext &context) noexcept override;
+    void append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point now) noexcept override;
+    void flush() noexcept override;
     [[nodiscard]] bool reopen() noexcept override;
 
 private:
@@ -96,36 +98,32 @@ private:
 
 class FileAppender final : public Appender {
 public:
-    static constexpr std::uint16_t kNoBufferSlot = static_cast<std::uint16_t>(-1);
-
-    FileAppender(AppenderId id, FileAppenderOptions options, std::uint16_t buffer_slot) noexcept;
+    FileAppender(AppenderId id, FileAppenderOptions options) noexcept;
     ~FileAppender() override;
 
     [[nodiscard]] bool open_file(int &system_error) noexcept;
 
-    void append(FormattedLogLine line, LogContext &context) noexcept override;
-    void flush(LogContext &context) noexcept override;
+    void append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point now) noexcept override;
+    void flush() noexcept override;
     [[nodiscard]] bool reopen() noexcept override;
+    [[nodiscard]] std::chrono::steady_clock::time_point flush_deadline() const noexcept override;
 
-    [[nodiscard]] bool buffered() const noexcept { return buffer_slot_ != kNoBufferSlot; }
-    [[nodiscard]] std::uint16_t buffer_slot() const noexcept { return buffer_slot_; }
+    [[nodiscard]] bool buffered() const noexcept { return buffer_size_ != 0; }
 
 private:
-    friend class LoggerManager;
-
     struct ArchiveEntry {
         std::uint64_t sequence = 0;
         std::string path;
     };
 
     [[nodiscard]] bool initialize_rotation(int &system_error) noexcept;
-    [[nodiscard]] bool should_rotate_locked(std::size_t incoming_size) const noexcept;
-    [[nodiscard]] bool rotate_locked() noexcept;
-    void select_cleanup_locked(std::uint64_t &sequence, std::string &path) noexcept;
-    void finish_cleanup(std::uint64_t sequence, std::string path) noexcept;
-    void write_bytes(const char *data, std::size_t size, std::uint64_t records) noexcept;
-    void write_bytes_locked(const char *data, std::size_t size, std::uint64_t records) noexcept;
-    void flush_buffer(LogBuffer &buffer) noexcept;
+    [[nodiscard]] bool should_rotate(std::size_t incoming_size) const noexcept;
+    [[nodiscard]] bool rotate() noexcept;
+    void cleanup_archives(std::chrono::steady_clock::time_point now) noexcept;
+    void prepare_record(std::size_t record_size, std::chrono::steady_clock::time_point now) noexcept;
+    void write_contiguous(const char *data, std::size_t size, std::uint64_t records) noexcept;
+    void write_record(const FormattedLogRecord &record) noexcept;
+    void flush_buffer() noexcept;
 
     std::string path_;
     std::string directory_path_;
@@ -133,15 +131,16 @@ private:
     mode_t file_mode_ = 0644;
     std::size_t buffer_size_ = 0;
     std::chrono::milliseconds flush_interval_{0};
-    std::uint16_t buffer_slot_ = kNoBufferSlot;
     std::optional<FileRotationOptions> rotation_;
     std::vector<ArchiveEntry> archives_;
-    std::mutex io_mutex_;
     std::chrono::steady_clock::time_point rotation_retry_after_{};
     std::chrono::steady_clock::time_point cleanup_retry_after_{};
+    std::chrono::steady_clock::time_point flush_at_{};
     std::uint64_t active_bytes_ = 0;
     std::uint64_t next_archive_sequence_ = 1;
-    std::uint64_t cleanup_in_progress_sequence_ = 0;
+    std::uint64_t buffered_records_ = 0;
+    char *buffer_ = nullptr;
+    std::size_t buffer_used_ = 0;
     int fd_ = -1;
 };
 

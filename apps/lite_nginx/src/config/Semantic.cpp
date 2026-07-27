@@ -845,10 +845,9 @@ std::expected<LogAppenderConfig, ConfigError> parse_log_appender(const Directive
         return std::unexpected(
                 make_error(directive, "rotate_size, archive_name, and rotate_keep must be configured together"));
     }
-    if (has_rotation_option && (appender.rotation->max_file_size < fiber::log::kMaxFormattedLogLineSize ||
-                                appender.rotation->max_file_size < appender.buffer_size)) {
-        return std::unexpected(
-                make_error(directive, "rotate_size must not be smaller than the buffer or maximum log line"));
+    if (has_rotation_option &&
+        (appender.rotation->max_file_size == 0 || appender.rotation->max_file_size < appender.buffer_size)) {
+        return std::unexpected(make_error(directive, "rotate_size must not be zero or smaller than the buffer"));
     }
     if (appender.kind == LogAppenderKind::File) {
         if (!seen_path) {

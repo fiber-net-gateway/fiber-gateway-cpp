@@ -1,12 +1,11 @@
 #include "LogLine.h"
 
-#include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 #include "../event/EventLoop.h"
+#include "LogRecord.h"
 #include "LoggerManager.h"
 
 namespace fiber::log {
@@ -36,91 +35,87 @@ char hex_digit(unsigned value) noexcept { return static_cast<char>(value < 10 ? 
 } // namespace
 
 LogLine::LogLine(const Logger &logger, LogLevel level, const char *file, std::uint32_t line,
-                 const char *function) noexcept :
-    logger_(logger), level_(level), file_(file), function_(function), line_(line),
-    timestamp_us_(current_timestamp_us()), thread_id_(current_thread_id()) {}
+                 const char *function) noexcept {
+    const LevelTargets &targets = logger.targets(level);
+    record_ = OwnedLogRecord::create(logger.name(), targets.first, targets.count, level, file, line, function,
+                                     current_timestamp_us(), current_thread_id());
+}
 
-LogLine::~LogLine() {
-    finish_message();
-    LogEvent event{
-            .logger_name = logger_.name(),
-            .message = std::string_view(message_, message_size_),
-            .file = file_ ? std::string_view(file_) : std::string_view(),
-            .function = function_ ? std::string_view(function_) : std::string_view(),
-            .level = level_,
-            .line = line_,
-            .timestamp_us = timestamp_us_,
-            .thread_id = thread_id_,
-    };
+LogLine::~LogLine() noexcept {
     auto &manager = LoggerManager::global();
-    logger_.dispatch(event, manager.current_context());
+    if (!record_) {
+        manager.record_allocation_failure();
+        return;
+    }
+    (void) manager.submit(record_);
 }
 
 void LogLine::append_raw(std::string_view value) noexcept {
-    const std::size_t remaining = kMessageCapacity - message_size_;
-    const std::size_t copy = std::min(remaining, value.size());
-    if (copy > 0) {
-        std::memcpy(message_ + message_size_, value.data(), copy);
-        message_size_ += copy;
-    }
-    if (copy != value.size()) {
-        truncated_ = true;
+    if (record_) {
+        (void) record_->append(value);
     }
 }
 
 void LogLine::append_escaped(std::string_view value) noexcept {
-    for (unsigned char ch: value) {
+    std::size_t plain_start = 0;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const auto ch = static_cast<unsigned char>(value[index]);
+        std::string_view escaped;
+        char escaped_control[4];
         switch (ch) {
             case '\n':
-                append_raw("\\n");
+                escaped = "\\n";
                 break;
             case '\r':
-                append_raw("\\r");
+                escaped = "\\r";
                 break;
             case '\t':
-                append_raw("\\t");
+                escaped = "\\t";
                 break;
             default:
                 if (ch < 0x20 || ch == 0x7f) {
-                    char escaped[] = {'\\', 'x', hex_digit(ch >> 4), hex_digit(ch & 0xf)};
-                    append_raw(std::string_view(escaped, sizeof(escaped)));
+                    escaped_control[0] = '\\';
+                    escaped_control[1] = 'x';
+                    escaped_control[2] = hex_digit(ch >> 4);
+                    escaped_control[3] = hex_digit(ch & 0xf);
+                    escaped = std::string_view(escaped_control, sizeof(escaped_control));
                 } else {
-                    append_raw(std::string_view(reinterpret_cast<const char *>(&ch), 1));
+                    continue;
                 }
                 break;
         }
-        if (truncated_) {
+        append_raw(value.substr(plain_start, index - plain_start));
+        append_raw(escaped);
+        plain_start = index + 1;
+        if (!record_ || record_->failed()) {
             return;
         }
     }
+    append_raw(value.substr(plain_start));
 }
 
 void LogLine::append_quoted(std::string_view value) noexcept {
     append_raw("\"");
-    for (unsigned char ch: value) {
+    std::size_t plain_start = 0;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const auto ch = static_cast<unsigned char>(value[index]);
+        if (ch != '\\' && ch != '"' && ch >= 0x20 && ch != 0x7f) {
+            continue;
+        }
+        append_escaped(value.substr(plain_start, index - plain_start));
         if (ch == '\\' || ch == '"') {
-            char escaped[] = {'\\', static_cast<char>(ch)};
+            const char escaped[] = {'\\', static_cast<char>(ch)};
             append_raw(std::string_view(escaped, sizeof(escaped)));
         } else {
-            append_escaped(std::string_view(reinterpret_cast<const char *>(&ch), 1));
+            append_escaped(value.substr(index, 1));
         }
-        if (truncated_) {
+        plain_start = index + 1;
+        if (!record_ || record_->failed()) {
             return;
         }
     }
+    append_escaped(value.substr(plain_start));
     append_raw("\"");
-}
-
-void LogLine::finish_message() noexcept {
-    if (!truncated_) {
-        return;
-    }
-    constexpr std::string_view marker = " ... <truncated>";
-    const std::size_t prefix_size = kMessageCapacity - marker.size();
-    if (message_size_ > prefix_size) {
-        message_size_ = prefix_size;
-    }
-    append_raw(marker);
 }
 
 LogLine &LogLine::operator<<(std::string_view value) noexcept {
@@ -170,18 +165,18 @@ bool log_complete_message(const Logger &logger, LogLevel level, const char *file
     if (!logger.enabled(level)) {
         return true;
     }
-    LogEvent event{
-            .logger_name = logger.name(),
-            .message = message,
-            .file = file ? std::string_view(file) : std::string_view(),
-            .function = function ? std::string_view(function) : std::string_view(),
-            .level = level,
-            .line = line,
-            .timestamp_us = current_timestamp_us(),
-            .thread_id = current_thread_id(),
-    };
-    auto &manager = LoggerManager::global();
-    return logger.dispatch_complete(event, manager.current_context());
+    const LevelTargets &targets = logger.targets(level);
+    OwnedLogRecord *record = OwnedLogRecord::create(logger.name(), targets.first, targets.count, level, file, line,
+                                                    function, current_timestamp_us(), current_thread_id());
+    if (!record) {
+        LoggerManager::global().record_allocation_failure();
+        return false;
+    }
+    if (!record->append(message)) {
+        (void) LoggerManager::global().submit(record);
+        return false;
+    }
+    return LoggerManager::global().submit(record);
 }
 
 } // namespace fiber::log

@@ -5,16 +5,14 @@
 #include <cstdint>
 #include <string_view>
 
-#include "LogEvent.h"
+#include "LogConfig.h"
 
 namespace fiber::log {
 
-class Appender;
-class LogContext;
 class LoggerManager;
 
 struct LevelTargets {
-    Appender *const *first = nullptr;
+    const AppenderId *first = nullptr;
     std::uint32_t count = 0;
 
     [[nodiscard]] bool empty() const noexcept { return count == 0; }
@@ -32,9 +30,6 @@ public:
     [[nodiscard]] bool vlog_enabled(unsigned verbosity) const noexcept {
         return verbosity <= verbosity_ && enabled(LogLevel::Debug);
     }
-
-    void dispatch(const LogEvent &event, LogContext &context) const noexcept;
-    [[nodiscard]] bool dispatch_complete(const LogEvent &event, LogContext &context) const noexcept;
 
 private:
     friend class LoggerManager;
