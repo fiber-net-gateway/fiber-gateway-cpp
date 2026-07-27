@@ -230,17 +230,18 @@ owner，settle 用 ticket 回到同一版本状态。远端调用 64 KiB 内部 
 和是否可重试。序列化器按入站协议生成 OpenAI 或 Anthropic 外观，绝不把 C++ 错误、
 Provider token、BT1 token 或配置 secret 写入响应。
 
-请求审计由请求级 RAII owner 聚合，并且无论在哪个早退分支结束，每个请求都只产生
-一条 `ai_server.audit` 日志。物理格式为“常规日志前缀 + 一个紧凑 JSON + 换行”，
-不再为 Provider attempt 单独写 audit 行。`schema_version=2` 的对象包含：
+请求审计由请求级 RAII owner 聚合。请求结束时把 `schema_version=3` 对象编码成一条
+无日志前缀的 NDJSON 记录，再提交给独立 audit EventLoop；该线程是文件的唯一 writer。
+同一对象包含：
 
-- request ID、来源、方法、路径、协议、stream、body size/hash；
-- username、kid、逻辑/上游模型、授权和限流结果；
-- `llm.input.prompt_parts` 中的 system/message/工具文本；
+- audit ID、采集是否完整及稳定的采集错误；
+- 来源、方法、路径、协议，以及唯一一份完整 request body、body encoding/size/hash；
+- 从 body 单独物化的 `request_model_name`、有效 `stream`、message/tool 数量；
+- username、kid、resolved model、授权和限流结果；
 - `llm.output` 中从同步响应或 SSE delta 聚合出的 role/content/tool/finish reason；
 - `provider_attempts` 中每次尝试的 Provider/token 名、协议、上游模型、路径、配置
   版本、fallback、状态和延迟；
-- 最终状态、响应字节、客户端中断、usage、总耗时及截断/采集错误状态。
+- 最终状态、响应字节、客户端中断、usage 和总耗时。
 
 `llm.output.capture_scope=provider_observed`：它说明 Provider 已生成并被网关观察到的
 内容，是否完整交付客户端仍以 `response.completed` 和 `terminal_error` 为准。
@@ -252,12 +253,17 @@ OpenAI 用 `prompt_tokens_details.cached_tokens` 作为缓存输入并从
 `input_tokens + cache_creation_input_tokens` 计入非缓存输入。有效 usage 同时写入
 CAT `LLMTokenUsage` 子 Event。
 
-JSON 总长度硬限制为 64 KiB，输入、输出和 attempts 使用独立编码预算；截断按 JSON
-编码后的字节计算，任何超限或局部采集失败都必须保持整条 JSON 合法并设置
-`truncated`/`incomplete`。多模态输入只抽取明确的文本字段，图片/文档签名 URL、
-base64、音频和二进制数据不进入日志。Authorization、Provider token、BT1 token 和
-配置 secret 同样禁止记录。prompt/输出仍可能携带业务敏感信息，部署必须为审计日志
-设置严格的读取、采集、传输和保留策略。
+request body 只写一次，不再构造或输出 `llm.input.prompt_parts`。UTF-8 body 作为
+JSON string 保留原始字节，非 UTF-8 body 使用 base64；因此多模态 URL、base64 和音频
+字段也属于完整审计内容。同步/流式输出不截断；stream delta 在转发给客户端之前追加，
+聚合形态与同步 `llm.output` 一致。记录上限、内存分配、队列准入或磁盘 writer 失败时
+fail closed，不允许继续产生一段无法完整审计的 LLM 对话。
+
+专用文件以 `0600` 和 append 模式打开；writer 仅在记录之间轮转，进程启动时截掉
+活动文件末尾的不完整 NDJSON 行，停机时在 HTTP drain 之后等待全部已提交记录落盘。
+Authorization、Provider token 值、BT1 token 和配置 secret 不作为独立字段输出，
+但 body/prompt/模型输出本身可能携带任意业务敏感信息，部署必须设置严格的读取、
+采集、传输和保留策略。
 
 Prometheus 的常规运行指标继续使用固定低基数 label，包含请求数/延迟/在途、
 Provider 尝试与失败、重试、熔断、限流准入/拒绝/settle、配置代际和 SSE 中途失败。
@@ -270,8 +276,8 @@ token usage 另有两个累计 Counter family：
 轻量消息。
 
 listener 只在完整首个配置安装到所有 worker 后绑定；服务注册和初始本机限流节点
-建立后才启动 accept。`/ready` 还会实时检查配置快照和非空成员环，成员信息丢失时
-返回 503，有限流规则的请求 fail closed。
+建立后才启动 accept。`/ready` 还会实时检查配置快照、非空成员环和 audit writer；
+任一条件失效时返回 503，限流与审计准入均 fail closed。
 
 ## 10. 完成标准
 

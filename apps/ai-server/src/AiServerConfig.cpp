@@ -34,18 +34,38 @@ constexpr std::string_view kCatHostnameKey = "CAT_HOSTNAME";
 constexpr std::string_view kCatIpKey = "CAT_IP";
 constexpr std::string_view kCatRouterAddressesKey = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectorAddressesKey = "CAT_COLLECTOR_ADDRESSES";
+constexpr std::string_view kAuditLogPathKey = "AI_SERVER_AUDIT_LOG_PATH";
+constexpr std::string_view kAuditMaxRecordBytesKey = "AI_SERVER_AUDIT_MAX_RECORD_BYTES";
+constexpr std::string_view kAuditMaxPendingRecordsKey = "AI_SERVER_AUDIT_MAX_PENDING_RECORDS";
+constexpr std::string_view kAuditRotateBytesKey = "AI_SERVER_AUDIT_ROTATE_BYTES";
+constexpr std::string_view kAuditMaxArchivesKey = "AI_SERVER_AUDIT_MAX_ARCHIVES";
 
-constexpr std::array<std::string_view, 20> kKnownKeys = {
-        kListenAddressKey,        kListenPortKey,
-        kInitialConfigTimeoutKey, kAdvertiseAddressKey,
-        kServiceNameKey,          kServiceGroupKey,
-        kNacosServerAddressesKey, kNacosHttpPortKey,
-        kNacosGrpcPortKey,        kNacosNamespaceKey,
-        kNacosTenantKey,          kNacosUsernameKey,
-        kNacosPasswordKey,        kNacosContextPathKey,
-        kNacosClientVersionKey,   kCatAppKey,
-        kCatHostnameKey,          kCatIpKey,
-        kCatRouterAddressesKey,   kCatCollectorAddressesKey,
+constexpr std::array<std::string_view, 25> kKnownKeys = {
+        kListenAddressKey,
+        kListenPortKey,
+        kInitialConfigTimeoutKey,
+        kAdvertiseAddressKey,
+        kServiceNameKey,
+        kServiceGroupKey,
+        kNacosServerAddressesKey,
+        kNacosHttpPortKey,
+        kNacosGrpcPortKey,
+        kNacosNamespaceKey,
+        kNacosTenantKey,
+        kNacosUsernameKey,
+        kNacosPasswordKey,
+        kNacosContextPathKey,
+        kNacosClientVersionKey,
+        kCatAppKey,
+        kCatHostnameKey,
+        kCatIpKey,
+        kCatRouterAddressesKey,
+        kCatCollectorAddressesKey,
+        kAuditLogPathKey,
+        kAuditMaxRecordBytesKey,
+        kAuditMaxPendingRecordsKey,
+        kAuditRotateBytesKey,
+        kAuditMaxArchivesKey,
 };
 
 struct EnvEntry {
@@ -331,6 +351,11 @@ bool parse_milliseconds(std::string_view text, std::chrono::milliseconds &out) n
     return true;
 }
 
+bool parse_uint64(std::string_view text, std::uint64_t &out) noexcept {
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), out);
+    return !text.empty() && result.ec == std::errc{} && result.ptr == text.data() + text.size();
+}
+
 std::expected<std::vector<net::IpAddress>, AiServerConfigError> parse_server_addresses(std::string_view value,
                                                                                        std::size_t line) {
     std::vector<net::IpAddress> addresses;
@@ -356,7 +381,8 @@ std::expected<void, AiServerConfigError>
 apply_entry(const EnvEntry &entry, net::IpAddress &listen_ip, std::uint16_t &listen_port,
             std::chrono::milliseconds &initial_config_timeout, std::optional<net::IpAddress> &advertise_address,
             std::string &service_name, std::string &service_group, cat::CatClientConfigParams &cat_params,
-            bool &cat_setting_present, nacos::NacosClientConfigParams &nacos_params, FieldLines &field_lines) {
+            bool &cat_setting_present, nacos::NacosClientConfigParams &nacos_params, FieldLines &field_lines,
+            LlmAuditWriterOptions &audit_options) {
     if (entry.key == kListenAddressKey) {
         if (!net::IpAddress::parse(entry.value, listen_ip)) {
             return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
@@ -490,6 +516,52 @@ apply_entry(const EnvEntry &entry, net::IpAddress &listen_ip, std::uint16_t &lis
         cat_setting_present = cat_setting_present || !entry.value.empty();
         return {};
     }
+    if (entry.key == kAuditLogPathKey) {
+        if (entry.value.empty() || entry.value.size() > 4096) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                              "expected a non-empty path of at most 4096 bytes"));
+        }
+        audit_options.path = entry.value;
+        return {};
+    }
+    if (entry.key == kAuditMaxRecordBytesKey) {
+        std::uint64_t value = 0;
+        if (!parse_uint64(entry.value, value) || value == 0 ||
+            value > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                              "expected a positive byte count"));
+        }
+        audit_options.max_record_bytes = static_cast<std::size_t>(value);
+        return {};
+    }
+    if (entry.key == kAuditMaxPendingRecordsKey) {
+        std::uint64_t value = 0;
+        if (!parse_uint64(entry.value, value) || value == 0 ||
+            value > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                              "expected a positive record count"));
+        }
+        audit_options.max_pending_records = static_cast<std::size_t>(value);
+        return {};
+    }
+    if (entry.key == kAuditRotateBytesKey) {
+        std::uint64_t value = 0;
+        if (!parse_uint64(entry.value, value)) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                              "expected a non-negative byte count"));
+        }
+        audit_options.rotate_bytes = value;
+        return {};
+    }
+    if (entry.key == kAuditMaxArchivesKey) {
+        std::uint64_t value = 0;
+        if (!parse_uint64(entry.value, value) || value == 0 || value > std::numeric_limits<std::uint32_t>::max()) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                              "expected a positive archive count"));
+        }
+        audit_options.max_archives = static_cast<std::uint32_t>(value);
+        return {};
+    }
 
     return std::unexpected(
             make_error(AiServerConfigErrorCode::UnknownKey, entry.line, entry.key, "unknown ai-server setting"));
@@ -552,11 +624,12 @@ AiServerConfigError from_cat_error(cat::CatConfigError error, const FieldLines &
 AiServerConfig::AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config,
                                std::chrono::milliseconds initial_config_timeout,
                                std::optional<net::IpAddress> advertise_address, std::string service_name,
-                               std::string service_group, std::optional<cat::CatClientConfig> cat_config) noexcept :
+                               std::string service_group, std::optional<cat::CatClientConfig> cat_config,
+                               LlmAuditWriterOptions audit_writer_options) noexcept :
     listen_address_(std::move(listen_address)), nacos_config_(std::move(nacos_config)),
     initial_config_timeout_(initial_config_timeout), advertise_address_(std::move(advertise_address)),
     service_name_(std::move(service_name)), service_group_(std::move(service_group)),
-    cat_config_(std::move(cat_config)) {}
+    cat_config_(std::move(cat_config)), audit_writer_options_(std::move(audit_writer_options)) {}
 
 std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_file(std::string_view path) {
     std::ifstream input(std::string(path), std::ios::binary);
@@ -593,10 +666,13 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     bool cat_setting_present = false;
     nacos::NacosClientConfigParams nacos_params;
     FieldLines field_lines;
+    LlmAuditWriterOptions audit_options{
+            .path = "ai-server-audit.ndjson",
+    };
     for (const EnvEntry &entry: *entries) {
         auto result =
                 apply_entry(entry, listen_ip, listen_port, initial_config_timeout, advertise_address, service_name,
-                            service_group, cat_params, cat_setting_present, nacos_params, field_lines);
+                            service_group, cat_params, cat_setting_present, nacos_params, field_lines, audit_options);
         if (!result) {
             return std::unexpected(std::move(result.error()));
         }
@@ -620,7 +696,7 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     }
     return AiServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(*nacos_config), initial_config_timeout,
                           std::move(advertise_address), std::move(service_name), std::move(service_group),
-                          std::move(cat_config));
+                          std::move(cat_config), std::move(audit_options));
 }
 
 } // namespace fiber::ai_server

@@ -1,4 +1,5 @@
 #include "AiServer.h"
+#include "audit/LlmAuditWriter.h"
 #include "server/LlmRequestHandler.h"
 #include "server/TokenRateLimitHttpHandler.h"
 
@@ -84,9 +85,10 @@ async::Task<void> send_json(http::HttpExchange &exchange, int status_code, std::
 
 } // namespace
 
-AiServer::AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group, cat::CatClient *cat_client) :
-    accept_loop_(&accept_loop), worker_group_(&worker_group), cat_client_(cat_client), workers_(worker_group.size()),
-    rate_limiters_(worker_group.size()), rate_limit_remote_client_(worker_group),
+AiServer::AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group, cat::CatClient *cat_client,
+                   LlmAuditWriter *audit_writer) :
+    accept_loop_(&accept_loop), worker_group_(&worker_group), cat_client_(cat_client), audit_writer_(audit_writer),
+    workers_(worker_group.size()), rate_limiters_(worker_group.size()), rate_limit_remote_client_(worker_group),
     rate_limit_coordinator_(rate_limiters_, rate_limit_ring_, rate_limit_remote_client_),
     provider_connections_(worker_group), provider_client_(provider_connections_), metrics_(worker_group),
     server_(
@@ -269,8 +271,11 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
             co_return;
         }
         const auto ring = rate_limit_ring_.snapshot();
-        auto collected = co_await metrics_.collect(event::EventLoop::current().io_buf_node_pool(),
-                                                   rate_limiters_.stats(), ring ? ring->nodes.size() : 0);
+        const std::optional<LlmAuditWriterStats> audit_stats =
+                audit_writer_ ? std::optional<LlmAuditWriterStats>(audit_writer_->stats()) : std::nullopt;
+        auto collected =
+                co_await metrics_.collect(event::EventLoop::current().io_buf_node_pool(), rate_limiters_.stats(),
+                                          ring ? ring->nodes.size() : 0, audit_stats ? &*audit_stats : nullptr);
         if (!collected) {
             co_await send_json(exchange, collected.error() == common::IoErr::Busy ? 503 : 500,
                                collected.error() == common::IoErr::Busy
@@ -303,7 +308,7 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         metrics.request_started(protocol);
         const auto started = event::EventLoop::current().now();
         LlmRequestHandler handler(provider_client_, worker.provider_runtime, rate_limit_coordinator_, metrics,
-                                  cat_client_);
+                                  cat_client_, audit_writer_);
         co_await handler.handle(exchange, protocol, worker.config);
         metrics.request_finished(
                 protocol, exchange.response_stats(),
@@ -325,7 +330,7 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
     }
     const auto config = current_config();
     const auto ring = rate_limit_ring_.snapshot();
-    if (config && ring && !ring->entries.empty()) {
+    if (config && ring && !ring->entries.empty() && (!audit_writer_ || audit_writer_->ready())) {
         co_await send_json(exchange, 200, kReadyBody);
         co_return;
     }

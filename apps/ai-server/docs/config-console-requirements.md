@@ -707,7 +707,17 @@ token 生命周期已经结束。
 | `AI_SERVER_SERVICE_GROUP` | `DEFAULT_GROUP` | 1..255 字节 |
 | `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS` | `60000` | 非负毫秒；0 表示无限等待 |
 
-### 13.3 Nacos
+### 13.3 LLM 审计
+
+| 参数 | 默认值 | 控件与规则 |
+| --- | --- | --- |
+| `AI_SERVER_AUDIT_LOG_PATH` | `ai-server-audit.ndjson` | 非空文件路径，最多 4096 字节 |
+| `AI_SERVER_AUDIT_MAX_RECORD_BYTES` | `134217728` | 正整数；单条记录超限时请求 fail closed |
+| `AI_SERVER_AUDIT_MAX_PENDING_RECORDS` | `256` | 正整数；含正在构造和等待写入的记录 |
+| `AI_SERVER_AUDIT_ROTATE_BYTES` | `1073741824` | 非负字节数；0 禁用轮转 |
+| `AI_SERVER_AUDIT_MAX_ARCHIVES` | `30` | 正整数 |
+
+### 13.4 Nacos
 
 | 参数 | 默认值 | 控件与规则 |
 | --- | --- | --- |
@@ -724,7 +734,7 @@ token 生命周期已经结束。
 Nacos server address 只接受 IP literal，不接受域名。页面输入采用一行一个地址，
 导出 dotenv 时用逗号连接。
 
-### 13.4 CAT
+### 13.5 CAT
 
 CAT 默认关闭。启用后：
 
@@ -738,7 +748,7 @@ CAT 默认关闭。启用后：
 
 Router 和 Collector 至少一类非空；端口为 1..65535；不解析域名。
 
-### 13.5 dotenv 导出
+### 13.6 dotenv 导出
 
 导出规则必须与 `AiServerConfig` 解析器兼容：
 

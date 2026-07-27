@@ -1,5 +1,6 @@
 #include "LlmRequestHandler.h"
 
+#include "../audit/LlmAuditWriter.h"
 #include "../auth/LlmRequestAuthenticator.h"
 #include "../protocol/LlmError.h"
 #include "../protocol/SseParser.h"
@@ -47,19 +48,12 @@ namespace fiber::ai_server {
 namespace {
 
 DEFINE_LOGGER(LOG_LLM, "ai_server.llm");
-DEFINE_LOGGER(LOG_AUDIT, "ai_server.audit");
 
 constexpr std::size_t kMaxRequestBodyBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaxProviderErrorBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaxProviderResponseBytes = 32 * 1024 * 1024;
 constexpr std::size_t kBodyChunkBytes = 64 * 1024;
-constexpr std::size_t kMaxAuditJsonBytes = log::kMaxCompleteLogMessageSize;
-constexpr std::size_t kMaxAuditOutputTextBytes = 16 * 1024;
-constexpr std::size_t kMaxAuditToolTextBytes = 8 * 1024;
-constexpr std::size_t kAuditInputSectionBytes = 20 * 1024;
-constexpr std::size_t kAuditOutputStringBytes = 18 * 1024;
-constexpr std::size_t kAuditAttemptSectionBytes = 12 * 1024;
-constexpr std::size_t kAuditMetadataStringBytes = 4 * 1024;
+constexpr std::size_t kAuditRecordMetadataReserveBytes = 1024 * 1024;
 constexpr std::chrono::seconds kProviderTimeout{300};
 
 std::int64_t wall_now_millis() noexcept;
@@ -153,24 +147,6 @@ std::string_view auth_failure_reason_name(Bt1AuthFailureReason reason) noexcept 
     return "unknown";
 }
 
-std::string_view prompt_part_kind_name(LlmAuditPromptPartKind kind) noexcept {
-    switch (kind) {
-        case LlmAuditPromptPartKind::SystemText:
-            return "system_text";
-        case LlmAuditPromptPartKind::MessageRole:
-            return "message_role";
-        case LlmAuditPromptPartKind::MessageText:
-            return "message_text";
-        case LlmAuditPromptPartKind::ToolName:
-            return "tool_name";
-        case LlmAuditPromptPartKind::ToolDescription:
-            return "tool_description";
-        case LlmAuditPromptPartKind::ToolArguments:
-            return "tool_arguments";
-    }
-    return "unknown";
-}
-
 std::size_t saturating_add(std::size_t left, std::size_t right) noexcept {
     return left > std::numeric_limits<std::size_t>::max() - right ? std::numeric_limits<std::size_t>::max()
                                                                   : left + right;
@@ -212,19 +188,26 @@ std::size_t utf8_sequence_size(std::string_view input, std::size_t offset) noexc
     return size;
 }
 
-std::string_view take_json_string_budget(std::string_view value, std::size_t &budget, bool &truncated) noexcept {
-    if (budget < 2) {
-        truncated = truncated || !value.empty();
-        return {};
+bool is_valid_utf8(std::string_view input) noexcept {
+    std::size_t offset = 0;
+    while (offset < input.size()) {
+        const std::size_t sequence = utf8_sequence_size(input, offset);
+        if (sequence == 0) {
+            return false;
+        }
+        offset += sequence;
     }
-    budget -= 2;
+    return true;
+}
+
+std::size_t json_string_content_size(std::string_view value) noexcept {
+    std::size_t size = 0;
     std::size_t offset = 0;
     while (offset < value.size()) {
         const auto ch = static_cast<unsigned char>(value[offset]);
         const std::size_t sequence = utf8_sequence_size(value, offset);
         if (sequence == 0) {
-            truncated = true;
-            break;
+            return std::numeric_limits<std::size_t>::max();
         }
         std::size_t encoded = sequence;
         if (ch < 0x20) {
@@ -232,43 +215,76 @@ std::string_view take_json_string_budget(std::string_view value, std::size_t &bu
         } else if (ch == '"' || ch == '\\') {
             encoded = 2;
         }
-        if (encoded > budget) {
-            truncated = true;
-            break;
-        }
-        budget -= encoded;
+        size = saturating_add(size, encoded);
         offset += sequence;
     }
-    if (offset != value.size()) {
-        truncated = true;
-    }
-    return value.substr(0, offset);
+    return size;
 }
 
 class AuditJsonSink final : public json::OutputSink {
 public:
-    explicit AuditJsonSink(mem::IoBuf &output) noexcept : output_(&output) {}
+    explicit AuditJsonSink(LlmAuditBuffer &output) noexcept : output_(&output) {}
 
-    [[nodiscard]] bool write(const char *data, std::size_t size) override {
-        if (size > output_->writable()) {
-            return false;
-        }
-        if (size != 0) {
-            std::memcpy(output_->writable_data(), data, size);
-            output_->commit(size);
-        }
+    [[nodiscard]] bool write(const char *data, std::size_t size) override { return output_->append(data, size); }
+
+    [[nodiscard]] std::size_t size() const noexcept { return output_->size(); }
+
+private:
+    LlmAuditBuffer *output_ = nullptr;
+};
+
+struct Base64AuditCursor {
+    std::string_view input;
+    std::size_t offset = 0;
+    std::array<char, 4096> output{};
+};
+
+bool next_base64_audit_chunk(void *opaque, const char *&data, std::size_t &size, bool &done) noexcept {
+    static constexpr char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    auto &cursor = *static_cast<Base64AuditCursor *>(opaque);
+    if (cursor.offset == cursor.input.size()) {
+        data = nullptr;
+        size = 0;
+        done = true;
         return true;
     }
 
-    [[nodiscard]] std::size_t size() const noexcept { return output_->readable(); }
-
-private:
-    mem::IoBuf *output_ = nullptr;
-};
+    const std::size_t remaining = cursor.input.size() - cursor.offset;
+    const std::size_t input_bytes = std::min<std::size_t>(remaining, (cursor.output.size() / 4) * 3);
+    const auto *input = reinterpret_cast<const unsigned char *>(cursor.input.data() + cursor.offset);
+    std::size_t input_offset = 0;
+    std::size_t output_offset = 0;
+    while (input_offset + 3 <= input_bytes) {
+        const std::uint32_t value = (static_cast<std::uint32_t>(input[input_offset]) << 16) |
+                                    (static_cast<std::uint32_t>(input[input_offset + 1]) << 8) |
+                                    static_cast<std::uint32_t>(input[input_offset + 2]);
+        cursor.output[output_offset++] = digits[(value >> 18) & 0x3f];
+        cursor.output[output_offset++] = digits[(value >> 12) & 0x3f];
+        cursor.output[output_offset++] = digits[(value >> 6) & 0x3f];
+        cursor.output[output_offset++] = digits[value & 0x3f];
+        input_offset += 3;
+    }
+    const std::size_t tail = input_bytes - input_offset;
+    if (tail != 0) {
+        std::uint32_t value = static_cast<std::uint32_t>(input[input_offset]) << 16;
+        if (tail == 2) {
+            value |= static_cast<std::uint32_t>(input[input_offset + 1]) << 8;
+        }
+        cursor.output[output_offset++] = digits[(value >> 18) & 0x3f];
+        cursor.output[output_offset++] = digits[(value >> 12) & 0x3f];
+        cursor.output[output_offset++] = tail == 2 ? digits[(value >> 6) & 0x3f] : '=';
+        cursor.output[output_offset++] = '=';
+    }
+    cursor.offset += input_bytes;
+    data = cursor.output.data();
+    size = output_offset;
+    done = cursor.offset == cursor.input.size();
+    return true;
+}
 
 class AuditJsonWriter {
 public:
-    explicit AuditJsonWriter(mem::IoBuf &output) noexcept : sink_(output), generator_(sink_) {
+    explicit AuditJsonWriter(LlmAuditBuffer &output) noexcept : sink_(output), generator_(sink_) {
         generator_.set_option(json::Generator::Option::ValidateUtf8);
     }
 
@@ -285,6 +301,20 @@ public:
             apply(generator_.string(value.data(), value.size()));
         }
     }
+    void text(const LlmAuditBuffer &value) noexcept {
+        if (!good_) {
+            return;
+        }
+        auto cursor = value.cursor();
+        apply(generator_.string_from_chunks(&LlmAuditBuffer::next_chunk, &cursor));
+    }
+    void binary_text(std::string_view value) noexcept {
+        if (!good_) {
+            return;
+        }
+        Base64AuditCursor cursor{.input = value};
+        apply(generator_.string_from_chunks(&next_base64_audit_chunk, &cursor));
+    }
     void integer(std::int64_t value) noexcept { apply(generator_.integer(value)); }
     void boolean(bool value) noexcept { apply(generator_.bool_value(value)); }
     void null() noexcept { apply(generator_.null_value()); }
@@ -295,6 +325,10 @@ public:
     }
     void field(std::string_view name, const char *value) noexcept {
         field(name, value ? std::string_view(value) : std::string_view{});
+    }
+    void field(std::string_view name, const LlmAuditBuffer &value) noexcept {
+        key(name);
+        text(value);
     }
     void field(std::string_view name, std::int64_t value) noexcept {
         key(name);
@@ -321,13 +355,6 @@ public:
             null();
         }
     }
-    std::size_t budgeted_field(std::string_view name, std::string_view value, std::size_t &budget,
-                               bool &truncated) noexcept {
-        key(name);
-        const std::string_view prefix = take_json_string_budget(value, budget, truncated);
-        text(prefix);
-        return prefix.size();
-    }
 
 private:
     void apply(json::Generator::Result result) noexcept {
@@ -339,53 +366,6 @@ private:
     AuditJsonSink sink_;
     json::Generator generator_;
     bool good_ = true;
-};
-
-class BoundedAuditText {
-public:
-    explicit BoundedAuditText(std::size_t capacity) noexcept : capacity_(capacity) {}
-
-    void append(std::string_view value) noexcept {
-        observed_bytes_ = saturating_add(observed_bytes_, value.size());
-        if (value.empty()) {
-            return;
-        }
-        if (!buffer_) {
-            buffer_ = mem::IoBuf::allocate(capacity_);
-            if (!buffer_) {
-                incomplete_ = true;
-                truncated_ = true;
-                return;
-            }
-        }
-        const std::size_t available = buffer_.writable();
-        std::size_t copy = std::min(available, value.size());
-        if (copy != value.size()) {
-            while (copy > 0 && copy < value.size() && (static_cast<unsigned char>(value[copy]) & 0xc0) == 0x80) {
-                --copy;
-            }
-            truncated_ = true;
-        }
-        if (copy != 0) {
-            std::memcpy(buffer_.writable_data(), value.data(), copy);
-            buffer_.commit(copy);
-        }
-    }
-
-    [[nodiscard]] std::string_view view() const noexcept {
-        return buffer_ ? std::string_view(reinterpret_cast<const char *>(buffer_.readable_data()), buffer_.readable())
-                       : std::string_view{};
-    }
-    [[nodiscard]] std::size_t observed_bytes() const noexcept { return observed_bytes_; }
-    [[nodiscard]] bool truncated() const noexcept { return truncated_; }
-    [[nodiscard]] bool incomplete() const noexcept { return incomplete_; }
-
-private:
-    mem::IoBuf buffer_;
-    std::size_t capacity_ = 0;
-    std::size_t observed_bytes_ = 0;
-    bool truncated_ = false;
-    bool incomplete_ = false;
 };
 
 enum class OutputAuditAction : std::uint32_t {
@@ -474,6 +454,8 @@ const json::JsonPathProgram &output_content_blocks_program() {
         constexpr json::JsonPathRule rules[] = {
                 {.expression = "$[*block].text", .action = static_cast<std::uint32_t>(OutputAuditAction::Content)},
                 {.expression = "$[*block].name", .action = static_cast<std::uint32_t>(OutputAuditAction::ToolName)},
+                {.expression = "$[*block].input",
+                 .action = static_cast<std::uint32_t>(OutputAuditAction::ToolArguments)},
         };
         auto compiled = json::JsonPathProgram::compile(rules);
         FIBER_ASSERT(compiled.has_value());
@@ -484,10 +466,16 @@ const json::JsonPathProgram &output_content_blocks_program() {
 
 class LlmAuditOutputCapture {
 public:
-    LlmAuditOutputCapture() noexcept :
-        content_(kMaxAuditOutputTextBytes), tool_names_(2048), tool_arguments_(kMaxAuditToolTextBytes) {}
+    explicit LlmAuditOutputCapture(std::size_t max_encoded_bytes) noexcept :
+        content_(max_encoded_bytes), tool_names_(max_encoded_bytes), tool_arguments_(max_encoded_bytes),
+        max_encoded_bytes_(max_encoded_bytes) {}
 
-    void observe(LlmWireProtocol protocol, std::string_view input, bool streaming) noexcept {
+    void set_max_encoded_bytes(std::size_t value) noexcept { max_encoded_bytes_ = value; }
+
+    [[nodiscard]] bool observe(LlmWireProtocol protocol, std::string_view input, bool streaming) noexcept {
+        if (capture_failed_) {
+            return false;
+        }
         available_ = true;
         event_count_ = saturating_add(event_count_, 1);
         observed_json_bytes_ = saturating_add(observed_json_bytes_, input.size());
@@ -509,7 +497,9 @@ public:
                                               });
         if (!visited) {
             parse_errors_ = saturating_add(parse_errors_, 1);
+            mark_failure("invalid_provider_json");
         }
+        return !capture_failed_;
     }
 
     void complete(bool value) noexcept { complete_ = value; }
@@ -520,24 +510,17 @@ public:
     [[nodiscard]] std::size_t observed_json_bytes() const noexcept { return observed_json_bytes_; }
     [[nodiscard]] std::size_t parse_errors() const noexcept { return parse_errors_; }
     [[nodiscard]] std::string_view role() const noexcept { return role_.view(); }
-    [[nodiscard]] std::string_view content() const noexcept { return content_.view(); }
-    [[nodiscard]] std::string_view tool_names() const noexcept { return tool_names_.view(); }
-    [[nodiscard]] std::string_view tool_arguments() const noexcept { return tool_arguments_.view(); }
+    [[nodiscard]] const LlmAuditBuffer &content() const noexcept { return content_; }
+    [[nodiscard]] const LlmAuditBuffer &tool_names() const noexcept { return tool_names_; }
+    [[nodiscard]] const LlmAuditBuffer &tool_arguments() const noexcept { return tool_arguments_; }
     [[nodiscard]] std::string_view finish_reason() const noexcept { return finish_reason_.view(); }
     [[nodiscard]] std::size_t captured_text_bytes() const noexcept {
-        return saturating_add(saturating_add(content_.view().size(), tool_names_.view().size()),
-                              tool_arguments_.view().size());
+        return saturating_add(saturating_add(content_.size(), tool_names_.size()), tool_arguments_.size());
     }
-    [[nodiscard]] std::size_t observed_text_bytes() const noexcept {
-        return saturating_add(saturating_add(content_.observed_bytes(), tool_names_.observed_bytes()),
-                              tool_arguments_.observed_bytes());
-    }
-    [[nodiscard]] bool truncated() const noexcept {
-        return content_.truncated() || tool_names_.truncated() || tool_arguments_.truncated();
-    }
-    [[nodiscard]] bool incomplete() const noexcept {
-        return content_.incomplete() || tool_names_.incomplete() || tool_arguments_.incomplete() || parse_errors_ != 0;
-    }
+    [[nodiscard]] std::size_t observed_text_bytes() const noexcept { return observed_text_bytes_; }
+    [[nodiscard]] bool incomplete() const noexcept { return capture_failed_ || parse_errors_ != 0; }
+    [[nodiscard]] bool canonical_complete() const noexcept { return complete_ && !incomplete(); }
+    [[nodiscard]] std::string_view capture_error() const noexcept { return capture_error_; }
 
     [[nodiscard]] std::string_view hash() noexcept {
         if (!available_ || !hash_valid_) {
@@ -565,6 +548,32 @@ private:
         std::string_view input;
     };
 
+    void mark_failure(std::string_view error) noexcept {
+        capture_failed_ = true;
+        if (capture_error_.empty()) {
+            capture_error_ = error;
+        }
+    }
+
+    [[nodiscard]] bool append(LlmAuditBuffer &target, std::string_view value, bool separator = false) noexcept {
+        observed_text_bytes_ = saturating_add(observed_text_bytes_, value.size());
+        const std::size_t encoded = json_string_content_size(value);
+        const std::size_t separator_bytes = separator ? 1 : 0;
+        const std::size_t required = saturating_add(separator_bytes, encoded);
+        if (encoded == std::numeric_limits<std::size_t>::max() || required > max_encoded_bytes_ ||
+            captured_encoded_bytes_ > max_encoded_bytes_ - required) {
+            mark_failure(encoded == std::numeric_limits<std::size_t>::max() ? "invalid_provider_utf8"
+                                                                            : "audit_record_too_large");
+            return false;
+        }
+        if ((separator && !target.append('\n')) || !target.append(value)) {
+            mark_failure("audit_allocation_failed");
+            return false;
+        }
+        captured_encoded_bytes_ += required;
+        return true;
+    }
+
     static bool on_match(void *opaque, const json::JsonPathMatch &match) noexcept {
         auto &context = *static_cast<MatchContext *>(opaque);
         LlmAuditOutputCapture &self = *context.capture;
@@ -586,29 +595,37 @@ private:
                                                   });
             if (!visited) {
                 self.parse_errors_ = saturating_add(self.parse_errors_, 1);
+                self.mark_failure("invalid_provider_json");
             }
-            return true;
+            return !self.capture_failed_;
+        }
+        if (action == OutputAuditAction::ToolArguments &&
+            (match.token.kind == json::TokenKind::StartObj || match.token.kind == json::TokenKind::StartArr)) {
+            return self.append(self.tool_arguments_, context.input.substr(match.span.begin, match.span.size()),
+                               !self.tool_arguments_.empty());
         }
         if (match.token.kind != json::TokenKind::Text) {
             return true;
         }
         switch (action) {
             case OutputAuditAction::Role:
+                if (match.token.view.size() > 32) {
+                    self.mark_failure("invalid_role");
+                    return false;
+                }
                 self.role_.assign(match.token.view);
                 break;
             case OutputAuditAction::Content:
-                self.content_.append(match.token.view);
-                break;
+                return self.append(self.content_, match.token.view);
             case OutputAuditAction::ToolName:
-                if (!self.tool_names_.view().empty()) {
-                    self.tool_names_.append("\n");
-                }
-                self.tool_names_.append(match.token.view);
-                break;
+                return self.append(self.tool_names_, match.token.view, !self.tool_names_.empty());
             case OutputAuditAction::ToolArguments:
-                self.tool_arguments_.append(match.token.view);
-                break;
+                return self.append(self.tool_arguments_, match.token.view);
             case OutputAuditAction::FinishReason:
+                if (match.token.view.size() > 64) {
+                    self.mark_failure("invalid_finish_reason");
+                    return false;
+                }
                 self.finish_reason_.assign(match.token.view);
                 break;
         }
@@ -616,27 +633,32 @@ private:
     }
 
     mem::BufPool parse_pool_;
-    BoundedAuditText content_;
-    BoundedAuditText tool_names_;
-    BoundedAuditText tool_arguments_;
+    LlmAuditBuffer content_;
+    LlmAuditBuffer tool_names_;
+    LlmAuditBuffer tool_arguments_;
     FixedAuditText<32> role_;
     FixedAuditText<64> finish_reason_;
     SHA256_CTX hash_{};
     std::array<char, 7 + SHA256_DIGEST_LENGTH * 2> hash_text_{};
     std::size_t event_count_ = 0;
     std::size_t observed_json_bytes_ = 0;
+    std::size_t observed_text_bytes_ = 0;
+    std::size_t captured_encoded_bytes_ = 0;
     std::size_t parse_errors_ = 0;
+    std::size_t max_encoded_bytes_ = 0;
+    std::string_view capture_error_;
     bool hash_valid_ = SHA256_Init(&hash_) == 1;
     bool available_ = false;
     bool complete_ = false;
+    bool capture_failed_ = false;
 };
 
 struct ProviderAttemptAudit {
-    FixedAuditText<128> provider;
-    FixedAuditText<128> token_name;
-    FixedAuditText<128> upstream_model;
-    FixedAuditText<512> path;
-    FixedAuditText<32> outcome;
+    std::string_view provider;
+    std::string_view token_name;
+    std::string_view upstream_model;
+    std::string_view path;
+    std::string_view outcome;
     std::size_t index = 0;
     std::size_t total = 0;
     std::int64_t latency_us = 0;
@@ -649,9 +671,21 @@ struct ProviderAttemptAudit {
 
 class LlmRequestAudit {
 public:
-    LlmRequestAudit(http::HttpExchange &exchange, LlmWireProtocol protocol, cat::CatClient *cat_client) noexcept :
+    LlmRequestAudit(http::HttpExchange &exchange, LlmWireProtocol protocol, cat::CatClient *cat_client,
+                    LlmAuditWriter *writer) noexcept :
         exchange_(&exchange), protocol_(protocol), started_(event::EventLoop::current().now()),
-        started_at_ms_(wall_now_millis()) {
+        started_at_ms_(wall_now_millis()), writer_(writer),
+        output_(writer ? writer->max_record_bytes() : std::size_t{0}) {
+        if (writer_) {
+            acquired_ = writer_->try_acquire();
+            if (acquired_) {
+                record_ = writer_->make_record();
+                if (!record_) {
+                    writer_->release_acquired();
+                    acquired_ = false;
+                }
+            }
+        }
         static std::atomic<std::uint64_t> sequence{0};
         const std::uint64_t next = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
         const int length = std::snprintf(request_id_storage_.data(), request_id_storage_.size(), "%llx-%llx",
@@ -692,6 +726,10 @@ public:
         }
     }
 
+    [[nodiscard]] bool available() const noexcept { return writer_ == nullptr || acquired_; }
+
+    void pin_config(std::shared_ptr<const LlmConfigSnapshot> config) noexcept { config_ = std::move(config); }
+
     void auth_allowed(const Bt1Principal &principal) noexcept {
         auth_result_ = "allow";
         auth_reason_ = -1;
@@ -709,48 +747,61 @@ public:
         auth_reason_name_ = auth_failure_reason_name(error.reason);
     }
 
-    void request_body(const mem::IoBuf &body) noexcept {
+    [[nodiscard]] bool request_body(const mem::IoBuf &body) noexcept {
+        request_body_ = body;
         body_size_ = body ? body.readable() : 0;
-        assign_sha256(body ? std::string_view(reinterpret_cast<const char *>(body.readable_data()), body.readable())
-                           : std::string_view{},
-                      body_hash_);
+        const std::string_view body_view =
+                body ? std::string_view(reinterpret_cast<const char *>(body.readable_data()), body.readable())
+                     : std::string_view{};
+        assign_sha256(body_view, body_hash_);
+        body_is_utf8_ = is_valid_utf8(body_view);
+        const std::size_t body_encoded_size =
+                body_is_utf8_ ? json_string_content_size(body_view) : saturating_add(body_size_, 2) / 3 * 4;
+        if (!writer_) {
+            return true;
+        }
+        const std::size_t maximum = writer_->max_record_bytes();
+        const std::size_t required = saturating_add(body_encoded_size, kAuditRecordMetadataReserveBytes);
+        if (required > maximum) {
+            capture_error_ = "audit_record_too_large";
+            return false;
+        }
+        output_.set_max_encoded_bytes(maximum - required);
+        return true;
     }
 
     void input(const LlmRoutingData &routing) noexcept {
-        input_available_ = true;
-        stream_ = routing.stream;
-        prompt_parts_ = routing.audit_prompt_parts;
+        stream_ = routing.stream.is_present() && *routing.stream;
+        requested_model_ = routing.model.is_present() ? *routing.model : std::string_view{};
         messages_count_ = routing.messages_count;
         tools_count_ = routing.tools_count;
-        input_truncated_ = routing.audit_prompt_truncated;
-        input_incomplete_ = routing.audit_prompt_incomplete;
-        for (const LlmAuditPromptPart &part: prompt_parts_) {
-            input_observed_text_bytes_ = saturating_add(input_observed_text_bytes_, part.text.size());
-        }
     }
 
-    void output(std::string_view json, bool streaming) noexcept { output_.observe(protocol_, json, streaming); }
+    [[nodiscard]] bool output(std::string_view json, bool streaming) noexcept {
+        return !writer_ || output_.observe(protocol_, json, streaming);
+    }
 
     void output_complete(bool complete) noexcept { output_.complete(complete); }
 
-    void reserve_provider_attempts(std::size_t capacity) noexcept {
+    [[nodiscard]] bool reserve_provider_attempts(std::size_t capacity) noexcept {
         if (capacity == 0) {
-            return;
+            return true;
         }
         attempts_ = exchange_->pool().alloc<ProviderAttemptAudit>(capacity);
         if (!attempts_) {
-            attempts_truncated_ = true;
-            return;
+            capture_error_ = "audit_allocation_failed";
+            return false;
         }
         for (std::size_t i = 0; i < capacity; ++i) {
             std::construct_at(attempts_ + i);
         }
         attempts_capacity_ = capacity;
+        return true;
     }
 
     void model(std::string_view requested, std::string_view resolved) noexcept {
-        requested_model_.assign(requested);
-        model_.assign(resolved);
+        (void) requested;
+        model_ = resolved;
         authz_result_ = "allow";
         if (cat_transaction_ && cat_transaction_->valid()) {
             (void) cat_transaction_->add_data("model", resolved);
@@ -758,7 +809,7 @@ public:
     }
 
     void authz_denied(std::string_view requested) noexcept {
-        requested_model_.assign(requested);
+        (void) requested;
         authz_result_ = "deny";
     }
 
@@ -799,12 +850,11 @@ public:
         ++attempts_observed_;
         if (attempts_size_ < attempts_capacity_) {
             ProviderAttemptAudit &record = attempts_[attempts_size_++];
-            record.provider.assign(attempt.provider->name);
-            record.token_name.assign(attempt.api_token ? std::string_view(attempt.api_token->name)
-                                                       : std::string_view{});
-            record.upstream_model.assign(attempt.protocol->model);
-            record.path.assign(attempt.protocol->path);
-            record.outcome.assign(outcome);
+            record.provider = attempt.provider->name;
+            record.token_name = attempt.api_token ? std::string_view(attempt.api_token->name) : std::string_view{};
+            record.upstream_model = attempt.protocol->model;
+            record.path = attempt.protocol->path;
+            record.outcome = outcome;
             record.index = index + 1;
             record.total = total;
             record.provider_config_version = attempt.provider->config->metadata.version;
@@ -814,7 +864,7 @@ public:
             record.retryable = retryable;
             record.response_started = response_started;
         } else {
-            attempts_truncated_ = true;
+            capture_error_ = "audit_attempt_overflow";
         }
         if (cat_transaction_ && cat_transaction_->valid()) {
             std::string data;
@@ -849,33 +899,53 @@ public:
     }
 
 private:
-    [[nodiscard]] mem::IoBuf encode(const http::HttpResponseStats &response, std::int64_t duration_us) noexcept {
-        mem::IoBuf encoded = mem::IoBuf::allocate(kMaxAuditJsonBytes);
-        if (!encoded) {
-            return {};
+    [[nodiscard]] bool encode(const http::HttpResponseStats &response, std::int64_t duration_us) noexcept {
+        if (!record_) {
+            return false;
         }
-        AuditJsonWriter json(encoded);
-        std::size_t metadata_budget = kAuditMetadataStringBytes;
-        bool metadata_truncated = false;
+        AuditJsonWriter json(record_->bytes());
+        const std::string_view output_error = output_.capture_error();
+        const std::string_view capture_error = !capture_error_.empty() ? capture_error_ : output_error;
+        const bool capture_complete =
+                capture_error.empty() && attempts_observed_ == attempts_size_ && !output_.incomplete();
 
         json.object_open();
-        json.field("schema_version", 2);
+        json.field("schema_version", 3);
         json.field("event", "llm_request");
+
+        json.key("audit");
+        json.object_open();
+        json.field("id", request_id_);
+        json.field("capture_complete", capture_complete);
+        if (capture_error.empty()) {
+            json.null_field("capture_error");
+        } else {
+            json.field("capture_error", capture_error);
+        }
+        json.object_close();
 
         json.key("request");
         json.object_open();
-        json.budgeted_field("id", request_id_, metadata_budget, metadata_truncated);
         json.field("started_at_ms", started_at_ms_);
         json.field("protocol", protocol_name(protocol_));
         const std::string remote_addr = exchange_->remote_addr().to_string();
-        json.budgeted_field("remote_addr", remote_addr, metadata_budget, metadata_truncated);
-        json.budgeted_field("method", exchange_->method_view(), metadata_budget, metadata_truncated);
-        json.budgeted_field("path", exchange_->uri().path, metadata_budget, metadata_truncated);
-        json.key("stream");
-        if (stream_.is_present()) {
-            json.boolean(*stream_);
+        json.field("remote_addr", remote_addr);
+        json.field("method", exchange_->method_view());
+        json.field("path", exchange_->uri().path);
+        json.field("request_model_name", requested_model_);
+        json.field("stream", stream_);
+        json.field("messages_count", static_cast<std::int64_t>(messages_count_));
+        json.field("tools_count", static_cast<std::int64_t>(tools_count_));
+        json.field("body_encoding", body_is_utf8_ ? "json_text" : "base64");
+        json.key("body");
+        const std::string_view body =
+                request_body_ ? std::string_view(reinterpret_cast<const char *>(request_body_.readable_data()),
+                                                 request_body_.readable())
+                              : std::string_view{};
+        if (body_is_utf8_) {
+            json.text(body);
         } else {
-            json.null();
+            json.binary_text(body);
         }
         json.field("body_bytes", static_cast<std::int64_t>(body_size_));
         json.field("body_sha256", body_hash_.view());
@@ -891,14 +961,13 @@ private:
             json.field("auth_reason", auth_reason_name_);
             json.field("auth_reason_code", auth_reason_);
         }
-        json.budgeted_field("user", user_.view(), metadata_budget, metadata_truncated);
-        json.budgeted_field("kid", kid_.view(), metadata_budget, metadata_truncated);
+        json.field("user", user_.view());
+        json.field("kid", kid_.view());
         json.object_close();
 
         json.key("routing");
         json.object_open();
-        json.budgeted_field("requested_model", requested_model_.view(), metadata_budget, metadata_truncated);
-        json.budgeted_field("resolved_model", model_.view(), metadata_budget, metadata_truncated);
+        json.field("resolved_model_name", model_);
         json.field("authorization", authz_result_);
         json.object_close();
 
@@ -912,72 +981,21 @@ private:
 
         json.key("llm");
         json.object_open();
-        json.key("input");
-        json.object_open();
-        json.field("available", input_available_);
-        json.field("messages_count", static_cast<std::int64_t>(messages_count_));
-        json.field("tools_count", static_cast<std::int64_t>(tools_count_));
-        json.key("prompt_parts");
-        json.array_open();
-        const std::size_t input_section_start = json.size();
-        std::size_t input_string_budget = kAuditInputSectionBytes;
-        std::size_t input_captured_bytes = 0;
-        bool input_encoding_truncated = false;
-        std::size_t input_parts_written = 0;
-        for (const LlmAuditPromptPart &part: prompt_parts_) {
-            const std::size_t section_size = json.size() - input_section_start;
-            if (section_size >= kAuditInputSectionBytes - 512 || input_string_budget < 160) {
-                input_encoding_truncated = true;
-                break;
-            }
-            json.object_open();
-            json.field("kind", prompt_part_kind_name(part.kind));
-            if (part.message_index == LlmAuditPromptPart::NoIndex) {
-                json.null_field("message_index");
-            } else {
-                json.field("message_index", static_cast<std::int64_t>(part.message_index));
-            }
-            if (part.item_index == LlmAuditPromptPart::NoIndex) {
-                json.null_field("item_index");
-            } else {
-                json.field("item_index", static_cast<std::int64_t>(part.item_index));
-            }
-            input_captured_bytes +=
-                    json.budgeted_field("text", part.text, input_string_budget, input_encoding_truncated);
-            json.object_close();
-            ++input_parts_written;
-        }
-        json.array_close();
-        const bool input_truncated =
-                input_truncated_ || input_encoding_truncated || input_parts_written != prompt_parts_.size();
-        json.field("observed_text_bytes", static_cast<std::int64_t>(input_observed_text_bytes_));
-        json.field("captured_text_bytes", static_cast<std::int64_t>(input_captured_bytes));
-        json.field("truncated", input_truncated);
-        json.field("incomplete", input_incomplete_);
-        json.object_close();
-
         json.key("output");
         json.object_open();
         json.field("available", output_.available());
         json.field("capture_scope", "provider_observed");
-        json.budgeted_field("role", output_.role(), metadata_budget, metadata_truncated);
-        std::size_t output_budget = kAuditOutputStringBytes;
-        bool output_encoding_truncated = false;
-        std::size_t output_captured_bytes = 0;
-        output_captured_bytes +=
-                json.budgeted_field("content", output_.content(), output_budget, output_encoding_truncated);
-        output_captured_bytes +=
-                json.budgeted_field("tool_names", output_.tool_names(), output_budget, output_encoding_truncated);
-        output_captured_bytes += json.budgeted_field("tool_arguments", output_.tool_arguments(), output_budget,
-                                                     output_encoding_truncated);
-        json.budgeted_field("finish_reason", output_.finish_reason(), metadata_budget, metadata_truncated);
+        json.field("role", output_.role());
+        json.field("content", output_.content());
+        json.field("tool_names", output_.tool_names());
+        json.field("tool_arguments", output_.tool_arguments());
+        json.field("finish_reason", output_.finish_reason());
         json.field("complete", output_.complete());
+        json.field("canonical_complete", output_.canonical_complete());
         json.field("events", static_cast<std::int64_t>(output_.event_count()));
         json.field("observed_json_bytes", static_cast<std::int64_t>(output_.observed_json_bytes()));
         json.field("observed_text_bytes", static_cast<std::int64_t>(output_.observed_text_bytes()));
-        json.field("captured_text_bytes", static_cast<std::int64_t>(output_captured_bytes));
-        json.field("truncated", output_.truncated() || output_encoding_truncated);
-        json.field("incomplete", output_.incomplete());
+        json.field("captured_text_bytes", static_cast<std::int64_t>(output_.captured_text_bytes()));
         json.field("parse_errors", static_cast<std::int64_t>(output_.parse_errors()));
         const std::string_view output_hash = output_.hash();
         if (output_hash.empty()) {
@@ -990,39 +1008,27 @@ private:
 
         json.key("provider_attempts");
         json.array_open();
-        const std::size_t attempts_section_start = json.size();
-        std::size_t attempts_budget = kAuditAttemptSectionBytes;
-        bool attempts_encoding_truncated = false;
-        std::size_t attempts_written = 0;
         for (std::size_t i = 0; i < attempts_size_; ++i) {
-            if (json.size() - attempts_section_start >= kAuditAttemptSectionBytes - 512 || attempts_budget < 256) {
-                attempts_encoding_truncated = true;
-                break;
-            }
             const ProviderAttemptAudit &attempt = attempts_[i];
             json.object_open();
             json.field("attempt", static_cast<std::int64_t>(attempt.index));
             json.field("total_attempts", static_cast<std::int64_t>(attempt.total));
-            json.budgeted_field("provider", attempt.provider.view(), attempts_budget, attempts_encoding_truncated);
-            json.budgeted_field("token_name", attempt.token_name.view(), attempts_budget, attempts_encoding_truncated);
+            json.field("provider", attempt.provider);
+            json.field("token_name", attempt.token_name);
             json.field("protocol", protocol_name(protocol_));
-            json.budgeted_field("upstream_model", attempt.upstream_model.view(), attempts_budget,
-                                attempts_encoding_truncated);
-            json.budgeted_field("path", attempt.path.view(), attempts_budget, attempts_encoding_truncated);
+            json.field("upstream_model", attempt.upstream_model);
+            json.field("path", attempt.path);
             json.field("provider_config_version", attempt.provider_config_version);
             json.field("fallback", attempt.fallback);
             json.field("status", attempt.status);
             json.field("latency_us", attempt.latency_us);
             json.field("retryable", attempt.retryable);
             json.field("response_started", attempt.response_started);
-            json.budgeted_field("outcome", attempt.outcome.view(), attempts_budget, attempts_encoding_truncated);
+            json.field("outcome", attempt.outcome);
             json.object_close();
-            ++attempts_written;
         }
         json.array_close();
         json.field("provider_attempt_count", static_cast<std::int64_t>(attempts_observed_));
-        json.field("provider_attempts_truncated",
-                   attempts_truncated_ || attempts_encoding_truncated || attempts_written != attempts_size_);
 
         json.key("response");
         json.object_open();
@@ -1043,30 +1049,28 @@ private:
         json.object_close();
 
         json.field("duration_us", duration_us);
-        json.field("truncated", metadata_truncated || input_truncated || output_.truncated() ||
-                                        output_encoding_truncated || attempts_truncated_ ||
-                                        attempts_encoding_truncated);
-        json.field("audit_incomplete", input_incomplete_ || output_.incomplete());
         json.object_close();
-        return json.good() ? encoded : mem::IoBuf{};
+        return json.good() && record_->bytes().append('\n');
     }
 
     void emit(const http::HttpResponseStats &response) noexcept {
-        if (emitted_) {
+        if (emitted_ || !writer_ || !acquired_) {
             return;
         }
         emitted_ = true;
         const auto duration =
                 std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started_);
-        mem::IoBuf encoded = encode(response, std::max<std::int64_t>(duration.count(), 0));
-        constexpr std::string_view fallback =
-                R"({"schema_version":2,"event":"llm_request","audit_incomplete":"encode_failed"})";
-        const std::string_view message =
-                encoded ? std::string_view(reinterpret_cast<const char *>(encoded.readable_data()), encoded.readable())
-                        : fallback;
-        if (!log::log_complete_message(LOG_AUDIT.get(), log::LogLevel::Info, __FILE__, __LINE__, __func__, message)) {
-            LOG(LOG_AUDIT, INFO) << fallback;
+        if (!encode(response, std::max<std::int64_t>(duration.count(), 0))) {
+            writer_->release_acquired();
+            acquired_ = false;
+            record_.reset();
+            LOG(LOG_LLM, ERROR) << "LLM audit record encoding failed audit_id=" << log::quoted(request_id_);
+            return;
         }
+        if (!writer_->submit(std::move(record_))) {
+            LOG(LOG_LLM, ERROR) << "LLM audit record submission failed audit_id=" << log::quoted(request_id_);
+        }
+        acquired_ = false;
     }
 
     http::HttpExchange *exchange_ = nullptr;
@@ -1077,20 +1081,22 @@ private:
     std::string_view request_id_;
     FixedAuditText<kBt1MaxUsernameBytes> user_;
     FixedAuditText<kBt1MaxKidLength> kid_;
-    FixedAuditText<128> requested_model_;
-    FixedAuditText<128> model_;
+    std::string_view requested_model_;
+    std::string_view model_;
     FixedAuditText<7 + SHA256_DIGEST_LENGTH * 2> body_hash_;
+    mem::IoBuf request_body_;
+    std::shared_ptr<const LlmConfigSnapshot> config_;
     std::string_view auth_result_ = "unknown";
     std::string_view auth_reason_name_;
     std::string_view authz_result_ = "unknown";
     std::string_view rate_limit_result_ = "unknown";
+    std::string_view capture_error_;
     int auth_reason_ = -1;
     std::size_t body_size_ = 0;
-    json::Nullable<bool> stream_;
-    json::JsonArray<LlmAuditPromptPart> prompt_parts_;
+    bool stream_ = false;
+    bool body_is_utf8_ = true;
     std::size_t messages_count_ = 0;
     std::size_t tools_count_ = 0;
-    std::size_t input_observed_text_bytes_ = 0;
     ProviderAttemptAudit *attempts_ = nullptr;
     std::size_t attempts_capacity_ = 0;
     std::size_t attempts_size_ = 0;
@@ -1099,15 +1105,14 @@ private:
     std::int64_t rate_max_ = 0;
     std::int64_t rate_recover_at_ = 0;
     LlmTokenUsage usage_;
+    LlmAuditWriter *writer_ = nullptr;
+    std::unique_ptr<LlmAuditRecord> record_;
     LlmAuditOutputCapture output_;
     std::optional<cat::MessageTrace> cat_trace_;
     std::optional<cat::Transaction> cat_transaction_;
-    bool input_available_ = false;
-    bool input_truncated_ = false;
-    bool input_incomplete_ = false;
-    bool attempts_truncated_ = false;
     bool cat_usage_emitted_ = false;
     bool emitted_ = false;
+    bool acquired_ = false;
 };
 
 enum class ReadRequestBodyError : std::uint8_t {
@@ -1628,6 +1633,7 @@ enum class SseRelayResult : std::uint8_t {
     Success,
     ProviderError,
     ClientError,
+    AuditError,
 };
 
 common::IoErr sse_parser_io_error(SseParseError error) noexcept {
@@ -1647,6 +1653,7 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
                                       std::optional<LlmTokenUsage> &usage, LlmRequestAudit &audit) noexcept {
     SseParser parser;
     mem::BufPool usage_pool;
+    bool audit_failed = false;
     auto drain_parser = [&]() noexcept -> SseParseStatus {
         for (;;) {
             const SseParseStatus status = parser.next();
@@ -1658,7 +1665,10 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
                 (protocol == LlmWireProtocol::OpenAiChatCompletions && data == std::string_view("[DONE]"))) {
                 continue;
             }
-            audit.output(data, true);
+            if (!audit.output(data, true)) {
+                audit_failed = true;
+                return SseParseStatus::Error;
+            }
             usage_pool.reset();
             auto extracted = extract_token_usage(protocol, data, true, usage_pool);
             if (!extracted) {
@@ -1695,6 +1705,11 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
             }
             const SseParseStatus status = drain_parser();
             if (status != SseParseStatus::NeedMore) {
+                if (audit_failed) {
+                    (void) upstream.abort(common::IoErr::Invalid);
+                    (void) exchange.abort(common::IoErr::Invalid);
+                    co_return SseRelayResult::AuditError;
+                }
                 const common::IoErr error =
                         status == SseParseStatus::Error ? sse_parser_io_error(parser.error()) : common::IoErr::Invalid;
                 (void) upstream.abort(error);
@@ -1711,6 +1726,10 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
             }
             const SseParseStatus status = drain_parser();
             if (status != SseParseStatus::Complete) {
+                if (audit_failed) {
+                    (void) exchange.abort(common::IoErr::Invalid);
+                    co_return SseRelayResult::AuditError;
+                }
                 const common::IoErr error =
                         status == SseParseStatus::Error ? sse_parser_io_error(parser.error()) : common::IoErr::Invalid;
                 (void) exchange.abort(error);
@@ -1738,7 +1757,18 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
 
 async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWireProtocol protocol,
                                             std::shared_ptr<const LlmConfigSnapshot> config) noexcept {
-    LlmRequestAudit audit(exchange, protocol, cat_client_);
+    LlmRequestAudit audit(exchange, protocol, cat_client_, audit_writer_);
+    if (!audit.available()) {
+        co_await send_error(exchange, protocol,
+                            LlmError{
+                                    .status_code = 503,
+                                    .code = "audit_unavailable",
+                                    .type = "server_error",
+                                    .message = "audit service is unavailable",
+                            });
+        co_return;
+    }
+    audit.pin_config(config);
     auto authenticated = authenticate_llm_request(exchange.request_headers(), std::move(config), wall_now_seconds());
     if (!authenticated) {
         audit.auth_denied(authenticated.error());
@@ -1776,7 +1806,16 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         }
         co_return;
     }
-    audit.request_body(*raw_body);
+    if (!audit.request_body(*raw_body)) {
+        co_await send_error(exchange, protocol,
+                            LlmError{
+                                    .status_code = 503,
+                                    .code = "audit_record_too_large",
+                                    .type = "server_error",
+                                    .message = "request cannot be captured by the audit service",
+                            });
+        co_return;
+    }
 
     auto parsed = ParsedLlmBody::parse(protocol, std::move(*raw_body), exchange.pool());
     if (!parsed) {
@@ -1856,7 +1895,16 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         co_await send_error(exchange, protocol, plan_error(protocol, plan.error()));
         co_return;
     }
-    audit.reserve_provider_attempts(plan->attempts.size());
+    if (!audit.reserve_provider_attempts(plan->attempts.size())) {
+        co_await send_error(exchange, protocol,
+                            LlmError{
+                                    .status_code = 503,
+                                    .code = "audit_unavailable",
+                                    .type = "server_error",
+                                    .message = "audit service is unavailable",
+                            });
+        co_return;
+    }
 
     ServiceInstanceRetryState service_instances;
     if (!service_instances.init(plan->load_balance.service_instance_policy, plan->route_key, plan->attempts.size(),
@@ -2020,10 +2068,11 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                     started->report_instance(InstanceReportOutcome::Neutral);
                 }
             }
-            const std::string_view outcome = relay_result == SseRelayResult::Success ? std::string_view("success")
-                                             : relay_result == SseRelayResult::ProviderError
-                                                     ? std::string_view("stream_error")
-                                                     : std::string_view("client_stream_error");
+            const std::string_view outcome =
+                    relay_result == SseRelayResult::Success         ? std::string_view("success")
+                    : relay_result == SseRelayResult::ProviderError ? std::string_view("stream_error")
+                    : relay_result == SseRelayResult::AuditError    ? std::string_view("audit_capture_error")
+                                                                    : std::string_view("client_stream_error");
             audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
@@ -2065,12 +2114,26 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         }
 
         if (response->status_code >= 200 && response->status_code < 300) {
-            response->load_balance.report(InstanceReportOutcome::Success);
-            attempt.runtime->record_success(attempt.api_token ? attempt.api_token->name : std::string_view{});
             mem::BufPool usage_pool;
             auto usage = extract_token_usage(protocol, io_buf_view(response->body), false, usage_pool);
-            audit.output(io_buf_view(response->body), false);
+            if (!audit.output(io_buf_view(response->body), false)) {
+                response->load_balance.report(InstanceReportOutcome::Neutral);
+                audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,
+                                       std::chrono::duration_cast<std::chrono::microseconds>(
+                                               event::EventLoop::current().now() - attempt_started),
+                                       false, false, "audit_capture_error");
+                co_await send_error(exchange, protocol,
+                                    LlmError{
+                                            .status_code = 503,
+                                            .code = "audit_capture_failed",
+                                            .type = "server_error",
+                                            .message = "provider response could not be captured by the audit service",
+                                    });
+                co_return;
+            }
             audit.output_complete(true);
+            response->load_balance.report(InstanceReportOutcome::Success);
+            attempt.runtime->record_success(attempt.api_token ? attempt.api_token->name : std::string_view{});
             audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),

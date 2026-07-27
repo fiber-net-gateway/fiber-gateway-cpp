@@ -4,7 +4,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <fstream>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -35,6 +37,7 @@
 #include <http/HttpHeaders.h>
 #include <net/SocketAddress.h>
 
+#include "audit/LlmAuditWriter.h"
 #include "config/LlmConfigSnapshot.h"
 #include "limit/RateLimitShardRing.h"
 #include "limit/TokenRateLimitCoordinator.h"
@@ -59,6 +62,8 @@ using fiber::ai_server::ConfigMetadata;
 using fiber::ai_server::DiscoveredInstance;
 using fiber::ai_server::DiscoveredService;
 using fiber::ai_server::InstanceReportOutcome;
+using fiber::ai_server::LlmAuditWriter;
+using fiber::ai_server::LlmAuditWriterOptions;
 using fiber::ai_server::LlmConfigSnapshot;
 using fiber::ai_server::LlmProjectSnapshot;
 using fiber::ai_server::LlmRequestHandler;
@@ -102,70 +107,6 @@ struct RawHttpResponse {
 struct FixturePorts {
     std::uint16_t entry = 0;
     std::uint16_t provider = 0;
-};
-
-class StderrCapture {
-public:
-    ~StderrCapture() { finish(); }
-
-    [[nodiscard]] bool start() noexcept {
-        int descriptors[2];
-        if (::pipe(descriptors) != 0) {
-            return false;
-        }
-        saved_stderr_ = ::dup(STDERR_FILENO);
-        if (saved_stderr_ < 0 || ::dup2(descriptors[1], STDERR_FILENO) < 0) {
-            if (saved_stderr_ >= 0) {
-                ::close(saved_stderr_);
-                saved_stderr_ = -1;
-            }
-            ::close(descriptors[0]);
-            ::close(descriptors[1]);
-            return false;
-        }
-        ::close(descriptors[1]);
-        read_fd_ = descriptors[0];
-        active_ = true;
-        reader_ = std::thread([this]() {
-            char buffer[8192];
-            for (;;) {
-                const ssize_t size = ::read(read_fd_, buffer, sizeof(buffer));
-                if (size > 0) {
-                    output_.append(buffer, static_cast<std::size_t>(size));
-                    continue;
-                }
-                if (size < 0 && errno == EINTR) {
-                    continue;
-                }
-                break;
-            }
-            ::close(read_fd_);
-            read_fd_ = -1;
-        });
-        return true;
-    }
-
-    void finish() noexcept {
-        if (!active_) {
-            return;
-        }
-        (void) ::dup2(saved_stderr_, STDERR_FILENO);
-        ::close(saved_stderr_);
-        saved_stderr_ = -1;
-        if (reader_.joinable()) {
-            reader_.join();
-        }
-        active_ = false;
-    }
-
-    [[nodiscard]] const std::string &output() const noexcept { return output_; }
-
-private:
-    std::thread reader_;
-    std::string output_;
-    int saved_stderr_ = -1;
-    int read_fd_ = -1;
-    bool active_ = false;
 };
 
 fiber::common::IoResult<std::uint16_t> bound_port(int fd) noexcept {
@@ -357,8 +298,8 @@ std::string bearer_token_name(std::string_view authorization) {
 class ProxyFixture {
 public:
     ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies, bool fail_settle,
-                 bool service_rendezvous) :
-        group_(&group), replies_(std::move(replies)), fail_settle_(fail_settle),
+                 bool service_rendezvous, LlmAuditWriter &audit_writer) :
+        group_(&group), audit_writer_(&audit_writer), replies_(std::move(replies)), fail_settle_(fail_settle),
         service_rendezvous_(service_rendezvous), rate_limiters_(1), rate_limit_handler_(rate_limiters_),
         remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_), connections_(group),
         provider_client_(connections_), metrics_(group),
@@ -445,6 +386,7 @@ public:
         }
         entry_server_.close();
         co_await entry_server_.shutdown_and_wait();
+        co_await audit_writer_->shutdown();
         co_await provider_server_.shutdown_and_wait();
         if (service_rendezvous_) {
             co_await failing_provider_server_.shutdown_and_wait();
@@ -694,7 +636,7 @@ private:
         AiServerMetrics::Worker &metrics = metrics_.worker(0);
         metrics.request_started(LlmWireProtocol::OpenAiChatCompletions);
         const auto started = fiber::event::EventLoop::current().now();
-        LlmRequestHandler handler(provider_client_, runtime_, coordinator_, metrics, nullptr);
+        LlmRequestHandler handler(provider_client_, runtime_, coordinator_, metrics, nullptr, audit_writer_);
         co_await handler.handle(exchange, LlmWireProtocol::OpenAiChatCompletions, config_);
         metrics.request_finished(LlmWireProtocol::OpenAiChatCompletions, exchange.response_stats(),
                                  std::chrono::duration_cast<std::chrono::microseconds>(
@@ -703,6 +645,7 @@ private:
     }
 
     fiber::event::EventLoopGroup *group_ = nullptr;
+    LlmAuditWriter *audit_writer_ = nullptr;
     mutable std::mutex mutex_;
     std::vector<MockReply> replies_;
     std::vector<ObservedProviderRequest> observed_;
@@ -731,9 +674,29 @@ private:
 
 class FixtureHarness {
 public:
-    explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false, bool service_rendezvous = false) :
-        fixture_(std::make_unique<ProxyFixture>(group_, std::move(replies), fail_settle, service_rendezvous)) {
+    explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false, bool service_rendezvous = false) {
+        char path[] = "/tmp/fiber-llm-audit-XXXXXX";
+        const int fd = ::mkstemp(path);
+        if (fd < 0) {
+            return;
+        }
+        (void) ::close(fd);
+        audit_path_ = path;
+        auto writer = LlmAuditWriter::create(audit_group_.at(0), LlmAuditWriterOptions{
+                                                                         .path = audit_path_,
+                                                                         .rotate_bytes = 0,
+                                                                 });
+        if (!writer) {
+            (void) ::unlink(audit_path_.c_str());
+            audit_path_.clear();
+            return;
+        }
+        audit_writer_ = std::move(*writer);
+        fixture_ = std::make_unique<ProxyFixture>(group_, std::move(replies), fail_settle, service_rendezvous,
+                                                  *audit_writer_);
+        audit_group_.start();
         group_.start();
+        groups_started_ = true;
         std::promise<FixturePorts> promise;
         auto future = promise.get_future();
         fiber::async::spawn(group_.at(0), [this, &promise]() { return fixture_->start(&promise); });
@@ -743,16 +706,26 @@ public:
     }
 
     ~FixtureHarness() {
-        std::promise<void> promise;
-        auto future = promise.get_future();
-        fiber::async::spawn(group_.at(0), [this, &promise]() { return fixture_->shutdown(&promise); });
-        (void) future.wait_for(5s);
-        group_.stop();
-        group_.join();
+        if (groups_started_) {
+            std::promise<void> promise;
+            auto future = promise.get_future();
+            fiber::async::spawn(group_.at(0), [this, &promise]() { return fixture_->shutdown(&promise); });
+            (void) future.wait_for(5s);
+            group_.stop();
+            audit_group_.stop();
+            group_.join();
+            audit_group_.join();
+        }
         fixture_.reset();
+        audit_writer_.reset();
+        if (!audit_path_.empty()) {
+            (void) ::unlink(audit_path_.c_str());
+        }
     }
 
-    [[nodiscard]] bool valid() const noexcept { return ports_.entry != 0 && ports_.provider != 0; }
+    [[nodiscard]] bool valid() const noexcept {
+        return fixture_ && audit_writer_ && ports_.entry != 0 && ports_.provider != 0;
+    }
 
     [[nodiscard]] std::uint16_t entry_port() const noexcept { return ports_.entry; }
 
@@ -762,6 +735,21 @@ public:
     [[nodiscard]] int completed_entry_calls() const noexcept { return fixture_->completed_entry_calls(); }
     [[nodiscard]] int failing_provider_calls() const noexcept { return fixture_->failing_provider_calls(); }
     [[nodiscard]] std::string rendezvous_route_key() const { return std::string(fixture_->rendezvous_route_key()); }
+
+    [[nodiscard]] bool wait_for_audit_records(std::uint64_t count) const noexcept {
+        for (std::size_t i = 0; i < 5000; ++i) {
+            if (audit_writer_->stats().written_records >= count) {
+                return true;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::string audit_contents() const {
+        std::ifstream input(audit_path_, std::ios::binary);
+        return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    }
 
     bool token_available(std::string token_name, std::chrono::seconds after) {
         std::promise<bool> promise;
@@ -785,8 +773,12 @@ public:
 
 private:
     fiber::event::EventLoopGroup group_{1};
+    fiber::event::EventLoopGroup audit_group_{1};
+    std::string audit_path_;
+    std::unique_ptr<LlmAuditWriter> audit_writer_;
     std::unique_ptr<ProxyFixture> fixture_;
     FixturePorts ports_;
+    bool groups_started_ = false;
 };
 
 TEST(LlmProxyIntegrationTest, RetriesTransportAuthRateLimitAndFallbackFromOriginalJson) {
@@ -974,31 +966,22 @@ TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
     ASSERT_FALSE(token.empty());
     constexpr std::string_view request =
             R"({"model":"logical","stream":false,"messages":[{"role":"system","content":"answer briefly"},{"role":"user","content":[{"type":"text","text":"weather in Paris"},{"type":"image_url","image_url":{"url":"https://example.test/image?signature=SECRET_URL"}},{"type":"input_audio","input_audio":{"data":"SECRET_BASE64"}}]}],"tools":[{"type":"function","function":{"name":"weather","description":"look up weather","parameters":{"type":"object"}}}]})";
-    StderrCapture capture;
-    ASSERT_TRUE(capture.start());
 
     const RawHttpResponse response = post_json(fixture.entry_port(), token, request);
-    for (std::size_t i = 0; i < 1000 && fixture.completed_entry_calls() == 0; ++i) {
-        std::this_thread::sleep_for(1ms);
-    }
-    capture.finish();
 
     ASSERT_EQ(response.system_error, 0);
     ASSERT_EQ(response.status, 200);
     ASSERT_TRUE(response.complete);
-    const std::string &logs = capture.output();
+    ASSERT_TRUE(fixture.wait_for_audit_records(1));
+    const std::string logs = fixture.audit_contents();
     constexpr std::string_view marker = R"("event":"llm_request")";
     const std::size_t marker_pos = logs.find(marker);
     ASSERT_NE(marker_pos, std::string::npos) << logs;
     EXPECT_EQ(logs.find(marker, marker_pos + marker.size()), std::string::npos);
-    EXPECT_EQ(logs.find(R"("event":"provider_attempt")"), std::string::npos);
-
-    const std::size_t line_begin = logs.rfind('\n', marker_pos);
-    const std::size_t json_begin = logs.find('{', line_begin == std::string::npos ? 0 : line_begin + 1);
-    const std::size_t line_end = logs.find('\n', marker_pos);
-    ASSERT_NE(json_begin, std::string::npos);
-    ASSERT_NE(line_end, std::string::npos);
-    const std::string_view audit_json(logs.data() + json_begin, line_end - json_begin);
+    ASSERT_FALSE(logs.empty());
+    ASSERT_EQ(logs.back(), '\n');
+    EXPECT_EQ(logs.find('\n'), logs.size() - 1);
+    const std::string_view audit_json(logs.data(), logs.size() - 1);
     EXPECT_EQ(audit_json.find('\n'), std::string_view::npos);
 
     fiber::mem::BufPool pool;
@@ -1020,11 +1003,90 @@ TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
     EXPECT_NE(audit_json.find("weather is sunny"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"(\"city\":\"Paris\")"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"("provider_attempts":[{)"), std::string_view::npos);
-    EXPECT_NE(audit_json.find(R"("schema_version":2)"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("schema_version":3)"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("request_model_name":"logical","stream":false,"messages_count":2,"tools_count":1)"),
+              std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("body_encoding":"json_text","body":"{)"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("content":"weather is sunny")"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"("usage":{"provider":"openai","in_cache":3,"in_nocache":5,"out":6,"total_tokens":14})"),
               std::string_view::npos);
-    EXPECT_EQ(audit_json.find("SECRET_URL"), std::string_view::npos);
-    EXPECT_EQ(audit_json.find("SECRET_BASE64"), std::string_view::npos);
+    const std::size_t secret_url = audit_json.find("SECRET_URL");
+    ASSERT_NE(secret_url, std::string_view::npos);
+    EXPECT_EQ(audit_json.find("SECRET_URL", secret_url + 1), std::string_view::npos);
+    const std::size_t secret_base64 = audit_json.find("SECRET_BASE64");
+    ASSERT_NE(secret_base64, std::string_view::npos);
+    EXPECT_EQ(audit_json.find("SECRET_BASE64", secret_base64 + 1), std::string_view::npos);
+}
+
+TEST(LlmProxyIntegrationTest, AggregatesStreamedContentIntoTheSameOutputField) {
+    FixtureHarness fixture({
+            MockReply{
+                    .status = 200,
+                    .content_type = "text/event-stream",
+                    .chunks =
+                            {
+                                    "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hello "
+                                    "\"}}]}\n\n",
+                                    "data: "
+                                    "{\"choices\":[{\"delta\":{\"content\":\"stream\"},\"finish_reason\":\"stop\"}]}"
+                                    "\n\n"
+                                    "data: [DONE]\n\n",
+                            },
+                    .stream = true,
+            },
+    });
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse response =
+            post_json(fixture.entry_port(), token,
+                      R"({"model":"logical","stream":true,"messages":[{"role":"user","content":"say hello"}]})");
+
+    ASSERT_EQ(response.system_error, 0);
+    ASSERT_EQ(response.status, 200);
+    ASSERT_TRUE(response.complete);
+    ASSERT_TRUE(fixture.wait_for_audit_records(1));
+    const std::string audit = fixture.audit_contents();
+    ASSERT_FALSE(audit.empty());
+    EXPECT_EQ(audit.find('\n'), audit.size() - 1);
+    EXPECT_NE(audit.find(R"("request_model_name":"logical","stream":true,"messages_count":1,"tools_count":0)"),
+              std::string::npos);
+    EXPECT_NE(audit.find(R"("role":"assistant","content":"hello stream")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("finish_reason":"stop","complete":true,"canonical_complete":true,"events":2)"),
+              std::string::npos);
+}
+
+TEST(LlmProxyIntegrationTest, PreservesLargeUtf8OutputWithoutTruncation) {
+    std::string content;
+    content.reserve(90 * 1024);
+    for (std::size_t index = 0; index < 30000; ++index) {
+        content.append("你");
+    }
+    content.append("END");
+    const std::string provider_body =
+            R"({"choices":[{"message":{"role":"assistant","content":")" + content + R"("},"finish_reason":"stop"}]})";
+    FixtureHarness fixture({
+            MockReply{
+                    .status = 200,
+                    .body = provider_body,
+            },
+    });
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse response =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","messages":[{"role":"user","content":"x"}]})");
+
+    ASSERT_EQ(response.system_error, 0);
+    ASSERT_EQ(response.status, 200);
+    ASSERT_TRUE(response.complete);
+    ASSERT_TRUE(fixture.wait_for_audit_records(1));
+    const std::string audit = fixture.audit_contents();
+    EXPECT_NE(audit.find(content), std::string::npos);
+    EXPECT_NE(audit.find(R"("canonical_complete":true)"), std::string::npos);
+    EXPECT_EQ(audit.find("\"truncated\""), std::string::npos);
 }
 
 } // namespace

@@ -74,6 +74,14 @@ HTTP 和集群成员：
 - `AI_SERVER_SERVICE_GROUP`：默认 `DEFAULT_GROUP`；
 - `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS`：默认 `60000`，`0` 表示无限等待。
 
+LLM 审计：
+
+- `AI_SERVER_AUDIT_LOG_PATH`：默认 `ai-server-audit.ndjson`；
+- `AI_SERVER_AUDIT_MAX_RECORD_BYTES`：默认 128 MiB；
+- `AI_SERVER_AUDIT_MAX_PENDING_RECORDS`：默认 256；
+- `AI_SERVER_AUDIT_ROTATE_BYTES`：默认 1 GiB，`0` 禁用轮转；
+- `AI_SERVER_AUDIT_MAX_ARCHIVES`：默认 30。
+
 Nacos：
 
 - `NACOS_SERVER_ADDRESSES`：必填，逗号分隔的 IPv4/IPv6 literal；
@@ -159,23 +167,29 @@ ai-server 在静态初始化边界编译 OpenAI/Anthropic 路径。请求只解�
 
 ## 可观测性与敏感信息
 
-日志固定输出 stderr/INFO，主要 category 为 `ai_server.lifecycle`、
-`ai_server.config`、`ai_server.http`、`ai_server.llm`、
-`ai_server.rate_limit` 和 `ai_server.audit`。
+常规运行日志固定输出 stderr/INFO，主要 category 为 `ai_server.lifecycle`、
+`ai_server.config`、`ai_server.http`、`ai_server.llm` 和 `ai_server.rate_limit`。
+LLM 对话审计不经过 stderr logger，而由独立 EventLoop 线程写入专用 NDJSON 文件；
+文件以 `0600` 打开，每个完成的请求严格对应一条无前缀 JSON 记录。
 
-`ai_server.audit` 对每个请求只写一条物理日志：常规日志前缀之后只有一个紧凑 JSON
-对象。当前 schema 为 `schema_version=2`，同一对象包含 request/identity/routing/
-rate-limit/response/usage、完整的 `provider_attempts` 数组，以及：
+当前审计 schema 为 `schema_version=3`。`request.body` 是入站 body 的唯一完整副本：
+合法 UTF-8 以 `body_encoding=json_text` 保存，非法 UTF-8 以 base64 保存；图片 URL、
+音频/base64 等多模态字段不会再被过滤。为了让采集服务不必解析 body，`request`
+还直接提供 `request_model_name`、有效 `stream`、`messages_count` 和 `tools_count`。
+`routing.resolved_model_name`、identity、rate-limit、完整 `provider_attempts`、response、
+usage 等信息与它位于同一对象。
 
-- `llm.input.prompt_parts`：system/message 文本、角色和工具名/描述/参数；
-- `llm.output`：Provider 已观察到的 role/content、tool name/arguments、finish reason；
-- input/output 的 observed/captured bytes、SHA-256、truncated/incomplete 状态。
+同步和 SSE 共用同一个 `llm.output` 聚合器。SSE delta 在转发前依次追加，最终
+`role/content/tool_names/tool_arguments/finish_reason` 的形态与同步响应一致；
+`complete` 表示 Provider 流完整结束，`canonical_complete` 还要求解析和聚合均成功。
+内容不做截断。记录超过 `AI_SERVER_AUDIT_MAX_RECORD_BYTES`、队列满、分配失败或 writer
+不健康时会 fail closed：网关不会继续发起或成功交付一段无法完整审计的模型对话。
 
-单条 JSON 硬上限为 64 KiB；输入、输出和 attempts 各有独立预算，超限后仍输出合法
-JSON 并显式标记 `truncated`。多模态内容只采集文本字段，不原样记录图片/文档 URL、
-base64、音频或二进制载荷；Authorization、Provider token、BT1 secret 和 Nacos
-凭据也不会进入审计日志。由于 prompt 和模型输出本身仍可能包含业务敏感信息，生产
-环境必须限制日志读取、采集和保留权限。
+writer 只在记录边界轮转，绝不拆分一条 JSON；启动时会删除活动文件末尾由崩溃留下的
+不完整行，优雅停机则先排空 HTTP 请求，再 drain 全部已提交记录。Authorization、
+Provider token 值、BT1 secret 和 Nacos 凭据不会作为独立字段写入，但完整 request
+body 和模型输出本身可能包含任意业务秘密，生产环境必须严格限制文件读取、采集、
+传输和保留权限。
 
 `usage` 将两种协议统一为 `in_cache`、`in_nocache`、`out` 和派生的
 `total_tokens`。OpenAI 的 `in_cache` 来自 `cached_tokens`，`in_nocache` 为
@@ -202,11 +216,12 @@ Prometheus 输出两个累计 Counter family：
 - process-wide token limiter 由固定 hash shard 和 mutex 保护，保证同一
   `username + model` 在多 worker 下只有一份状态；
 - Nacos EventLoop 拥有 client、config/naming service、配置图、实例注册和成员订阅；
-- 可选 CAT EventLoop 独占 sender。
+- 可选 CAT EventLoop 独占 sender；
+- audit EventLoop 是审计文件的唯一 writer。
 
 收到 `SIGINT` 或 `SIGTERM` 后，进程依次停止 listener/排空 HTTP、等待 metrics 和
-限流结算、关闭 Provider pool/DNS、停止 CAT、注销成员并关闭配置/Nacos 服务，最后
-停止各 EventLoopGroup。
+限流结算、关闭 Provider pool/DNS、排空并关闭审计 writer、停止 CAT、注销成员并
+关闭配置/Nacos 服务，最后停止各 EventLoopGroup。
 
 ## 测试
 
