@@ -34,6 +34,7 @@ public:
     }
 
     void dispatch(const LogEvent &event, LogContext &context) const noexcept;
+    [[nodiscard]] bool dispatch_complete(const LogEvent &event, LogContext &context) const noexcept;
 
 private:
     friend class LoggerManager;

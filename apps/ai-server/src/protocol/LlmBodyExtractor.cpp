@@ -33,6 +33,17 @@ enum class BodyAction : std::uint32_t {
     System,
 };
 
+enum class AuditAction : std::uint32_t {
+    SystemText,
+    MessageText,
+    ToolName,
+    ToolDescription,
+    ToolArguments,
+};
+
+constexpr std::size_t kMaxAuditPromptParts = 256;
+constexpr std::size_t kMaxNestedAuditPromptBytes = 24 * 1024;
+
 template<typename T>
 class RequestArrayBuilder {
     static_assert(std::is_trivially_copyable_v<T>);
@@ -84,8 +95,9 @@ const JsonPathProgram &openai_program() {
                 {.expression = "$.metadata.routeKey",
                  .action = static_cast<std::uint32_t>(BodyAction::MetadataRouteKeyCamel)},
                 {.expression = "$.prompt_cache_key", .action = static_cast<std::uint32_t>(BodyAction::PromptCacheKey)},
-                {.expression = "$.messages[*].role", .action = static_cast<std::uint32_t>(BodyAction::MessageRole)},
-                {.expression = "$.messages[*].content",
+                {.expression = "$.messages[*message].role",
+                 .action = static_cast<std::uint32_t>(BodyAction::MessageRole)},
+                {.expression = "$.messages[*message].content",
                  .action = static_cast<std::uint32_t>(BodyAction::MessageContent)},
         };
         auto result = JsonPathProgram::compile(rules);
@@ -105,10 +117,55 @@ const JsonPathProgram &anthropic_program() {
                 {.expression = "$.metadata.routeKey",
                  .action = static_cast<std::uint32_t>(BodyAction::MetadataRouteKeyCamel)},
                 {.expression = "$.container", .action = static_cast<std::uint32_t>(BodyAction::Container)},
-                {.expression = "$.messages[*].role", .action = static_cast<std::uint32_t>(BodyAction::MessageRole)},
-                {.expression = "$.messages[*].content",
+                {.expression = "$.messages[*message].role",
+                 .action = static_cast<std::uint32_t>(BodyAction::MessageRole)},
+                {.expression = "$.messages[*message].content",
                  .action = static_cast<std::uint32_t>(BodyAction::MessageContent)},
                 {.expression = "$.system", .action = static_cast<std::uint32_t>(BodyAction::System)},
+        };
+        auto result = JsonPathProgram::compile(rules);
+        FIBER_ASSERT(result.has_value());
+        return std::move(*result);
+    }();
+    return program;
+}
+
+const JsonPathProgram &openai_audit_program() {
+    static const JsonPathProgram program = [] {
+        constexpr JsonPathRule rules[] = {
+                {.expression = "$.messages[*message].content[*block].text",
+                 .action = static_cast<std::uint32_t>(AuditAction::MessageText)},
+                {.expression = "$.messages[*message].content[*block].input_text",
+                 .action = static_cast<std::uint32_t>(AuditAction::MessageText)},
+                {.expression = "$.messages[*message].tool_calls[*tool].function.name",
+                 .action = static_cast<std::uint32_t>(AuditAction::ToolName)},
+                {.expression = "$.messages[*message].tool_calls[*tool].function.arguments",
+                 .action = static_cast<std::uint32_t>(AuditAction::ToolArguments)},
+                {.expression = "$.tools[*tool].function.name",
+                 .action = static_cast<std::uint32_t>(AuditAction::ToolName)},
+                {.expression = "$.tools[*tool].function.description",
+                 .action = static_cast<std::uint32_t>(AuditAction::ToolDescription)},
+        };
+        auto result = JsonPathProgram::compile(rules);
+        FIBER_ASSERT(result.has_value());
+        return std::move(*result);
+    }();
+    return program;
+}
+
+const JsonPathProgram &anthropic_audit_program() {
+    static const JsonPathProgram program = [] {
+        constexpr JsonPathRule rules[] = {
+                {.expression = "$.system[*block].text", .action = static_cast<std::uint32_t>(AuditAction::SystemText)},
+                {.expression = "$.messages[*message].content[*block].text",
+                 .action = static_cast<std::uint32_t>(AuditAction::MessageText)},
+                {.expression = "$.messages[*message].content[*block].content",
+                 .action = static_cast<std::uint32_t>(AuditAction::MessageText)},
+                {.expression = "$.messages[*message].content[*block].name",
+                 .action = static_cast<std::uint32_t>(AuditAction::ToolName)},
+                {.expression = "$.tools[*tool].name", .action = static_cast<std::uint32_t>(AuditAction::ToolName)},
+                {.expression = "$.tools[*tool].description",
+                 .action = static_cast<std::uint32_t>(AuditAction::ToolDescription)},
         };
         auto result = JsonPathProgram::compile(rules);
         FIBER_ASSERT(result.has_value());
@@ -131,9 +188,20 @@ bool copy_text(mem::BufPool &pool, std::string_view value, std::string_view &out
     return true;
 }
 
+std::size_t utf8_prefix_size(std::string_view value, std::size_t maximum) noexcept {
+    std::size_t size = std::min(value.size(), maximum);
+    if (size == value.size()) {
+        return size;
+    }
+    while (size > 0 && (static_cast<unsigned char>(value[size]) & 0xc0) == 0x80) {
+        --size;
+    }
+    return size;
+}
+
 struct ExtractContext {
     explicit ExtractContext(std::string_view input, mem::BufPool &pool) noexcept :
-        input(input), pool(&pool), roles(pool), contents(pool), patches(pool) {}
+        input(input), pool(&pool), roles(pool), contents(pool), prompt_parts(pool), patches(pool) {}
 
     [[nodiscard]] bool set_error(LlmBodyErrorCode code, const JsonPathMatch &match, std::string_view field,
                                  const char *message) noexcept {
@@ -182,6 +250,61 @@ struct ExtractContext {
         }
         target.set_present(value);
         return true;
+    }
+
+    [[nodiscard]] bool append_prompt_part(LlmAuditPromptPartKind kind, std::size_t message_index,
+                                          std::size_t item_index, std::string_view text,
+                                          const JsonPathMatch &match) noexcept {
+        if (routing.audit_prompt_incomplete) {
+            return true;
+        }
+        if (prompt_parts_count == kMaxAuditPromptParts) {
+            routing.audit_prompt_truncated = true;
+            return true;
+        }
+        if (!prompt_parts.append(LlmAuditPromptPart{
+                    .kind = kind,
+                    .message_index = message_index,
+                    .item_index = item_index,
+                    .text = text,
+            })) {
+            routing.audit_prompt_incomplete = true;
+            return true;
+        }
+        ++prompt_parts_count;
+        return true;
+    }
+
+    [[nodiscard]] bool append_nested_prompt_part(LlmAuditPromptPartKind kind, std::size_t message_index,
+                                                 std::size_t item_index, const JsonPathMatch &match) noexcept {
+        if (match.token.kind != TokenKind::Text) {
+            return true;
+        }
+        const std::size_t remaining =
+                nested_prompt_bytes < kMaxNestedAuditPromptBytes ? kMaxNestedAuditPromptBytes - nested_prompt_bytes : 0;
+        if (remaining == 0) {
+            routing.audit_prompt_truncated = true;
+            return true;
+        }
+        const std::size_t copy_size = utf8_prefix_size(match.token.view, remaining);
+        std::string_view value;
+        if (!copy_text(*pool, match.token.view.substr(0, copy_size), value)) {
+            routing.audit_prompt_incomplete = true;
+            return false;
+        }
+        nested_prompt_bytes += copy_size;
+        if (copy_size != match.token.view.size()) {
+            routing.audit_prompt_truncated = true;
+        }
+        return append_prompt_part(kind, message_index, item_index, value, match);
+    }
+
+    void observe_message_index(const JsonPathMatch &match) noexcept {
+        const json::JsonPathCapture *capture = match.variables.find("message");
+        if (capture && capture->kind == json::JsonPathCaptureKind::ArrayIndex &&
+            capture->index != std::numeric_limits<std::size_t>::max()) {
+            routing.messages_count = std::max(routing.messages_count, capture->index + 1);
+        }
     }
 
     static bool on_match(void *opaque, const JsonPathMatch &match) noexcept {
@@ -233,6 +356,7 @@ struct ExtractContext {
             case BodyAction::PromptCacheKey:
                 return self.copy_match_text(match, "$.prompt_cache_key", self.routing.prompt_cache_key);
             case BodyAction::MessageRole: {
+                self.observe_message_index(match);
                 Nullable<std::string_view> value;
                 if (!self.copy_match_text(match, "$.messages[*].role", value)) {
                     return false;
@@ -240,9 +364,16 @@ struct ExtractContext {
                 if (!self.roles.append(value)) {
                     return self.set_error(LlmBodyErrorCode::OutOfMemory, match, {}, "out of memory");
                 }
+                const json::JsonPathCapture *message = match.variables.find("message");
+                if (value.is_present() && message &&
+                    !self.append_prompt_part(LlmAuditPromptPartKind::MessageRole, message->index,
+                                             LlmAuditPromptPart::NoIndex, *value, match)) {
+                    return false;
+                }
                 return true;
             }
             case BodyAction::MessageContent: {
+                self.observe_message_index(match);
                 Nullable<std::string_view> value;
                 if (!self.read_text_or_null(match, value)) {
                     return false;
@@ -250,12 +381,59 @@ struct ExtractContext {
                 if (!self.contents.append(value)) {
                     return self.set_error(LlmBodyErrorCode::OutOfMemory, match, {}, "out of memory");
                 }
+                const json::JsonPathCapture *message = match.variables.find("message");
+                if (value.is_present() && message &&
+                    !self.append_prompt_part(LlmAuditPromptPartKind::MessageText, message->index,
+                                             LlmAuditPromptPart::NoIndex, *value, match)) {
+                    return false;
+                }
                 return true;
             }
             case BodyAction::System:
-                return self.read_text_or_null(match, self.routing.system_text);
+                if (!self.read_text_or_null(match, self.routing.system_text)) {
+                    return false;
+                }
+                return !self.routing.system_text.is_present() ||
+                       self.append_prompt_part(LlmAuditPromptPartKind::SystemText, LlmAuditPromptPart::NoIndex,
+                                               LlmAuditPromptPart::NoIndex, *self.routing.system_text, match);
         }
         return self.set_error(LlmBodyErrorCode::InvalidJson, match, {}, "unknown JSON path action");
+    }
+
+    static bool on_audit_match(void *opaque, const JsonPathMatch &match) noexcept {
+        auto &self = *static_cast<ExtractContext *>(opaque);
+        const json::JsonPathCapture *message = match.variables.find("message");
+        const json::JsonPathCapture *block = match.variables.find("block");
+        const json::JsonPathCapture *tool = match.variables.find("tool");
+        if (message) {
+            self.observe_message_index(match);
+        }
+        if (tool && tool->kind == json::JsonPathCaptureKind::ArrayIndex &&
+            tool->index != std::numeric_limits<std::size_t>::max()) {
+            self.routing.tools_count = std::max(self.routing.tools_count, tool->index + 1);
+        }
+
+        LlmAuditPromptPartKind kind = LlmAuditPromptPartKind::MessageText;
+        switch (static_cast<AuditAction>(match.action)) {
+            case AuditAction::SystemText:
+                kind = LlmAuditPromptPartKind::SystemText;
+                break;
+            case AuditAction::MessageText:
+                kind = LlmAuditPromptPartKind::MessageText;
+                break;
+            case AuditAction::ToolName:
+                kind = LlmAuditPromptPartKind::ToolName;
+                break;
+            case AuditAction::ToolDescription:
+                kind = LlmAuditPromptPartKind::ToolDescription;
+                break;
+            case AuditAction::ToolArguments:
+                kind = LlmAuditPromptPartKind::ToolArguments;
+                break;
+        }
+        return self.append_nested_prompt_part(kind, message ? message->index : LlmAuditPromptPart::NoIndex,
+                                              tool ? tool->index : (block ? block->index : LlmAuditPromptPart::NoIndex),
+                                              match);
     }
 
     std::string_view input;
@@ -263,8 +441,11 @@ struct ExtractContext {
     LlmRoutingData routing;
     RequestArrayBuilder<Nullable<std::string_view>> roles;
     RequestArrayBuilder<Nullable<std::string_view>> contents;
+    RequestArrayBuilder<LlmAuditPromptPart> prompt_parts;
     RequestArrayBuilder<LlmBodyPatchSite> patches;
     std::optional<LlmBodyError> error;
+    std::size_t prompt_parts_count = 0;
+    std::size_t nested_prompt_bytes = 0;
 };
 
 bool root_is_object(std::string_view input) noexcept {
@@ -322,9 +503,21 @@ std::expected<ParsedLlmBody, LlmBodyError> ParsedLlmBody::parse(LlmWireProtocol 
         });
     }
 
+    const JsonPathProgram &audit_program =
+            protocol == LlmWireProtocol::OpenAiChatCompletions ? openai_audit_program() : anthropic_audit_program();
+    auto audit_visited = json::visit_json_paths(audit_program, input, pool,
+                                                JsonPathVisitor{
+                                                        .context = &context,
+                                                        .on_match = &ExtractContext::on_audit_match,
+                                                });
+    if (!audit_visited) {
+        context.routing.audit_prompt_incomplete = true;
+    }
+
     context.routing.message_roles = context.roles.finish();
     context.routing.message_content_texts = context.contents.finish();
-    context.routing.messages_count = context.routing.message_roles.size();
+    context.routing.audit_prompt_parts = context.prompt_parts.finish();
+    context.routing.messages_count = std::max(context.routing.messages_count, context.routing.message_roles.size());
     return ParsedLlmBody(std::move(body), context.routing, context.patches.finish());
 }
 

@@ -1,6 +1,9 @@
 #include "Logger.h"
 
 #include <array>
+#include <limits>
+#include <memory>
+#include <new>
 
 #include "Appender.h"
 #include "LogContext.h"
@@ -47,6 +50,29 @@ void Logger::dispatch(const LogEvent &event, LogContext &context) const noexcept
 
     const std::size_t size = detail::format_log_event(event, scratch.data(), kMaxFormattedLogLineSize);
     append_to_targets(targets, FormattedLogLine{.bytes = std::string_view(scratch.data(), size)}, context);
+}
+
+bool Logger::dispatch_complete(const LogEvent &event, LogContext &context) const noexcept {
+    if (!valid_log_level(event.level)) {
+        return false;
+    }
+    const LevelTargets &targets = levels_[level_index(event.level)];
+    if (targets.empty()) {
+        return true;
+    }
+    if (event.message.size() > kMaxCompleteLogMessageSize ||
+        event.message.size() > std::numeric_limits<std::size_t>::max() - kMaxFormattedLogLineSize) {
+        return false;
+    }
+
+    const std::size_t capacity = event.message.size() + kMaxFormattedLogLineSize;
+    std::unique_ptr<char[]> scratch(new (std::nothrow) char[capacity]);
+    if (!scratch) {
+        return false;
+    }
+    const std::size_t size = detail::format_log_event(event, scratch.get(), capacity);
+    append_to_targets(targets, FormattedLogLine{.bytes = std::string_view(scratch.get(), size)}, context);
+    return true;
 }
 
 const Logger &bootstrap_logger() noexcept {

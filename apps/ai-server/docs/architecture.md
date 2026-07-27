@@ -230,16 +230,28 @@ owner，settle 用 ticket 回到同一版本状态。远端调用 64 KiB 内部 
 和是否可重试。序列化器按入站协议生成 OpenAI 或 Anthropic 外观，绝不把 C++ 错误、
 Provider token、BT1 token 或配置 secret 写入响应。
 
-请求审计记录：
+请求审计由请求级 RAII owner 聚合，并且无论在哪个早退分支结束，每个请求都只产生
+一条 `ai_server.audit` 日志。物理格式为“常规日志前缀 + 一个紧凑 JSON + 换行”，
+不再为 Provider attempt 单独写 audit 行。`schema_version=1` 的对象包含：
 
-- request ID、来源、方法、路径、body size/hash；
-- username、kid、逻辑模型、授权和限流结果；
-- 每次尝试的 Provider/token 名、协议、上游模型、路径、配置版本、fallback、状态、
-  延迟；
-- 最终状态、响应字节、客户端中断和 usage。
+- request ID、来源、方法、路径、协议、stream、body size/hash；
+- username、kid、逻辑/上游模型、授权和限流结果；
+- `llm.input.prompt_parts` 中的 system/message/工具文本；
+- `llm.output` 中从同步响应或 SSE delta 聚合出的 role/content/tool/finish reason；
+- `provider_attempts` 中每次尝试的 Provider/token 名、协议、上游模型、路径、配置
+  版本、fallback、状态和延迟；
+- 最终状态、响应字节、客户端中断、usage、总耗时及截断/采集错误状态。
 
-默认不记录完整 prompt 正文。若将来增加会话审计，必须由启动配置显式开启并设置
-硬截断，不能复制 Java 默认完整记录 4 MiB 原文的风险行为。
+`llm.output.capture_scope=provider_observed`：它说明 Provider 已生成并被网关观察到的
+内容，是否完整交付客户端仍以 `response.completed` 和 `terminal_error` 为准。
+Provider 非 2xx 错误正文不会被当成模型输出。
+
+JSON 总长度硬限制为 64 KiB，输入、输出和 attempts 使用独立编码预算；截断按 JSON
+编码后的字节计算，任何超限或局部采集失败都必须保持整条 JSON 合法并设置
+`truncated`/`incomplete`。多模态输入只抽取明确的文本字段，图片/文档签名 URL、
+base64、音频和二进制数据不进入日志。Authorization、Provider token、BT1 token 和
+配置 secret 同样禁止记录。prompt/输出仍可能携带业务敏感信息，部署必须为审计日志
+设置严格的读取、采集、传输和保留策略。
 
 Prometheus 使用固定 label 集合，包含请求数/延迟/在途、Provider 尝试与失败、
 重试、熔断、限流准入/拒绝/settle、配置代际和 SSE 中途失败。高基数 request ID、

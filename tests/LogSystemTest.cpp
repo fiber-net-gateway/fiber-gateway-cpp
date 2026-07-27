@@ -369,6 +369,33 @@ TEST(LogSystemTest, MaterializesLoggerRequestedByRuntimeName) {
     EXPECT_NE(read_file(output.path()).find("dynamic-message"), std::string::npos);
 }
 
+TEST(LogSystemTest, CompleteMessagePathPreservesOneLargePhysicalRecord) {
+    LoggingScope scope;
+    TempLogFile output;
+    ASSERT_TRUE(output.valid());
+
+    fiber::log::LogConfigBuilder builder;
+    auto output_id = builder.add_file_appender({.name = "complete_output", .path = output.path()});
+    ASSERT_TRUE(output_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*output_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    auto initialized = fiber::log::LoggerManager::global().initialize(std::move(*config));
+    ASSERT_TRUE(initialized) << initialized.error().message;
+
+    std::string message = R"({"event":"large","content":")";
+    message.append(32 * 1024, 'x');
+    message.append(R"("})");
+    ASSERT_TRUE(fiber::log::log_complete_message(LOG_TEST_OTHER.get(), fiber::log::LogLevel::Info, __FILE__, __LINE__,
+                                                 __func__, message));
+
+    fiber::log::LoggerManager::global().shutdown();
+    const std::string content = read_file(output.path());
+    EXPECT_NE(content.find(message), std::string::npos);
+    EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), 1);
+    EXPECT_EQ(content.find("<truncated>"), std::string::npos);
+}
+
 TEST(LogSystemTest, CompilesHierarchyIntoPerLevelAppenderArrays) {
     LoggingScope scope;
     TempLogFile all;

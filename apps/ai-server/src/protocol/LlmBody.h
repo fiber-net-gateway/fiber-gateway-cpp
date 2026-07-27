@@ -36,6 +36,24 @@ struct LlmBodyError {
     const char *message = nullptr;
 };
 
+enum class LlmAuditPromptPartKind : std::uint8_t {
+    SystemText,
+    MessageRole,
+    MessageText,
+    ToolName,
+    ToolDescription,
+    ToolArguments,
+};
+
+struct LlmAuditPromptPart {
+    static constexpr std::size_t NoIndex = static_cast<std::size_t>(-1);
+
+    LlmAuditPromptPartKind kind = LlmAuditPromptPartKind::MessageText;
+    std::size_t message_index = NoIndex;
+    std::size_t item_index = NoIndex;
+    std::string_view text;
+};
+
 struct LlmRoutingData {
     json::Nullable<std::string_view> model;
     json::Nullable<bool> stream;
@@ -45,8 +63,11 @@ struct LlmRoutingData {
     json::Nullable<std::string_view> system_text;
     json::JsonArray<json::Nullable<std::string_view>> message_roles;
     json::JsonArray<json::Nullable<std::string_view>> message_content_texts;
+    json::JsonArray<LlmAuditPromptPart> audit_prompt_parts;
     std::size_t messages_count = 0;
     std::size_t tools_count = 0;
+    bool audit_prompt_truncated = false;
+    bool audit_prompt_incomplete = false;
 };
 
 enum class LlmBodyPatchKind : std::uint8_t {
