@@ -15,6 +15,7 @@ namespace {
 
 using namespace std::chrono_literals;
 using fiber::ai_server::AiServerMetrics;
+using fiber::ai_server::LlmTokenUsage;
 using fiber::ai_server::LlmWireProtocol;
 using fiber::ai_server::RateLimitCheckMetric;
 using fiber::ai_server::RateLimitSettleMetric;
@@ -39,6 +40,21 @@ fiber::async::DetachedTask record_worker_metrics(AiServerMetrics::Worker *worker
     worker->rate_limit_check(RateLimitCheckMetric::Allowed);
     worker->rate_limit_settle(RateLimitSettleMetric::Usage);
     worker->sse_failure(protocol);
+    const LlmTokenUsage usage =
+            protocol == LlmWireProtocol::OpenAiChatCompletions
+                    ? LlmTokenUsage{
+                              .in_cache = 2,
+                              .in_nocache = 3,
+                              .out = 5,
+                              .total_tokens = 10,
+                      }
+                    : LlmTokenUsage{
+                              .in_cache = 7,
+                              .in_nocache = 11,
+                              .out = 13,
+                              .total_tokens = 31,
+                      };
+    worker->token_usage("alice", "primary", protocol, usage);
     worker->request_finished(protocol, response, 1500us);
     done->set_value();
     co_return;
@@ -66,7 +82,7 @@ fiber::async::DetachedTask stop_metrics(AiServerMetrics *metrics, std::promise<v
     done->set_value();
 }
 
-TEST(AiServerMetricsTest, AggregatesFixedSchemaAndRuntimeGauges) {
+TEST(AiServerMetricsTest, AggregatesRuntimeAndDynamicTokenUsageMetrics) {
     fiber::event::EventLoopGroup workers(2);
     AiServerMetrics metrics(workers);
     ASSERT_TRUE(metrics.valid());
@@ -110,6 +126,21 @@ TEST(AiServerMetricsTest, AggregatesFixedSchemaAndRuntimeGauges) {
     EXPECT_NE(result->find("ai_server_provider_attempts_total{protocol=\"openai\"} 1"), std::string::npos);
     EXPECT_NE(result->find("ai_server_provider_circuit_opens_total{protocol=\"anthropic\"} 1"), std::string::npos);
     EXPECT_NE(result->find("ai_server_rate_limit_checks_total{result=\"allowed\"} 2"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"in_cache\"} 9"),
+              std::string::npos);
+    EXPECT_NE(result->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"in_nocache\"} 14"),
+              std::string::npos);
+    EXPECT_NE(result->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"out\"} 18"),
+              std::string::npos);
+    EXPECT_NE(result->find("ai_server_provider_token_usage_total{provider_name=\"primary\",protocol=\"openai\","
+                           "token_type=\"in_cache\"} 2"),
+              std::string::npos);
+    EXPECT_NE(result->find("ai_server_provider_token_usage_total{provider_name=\"primary\",protocol=\"anthropic\","
+                           "token_type=\"in_nocache\"} 11"),
+              std::string::npos);
+    EXPECT_NE(result->find("ai_server_provider_token_usage_total{provider_name=\"primary\",protocol=\"anthropic\","
+                           "token_type=\"out\"} 13"),
+              std::string::npos);
     EXPECT_NE(result->find("ai_server_config_generation 7"), std::string::npos);
     EXPECT_NE(result->find("ai_server_rate_limit_entries 3"), std::string::npos);
     EXPECT_NE(result->find("ai_server_rate_limit_inflight 1"), std::string::npos);

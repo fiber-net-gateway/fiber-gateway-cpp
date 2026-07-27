@@ -232,7 +232,7 @@ Provider token、BT1 token 或配置 secret 写入响应。
 
 请求审计由请求级 RAII owner 聚合，并且无论在哪个早退分支结束，每个请求都只产生
 一条 `ai_server.audit` 日志。物理格式为“常规日志前缀 + 一个紧凑 JSON + 换行”，
-不再为 Provider attempt 单独写 audit 行。`schema_version=1` 的对象包含：
+不再为 Provider attempt 单独写 audit 行。`schema_version=2` 的对象包含：
 
 - request ID、来源、方法、路径、协议、stream、body size/hash；
 - username、kid、逻辑/上游模型、授权和限流结果；
@@ -246,6 +246,12 @@ Provider token、BT1 token 或配置 secret 写入响应。
 内容，是否完整交付客户端仍以 `response.completed` 和 `terminal_error` 为准。
 Provider 非 2xx 错误正文不会被当成模型输出。
 
+usage 统一输出 `in_cache`、`in_nocache`、`out` 和派生的 `total_tokens`：
+OpenAI 用 `prompt_tokens_details.cached_tokens` 作为缓存输入并从
+`prompt_tokens` 中扣除；Anthropic 只把 `cache_read_input_tokens` 计入缓存命中，
+`input_tokens + cache_creation_input_tokens` 计入非缓存输入。有效 usage 同时写入
+CAT `LLMTokenUsage` 子 Event。
+
 JSON 总长度硬限制为 64 KiB，输入、输出和 attempts 使用独立编码预算；截断按 JSON
 编码后的字节计算，任何超限或局部采集失败都必须保持整条 JSON 合法并设置
 `truncated`/`incomplete`。多模态输入只抽取明确的文本字段，图片/文档签名 URL、
@@ -253,10 +259,15 @@ base64、音频和二进制数据不进入日志。Authorization、Provider toke
 配置 secret 同样禁止记录。prompt/输出仍可能携带业务敏感信息，部署必须为审计日志
 设置严格的读取、采集、传输和保留策略。
 
-Prometheus 使用固定 label 集合，包含请求数/延迟/在途、Provider 尝试与失败、
-重试、熔断、限流准入/拒绝/settle、配置代际和 SSE 中途失败。高基数 request ID、
-username、model 原文和 token 名不能作为 label。CAT transaction 在独立 sender loop
-发送，业务 worker 只提交轻量消息。
+Prometheus 的常规运行指标继续使用固定低基数 label，包含请求数/延迟/在途、
+Provider 尝试与失败、重试、熔断、限流准入/拒绝/settle、配置代际和 SSE 中途失败。
+token usage 另有两个累计 Counter family：
+`ai_server_user_token_usage_total{username,token_type}` 和
+`ai_server_provider_token_usage_total{provider_name,protocol,token_type}`，
+`token_type` 固定为 `in_cache`、`in_nocache`、`out`。username series 按需求保留原文
+并具有高基数风险；series 在进程生命周期内不回收。request ID、model 原文和 token
+名仍不能作为 label。CAT transaction 在独立 sender loop 发送，业务 worker 只提交
+轻量消息。
 
 listener 只在完整首个配置安装到所有 worker 后绑定；服务注册和初始本机限流节点
 建立后才启动 accept。`/ready` 还会实时检查配置快照和非空成员环，成员信息丢失时

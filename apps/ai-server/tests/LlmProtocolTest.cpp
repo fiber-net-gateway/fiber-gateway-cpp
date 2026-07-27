@@ -58,18 +58,28 @@ TEST(LlmProtocolTest, ExtractsAndMergesOpenAiUsage) {
             R"({"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17,"prompt_tokens_details":{"cached_tokens":3}}})",
             false, pool);
     ASSERT_TRUE(usage.has_value());
-    EXPECT_EQ(usage->input_cached, 3);
-    EXPECT_EQ(usage->input_uncached, 9);
-    EXPECT_EQ(usage->output, 5);
-    EXPECT_EQ(usage->total, 17);
+    EXPECT_EQ(usage->in_cache, 3);
+    EXPECT_EQ(usage->in_nocache, 9);
+    EXPECT_EQ(usage->out, 5);
+    EXPECT_EQ(usage->total_tokens, 17);
 
     mem::BufPool chunk_pool;
     auto next = extract_token_usage(LlmWireProtocol::OpenAiChatCompletions,
                                     R"({"usage":{"completion_tokens":8,"total_tokens":20}})", true, chunk_pool);
     ASSERT_TRUE(next.has_value());
     usage->merge(*next);
-    EXPECT_EQ(usage->output, 8);
-    EXPECT_EQ(usage->total, 20);
+    EXPECT_EQ(usage->out, 8);
+    EXPECT_EQ(usage->total_tokens, 20);
+
+    mem::BufPool no_cache_details_pool;
+    auto no_cache_details =
+            extract_token_usage(LlmWireProtocol::OpenAiChatCompletions,
+                                R"({"usage":{"prompt_tokens":7,"completion_tokens":2}})", false, no_cache_details_pool);
+    ASSERT_TRUE(no_cache_details.has_value());
+    EXPECT_EQ(no_cache_details->in_cache, 0);
+    EXPECT_EQ(no_cache_details->in_nocache, 7);
+    EXPECT_EQ(no_cache_details->out, 2);
+    EXPECT_EQ(no_cache_details->total_tokens, 9);
 }
 
 TEST(LlmProtocolTest, ExtractsAnthropicResponseAndPartialEventUsage) {
@@ -79,18 +89,28 @@ TEST(LlmProtocolTest, ExtractsAnthropicResponseAndPartialEventUsage) {
             R"({"usage":{"input_tokens":10,"output_tokens":4,"cache_creation_input_tokens":2,"cache_read_input_tokens":3}})",
             false, response_pool);
     ASSERT_TRUE(response.has_value());
-    EXPECT_EQ(response->input_cached, 3);
-    EXPECT_EQ(response->input_uncached, 12);
-    EXPECT_EQ(response->output, 4);
-    EXPECT_EQ(response->total, 19);
+    EXPECT_EQ(response->in_cache, 3);
+    EXPECT_EQ(response->in_nocache, 12);
+    EXPECT_EQ(response->out, 4);
+    EXPECT_EQ(response->total_tokens, 19);
 
     mem::BufPool event_pool;
     auto event = extract_token_usage(LlmWireProtocol::AnthropicMessages,
                                      R"({"type":"message_delta","usage":{"output_tokens":7}})", true, event_pool);
     ASSERT_TRUE(event.has_value());
-    EXPECT_FALSE(event->input_cached.has_value());
-    EXPECT_FALSE(event->input_uncached.has_value());
-    EXPECT_EQ(event->output, 7);
+    EXPECT_FALSE(event->in_cache.has_value());
+    EXPECT_FALSE(event->in_nocache.has_value());
+    EXPECT_EQ(event->out, 7);
+
+    mem::BufPool no_cache_fields_pool;
+    auto no_cache_fields =
+            extract_token_usage(LlmWireProtocol::AnthropicMessages, R"({"usage":{"input_tokens":6,"output_tokens":2}})",
+                                false, no_cache_fields_pool);
+    ASSERT_TRUE(no_cache_fields.has_value());
+    EXPECT_EQ(no_cache_fields->in_cache, 0);
+    EXPECT_EQ(no_cache_fields->in_nocache, 6);
+    EXPECT_EQ(no_cache_fields->out, 2);
+    EXPECT_EQ(no_cache_fields->total_tokens, 8);
 }
 
 TEST(LlmProtocolTest, ParsesSseAcrossChunksAndAssemblesSplitData) {

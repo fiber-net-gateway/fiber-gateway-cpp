@@ -69,6 +69,18 @@ std::string_view protocol_name(LlmWireProtocol protocol) noexcept {
                                                               : std::string_view("anthropic");
 }
 
+void add_cat_integer(cat::Event &event, std::string_view key, const std::optional<std::int64_t> &value) noexcept {
+    if (!value) {
+        return;
+    }
+    std::array<char, std::numeric_limits<std::int64_t>::digits10 + 3> buffer{};
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), *value);
+    if (converted.ec == std::errc{}) {
+        (void) event.add_data(key,
+                              std::string_view(buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())));
+    }
+}
+
 template<std::size_t Capacity>
 class FixedAuditText {
 public:
@@ -759,10 +771,26 @@ public:
 
     void rate_limit_error() noexcept { rate_limit_result_ = "error"; }
 
-    void usage(const std::optional<LlmTokenUsage> &usage) noexcept {
-        if (usage) {
-            usage_.merge(*usage);
+    void usage(const std::optional<LlmTokenUsage> &usage, const ResolvedProviderAttempt &attempt) noexcept {
+        if (!usage) {
+            return;
         }
+        usage_.merge(*usage);
+        if (cat_usage_emitted_ || !usage_.has_usage_fields() || !cat_transaction_ || !cat_transaction_->valid()) {
+            return;
+        }
+        auto event = cat_transaction_->start_event("LLMTokenUsage", attempt.protocol->model);
+        if (!event) {
+            return;
+        }
+        (void) event->add_data("provider", protocol_name(protocol_));
+        (void) event->add_data("model", attempt.protocol->model);
+        (void) event->add_data("resolved_provider", attempt.provider->name);
+        add_cat_integer(*event, "in_cache", usage_.in_cache);
+        add_cat_integer(*event, "in_nocache", usage_.in_nocache);
+        add_cat_integer(*event, "out", usage_.out);
+        (void) event->complete(cat::status::Success);
+        cat_usage_emitted_ = true;
     }
 
     void provider_attempt(const ResolvedProviderAttempt &attempt, std::size_t index, std::size_t total, int status,
@@ -831,7 +859,7 @@ private:
         bool metadata_truncated = false;
 
         json.object_open();
-        json.field("schema_version", 1);
+        json.field("schema_version", 2);
         json.field("event", "llm_request");
 
         json.key("request");
@@ -1007,10 +1035,11 @@ private:
 
         json.key("usage");
         json.object_open();
-        json.optional_field("input_cached", usage_.input_cached);
-        json.optional_field("input_uncached", usage_.input_uncached);
-        json.optional_field("output", usage_.output);
-        json.optional_field("total", usage_.total);
+        json.field("provider", protocol_name(protocol_));
+        json.optional_field("in_cache", usage_.in_cache);
+        json.optional_field("in_nocache", usage_.in_nocache);
+        json.optional_field("out", usage_.out);
+        json.optional_field("total_tokens", usage_.total_tokens);
         json.object_close();
 
         json.field("duration_us", duration_us);
@@ -1031,7 +1060,7 @@ private:
                 std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started_);
         mem::IoBuf encoded = encode(response, std::max<std::int64_t>(duration.count(), 0));
         constexpr std::string_view fallback =
-                R"({"schema_version":1,"event":"llm_request","audit_incomplete":"encode_failed"})";
+                R"({"schema_version":2,"event":"llm_request","audit_incomplete":"encode_failed"})";
         const std::string_view message =
                 encoded ? std::string_view(reinterpret_cast<const char *>(encoded.readable_data()), encoded.readable())
                         : fallback;
@@ -1077,6 +1106,7 @@ private:
     bool input_truncated_ = false;
     bool input_incomplete_ = false;
     bool attempts_truncated_ = false;
+    bool cat_usage_emitted_ = false;
     bool emitted_ = false;
 };
 
@@ -1686,7 +1716,7 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
                 (void) exchange.abort(error);
                 co_return SseRelayResult::ProviderError;
             }
-            rate_limit.settle_async(usage ? usage->total : std::optional<std::int64_t>{});
+            rate_limit.settle_async(usage ? usage->total_tokens : std::optional<std::int64_t>{});
             relay_chunk.mark_complete();
         }
 
@@ -1975,7 +2005,6 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             std::optional<LlmTokenUsage> usage;
             const SseRelayResult relay_result =
                     co_await relay_sse(exchange, *started, protocol, rate_limit, usage, audit);
-            audit.usage(usage);
             audit.output_complete(relay_result == SseRelayResult::Success);
             if (relay_result == SseRelayResult::Success) {
                 started->report_instance(InstanceReportOutcome::Success);
@@ -1999,6 +2028,10 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
                                    false, true, outcome);
+            audit.usage(usage, attempt);
+            if (usage) {
+                metrics_->token_usage(authenticated->principal().username(), attempt.provider->name, protocol, *usage);
+            }
             co_return;
         }
 
@@ -2036,14 +2069,17 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             attempt.runtime->record_success(attempt.api_token ? attempt.api_token->name : std::string_view{});
             mem::BufPool usage_pool;
             auto usage = extract_token_usage(protocol, io_buf_view(response->body), false, usage_pool);
-            audit.usage(usage);
             audit.output(io_buf_view(response->body), false);
             audit.output_complete(true);
             audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
                                    false, false, "success");
-            rate_limit.settle_async(usage ? usage->total : std::optional<std::int64_t>{});
+            audit.usage(usage, attempt);
+            if (usage) {
+                metrics_->token_usage(authenticated->principal().username(), attempt.provider->name, protocol, *usage);
+            }
+            rate_limit.settle_async(usage ? usage->total_tokens : std::optional<std::int64_t>{});
             co_await send_body(exchange, response->status_code, response->content_type, response->body,
                                response->request_id);
             co_return;

@@ -164,7 +164,7 @@ ai-server 在静态初始化边界编译 OpenAI/Anthropic 路径。请求只解�
 `ai_server.rate_limit` 和 `ai_server.audit`。
 
 `ai_server.audit` 对每个请求只写一条物理日志：常规日志前缀之后只有一个紧凑 JSON
-对象。当前 schema 为 `schema_version=1`，同一对象包含 request/identity/routing/
+对象。当前 schema 为 `schema_version=2`，同一对象包含 request/identity/routing/
 rate-limit/response/usage、完整的 `provider_attempts` 数组，以及：
 
 - `llm.input.prompt_parts`：system/message 文本、角色和工具名/描述/参数；
@@ -177,9 +177,23 @@ base64、音频或二进制载荷；Authorization、Provider token、BT1 secret 
 凭据也不会进入审计日志。由于 prompt 和模型输出本身仍可能包含业务敏感信息，生产
 环境必须限制日志读取、采集和保留权限。
 
-Prometheus label 使用固定低基数集合，不会把 request ID、username、原始 model 或
-token 名放入 label。配置 CAT 后，请求和 Provider 尝试还会生成 CAT transaction，
-但 Provider 尝试不再额外写独立的 audit 日志行。
+`usage` 将两种协议统一为 `in_cache`、`in_nocache`、`out` 和派生的
+`total_tokens`。OpenAI 的 `in_cache` 来自 `cached_tokens`，`in_nocache` 为
+`prompt_tokens - cached_tokens`；Anthropic 的 `in_cache` 来自
+`cache_read_input_tokens`，`in_nocache` 为 `input_tokens +
+cache_creation_input_tokens`。配置 CAT 后，每份有效 usage 还会生成
+`LLMTokenUsage` 子 Event，携带相同三个用量字段、协议、上游模型和实际 Provider。
+
+Prometheus 输出两个累计 Counter family：
+
+- `ai_server_user_token_usage_total{username,token_type}`；
+- `ai_server_provider_token_usage_total{provider_name,protocol,token_type}`。
+
+其中 `token_type` 固定为 `in_cache`、`in_nocache`、`out`。username 是需求指定的
+高基数 label；进程会保留首次出现的 username/Provider series 直至退出，部署时应
+据实际用户规模评估时序数量。其他指标仍使用固定低基数 label，不会把 request ID、
+原始 model 或 token 名放入 label。请求和 Provider 尝试继续生成 CAT transaction，
+但 Provider 尝试不额外写独立的 audit 日志行。
 
 ## 所有权与关闭
 
