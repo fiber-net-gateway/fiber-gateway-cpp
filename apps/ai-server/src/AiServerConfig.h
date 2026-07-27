@@ -1,6 +1,8 @@
 #ifndef FIBER_AI_SERVER_AI_SERVER_CONFIG_H
 #define FIBER_AI_SERVER_AI_SERVER_CONFIG_H
 
+#include "audit/LlmAuditWriter.h"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -46,12 +48,13 @@ public:
     [[nodiscard]] std::string_view service_name() const noexcept { return service_name_; }
     [[nodiscard]] std::string_view service_group() const noexcept { return service_group_; }
     [[nodiscard]] const std::optional<cat::CatClientConfig> &cat_config() const noexcept { return cat_config_; }
+    [[nodiscard]] const LlmAuditWriterOptions &audit_writer_options() const noexcept { return audit_writer_options_; }
 
 private:
     AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config,
                    std::chrono::milliseconds initial_config_timeout, std::optional<net::IpAddress> advertise_address,
-                   std::string service_name, std::string service_group,
-                   std::optional<cat::CatClientConfig> cat_config) noexcept;
+                   std::string service_name, std::string service_group, std::optional<cat::CatClientConfig> cat_config,
+                   LlmAuditWriterOptions audit_writer_options) noexcept;
 
     net::SocketAddress listen_address_;
     nacos::NacosClientConfig nacos_config_;
@@ -60,6 +63,7 @@ private:
     std::string service_name_;
     std::string service_group_;
     std::optional<cat::CatClientConfig> cat_config_;
+    LlmAuditWriterOptions audit_writer_options_;
 };
 
 } // namespace fiber::ai_server

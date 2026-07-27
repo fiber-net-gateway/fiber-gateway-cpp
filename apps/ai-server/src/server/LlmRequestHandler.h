@@ -22,13 +22,15 @@ class CatClient;
 
 namespace fiber::ai_server {
 
+class LlmAuditWriter;
+
 class LlmRequestHandler {
 public:
     LlmRequestHandler(ProviderHttpClient &provider_client, ProviderRuntimeRegistry &provider_runtime,
                       TokenRateLimitCoordinator &rate_limiters, AiServerMetrics::Worker &metrics,
-                      cat::CatClient *cat_client) noexcept :
+                      cat::CatClient *cat_client, LlmAuditWriter *audit_writer = nullptr) noexcept :
         provider_client_(&provider_client), provider_runtime_(&provider_runtime), rate_limiters_(&rate_limiters),
-        metrics_(&metrics), cat_client_(cat_client) {}
+        metrics_(&metrics), cat_client_(cat_client), audit_writer_(audit_writer) {}
 
     [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange, LlmWireProtocol protocol,
                                            std::shared_ptr<const LlmConfigSnapshot> config) noexcept;
@@ -39,6 +41,7 @@ private:
     TokenRateLimitCoordinator *rate_limiters_ = nullptr;
     AiServerMetrics::Worker *metrics_ = nullptr;
     cat::CatClient *cat_client_ = nullptr;
+    LlmAuditWriter *audit_writer_ = nullptr;
 };
 
 } // namespace fiber::ai_server

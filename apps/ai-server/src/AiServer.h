@@ -36,9 +36,12 @@ class CatClient;
 
 namespace fiber::ai_server {
 
+class LlmAuditWriter;
+
 class AiServer final : public common::NonCopyable, public common::NonMovable {
 public:
-    AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group, cat::CatClient *cat_client = nullptr);
+    AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group, cat::CatClient *cat_client = nullptr,
+             LlmAuditWriter *audit_writer = nullptr);
     ~AiServer();
 
     [[nodiscard]] async::Task<bool> start_config_workers(LlmConfigManager &config_manager) noexcept;
@@ -68,6 +71,7 @@ private:
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoopGroup *worker_group_ = nullptr;
     cat::CatClient *cat_client_ = nullptr;
+    LlmAuditWriter *audit_writer_ = nullptr;
     std::vector<WorkerState> workers_;
     async::WaitGroup initial_installs_;
     async::WaitGroup config_tasks_;

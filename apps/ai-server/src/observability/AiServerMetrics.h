@@ -1,6 +1,7 @@
 #ifndef FIBER_AI_SERVER_METRICS_H
 #define FIBER_AI_SERVER_METRICS_H
 
+#include "../audit/LlmAuditWriter.h"
 #include "../limit/TokenRateLimiter.h"
 #include "../protocol/TokenUsage.h"
 
@@ -97,7 +98,8 @@ public:
 
     void set_config_generation(std::uint64_t generation) noexcept;
     [[nodiscard]] async::Task<common::IoResult<mem::IoBufChain>>
-    collect(mem::IoBufNodePool &node_pool, TokenRateLimiterStats limiter_stats, std::size_t cluster_nodes) noexcept;
+    collect(mem::IoBufNodePool &node_pool, TokenRateLimiterStats limiter_stats, std::size_t cluster_nodes,
+            const LlmAuditWriterStats *audit_stats = nullptr) noexcept;
 
     void stop_collecting() noexcept;
     [[nodiscard]] async::Task<void> wait_for_idle() noexcept;

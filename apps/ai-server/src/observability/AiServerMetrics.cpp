@@ -118,6 +118,13 @@ private:
            output.append(" ") && output.append_uint(value) && output.append("\n");
 }
 
+[[nodiscard]] bool append_counter(BoundedTextBuilder &output, std::string_view name, std::string_view help,
+                                  std::uint64_t value) noexcept {
+    return output.append("# HELP ") && output.append(name) && output.append(" ") && output.append(help) &&
+           output.append("\n# TYPE ") && output.append(name) && output.append(" counter\n") && output.append(name) &&
+           output.append(" ") && output.append_uint(value) && output.append("\n");
+}
+
 struct TokenUsageCounters {
     std::array<std::atomic<std::uint64_t>, 3> values{};
     std::atomic<bool> observed{false};
@@ -522,9 +529,9 @@ void AiServerMetrics::set_config_generation(std::uint64_t generation) noexcept {
     }
 }
 
-async::Task<common::IoResult<mem::IoBufChain>> AiServerMetrics::collect(mem::IoBufNodePool &node_pool,
-                                                                        TokenRateLimiterStats limiter_stats,
-                                                                        std::size_t cluster_nodes) noexcept {
+async::Task<common::IoResult<mem::IoBufChain>>
+AiServerMetrics::collect(mem::IoBufNodePool &node_pool, TokenRateLimiterStats limiter_stats, std::size_t cluster_nodes,
+                         const LlmAuditWriterStats *audit_stats) noexcept {
     auto collected = co_await registry_.collect_text(node_pool, prometheus::CollectOptions{
                                                                         .max_output_bytes = kMaxMetricsOutputBytes,
                                                                 });
@@ -541,6 +548,27 @@ async::Task<common::IoResult<mem::IoBufChain>> AiServerMetrics::collect(mem::IoB
         !append_gauge(output, "ai_server_rate_limit_cluster_nodes", "Token rate limit shard ring nodes.",
                       cluster_nodes) ||
         !token_usage_store_->append_text(output)) {
+        co_return std::unexpected(output.error());
+    }
+    if (audit_stats &&
+        (!append_counter(output, "ai_server_audit_submitted_records_total", "LLM audit records submitted.",
+                         audit_stats->submitted_records) ||
+         !append_counter(output, "ai_server_audit_written_records_total", "LLM audit records written.",
+                         audit_stats->written_records) ||
+         !append_counter(output, "ai_server_audit_written_bytes_total", "LLM audit bytes written.",
+                         audit_stats->written_bytes) ||
+         !append_counter(output, "ai_server_audit_write_failures_total", "LLM audit write failures.",
+                         audit_stats->write_failures) ||
+         !append_counter(output, "ai_server_audit_rotations_total", "LLM audit log rotations.",
+                         audit_stats->rotations) ||
+         !append_counter(output, "ai_server_audit_rotation_failures_total", "LLM audit rotation failures.",
+                         audit_stats->rotation_failures) ||
+         !append_counter(output, "ai_server_audit_admission_rejections_total", "LLM audit admission rejections.",
+                         audit_stats->admission_rejections) ||
+         !append_gauge(output, "ai_server_audit_outstanding_records", "LLM audit records retained or queued.",
+                       audit_stats->outstanding_records) ||
+         !append_gauge(output, "ai_server_audit_healthy", "Whether the LLM audit writer accepts requests.",
+                       audit_stats->healthy ? 1 : 0))) {
         co_return std::unexpected(output.error());
     }
     co_return std::move(*collected);

@@ -9,7 +9,6 @@
 
 namespace {
 
-using fiber::ai_server::LlmAuditPromptPartKind;
 using fiber::ai_server::LlmBodyErrorCode;
 using fiber::ai_server::LlmWireProtocol;
 using fiber::ai_server::ParsedLlmBody;
@@ -104,7 +103,7 @@ TEST(LlmBodyTest, ExtractsAnthropicSpecificFieldsAndNullsComplexValues) {
     EXPECT_TRUE(routing.message_content_texts[1].is_null());
 }
 
-TEST(LlmBodyTest, ExtractsOnlyAuditableTextFromComplexPrompts) {
+TEST(LlmBodyTest, CountsMessagesAndToolsWithoutBuildingDuplicatePromptParts) {
     constexpr std::string_view input = R"({
         "model":"claude.public",
         "system":[{"type":"text","text":"system rules"}],
@@ -126,30 +125,10 @@ TEST(LlmBodyTest, ExtractsOnlyAuditableTextFromComplexPrompts) {
     const auto &routing = body->routing();
     EXPECT_EQ(routing.messages_count, 1u);
     EXPECT_EQ(routing.tools_count, 1u);
-    EXPECT_FALSE(routing.audit_prompt_truncated);
-    EXPECT_FALSE(routing.audit_prompt_incomplete);
-
-    bool found_system = false;
-    bool found_message = false;
-    bool found_tool_name = false;
-    bool found_tool_description = false;
-    std::string captured;
-    for (const auto &part: routing.audit_prompt_parts) {
-        captured.append(part.text);
-        captured.push_back('\n');
-        found_system = found_system || (part.kind == LlmAuditPromptPartKind::SystemText && part.text == "system rules");
-        found_message =
-                found_message || (part.kind == LlmAuditPromptPartKind::MessageText && part.text == "visible prompt");
-        found_tool_name = found_tool_name || (part.kind == LlmAuditPromptPartKind::ToolName && part.text == "weather");
-        found_tool_description = found_tool_description || (part.kind == LlmAuditPromptPartKind::ToolDescription &&
-                                                            part.text == "look up weather");
-    }
-    EXPECT_TRUE(found_system);
-    EXPECT_TRUE(found_message);
-    EXPECT_TRUE(found_tool_name);
-    EXPECT_TRUE(found_tool_description);
-    EXPECT_EQ(captured.find("SECRET_BASE64"), std::string::npos);
-    EXPECT_EQ(captured.find("signature=SECRET"), std::string::npos);
+    EXPECT_EQ(body->body_size(), input.size());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(body->raw_body().readable_data()),
+                               body->raw_body().readable()),
+              input);
 }
 
 TEST(LlmBodyTest, RejectsInvalidBodyAndRoutingFieldTypes) {
