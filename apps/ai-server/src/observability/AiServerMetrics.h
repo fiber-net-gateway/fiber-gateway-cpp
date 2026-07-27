@@ -2,13 +2,14 @@
 #define FIBER_AI_SERVER_METRICS_H
 
 #include "../limit/TokenRateLimiter.h"
-#include "../protocol/LlmBody.h"
+#include "../protocol/TokenUsage.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <async/Task.h>
@@ -41,9 +42,20 @@ enum class RateLimitSettleMetric : std::uint8_t {
 };
 
 class AiServerMetrics final : public common::NonCopyable, public common::NonMovable {
+    class TokenUsageStore;
+    class WorkerTokenUsageCache;
+
 public:
     class Worker {
     public:
+        Worker();
+        ~Worker();
+
+        Worker(const Worker &) = delete;
+        Worker &operator=(const Worker &) = delete;
+        Worker(Worker &&) noexcept;
+        Worker &operator=(Worker &&) noexcept;
+
         void request_started(LlmWireProtocol protocol) noexcept;
         void request_finished(LlmWireProtocol protocol, const http::HttpResponseStats &response,
                               std::chrono::microseconds duration) noexcept;
@@ -54,6 +66,8 @@ public:
         void rate_limit_check(RateLimitCheckMetric result) noexcept;
         void rate_limit_settle(RateLimitSettleMetric result) noexcept;
         void sse_failure(LlmWireProtocol protocol) noexcept;
+        void token_usage(std::string_view username, std::string_view provider_name, LlmWireProtocol protocol,
+                         const LlmTokenUsage &usage) noexcept;
 
     private:
         friend class AiServerMetrics;
@@ -71,6 +85,8 @@ public:
         std::array<prometheus::CounterRef, static_cast<std::size_t>(RateLimitCheckMetric::Count)> rate_limit_checks_;
         std::array<prometheus::CounterRef, static_cast<std::size_t>(RateLimitSettleMetric::Count)> rate_limit_settles_;
         std::array<prometheus::CounterRef, kProtocolCount> sse_failures_;
+        std::unique_ptr<WorkerTokenUsageCache> token_usage_cache_;
+        AiServerMetrics *owner_ = nullptr;
     };
 
     explicit AiServerMetrics(event::EventLoopGroup &workers);
@@ -88,8 +104,11 @@ public:
 
 private:
     [[nodiscard]] bool initialize(event::EventLoopGroup &workers);
+    void record_token_usage(Worker &worker, std::string_view username, std::string_view provider_name,
+                            LlmWireProtocol protocol, const LlmTokenUsage &usage) noexcept;
 
     prometheus::MetricsRegistry registry_;
+    std::unique_ptr<TokenUsageStore> token_usage_store_;
     std::vector<Worker> workers_;
     std::atomic<std::uint64_t> config_generation_{0};
     bool collecting_stopped_ = false;

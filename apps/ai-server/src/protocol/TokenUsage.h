@@ -12,12 +12,12 @@
 namespace fiber::ai_server {
 
 struct LlmTokenUsage {
-    std::optional<std::int64_t> input_cached;
-    std::optional<std::int64_t> input_uncached;
-    std::optional<std::int64_t> output;
-    std::optional<std::int64_t> total;
+    std::optional<std::int64_t> in_cache;
+    std::optional<std::int64_t> in_nocache;
+    std::optional<std::int64_t> out;
+    std::optional<std::int64_t> total_tokens;
 
-    [[nodiscard]] bool has_usage_fields() const noexcept { return input_cached || input_uncached || output; }
+    [[nodiscard]] bool has_usage_fields() const noexcept { return in_cache || in_nocache || out; }
 
     void merge(const LlmTokenUsage &next) noexcept;
 };

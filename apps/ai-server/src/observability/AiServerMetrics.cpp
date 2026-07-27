@@ -2,15 +2,28 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstring>
+#include <limits>
+#include <map>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 
 #include <common/Assert.h>
 #include <common/mem/IoBuf.h>
 
 namespace fiber::ai_server {
 namespace {
+
+constexpr std::size_t kMaxMetricsOutputBytes = 16 * 1024 * 1024;
+constexpr std::array<std::string_view, 2> kProtocolNames{"openai", "anthropic"};
+constexpr std::array<std::string_view, 3> kTokenTypes{"in_cache", "in_nocache", "out"};
+constexpr std::string_view kUserTokenUsageMetric = "ai_server_user_token_usage_total";
+constexpr std::string_view kProviderTokenUsageMetric = "ai_server_provider_token_usage_total";
+constexpr std::size_t kMetricsChunkBytes = 4 * 1024;
 
 constexpr std::size_t protocol_index(LlmWireProtocol protocol) noexcept {
     return protocol == LlmWireProtocol::OpenAiChatCompletions ? 0 : 1;
@@ -29,21 +42,248 @@ std::size_t request_result_index(const http::HttpResponseStats &response) noexce
     return 2;
 }
 
-void append_gauge(std::string &output, std::string_view name, std::string_view help, std::uint64_t value) {
-    output.append("# HELP ");
-    output.append(name);
-    output.push_back(' ');
-    output.append(help);
-    output.append("\n# TYPE ");
-    output.append(name);
-    output.append(" gauge\n");
-    output.append(name);
-    output.push_back(' ');
-    output.append(std::to_string(value));
-    output.push_back('\n');
+class BoundedTextBuilder {
+public:
+    BoundedTextBuilder(mem::IoBufChain &output, std::size_t max_size) noexcept :
+        output_(&output), max_size_(max_size), written_(output.readable_bytes()) {}
+
+    [[nodiscard]] bool append(std::string_view value) noexcept {
+        if (error_ != common::IoErr::None) {
+            return false;
+        }
+        if (written_ > max_size_ || value.size() > max_size_ - written_) {
+            error_ = common::IoErr::MessageTooLarge;
+            return false;
+        }
+        while (!value.empty()) {
+            mem::IoBuf *tail = output_->back();
+            if (!tail || tail->writable() == 0) {
+                const std::size_t capacity = std::min(kMetricsChunkBytes, max_size_ - written_);
+                mem::IoBuf chunk = mem::IoBuf::allocate(capacity);
+                if (!chunk || !output_->append(std::move(chunk))) {
+                    error_ = common::IoErr::NoMem;
+                    return false;
+                }
+                tail = output_->back();
+            }
+            const std::size_t count = std::min(value.size(), tail->writable());
+            std::memcpy(tail->writable_data(), value.data(), count);
+            output_->commit_back(count);
+            written_ += count;
+            value.remove_prefix(count);
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool append_uint(std::uint64_t value) noexcept {
+        std::array<char, std::numeric_limits<std::uint64_t>::digits10 + 2> buffer{};
+        const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+        if (converted.ec != std::errc{}) {
+            error_ = common::IoErr::Invalid;
+            return false;
+        }
+        return append(std::string_view(buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())));
+    }
+
+    [[nodiscard]] bool append_label_value(std::string_view value) noexcept {
+        std::size_t start = 0;
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            const char ch = value[index];
+            if (ch != '\\' && ch != '"' && ch != '\n') {
+                continue;
+            }
+            if (!append(value.substr(start, index - start)) ||
+                !append(ch == '\\' ? std::string_view("\\\\")
+                                   : (ch == '"' ? std::string_view("\\\"") : std::string_view("\\n")))) {
+                return false;
+            }
+            start = index + 1;
+        }
+        return append(value.substr(start));
+    }
+
+    [[nodiscard]] common::IoErr error() const noexcept { return error_; }
+
+private:
+    mem::IoBufChain *output_ = nullptr;
+    std::size_t max_size_ = 0;
+    std::size_t written_ = 0;
+    common::IoErr error_ = common::IoErr::None;
+};
+
+[[nodiscard]] bool append_gauge(BoundedTextBuilder &output, std::string_view name, std::string_view help,
+                                std::uint64_t value) noexcept {
+    return output.append("# HELP ") && output.append(name) && output.append(" ") && output.append(help) &&
+           output.append("\n# TYPE ") && output.append(name) && output.append(" gauge\n") && output.append(name) &&
+           output.append(" ") && output.append_uint(value) && output.append("\n");
+}
+
+struct TokenUsageCounters {
+    std::array<std::atomic<std::uint64_t>, 3> values{};
+    std::atomic<bool> observed{false};
+
+    void add(const LlmTokenUsage &usage) noexcept {
+        add_value(0, usage.in_cache);
+        add_value(1, usage.in_nocache);
+        add_value(2, usage.out);
+        observed.store(true, std::memory_order_release);
+    }
+
+private:
+    void add_value(std::size_t index, const std::optional<std::int64_t> &value) noexcept {
+        if (value && *value >= 0) {
+            values[index].fetch_add(static_cast<std::uint64_t>(*value), std::memory_order_relaxed);
+        }
+    }
+};
+
+struct UserTokenUsageSeries {
+    explicit UserTokenUsageSeries(std::string_view value) : username(value) {}
+
+    std::string username;
+    TokenUsageCounters usage;
+};
+
+struct ProviderTokenUsageSeries {
+    explicit ProviderTokenUsageSeries(std::string_view value) : provider_name(value) {}
+
+    std::string provider_name;
+    std::array<TokenUsageCounters, 2> protocols;
+};
+
+[[nodiscard]] bool append_family_header(BoundedTextBuilder &output, std::string_view name, std::string_view help) {
+    return output.append("# HELP ") && output.append(name) && output.append(" ") && output.append(help) &&
+           output.append("\n# TYPE ") && output.append(name) && output.append(" counter\n");
+}
+
+[[nodiscard]] bool append_user_sample(BoundedTextBuilder &output, std::string_view username,
+                                      std::string_view token_type, std::uint64_t value) {
+    return output.append(kUserTokenUsageMetric) && output.append("{username=\"") &&
+           output.append_label_value(username) && output.append("\",token_type=\"") && output.append(token_type) &&
+           output.append("\"} ") && output.append_uint(value) && output.append("\n");
+}
+
+[[nodiscard]] bool append_provider_sample(BoundedTextBuilder &output, std::string_view provider_name,
+                                          std::string_view protocol, std::string_view token_type, std::uint64_t value) {
+    return output.append(kProviderTokenUsageMetric) && output.append("{provider_name=\"") &&
+           output.append_label_value(provider_name) && output.append("\",protocol=\"") && output.append(protocol) &&
+           output.append("\",token_type=\"") && output.append(token_type) && output.append("\"} ") &&
+           output.append_uint(value) && output.append("\n");
 }
 
 } // namespace
+
+class AiServerMetrics::WorkerTokenUsageCache {
+public:
+    std::unordered_map<std::string_view, UserTokenUsageSeries *> users;
+    std::unordered_map<std::string_view, ProviderTokenUsageSeries *> providers;
+};
+
+class AiServerMetrics::TokenUsageStore {
+public:
+    void record(WorkerTokenUsageCache &cache, std::string_view username, std::string_view provider_name,
+                LlmWireProtocol protocol, const LlmTokenUsage &usage) {
+        if (!usage.has_usage_fields()) {
+            return;
+        }
+        find_user(cache, username)->usage.add(usage);
+        find_provider(cache, provider_name)->protocols[protocol_index(protocol)].add(usage);
+    }
+
+    [[nodiscard]] bool append_text(BoundedTextBuilder &output) {
+        if (!append_family_header(output, kUserTokenUsageMetric,
+                                  "LLM tokens by authenticated username and token type.")) {
+            return false;
+        }
+
+        std::lock_guard lock(mutex_);
+        for (const auto &[username, series]: users_) {
+            for (std::size_t type = 0; type < kTokenTypes.size(); ++type) {
+                if (!append_user_sample(output, username, kTokenTypes[type],
+                                        series->usage.values[type].load(std::memory_order_relaxed))) {
+                    return false;
+                }
+            }
+        }
+
+        if (!append_family_header(output, kProviderTokenUsageMetric,
+                                  "LLM tokens by provider, wire protocol, and token type.")) {
+            return false;
+        }
+        for (const auto &[provider_name, series]: providers_) {
+            for (std::size_t protocol = 0; protocol < kProtocolNames.size(); ++protocol) {
+                const TokenUsageCounters &usage = series->protocols[protocol];
+                if (!usage.observed.load(std::memory_order_acquire)) {
+                    continue;
+                }
+                for (std::size_t type = 0; type < kTokenTypes.size(); ++type) {
+                    if (!append_provider_sample(output, provider_name, kProtocolNames[protocol], kTokenTypes[type],
+                                                usage.values[type].load(std::memory_order_relaxed))) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+private:
+    UserTokenUsageSeries *find_user(WorkerTokenUsageCache &cache, std::string_view username) {
+        const auto cached = cache.users.find(username);
+        if (cached != cache.users.end()) {
+            return cached->second;
+        }
+
+        UserTokenUsageSeries *series = nullptr;
+        {
+            std::lock_guard lock(mutex_);
+            auto found = users_.find(username);
+            if (found == users_.end()) {
+                auto created = std::make_unique<UserTokenUsageSeries>(username);
+                series = created.get();
+                users_.emplace(series->username, std::move(created));
+            } else {
+                series = found->second.get();
+            }
+        }
+        cache.users.emplace(series->username, series);
+        return series;
+    }
+
+    ProviderTokenUsageSeries *find_provider(WorkerTokenUsageCache &cache, std::string_view provider_name) {
+        const auto cached = cache.providers.find(provider_name);
+        if (cached != cache.providers.end()) {
+            return cached->second;
+        }
+
+        ProviderTokenUsageSeries *series = nullptr;
+        {
+            std::lock_guard lock(mutex_);
+            auto found = providers_.find(provider_name);
+            if (found == providers_.end()) {
+                auto created = std::make_unique<ProviderTokenUsageSeries>(provider_name);
+                series = created.get();
+                providers_.emplace(series->provider_name, std::move(created));
+            } else {
+                series = found->second.get();
+            }
+        }
+        cache.providers.emplace(series->provider_name, series);
+        return series;
+    }
+
+    std::mutex mutex_;
+    std::map<std::string, std::unique_ptr<UserTokenUsageSeries>, std::less<>> users_;
+    std::map<std::string, std::unique_ptr<ProviderTokenUsageSeries>, std::less<>> providers_;
+};
+
+AiServerMetrics::Worker::Worker() : token_usage_cache_(std::make_unique<WorkerTokenUsageCache>()) {}
+
+AiServerMetrics::Worker::~Worker() = default;
+
+AiServerMetrics::Worker::Worker(Worker &&) noexcept = default;
+
+AiServerMetrics::Worker &AiServerMetrics::Worker::operator=(Worker &&) noexcept = default;
 
 void AiServerMetrics::Worker::request_started(LlmWireProtocol protocol) noexcept {
     inflight_[protocol_index(protocol)].inc();
@@ -85,7 +325,16 @@ void AiServerMetrics::Worker::sse_failure(LlmWireProtocol protocol) noexcept {
     sse_failures_[protocol_index(protocol)].inc();
 }
 
-AiServerMetrics::AiServerMetrics(event::EventLoopGroup &workers) { valid_ = initialize(workers); }
+void AiServerMetrics::Worker::token_usage(std::string_view username, std::string_view provider_name,
+                                          LlmWireProtocol protocol, const LlmTokenUsage &usage) noexcept {
+    FIBER_ASSERT(owner_ != nullptr);
+    owner_->record_token_usage(*this, username, provider_name, protocol, usage);
+}
+
+AiServerMetrics::AiServerMetrics(event::EventLoopGroup &workers) :
+    token_usage_store_(std::make_unique<TokenUsageStore>()) {
+    valid_ = initialize(workers);
+}
 
 AiServerMetrics::~AiServerMetrics() { FIBER_ASSERT(!valid_ || collecting_stopped_); }
 
@@ -93,7 +342,6 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     constexpr std::array<std::string_view, 1> kProtocolLabel{"protocol"};
     constexpr std::array<std::string_view, 2> kRequestLabels{"protocol", "result"};
     constexpr std::array<std::string_view, 1> kResultLabel{"result"};
-    constexpr std::array<std::string_view, 2> kProtocols{"openai", "anthropic"};
     constexpr std::array<std::string_view, 4> kRequestResults{"success", "client_error", "server_error", "canceled"};
     constexpr std::array<std::string_view, 4> kCheckResults{"bypass", "allowed", "denied", "error"};
     constexpr std::array<std::string_view, 3> kSettleResults{"usage", "no_usage", "error"};
@@ -137,10 +385,10 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     std::array<prometheus::SeriesId, 2> sse_series;
     std::array<prometheus::SeriesId, 4> check_series;
     std::array<prometheus::SeriesId, 3> settle_series;
-    for (std::size_t protocol = 0; protocol < kProtocols.size(); ++protocol) {
+    for (std::size_t protocol = 0; protocol < kProtocolNames.size(); ++protocol) {
         for (std::size_t result = 0; result < kRequestResults.size(); ++result) {
             auto series = registry_.register_series(*requests, std::array<std::string_view, 2>{
-                                                                       kProtocols[protocol],
+                                                                       kProtocolNames[protocol],
                                                                        kRequestResults[result],
                                                                });
             if (!series) {
@@ -148,17 +396,20 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             }
             request_series[protocol][result] = *series;
         }
-        auto duration_id = registry_.register_series(*duration, std::array<std::string_view, 1>{kProtocols[protocol]});
-        auto inflight_id = registry_.register_series(*inflight, std::array<std::string_view, 1>{kProtocols[protocol]});
-        auto attempt_id =
-                registry_.register_series(*provider_attempts, std::array<std::string_view, 1>{kProtocols[protocol]});
-        auto failure_id =
-                registry_.register_series(*provider_failures, std::array<std::string_view, 1>{kProtocols[protocol]});
+        auto duration_id =
+                registry_.register_series(*duration, std::array<std::string_view, 1>{kProtocolNames[protocol]});
+        auto inflight_id =
+                registry_.register_series(*inflight, std::array<std::string_view, 1>{kProtocolNames[protocol]});
+        auto attempt_id = registry_.register_series(*provider_attempts,
+                                                    std::array<std::string_view, 1>{kProtocolNames[protocol]});
+        auto failure_id = registry_.register_series(*provider_failures,
+                                                    std::array<std::string_view, 1>{kProtocolNames[protocol]});
         auto retry_id =
-                registry_.register_series(*provider_retries, std::array<std::string_view, 1>{kProtocols[protocol]});
+                registry_.register_series(*provider_retries, std::array<std::string_view, 1>{kProtocolNames[protocol]});
         auto circuit_open_id = registry_.register_series(*provider_circuit_opens,
-                                                         std::array<std::string_view, 1>{kProtocols[protocol]});
-        auto sse_id = registry_.register_series(*sse_failures, std::array<std::string_view, 1>{kProtocols[protocol]});
+                                                         std::array<std::string_view, 1>{kProtocolNames[protocol]});
+        auto sse_id =
+                registry_.register_series(*sse_failures, std::array<std::string_view, 1>{kProtocolNames[protocol]});
         if (!duration_id || !inflight_id || !attempt_id || !failure_id || !retry_id || !circuit_open_id || !sse_id) {
             return false;
         }
@@ -205,7 +456,8 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             return false;
         }
         Worker &worker = workers_[worker_index];
-        for (std::size_t protocol = 0; protocol < kProtocols.size(); ++protocol) {
+        worker.owner_ = this;
+        for (std::size_t protocol = 0; protocol < kProtocolNames.size(); ++protocol) {
             for (std::size_t result = 0; result < kRequestResults.size(); ++result) {
                 auto value = shard->counter(request_series[protocol][result]);
                 if (!value) {
@@ -256,6 +508,13 @@ AiServerMetrics::Worker &AiServerMetrics::worker(std::size_t index) noexcept {
     return workers_[index];
 }
 
+void AiServerMetrics::record_token_usage(Worker &worker, std::string_view username, std::string_view provider_name,
+                                         LlmWireProtocol protocol, const LlmTokenUsage &usage) noexcept {
+    FIBER_ASSERT(worker.owner_ == this);
+    FIBER_ASSERT(worker.token_usage_cache_ != nullptr);
+    token_usage_store_->record(*worker.token_usage_cache_, username, provider_name, protocol, usage);
+}
+
 void AiServerMetrics::set_config_generation(std::uint64_t generation) noexcept {
     std::uint64_t current = config_generation_.load(std::memory_order_relaxed);
     while (current < generation && !config_generation_.compare_exchange_weak(
@@ -266,27 +525,23 @@ void AiServerMetrics::set_config_generation(std::uint64_t generation) noexcept {
 async::Task<common::IoResult<mem::IoBufChain>> AiServerMetrics::collect(mem::IoBufNodePool &node_pool,
                                                                         TokenRateLimiterStats limiter_stats,
                                                                         std::size_t cluster_nodes) noexcept {
-    auto collected = co_await registry_.collect_text(node_pool);
+    auto collected = co_await registry_.collect_text(node_pool, prometheus::CollectOptions{
+                                                                        .max_output_bytes = kMaxMetricsOutputBytes,
+                                                                });
     if (!collected) {
         co_return std::unexpected(collected.error());
     }
-    std::string gauges;
-    gauges.reserve(512);
-    append_gauge(gauges, "ai_server_config_generation", "Latest installed configuration generation.",
-                 config_generation_.load(std::memory_order_acquire));
-    append_gauge(gauges, "ai_server_rate_limit_entries", "Local token rate limiter entries.",
-                 limiter_stats.limiter_count);
-    append_gauge(gauges, "ai_server_rate_limit_inflight", "Local token rate limiter in-flight sessions.",
-                 limiter_stats.in_flight_count);
-    append_gauge(gauges, "ai_server_rate_limit_cluster_nodes", "Token rate limit shard ring nodes.", cluster_nodes);
-    mem::IoBuf tail = mem::IoBuf::allocate(gauges.size());
-    if (!tail) {
-        co_return std::unexpected(common::IoErr::NoMem);
-    }
-    std::memcpy(tail.writable_data(), gauges.data(), gauges.size());
-    tail.commit(gauges.size());
-    if (!collected->append(std::move(tail))) {
-        co_return std::unexpected(common::IoErr::NoMem);
+    BoundedTextBuilder output(*collected, kMaxMetricsOutputBytes);
+    if (!append_gauge(output, "ai_server_config_generation", "Latest installed configuration generation.",
+                      config_generation_.load(std::memory_order_acquire)) ||
+        !append_gauge(output, "ai_server_rate_limit_entries", "Local token rate limiter entries.",
+                      limiter_stats.limiter_count) ||
+        !append_gauge(output, "ai_server_rate_limit_inflight", "Local token rate limiter in-flight sessions.",
+                      limiter_stats.in_flight_count) ||
+        !append_gauge(output, "ai_server_rate_limit_cluster_nodes", "Token rate limit shard ring nodes.",
+                      cluster_nodes) ||
+        !token_usage_store_->append_text(output)) {
+        co_return std::unexpected(output.error());
     }
     co_return std::move(*collected);
 }

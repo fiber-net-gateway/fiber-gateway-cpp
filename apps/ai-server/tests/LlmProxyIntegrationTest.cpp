@@ -951,13 +951,22 @@ TEST(LlmProxyIntegrationTest, SettlementFailureDoesNotChangeProviderResponse) {
     auto metrics = fixture.settlement_metrics();
     ASSERT_TRUE(metrics);
     EXPECT_NE(metrics->find("ai_server_rate_limit_settlements_total{result=\"error\"} 2"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"in_cache\"} 0"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"in_nocache\"} 6"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"out\"} 9"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_provider_token_usage_total{provider_name=\"primary\",protocol=\"openai\","
+                            "token_type=\"in_nocache\"} 6"),
+              std::string::npos);
 }
 
 TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
     FixtureHarness fixture({
             MockReply{
                     .status = 200,
-                    .body = R"({"id":"ok","choices":[{"message":{"role":"assistant","content":"weather is sunny","tool_calls":[{"type":"function","function":{"name":"weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14}})",
+                    .body = R"({"id":"ok","choices":[{"message":{"role":"assistant","content":"weather is sunny","tool_calls":[{"type":"function","function":{"name":"weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":3}}})",
             },
     });
     ASSERT_TRUE(fixture.valid());
@@ -1011,6 +1020,9 @@ TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
     EXPECT_NE(audit_json.find("weather is sunny"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"(\"city\":\"Paris\")"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"("provider_attempts":[{)"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("schema_version":2)"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("usage":{"provider":"openai","in_cache":3,"in_nocache":5,"out":6,"total_tokens":14})"),
+              std::string_view::npos);
     EXPECT_EQ(audit_json.find("SECRET_URL"), std::string_view::npos);
     EXPECT_EQ(audit_json.find("SECRET_BASE64"), std::string_view::npos);
 }

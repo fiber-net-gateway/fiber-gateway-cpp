@@ -134,10 +134,10 @@ std::optional<LlmTokenUsage> to_openai(const RawUsage &raw) noexcept {
         total = add(raw.input, raw.output);
     }
     return LlmTokenUsage{
-            .input_cached = cached,
-            .input_uncached = uncached,
-            .output = raw.output,
-            .total = total,
+            .in_cache = cached,
+            .in_nocache = uncached,
+            .out = raw.output,
+            .total_tokens = total,
     };
 }
 
@@ -163,30 +163,30 @@ std::optional<LlmTokenUsage> to_anthropic(const RawUsage &raw, bool partial) noe
         total = add(total, read.value_or(0));
     }
     return LlmTokenUsage{
-            .input_cached = read,
-            .input_uncached = uncached,
-            .output = raw.output,
-            .total = total,
+            .in_cache = read,
+            .in_nocache = uncached,
+            .out = raw.output,
+            .total_tokens = total,
     };
 }
 
 } // namespace
 
 void LlmTokenUsage::merge(const LlmTokenUsage &next) noexcept {
-    if (next.input_cached) {
-        input_cached = next.input_cached;
+    if (next.in_cache) {
+        in_cache = next.in_cache;
     }
-    if (next.input_uncached) {
-        input_uncached = next.input_uncached;
+    if (next.in_nocache) {
+        in_nocache = next.in_nocache;
     }
-    if (next.output) {
-        output = next.output;
+    if (next.out) {
+        out = next.out;
     }
-    if (next.total) {
-        total = next.total;
+    if (next.total_tokens) {
+        total_tokens = next.total_tokens;
     }
-    if (!total && input_cached && input_uncached && output) {
-        total = add(add(input_cached, input_uncached), output);
+    if (!total_tokens && in_cache && in_nocache && out) {
+        total_tokens = add(add(in_cache, in_nocache), out);
     }
 }
 
