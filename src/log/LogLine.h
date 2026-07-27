@@ -14,6 +14,8 @@
 
 namespace fiber::log {
 
+class OwnedLogRecord;
+
 struct QuotedLogValue {
     std::string_view value;
 };
@@ -22,10 +24,8 @@ struct QuotedLogValue {
 
 class LogLine {
 public:
-    static constexpr std::size_t kMessageCapacity = 8192;
-
     LogLine(const Logger &logger, LogLevel level, const char *file, std::uint32_t line, const char *function) noexcept;
-    ~LogLine();
+    ~LogLine() noexcept;
 
     LogLine(const LogLine &) = delete;
     LogLine &operator=(const LogLine &) = delete;
@@ -81,18 +81,8 @@ private:
     void append_raw(std::string_view value) noexcept;
     void append_escaped(std::string_view value) noexcept;
     void append_quoted(std::string_view value) noexcept;
-    void finish_message() noexcept;
 
-    const Logger &logger_;
-    LogLevel level_;
-    const char *file_;
-    const char *function_;
-    std::uint32_t line_;
-    std::uint64_t timestamp_us_ = 0;
-    std::uint32_t thread_id_ = 0;
-    char message_[kMessageCapacity];
-    std::size_t message_size_ = 0;
-    bool truncated_ = false;
+    OwnedLogRecord *record_ = nullptr;
 };
 
 class NullLogLine {

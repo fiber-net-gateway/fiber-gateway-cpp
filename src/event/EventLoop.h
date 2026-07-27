@@ -187,6 +187,7 @@ public:
     [[nodiscard]] static EventLoop *current_or_null() noexcept { return current_; }
 
     [[nodiscard]] bool in_loop() const noexcept { return current_or_null() == this; }
+    [[nodiscard]] bool valid() const noexcept { return event_fd_ >= 0 && poller_.valid(); }
     [[nodiscard]] bool running() const noexcept { return running_.load(std::memory_order_acquire); }
     [[nodiscard]] std::chrono::steady_clock::time_point now() const noexcept { return now_; }
 

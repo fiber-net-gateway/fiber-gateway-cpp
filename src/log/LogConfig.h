@@ -19,13 +19,17 @@ namespace fiber::log {
 using AppenderId = std::uint16_t;
 inline constexpr AppenderId kInvalidAppenderId = static_cast<AppenderId>(-1);
 inline constexpr std::size_t kMaxLoggerNameLength = 255;
-inline constexpr std::size_t kMaxFormattedLogLineSize = 9216;
-inline constexpr std::size_t kMaxCompleteLogMessageSize = 64 * 1024;
 inline constexpr std::uint32_t kMaxRetainedLogArchives = 10000;
+inline constexpr std::size_t kDefaultLogBacklogCapacity = 64 * 1024 * 1024;
 
 enum class ConsoleStream : std::uint8_t {
     Stdout,
     Stderr,
+};
+
+enum class LogQueueFullPolicy : std::uint8_t {
+    Block,
+    DropNewest,
 };
 
 enum class LogConfigErrorCode : std::uint8_t {
@@ -48,6 +52,7 @@ enum class LogConfigErrorCode : std::uint8_t {
     OutOfMemory,
     SizeOverflow,
     LateLoggerRegistration,
+    WorkerStartFailed,
 };
 
 struct LogConfigError {
@@ -81,6 +86,11 @@ struct ConsoleAppenderOptions {
     ConsoleStream stream = ConsoleStream::Stderr;
     LogLevel min_level = LogLevel::Trace;
     LogLevel max_level = LogLevel::Fatal;
+};
+
+struct AsyncLogOptions {
+    std::size_t backlog_capacity = kDefaultLogBacklogCapacity;
+    LogQueueFullPolicy full_policy = LogQueueFullPolicy::Block;
 };
 
 struct LoggerOptions {
@@ -134,6 +144,7 @@ private:
     std::vector<std::string> requested_loggers_;
     RootLoggerOptions root_{};
     std::vector<AppenderId> root_appenders_;
+    AsyncLogOptions async_{};
     bool has_root_ = false;
 };
 
@@ -149,6 +160,7 @@ public:
     [[nodiscard]] LogConfigResult<void> set_root_logger(RootLoggerOptions options,
                                                         std::initializer_list<AppenderId> appenders);
     [[nodiscard]] LogConfigResult<void> set_root_logger(RootLoggerOptions options, std::vector<AppenderId> appenders);
+    [[nodiscard]] LogConfigResult<void> set_async_options(AsyncLogOptions options);
 
     [[nodiscard]] LogConfigResult<LogConfig> finish();
 

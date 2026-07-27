@@ -2,16 +2,21 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <string_view>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
 #include "../common/Assert.h"
 #include "../common/mem/BufPool.h"
+#include "LogFormatter.h"
+#include "LogRecord.h"
 #include "Logger.h"
 
 namespace fiber::log {
@@ -30,16 +35,46 @@ bool logger_rule_matches(std::string_view rule, std::string_view logger) noexcep
     return logger.size() > rule.size() && logger.starts_with(rule) && logger[rule.size()] == '.';
 }
 
-LogContext &thread_log_context() noexcept {
-    static thread_local LogContext context;
-    return context;
+void report_raw_error(std::string_view message) noexcept {
+    static std::atomic<std::uint64_t> last_report_second{std::numeric_limits<std::uint64_t>::max()};
+    const auto now =
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+    const auto current_second = static_cast<std::uint64_t>(now);
+    std::uint64_t previous = last_report_second.load(std::memory_order_relaxed);
+    for (;;) {
+        if (previous == current_second) {
+            return;
+        }
+        if (last_report_second.compare_exchange_weak(previous, current_second, std::memory_order_relaxed,
+                                                     std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    (void) ::write(STDERR_FILENO, message.data(), message.size());
+}
+
+bool write_bootstrap(OwnedLogRecord &record) noexcept {
+    static std::mutex mutex;
+    static LogFormatter formatter;
+    static ConsoleAppender console(kInvalidAppenderId, ConsoleAppenderOptions{
+                                                               .name = "bootstrap",
+                                                               .stream = ConsoleStream::Stderr,
+                                                       });
+
+    std::lock_guard<std::mutex> guard(mutex);
+    FormattedLogRecord formatted;
+    if (!formatter.format(record, formatted)) {
+        report_raw_error("fiber logging bootstrap formatting failed\n");
+        return false;
+    }
+    console.append(formatted, std::chrono::steady_clock::now());
+    return true;
 }
 
 } // namespace
 
 struct LoggerManager::Runtime {
-    explicit Runtime(std::uint64_t value) : generation(value) {}
-
     struct NamedLogger {
         std::string_view name;
         const Logger *logger = nullptr;
@@ -49,8 +84,7 @@ struct LoggerManager::Runtime {
     std::vector<LoggerHandle *> handles;
     std::vector<NamedLogger> named_loggers;
     mem::BufPool logger_arena{4096};
-    std::uint64_t generation = 0;
-    std::uint16_t buffer_count = 0;
+    std::unique_ptr<LogWorker> worker;
 };
 
 LoggerManager::LoggerManager() noexcept { g_logger_manager = this; }
@@ -81,7 +115,7 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
                 make_error(LogConfigErrorCode::LateLoggerRegistration, "logger registered after registry was sealed"));
     }
 
-    auto candidate = std::unique_ptr<Runtime>(new (std::nothrow) Runtime(next_generation_));
+    auto candidate = std::unique_ptr<Runtime>(new (std::nothrow) Runtime());
     if (!candidate) {
         return std::unexpected(make_error(LogConfigErrorCode::OutOfMemory, "failed to allocate logging runtime"));
     }
@@ -100,14 +134,7 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
             continue;
         }
 
-        std::uint16_t buffer_slot = FileAppender::kNoBufferSlot;
-        if (definition.file.buffer_size > 0) {
-            if (candidate->buffer_count == FileAppender::kNoBufferSlot) {
-                return std::unexpected(make_error(LogConfigErrorCode::SizeOverflow, "too many buffered appenders"));
-            }
-            buffer_slot = candidate->buffer_count++;
-        }
-        auto *raw = new (std::nothrow) FileAppender(id, std::move(definition.file), buffer_slot);
+        auto *raw = new (std::nothrow) FileAppender(id, std::move(definition.file));
         if (!raw) {
             return std::unexpected(make_error(LogConfigErrorCode::OutOfMemory, "failed to allocate file appender"));
         }
@@ -142,7 +169,6 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
     candidate->named_loggers.reserve(logger_names.size());
 
     for (std::string_view logger_name: logger_names) {
-
         std::vector<const LogConfig::LoggerDefinition *> matching_rules;
         for (const auto &rule: config.loggers_) {
             if (logger_rule_matches(rule.options.name, logger_name)) {
@@ -167,7 +193,7 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
             }
         }
 
-        std::array<std::vector<Appender *>, kLogLevelCount> resolved;
+        std::array<std::vector<AppenderId>, kLogLevelCount> resolved;
         std::size_t total_count = 0;
         for (std::size_t level_pos = 0; level_pos < kLogLevelCount; ++level_pos) {
             const auto level = static_cast<LogLevel>(level_pos);
@@ -176,12 +202,11 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
             }
             auto &targets = resolved[level_pos];
             auto append_unique = [&](AppenderId id) {
-                Appender *appender = candidate->appenders[id].get();
-                if (!appender->accepts(level)) {
+                if (!candidate->appenders[id]->accepts(level)) {
                     return;
                 }
-                if (std::find(targets.begin(), targets.end(), appender) == targets.end()) {
-                    targets.push_back(appender);
+                if (std::find(targets.begin(), targets.end(), id) == targets.end()) {
+                    targets.push_back(id);
                 }
             };
 
@@ -210,17 +235,17 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
             total_count += targets.size();
         }
 
-        constexpr std::size_t pointer_align = alignof(Appender *);
-        if (sizeof(Logger) > std::numeric_limits<std::size_t>::max() - (pointer_align - 1)) {
+        constexpr std::size_t target_align = alignof(AppenderId);
+        if (sizeof(Logger) > std::numeric_limits<std::size_t>::max() - (target_align - 1)) {
             return std::unexpected(make_error(LogConfigErrorCode::SizeOverflow, "logger size overflow"));
         }
-        const std::size_t logger_size = (sizeof(Logger) + pointer_align - 1) & ~(pointer_align - 1);
-        if (total_count > (std::numeric_limits<std::size_t>::max() - logger_size) / sizeof(Appender *)) {
+        const std::size_t logger_size = (sizeof(Logger) + target_align - 1) & ~(target_align - 1);
+        if (total_count > (std::numeric_limits<std::size_t>::max() - logger_size) / sizeof(AppenderId)) {
             return std::unexpected(make_error(LogConfigErrorCode::SizeOverflow, "logger allocation size overflow"));
         }
-        const std::size_t allocation_size = logger_size + total_count * sizeof(Appender *);
-        void *memory = candidate->logger_arena.alloc(allocation_size,
-                                                     std::max<std::size_t>(alignof(Logger), alignof(Appender *)));
+        const std::size_t allocation_size = logger_size + total_count * sizeof(AppenderId);
+        void *memory =
+                candidate->logger_arena.alloc(allocation_size, std::max<std::size_t>(alignof(Logger), target_align));
         if (!memory) {
             return std::unexpected(make_error(LogConfigErrorCode::OutOfMemory, "failed to allocate logger"));
         }
@@ -234,8 +259,7 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
 
         auto *logger = new (memory) Logger(owned_name);
         logger->verbosity_ = effective_verbosity;
-        auto **storage = reinterpret_cast<Appender **>(static_cast<char *>(memory) + logger_size);
-        Appender **current = storage;
+        auto *current = reinterpret_cast<AppenderId *>(static_cast<char *>(memory) + logger_size);
         for (std::size_t level_pos = 0; level_pos < kLogLevelCount; ++level_pos) {
             const auto &targets = resolved[level_pos];
             if (targets.empty()) {
@@ -245,16 +269,24 @@ LogConfigResult<void> LoggerManager::initialize(LogConfig config) {
                     .first = current,
                     .count = static_cast<std::uint32_t>(targets.size()),
             };
-            for (Appender *appender: targets) {
-                *current++ = appender;
+            for (AppenderId id: targets) {
+                *current++ = id;
             }
         }
         candidate->named_loggers.push_back({.name = owned_name, .logger = logger});
     }
 
     candidate->handles = handles;
+    auto *worker = new (std::nothrow) LogWorker(candidate->appenders, config.async_);
+    if (!worker) {
+        return std::unexpected(make_error(LogConfigErrorCode::OutOfMemory, "failed to allocate logging worker"));
+    }
+    candidate->worker.reset(worker);
+    if (!candidate->worker->start()) {
+        return std::unexpected(make_error(LogConfigErrorCode::WorkerStartFailed, "failed to start logging worker"));
+    }
+
     runtime_ = std::move(candidate);
-    ++next_generation_;
     for (LoggerHandle *handle: handles) {
         const Logger *logger = find_logger(handle->name());
         FIBER_ASSERT(logger != nullptr);
@@ -267,12 +299,11 @@ void LoggerManager::shutdown() noexcept {
     if (!runtime_) {
         return;
     }
-    LogContext &context = thread_log_context();
-    flush_context(context);
     for (LoggerHandle *handle: runtime_->handles) {
         handle->logger_ = &bootstrap_logger();
     }
-    context.reset();
+    runtime_->worker->stop_accepting();
+    runtime_->worker->stop_after_drain();
     runtime_.reset();
 }
 
@@ -289,67 +320,42 @@ const Logger *LoggerManager::find_logger(std::string_view name) const noexcept {
     return it != loggers.end() && it->name == name ? it->logger : nullptr;
 }
 
-bool LoggerManager::reopen_all() noexcept {
-    if (!runtime_) {
+bool LoggerManager::submit(OwnedLogRecord *record) noexcept {
+    if (!record) {
+        record_allocation_failure();
         return false;
     }
-    bool success = true;
-    for (auto &appender: runtime_->appenders) {
-        if (!appender->reopen()) {
-            success = false;
-        }
+    if (record->failed()) {
+        record_allocation_failure();
+        delete record;
+        return false;
     }
-    return success;
-}
-
-void LoggerManager::flush_current_thread() noexcept {
     if (!runtime_) {
-        return;
+        const bool success = write_bootstrap(*record);
+        delete record;
+        return success;
     }
-    flush_context(thread_log_context());
+    if (!runtime_->worker->backlog().admit(*record)) {
+        delete record;
+        return false;
+    }
+    runtime_->worker->submit(*record);
+    return true;
 }
 
-LogContext &LoggerManager::current_context() noexcept {
-    LogContext &context = thread_log_context();
-    if (!runtime_) {
-        (void) context.prepare(0, 0);
-        return context;
+void LoggerManager::record_allocation_failure() noexcept {
+    if (runtime_) {
+        runtime_->worker->record_allocation_failure();
     }
-    (void) context.prepare(runtime_->generation, runtime_->buffer_count);
-    return context;
+    report_raw_error("fiber logging allocation failed\n");
 }
 
-void LoggerManager::flush_context(LogContext &context) noexcept {
-    if (!runtime_ || context.generation_ != runtime_->generation) {
-        return;
-    }
-    for (auto &appender: runtime_->appenders) {
-        appender->flush(context);
-    }
-    context.cancel_flush_schedule();
-}
+bool LoggerManager::reopen_all() noexcept { return runtime_ && runtime_->worker->reopen_all(); }
 
-void LoggerManager::destroy_context(LogContext &context) noexcept {
-    flush_context(context);
-    context.reset();
-}
-
-void LoggerManager::on_context_timer(LogContext &context) noexcept {
-    if (!runtime_ || context.generation_ != runtime_->generation || !context.loop_) {
-        context.cancel_flush_schedule();
-        return;
+void LoggerManager::flush() noexcept {
+    if (runtime_) {
+        (void) runtime_->worker->flush();
     }
-    FIBER_ASSERT(context.loop_->in_loop());
-    const auto now = event::EventLoop::current().now();
-    for (std::uint16_t i = 0; i < context.buffer_count_; ++i) {
-        LogBuffer &buffer = context.buffers_[i];
-        if (buffer.size == 0 || now < buffer.flush_at) {
-            continue;
-        }
-        FIBER_ASSERT(buffer.owner != nullptr);
-        buffer.owner->flush_buffer(buffer);
-    }
-    context.rebuild_flush_schedule();
 }
 
 AppenderStats LoggerManager::appender_stats(AppenderId id) const noexcept {
@@ -357,6 +363,10 @@ AppenderStats LoggerManager::appender_stats(AppenderId id) const noexcept {
         return {};
     }
     return runtime_->appenders[id]->stats();
+}
+
+LogQueueStats LoggerManager::queue_stats() const noexcept {
+    return runtime_ ? runtime_->worker->queue_stats() : LogQueueStats{};
 }
 
 } // namespace fiber::log

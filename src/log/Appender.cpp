@@ -14,11 +14,9 @@
 #include <string_view>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include <utility>
-
-#include "../event/EventLoop.h"
-#include "LogContext.h"
 
 namespace fiber::log {
 namespace {
@@ -27,17 +25,17 @@ constexpr std::chrono::seconds kRotationRetryDelay{1};
 constexpr std::size_t kUtcArchiveStampSize = 16;
 constexpr std::size_t kMinArchiveSequenceDigits = 6;
 constexpr unsigned kMaxArchiveNameAttempts = 1024;
+constexpr std::size_t kWriteVectorCount = 64;
 
-std::chrono::steady_clock::time_point current_steady_time() noexcept {
-    if (auto *loop = event::EventLoop::current_or_null()) {
-        return loop->now();
-    }
-    return std::chrono::steady_clock::now();
-}
-
-std::mutex &console_write_mutex() noexcept {
-    static std::mutex mutex;
-    return mutex;
+std::uint64_t current_thread_id() noexcept {
+    static thread_local const std::uint64_t value = []() noexcept {
+#if defined(SYS_gettid)
+        return static_cast<std::uint64_t>(::syscall(SYS_gettid));
+#else
+        return static_cast<std::uint64_t>(::getpid());
+#endif
+    }();
+    return value;
 }
 
 void report_raw_error(std::atomic<std::uint64_t> &last_report_second, std::string_view message) noexcept {
@@ -208,6 +206,62 @@ int exchange_paths(const char *first, const char *second) noexcept {
 #endif
 }
 
+std::size_t write_contiguous_bytes(int fd, const char *data, std::size_t size) noexcept {
+    std::size_t offset = 0;
+    while (offset < size) {
+        const std::size_t remaining = size - offset;
+        const std::size_t request = std::min(remaining, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+        const ssize_t written = ::write(fd, data + offset, request);
+        if (written > 0) {
+            offset += static_cast<std::size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+    return offset;
+}
+
+std::size_t write_record_bytes(int fd, const FormattedLogRecord &record) noexcept {
+    FormattedLogRecord::Cursor position = record.cursor();
+    std::size_t total_written = 0;
+    while (!position.done()) {
+        iovec vectors[kWriteVectorCount];
+        std::size_t vector_count = 0;
+        std::size_t request_size = 0;
+        FormattedLogRecord::Cursor gather = position;
+        while (!gather.done() && vector_count < kWriteVectorCount) {
+            const LogSegment segment = gather.current();
+            const std::size_t available = static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()) - request_size;
+            if (available == 0) {
+                break;
+            }
+            const std::size_t size = std::min(segment.size, available);
+            vectors[vector_count++] = {
+                    .iov_base = const_cast<char *>(segment.data),
+                    .iov_len = size,
+            };
+            request_size += size;
+            gather.advance(size);
+        }
+
+        const ssize_t written = ::writev(fd, vectors, static_cast<int>(vector_count));
+        if (written > 0) {
+            const auto bytes = static_cast<std::size_t>(written);
+            total_written += bytes;
+            position.advance(bytes);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+    return total_written;
+}
+
 } // namespace
 
 Appender::Appender(AppenderId id, std::string name, LogLevel min_level, LogLevel max_level) noexcept :
@@ -224,17 +278,22 @@ AppenderStats Appender::stats() const noexcept {
             .rotation_errors = rotation_errors_.load(std::memory_order_relaxed),
             .retention_errors = retention_errors_.load(std::memory_order_relaxed),
             .active_file_bytes = active_file_bytes_.load(std::memory_order_relaxed),
+            .writer_thread_id = writer_thread_id_.load(std::memory_order_relaxed),
     };
 }
 
 void Appender::record_write(std::size_t bytes, std::uint64_t records) noexcept {
     written_records_.fetch_add(records, std::memory_order_relaxed);
     written_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    writer_thread_id_.store(current_thread_id(), std::memory_order_relaxed);
 }
+
+void Appender::record_drop() noexcept { dropped_records_.fetch_add(1, std::memory_order_relaxed); }
 
 void Appender::record_write_error(std::uint64_t dropped_records) noexcept {
     write_errors_.fetch_add(1, std::memory_order_relaxed);
     dropped_records_.fetch_add(dropped_records, std::memory_order_relaxed);
+    writer_thread_id_.store(current_thread_id(), std::memory_order_relaxed);
     report_raw_error(last_diagnostic_second_, "fiber logging write failed\n");
 }
 
@@ -263,49 +322,43 @@ ConsoleAppender::ConsoleAppender(AppenderId id, ConsoleAppenderOptions options) 
     Appender(id, std::move(options.name), options.min_level, options.max_level),
     fd_(options.stream == ConsoleStream::Stdout ? STDOUT_FILENO : STDERR_FILENO) {}
 
-void ConsoleAppender::append(FormattedLogLine line, LogContext &) noexcept {
-    std::size_t offset = 0;
-    {
-        std::lock_guard<std::mutex> guard(console_write_mutex());
-        while (offset < line.bytes.size()) {
-            const ssize_t written = ::write(fd_, line.bytes.data() + offset, line.bytes.size() - offset);
-            if (written > 0) {
-                offset += static_cast<std::size_t>(written);
-                continue;
-            }
-            if (written < 0 && errno == EINTR) {
-                continue;
-            }
-            break;
-        }
-    }
-
-    if (offset != line.bytes.size()) {
-        if (offset > 0) {
-            record_write(offset, 0);
+void ConsoleAppender::append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point) noexcept {
+    const std::size_t written = write_record_bytes(fd_, record);
+    if (written != record.size()) {
+        if (written > 0) {
+            record_write(written, 0);
         }
         record_write_error(1);
         return;
     }
-    record_write(line.bytes.size(), 1);
+    record_write(record.size(), 1);
 }
 
-void ConsoleAppender::flush(LogContext &) noexcept {}
+void ConsoleAppender::flush() noexcept {}
 
 bool ConsoleAppender::reopen() noexcept { return true; }
 
-FileAppender::FileAppender(AppenderId id, FileAppenderOptions options, std::uint16_t buffer_slot) noexcept :
+FileAppender::FileAppender(AppenderId id, FileAppenderOptions options) noexcept :
     Appender(id, std::move(options.name), options.min_level, options.max_level), path_(std::move(options.path)),
     file_mode_(options.file_mode), buffer_size_(options.buffer_size), flush_interval_(options.flush_interval),
-    buffer_slot_(buffer_slot), rotation_(std::move(options.rotation)) {}
+    rotation_(std::move(options.rotation)) {}
 
 FileAppender::~FileAppender() {
+    std::free(buffer_);
     if (fd_ >= 0) {
         ::close(fd_);
     }
 }
 
 bool FileAppender::open_file(int &system_error) noexcept {
+    if (buffered()) {
+        buffer_ = static_cast<char *>(std::malloc(buffer_size_));
+        if (!buffer_) {
+            system_error = ENOMEM;
+            return false;
+        }
+    }
+
     int flags = O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC;
     if (rotation_) {
         flags |= O_NOFOLLOW;
@@ -405,14 +458,14 @@ bool FileAppender::initialize_rotation(int &system_error) noexcept {
     return true;
 }
 
-bool FileAppender::should_rotate_locked(std::size_t incoming_size) const noexcept {
+bool FileAppender::should_rotate(std::size_t incoming_size) const noexcept {
     if (!rotation_ || active_bytes_ == 0) {
         return false;
     }
     return active_bytes_ >= rotation_->max_file_size || incoming_size > rotation_->max_file_size - active_bytes_;
 }
 
-bool FileAppender::rotate_locked() noexcept {
+bool FileAppender::rotate() noexcept {
     if (!rotation_ || next_archive_sequence_ == 0) {
         record_rotation_error();
         return false;
@@ -464,65 +517,58 @@ bool FileAppender::rotate_locked() noexcept {
     return false;
 }
 
-void FileAppender::select_cleanup_locked(std::uint64_t &sequence, std::string &path) noexcept {
-    if (!rotation_ || archives_.size() <= rotation_->max_archives || cleanup_in_progress_sequence_ != 0) {
+void FileAppender::cleanup_archives(std::chrono::steady_clock::time_point now) noexcept {
+    if (!rotation_ || archives_.size() <= rotation_->max_archives || now < cleanup_retry_after_) {
         return;
     }
-    const auto now = current_steady_time();
-    if (now < cleanup_retry_after_) {
-        return;
-    }
-    cleanup_in_progress_sequence_ = archives_.front().sequence;
-    sequence = archives_.front().sequence;
-    path = archives_.front().path;
-}
-
-void FileAppender::finish_cleanup(std::uint64_t sequence, std::string path) noexcept {
-    const bool success = ::unlink(path.c_str()) == 0 || errno == ENOENT;
-    {
-        std::lock_guard<std::mutex> guard(io_mutex_);
-        if (success) {
-            auto it = std::find_if(archives_.begin(), archives_.end(),
-                                   [sequence](const ArchiveEntry &entry) { return entry.sequence == sequence; });
-            if (it != archives_.end()) {
-                archives_.erase(it);
-            }
+    while (archives_.size() > rotation_->max_archives) {
+        if (::unlink(archives_.front().path.c_str()) == 0 || errno == ENOENT) {
+            archives_.erase(archives_.begin());
             cleanup_retry_after_ = {};
-        } else {
-            cleanup_retry_after_ = current_steady_time() + kRotationRetryDelay;
+            continue;
         }
-        if (cleanup_in_progress_sequence_ == sequence) {
-            cleanup_in_progress_sequence_ = 0;
-        }
-    }
-    if (!success) {
+        cleanup_retry_after_ = now + kRotationRetryDelay;
         record_retention_error();
-    }
-}
-
-void FileAppender::write_bytes_locked(const char *data, std::size_t size, std::uint64_t records) noexcept {
-    std::size_t offset = 0;
-    while (offset < size) {
-        const ssize_t written = ::write(fd_, data + offset, size - offset);
-        if (written > 0) {
-            offset += static_cast<std::size_t>(written);
-            continue;
-        }
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
         break;
     }
+}
 
-    if (offset > std::numeric_limits<std::uint64_t>::max() - active_bytes_) {
+void FileAppender::prepare_record(std::size_t record_size, std::chrono::steady_clock::time_point now) noexcept {
+    if (!rotation_) {
+        return;
+    }
+
+    bool rotate_before_record = false;
+    if (buffer_used_ > 0) {
+        const std::uint64_t logical_size = buffer_used_ > std::numeric_limits<std::uint64_t>::max() - active_bytes_
+                                                   ? std::numeric_limits<std::uint64_t>::max()
+                                                   : active_bytes_ + buffer_used_;
+        rotate_before_record =
+                logical_size >= rotation_->max_file_size || record_size > rotation_->max_file_size - logical_size;
+        if (rotate_before_record) {
+            flush_buffer();
+        }
+    } else {
+        rotate_before_record = should_rotate(record_size);
+    }
+
+    if (rotate_before_record && now >= rotation_retry_after_ && !rotate()) {
+        rotation_retry_after_ = now + kRotationRetryDelay;
+    }
+    cleanup_archives(now);
+}
+
+void FileAppender::write_contiguous(const char *data, std::size_t size, std::uint64_t records) noexcept {
+    const std::size_t written = write_contiguous_bytes(fd_, data, size);
+    if (written > std::numeric_limits<std::uint64_t>::max() - active_bytes_) {
         active_bytes_ = std::numeric_limits<std::uint64_t>::max();
     } else {
-        active_bytes_ += offset;
+        active_bytes_ += written;
     }
     set_active_file_bytes(active_bytes_);
-    if (offset != size) {
-        if (offset > 0) {
-            record_write(offset, 0);
+    if (written != size) {
+        if (written > 0) {
+            record_write(written, 0);
         }
         record_write_error(records);
         return;
@@ -530,103 +576,72 @@ void FileAppender::write_bytes_locked(const char *data, std::size_t size, std::u
     record_write(size, records);
 }
 
-void FileAppender::write_bytes(const char *data, std::size_t size, std::uint64_t records) noexcept {
-    std::uint64_t cleanup_sequence = 0;
-    std::string cleanup_path;
-    {
-        std::lock_guard<std::mutex> guard(io_mutex_);
-        if (should_rotate_locked(size)) {
-            const auto now = current_steady_time();
-            if (now >= rotation_retry_after_ && !rotate_locked()) {
-                rotation_retry_after_ = now + kRotationRetryDelay;
-            }
-        }
-        write_bytes_locked(data, size, records);
-        select_cleanup_locked(cleanup_sequence, cleanup_path);
+void FileAppender::write_record(const FormattedLogRecord &record) noexcept {
+    const std::size_t written = write_record_bytes(fd_, record);
+    if (written > std::numeric_limits<std::uint64_t>::max() - active_bytes_) {
+        active_bytes_ = std::numeric_limits<std::uint64_t>::max();
+    } else {
+        active_bytes_ += written;
     }
-    if (cleanup_sequence != 0) {
-        finish_cleanup(cleanup_sequence, std::move(cleanup_path));
+    set_active_file_bytes(active_bytes_);
+    if (written != record.size()) {
+        if (written > 0) {
+            record_write(written, 0);
+        }
+        record_write_error(1);
+        return;
+    }
+    record_write(record.size(), 1);
+}
+
+void FileAppender::flush_buffer() noexcept {
+    if (buffer_used_ == 0) {
+        return;
+    }
+    write_contiguous(buffer_, buffer_used_, buffered_records_);
+    buffer_used_ = 0;
+    buffered_records_ = 0;
+    flush_at_ = {};
+}
+
+void FileAppender::append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point now) noexcept {
+    if (buffer_used_ > 0 && now >= flush_at_) {
+        flush_buffer();
+    }
+    prepare_record(record.size(), now);
+
+    if (!buffered() || record.size() > buffer_size_) {
+        if (buffer_used_ > 0) {
+            flush_buffer();
+        }
+        write_record(record);
+        return;
+    }
+    if (record.size() > buffer_size_ - buffer_used_) {
+        flush_buffer();
+    }
+    if (buffer_used_ == 0) {
+        flush_at_ = now + flush_interval_;
+    }
+    if (!record.copy_to(buffer_ + buffer_used_, buffer_size_ - buffer_used_)) {
+        record_drop();
+        return;
+    }
+    buffer_used_ += record.size();
+    ++buffered_records_;
+    if (buffer_used_ == buffer_size_) {
+        flush_buffer();
     }
 }
 
-void FileAppender::flush_buffer(LogBuffer &buffer) noexcept {
-    if (buffer.size == 0) {
-        return;
-    }
-    write_bytes(buffer.data, buffer.size, buffer.records);
-    buffer.size = 0;
-    buffer.records = 0;
-    buffer.flush_at = {};
-}
+void FileAppender::flush() noexcept { flush_buffer(); }
 
-void FileAppender::append(FormattedLogLine line, LogContext &context) noexcept {
-    const std::size_t size = line.bytes.size();
-    if (!buffered()) {
-        write_bytes(line.bytes.data(), size, 1);
-        return;
-    }
-
-    LogBuffer *buffer = context.buffer_at(buffer_slot_);
-    if (!buffer) {
-        write_bytes(line.bytes.data(), size, 1);
-        return;
-    }
-    if (!buffer->data) {
-        if (buffer->owner == this && buffer->capacity == 0) {
-            write_bytes(line.bytes.data(), size, 1);
-            return;
-        }
-        buffer->data = static_cast<char *>(std::malloc(buffer_size_));
-        if (!buffer->data) {
-            buffer->owner = this;
-            buffer->capacity = 0;
-            write_bytes(line.bytes.data(), size, 1);
-            return;
-        }
-        buffer->owner = this;
-        buffer->capacity = buffer_size_;
-    }
-    if (buffer->owner != this) {
-        write_bytes(line.bytes.data(), size, 1);
-        return;
-    }
-
-    const auto now = current_steady_time();
-    if (buffer->size > 0 && now >= buffer->flush_at) {
-        flush_buffer(*buffer);
-    }
-    if (size > buffer->capacity) {
-        write_bytes(line.bytes.data(), size, 1);
-        context.update_flush_schedule(*buffer);
-        return;
-    }
-    if (size > buffer->capacity - buffer->size) {
-        flush_buffer(*buffer);
-    }
-    if (buffer->size == 0) {
-        buffer->flush_at = now + flush_interval_;
-    }
-    std::memcpy(buffer->data + buffer->size, line.bytes.data(), size);
-    buffer->size += size;
-    ++buffer->records;
-    if (buffer->size == buffer->capacity) {
-        flush_buffer(*buffer);
-    }
-    context.update_flush_schedule(*buffer);
-}
-
-void FileAppender::flush(LogContext &context) noexcept {
-    if (!buffered()) {
-        return;
-    }
-    LogBuffer *buffer = context.buffer_at(buffer_slot_);
-    if (buffer && buffer->owner == this) {
-        flush_buffer(*buffer);
-    }
+std::chrono::steady_clock::time_point FileAppender::flush_deadline() const noexcept {
+    return buffer_used_ > 0 ? flush_at_ : std::chrono::steady_clock::time_point::max();
 }
 
 bool FileAppender::reopen() noexcept {
-    std::lock_guard<std::mutex> guard(io_mutex_);
+    flush_buffer();
     int flags = O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC;
     if (rotation_) {
         flags |= O_NOFOLLOW;
