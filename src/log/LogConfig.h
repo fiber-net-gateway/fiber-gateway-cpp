@@ -20,6 +20,7 @@ using AppenderId = std::uint16_t;
 inline constexpr AppenderId kInvalidAppenderId = static_cast<AppenderId>(-1);
 inline constexpr std::size_t kMaxLoggerNameLength = 255;
 inline constexpr std::size_t kMaxFormattedLogLineSize = 9216;
+inline constexpr std::size_t kMaxCompleteLogMessageSize = 64 * 1024;
 inline constexpr std::uint32_t kMaxRetainedLogArchives = 10000;
 
 enum class ConsoleStream : std::uint8_t {

@@ -165,4 +165,23 @@ LogLine &LogLine::operator<<(QuotedLogValue value) noexcept {
     return *this;
 }
 
+bool log_complete_message(const Logger &logger, LogLevel level, const char *file, std::uint32_t line,
+                          const char *function, std::string_view message) noexcept {
+    if (!logger.enabled(level)) {
+        return true;
+    }
+    LogEvent event{
+            .logger_name = logger.name(),
+            .message = message,
+            .file = file ? std::string_view(file) : std::string_view(),
+            .function = function ? std::string_view(function) : std::string_view(),
+            .level = level,
+            .line = line,
+            .timestamp_us = current_timestamp_us(),
+            .thread_id = current_thread_id(),
+    };
+    auto &manager = LoggerManager::global();
+    return logger.dispatch_complete(event, manager.current_context());
+}
+
 } // namespace fiber::log

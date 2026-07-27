@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -16,10 +17,13 @@
 #include <netinet/in.h>
 #include <openssl/hmac.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <async/Spawn.h>
 #include <common/Assert.h>
 #include <common/IoError.h>
+#include <common/json/JsonParse.h>
+#include <common/json/JsonStructDecode.h>
 #include <event/EventLoop.h>
 #include <event/EventLoopGroup.h>
 #include <http/ClientHttp1Exchange.h>
@@ -98,6 +102,70 @@ struct RawHttpResponse {
 struct FixturePorts {
     std::uint16_t entry = 0;
     std::uint16_t provider = 0;
+};
+
+class StderrCapture {
+public:
+    ~StderrCapture() { finish(); }
+
+    [[nodiscard]] bool start() noexcept {
+        int descriptors[2];
+        if (::pipe(descriptors) != 0) {
+            return false;
+        }
+        saved_stderr_ = ::dup(STDERR_FILENO);
+        if (saved_stderr_ < 0 || ::dup2(descriptors[1], STDERR_FILENO) < 0) {
+            if (saved_stderr_ >= 0) {
+                ::close(saved_stderr_);
+                saved_stderr_ = -1;
+            }
+            ::close(descriptors[0]);
+            ::close(descriptors[1]);
+            return false;
+        }
+        ::close(descriptors[1]);
+        read_fd_ = descriptors[0];
+        active_ = true;
+        reader_ = std::thread([this]() {
+            char buffer[8192];
+            for (;;) {
+                const ssize_t size = ::read(read_fd_, buffer, sizeof(buffer));
+                if (size > 0) {
+                    output_.append(buffer, static_cast<std::size_t>(size));
+                    continue;
+                }
+                if (size < 0 && errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            ::close(read_fd_);
+            read_fd_ = -1;
+        });
+        return true;
+    }
+
+    void finish() noexcept {
+        if (!active_) {
+            return;
+        }
+        (void) ::dup2(saved_stderr_, STDERR_FILENO);
+        ::close(saved_stderr_);
+        saved_stderr_ = -1;
+        if (reader_.joinable()) {
+            reader_.join();
+        }
+        active_ = false;
+    }
+
+    [[nodiscard]] const std::string &output() const noexcept { return output_; }
+
+private:
+    std::thread reader_;
+    std::string output_;
+    int saved_stderr_ = -1;
+    int read_fd_ = -1;
+    bool active_ = false;
 };
 
 fiber::common::IoResult<std::uint16_t> bound_port(int fd) noexcept {
@@ -412,6 +480,9 @@ public:
     }
 
     [[nodiscard]] int entry_calls() const noexcept { return entry_calls_.load(std::memory_order_acquire); }
+    [[nodiscard]] int completed_entry_calls() const noexcept {
+        return completed_entry_calls_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] int failing_provider_calls() const noexcept {
         return failing_provider_calls_.load(std::memory_order_acquire);
     }
@@ -628,6 +699,7 @@ private:
         metrics.request_finished(LlmWireProtocol::OpenAiChatCompletions, exchange.response_stats(),
                                  std::chrono::duration_cast<std::chrono::microseconds>(
                                          fiber::event::EventLoop::current().now() - started));
+        completed_entry_calls_.fetch_add(1, std::memory_order_release);
     }
 
     fiber::event::EventLoopGroup *group_ = nullptr;
@@ -636,6 +708,7 @@ private:
     std::vector<ObservedProviderRequest> observed_;
     std::size_t reply_index_ = 0;
     std::atomic<int> entry_calls_{0};
+    std::atomic<int> completed_entry_calls_{0};
     std::atomic<int> failing_provider_calls_{0};
     bool fail_settle_ = false;
     bool service_rendezvous_ = false;
@@ -686,6 +759,7 @@ public:
     [[nodiscard]] std::vector<ObservedProviderRequest> observed() const { return fixture_->observed(); }
 
     [[nodiscard]] int entry_calls() const noexcept { return fixture_->entry_calls(); }
+    [[nodiscard]] int completed_entry_calls() const noexcept { return fixture_->completed_entry_calls(); }
     [[nodiscard]] int failing_provider_calls() const noexcept { return fixture_->failing_provider_calls(); }
     [[nodiscard]] std::string rendezvous_route_key() const { return std::string(fixture_->rendezvous_route_key()); }
 
@@ -877,6 +951,68 @@ TEST(LlmProxyIntegrationTest, SettlementFailureDoesNotChangeProviderResponse) {
     auto metrics = fixture.settlement_metrics();
     ASSERT_TRUE(metrics);
     EXPECT_NE(metrics->find("ai_server_rate_limit_settlements_total{result=\"error\"} 2"), std::string::npos);
+}
+
+TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
+    FixtureHarness fixture({
+            MockReply{
+                    .status = 200,
+                    .body = R"({"id":"ok","choices":[{"message":{"role":"assistant","content":"weather is sunny","tool_calls":[{"type":"function","function":{"name":"weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14}})",
+            },
+    });
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+    constexpr std::string_view request =
+            R"({"model":"logical","stream":false,"messages":[{"role":"system","content":"answer briefly"},{"role":"user","content":[{"type":"text","text":"weather in Paris"},{"type":"image_url","image_url":{"url":"https://example.test/image?signature=SECRET_URL"}},{"type":"input_audio","input_audio":{"data":"SECRET_BASE64"}}]}],"tools":[{"type":"function","function":{"name":"weather","description":"look up weather","parameters":{"type":"object"}}}]})";
+    StderrCapture capture;
+    ASSERT_TRUE(capture.start());
+
+    const RawHttpResponse response = post_json(fixture.entry_port(), token, request);
+    for (std::size_t i = 0; i < 1000 && fixture.completed_entry_calls() == 0; ++i) {
+        std::this_thread::sleep_for(1ms);
+    }
+    capture.finish();
+
+    ASSERT_EQ(response.system_error, 0);
+    ASSERT_EQ(response.status, 200);
+    ASSERT_TRUE(response.complete);
+    const std::string &logs = capture.output();
+    constexpr std::string_view marker = R"("event":"llm_request")";
+    const std::size_t marker_pos = logs.find(marker);
+    ASSERT_NE(marker_pos, std::string::npos) << logs;
+    EXPECT_EQ(logs.find(marker, marker_pos + marker.size()), std::string::npos);
+    EXPECT_EQ(logs.find(R"("event":"provider_attempt")"), std::string::npos);
+
+    const std::size_t line_begin = logs.rfind('\n', marker_pos);
+    const std::size_t json_begin = logs.find('{', line_begin == std::string::npos ? 0 : line_begin + 1);
+    const std::size_t line_end = logs.find('\n', marker_pos);
+    ASSERT_NE(json_begin, std::string::npos);
+    ASSERT_NE(line_end, std::string::npos);
+    const std::string_view audit_json(logs.data() + json_begin, line_end - json_begin);
+    EXPECT_EQ(audit_json.find('\n'), std::string_view::npos);
+
+    fiber::mem::BufPool pool;
+    fiber::json::JsonParser parser;
+    ASSERT_TRUE(parser.feed(audit_json.data(), audit_json.size()));
+    parser.finish();
+    fiber::json::JsonAny root;
+    ASSERT_EQ(fiber::json::parse_document(parser, pool, root,
+                                          [](fiber::json::JsonParser &value_parser, fiber::mem::BufPool &value_pool,
+                                             fiber::json::JsonAny &value) noexcept {
+                                              return fiber::json::parse_any(value_parser, value_pool, value);
+                                          }),
+              fiber::json::ParseStatus::Done);
+    ASSERT_TRUE(root.is_object());
+
+    EXPECT_NE(audit_json.find("answer briefly"), std::string_view::npos);
+    EXPECT_NE(audit_json.find("weather in Paris"), std::string_view::npos);
+    EXPECT_NE(audit_json.find("look up weather"), std::string_view::npos);
+    EXPECT_NE(audit_json.find("weather is sunny"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"(\"city\":\"Paris\")"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("provider_attempts":[{)"), std::string_view::npos);
+    EXPECT_EQ(audit_json.find("SECRET_URL"), std::string_view::npos);
+    EXPECT_EQ(audit_json.find("SECRET_BASE64"), std::string_view::npos);
 }
 
 } // namespace

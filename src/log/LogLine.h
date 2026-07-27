@@ -103,6 +103,9 @@ public:
     }
 };
 
+[[nodiscard]] bool log_complete_message(const Logger &logger, LogLevel level, const char *file, std::uint32_t line,
+                                        const char *function, std::string_view message) noexcept;
+
 } // namespace fiber::log
 
 #endif // FIBER_LOG_LOG_LINE_H

@@ -163,11 +163,23 @@ ai-server 在静态初始化边界编译 OpenAI/Anthropic 路径。请求只解�
 `ai_server.config`、`ai_server.http`、`ai_server.llm`、
 `ai_server.rate_limit` 和 `ai_server.audit`。
 
-审计记录 request ID、协议、用户、kid、模型、正文大小/SHA-256、授权和限流结果、
-Provider/token 名、状态、耗时及 usage；不记录 prompt、完整正文、Authorization、
-Provider token、BT1 secret 或 Nacos 凭据。Prometheus label 使用固定低基数集合，
-不会把 request ID、username、原始 model 或 token 名放入 label。配置 CAT 后，
-请求和 Provider 尝试还会生成 CAT transaction。
+`ai_server.audit` 对每个请求只写一条物理日志：常规日志前缀之后只有一个紧凑 JSON
+对象。当前 schema 为 `schema_version=1`，同一对象包含 request/identity/routing/
+rate-limit/response/usage、完整的 `provider_attempts` 数组，以及：
+
+- `llm.input.prompt_parts`：system/message 文本、角色和工具名/描述/参数；
+- `llm.output`：Provider 已观察到的 role/content、tool name/arguments、finish reason；
+- input/output 的 observed/captured bytes、SHA-256、truncated/incomplete 状态。
+
+单条 JSON 硬上限为 64 KiB；输入、输出和 attempts 各有独立预算，超限后仍输出合法
+JSON 并显式标记 `truncated`。多模态内容只采集文本字段，不原样记录图片/文档 URL、
+base64、音频或二进制载荷；Authorization、Provider token、BT1 secret 和 Nacos
+凭据也不会进入审计日志。由于 prompt 和模型输出本身仍可能包含业务敏感信息，生产
+环境必须限制日志读取、采集和保留权限。
+
+Prometheus label 使用固定低基数集合，不会把 request ID、username、原始 model 或
+token 名放入 label。配置 CAT 后，请求和 Provider 尝试还会生成 CAT transaction，
+但 Provider 尝试不再额外写独立的 audit 日志行。
 
 ## 所有权与关闭
 
