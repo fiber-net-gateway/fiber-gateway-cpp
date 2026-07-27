@@ -286,6 +286,22 @@ LoadBalancer::LoadBalancer(Options options) : core_(std::make_shared<Core>(std::
 
 LoadBalancer::~LoadBalancer() { shutdown(); }
 
+std::shared_ptr<RoundRobin> LoadBalancer::load_current() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    return current_.load(std::memory_order_acquire);
+#else
+    return std::atomic_load_explicit(&current_, std::memory_order_acquire);
+#endif
+}
+
+void LoadBalancer::store_current(std::shared_ptr<RoundRobin> current) noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    current_.store(std::move(current), std::memory_order_release);
+#else
+    std::atomic_store_explicit(&current_, std::move(current), std::memory_order_release);
+#endif
+}
+
 std::expected<LoadBalancer::Instance, LoadBalanceError> LoadBalancer::load_balance() noexcept {
     return load_balance(event::EventLoop::current().now());
 }
@@ -295,7 +311,7 @@ std::expected<LoadBalancer::Instance, LoadBalanceError> LoadBalancer::load_balan
     if (core_->shutdown) {
         return std::unexpected(LoadBalanceError::Shutdown);
     }
-    std::shared_ptr<RoundRobin> current = current_.load(std::memory_order_acquire);
+    std::shared_ptr<RoundRobin> current = load_current();
     if (!current) {
         return std::unexpected(LoadBalanceError::Uninitialized);
     }
@@ -359,7 +375,7 @@ LoadBalancer::load_balance(std::uint64_t key, std::span<const std::uint64_t> exc
     if (core_->shutdown) {
         return std::unexpected(LoadBalanceError::Shutdown);
     }
-    std::shared_ptr<RoundRobin> current = current_.load(std::memory_order_acquire);
+    std::shared_ptr<RoundRobin> current = load_current();
     if (!current) {
         return std::unexpected(LoadBalanceError::Uninitialized);
     }
@@ -547,7 +563,7 @@ LoadBalancerUpdateResult LoadBalancer::update_instances(DiscoveredService update
     if (core_->shutdown) {
         return LoadBalancerUpdateResult::Unchanged;
     }
-    std::shared_ptr<RoundRobin> current = current_.load(std::memory_order_acquire);
+    std::shared_ptr<RoundRobin> current = load_current();
     if (current && same_round_robin(*current, *next)) {
         return LoadBalancerUpdateResult::Unchanged;
     }
@@ -597,7 +613,7 @@ LoadBalancerUpdateResult LoadBalancer::update_instances(DiscoveredService update
         }
     }
 
-    current_.store(std::move(next), std::memory_order_release);
+    store_current(std::move(next));
     return LoadBalancerUpdateResult::Applied;
 }
 
@@ -609,20 +625,20 @@ void LoadBalancer::shutdown() noexcept {
     core_->shutdown = true;
 }
 
-bool LoadBalancer::initialized() const noexcept { return current_.load(std::memory_order_acquire) != nullptr; }
+bool LoadBalancer::initialized() const noexcept { return load_current() != nullptr; }
 
 std::uint64_t LoadBalancer::generation() const noexcept {
-    const std::shared_ptr<RoundRobin> current = current_.load(std::memory_order_acquire);
+    const std::shared_ptr<RoundRobin> current = load_current();
     return current ? current->generation : 0;
 }
 
 std::size_t LoadBalancer::configured_instance_count() const noexcept {
-    const std::shared_ptr<RoundRobin> current = current_.load(std::memory_order_acquire);
+    const std::shared_ptr<RoundRobin> current = load_current();
     return current ? current->peers.size() : 0;
 }
 
 LoadBalancerStats LoadBalancer::stats() const noexcept {
-    const std::shared_ptr<RoundRobin> current = current_.load(std::memory_order_acquire);
+    const std::shared_ptr<RoundRobin> current = load_current();
     return LoadBalancerStats{
             .generation = current ? current->generation : 0,
             .configured_instances = current ? current->peers.size() : 0,

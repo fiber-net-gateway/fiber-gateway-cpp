@@ -147,10 +147,16 @@ private:
 
     struct Core;
     static void complete_instance(Instance &instance, InstanceReportOutcome outcome, TimePoint now) noexcept;
+    [[nodiscard]] std::shared_ptr<detail::RoundRobin> load_current() const noexcept;
+    void store_current(std::shared_ptr<detail::RoundRobin> current) noexcept;
 
     // Core is stable across generations, so all workers and updates share one selection/circuit lock domain.
     std::shared_ptr<Core> core_;
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<detail::RoundRobin>> current_;
+#else
+    std::shared_ptr<detail::RoundRobin> current_;
+#endif
 };
 
 } // namespace fiber::ai_server
