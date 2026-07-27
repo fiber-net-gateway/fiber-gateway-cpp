@@ -3,7 +3,6 @@
 
 #include "AiServer.h"
 #include "AiServerConfig.h"
-#include "audit/LlmAuditWriter.h"
 #include "config/LlmConfigManager.h"
 #include "limit/RateLimitClusterMembership.h"
 
@@ -39,7 +38,6 @@ enum class AiServerRuntimeErrorCode : std::uint8_t {
     CreateConfigService,
     CreateNamingService,
     CreateCatClient,
-    CreateAuditWriter,
     AllocateRuntime,
     Bind,
     StartNacosClient,
@@ -73,7 +71,7 @@ class AiServerRuntime final : public common::NonCopyable, public common::NonMova
 public:
     [[nodiscard]] static std::expected<std::unique_ptr<AiServerRuntime>, AiServerRuntimeError>
     create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
-           event::EventLoop &audit_loop, event::EventLoopGroup &http_workers, const AiServerConfig &config,
+           event::EventLoopGroup &http_workers, const AiServerConfig &config, log::AppenderId audit_appender_id,
            const net::ListenOptions &listen_options = {});
 
     ~AiServerRuntime();
@@ -101,11 +99,12 @@ private:
     };
 
     AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
-                    event::EventLoop &audit_loop, event::EventLoopGroup &http_workers,
-                    net::SocketAddress listen_address, net::ListenOptions listen_options,
-                    std::chrono::milliseconds initial_config_timeout, std::optional<net::IpAddress> advertise_address,
-                    std::string service_name, std::string service_group, std::unique_ptr<cat::CatClient> cat_client,
-                    std::unique_ptr<LlmAuditWriter> audit_writer, std::unique_ptr<nacos::NacosClient> nacos_client,
+                    event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
+                    net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
+                    std::optional<net::IpAddress> advertise_address, std::string service_name,
+                    std::string service_group, std::unique_ptr<cat::CatClient> cat_client,
+                    std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id,
+                    std::unique_ptr<nacos::NacosClient> nacos_client,
                     std::unique_ptr<nacos::ConfigService> config_service,
                     std::unique_ptr<nacos::NamingService> naming_service) noexcept;
 
@@ -121,13 +120,11 @@ private:
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoop *nacos_loop_ = nullptr;
     event::EventLoop *cat_loop_ = nullptr;
-    event::EventLoop *audit_loop_ = nullptr;
     net::SocketAddress listen_address_;
     net::ListenOptions listen_options_;
     std::chrono::milliseconds initial_config_timeout_{0};
     std::optional<net::IpAddress> advertise_address_;
     std::unique_ptr<cat::CatClient> cat_client_;
-    std::unique_ptr<LlmAuditWriter> audit_writer_;
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;
     std::unique_ptr<nacos::NamingService> naming_service_;

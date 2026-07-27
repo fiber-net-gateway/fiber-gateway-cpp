@@ -35,9 +35,10 @@
 #include <http/HttpBodySpec.h>
 #include <http/HttpExchange.h>
 #include <http/HttpHeaders.h>
+#include <log/LoggerManager.h>
 #include <net/SocketAddress.h>
 
-#include "audit/LlmAuditWriter.h"
+#include "AiServerLogging.h"
 #include "config/LlmConfigSnapshot.h"
 #include "limit/RateLimitShardRing.h"
 #include "limit/TokenRateLimitCoordinator.h"
@@ -62,8 +63,6 @@ using fiber::ai_server::ConfigMetadata;
 using fiber::ai_server::DiscoveredInstance;
 using fiber::ai_server::DiscoveredService;
 using fiber::ai_server::InstanceReportOutcome;
-using fiber::ai_server::LlmAuditWriter;
-using fiber::ai_server::LlmAuditWriterOptions;
 using fiber::ai_server::LlmConfigSnapshot;
 using fiber::ai_server::LlmProjectSnapshot;
 using fiber::ai_server::LlmRequestHandler;
@@ -298,11 +297,11 @@ std::string bearer_token_name(std::string_view authorization) {
 class ProxyFixture {
 public:
     ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies, bool fail_settle,
-                 bool service_rendezvous, LlmAuditWriter &audit_writer) :
-        group_(&group), audit_writer_(&audit_writer), replies_(std::move(replies)), fail_settle_(fail_settle),
-        service_rendezvous_(service_rendezvous), rate_limiters_(1), rate_limit_handler_(rate_limiters_),
-        remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_), connections_(group),
-        provider_client_(connections_), metrics_(group),
+                 bool service_rendezvous, std::size_t audit_max_record_bytes) :
+        group_(&group), replies_(std::move(replies)), fail_settle_(fail_settle),
+        service_rendezvous_(service_rendezvous), audit_max_record_bytes_(audit_max_record_bytes), rate_limiters_(1),
+        rate_limit_handler_(rate_limiters_), remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_),
+        connections_(group), provider_client_(connections_), metrics_(group),
         provider_server_(group.at(0),
                          [this](fiber::http::HttpExchange &exchange) { return handle_provider(exchange); }),
         failing_provider_server_(
@@ -386,7 +385,6 @@ public:
         }
         entry_server_.close();
         co_await entry_server_.shutdown_and_wait();
-        co_await audit_writer_->shutdown();
         co_await provider_server_.shutdown_and_wait();
         if (service_rendezvous_) {
             co_await failing_provider_server_.shutdown_and_wait();
@@ -636,7 +634,7 @@ private:
         AiServerMetrics::Worker &metrics = metrics_.worker(0);
         metrics.request_started(LlmWireProtocol::OpenAiChatCompletions);
         const auto started = fiber::event::EventLoop::current().now();
-        LlmRequestHandler handler(provider_client_, runtime_, coordinator_, metrics, nullptr, audit_writer_);
+        LlmRequestHandler handler(provider_client_, runtime_, coordinator_, metrics, nullptr, audit_max_record_bytes_);
         co_await handler.handle(exchange, LlmWireProtocol::OpenAiChatCompletions, config_);
         metrics.request_finished(LlmWireProtocol::OpenAiChatCompletions, exchange.response_stats(),
                                  std::chrono::duration_cast<std::chrono::microseconds>(
@@ -645,7 +643,6 @@ private:
     }
 
     fiber::event::EventLoopGroup *group_ = nullptr;
-    LlmAuditWriter *audit_writer_ = nullptr;
     mutable std::mutex mutex_;
     std::vector<MockReply> replies_;
     std::vector<ObservedProviderRequest> observed_;
@@ -655,6 +652,7 @@ private:
     std::atomic<int> failing_provider_calls_{0};
     bool fail_settle_ = false;
     bool service_rendezvous_ = false;
+    std::size_t audit_max_record_bytes_ = 0;
     std::string rendezvous_route_key_;
     fiber::ai_server::TokenRateLimitService rate_limiters_;
     fiber::ai_server::TokenRateLimitHttpHandler rate_limit_handler_;
@@ -674,7 +672,9 @@ private:
 
 class FixtureHarness {
 public:
-    explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false, bool service_rendezvous = false) {
+    explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false, bool service_rendezvous = false,
+                            std::size_t audit_max_record_bytes = fiber::ai_server::kDefaultLlmAuditMaxRecordBytes) {
+        fiber::log::LoggerManager::global().shutdown();
         char path[] = "/tmp/fiber-llm-audit-XXXXXX";
         const int fd = ::mkstemp(path);
         if (fd < 0) {
@@ -682,19 +682,25 @@ public:
         }
         (void) ::close(fd);
         audit_path_ = path;
-        auto writer = LlmAuditWriter::create(audit_group_.at(0), LlmAuditWriterOptions{
-                                                                         .path = audit_path_,
-                                                                         .rotate_bytes = 0,
-                                                                 });
-        if (!writer) {
+        auto log_config = fiber::ai_server::make_log_config({
+                .path = audit_path_,
+                .max_record_bytes = audit_max_record_bytes,
+                .rotate_bytes = 0,
+        });
+        if (!log_config) {
             (void) ::unlink(audit_path_.c_str());
             audit_path_.clear();
             return;
         }
-        audit_writer_ = std::move(*writer);
+        audit_appender_id_ = log_config->audit_appender_id;
+        if (!fiber::log::LoggerManager::global().initialize(std::move(log_config->config))) {
+            (void) ::unlink(audit_path_.c_str());
+            audit_path_.clear();
+            return;
+        }
+        logging_started_ = true;
         fixture_ = std::make_unique<ProxyFixture>(group_, std::move(replies), fail_settle, service_rendezvous,
-                                                  *audit_writer_);
-        audit_group_.start();
+                                                  audit_max_record_bytes);
         group_.start();
         groups_started_ = true;
         std::promise<FixturePorts> promise;
@@ -712,19 +718,19 @@ public:
             fiber::async::spawn(group_.at(0), [this, &promise]() { return fixture_->shutdown(&promise); });
             (void) future.wait_for(5s);
             group_.stop();
-            audit_group_.stop();
             group_.join();
-            audit_group_.join();
         }
         fixture_.reset();
-        audit_writer_.reset();
+        if (logging_started_) {
+            fiber::log::LoggerManager::global().shutdown();
+        }
         if (!audit_path_.empty()) {
             (void) ::unlink(audit_path_.c_str());
         }
     }
 
     [[nodiscard]] bool valid() const noexcept {
-        return fixture_ && audit_writer_ && ports_.entry != 0 && ports_.provider != 0;
+        return fixture_ && logging_started_ && ports_.entry != 0 && ports_.provider != 0;
     }
 
     [[nodiscard]] std::uint16_t entry_port() const noexcept { return ports_.entry; }
@@ -738,7 +744,8 @@ public:
 
     [[nodiscard]] bool wait_for_audit_records(std::uint64_t count) const noexcept {
         for (std::size_t i = 0; i < 5000; ++i) {
-            if (audit_writer_->stats().written_records >= count) {
+            fiber::log::LoggerManager::global().flush();
+            if (fiber::log::LoggerManager::global().appender_stats(audit_appender_id_).written_records >= count) {
                 return true;
             }
             std::this_thread::sleep_for(1ms);
@@ -747,8 +754,14 @@ public:
     }
 
     [[nodiscard]] std::string audit_contents() const {
+        fiber::log::LoggerManager::global().flush();
         std::ifstream input(audit_path_, std::ios::binary);
         return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    }
+
+    [[nodiscard]] fiber::log::AppenderStats audit_stats() const noexcept {
+        fiber::log::LoggerManager::global().flush();
+        return fiber::log::LoggerManager::global().appender_stats(audit_appender_id_);
     }
 
     bool token_available(std::string token_name, std::chrono::seconds after) {
@@ -773,12 +786,12 @@ public:
 
 private:
     fiber::event::EventLoopGroup group_{1};
-    fiber::event::EventLoopGroup audit_group_{1};
     std::string audit_path_;
-    std::unique_ptr<LlmAuditWriter> audit_writer_;
     std::unique_ptr<ProxyFixture> fixture_;
     FixturePorts ports_;
+    fiber::log::AppenderId audit_appender_id_ = fiber::log::kInvalidAppenderId;
     bool groups_started_ = false;
+    bool logging_started_ = false;
 };
 
 TEST(LlmProxyIntegrationTest, RetriesTransportAuthRateLimitAndFallbackFromOriginalJson) {
@@ -981,7 +994,11 @@ TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
     ASSERT_FALSE(logs.empty());
     ASSERT_EQ(logs.back(), '\n');
     EXPECT_EQ(logs.find('\n'), logs.size() - 1);
-    const std::string_view audit_json(logs.data(), logs.size() - 1);
+    constexpr std::string_view audit_prefix = "audit_json=";
+    const std::size_t audit_prefix_pos = logs.find(audit_prefix);
+    ASSERT_NE(audit_prefix_pos, std::string::npos) << logs;
+    const std::size_t audit_json_begin = audit_prefix_pos + audit_prefix.size();
+    const std::string_view audit_json(logs.data() + audit_json_begin, logs.size() - audit_json_begin - 1);
     EXPECT_EQ(audit_json.find('\n'), std::string_view::npos);
 
     fiber::mem::BufPool pool;
@@ -1087,6 +1104,32 @@ TEST(LlmProxyIntegrationTest, PreservesLargeUtf8OutputWithoutTruncation) {
     EXPECT_NE(audit.find(content), std::string::npos);
     EXPECT_NE(audit.find(R"("canonical_complete":true)"), std::string::npos);
     EXPECT_EQ(audit.find("\"truncated\""), std::string::npos);
+}
+
+TEST(LlmProxyIntegrationTest, AuditGenerationFailureDoesNotChangeTheResponse) {
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"ok","choices":[{"message":{"role":"assistant","content":"ok"}}]})",
+                    },
+            },
+            false, false, 256);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse response =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","messages":[{"role":"user","content":"x"}]})");
+
+    ASSERT_EQ(response.system_error, 0);
+    ASSERT_EQ(response.status, 200);
+    ASSERT_TRUE(response.complete);
+    EXPECT_EQ(fixture.audit_stats().written_records, 0u);
+    EXPECT_TRUE(fixture.audit_contents().empty());
+    auto metrics = fixture.settlement_metrics();
+    ASSERT_TRUE(metrics);
+    EXPECT_NE(metrics->find("ai_server_audit_generation_failures_total 1"), std::string::npos);
 }
 
 } // namespace

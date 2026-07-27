@@ -712,10 +712,13 @@ token 生命周期已经结束。
 | 参数 | 默认值 | 控件与规则 |
 | --- | --- | --- |
 | `AI_SERVER_AUDIT_LOG_PATH` | `ai-server-audit.ndjson` | 非空文件路径，最多 4096 字节 |
-| `AI_SERVER_AUDIT_MAX_RECORD_BYTES` | `134217728` | 正整数；单条记录超限时请求 fail closed |
-| `AI_SERVER_AUDIT_MAX_PENDING_RECORDS` | `256` | 正整数；含正在构造和等待写入的记录 |
+| `AI_SERVER_AUDIT_MAX_RECORD_BYTES` | `134217728` | 正整数；单条记录超限时丢弃该审计，不改变请求结果 |
 | `AI_SERVER_AUDIT_ROTATE_BYTES` | `1073741824` | 非负字节数；0 禁用轮转 |
 | `AI_SERVER_AUDIT_MAX_ARCHIVES` | `30` | 正整数 |
+
+运行时审计使用共享异步日志线程和 `DropNewest` 策略。请求线程只生成并投递
+`audit_json=<json>`，不等待容量或写入结果；队列满、生成失败和 I/O 失败均通过指标
+暴露，不参与请求成功判定或 `/ready`。
 
 ### 13.4 Nacos
 

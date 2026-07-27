@@ -74,6 +74,10 @@ Logger、logger 名称和目标数组都由 runtime arena 持有，在 shutdown 
 
 分段存储避免为了完成一条大日志反复复制整个历史消息。构造失败时整条记录丢弃并增加 allocation failure 统计，不提交半条记录。
 
+需要由专用编码器直接构造消息时，`LogLine::append_raw()` 可追加不转义字节并返回
+成功状态，`good()` 用于检查整条记录，`discard()` 可在编码中途失败时取消提交。
+调用方必须自行保证单行协议边界，尤其不能把未转义换行写进一条结构化日志。
+
 ### 3.3 不在生产线程聚合多条记录
 
 生产线程只在当前 `LogLine` 内积累一条记录。`LogLine` 析构后立即调用 `EventLoop::post()`。
@@ -242,10 +246,15 @@ shutdown 不与仍在运行且缓存了 runtime `Logger*` 的生产者并发。�
 
 `log_complete_message()` 与流式 `LogLine` 使用同一个 `OwnedLogRecord` 提交路径。
 
+FileAppender 可按用途额外启用 `no_follow`、`regular_file_only`、
+`enforce_file_mode` 和 `truncate_incomplete_tail`。尾部恢复只允许用于 unbuffered
+普通文件：启动或 reopen 时保留最后一个换行及其之前的内容，删除崩溃留下的半条记录；
+直接写一条记录发生部分写失败时也尝试回退到该记录起点。
+
 ## 9. 故障策略
 
 - 记录或 chunk 分配失败：丢弃整条记录，增加 allocation failure，并限频输出原始 stderr；
-- backlog 满：按 `Block` 或 `DropNewest` 执行；
+- backlog 满：按 `Block` 或 `DropNewest` 执行，并把丢弃计入每个目标 Appender；
 - 格式化分配失败：丢弃整条记录，增加 formatting failure；
 - 文件或 console 部分写失败：记录已写字节，增加 write error 和 dropped record；
 - reopen、rotation、retention 失败：保留对应统计并限频输出原始 stderr；

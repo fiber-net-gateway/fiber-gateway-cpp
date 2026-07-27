@@ -27,6 +27,7 @@
 #include "event/EventLoop.h"
 #include "event/EventLoopGroup.h"
 #include "http/Http1Server.h"
+#include "log/LogConfig.h"
 #include "net/SocketAddress.h"
 #include "net/TcpListener.h"
 
@@ -36,12 +37,10 @@ class CatClient;
 
 namespace fiber::ai_server {
 
-class LlmAuditWriter;
-
 class AiServer final : public common::NonCopyable, public common::NonMovable {
 public:
     AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group, cat::CatClient *cat_client = nullptr,
-             LlmAuditWriter *audit_writer = nullptr);
+             std::size_t audit_max_record_bytes = 0, log::AppenderId audit_appender_id = log::kInvalidAppenderId);
     ~AiServer();
 
     [[nodiscard]] async::Task<bool> start_config_workers(LlmConfigManager &config_manager) noexcept;
@@ -71,7 +70,8 @@ private:
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoopGroup *worker_group_ = nullptr;
     cat::CatClient *cat_client_ = nullptr;
-    LlmAuditWriter *audit_writer_ = nullptr;
+    std::size_t audit_max_record_bytes_ = 0;
+    log::AppenderId audit_appender_id_ = log::kInvalidAppenderId;
     std::vector<WorkerState> workers_;
     async::WaitGroup initial_installs_;
     async::WaitGroup config_tasks_;

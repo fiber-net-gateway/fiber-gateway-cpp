@@ -65,8 +65,6 @@ std::string_view runtime_stage_name(fiber::ai_server::AiServerRuntimeErrorCode c
             return "create Nacos naming service";
         case Code::CreateCatClient:
             return "create CAT client";
-        case Code::CreateAuditWriter:
-            return "create audit writer";
         case Code::AllocateRuntime:
             return "allocate ai-server runtime";
         case Code::Bind:
@@ -138,12 +136,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    auto log_config = fiber::ai_server::make_log_config();
+    auto log_config = fiber::ai_server::make_log_config(config.audit_log_options());
     if (!log_config) {
         print_log_error(log_config.error());
         return 1;
     }
-    auto logging_started = fiber::log::LoggerManager::global().initialize(std::move(*log_config));
+    const fiber::log::AppenderId audit_appender_id = log_config->audit_appender_id;
+    auto logging_started = fiber::log::LoggerManager::global().initialize(std::move(log_config->config));
     if (!logging_started) {
         print_log_error(logging_started.error());
         return 1;
@@ -153,17 +152,16 @@ int main(int argc, char **argv) {
     fiber::event::EventLoopGroup http_workers(fiber::ai_server::default_http_worker_count());
     fiber::event::EventLoopGroup nacos_group(1);
     fiber::event::EventLoopGroup cat_group(1);
-    fiber::event::EventLoopGroup audit_group(1);
     LoggingShutdownGuard logging_guard;
     fiber::net::ListenOptions listen_options{};
     LOG(LOG_LIFECYCLE, INFO) << "configuration loaded path=" << fiber::log::quoted(config_path)
                              << " listen=" << fiber::log::quoted(config.listen_address().to_string())
                              << " http_workers=" << http_workers.size()
                              << " nacos_servers=" << config.nacos_config().server_ips().size()
-                             << " audit_path=" << fiber::log::quoted(config.audit_writer_options().path);
+                             << " audit_path=" << fiber::log::quoted(config.audit_log_options().path);
 
     auto runtime_result = fiber::ai_server::AiServerRuntime::create(
-            accept_loop, nacos_group.at(0), cat_group.at(0), audit_group.at(0), http_workers, config, listen_options);
+            accept_loop, nacos_group.at(0), cat_group.at(0), http_workers, config, audit_appender_id, listen_options);
     if (!runtime_result) {
         log_runtime_error(runtime_result.error());
         return 1;
@@ -173,7 +171,6 @@ int main(int argc, char **argv) {
     http_workers.start(shutdown_signals);
     nacos_group.start(shutdown_signals);
     cat_group.start(shutdown_signals);
-    audit_group.start(shutdown_signals);
 
     fiber::event::SignalService signal_service(accept_loop);
     int exit_code = 0;
@@ -247,11 +244,9 @@ int main(int argc, char **argv) {
     http_workers.stop();
     nacos_group.stop();
     cat_group.stop();
-    audit_group.stop();
     http_workers.join();
     nacos_group.join();
     cat_group.join();
-    audit_group.join();
     LOG(LOG_LIFECYCLE, INFO) << "ai-server stopped";
     return exit_code;
 }

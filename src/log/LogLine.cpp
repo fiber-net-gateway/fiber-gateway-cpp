@@ -44,15 +44,28 @@ LogLine::LogLine(const Logger &logger, LogLevel level, const char *file, std::ui
 LogLine::~LogLine() noexcept {
     auto &manager = LoggerManager::global();
     if (!record_) {
-        manager.record_allocation_failure();
+        if (!discarded_) {
+            manager.record_allocation_failure();
+        }
         return;
     }
     (void) manager.submit(record_);
 }
 
-void LogLine::append_raw(std::string_view value) noexcept {
-    if (record_) {
-        (void) record_->append(value);
+bool LogLine::append_raw(std::string_view value) noexcept { return record_ && record_->append(value); }
+
+bool LogLine::good() const noexcept { return record_ && !record_->failed(); }
+
+void LogLine::discard() noexcept {
+    if (!record_) {
+        return;
+    }
+    const bool failed = record_->failed();
+    delete record_;
+    record_ = nullptr;
+    discarded_ = true;
+    if (failed) {
+        LoggerManager::global().record_allocation_failure();
     }
 }
 
@@ -84,18 +97,18 @@ void LogLine::append_escaped(std::string_view value) noexcept {
                 }
                 break;
         }
-        append_raw(value.substr(plain_start, index - plain_start));
-        append_raw(escaped);
+        (void) append_raw(value.substr(plain_start, index - plain_start));
+        (void) append_raw(escaped);
         plain_start = index + 1;
         if (!record_ || record_->failed()) {
             return;
         }
     }
-    append_raw(value.substr(plain_start));
+    (void) append_raw(value.substr(plain_start));
 }
 
 void LogLine::append_quoted(std::string_view value) noexcept {
-    append_raw("\"");
+    (void) append_raw("\"");
     std::size_t plain_start = 0;
     for (std::size_t index = 0; index < value.size(); ++index) {
         const auto ch = static_cast<unsigned char>(value[index]);
@@ -105,7 +118,7 @@ void LogLine::append_quoted(std::string_view value) noexcept {
         append_escaped(value.substr(plain_start, index - plain_start));
         if (ch == '\\' || ch == '"') {
             const char escaped[] = {'\\', static_cast<char>(ch)};
-            append_raw(std::string_view(escaped, sizeof(escaped)));
+            (void) append_raw(std::string_view(escaped, sizeof(escaped)));
         } else {
             append_escaped(value.substr(index, 1));
         }
@@ -115,7 +128,7 @@ void LogLine::append_quoted(std::string_view value) noexcept {
         }
     }
     append_escaped(value.substr(plain_start));
-    append_raw("\"");
+    (void) append_raw("\"");
 }
 
 LogLine &LogLine::operator<<(std::string_view value) noexcept {
@@ -133,22 +146,22 @@ LogLine &LogLine::operator<<(char value) noexcept {
 }
 
 LogLine &LogLine::operator<<(bool value) noexcept {
-    append_raw(value ? "true" : "false");
+    (void) append_raw(value ? "true" : "false");
     return *this;
 }
 
 LogLine &LogLine::operator<<(const void *value) noexcept {
     if (!value) {
-        append_raw("nullptr");
+        (void) append_raw("nullptr");
         return *this;
     }
-    append_raw("0x");
+    (void) append_raw("0x");
     char buffer[2 * sizeof(std::uintptr_t)];
     auto result = std::to_chars(buffer, buffer + sizeof(buffer), reinterpret_cast<std::uintptr_t>(value), 16);
     if (result.ec == std::errc()) {
-        append_raw(std::string_view(buffer, static_cast<std::size_t>(result.ptr - buffer)));
+        (void) append_raw(std::string_view(buffer, static_cast<std::size_t>(result.ptr - buffer)));
     } else {
-        append_raw("<format-error>");
+        (void) append_raw("<format-error>");
     }
     return *this;
 }

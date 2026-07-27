@@ -113,8 +113,8 @@ std::size_t default_http_worker_count() noexcept {
 
 std::expected<std::unique_ptr<AiServerRuntime>, AiServerRuntimeError>
 AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
-                        event::EventLoop &audit_loop, event::EventLoopGroup &http_workers, const AiServerConfig &config,
-                        const net::ListenOptions &listen_options) {
+                        event::EventLoopGroup &http_workers, const AiServerConfig &config,
+                        log::AppenderId audit_appender_id, const net::ListenOptions &listen_options) {
     auto client = nacos::NacosClient::create(nacos_loop, config.nacos_config());
     if (!client) {
         return std::unexpected(create_error(AiServerRuntimeErrorCode::CreateNacosClient, client.error()));
@@ -139,22 +139,11 @@ AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_l
         }
         cat_client = std::move(*created);
     }
-    auto audit_writer = LlmAuditWriter::create(audit_loop, config.audit_writer_options());
-    if (!audit_writer) {
-        return std::unexpected(AiServerRuntimeError{
-                .code = AiServerRuntimeErrorCode::CreateAuditWriter,
-                .io_error = audit_writer.error().system_error == 0
-                                    ? common::IoErr::Invalid
-                                    : common::io_err_from_errno(audit_writer.error().system_error),
-                .message = "failed to create LLM audit writer",
-        });
-    }
-
     auto runtime = std::unique_ptr<AiServerRuntime>(new (std::nothrow) AiServerRuntime(
-            accept_loop, nacos_loop, cat_loop, audit_loop, http_workers, config.listen_address(), listen_options,
+            accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), listen_options,
             config.initial_config_timeout(), config.advertise_address(), std::string(config.service_name()),
-            std::string(config.service_group()), std::move(cat_client), std::move(*audit_writer), std::move(*client),
-            std::move(*service), std::move(*naming)));
+            std::string(config.service_group()), std::move(cat_client), config.audit_log_options().max_record_bytes,
+            audit_appender_id, std::move(*client), std::move(*service), std::move(*naming)));
     if (!runtime) {
         return std::unexpected(AiServerRuntimeError{
                 .code = AiServerRuntimeErrorCode::AllocateRuntime,
@@ -165,38 +154,33 @@ AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_l
 }
 
 AiServerRuntime::AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop &nacos_loop,
-                                 event::EventLoop &cat_loop, event::EventLoop &audit_loop,
-                                 event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
-                                 net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
+                                 event::EventLoop &cat_loop, event::EventLoopGroup &http_workers,
+                                 net::SocketAddress listen_address, net::ListenOptions listen_options,
+                                 std::chrono::milliseconds initial_config_timeout,
                                  std::optional<net::IpAddress> advertise_address, std::string service_name,
                                  std::string service_group, std::unique_ptr<cat::CatClient> cat_client,
-                                 std::unique_ptr<LlmAuditWriter> audit_writer,
+                                 std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id,
                                  std::unique_ptr<nacos::NacosClient> nacos_client,
                                  std::unique_ptr<nacos::ConfigService> config_service,
                                  std::unique_ptr<nacos::NamingService> naming_service) noexcept :
-    accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop), audit_loop_(&audit_loop),
+    accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop),
     listen_address_(std::move(listen_address)), listen_options_(std::move(listen_options)),
     initial_config_timeout_(initial_config_timeout), advertise_address_(std::move(advertise_address)),
-    cat_client_(std::move(cat_client)), audit_writer_(std::move(audit_writer)), nacos_client_(std::move(nacos_client)),
+    cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
     config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
     config_manager_(nacos_loop, *config_service_, *naming_service_),
-    server_(accept_loop, http_workers, cat_client_.get(), audit_writer_.get()),
+    server_(accept_loop, http_workers, cat_client_.get(), audit_max_record_bytes, audit_appender_id),
     rate_limit_membership_(nacos_loop, *naming_service_, server_.rate_limit_ring(), std::move(service_name),
                            std::move(service_group)) {
     FIBER_ASSERT(nacos_client_ != nullptr);
     FIBER_ASSERT(config_service_ != nullptr);
     FIBER_ASSERT(naming_service_ != nullptr);
-    FIBER_ASSERT(audit_writer_ != nullptr);
     FIBER_ASSERT(accept_loop_ != nacos_loop_);
     FIBER_ASSERT(accept_loop_ != cat_loop_);
-    FIBER_ASSERT(accept_loop_ != audit_loop_);
     FIBER_ASSERT(nacos_loop_ != cat_loop_);
-    FIBER_ASSERT(nacos_loop_ != audit_loop_);
-    FIBER_ASSERT(cat_loop_ != audit_loop_);
     for (std::size_t i = 0; i < http_workers.size(); ++i) {
         FIBER_ASSERT(&http_workers.at(i) != nacos_loop_);
         FIBER_ASSERT(&http_workers.at(i) != cat_loop_);
-        FIBER_ASSERT(&http_workers.at(i) != audit_loop_);
     }
     nacos_start_publisher_ = nacos_start_status_.acquire_publisher();
     FIBER_ASSERT(nacos_start_publisher_.has_value());
@@ -348,7 +332,6 @@ async::Task<void> AiServerRuntime::fail_start() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     state_ = AiServerRuntimeState::Stopping;
     co_await server_.shutdown_and_wait();
-    co_await audit_writer_->shutdown();
     co_await stop_cat();
     co_await stop_nacos();
     state_ = AiServerRuntimeState::Stopped;
@@ -464,7 +447,6 @@ async::Task<void> AiServerRuntime::shutdown() noexcept {
     LOG(LOG_LIFECYCLE, INFO) << "runtime shutdown started";
     if (state_ == AiServerRuntimeState::Created) {
         server_.close();
-        co_await audit_writer_->shutdown();
         co_await stop_cat();
         co_await stop_nacos();
         state_ = AiServerRuntimeState::Stopped;
@@ -474,7 +456,6 @@ async::Task<void> AiServerRuntime::shutdown() noexcept {
 
     state_ = AiServerRuntimeState::Stopping;
     co_await server_.shutdown_and_wait();
-    co_await audit_writer_->shutdown();
     co_await stop_cat();
     co_await stop_nacos();
     state_ = AiServerRuntimeState::Stopped;

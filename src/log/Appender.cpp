@@ -1,6 +1,7 @@
 #include "Appender.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
@@ -341,7 +342,9 @@ bool ConsoleAppender::reopen() noexcept { return true; }
 FileAppender::FileAppender(AppenderId id, FileAppenderOptions options) noexcept :
     Appender(id, std::move(options.name), options.min_level, options.max_level), path_(std::move(options.path)),
     file_mode_(options.file_mode), buffer_size_(options.buffer_size), flush_interval_(options.flush_interval),
-    rotation_(std::move(options.rotation)) {}
+    rotation_(std::move(options.rotation)), no_follow_(options.no_follow),
+    regular_file_only_(options.regular_file_only), enforce_file_mode_(options.enforce_file_mode),
+    truncate_incomplete_tail_(options.truncate_incomplete_tail) {}
 
 FileAppender::~FileAppender() {
     std::free(buffer_);
@@ -359,30 +362,103 @@ bool FileAppender::open_file(int &system_error) noexcept {
         }
     }
 
-    int flags = O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC;
-    if (rotation_) {
-        flags |= O_NOFOLLOW;
-    }
-    fd_ = ::open(path_.c_str(), flags, file_mode_);
-    if (fd_ < 0) {
+    const int candidate = ::open(path_.c_str(), open_flags(), file_mode_);
+    if (candidate < 0) {
         system_error = errno;
         return false;
     }
 
-    struct stat file_stat{};
-    if (::fstat(fd_, &file_stat) < 0) {
-        system_error = errno;
+    std::uint64_t active_bytes = 0;
+    if (!validate_open_file(candidate, active_bytes, system_error)) {
+        ::close(candidate);
         return false;
     }
-    if (rotation_ && !S_ISREG(file_stat.st_mode)) {
-        system_error = EINVAL;
-        return false;
-    }
-    active_bytes_ = file_stat.st_size > 0 ? static_cast<std::uint64_t>(file_stat.st_size) : 0;
+    fd_ = candidate;
+    active_bytes_ = active_bytes;
     set_active_file_bytes(active_bytes_);
     if (rotation_ && !initialize_rotation(system_error)) {
         return false;
     }
+    system_error = 0;
+    return true;
+}
+
+int FileAppender::open_flags() const noexcept {
+    int flags = (truncate_incomplete_tail_ ? O_RDWR : O_WRONLY) | O_APPEND | O_CREAT | O_CLOEXEC;
+    if (rotation_ || no_follow_) {
+        flags |= O_NOFOLLOW;
+    }
+    return flags;
+}
+
+bool FileAppender::validate_open_file(int fd, std::uint64_t &active_bytes, int &system_error) const noexcept {
+    struct stat file_stat{};
+    if (::fstat(fd, &file_stat) < 0) {
+        system_error = errno;
+        return false;
+    }
+    if ((rotation_ || regular_file_only_) && !S_ISREG(file_stat.st_mode)) {
+        system_error = EINVAL;
+        return false;
+    }
+    if (enforce_file_mode_ && ::fchmod(fd, file_mode_) < 0) {
+        system_error = errno;
+        return false;
+    }
+
+    const std::uint64_t file_size = file_stat.st_size > 0 ? static_cast<std::uint64_t>(file_stat.st_size) : 0;
+    if (truncate_incomplete_tail_) {
+        return recover_incomplete_tail(fd, file_size, active_bytes, system_error);
+    }
+    active_bytes = file_size;
+    system_error = 0;
+    return true;
+}
+
+bool FileAppender::recover_incomplete_tail(int fd, std::uint64_t file_size, std::uint64_t &active_bytes,
+                                           int &system_error) const noexcept {
+    if (file_size == 0) {
+        active_bytes = 0;
+        system_error = 0;
+        return true;
+    }
+
+    char last = 0;
+    const ssize_t last_read = ::pread(fd, &last, 1, static_cast<off_t>(file_size - 1));
+    if (last_read != 1) {
+        system_error = last_read < 0 ? errno : EIO;
+        return false;
+    }
+    if (last == '\n') {
+        active_bytes = file_size;
+        system_error = 0;
+        return true;
+    }
+
+    std::array<char, 4096> buffer{};
+    std::uint64_t cursor = file_size;
+    std::uint64_t keep = 0;
+    while (cursor != 0) {
+        const std::size_t take = static_cast<std::size_t>(std::min<std::uint64_t>(cursor, buffer.size()));
+        cursor -= take;
+        const ssize_t read = ::pread(fd, buffer.data(), take, static_cast<off_t>(cursor));
+        if (read != static_cast<ssize_t>(take)) {
+            system_error = read < 0 ? errno : EIO;
+            return false;
+        }
+        for (std::size_t index = take; index != 0; --index) {
+            if (buffer[index - 1] == '\n') {
+                keep = cursor + index;
+                cursor = 0;
+                break;
+            }
+        }
+    }
+    if (::ftruncate(fd, static_cast<off_t>(keep)) < 0) {
+        system_error = errno;
+        return false;
+    }
+    active_bytes = keep;
     system_error = 0;
     return true;
 }
@@ -480,13 +556,25 @@ bool FileAppender::rotate() noexcept {
             break;
         }
         std::string archive_path = make_child_path(directory_path_, archive_name);
-        const int replacement =
-                ::open(archive_path.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_CLOEXEC, file_mode_);
+        int replacement_flags =
+                (truncate_incomplete_tail_ ? O_RDWR : O_WRONLY) | O_APPEND | O_CREAT | O_EXCL | O_CLOEXEC;
+        if (no_follow_) {
+            replacement_flags |= O_NOFOLLOW;
+        }
+        const int replacement = ::open(archive_path.c_str(), replacement_flags, file_mode_);
         if (replacement < 0) {
             last_error = errno;
             if (last_error == EEXIST && sequence != std::numeric_limits<std::uint64_t>::max()) {
                 ++sequence;
                 continue;
+            }
+            break;
+        }
+        if (enforce_file_mode_ && ::fchmod(replacement, file_mode_) < 0) {
+            last_error = errno;
+            ::close(replacement);
+            if (::unlink(archive_path.c_str()) < 0 && errno != ENOENT) {
+                record_retention_error();
             }
             break;
         }
@@ -577,6 +665,7 @@ void FileAppender::write_contiguous(const char *data, std::size_t size, std::uin
 }
 
 void FileAppender::write_record(const FormattedLogRecord &record) noexcept {
+    const std::uint64_t record_start = active_bytes_;
     const std::size_t written = write_record_bytes(fd_, record);
     if (written > std::numeric_limits<std::uint64_t>::max() - active_bytes_) {
         active_bytes_ = std::numeric_limits<std::uint64_t>::max();
@@ -585,7 +674,15 @@ void FileAppender::write_record(const FormattedLogRecord &record) noexcept {
     }
     set_active_file_bytes(active_bytes_);
     if (written != record.size()) {
-        if (written > 0) {
+        bool rolled_back = false;
+        if (truncate_incomplete_tail_ &&
+            record_start <= static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) &&
+            ::ftruncate(fd_, static_cast<off_t>(record_start)) == 0) {
+            active_bytes_ = record_start;
+            set_active_file_bytes(active_bytes_);
+            rolled_back = true;
+        }
+        if (written > 0 && !rolled_back) {
             record_write(written, 0);
         }
         record_write_error(1);
@@ -642,23 +739,15 @@ std::chrono::steady_clock::time_point FileAppender::flush_deadline() const noexc
 
 bool FileAppender::reopen() noexcept {
     flush_buffer();
-    int flags = O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC;
-    if (rotation_) {
-        flags |= O_NOFOLLOW;
-    }
-    const int replacement = ::open(path_.c_str(), flags, file_mode_);
+    const int replacement = ::open(path_.c_str(), open_flags(), file_mode_);
     if (replacement < 0) {
         record_reopen_error();
         return false;
     }
 
-    struct stat file_stat{};
-    if (::fstat(replacement, &file_stat) < 0) {
-        ::close(replacement);
-        record_reopen_error();
-        return false;
-    }
-    if (rotation_ && !S_ISREG(file_stat.st_mode)) {
+    std::uint64_t active_bytes = 0;
+    int system_error = 0;
+    if (!validate_open_file(replacement, active_bytes, system_error)) {
         ::close(replacement);
         record_reopen_error();
         return false;
@@ -666,7 +755,7 @@ bool FileAppender::reopen() noexcept {
     const int previous = fd_;
     fd_ = replacement;
     ::close(previous);
-    active_bytes_ = file_stat.st_size > 0 ? static_cast<std::uint64_t>(file_stat.st_size) : 0;
+    active_bytes_ = active_bytes;
     set_active_file_bytes(active_bytes_);
     return true;
 }

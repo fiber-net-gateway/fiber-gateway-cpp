@@ -95,6 +95,8 @@ FileAppender buffer 现在每个 Appender 只有一份，由日志线程拥有�
 - reopen 与记录的顺序；
 - 超过轮转阈值的完整记录与 archive retention；
 - 多生产者并发时每条文件和 console 记录保持完整；
-- shutdown 排空已投递记录。
+- shutdown 排空已投递记录；
+- raw append 保持字节不变，编码失败时可取消半条记录；
+- 安全文件模式拒绝符号链接、强制权限并恢复不完整尾行。
 
 实现无法承诺进程崩溃、内存耗尽、文件系统永久阻塞或 `SIGKILL` 下无日志损失；这些属于持久化与故障模型的后续议题。

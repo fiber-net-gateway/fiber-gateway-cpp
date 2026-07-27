@@ -32,6 +32,10 @@ public:
     LogLine(LogLine &&) = delete;
     LogLine &operator=(LogLine &&) = delete;
 
+    [[nodiscard]] bool append_raw(std::string_view value) noexcept;
+    [[nodiscard]] bool good() const noexcept;
+    void discard() noexcept;
+
     LogLine &operator<<(std::string_view value) noexcept;
     LogLine &operator<<(const std::string &value) noexcept { return *this << std::string_view(value); }
     LogLine &operator<<(const char *value) noexcept;
@@ -48,9 +52,9 @@ public:
         char buffer[std::numeric_limits<T>::digits10 + 4];
         auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
         if (result.ec == std::errc()) {
-            append_raw(std::string_view(buffer, static_cast<std::size_t>(result.ptr - buffer)));
+            (void) append_raw(std::string_view(buffer, static_cast<std::size_t>(result.ptr - buffer)));
         } else {
-            append_raw("<format-error>");
+            (void) append_raw("<format-error>");
         }
         return *this;
     }
@@ -64,9 +68,9 @@ public:
         auto result = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general,
                                     std::numeric_limits<T>::max_digits10);
         if (result.ec == std::errc()) {
-            append_raw(std::string_view(buffer, static_cast<std::size_t>(result.ptr - buffer)));
+            (void) append_raw(std::string_view(buffer, static_cast<std::size_t>(result.ptr - buffer)));
         } else {
-            append_raw("<format-error>");
+            (void) append_raw("<format-error>");
         }
         return *this;
     }
@@ -78,11 +82,11 @@ public:
     }
 
 private:
-    void append_raw(std::string_view value) noexcept;
     void append_escaped(std::string_view value) noexcept;
     void append_quoted(std::string_view value) noexcept;
 
     OwnedLogRecord *record_ = nullptr;
+    bool discarded_ = false;
 };
 
 class NullLogLine {
