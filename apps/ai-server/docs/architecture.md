@@ -159,6 +159,10 @@ token 删除时清理对应状态：
 - 成功清除 Provider 连续失败并恢复成功 token。
 
 固定 `http(s)://` 地址在 worker DNS resolver 上解析全部 A/AAAA，再依序连接。
+resolver 仍使用共享的正向/权威负向缓存；ai-server 额外维护一个进程内、固定 64 项的
+DNS transient failure cache。它只缓存 `TimedOut`，默认 TTL 为 2 秒，hostname 以
+ASCII 小写并去除末尾点后比较。缓存命中不会再次访问 resolver，成功解析会清除对应
+项；NXDOMAIN、NoData 和其他 I/O 错误不进入该缓存。
 `service://` 默认按 Nacos 权重执行平滑加权轮询；模型配置
 `service-instance-policy: weighted-rendezvous` 后，以 Provider-scoped route key 和
 实例 endpoint 计算带权 Rendezvous score，使用 Nacos 基础权重稳定选择实例。同一次
@@ -182,7 +186,8 @@ Provider 的实例级失败会加入请求级排除集合，后续 token 尝试�
 
 - 401/403/429 始终可尝试后续 token/Provider；
 - `retryable-status` 中的状态可重试；
-- 传输错误可重试；
+- 非 DNS 传输错误可进入下一 attempt；
+- DNS 错误直接跳到下一 Provider，并把当前 Provider 的剩余 token 计划项计为 skipped；
 - 普通 4xx 不重试；
 - 尝试耗尽后，同协议上游状态、Content-Type 和正文原样返回。
 
@@ -267,7 +272,7 @@ no-follow、普通文件限定、权限强制和不完整尾部恢复。
 Provider token、BT1 token 或配置 secret 写入响应。
 
 请求审计由请求级 RAII owner 聚合。请求结束时，当前 HTTP worker 把
-`schema_version=3` 对象直接编码到一条 `ai_server.audit` 日志记录中，消息格式为
+`schema_version=4` 对象直接编码到一条 `ai_server.audit` 日志记录中，消息格式为
 `audit_json=<json>`。记录随后提交给进程共享的 log EventLoop，该线程是 stderr 和
 审计文件的唯一正常 writer；审计 logger 关闭 additive，不会复制到 stderr。
 同一对象包含：
@@ -278,7 +283,9 @@ Provider token、BT1 token 或配置 secret 写入响应。
 - username、kid、resolved model、授权和限流结果；
 - `llm.output` 中从同步响应或 SSE delta 聚合出的 role/content/tool/finish reason；
 - `provider_attempts` 中每次尝试的 Provider/token 名、协议、上游模型、路径、配置
-  版本、fallback、状态和延迟；
+  版本、fallback、状态和延迟，以及失败阶段、I/O 错误、失败来源、重试目标、是否
+  真正重试和跳过的计划项数；
+- 请求级 `provider_attempt_skipped_count`；
 - 最终状态、响应字节、客户端中断、usage 和总耗时。
 
 `llm.output.capture_scope=provider_observed`：它说明 Provider 已生成并被网关观察到的
@@ -309,6 +316,10 @@ Authorization、Provider token 值、BT1 token 和配置 secret 不作为独立�
 
 Prometheus 的常规运行指标继续使用固定低基数 label，包含请求数/延迟/在途、
 Provider 尝试与失败、重试、熔断、限流准入/拒绝/settle、配置代际和 SSE 中途失败。
+Provider 传输失败阶段、计划剪枝和 DNS timeout backoff 分别使用
+`ai_server_provider_transport_failures_total{protocol,phase}`、
+`ai_server_provider_attempts_skipped_total{protocol}` 和
+`ai_server_dns_backoff_hits_total{protocol}`，不引入 Provider/host/token label。
 `ai_server_sse_drains_total{protocol,result}` 记录下游交付失败后的 upstream drain，
 `result` 固定为 `completed`、`upstream_error`、`timeout`。
 审计另有 generated/generation failure/capture incomplete，以及 FileAppender 的
@@ -328,6 +339,12 @@ token 是网关解析完整 SSE 事件后观测到的 TTFT：OpenAI 文本、拒
 Anthropic 文本和 tool-use 增量均计入，纯元数据事件不计入；它不表示 Provider 内部
 tokenizer 的精确边界。只输出已经观察到的里程碑，非流式响应不输出 first token；
 SSE 的 body transfer 包含交替下游写入形成的背压时间。
+每个 Provider 的 `RemoteCall` Event 归属相应的 `LLM.Provider` Transaction。失败
+attempt 保持父 Transaction 的失败状态，并增加 `LLM.UpstreamError` 子 Event：
+DNS、连接/endpoint 获取和请求发送/响应读取（含非 2xx）分别使用
+`upstream_dns_error`、`upstream_connect_error`、`upstream_request_error`。Event
+data 继续给出精确 failure phase、I/O error、上游状态和 retry target；成功 attempt
+不生成错误 Event。
 
 listener 只在完整首个配置安装到所有 worker 后绑定；服务注册使用启动配置
 `<AI_SERVER_ZONE>-<AI_SERVER_CLUSTER>` 作为 Nacos cluster，注册和初始本机限流节点

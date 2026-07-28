@@ -74,6 +74,18 @@ std::chrono::milliseconds retry_after_ttl(std::string_view value, std::chrono::m
 
 } // namespace
 
+std::string_view provider_retry_target_name(ProviderRetryTarget target) noexcept {
+    switch (target) {
+        case ProviderRetryTarget::None:
+            return "none";
+        case ProviderRetryTarget::NextAttempt:
+            return "next_attempt";
+        case ProviderRetryTarget::NextProvider:
+            return "next_provider";
+    }
+    return "none";
+}
+
 ProviderErrorDecision classify_provider_response(LlmWireProtocol protocol, int status_code,
                                                  std::string_view retry_after, std::string_view body,
                                                  const LoadBalanceConfig &load_balance, bool response_started,
@@ -96,7 +108,7 @@ ProviderErrorDecision classify_provider_response(LlmWireProtocol protocol, int s
         return ProviderErrorDecision{
                 .scope = ProviderErrorScope::ApiToken,
                 .instance_outcome = InstanceReportOutcome::Neutral,
-                .retryable = !response_started,
+                .retry_target = response_started ? ProviderRetryTarget::None : ProviderRetryTarget::NextAttempt,
                 .unavailable_ttl = retry_after_ttl(retry_after, fallback),
                 .reason = !body_context.reason.empty() ? body_context.reason
                                                        : (status_code == 429 ? std::string_view("rate_limit")
@@ -114,17 +126,70 @@ ProviderErrorDecision classify_provider_response(LlmWireProtocol protocol, int s
     return ProviderErrorDecision{
             .scope = ProviderErrorScope::Provider,
             .instance_outcome = instance_failure ? InstanceReportOutcome::Failure : InstanceReportOutcome::Success,
-            .retryable = retryable,
+            .retry_target = retryable ? ProviderRetryTarget::NextAttempt : ProviderRetryTarget::None,
             .reason = "provider_status",
     };
 }
 
-ProviderErrorDecision classify_provider_transport_error(bool response_started) noexcept {
+ProviderErrorDecision classify_provider_transport_error(const ProviderHttpError &error,
+                                                        bool response_started) noexcept {
+    ProviderErrorDecision decision = classify_provider_transport_error(error.code, response_started);
+    if (error.dns_backoff_hit) {
+        decision.scope = ProviderErrorScope::None;
+        decision.reason = "dns_backoff";
+    }
+    return decision;
+}
+
+ProviderErrorDecision classify_provider_transport_error(ProviderHttpErrorCode code, bool response_started) noexcept {
     return ProviderErrorDecision{
             .scope = ProviderErrorScope::Provider,
             .instance_outcome = InstanceReportOutcome::Failure,
-            .retryable = !response_started,
-            .reason = "provider_transport_error",
+            .retry_target = response_started ? ProviderRetryTarget::None
+                                             : (code == ProviderHttpErrorCode::Dns ? ProviderRetryTarget::NextProvider
+                                                                                   : ProviderRetryTarget::NextAttempt),
+            .reason = code == ProviderHttpErrorCode::Dns ? std::string_view("provider_dns_error")
+                                                         : std::string_view("provider_transport_error"),
+    };
+}
+
+ProviderRetrySelection select_provider_retry(std::span<const ResolvedProviderAttempt> attempts,
+                                             std::size_t current_index, const ProviderErrorDecision &decision,
+                                             bool response_started, ProviderRuntimeState::TimePoint now) noexcept {
+    if (response_started || current_index >= attempts.size()) {
+        return {};
+    }
+
+    ProviderRetryTarget target = decision.retry_target;
+    const ResolvedProviderAttempt &current = attempts[current_index];
+    if (target == ProviderRetryTarget::NextAttempt && decision.scope == ProviderErrorScope::Provider &&
+        current.provider && !current.provider->service && current.runtime &&
+        current.runtime->provider_unavailable_until() > now) {
+        target = ProviderRetryTarget::NextProvider;
+    }
+    if (target == ProviderRetryTarget::None) {
+        return {};
+    }
+    if (target == ProviderRetryTarget::NextAttempt) {
+        if (current_index + 1 >= attempts.size()) {
+            return ProviderRetrySelection{.retry_target = target};
+        }
+        return ProviderRetrySelection{
+                .retry_target = target,
+                .next_index = current_index + 1,
+                .retry_performed = true,
+        };
+    }
+
+    std::size_t next = current_index + 1;
+    while (next < attempts.size() && attempts[next].provider == current.provider) {
+        ++next;
+    }
+    return ProviderRetrySelection{
+            .retry_target = target,
+            .next_index = next,
+            .skipped_attempts = next - current_index - 1,
+            .retry_performed = next < attempts.size(),
     };
 }
 

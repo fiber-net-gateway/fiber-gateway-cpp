@@ -4,6 +4,7 @@
 #include "../src/provider/ProviderErrorClassifier.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -325,7 +326,8 @@ TEST(LlmProtocolTest, ClassifiesTokenAndProviderFailures) {
                                             R"({"error":{"type":"insufficient_quota"}})", load_balance, false, pool);
     EXPECT_EQ(token.scope, ProviderErrorScope::ApiToken);
     EXPECT_EQ(token.instance_outcome, InstanceReportOutcome::Neutral);
-    EXPECT_TRUE(token.retryable);
+    EXPECT_TRUE(token.retryable());
+    EXPECT_EQ(token.retry_target, ProviderRetryTarget::NextAttempt);
     EXPECT_EQ(token.unavailable_ttl, std::chrono::seconds(7));
 
     mem::BufPool status_pool;
@@ -333,12 +335,125 @@ TEST(LlmProtocolTest, ClassifiesTokenAndProviderFailures) {
                                                status_pool);
     EXPECT_EQ(provider.scope, ProviderErrorScope::Provider);
     EXPECT_EQ(provider.instance_outcome, InstanceReportOutcome::Failure);
-    EXPECT_TRUE(provider.retryable);
+    EXPECT_TRUE(provider.retryable());
+    EXPECT_EQ(provider.retry_target, ProviderRetryTarget::NextAttempt);
 
-    auto started = classify_provider_transport_error(true);
+    auto started = classify_provider_transport_error(ProviderHttpErrorCode::ReadHeader, true);
     EXPECT_EQ(started.scope, ProviderErrorScope::Provider);
     EXPECT_EQ(started.instance_outcome, InstanceReportOutcome::Failure);
-    EXPECT_FALSE(started.retryable);
+    EXPECT_FALSE(started.retryable());
+}
+
+TEST(LlmProtocolTest, ClassifiesDnsAsProviderLevelRetryTarget) {
+    const ProviderHttpError dns{
+            .code = ProviderHttpErrorCode::Dns,
+            .io_error = common::IoErr::TimedOut,
+    };
+    const ProviderErrorDecision dns_decision = classify_provider_transport_error(dns, false);
+    EXPECT_EQ(dns_decision.scope, ProviderErrorScope::Provider);
+    EXPECT_EQ(dns_decision.retry_target, ProviderRetryTarget::NextProvider);
+
+    const ProviderErrorDecision read_header =
+            classify_provider_transport_error(ProviderHttpErrorCode::ReadHeader, false);
+    EXPECT_EQ(read_header.retry_target, ProviderRetryTarget::NextAttempt);
+
+    const ProviderHttpError backoff{
+            .code = ProviderHttpErrorCode::Dns,
+            .io_error = common::IoErr::TimedOut,
+            .dns_backoff_hit = true,
+    };
+    const ProviderErrorDecision backoff_decision = classify_provider_transport_error(backoff, false);
+    EXPECT_EQ(backoff_decision.scope, ProviderErrorScope::None);
+    EXPECT_EQ(backoff_decision.retry_target, ProviderRetryTarget::NextProvider);
+
+    ProjectProvider provider;
+    ProviderRuntimeState runtime;
+    const ResolvedProviderAttempt attempt{
+            .provider = &provider,
+            .runtime = &runtime,
+    };
+    const auto now = std::chrono::steady_clock::now();
+    apply_provider_error(attempt, dns_decision, now);
+    EXPECT_EQ(runtime.consecutive_failures(), 1u);
+    apply_provider_error(attempt, backoff_decision, now);
+    EXPECT_EQ(runtime.consecutive_failures(), 1u);
+}
+
+TEST(LlmProtocolTest, SelectsNextProviderWithoutTryingItsRemainingTokens) {
+    ProjectProvider primary;
+    ProjectProvider fallback;
+    ProviderRuntimeState primary_runtime;
+    ProviderRuntimeState fallback_runtime;
+    const std::array<ResolvedProviderAttempt, 4> attempts{{
+            {.provider = &primary, .runtime = &primary_runtime},
+            {.provider = &primary, .runtime = &primary_runtime},
+            {.provider = &primary, .runtime = &primary_runtime},
+            {.provider = &fallback, .runtime = &fallback_runtime, .fallback = true},
+    }};
+    const ProviderErrorDecision decision{
+            .scope = ProviderErrorScope::Provider,
+            .retry_target = ProviderRetryTarget::NextProvider,
+    };
+
+    const ProviderRetrySelection selected =
+            select_provider_retry(attempts, 0, decision, false, ProviderRuntimeState::TimePoint{});
+    EXPECT_TRUE(selected.retry_performed);
+    EXPECT_EQ(selected.retry_target, ProviderRetryTarget::NextProvider);
+    EXPECT_EQ(selected.next_index, 3u);
+    EXPECT_EQ(selected.skipped_attempts, 2u);
+
+    const ProviderRetrySelection terminal =
+            select_provider_retry(std::span<const ResolvedProviderAttempt>(attempts.data(), 3), 0, decision, false,
+                                  ProviderRuntimeState::TimePoint{});
+    EXPECT_FALSE(terminal.retry_performed);
+    EXPECT_EQ(terminal.skipped_attempts, 2u);
+}
+
+TEST(LlmProtocolTest, PromotesProviderFailureToNextProviderWhenCircuitOpens) {
+    ProjectProvider primary;
+    ProjectProvider fallback;
+    ProviderRuntimeState primary_runtime;
+    ProviderRuntimeState fallback_runtime;
+    const auto now = std::chrono::steady_clock::now();
+    primary_runtime.mark_provider_unavailable(now, std::chrono::seconds(1));
+    const std::array<ResolvedProviderAttempt, 3> attempts{{
+            {.provider = &primary, .runtime = &primary_runtime},
+            {.provider = &primary, .runtime = &primary_runtime},
+            {.provider = &fallback, .runtime = &fallback_runtime, .fallback = true},
+    }};
+    const ProviderErrorDecision decision{
+            .scope = ProviderErrorScope::Provider,
+            .retry_target = ProviderRetryTarget::NextAttempt,
+    };
+
+    const ProviderRetrySelection selected = select_provider_retry(attempts, 0, decision, false, now);
+    EXPECT_TRUE(selected.retry_performed);
+    EXPECT_EQ(selected.retry_target, ProviderRetryTarget::NextProvider);
+    EXPECT_EQ(selected.next_index, 2u);
+    EXPECT_EQ(selected.skipped_attempts, 1u);
+}
+
+TEST(LlmProtocolTest, KeepsServiceProviderRetriesAtInstanceLevel) {
+    ProjectProvider service_provider;
+    const auto owner = std::make_shared<int>(1);
+    service_provider.service = std::shared_ptr<LoadBalancer>(owner, reinterpret_cast<LoadBalancer *>(owner.get()));
+    ProviderRuntimeState runtime;
+    const std::array<ResolvedProviderAttempt, 2> attempts{{
+            {.provider = &service_provider, .runtime = &runtime},
+            {.provider = &service_provider, .runtime = &runtime},
+    }};
+    runtime.mark_provider_unavailable(std::chrono::steady_clock::now(), std::chrono::seconds(1));
+    const ProviderErrorDecision decision{
+            .scope = ProviderErrorScope::Provider,
+            .retry_target = ProviderRetryTarget::NextAttempt,
+    };
+
+    const ProviderRetrySelection selected =
+            select_provider_retry(attempts, 0, decision, false, std::chrono::steady_clock::now());
+    EXPECT_TRUE(selected.retry_performed);
+    EXPECT_EQ(selected.retry_target, ProviderRetryTarget::NextAttempt);
+    EXPECT_EQ(selected.next_index, 1u);
+    EXPECT_EQ(selected.skipped_attempts, 0u);
 }
 
 } // namespace

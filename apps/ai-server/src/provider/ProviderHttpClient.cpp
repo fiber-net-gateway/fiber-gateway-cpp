@@ -28,14 +28,32 @@ constexpr std::string_view kAuthorizationLowcaseName = "authorization";
 constexpr std::uint64_t kAuthorizationHash = http::http_header_name_hash(kAuthorizationLowcaseName);
 
 ProviderHttpError error(ProviderHttpErrorCode code, common::IoErr io_error, const char *message,
-                        std::uint64_t failed_service_peer_id = 0, ProviderHttpTiming timing = {}) noexcept {
+                        std::uint64_t failed_service_peer_id = 0, ProviderHttpTiming timing = {},
+                        bool dns_backoff_hit = false) noexcept {
     return ProviderHttpError{
             .code = code,
             .io_error = io_error,
             .message = message,
             .failed_service_peer_id = failed_service_peer_id,
+            .dns_backoff_hit = dns_backoff_hit,
             .timing = timing,
     };
+}
+
+ProviderHttpErrorCode http_error_code(ProviderConnectionErrorCode code) noexcept {
+    switch (code) {
+        case ProviderConnectionErrorCode::InvalidEndpoint:
+            return ProviderHttpErrorCode::InvalidEndpoint;
+        case ProviderConnectionErrorCode::NoServiceEndpoint:
+            return ProviderHttpErrorCode::NoServiceEndpoint;
+        case ProviderConnectionErrorCode::Dns:
+            return ProviderHttpErrorCode::Dns;
+        case ProviderConnectionErrorCode::PoolShutdown:
+            return ProviderHttpErrorCode::PoolShutdown;
+        case ProviderConnectionErrorCode::Connect:
+            return ProviderHttpErrorCode::Connect;
+    }
+    return ProviderHttpErrorCode::Connect;
 }
 
 std::chrono::microseconds elapsed(std::chrono::steady_clock::time_point start,
@@ -124,6 +142,36 @@ std::string header_copy(const http::HttpHeaders &headers, std::string_view name)
 
 } // namespace
 
+std::string_view provider_http_error_code_name(ProviderHttpErrorCode code) noexcept {
+    switch (code) {
+        case ProviderHttpErrorCode::InvalidEndpoint:
+            return "invalid_endpoint";
+        case ProviderHttpErrorCode::NoServiceEndpoint:
+            return "no_service_endpoint";
+        case ProviderHttpErrorCode::Dns:
+            return "dns";
+        case ProviderHttpErrorCode::PoolShutdown:
+            return "pool_shutdown";
+        case ProviderHttpErrorCode::Connect:
+            return "connect";
+        case ProviderHttpErrorCode::SendHeader:
+            return "send_header";
+        case ProviderHttpErrorCode::SendBody:
+            return "send_body";
+        case ProviderHttpErrorCode::ReadHeader:
+            return "read_header";
+        case ProviderHttpErrorCode::ReadBody:
+            return "read_body";
+        case ProviderHttpErrorCode::ResponseTooLarge:
+            return "response_too_large";
+        case ProviderHttpErrorCode::InvalidResponse:
+            return "invalid_response";
+        case ProviderHttpErrorCode::Count:
+            break;
+    }
+    return "unknown";
+}
+
 async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> ProviderHttpClient::execute_buffered(
         const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body, mem::BufPool &request_pool,
         std::size_t max_response_bytes, ProviderServiceSelection service_selection,
@@ -180,8 +228,9 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
                           const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
     auto acquired = co_await connections_->acquire(attempt, kConnectTimeout, service_selection);
     if (!acquired) {
-        co_return std::unexpected(error(ProviderHttpErrorCode::Connect, acquired.error().io_error,
-                                        acquired.error().message, acquired.error().failed_service_peer_id));
+        co_return std::unexpected(error(http_error_code(acquired.error().code), acquired.error().io_error,
+                                        acquired.error().message, acquired.error().failed_service_peer_id, {},
+                                        acquired.error().dns_backoff_hit));
     }
     ProviderConnectionLease connection = std::move(*acquired);
 

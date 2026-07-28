@@ -149,6 +149,37 @@ fiber::common::IoResult<std::uint16_t> bound_port(int fd) noexcept {
     return address.port();
 }
 
+int bind_dropping_dns_socket(std::uint16_t &port) noexcept {
+    const int fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        (void) ::close(fd);
+        return -1;
+    }
+    auto resolved_port = bound_port(fd);
+    if (!resolved_port) {
+        (void) ::close(fd);
+        return -1;
+    }
+    port = *resolved_port;
+    return fd;
+}
+
+std::size_t drain_dns_packets(int fd) noexcept {
+    std::size_t count = 0;
+    std::array<std::uint8_t, 512> packet{};
+    while (::recv(fd, packet.data(), packet.size(), MSG_DONTWAIT) >= 0) {
+        ++count;
+    }
+    return count;
+}
+
 std::string consume_chain(fiber::mem::IoBufChain chain) {
     std::string output;
     while (const fiber::mem::IoBuf *part = chain.first_readable()) {
@@ -421,12 +452,15 @@ std::string bearer_token_name(std::string_view authorization) {
 class ProxyFixture {
 public:
     ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies, bool fail_settle,
-                 bool service_rendezvous, std::size_t audit_max_record_bytes, bool enable_cat) :
+                 bool service_rendezvous, std::size_t audit_max_record_bytes, bool enable_cat,
+                 fiber::ai_server::WorkerDnsService::Options dns_options, bool primary_dns_timeout,
+                 bool fallback_enabled) :
         group_(&group), replies_(std::move(replies)), fail_settle_(fail_settle),
         service_rendezvous_(service_rendezvous), audit_max_record_bytes_(audit_max_record_bytes),
-        enable_cat_(enable_cat), rate_limiters_(1), remote_client_(group),
-        coordinator_(rate_limiters_, ring_, remote_client_), connections_(group), provider_client_(connections_),
-        metrics_(group), cat_collector_(group.at(0)),
+        enable_cat_(enable_cat), primary_dns_timeout_(primary_dns_timeout), fallback_enabled_(fallback_enabled),
+        rate_limiters_(1), remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_),
+        connections_(group, std::move(dns_options)), provider_client_(connections_), metrics_(group),
+        cat_collector_(group.at(0)),
         provider_server_(group.at(0),
                          [this](fiber::http::HttpExchange &exchange) { return handle_provider(exchange); }),
         failing_provider_server_(
@@ -701,7 +735,11 @@ private:
         auto primary_config = std::make_shared<ProviderConfigSnapshot>();
         primary_config->metadata.version = 11;
         primary_config->name = "primary";
-        primary_config->base_url = service_rendezvous_ ? "service://mock-provider" : direct_base_url;
+        primary_config->base_url =
+                service_rendezvous_
+                        ? "service://mock-provider"
+                        : (primary_dns_timeout_ ? "http://dns-timeout.invalid:" + std::to_string(provider_port)
+                                                : direct_base_url);
         primary_config->api_tokens = {
                 {.name = "token-a", .token = "token-a"},
                 {.name = "token-b", .token = "token-b"},
@@ -773,9 +811,11 @@ private:
         CompiledModelRoute route;
         route.model_name = "logical";
         route.providers.push_back(primary);
-        route.fallback_provider = fallback;
+        if (fallback_enabled_) {
+            route.fallback_provider = fallback;
+        }
         route.load_balance.max_primary_attempts = 1;
-        route.load_balance.fallback_enabled = true;
+        route.load_balance.fallback_enabled = fallback_enabled_;
         if (service_rendezvous_) {
             route.load_balance.service_instance_policy = ServiceInstancePolicy::WeightedRendezvous;
         }
@@ -951,6 +991,8 @@ private:
     bool service_rendezvous_ = false;
     std::size_t audit_max_record_bytes_ = 0;
     bool enable_cat_ = false;
+    bool primary_dns_timeout_ = false;
+    bool fallback_enabled_ = true;
     std::string rendezvous_route_key_;
     std::unique_ptr<fiber::cat::CatClient> cat_client_;
     fiber::ai_server::TokenRateLimitService rate_limiters_;
@@ -974,7 +1016,8 @@ class FixtureHarness {
 public:
     explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false, bool service_rendezvous = false,
                             std::size_t audit_max_record_bytes = fiber::ai_server::kDefaultLlmAuditMaxRecordBytes,
-                            bool enable_cat = false) {
+                            bool enable_cat = false, fiber::ai_server::WorkerDnsService::Options dns_options = {},
+                            bool primary_dns_timeout = false, bool fallback_enabled = true) {
         fiber::log::LoggerManager::global().shutdown();
         char path[] = "/tmp/fiber-llm-audit-XXXXXX";
         const int fd = ::mkstemp(path);
@@ -1025,7 +1068,8 @@ public:
         }
         logging_started_ = true;
         fixture_ = std::make_unique<ProxyFixture>(group_, std::move(replies), fail_settle, service_rendezvous,
-                                                  audit_max_record_bytes, enable_cat);
+                                                  audit_max_record_bytes, enable_cat, std::move(dns_options),
+                                                  primary_dns_timeout, fallback_enabled);
         group_.start();
         groups_started_ = true;
         std::promise<FixturePorts> promise;
@@ -1170,22 +1214,24 @@ private:
 };
 
 TEST(LlmProxyIntegrationTest, RetriesTransportAuthRateLimitAndFallbackFromOriginalJson) {
-    FixtureHarness fixture({
-            MockReply{.abort_before_header = true},
-            MockReply{
-                    .status = 401,
-                    .body = R"({"error":{"type":"authentication_error","code":"invalid_api_key"}})",
+    FixtureHarness fixture(
+            {
+                    MockReply{.abort_before_header = true},
+                    MockReply{
+                            .status = 401,
+                            .body = R"({"error":{"type":"authentication_error","code":"invalid_api_key"}})",
+                    },
+                    MockReply{
+                            .status = 429,
+                            .body = R"({"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}})",
+                            .retry_after = "120",
+                    },
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"ok","usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}})",
+                    },
             },
-            MockReply{
-                    .status = 429,
-                    .body = R"({"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}})",
-                    .retry_after = "120",
-            },
-            MockReply{
-                    .status = 200,
-                    .body = R"({"id":"ok","usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}})",
-            },
-    });
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
     ASSERT_TRUE(fixture.valid());
     const std::string token = issue_token();
     ASSERT_FALSE(token.empty());
@@ -1215,6 +1261,117 @@ TEST(LlmProxyIntegrationTest, RetriesTransportAuthRateLimitAndFallbackFromOrigin
     EXPECT_NE(auth_failed, rate_limited);
     EXPECT_FALSE(fixture.token_available(auth_failed, 121s));
     EXPECT_TRUE(fixture.token_available(rate_limited, 121s));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.UpstreamError", "upstream_request_error"));
+}
+
+TEST(LlmProxyIntegrationTest, DnsTimeoutSkipsRemainingTokensAndBacksOffRepeatedLookup) {
+    std::uint16_t dns_port = 0;
+    const int dns_fd = bind_dropping_dns_socket(dns_port);
+    ASSERT_GE(dns_fd, 0);
+    ASSERT_NE(dns_port, 0);
+
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"first","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})",
+                    },
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"second","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}})",
+                    },
+            },
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true,
+            fiber::ai_server::WorkerDnsService::Options{
+                    .nameserver = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), dns_port),
+                    .timeout = 20ms,
+                    .transient_failure_ttl = 1s,
+                    .attempts = 1,
+            },
+            true);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse first =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":false,"messages":[]})");
+    ASSERT_EQ(first.system_error, 0);
+    ASSERT_EQ(first.status, 200);
+    EXPECT_NE(first.body.find(R"("id":"first")"), std::string::npos);
+    EXPECT_EQ(drain_dns_packets(dns_fd), 2u);
+
+    const RawHttpResponse second =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":false,"messages":[]})");
+    ASSERT_EQ(second.system_error, 0);
+    ASSERT_EQ(second.status, 200);
+    EXPECT_NE(second.body.find(R"("id":"second")"), std::string::npos);
+    EXPECT_EQ(drain_dns_packets(dns_fd), 0u);
+
+    const auto observed = fixture.observed();
+    ASSERT_EQ(observed.size(), 2u);
+    EXPECT_EQ(bearer_token_name(observed[0].authorization), "token-f");
+    EXPECT_EQ(bearer_token_name(observed[1].authorization), "token-f");
+    EXPECT_NE(observed[0].body.find("upstream-fallback"), std::string::npos);
+    EXPECT_NE(observed[1].body.find("upstream-fallback"), std::string::npos);
+
+    ASSERT_TRUE(fixture.wait_for_audit_records(2));
+    const std::string audit = fixture.audit_contents();
+    EXPECT_NE(audit.find(R"("schema_version":4)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("failure_phase":"dns")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("io_error":"timed_out")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("failure_source":"io")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("failure_source":"dns_backoff")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("retry_target":"next_provider")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("retry_performed":true,"skipped_attempts":2)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("provider_attempt_count":2,"provider_attempt_skipped_count":2)"), std::string::npos);
+    EXPECT_TRUE(fixture.wait_for_cat_frame("failure_phase=dns", "failure_source=io"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("failure_phase=dns", "failure_source=dns_backoff"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("retry_target=next_provider", "skipped_attempts=2"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.UpstreamError", "upstream_dns_error"));
+
+    auto metrics = fixture.settlement_metrics();
+    ASSERT_TRUE(metrics);
+    EXPECT_NE(metrics->find("ai_server_provider_transport_failures_total{protocol=\"openai\",phase=\"dns\"} 2"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_provider_attempts_skipped_total{protocol=\"openai\"} 4"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_dns_backoff_hits_total{protocol=\"openai\"} 1"), std::string::npos);
+    (void) ::close(dns_fd);
+}
+
+TEST(LlmProxyIntegrationTest, DnsTimeoutWithoutFallbackReturnsCurrentTransportError) {
+    std::uint16_t dns_port = 0;
+    const int dns_fd = bind_dropping_dns_socket(dns_port);
+    ASSERT_GE(dns_fd, 0);
+    ASSERT_NE(dns_port, 0);
+
+    FixtureHarness fixture(
+            {}, false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, false,
+            fiber::ai_server::WorkerDnsService::Options{
+                    .nameserver = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), dns_port),
+                    .timeout = 20ms,
+                    .transient_failure_ttl = 1s,
+                    .attempts = 1,
+            },
+            true, false);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse response =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":false,"messages":[]})");
+    ASSERT_EQ(response.system_error, 0);
+    EXPECT_EQ(response.status, 502);
+    EXPECT_NE(response.body.find("provider_transport_error"), std::string::npos);
+    EXPECT_TRUE(fixture.observed().empty());
+    EXPECT_EQ(drain_dns_packets(dns_fd), 2u);
+
+    ASSERT_TRUE(fixture.wait_for_audit_records(1));
+    const std::string audit = fixture.audit_contents();
+    EXPECT_NE(audit.find(R"("failure_phase":"dns")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("retry_target":"next_provider","retryable":true,"retry_performed":false)"),
+              std::string::npos);
+    EXPECT_NE(audit.find(R"("provider_attempt_count":1,"provider_attempt_skipped_count":2)"), std::string::npos);
+    (void) ::close(dns_fd);
 }
 
 TEST(LlmProxyIntegrationTest, PropagatesCatContextToRemoteLimiterAndEveryProviderAttempt) {
@@ -1377,9 +1534,14 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
     EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/messages:logical", "stream=true"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/message:logical", "stream=false"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "time_to_response_header_us="));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "failure_phase=none"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "retry_target=none"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "retry_performed=false"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "skipped_attempts=0"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("upstream_model=upstream-anthropic-primary", "time_to_first_token_us="));
     EXPECT_FALSE(fixture.cat_frame_contains("upstream_model=upstream-primary", "time_to_first_token_us="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "body_transfer_us="));
+    EXPECT_FALSE(fixture.cat_frame_contains("LLM.UpstreamError"));
 }
 
 TEST(LlmProxyIntegrationTest, CatProviderTransactionOmitsFirstTokenAndBodyTransferForEmptyResponse) {
@@ -1777,7 +1939,7 @@ TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
     EXPECT_NE(audit_json.find("weather is sunny"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"(\"city\":\"Paris\")"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"("provider_attempts":[{)"), std::string_view::npos);
-    EXPECT_NE(audit_json.find(R"("schema_version":3)"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("schema_version":4)"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"("request_model_name":"logical","stream":false,"messages_count":2,"tools_count":1)"),
               std::string_view::npos);
     EXPECT_NE(audit_json.find(R"("body_encoding":"json_text","body":"{)"), std::string_view::npos);

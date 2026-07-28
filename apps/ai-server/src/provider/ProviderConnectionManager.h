@@ -39,6 +39,7 @@ struct ProviderConnectionError {
     common::IoErr io_error = common::IoErr::None;
     const char *message = nullptr;
     std::uint64_t failed_service_peer_id = 0;
+    bool dns_backoff_hit = false;
 };
 
 struct ProviderServiceSelection {
@@ -73,6 +74,7 @@ struct ProviderConnectionLease {
 class ProviderConnectionManager final : public common::NonCopyable, public common::NonMovable {
 public:
     explicit ProviderConnectionManager(event::EventLoopGroup &workers) noexcept;
+    ProviderConnectionManager(event::EventLoopGroup &workers, WorkerDnsService::Options dns_options) noexcept;
     ~ProviderConnectionManager();
 
     [[nodiscard]] async::Task<bool> init() noexcept;

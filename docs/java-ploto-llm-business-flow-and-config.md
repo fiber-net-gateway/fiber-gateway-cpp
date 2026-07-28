@@ -607,6 +607,11 @@ Anthropic Provider 当前也使用 Bearer 认证，不会自动发送原生 Anth
 
 401、403、429 以及响应体中可识别的额度错误被视为 API token 级错误。只要响应尚未开始，它们会触发下一 token/Provider 尝试；其中 401 和 403 即使没有出现在 `retryable-status` 中也会重试。
 
+C++ ai-server 在 DNS 失败上有一处有意的可靠性差异：DNS 属于 Provider hostname
+级故障，不会按 Java 的通用异常规则逐个尝试同一 Provider 的剩余 token，而是直接
+跳到下一 Provider。`TimedOut` 还会进入默认 2 秒的进程级短暂抑制缓存，避免一个
+DNS 慢窗口被请求内 token 数和并发请求继续放大。401/403/429 的 token 轮换语义不变。
+
 ### 8.3 token 暂时摘除
 
 | 上游结果 | 默认摘除时间 | 范围 |

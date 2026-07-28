@@ -21,6 +21,10 @@ namespace {
 constexpr std::size_t kMaxMetricsOutputBytes = 16 * 1024 * 1024;
 constexpr std::array<std::string_view, 2> kProtocolNames{"openai", "anthropic"};
 constexpr std::array<std::string_view, 3> kTokenTypes{"in_cache", "in_nocache", "out"};
+constexpr std::array<std::string_view, static_cast<std::size_t>(ProviderHttpErrorCode::Count)> kFailurePhases{
+        "invalid_endpoint", "no_service_endpoint", "dns",       "pool_shutdown",      "connect",          "send_header",
+        "send_body",        "read_header",         "read_body", "response_too_large", "invalid_response",
+};
 constexpr std::string_view kUserTokenUsageMetric = "ai_server_user_token_usage_total";
 constexpr std::string_view kProviderTokenUsageMetric = "ai_server_provider_token_usage_total";
 constexpr std::size_t kMetricsChunkBytes = 4 * 1024;
@@ -316,6 +320,22 @@ void AiServerMetrics::Worker::provider_retry(LlmWireProtocol protocol) noexcept 
     provider_retries_[protocol_index(protocol)].inc();
 }
 
+void AiServerMetrics::Worker::provider_transport_failure(LlmWireProtocol protocol,
+                                                         ProviderHttpErrorCode phase) noexcept {
+    const std::size_t phase_index = static_cast<std::size_t>(phase);
+    if (phase_index < static_cast<std::size_t>(ProviderHttpErrorCode::Count)) {
+        provider_transport_failures_[protocol_index(protocol)][phase_index].inc();
+    }
+}
+
+void AiServerMetrics::Worker::provider_attempts_skipped(LlmWireProtocol protocol, std::size_t count) noexcept {
+    provider_attempts_skipped_[protocol_index(protocol)].add(count);
+}
+
+void AiServerMetrics::Worker::dns_backoff_hit(LlmWireProtocol protocol) noexcept {
+    dns_backoff_hits_[protocol_index(protocol)].inc();
+}
+
 void AiServerMetrics::Worker::provider_circuit_open(LlmWireProtocol protocol) noexcept {
     provider_circuit_opens_[protocol_index(protocol)].inc();
 }
@@ -358,6 +378,7 @@ AiServerMetrics::~AiServerMetrics() { FIBER_ASSERT(!valid_ || collecting_stopped
 bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     constexpr std::array<std::string_view, 1> kProtocolLabel{"protocol"};
     constexpr std::array<std::string_view, 2> kRequestLabels{"protocol", "result"};
+    constexpr std::array<std::string_view, 2> kTransportFailureLabels{"protocol", "phase"};
     constexpr std::array<std::string_view, 2> kSseDrainLabels{"protocol", "result"};
     constexpr std::array<std::string_view, 1> kResultLabel{"result"};
     constexpr std::array<std::string_view, 4> kRequestResults{"success", "client_error", "server_error", "canceled"};
@@ -381,6 +402,14 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                                                         "Failed Provider attempts.", kProtocolLabel);
     auto provider_retries = registry_.register_counter("ai_server_provider_retries_total", "Retried Provider attempts.",
                                                        kProtocolLabel);
+    auto provider_transport_failures =
+            registry_.register_counter("ai_server_provider_transport_failures_total",
+                                       "Provider transport failures by phase.", kTransportFailureLabels);
+    auto provider_attempts_skipped = registry_.register_counter(
+            "ai_server_provider_attempts_skipped_total", "Provider attempts skipped by retry pruning.", kProtocolLabel);
+    auto dns_backoff_hits =
+            registry_.register_counter("ai_server_dns_backoff_hits_total",
+                                       "Provider DNS lookups suppressed by transient timeout backoff.", kProtocolLabel);
     auto provider_circuit_opens = registry_.register_counter("ai_server_provider_circuit_opens_total",
                                                              "Provider circuit breaker openings.", kProtocolLabel);
     auto rate_checks = registry_.register_counter("ai_server_rate_limit_checks_total",
@@ -398,7 +427,8 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto audit_capture_incomplete = registry_.register_counter(
             "ai_server_audit_capture_incomplete_total", "LLM audit records with incomplete request observations.");
     if (!requests || !duration || !inflight || !provider_attempts || !provider_failures || !provider_retries ||
-        !provider_circuit_opens || !rate_checks || !rate_settles || !sse_failures || !sse_drains || !audit_generated ||
+        !provider_transport_failures || !provider_attempts_skipped || !dns_backoff_hits || !provider_circuit_opens ||
+        !rate_checks || !rate_settles || !sse_failures || !sse_drains || !audit_generated ||
         !audit_generation_failures || !audit_capture_incomplete) {
         return false;
     }
@@ -416,6 +446,9 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     std::array<prometheus::SeriesId, 2> attempt_series;
     std::array<prometheus::SeriesId, 2> failure_series;
     std::array<prometheus::SeriesId, 2> retry_series;
+    std::array<std::array<prometheus::SeriesId, kFailurePhases.size()>, 2> transport_failure_series;
+    std::array<prometheus::SeriesId, 2> attempts_skipped_series;
+    std::array<prometheus::SeriesId, 2> dns_backoff_hit_series;
     std::array<prometheus::SeriesId, 2> circuit_open_series;
     std::array<prometheus::SeriesId, 2> sse_series;
     std::array<std::array<prometheus::SeriesId, 3>, 2> sse_drain_series;
@@ -442,12 +475,26 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                                                     std::array<std::string_view, 1>{kProtocolNames[protocol]});
         auto retry_id =
                 registry_.register_series(*provider_retries, std::array<std::string_view, 1>{kProtocolNames[protocol]});
+        auto attempts_skipped_id = registry_.register_series(*provider_attempts_skipped,
+                                                             std::array<std::string_view, 1>{kProtocolNames[protocol]});
+        auto dns_backoff_hit_id =
+                registry_.register_series(*dns_backoff_hits, std::array<std::string_view, 1>{kProtocolNames[protocol]});
         auto circuit_open_id = registry_.register_series(*provider_circuit_opens,
                                                          std::array<std::string_view, 1>{kProtocolNames[protocol]});
         auto sse_id =
                 registry_.register_series(*sse_failures, std::array<std::string_view, 1>{kProtocolNames[protocol]});
-        if (!duration_id || !inflight_id || !attempt_id || !failure_id || !retry_id || !circuit_open_id || !sse_id) {
+        if (!duration_id || !inflight_id || !attempt_id || !failure_id || !retry_id || !attempts_skipped_id ||
+            !dns_backoff_hit_id || !circuit_open_id || !sse_id) {
             return false;
+        }
+        for (std::size_t phase = 0; phase < kFailurePhases.size(); ++phase) {
+            auto transport_failure_id = registry_.register_series(
+                    *provider_transport_failures,
+                    std::array<std::string_view, 2>{kProtocolNames[protocol], kFailurePhases[phase]});
+            if (!transport_failure_id) {
+                return false;
+            }
+            transport_failure_series[protocol][phase] = *transport_failure_id;
         }
         for (std::size_t result = 0; result < kSseDrainResults.size(); ++result) {
             auto drain_id = registry_.register_series(
@@ -462,6 +509,8 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
         attempt_series[protocol] = *attempt_id;
         failure_series[protocol] = *failure_id;
         retry_series[protocol] = *retry_id;
+        attempts_skipped_series[protocol] = *attempts_skipped_id;
+        dns_backoff_hit_series[protocol] = *dns_backoff_hit_id;
         circuit_open_series[protocol] = *circuit_open_id;
         sse_series[protocol] = *sse_id;
     }
@@ -523,10 +572,12 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             auto attempt_value = shard->counter(attempt_series[protocol]);
             auto failure_value = shard->counter(failure_series[protocol]);
             auto retry_value = shard->counter(retry_series[protocol]);
+            auto attempts_skipped_value = shard->counter(attempts_skipped_series[protocol]);
+            auto dns_backoff_hit_value = shard->counter(dns_backoff_hit_series[protocol]);
             auto circuit_open_value = shard->counter(circuit_open_series[protocol]);
             auto sse_value = shard->counter(sse_series[protocol]);
             if (!duration_value || !inflight_value || !attempt_value || !failure_value || !retry_value ||
-                !circuit_open_value || !sse_value) {
+                !attempts_skipped_value || !dns_backoff_hit_value || !circuit_open_value || !sse_value) {
                 return false;
             }
             worker.request_duration_[protocol] = *duration_value;
@@ -534,7 +585,16 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             worker.provider_attempts_[protocol] = *attempt_value;
             worker.provider_failures_[protocol] = *failure_value;
             worker.provider_retries_[protocol] = *retry_value;
+            worker.provider_attempts_skipped_[protocol] = *attempts_skipped_value;
+            worker.dns_backoff_hits_[protocol] = *dns_backoff_hit_value;
             worker.provider_circuit_opens_[protocol] = *circuit_open_value;
+            for (std::size_t phase = 0; phase < kFailurePhases.size(); ++phase) {
+                auto transport_failure_value = shard->counter(transport_failure_series[protocol][phase]);
+                if (!transport_failure_value) {
+                    return false;
+                }
+                worker.provider_transport_failures_[protocol][phase] = *transport_failure_value;
+            }
             worker.sse_failures_[protocol] = *sse_value;
             for (std::size_t result = 0; result < kSseDrainResults.size(); ++result) {
                 auto drain_value = shard->counter(sse_drain_series[protocol][result]);
