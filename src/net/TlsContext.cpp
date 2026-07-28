@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unistd.h>
 
 #include <openssl/ssl.h>
 #include <openssl/tls1.h>
@@ -39,9 +42,19 @@ common::IoResult<void> configure_common_context(SSL_CTX *ctx, const TlsOptions &
             SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
         }
     } else if (options.verify_peer) {
-        const int trust_loaded = options.ca_file.empty()
-                                         ? SSL_CTX_set_default_verify_paths(ctx)
-                                         : SSL_CTX_load_verify_locations(ctx, options.ca_file.c_str(), nullptr);
+        // When no explicit ca_file is configured, prefer a probed system CA
+        // bundle. BoringSSL's SSL_CTX_set_default_verify_paths only consults
+        // SSL_CERT_FILE/SSL_CERT_DIR or the hardcoded /etc/ssl default, which
+        // misses the bundle on RHEL-like and minimal hosts and leaves the trust
+        // store empty (every cert verification fails -> handshake aborts).
+        int trust_loaded;
+        if (!options.ca_file.empty()) {
+            trust_loaded = SSL_CTX_load_verify_locations(ctx, options.ca_file.c_str(), nullptr);
+        } else {
+            const std::string &system_ca = TlsContext::system_ca_bundle_path();
+            trust_loaded = !system_ca.empty() ? SSL_CTX_load_verify_locations(ctx, system_ca.c_str(), nullptr)
+                                              : SSL_CTX_set_default_verify_paths(ctx);
+        }
         if (trust_loaded != 1) {
             return std::unexpected(common::IoErr::Invalid);
         }
@@ -163,6 +176,34 @@ TlsContext::~TlsContext() {
         SSL_CTX_free(ctx_);
         ctx_ = nullptr;
     }
+}
+
+const std::string &TlsContext::system_ca_bundle_path() noexcept {
+    // Probed once per process; the cached std::string is stable for the program
+    // lifetime, so returning a reference is safe. Allocation happens at most once
+    // and OOM is fatal per the codebase convention (noexcept + terminate).
+    static const std::string cached = []() -> std::string {
+        if (const char *env = std::getenv("SSL_CERT_FILE")) {
+            if (env[0] != '\0' && ::access(env, R_OK) == 0) {
+                return std::string(env);
+            }
+        }
+        static constexpr const char *kCandidates[] = {
+                "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu
+                "/etc/pki/tls/cert.pem", // RHEL/CentOS/Fedora
+                "/etc/ssl/certs/ca-bundle.crt", // older RHEL
+                "/etc/ssl/cert.pem", // Alpine
+                "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
+                "/etc/openssl/certs/ca-certificates.crt", // OpenBSD
+        };
+        for (const char *candidate: kCandidates) {
+            if (::access(candidate, R_OK) == 0) {
+                return std::string(candidate);
+            }
+        }
+        return {};
+    }();
+    return cached;
 }
 
 common::IoResult<void> TlsContext::init() {
