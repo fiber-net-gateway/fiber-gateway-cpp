@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <async/Sleep.h>
 #include <async/Spawn.h>
 #include <common/Assert.h>
 #include <common/IoError.h>
@@ -90,6 +91,8 @@ struct MockReply {
     bool stream = false;
     bool abort_before_header = false;
     bool abort_after_chunks = false;
+    bool pause_before_header = false;
+    std::size_t pause_after_chunks = 0;
 };
 
 struct ObservedProviderRequest {
@@ -326,6 +329,71 @@ RawHttpResponse post_json(std::uint16_t port, std::string_view token, std::strin
     return future.get();
 }
 
+int open_json_request(std::uint16_t port, std::string_view token, std::string_view body) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    timeval timeout{
+            .tv_sec = 5,
+            .tv_usec = 0,
+    };
+    (void) ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void) ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    sockaddr_in address{
+            .sin_family = AF_INET,
+            .sin_port = htons(port),
+            .sin_addr = {.s_addr = htonl(INADDR_LOOPBACK)},
+    };
+    if (::connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        (void) ::close(fd);
+        return -1;
+    }
+
+    std::string request = "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                          "Content-Type: application/json\r\nAuthorization: Bearer ";
+    request.append(token);
+    request.append("\r\nContent-Length: ");
+    request.append(std::to_string(body.size()));
+    request.append("\r\n\r\n");
+    request.append(body);
+    std::size_t sent = 0;
+    while (sent < request.size()) {
+        const ssize_t written = ::send(fd, request.data() + sent, request.size() - sent, MSG_NOSIGNAL);
+        if (written <= 0) {
+            (void) ::close(fd);
+            return -1;
+        }
+        sent += static_cast<std::size_t>(written);
+    }
+    return fd;
+}
+
+bool wait_for_socket_text(int fd, std::string_view expected, std::string &received) {
+    std::array<char, 4096> buffer{};
+    while (received.find(expected) == std::string::npos) {
+        const ssize_t read = ::recv(fd, buffer.data(), buffer.size(), 0);
+        if (read <= 0) {
+            return false;
+        }
+        received.append(buffer.data(), static_cast<std::size_t>(read));
+    }
+    return true;
+}
+
+void reset_http_client(int fd) noexcept {
+    if (fd < 0) {
+        return;
+    }
+    linger reset{
+            .l_onoff = 1,
+            .l_linger = 0,
+    };
+    (void) ::setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset));
+    (void) ::close(fd);
+}
+
 std::string bearer_token_name(std::string_view authorization) {
     constexpr std::string_view prefix = "Bearer ";
     return authorization.starts_with(prefix) ? std::string(authorization.substr(prefix.size())) : std::string{};
@@ -416,6 +484,7 @@ public:
     }
 
     fiber::async::DetachedTask shutdown(std::promise<void> *promise) noexcept {
+        release_provider();
         provider_server_.close();
         if (service_rendezvous_) {
             failing_provider_server_.close();
@@ -477,9 +546,20 @@ public:
     [[nodiscard]] int failing_provider_calls() const noexcept {
         return failing_provider_calls_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool provider_paused() const noexcept {
+        return provider_pause_reached_.load(std::memory_order_acquire);
+    }
+    void release_provider() noexcept { provider_pause_released_.store(true, std::memory_order_release); }
     [[nodiscard]] std::string_view rendezvous_route_key() const noexcept { return rendezvous_route_key_; }
 
 private:
+    fiber::async::Task<void> pause_provider() noexcept {
+        provider_pause_reached_.store(true, std::memory_order_release);
+        while (!provider_pause_released_.load(std::memory_order_acquire)) {
+            co_await fiber::async::sleep(1ms);
+        }
+    }
+
     bool start_cat() noexcept {
         fiber::cat::CatClientConfigParams params{
                 .app_key = "ai-server-test",
@@ -659,6 +739,9 @@ private:
             (void) exchange.abort(fiber::common::IoErr::Canceled);
             co_return;
         }
+        if (reply.pause_before_header) {
+            co_await pause_provider();
+        }
 
         fiber::http::HttpHeaders headers(exchange.pool());
         headers.set("Content-Type", reply.content_type);
@@ -693,6 +776,9 @@ private:
                                                         chunk.size(), end);
             if (!written) {
                 co_return;
+            }
+            if (reply.pause_after_chunks == i + 1) {
+                co_await pause_provider();
             }
         }
         if (reply.abort_after_chunks) {
@@ -765,6 +851,8 @@ private:
     std::atomic<int> entry_calls_{0};
     std::atomic<int> completed_entry_calls_{0};
     std::atomic<int> failing_provider_calls_{0};
+    std::atomic<bool> provider_pause_reached_{false};
+    std::atomic<bool> provider_pause_released_{false};
     bool fail_settle_ = false;
     bool service_rendezvous_ = false;
     std::size_t audit_max_record_bytes_ = 0;
@@ -854,6 +942,7 @@ public:
 
     ~FixtureHarness() {
         if (groups_started_) {
+            fixture_->release_provider();
             std::promise<void> promise;
             auto future = promise.get_future();
             fiber::async::spawn(group_.at(0), [this, &promise]() { return fixture_->shutdown(&promise); });
@@ -895,6 +984,28 @@ public:
     [[nodiscard]] int completed_entry_calls() const noexcept { return fixture_->completed_entry_calls(); }
     [[nodiscard]] int failing_provider_calls() const noexcept { return fixture_->failing_provider_calls(); }
     [[nodiscard]] std::string rendezvous_route_key() const { return std::string(fixture_->rendezvous_route_key()); }
+
+    [[nodiscard]] bool wait_for_provider_pause() const noexcept {
+        for (std::size_t i = 0; i < 5000; ++i) {
+            if (fixture_->provider_paused()) {
+                return true;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        return false;
+    }
+
+    void release_provider() noexcept { fixture_->release_provider(); }
+
+    [[nodiscard]] bool wait_for_completed_entry_calls(int count) const noexcept {
+        for (std::size_t i = 0; i < 5000; ++i) {
+            if (fixture_->completed_entry_calls() >= count) {
+                return true;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        return false;
+    }
 
     [[nodiscard]] bool wait_for_audit_records(std::uint64_t count) const noexcept {
         for (std::size_t i = 0; i < 5000; ++i) {
@@ -1152,6 +1263,209 @@ TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterRespons
     EXPECT_EQ(truncated.trace_id, "sse-truncated-root");
     EXPECT_EQ(truncated.body.find("data: [DONE]"), std::string::npos);
     EXPECT_EQ(fixture.observed().size(), 2u);
+}
+
+TEST(LlmProxyIntegrationTest, DrainsSseUsageAfterClientDisconnectAndDoesNotRetry) {
+    constexpr std::string_view first_event = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
+    // Fill one relay read budget so the first event reaches the client before the mock Provider pauses.
+    std::string first_chunk = ":";
+    first_chunk.append(64 * 1024 - first_event.size() - 2, 'x');
+    first_chunk.push_back('\n');
+    first_chunk.append(first_event);
+    FixtureHarness fixture({
+            MockReply{
+                    .status = 200,
+                    .content_type = "text/event-stream",
+                    .chunks =
+                            {
+                                    std::move(first_chunk),
+                                    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,"
+                                    "\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n",
+                            },
+                    .stream = true,
+                    .pause_after_chunks = 1,
+            },
+            MockReply{
+                    .status = 200,
+                    .content_type = "text/event-stream",
+                    .chunks = {"data: {\"choices\":[]}\n\n"},
+                    .stream = true,
+            },
+    });
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+    constexpr std::string_view request =
+            R"({"model":"logical","stream":true,"messages":[{"role":"user","content":"hello"}]})";
+
+    const int client = open_json_request(fixture.entry_port(), token, request);
+    ASSERT_GE(client, 0);
+    if (!fixture.wait_for_provider_pause()) {
+        reset_http_client(client);
+        FAIL() << "Provider did not pause after the first SSE chunk";
+    }
+    std::string received;
+    if (!wait_for_socket_text(client, first_event, received)) {
+        reset_http_client(client);
+        FAIL() << "did not receive the first SSE event: " << received;
+    }
+    reset_http_client(client);
+    std::this_thread::sleep_for(20ms);
+    fixture.release_provider();
+
+    ASSERT_TRUE(fixture.wait_for_completed_entry_calls(1));
+    ASSERT_TRUE(fixture.wait_for_rate_limit_requests(2));
+    ASSERT_TRUE(fixture.wait_for_audit_records(1));
+    EXPECT_EQ(fixture.observed().size(), 1u);
+
+    auto metrics = fixture.settlement_metrics();
+    ASSERT_TRUE(metrics);
+    EXPECT_NE(metrics->find("ai_server_provider_attempts_total{protocol=\"openai\"} 1"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_provider_retries_total{protocol=\"openai\"} 0"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_sse_drains_total{protocol=\"openai\",result=\"completed\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_rate_limit_settlements_total{result=\"usage\"} 1"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"in_nocache\"} 2"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"out\"} 3"),
+              std::string::npos);
+
+    const std::string audit = fixture.audit_contents();
+    EXPECT_NE(audit.find(R"("provider_attempt_count":1)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("response_started":true,"outcome":"success")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("complete":true,"canonical_complete":true)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("completed":false)"), std::string::npos);
+    EXPECT_EQ(audit.find(R"("terminal_error":"none")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("usage":{"provider":"openai","in_cache":0,"in_nocache":2,"out":3,"total_tokens":5})"),
+              std::string::npos);
+}
+
+TEST(LlmProxyIntegrationTest, DoesNotRetryWhenUpstreamFailsWhileDrainingAfterClientDisconnect) {
+    constexpr std::string_view first_event = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
+    // Fill one relay read budget so the first event reaches the client before the mock Provider pauses.
+    std::string first_chunk = ":";
+    first_chunk.append(64 * 1024 - first_event.size() - 2, 'x');
+    first_chunk.push_back('\n');
+    first_chunk.append(first_event);
+    std::string drain_chunk = ":";
+    drain_chunk.append(64 * 1024 - 2, 'y');
+    drain_chunk.push_back('\n');
+    FixtureHarness fixture({
+            MockReply{
+                    .status = 200,
+                    .content_type = "text/event-stream",
+                    .chunks = {std::move(first_chunk), std::move(drain_chunk)},
+                    .stream = true,
+                    .abort_after_chunks = true,
+                    .pause_after_chunks = 1,
+            },
+            MockReply{
+                    .status = 200,
+                    .content_type = "text/event-stream",
+                    .chunks = {"data: {\"choices\":[]}\n\n"},
+                    .stream = true,
+            },
+    });
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+    constexpr std::string_view request =
+            R"({"model":"logical","stream":true,"messages":[{"role":"user","content":"hello"}]})";
+
+    const int client = open_json_request(fixture.entry_port(), token, request);
+    ASSERT_GE(client, 0);
+    if (!fixture.wait_for_provider_pause()) {
+        reset_http_client(client);
+        FAIL() << "Provider did not pause after the first SSE chunk";
+    }
+    std::string received;
+    if (!wait_for_socket_text(client, first_event, received)) {
+        reset_http_client(client);
+        FAIL() << "did not receive the first SSE event: " << received;
+    }
+    reset_http_client(client);
+    std::this_thread::sleep_for(20ms);
+    fixture.release_provider();
+
+    ASSERT_TRUE(fixture.wait_for_completed_entry_calls(1));
+    ASSERT_TRUE(fixture.wait_for_rate_limit_requests(2));
+    ASSERT_TRUE(fixture.wait_for_audit_records(1));
+    EXPECT_EQ(fixture.observed().size(), 1u);
+
+    auto metrics = fixture.settlement_metrics();
+    ASSERT_TRUE(metrics);
+    EXPECT_NE(metrics->find("ai_server_provider_attempts_total{protocol=\"openai\"} 1"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_provider_retries_total{protocol=\"openai\"} 0"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_provider_failures_total{protocol=\"openai\"} 1"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_sse_drains_total{protocol=\"openai\",result=\"upstream_error\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_rate_limit_settlements_total{result=\"no_usage\"} 1"), std::string::npos);
+
+    const std::string audit = fixture.audit_contents();
+    EXPECT_NE(audit.find(R"("provider_attempt_count":1)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("response_started":true,"outcome":"stream_error")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("complete":false,"canonical_complete":false)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("completed":false)"), std::string::npos);
+}
+
+TEST(LlmProxyIntegrationTest, DrainsSseWhenClientDisconnectsBeforeResponseHeader) {
+    FixtureHarness fixture({
+            MockReply{
+                    .status = 200,
+                    .content_type = "text/event-stream",
+                    .chunks =
+                            {
+                                    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,"
+                                    "\"completion_tokens\":6,\"total_tokens\":10}}\n\ndata: [DONE]\n\n",
+                            },
+                    .stream = true,
+                    .pause_before_header = true,
+            },
+            MockReply{
+                    .status = 200,
+                    .content_type = "text/event-stream",
+                    .chunks = {"data: {\"choices\":[]}\n\n"},
+                    .stream = true,
+            },
+    });
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+    constexpr std::string_view request =
+            R"({"model":"logical","stream":true,"messages":[{"role":"user","content":"hello"}]})";
+
+    const int client = open_json_request(fixture.entry_port(), token, request);
+    ASSERT_GE(client, 0);
+    if (!fixture.wait_for_provider_pause()) {
+        reset_http_client(client);
+        FAIL() << "Provider did not pause before the response header";
+    }
+    reset_http_client(client);
+    std::this_thread::sleep_for(20ms);
+    fixture.release_provider();
+
+    ASSERT_TRUE(fixture.wait_for_completed_entry_calls(1));
+    ASSERT_TRUE(fixture.wait_for_rate_limit_requests(2));
+    ASSERT_TRUE(fixture.wait_for_audit_records(1));
+    EXPECT_EQ(fixture.observed().size(), 1u);
+
+    auto metrics = fixture.settlement_metrics();
+    ASSERT_TRUE(metrics);
+    EXPECT_NE(metrics->find("ai_server_provider_attempts_total{protocol=\"openai\"} 1"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_provider_retries_total{protocol=\"openai\"} 0"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_sse_drains_total{protocol=\"openai\",result=\"completed\"} 1"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_rate_limit_settlements_total{result=\"usage\"} 1"), std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"in_nocache\"} 4"),
+              std::string::npos);
+    EXPECT_NE(metrics->find("ai_server_user_token_usage_total{username=\"alice\",token_type=\"out\"} 6"),
+              std::string::npos);
+
+    const std::string audit = fixture.audit_contents();
+    EXPECT_NE(audit.find(R"("provider_attempt_count":1)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("response_started":false,"outcome":"success")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("header_sent":false,"completed":false)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("total_tokens":10)"), std::string::npos);
 }
 
 TEST(LlmProxyIntegrationTest, SettlementFailureDoesNotChangeProviderResponse) {
