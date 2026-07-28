@@ -299,7 +299,11 @@ private:
             dto::req::ConnectResetRequest reset;
             reset.request_id.set_present("reset-1");
             reset.server_ip.set_present("127.0.0.1");
-            reset.server_port.set_present(std::to_string(port_));
+            // server_port is Nullable<string_view> (non-owning); keep the text
+            // alive across encode_payload, otherwise the std::to_string temporary
+            // dangles and the encoded JSON contains garbage (use-after-free).
+            std::string server_port_text = std::to_string(port_);
+            reset.server_port.set_present(server_port_text);
             auto reset_payload = nacos_detail::encode_payload(reset, server_metadata(), 1024 * 1024);
             if (!reset_payload || !(co_await send_payload(exchange, *reset_payload))) {
                 co_return;
