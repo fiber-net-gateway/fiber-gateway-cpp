@@ -23,6 +23,7 @@
 
 #include <async/Sleep.h>
 #include <async/Spawn.h>
+#include <async/WaitGroup.h>
 #include <common/Assert.h>
 #include <common/IoError.h>
 #include <common/json/JsonParse.h>
@@ -39,6 +40,8 @@
 #include <http/HttpHeaders.h>
 #include <log/LoggerManager.h>
 #include <net/SocketAddress.h>
+#include <net/TcpListener.h>
+#include <net/TcpStream.h>
 
 #include "AiServerLogging.h"
 #include "config/LlmConfigSnapshot.h"
@@ -169,6 +172,22 @@ fiber::async::Task<fiber::common::IoResult<std::string>> read_body(fiber::http::
         }
     }
     co_return output;
+}
+
+fiber::async::Task<fiber::common::IoResult<void>> read_exact_bytes(fiber::net::TcpStream &stream, std::uint8_t *data,
+                                                                   std::size_t size) noexcept {
+    std::size_t offset = 0;
+    while (offset < size) {
+        auto read = co_await stream.read(data + offset, size - offset, 30s);
+        if (!read) {
+            co_return std::unexpected(read.error());
+        }
+        if (*read == 0) {
+            co_return std::unexpected(fiber::common::IoErr::NotConnected);
+        }
+        offset += *read;
+    }
+    co_return fiber::common::IoResult<void>{};
 }
 
 std::string base64url_encode(std::string_view bytes) {
@@ -407,7 +426,7 @@ public:
         service_rendezvous_(service_rendezvous), audit_max_record_bytes_(audit_max_record_bytes),
         enable_cat_(enable_cat), rate_limiters_(1), remote_client_(group),
         coordinator_(rate_limiters_, ring_, remote_client_), connections_(group), provider_client_(connections_),
-        metrics_(group),
+        metrics_(group), cat_collector_(group.at(0)),
         provider_server_(group.at(0),
                          [this](fiber::http::HttpExchange &exchange) { return handle_provider(exchange); }),
         failing_provider_server_(
@@ -504,6 +523,8 @@ public:
             (void) co_await cat_client_->detach_current_event_loop();
             co_await cat_client_->shutdown();
         }
+        cat_collector_.close();
+        co_await cat_collector_tasks_.join();
         metrics_.stop_collecting();
         co_await metrics_.wait_for_idle();
         promise->set_value();
@@ -539,6 +560,20 @@ public:
         return observed_rate_limits_;
     }
 
+    [[nodiscard]] bool cat_frame_contains(std::string_view first, std::string_view second = {}) const {
+        std::lock_guard lock(mutex_);
+        for (const auto &frame: cat_frames_) {
+            const bool contains_first =
+                    std::search(frame.begin(), frame.end(), first.begin(), first.end()) != frame.end();
+            const bool contains_second = second.empty() || std::search(frame.begin(), frame.end(), second.begin(),
+                                                                       second.end()) != frame.end();
+            if (contains_first && contains_second) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     [[nodiscard]] int entry_calls() const noexcept { return entry_calls_.load(std::memory_order_acquire); }
     [[nodiscard]] int completed_entry_calls() const noexcept {
         return completed_entry_calls_.load(std::memory_order_acquire);
@@ -560,7 +595,52 @@ private:
         }
     }
 
+    fiber::async::DetachedTask collect_cat_frames() noexcept {
+        auto accepted = co_await cat_collector_.accept();
+        if (!accepted) {
+            cat_collector_tasks_.done();
+            co_return;
+        }
+        cat_collector_.close();
+        fiber::net::TcpStream stream(fiber::event::EventLoop::current(), accepted->release_fd(), accepted->take_peer());
+        for (;;) {
+            std::array<std::uint8_t, 4> prefix{};
+            auto prefix_result = co_await read_exact_bytes(stream, prefix.data(), prefix.size());
+            if (!prefix_result) {
+                break;
+            }
+            const std::size_t payload_size = static_cast<std::size_t>(prefix[0]) << 24U |
+                                             static_cast<std::size_t>(prefix[1]) << 16U |
+                                             static_cast<std::size_t>(prefix[2]) << 8U | prefix[3];
+            if (payload_size == 0 || payload_size > 2 * 1024 * 1024) {
+                break;
+            }
+            std::vector<std::uint8_t> frame(prefix.begin(), prefix.end());
+            frame.resize(prefix.size() + payload_size);
+            auto payload_result = co_await read_exact_bytes(stream, frame.data() + prefix.size(), payload_size);
+            if (!payload_result) {
+                break;
+            }
+            std::lock_guard lock(mutex_);
+            cat_frames_.push_back(std::move(frame));
+        }
+        stream.close();
+        cat_collector_tasks_.done();
+    }
+
     bool start_cat() noexcept {
+        auto bound = cat_collector_.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
+        if (!bound) {
+            return false;
+        }
+        auto collector_port = bound_port(cat_collector_.fd());
+        if (!collector_port) {
+            cat_collector_.close();
+            return false;
+        }
+        cat_collector_tasks_.add();
+        fiber::async::spawn([this]() { return collect_cat_frames(); });
+
         fiber::cat::CatClientConfigParams params{
                 .app_key = "ai-server-test",
                 .hostname = "test-host",
@@ -569,7 +649,7 @@ private:
                 .thread_id = "0",
                 .thread_name = "worker",
         };
-        params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), 9);
+        params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), *collector_port);
         auto config = fiber::cat::CatClientConfig::create(std::move(params));
         if (!config) {
             return false;
@@ -632,6 +712,11 @@ private:
                 .path = "/provider/chat",
                 .model = "upstream-primary",
         });
+        primary_config->protocols.push_back(ProviderProtocol{
+                .type = ProviderProtocolType::AnthropicMessages,
+                .path = "/provider/messages",
+                .model = "upstream-anthropic-primary",
+        });
 
         auto fallback_config = std::make_shared<ProviderConfigSnapshot>();
         fallback_config->metadata.version = 12;
@@ -644,6 +729,11 @@ private:
                 .type = ProviderProtocolType::OpenAiChatCompletions,
                 .path = "/provider/chat",
                 .model = "upstream-fallback",
+        });
+        fallback_config->protocols.push_back(ProviderProtocol{
+                .type = ProviderProtocolType::AnthropicMessages,
+                .path = "/provider/messages",
+                .model = "upstream-anthropic-fallback",
         });
 
         auto primary = std::make_shared<ProjectProvider>();
@@ -831,12 +921,15 @@ private:
             co_return;
         }
         entry_calls_.fetch_add(1, std::memory_order_release);
+        const LlmWireProtocol protocol = exchange.uri().path == "/v1/chat/completions"
+                                                 ? LlmWireProtocol::OpenAiChatCompletions
+                                                 : LlmWireProtocol::AnthropicMessages;
         AiServerMetrics::Worker &metrics = metrics_.worker(0);
-        metrics.request_started(LlmWireProtocol::OpenAiChatCompletions);
+        metrics.request_started(protocol);
         const auto started = fiber::event::EventLoop::current().now();
         LlmRequestHandler handler(provider_client_, runtime_, coordinator_, metrics, audit_max_record_bytes_);
-        co_await handler.handle(exchange, LlmWireProtocol::OpenAiChatCompletions, config_, &cat_request);
-        metrics.request_finished(LlmWireProtocol::OpenAiChatCompletions, exchange.response_stats(),
+        co_await handler.handle(exchange, protocol, config_, &cat_request);
+        metrics.request_finished(protocol, exchange.response_stats(),
                                  std::chrono::duration_cast<std::chrono::microseconds>(
                                          fiber::event::EventLoop::current().now() - started));
         completed_entry_calls_.fetch_add(1, std::memory_order_release);
@@ -847,6 +940,7 @@ private:
     std::vector<MockReply> replies_;
     std::vector<ObservedProviderRequest> observed_;
     std::vector<ObservedRateLimitRequest> observed_rate_limits_;
+    std::vector<std::vector<std::uint8_t>> cat_frames_;
     std::size_t reply_index_ = 0;
     std::atomic<int> entry_calls_{0};
     std::atomic<int> completed_entry_calls_{0};
@@ -868,6 +962,8 @@ private:
     AiServerMetrics metrics_;
     fiber::ai_server::ProviderRuntimeRegistry runtime_;
     std::shared_ptr<const LlmConfigSnapshot> config_;
+    fiber::net::TcpListener cat_collector_;
+    fiber::async::WaitGroup cat_collector_tasks_;
     fiber::http::Http1Server provider_server_;
     fiber::http::Http1Server failing_provider_server_;
     fiber::http::Http1Server entry_server_;
@@ -973,6 +1069,16 @@ public:
     [[nodiscard]] bool wait_for_rate_limit_requests(std::size_t count) const {
         for (std::size_t i = 0; i < 5000; ++i) {
             if (fixture_->observed_rate_limits().size() >= count) {
+                return true;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool wait_for_cat_frame(std::string_view first, std::string_view second = {}) const {
+        for (std::size_t i = 0; i < 5000; ++i) {
+            if (fixture_->cat_frame_contains(first, second)) {
                 return true;
             }
             std::this_thread::sleep_for(1ms);
@@ -1206,6 +1312,60 @@ TEST(LlmProxyIntegrationTest, WeightedRendezvousRetryExcludesFailedServiceInstan
     const auto observed = fixture.observed();
     ASSERT_EQ(observed.size(), 1u);
     EXPECT_NE(observed[0].body.find(R"("model":"upstream-primary")"), std::string::npos);
+}
+
+TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBothProtocols) {
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"openai","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3}})",
+                    },
+                    MockReply{
+                            .status = 200,
+                            .content_type = "text/event-stream",
+                            .chunks =
+                                    {
+                                            "event: message_start\n"
+                                            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_"
+                                            "tokens\":2,\"output_tokens\":0}}}\n\n",
+                                            "event: message_delta\n"
+                                            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n"
+                                            "event: message_stop\n"
+                                            "data: {\"type\":\"message_stop\"}\n\n",
+                                    },
+                            .stream = true,
+                    },
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"anthropic-alias","type":"message","role":"assistant","content":[],"model":"upstream-anthropic-primary","stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}})",
+                    },
+            },
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse openai =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":false,"messages":[]})");
+    const RawHttpResponse anthropic =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":true,"max_tokens":16,"messages":[]})",
+                      {}, "/v1/messages");
+    const RawHttpResponse anthropic_alias = post_json(
+            fixture.entry_port(), token, R"({"model":"logical","max_tokens":16,"messages":[]})", {}, "/v1/message");
+
+    EXPECT_EQ(openai.system_error, 0);
+    EXPECT_EQ(openai.status, 200);
+    EXPECT_TRUE(openai.complete);
+    EXPECT_EQ(anthropic.system_error, 0);
+    EXPECT_EQ(anthropic.status, 200);
+    EXPECT_TRUE(anthropic.complete);
+    EXPECT_EQ(anthropic_alias.system_error, 0);
+    EXPECT_EQ(anthropic_alias.status, 200);
+    EXPECT_TRUE(anthropic_alias.complete);
+    EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/chat/completions:logical", "stream=false"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/messages:logical", "stream=true"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/message:logical", "stream=false"));
 }
 
 TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterResponseStart) {

@@ -761,6 +761,9 @@ public:
         requested_model_ = routing.model.is_present() ? *routing.model : std::string_view{};
         messages_count_ = routing.messages_count;
         tools_count_ = routing.tools_count;
+        if (cat_transaction_ && cat_transaction_->valid()) {
+            (void) cat_transaction_->add_data("stream", stream_ ? std::string_view("true") : std::string_view("false"));
+        }
     }
 
     void output(std::string_view json, bool streaming) noexcept {
@@ -1876,6 +1879,9 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         audit.authz_denied(requested_model);
         co_await send_error(exchange, cat_request, protocol, model_error(protocol, authorized.error()));
         co_return;
+    }
+    if (cat_request) {
+        (void) cat_request->set_root_model_name(authorized->model_name);
     }
     audit.model(requested_model, authorized->model_name);
 

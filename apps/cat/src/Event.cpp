@@ -34,6 +34,10 @@ RecordError Event::add_data(std::string_view key, std::string_view value) noexce
     return detail::add_data(data_, key, value);
 }
 
+RecordError Event::set_type(std::string_view type) noexcept { return detail::set_type(data_, type); }
+
+RecordError Event::set_name(std::string_view name) noexcept { return detail::set_name(data_, name); }
+
 RecordError Event::set_status(std::string_view status_value) noexcept {
     return detail::set_status(data_, status_value);
 }

@@ -85,14 +85,16 @@ LLM 入口严格按以下顺序：
 4. 校验 POST、`application/json` 和 4 MiB 正文上限；
 5. 读取完整正文到单个 `IoBuf`；
 6. 用预编译 JSONPath program 抽取路由字段并保存原始正文；
-7. 校验逻辑模型名、查找模型、执行用户组授权；
-8. 计算协议相关 route key；
-9. 对 `username + model` 做 token 限流 check；
-10. 生成有限且不可扩张的 Provider 尝试计划；
-11. 每次尝试从原始正文改写上游模型、调用 Provider；
-12. 仅在响应尚未开始且错误可重试时进入下一尝试；
-13. 成功响应提取 usage，并提交 tracked best-effort 限流 settle；
-14. 写回同步响应或转发 SSE，best-effort 提交审计，并完成指标和 CAT transaction。
+7. 在 CAT 根 `URL` Transaction data 记录 `stream=true|false`；
+8. 校验逻辑模型名、查找模型、执行用户组授权，并将 CAT 根 Transaction name 更新为
+   `<path>:<authorized-model>`；
+9. 计算协议相关 route key；
+10. 对 `username + model` 做 token 限流 check；
+11. 生成有限且不可扩张的 Provider 尝试计划；
+12. 每次尝试从原始正文改写上游模型、调用 Provider；
+13. 仅在响应尚未开始且错误可重试时进入下一尝试；
+14. 成功响应提取 usage，并提交 tracked best-effort 限流 settle；
+15. 写回同步响应或转发 SSE，best-effort 提交审计，并完成指标和 CAT transaction。
 
 没有有效 BT1 的错误优先于 405/415。Content-Length 已知且大于上限时不读取正文即
 返回 413；chunked/未知长度在累计读取时执行同一上限。

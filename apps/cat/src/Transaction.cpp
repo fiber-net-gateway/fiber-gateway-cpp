@@ -93,6 +93,10 @@ RecordError Transaction::add_data(std::string_view key, std::string_view value) 
     return detail::add_data(data_, key, value);
 }
 
+RecordError Transaction::set_type(std::string_view type) noexcept { return detail::set_type(data_, type); }
+
+RecordError Transaction::set_name(std::string_view name) noexcept { return detail::set_name(data_, name); }
+
 RecordError Transaction::set_status(std::string_view status_value) noexcept {
     return detail::set_status(data_, status_value);
 }

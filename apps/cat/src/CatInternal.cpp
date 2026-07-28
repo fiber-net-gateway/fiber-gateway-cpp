@@ -932,6 +932,53 @@ RecordError add_data(MessageData *message, std::string_view key, std::string_vie
     return append_data(message, key, value, true);
 }
 
+namespace {
+
+RecordError set_message_text(MessageData *message, std::string_view value, std::size_t RecordLimits::*limit_field,
+                             StringRef MessageData::*field) noexcept {
+    const RecordError mutable_result = validate_mutation(message);
+    if (mutable_result != RecordError::None) {
+        return mutable_result;
+    }
+    MessageTraceData &trace_data = *message->trace->data;
+    const std::size_t limit = trace_data.limits.*limit_field;
+    if (value.size() > limit) {
+        mark_truncated(trace_data, 0, value.size(), RecordError::LimitExceeded);
+        return RecordError::LimitExceeded;
+    }
+
+    StringRef &current = message->*field;
+    if (current.view() == value) {
+        return RecordError::None;
+    }
+    if (value.empty()) {
+        current = literal_ref("");
+        return RecordError::None;
+    }
+    if (!can_charge(trace_data, value.size())) {
+        mark_truncated(trace_data, 0, value.size(), RecordError::LimitExceeded);
+        return RecordError::LimitExceeded;
+    }
+    StringRef copy = copy_string(*message->trace, value);
+    if (!copy.data) {
+        mark_truncated(trace_data, 0, value.size(), RecordError::NoMemory);
+        return RecordError::NoMemory;
+    }
+    current = copy;
+    trace_data.payload_bytes += value.size();
+    return RecordError::None;
+}
+
+} // namespace
+
+RecordError set_type(MessageData *message, std::string_view value) noexcept {
+    return set_message_text(message, value, &RecordLimits::max_type_bytes, &MessageData::type);
+}
+
+RecordError set_name(MessageData *message, std::string_view value) noexcept {
+    return set_message_text(message, value, &RecordLimits::max_name_bytes, &MessageData::name);
+}
+
 RecordError set_status(MessageData *message, std::string_view value) noexcept {
     const RecordError mutable_result = validate_mutation(message);
     if (mutable_result != RecordError::None) {
