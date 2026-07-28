@@ -189,6 +189,17 @@ std::string consume_chain(fiber::mem::IoBufChain chain) {
     return output;
 }
 
+std::string cat_nt1_type_and_name(std::string_view type, std::string_view name) {
+    FIBER_ASSERT(type.size() < 128 && name.size() < 128);
+    std::string encoded;
+    encoded.reserve(type.size() + name.size() + 2);
+    encoded.push_back(static_cast<char>(type.size()));
+    encoded.append(type);
+    encoded.push_back(static_cast<char>(name.size()));
+    encoded.append(name);
+    return encoded;
+}
+
 fiber::async::Task<fiber::common::IoResult<std::string>> read_body(fiber::http::HttpExchange &exchange) noexcept {
     std::string output;
     for (;;) {
@@ -1261,7 +1272,8 @@ TEST(LlmProxyIntegrationTest, RetriesTransportAuthRateLimitAndFallbackFromOrigin
     EXPECT_NE(auth_failed, rate_limited);
     EXPECT_FALSE(fixture.token_available(auth_failed, 121s));
     EXPECT_TRUE(fixture.token_available(rate_limited, 121s));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.UpstreamError", "upstream_request_error"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_and_name("LLM.UpstreamError", "read_header")));
+    EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_and_name("LLM.UpstreamError", "upstream_error")));
 }
 
 TEST(LlmProxyIntegrationTest, DnsTimeoutSkipsRemainingTokensAndBacksOffRepeatedLookup) {
@@ -1327,7 +1339,7 @@ TEST(LlmProxyIntegrationTest, DnsTimeoutSkipsRemainingTokensAndBacksOffRepeatedL
     EXPECT_TRUE(fixture.wait_for_cat_frame("failure_phase=dns", "failure_source=io"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("failure_phase=dns", "failure_source=dns_backoff"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("retry_target=next_provider", "skipped_attempts=2"));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.UpstreamError", "upstream_dns_error"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_and_name("LLM.UpstreamError", "dns")));
 
     auto metrics = fixture.settlement_metrics();
     ASSERT_TRUE(metrics);

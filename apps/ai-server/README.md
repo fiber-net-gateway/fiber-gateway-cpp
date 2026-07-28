@@ -126,9 +126,10 @@ transfer 会反映下游背压。
 
 Provider 的 `RemoteCall` 和失败分类都挂在对应 `LLM.Provider` Transaction 下。
 失败 attempt 的 Transaction 状态仍为失败，以保留 CAT Transaction 报表的失败率；
-同时生成 `LLM.UpstreamError` Event，name 固定为 `upstream_dns_error`、
-`upstream_connect_error` 或 `upstream_request_error`。Event data 保留具体
-`failure_phase`、`io_error`、上游状态和重试目标，成功 attempt 不生成该 Event。
+同时生成 `LLM.UpstreamError` Event。存在传输 `failure_code` 时，Event name 使用其
+小写 snake_case 名称，例如 `dns`、`connect` 或 `read_header`；非 2xx 响应没有传输
+错误码，name 使用 `upstream_error`。Event data 保留具体 `failure_phase`、
+`io_error`、上游状态和重试目标，成功 attempt 不生成该 Event。
 
 配置限流规则后，本地 check/settle 记录 `RateLimit.Check/Settle` Event，远程 owner
 调用记录同类型 Transaction；allow、deny 和 stale 属于正常业务结果，网络、成员环
