@@ -363,7 +363,11 @@ private:
             if (current.value && *current.value > sent_sequence) {
                 sent_sequence = *current.value;
                 dto::req::NotifySubscriberRequest notify;
-                notify.request_id.set_present("notify-" + std::to_string(sent_sequence));
+                // request_id is Nullable<string_view> (non-owning); build the text
+                // in a local that outlives encode_payload, else the temporary from
+                // "notify-" + std::to_string(...) dangles (use-after-free).
+                std::string request_id_text = "notify-" + std::to_string(sent_sequence);
+                notify.request_id.set_present(request_id_text);
                 notify.namespace_id.set_present("namespace");
                 notify.service_name.set_present("service");
                 notify.group_name.set_present("group");
