@@ -72,9 +72,7 @@ void EventLoop::notify_wakeup() {
 
 void EventLoop::enqueue_notify(NotifyNode *node) {
     notify_queue_.push(node);
-    if (!in_loop()) {
-        notify_wakeup();
-    }
+    notify_wakeup();
 }
 
 void EventLoop::on_wakeup(Poller::Item *item, int fd, IoEvent events) {
