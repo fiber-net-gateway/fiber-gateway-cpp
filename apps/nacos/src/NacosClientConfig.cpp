@@ -4,27 +4,12 @@
 #include <utility>
 
 namespace fiber::nacos {
-namespace {
-
-bool invalid_context_path(const std::string &path) noexcept {
-    if (path.empty() || path.front() != '/') {
-        return true;
-    }
-    for (const char ch: path) {
-        if (ch == '?' || ch == '#' || ch == '\r' || ch == '\n') {
-            return true;
-        }
-    }
-    return false;
-}
-
-} // namespace
 
 NacosClientConfig::NacosClientConfig(NacosClientConfigParams params) noexcept :
     server_ips_(std::move(params.server_ips)), username_(std::move(params.username)),
     password_(std::move(params.password)), http_port_(params.http_port), grpc_port_(params.grpc_port),
     namespace_id_(std::move(params.namespace_id)), tenant_(std::move(params.tenant)),
-    client_version_(std::move(params.client_version)), context_path_(std::move(params.context_path)) {}
+    client_version_(std::move(params.client_version)) {}
 
 std::expected<NacosClientConfig, NacosConfigError> NacosClientConfig::create(NacosClientConfigParams params) {
     if (params.server_ips.empty()) {
@@ -47,13 +32,6 @@ std::expected<NacosClientConfig, NacosConfigError> NacosClientConfig::create(Nac
     }
     if (!params.username.empty() && params.password.empty()) {
         return std::unexpected(NacosConfigError{.code = NacosConfigErrorCode::EmptyPassword});
-    }
-    if (invalid_context_path(params.context_path)) {
-        return std::unexpected(NacosConfigError{.code = NacosConfigErrorCode::InvalidContextPath});
-    }
-
-    while (params.context_path.size() > 1 && params.context_path.back() == '/') {
-        params.context_path.pop_back();
     }
 
     std::vector<net::IpAddress> unique_ips;

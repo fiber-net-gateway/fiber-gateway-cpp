@@ -86,10 +86,12 @@ Nacos：
 - `NACOS_SERVER_ADDRESSES`：必填，逗号分隔的 IPv4/IPv6 literal；
 - `NACOS_HTTP_PORT`：默认 `8848`；
 - `NACOS_GRPC_PORT`：默认 `9848`；
-- `NACOS_NAMESPACE_ID`、`NACOS_TENANT`；
+- `NACOS_NAMESPACE_ID`：Naming namespace，默认 `public`；
+- `NACOS_TENANT`：ConfigService tenant，默认空；
 - `NACOS_USERNAME`、`NACOS_PASSWORD`：必须同时为空或同时配置；
-- `NACOS_CONTEXT_PATH`：默认 `/nacos`；
 - `NACOS_CLIENT_VERSION`：默认 `fiber-ai-server/1.0`。
+
+认证路径固定为 `/nacos/v1/auth/users/login`，不提供 context path 配置项。
 
 CAT 默认关闭。只要任意 CAT 值非空，就必须同时提供：
 

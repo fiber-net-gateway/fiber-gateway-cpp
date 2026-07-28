@@ -122,9 +122,8 @@ if (!configs || !naming) {
 ```
 
 `server_ips` must contain at least one unicast address. Duplicate addresses are
-removed while preserving order. The context path must be absolute and defaults
-to `/nacos`. Username and password must either both be empty or both be
-non-empty. When both are empty, HTTP authentication is skipped.
+removed while preserving order. Username and password must either both be empty
+or both be non-empty. When both are empty, HTTP authentication is skipped.
 
 `NacosClient` owns authentication state only. `ConfigService::create()` creates
 an independent service using the client's immutable configuration,
@@ -309,9 +308,9 @@ The destructor asserts this invariant.
 ## Authentication Behavior
 
 The client implements only the Nacos 2.x interaction flow. Authentication
-always posts to `{context_path}/v1/auth/users/login`; this path name is part of
-the Nacos 2.x Java/server protocol and does not mean that this client implements
-a selectable v1 mode. It does not probe or call the v3 login API.
+always posts to `/nacos/v1/auth/users/login`, matching the Java client. This
+path name is fixed and does not mean that this client implements a selectable
+v1 mode. It does not probe or call the v3 login API.
 
 Each attempt starts with the previously successful server, then walks the
 configured IP list in order. Authentication requests use

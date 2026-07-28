@@ -37,7 +37,6 @@ TEST(NacosClientConfigTest, AppliesDefaultsAndOwnsValues) {
     EXPECT_EQ(result->namespace_id(), "namespace");
     EXPECT_EQ(result->tenant(), "tenant");
     EXPECT_EQ(result->client_version(), "fiber-nacos/1.0");
-    EXPECT_EQ(result->context_path(), "/nacos");
 }
 
 TEST(NacosClientConfigTest, RpcOptionsEnableTcpNoDelayByDefault) {
@@ -102,28 +101,16 @@ TEST(NacosClientConfigTest, RejectsInvalidRequiredFields) {
     }
 }
 
-TEST(NacosClientConfigTest, NormalizesContextPathAndDeduplicatesServers) {
+TEST(NacosClientConfigTest, DeduplicatesServers) {
     auto params = valid_params();
     params.server_ips.push_back(parse_ip("127.0.0.1"));
     params.server_ips.push_back(parse_ip("127.0.0.2"));
-    params.context_path = "/custom///";
 
     auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result->server_ips().size(), 2u);
     EXPECT_EQ(result->server_ips()[0], parse_ip("127.0.0.1"));
     EXPECT_EQ(result->server_ips()[1], parse_ip("127.0.0.2"));
-    EXPECT_EQ(result->context_path(), "/custom");
-}
-
-TEST(NacosClientConfigTest, RejectsMalformedContextPath) {
-    for (const std::string path: {"", "nacos", "/nacos?x=1", "/nacos#fragment", "/nacos\r\nx"}) {
-        auto params = valid_params();
-        params.context_path = path;
-        auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
-        ASSERT_FALSE(result.has_value()) << path;
-        EXPECT_EQ(result.error().code, fiber::nacos::NacosConfigErrorCode::InvalidContextPath);
-    }
 }
 
 } // namespace

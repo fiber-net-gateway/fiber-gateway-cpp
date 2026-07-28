@@ -754,15 +754,15 @@ INFO/`additive=false` 都是代码不变量，不提供控件。请求线程只�
 | `NACOS_SERVER_ADDRESSES` | 无 | 必填，多值 IPv4/IPv6 literal，去重 |
 | `NACOS_HTTP_PORT` | `8848` | 1..65535 |
 | `NACOS_GRPC_PORT` | `9848` | 1..65535 |
-| `NACOS_NAMESPACE_ID` | 空 | 文本 |
+| `NACOS_NAMESPACE_ID` | `public` | Naming namespace，文本 |
 | `NACOS_TENANT` | 空 | 文本 |
 | `NACOS_USERNAME` | 空 | 与密码同时为空或同时配置 |
 | `NACOS_PASSWORD` | 空 | secret，只写 |
-| `NACOS_CONTEXT_PATH` | `/nacos` | 绝对路径，无 query/fragment，末尾 `/` 规范化 |
 | `NACOS_CLIENT_VERSION` | `fiber-ai-server/1.0` | 文本 |
 
 Nacos server address 只接受 IP literal，不接受域名。页面输入采用一行一个地址，
-导出 dotenv 时用逗号连接。
+导出 dotenv 时用逗号连接。认证路径固定为 `/nacos/v1/auth/users/login`，控制台不提供
+context path 字段。
 
 ### 13.5 CAT
 

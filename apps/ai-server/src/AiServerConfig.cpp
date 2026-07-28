@@ -28,7 +28,6 @@ constexpr std::string_view kNacosNamespaceKey = "NACOS_NAMESPACE_ID";
 constexpr std::string_view kNacosTenantKey = "NACOS_TENANT";
 constexpr std::string_view kNacosUsernameKey = "NACOS_USERNAME";
 constexpr std::string_view kNacosPasswordKey = "NACOS_PASSWORD";
-constexpr std::string_view kNacosContextPathKey = "NACOS_CONTEXT_PATH";
 constexpr std::string_view kNacosClientVersionKey = "NACOS_CLIENT_VERSION";
 constexpr std::string_view kCatAppKey = "CAT_APP_KEY";
 constexpr std::string_view kCatHostnameKey = "CAT_HOSTNAME";
@@ -37,17 +36,26 @@ constexpr std::string_view kCatRouterAddressesKey = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectorAddressesKey = "CAT_COLLECTOR_ADDRESSES";
 constexpr std::string_view kLogConfigPathKey = "AI_SERVER_LOG_CONFIG_PATH";
 
-constexpr std::array<std::string_view, 21> kKnownKeys = {
-        kListenAddressKey,        kListenPortKey,
-        kInitialConfigTimeoutKey, kAdvertiseAddressKey,
-        kServiceNameKey,          kServiceGroupKey,
-        kNacosServerAddressesKey, kNacosHttpPortKey,
-        kNacosGrpcPortKey,        kNacosNamespaceKey,
-        kNacosTenantKey,          kNacosUsernameKey,
-        kNacosPasswordKey,        kNacosContextPathKey,
-        kNacosClientVersionKey,   kCatAppKey,
-        kCatHostnameKey,          kCatIpKey,
-        kCatRouterAddressesKey,   kCatCollectorAddressesKey,
+constexpr std::array<std::string_view, 20> kKnownKeys = {
+        kListenAddressKey,
+        kListenPortKey,
+        kInitialConfigTimeoutKey,
+        kAdvertiseAddressKey,
+        kServiceNameKey,
+        kServiceGroupKey,
+        kNacosServerAddressesKey,
+        kNacosHttpPortKey,
+        kNacosGrpcPortKey,
+        kNacosNamespaceKey,
+        kNacosTenantKey,
+        kNacosUsernameKey,
+        kNacosPasswordKey,
+        kNacosClientVersionKey,
+        kCatAppKey,
+        kCatHostnameKey,
+        kCatIpKey,
+        kCatRouterAddressesKey,
+        kCatCollectorAddressesKey,
         kLogConfigPathKey,
 };
 
@@ -63,7 +71,6 @@ struct FieldLines {
     std::size_t grpc_port = 0;
     std::size_t username = 0;
     std::size_t password = 0;
-    std::size_t context_path = 0;
     std::size_t cat_app_key = 0;
     std::size_t cat_hostname = 0;
     std::size_t cat_ip = 0;
@@ -463,11 +470,6 @@ apply_entry(const EnvEntry &entry, net::IpAddress &listen_ip, std::uint16_t &lis
         field_lines.password = entry.line;
         return {};
     }
-    if (entry.key == kNacosContextPathKey) {
-        nacos_params.context_path = entry.value;
-        field_lines.context_path = entry.line;
-        return {};
-    }
     if (entry.key == kNacosClientVersionKey) {
         nacos_params.client_version = entry.value;
         return {};
@@ -543,9 +545,6 @@ AiServerConfigError from_nacos_error(const nacos::NacosConfigError &error, const
         case nacos::NacosConfigErrorCode::EmptyPassword:
             return make_error(AiServerConfigErrorCode::InvalidNacosConfig, lines.username, kNacosPasswordKey,
                               "username and password must both be empty or both be set");
-        case nacos::NacosConfigErrorCode::InvalidContextPath:
-            return make_error(AiServerConfigErrorCode::InvalidNacosConfig, lines.context_path, kNacosContextPathKey,
-                              "context path must be absolute and contain no query or fragment");
     }
     return make_error(AiServerConfigErrorCode::InvalidNacosConfig, 0, {}, "invalid Nacos configuration");
 }
@@ -634,6 +633,7 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     };
     bool cat_setting_present = false;
     nacos::NacosClientConfigParams nacos_params;
+    nacos_params.namespace_id = "public";
     FieldLines field_lines;
     std::string logging_config_path;
     for (const EnvEntry &entry: *entries) {
