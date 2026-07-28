@@ -1,6 +1,8 @@
 #include "LoadBalancer.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -75,10 +77,33 @@ std::uint64_t mix_rendezvous_hash(std::uint64_t key, std::uint64_t peer_hash) no
     return value;
 }
 
+double negative_log_hash_uniform(std::uint64_t hash) noexcept {
+    // The hash midpoint is (2 * (hash >> 11) + 1) / 2^54.  Reduce it to
+    // mantissa * 2^-exponent with mantissa in [0.5, 1), then evaluate
+    // -log(mantissa) through the rapidly converging atanh series.  This keeps
+    // weighted rendezvous independent of the platform libm symbol version.
+    constexpr double kLn2 = 0x1.62e42fefa39efp-1;
+    constexpr std::array<double, 16> kReciprocalOdd{
+            1.0,        1.0 / 3.0,  1.0 / 5.0,  1.0 / 7.0,  1.0 / 9.0,  1.0 / 11.0, 1.0 / 13.0, 1.0 / 15.0,
+            1.0 / 17.0, 1.0 / 19.0, 1.0 / 21.0, 1.0 / 23.0, 1.0 / 25.0, 1.0 / 27.0, 1.0 / 29.0, 1.0 / 31.0,
+    };
+
+    const std::uint64_t midpoint = ((hash >> 11U) << 1U) | 1U;
+    const unsigned highest_bit = 63U - static_cast<unsigned>(std::countl_zero(midpoint));
+    const unsigned exponent = 53U - highest_bit;
+    const double mantissa = static_cast<double>(midpoint) / static_cast<double>(std::uint64_t{1} << (highest_bit + 1U));
+    const double z = (1.0 - mantissa) / (1.0 + mantissa);
+    const double z_squared = z * z;
+
+    double polynomial = kReciprocalOdd.back();
+    for (std::size_t i = kReciprocalOdd.size() - 1; i != 0; --i) {
+        polynomial = kReciprocalOdd[i - 1] + z_squared * polynomial;
+    }
+    return static_cast<double>(exponent) * kLn2 + 2.0 * z * polynomial;
+}
+
 double weighted_rendezvous_cost(std::uint64_t hash, std::int64_t weight) noexcept {
-    constexpr double kInverseHashRange = 1.0 / 9007199254740992.0;
-    const double uniform = (static_cast<double>(hash >> 11U) + 0.5) * kInverseHashRange;
-    return -std::log(uniform) / static_cast<double>(weight);
+    return negative_log_hash_uniform(hash) / static_cast<double>(weight);
 }
 
 bool excluded_peer(std::span<const std::uint64_t> excluded_peer_ids, std::uint64_t peer_id) noexcept {

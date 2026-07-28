@@ -128,6 +128,45 @@ TEST(LoadBalancerTest, WeightedRendezvousUsesNacosBaseWeightDistribution) {
     EXPECT_NEAR(static_cast<double>(selected["c"]), 10'000.0, 600.0);
 }
 
+TEST(LoadBalancerTest, WeightedRendezvousMappingHasStableGoldenVectors) {
+    LoadBalancer load_balancer;
+    const auto now = LoadBalancer::TimePoint{};
+    EXPECT_EQ(load_balancer.update_instances(make_service("v1", {make_instance("a", "10.0.0.1", 8080, 5.0),
+                                                                 make_instance("b", "10.0.0.2", 8080, 3.0),
+                                                                 make_instance("c", "10.0.0.3", 8080, 1.0)})),
+              LoadBalancerUpdateResult::Applied);
+
+    constexpr std::array<std::uint64_t, 16> kKeys{
+            0,
+            1,
+            2,
+            3,
+            7,
+            42,
+            99,
+            1024,
+            0x0123456789abcdefULL,
+            0x1111111111111111ULL,
+            0x5555555555555555ULL,
+            0x8000000000000000ULL,
+            0xaaaaaaaaaaaaaaaaULL,
+            0xfedcba9876543210ULL,
+            0xfffffffffffffffeULL,
+            0xffffffffffffffffULL,
+    };
+    constexpr std::array<std::string_view, kKeys.size()> kExpected{
+            "a", "b", "c", "a", "a", "a", "a", "a", "b", "a", "b", "a", "a", "a", "b", "b",
+    };
+
+    for (std::size_t i = 0; i < kKeys.size(); ++i) {
+        SCOPED_TRACE(::testing::Message() << "key=" << kKeys[i]);
+        auto selected = load_balancer.load_balance(kKeys[i], {}, now);
+        ASSERT_TRUE(selected);
+        EXPECT_EQ(selected->instance_id(), kExpected[i]);
+        load_balancer.report(std::move(*selected), InstanceReportOutcome::Neutral, now);
+    }
+}
+
 TEST(LoadBalancerTest, WeightedRendezvousKeepsBaseWeightAffinityUntilCircuitOpens) {
     LoadBalancer load_balancer(LoadBalancer::Options{
             .max_fails = 2,

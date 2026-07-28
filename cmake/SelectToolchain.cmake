@@ -337,6 +337,9 @@ macro(_fiber_configure_clang_stdlib)
                     "Set FIBER_STATIC_LIBCXX=OFF to use the system libc++ dylib.")
             endif()
 
+            # Suppress Clang's implicit dynamic -lc++ after the manually selected
+            # static runtime archives below.
+            list(APPEND FIBER_STDLIB_LINK_OPTIONS -nostdlib++)
             _fiber_find_clang_library_dirs("${CMAKE_CXX_COMPILER}" "${fiber_selected_clang_includedir}" fiber_clang_library_dirs)
             _fiber_find_static_library(fiber_libcxx_static c++ HINTS ${fiber_clang_library_dirs})
             _fiber_find_static_library(fiber_libcxxabi_static c++abi HINTS ${fiber_clang_library_dirs})
