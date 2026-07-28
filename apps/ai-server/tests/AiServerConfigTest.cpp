@@ -91,7 +91,7 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_TRUE(result->nacos_config().password().empty());
     EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(60000));
     EXPECT_FALSE(result->advertise_address());
-    EXPECT_EQ(result->service_name(), "ploto-ai-server");
+    EXPECT_EQ(result->service_name(), "fiber-ai-server");
     EXPECT_EQ(result->service_group(), "DEFAULT_GROUP");
     EXPECT_EQ(result->zone(), "daily1");
     EXPECT_EQ(result->cluster(), "dev");

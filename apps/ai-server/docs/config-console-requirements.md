@@ -703,7 +703,7 @@ token 生命周期已经结束。
 | `AI_SERVER_LISTEN_ADDRESS` | `0.0.0.0` | IPv4/IPv6 literal |
 | `AI_SERVER_LISTEN_PORT` | `8080` | 0..65535；0 只推荐测试 |
 | `AI_SERVER_ADVERTISE_ADDRESS` | 自动选择 | 指定的单播 IPv4，不允许 unspecified/multicast |
-| `AI_SERVER_SERVICE_NAME` | `ploto-ai-server` | 1..255 字节 |
+| `AI_SERVER_SERVICE_NAME` | `fiber-ai-server` | 1..255 字节 |
 | `AI_SERVER_SERVICE_GROUP` | `DEFAULT_GROUP` | 1..255 字节 |
 | `AI_SERVER_ZONE` | `daily1` | 1..255 字节 |
 | `AI_SERVER_CLUSTER` | `dev` | 1..255 字节；与 zone 组合后的 `<zone>-<cluster>` 不超过 255 字节 |
@@ -992,7 +992,7 @@ Nacos 写入
     "namingGroup": "DEFAULT_GROUP"
   },
   "cluster": {
-    "serviceName": "ploto-ai-server",
+    "serviceName": "fiber-ai-server",
     "serviceGroup": "DEFAULT_GROUP",
     "zone": "daily1",
     "name": "dev",

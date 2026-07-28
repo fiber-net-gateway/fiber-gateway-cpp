@@ -655,7 +655,7 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     std::uint16_t listen_port = 8080;
     std::chrono::milliseconds initial_config_timeout{60000};
     std::optional<net::IpAddress> advertise_address;
-    std::string service_name = "ploto-ai-server";
+    std::string service_name = "fiber-ai-server";
     std::string service_group = "DEFAULT_GROUP";
     std::string zone = "daily1";
     std::string cluster = "dev";

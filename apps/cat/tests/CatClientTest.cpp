@@ -291,12 +291,23 @@ fiber::async::DetachedTask run_trace_producer(fiber::cat::CatClient *client, Pro
         auto outbound = propagation ? client->create_remote_context(*propagation, "inventory")
                                     : std::expected<fiber::cat::PropagationContext, fiber::cat::RecordError>(
                                               std::unexpected(fiber::cat::RecordError::InvalidContext));
+        auto inherited_trace = fiber::cat::MessageTrace::create(*client, {},
+                                                                {
+                                                                        .root_message_id = "upstream-root",
+                                                                        .parent_message_id = "upstream-parent",
+                                                                });
+        auto inherited = inherited_trace ? inherited_trace->propagation_context()
+                                         : std::expected<fiber::cat::PropagationContext, fiber::cat::RecordError>(
+                                                   std::unexpected(fiber::cat::RecordError::InvalidContext));
+        const bool inherited_context = inherited && !inherited->message_id().empty() &&
+                                       inherited->root_message_id() == "upstream-root" &&
+                                       inherited->parent_message_id() == "upstream-parent";
         const bool propagated = propagation && outbound &&
                                 propagation->message_id().starts_with("checkout-7f000001-") &&
                                 propagation->root_message_id().empty() && propagation->parent_message_id().empty() &&
                                 outbound->message_id().starts_with("inventory-7f000001-") &&
                                 outbound->root_message_id() == propagation->message_id() &&
-                                outbound->parent_message_id() == propagation->message_id();
+                                outbound->parent_message_id() == propagation->message_id() && inherited_context;
         state->context_verified.store(put_context && got_context && iterated && visited && propagated,
                                       std::memory_order_release);
         auto root_result = trace.create_transaction("URL", "/orders");

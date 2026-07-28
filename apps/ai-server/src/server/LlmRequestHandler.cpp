@@ -2,6 +2,7 @@
 
 #include "../audit/LlmAuditLog.h"
 #include "../auth/LlmRequestAuthenticator.h"
+#include "../observability/AiServerCatRequest.h"
 #include "../observability/AiServerLogCategories.h"
 #include "../protocol/LlmError.h"
 #include "../protocol/SseParser.h"
@@ -36,8 +37,6 @@
 #include <common/json/JsonEncode.h>
 #include <common/json/JsonPath.h>
 #include <event/EventLoop.h>
-#include <fiber/cat/CatClient.h>
-#include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/Status.h>
 #include <http/HttpBodySpec.h>
 #include <http/HttpExchange.h>
@@ -681,7 +680,7 @@ struct ProviderAttemptAudit {
 
 class LlmRequestAudit {
 public:
-    LlmRequestAudit(http::HttpExchange &exchange, LlmWireProtocol protocol, cat::CatClient *cat_client,
+    LlmRequestAudit(http::HttpExchange &exchange, LlmWireProtocol protocol, AiServerCatRequest *cat_request,
                     AiServerMetrics::Worker &metrics, std::size_t max_record_bytes) noexcept :
         exchange_(&exchange), protocol_(protocol), started_(event::EventLoop::current().now()),
         started_at_ms_(wall_now_millis()), metrics_(&metrics), max_record_bytes_(max_record_bytes),
@@ -697,22 +696,16 @@ public:
                     std::string_view(request_id_storage_.data(), std::min<std::size_t>(static_cast<std::size_t>(length),
                                                                                        request_id_storage_.size() - 1));
         }
-        if (cat_client) {
-            auto trace = cat::MessageTrace::create(*cat_client);
-            if (trace) {
-                cat_trace_.emplace(std::move(*trace));
-                auto context = cat_trace_->propagation_context();
-                if (context) {
-                    const std::string_view message_id = context->message_id();
-                    const std::size_t size = std::min<std::size_t>(message_id.size(), request_id_storage_.size() - 1);
-                    std::memcpy(request_id_storage_.data(), message_id.data(), size);
-                    request_id_ = std::string_view(request_id_storage_.data(), size);
-                }
-                auto transaction = cat_trace_->create_transaction("URL", exchange.uri().path);
-                if (transaction) {
-                    cat_transaction_.emplace(std::move(*transaction));
-                    (void) cat_transaction_->add_data("protocol", protocol_name(protocol_));
-                }
+        if (cat_request) {
+            const std::string_view cat_request_id = cat_request->request_id();
+            if (!cat_request_id.empty()) {
+                const std::size_t size = std::min<std::size_t>(cat_request_id.size(), request_id_storage_.size() - 1);
+                std::memcpy(request_id_storage_.data(), cat_request_id.data(), size);
+                request_id_ = std::string_view(request_id_storage_.data(), size);
+            }
+            cat_transaction_ = cat_request->root_transaction();
+            if (cat_transaction_) {
+                (void) cat_transaction_->add_data("protocol", protocol_name(protocol_));
             }
         }
     }
@@ -720,11 +713,6 @@ public:
     ~LlmRequestAudit() {
         const http::HttpResponseStats &response = exchange_->response_stats();
         emit(response);
-        if (cat_transaction_ && cat_transaction_->valid()) {
-            const bool success = response.completed && response.terminal_error == common::IoErr::None &&
-                                 response.status_code >= 200 && response.status_code < 400;
-            (void) cat_transaction_->complete(success ? cat::status::Success : cat::status::Fail);
-        }
     }
 
     void pin_config(std::shared_ptr<const LlmConfigSnapshot> config) noexcept { config_ = std::move(config); }
@@ -1117,8 +1105,7 @@ private:
     AiServerMetrics::Worker *metrics_ = nullptr;
     std::size_t max_record_bytes_ = 0;
     LlmAuditOutputCapture output_;
-    std::optional<cat::MessageTrace> cat_trace_;
-    std::optional<cat::Transaction> cat_transaction_;
+    cat::Transaction *cat_transaction_ = nullptr;
     bool cat_usage_emitted_ = false;
     bool emitted_ = false;
     bool audit_enabled_ = false;
@@ -1296,12 +1283,16 @@ read_request_body(http::HttpExchange &exchange) noexcept {
     co_return std::move(body);
 }
 
-async::Task<void> send_body(http::HttpExchange &exchange, int status_code, std::string_view content_type,
-                            const mem::IoBuf &body, std::string_view request_id = {}) noexcept {
+async::Task<void> send_body(http::HttpExchange &exchange, AiServerCatRequest *cat_request, int status_code,
+                            std::string_view content_type, const mem::IoBuf &body,
+                            std::string_view request_id = {}) noexcept {
     http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", content_type.empty() ? std::string_view("application/json") : content_type);
     if (!request_id.empty()) {
         headers.set("X-Request-Id", request_id);
+    }
+    if (cat_request) {
+        cat_request->inject_response_header(headers);
     }
     const std::size_t size = body ? body.readable() : 0;
     auto sent_header = co_await exchange.send_header({
@@ -1318,8 +1309,8 @@ async::Task<void> send_body(http::HttpExchange &exchange, int status_code, std::
     (void) co_await exchange.write_body(body.readable_data(), size, true);
 }
 
-async::Task<void> send_error(http::HttpExchange &exchange, LlmWireProtocol protocol, const LlmError &error,
-                             bool allow_post = false) noexcept {
+async::Task<void> send_error(http::HttpExchange &exchange, AiServerCatRequest *cat_request, LlmWireProtocol protocol,
+                             const LlmError &error, bool allow_post = false) noexcept {
     auto encoded = encode_llm_error(protocol, error);
     if (!encoded) {
         constexpr std::string_view kOpenAiFallback =
@@ -1333,7 +1324,7 @@ async::Task<void> send_error(http::HttpExchange &exchange, LlmWireProtocol proto
             std::memcpy(body.writable_data(), fallback.data(), fallback.size());
             body.commit(fallback.size());
         }
-        co_await send_body(exchange, 500, "application/json", body);
+        co_await send_body(exchange, cat_request, 500, "application/json", body);
         co_return;
     }
 
@@ -1341,6 +1332,9 @@ async::Task<void> send_error(http::HttpExchange &exchange, LlmWireProtocol proto
     headers.set_view("Content-Type", "application/json");
     if (allow_post) {
         headers.set_view("Allow", "POST");
+    }
+    if (cat_request) {
+        cat_request->inject_response_header(headers);
     }
     auto sent_header = co_await exchange.send_header({
             .kind = http::OutgoingHeaderKind::Final,
@@ -1505,17 +1499,20 @@ class RateLimitSession {
 public:
     RateLimitSession() noexcept = default;
     RateLimitSession(TokenRateLimitCoordinator &manager, RateLimitNode owner, std::string_view user,
-                     std::string_view model, TokenRateLimitTicket ticket, AiServerMetrics::Worker &metrics) noexcept :
-        manager_(&manager), owner_(std::move(owner)), user_(user), model_(model), ticket_(ticket), metrics_(&metrics) {}
+                     std::string_view model, TokenRateLimitTicket ticket, AiServerMetrics::Worker &metrics,
+                     AiServerCatRequest *cat_request) noexcept :
+        manager_(&manager), owner_(std::move(owner)), user_(user), model_(model), ticket_(ticket), metrics_(&metrics),
+        cat_request_(cat_request) {}
     ~RateLimitSession() { settle_async(std::nullopt); }
 
     RateLimitSession(const RateLimitSession &) = delete;
     RateLimitSession &operator=(const RateLimitSession &) = delete;
     RateLimitSession(RateLimitSession &&other) noexcept :
         manager_(other.manager_), owner_(std::move(other.owner_)), user_(other.user_), model_(other.model_),
-        ticket_(other.ticket_), metrics_(other.metrics_) {
+        ticket_(other.ticket_), metrics_(other.metrics_), cat_request_(other.cat_request_) {
         other.manager_ = nullptr;
         other.metrics_ = nullptr;
+        other.cat_request_ = nullptr;
     }
     RateLimitSession &operator=(RateLimitSession &&other) noexcept {
         if (this == &other) {
@@ -1528,8 +1525,10 @@ public:
         model_ = other.model_;
         ticket_ = other.ticket_;
         metrics_ = other.metrics_;
+        cat_request_ = other.cat_request_;
         other.manager_ = nullptr;
         other.metrics_ = nullptr;
+        other.cat_request_ = nullptr;
         return *this;
     }
 
@@ -1547,7 +1546,9 @@ public:
                 RateLimitSettleCompletion{
                         .context = metrics,
                         .callback = total_tokens.has_value() ? settle_usage_completed : settle_no_usage_completed,
-                });
+                },
+                cat_request_);
+        cat_request_ = nullptr;
     }
 
 private:
@@ -1569,6 +1570,7 @@ private:
     std::string_view model_;
     TokenRateLimitTicket ticket_;
     AiServerMetrics::Worker *metrics_ = nullptr;
+    AiServerCatRequest *cat_request_ = nullptr;
 };
 
 std::string_view io_buf_view(const mem::IoBuf &body) noexcept {
@@ -1624,11 +1626,15 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
     co_return std::move(response);
 }
 
-async::Task<bool> send_sse_header(http::HttpExchange &exchange, int status_code) noexcept {
+async::Task<bool> send_sse_header(http::HttpExchange &exchange, AiServerCatRequest *cat_request,
+                                  int status_code) noexcept {
     http::HttpHeaders headers(exchange.pool());
     headers.set_view("Content-Type", "text/event-stream; charset=utf-8");
     headers.set_view("Cache-Control", "no-cache");
     headers.set_view("X-Accel-Buffering", "no");
+    if (cat_request) {
+        cat_request->inject_response_header(headers);
+    }
     auto sent = co_await exchange.send_header({
             .kind = http::OutgoingHeaderKind::Final,
             .status_code = status_code,
@@ -1753,23 +1759,25 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
 } // namespace
 
 async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWireProtocol protocol,
-                                            std::shared_ptr<const LlmConfigSnapshot> config) noexcept {
-    LlmRequestAudit audit(exchange, protocol, cat_client_, *metrics_, audit_max_record_bytes_);
+                                            std::shared_ptr<const LlmConfigSnapshot> config,
+                                            AiServerCatRequest *cat_request) noexcept {
+    LlmRequestAudit audit(exchange, protocol, cat_request, *metrics_, audit_max_record_bytes_);
     audit.pin_config(config);
     auto authenticated = authenticate_llm_request(exchange.request_headers(), std::move(config), wall_now_seconds());
     if (!authenticated) {
         audit.auth_denied(authenticated.error());
-        co_await send_error(exchange, protocol, auth_error(authenticated.error()));
+        co_await send_error(exchange, cat_request, protocol, auth_error(authenticated.error()));
         co_return;
     }
     audit.auth_allowed(authenticated->principal());
     if (exchange.method() != http::HttpMethod::Post) {
-        co_await send_error(exchange, protocol, input_error(405, "method_not_allowed", "method not allowed"), true);
+        co_await send_error(exchange, cat_request, protocol,
+                            input_error(405, "method_not_allowed", "method not allowed"), true);
         co_return;
     }
     const auto *content_type = exchange.content_type_header();
     if (!content_type || !is_json_content_type(content_type->value_view())) {
-        co_await send_error(exchange, protocol,
+        co_await send_error(exchange, cat_request, protocol,
                             input_error(415, "unsupported_media_type", "content-type must be application/json"));
         co_return;
     }
@@ -1777,9 +1785,10 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
     auto raw_body = co_await read_request_body(exchange);
     if (!raw_body) {
         if (raw_body.error().code == ReadRequestBodyError::TooLarge) {
-            co_await send_error(exchange, protocol, input_error(413, "request_too_large", "request body is too large"));
+            co_await send_error(exchange, cat_request, protocol,
+                                input_error(413, "request_too_large", "request body is too large"));
         } else if (raw_body.error().code == ReadRequestBodyError::OutOfMemory) {
-            co_await send_error(exchange, protocol,
+            co_await send_error(exchange, cat_request, protocol,
                                 LlmError{
                                         .status_code = 500,
                                         .code = "internal_error",
@@ -1789,7 +1798,8 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                         .message = "internal server error",
                                 });
         } else {
-            co_await send_error(exchange, protocol, input_error(400, "request_body_error", "read request body failed"));
+            co_await send_error(exchange, cat_request, protocol,
+                                input_error(400, "request_body_error", "read request body failed"));
         }
         co_return;
     }
@@ -1797,7 +1807,8 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
 
     auto parsed = ParsedLlmBody::parse(protocol, std::move(*raw_body), exchange.pool());
     if (!parsed) {
-        co_await send_error(exchange, protocol, input_error(400, "invalid_json", "invalid json request body"));
+        co_await send_error(exchange, cat_request, protocol,
+                            input_error(400, "invalid_json", "invalid json request body"));
         co_return;
     }
     const LlmRoutingData &routing = parsed->routing();
@@ -1806,14 +1817,14 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
     auto authorized = authorize_model(authenticated->config(), authenticated->principal().username(), requested_model);
     if (!authorized) {
         audit.authz_denied(requested_model);
-        co_await send_error(exchange, protocol, model_error(protocol, authorized.error()));
+        co_await send_error(exchange, cat_request, protocol, model_error(protocol, authorized.error()));
         co_return;
     }
     audit.model(requested_model, authorized->model_name);
 
     auto route_key = build_provider_route_key(protocol, routing, authorized->route->load_balance, exchange.pool());
     if (!route_key) {
-        co_await send_error(exchange, protocol,
+        co_await send_error(exchange, cat_request, protocol,
                             LlmError{
                                     .status_code = 500,
                                     .code = "internal_error",
@@ -1826,11 +1837,11 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
     }
 
     auto coordinated_limit = co_await rate_limiters_->check(authenticated->principal().username(), *authorized->route,
-                                                            wall_now_millis());
+                                                            wall_now_millis(), cat_request);
     if (!coordinated_limit) {
         audit.rate_limit_error();
         metrics_->rate_limit_check(RateLimitCheckMetric::Error);
-        co_await send_error(exchange, protocol,
+        co_await send_error(exchange, cat_request, protocol,
                             LlmError{
                                     .status_code = 503,
                                     .code = "rate_limit_unavailable",
@@ -1849,7 +1860,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
     if (!limit.allowed) {
         std::string message = "token rate limit exceeded for model: ";
         message.append(authorized->model_name);
-        co_await send_error(exchange, protocol,
+        co_await send_error(exchange, cat_request, protocol,
                             LlmError{
                                     .status_code = 429,
                                     .code = "token_rate_limit_exceeded",
@@ -1864,13 +1875,13 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         FIBER_ASSERT(coordinated_limit->owner.has_value());
         rate_limit = RateLimitSession(*rate_limiters_, std::move(*coordinated_limit->owner),
                                       authenticated->principal().username(), authorized->model_name, limit.ticket,
-                                      *metrics_);
+                                      *metrics_, cat_request);
     }
 
     auto plan = resolve_execution_plan(*authorized, protocol, *route_key, *provider_runtime_,
                                        event::EventLoop::current().now(), exchange.pool());
     if (!plan) {
-        co_await send_error(exchange, protocol, plan_error(protocol, plan.error()));
+        co_await send_error(exchange, cat_request, protocol, plan_error(protocol, plan.error()));
         co_return;
     }
     audit.reserve_provider_attempts(plan->attempts.size());
@@ -1878,7 +1889,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
     ServiceInstanceRetryState service_instances;
     if (!service_instances.init(plan->load_balance.service_instance_policy, plan->route_key, plan->attempts.size(),
                                 exchange.pool())) {
-        co_await send_error(exchange, protocol,
+        co_await send_error(exchange, cat_request, protocol,
                             plan_error(protocol, ExecutionPlanError{
                                                          .code = ExecutionPlanErrorCode::OutOfMemory,
                                                          .message = "failed to allocate service retry state",
@@ -1895,15 +1906,26 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                 routing.stream.is_present() ? std::optional<bool>(*routing.stream) : std::nullopt,
                                 event::EventLoop::current().io_buf_node_pool());
         if (!rewritten) {
-            co_await send_error(exchange, protocol, input_error(400, "invalid_json", "failed to modify request body"));
+            co_await send_error(exchange, cat_request, protocol,
+                                input_error(400, "invalid_json", "failed to modify request body"));
             co_return;
+        }
+
+        std::optional<cat::PropagationContext> provider_cat_context;
+        if (cat_request) {
+            auto remote_context = cat_request->create_remote_context();
+            if (remote_context) {
+                provider_cat_context.emplace(std::move(*remote_context));
+            }
         }
 
         if (stream) {
             metrics_->provider_attempt(protocol);
             const auto attempt_started = event::EventLoop::current().now();
-            auto started = co_await provider_client_->start(attempt, true, std::move(*rewritten), exchange.pool(),
-                                                            service_selection);
+            auto started = co_await provider_client_->start(
+                    attempt, true, std::move(*rewritten), exchange.pool(), service_selection,
+                    provider_cat_context ? &*provider_cat_context : nullptr,
+                    cat_request ? cat_request->trace_state() : std::string_view{});
             if (!started) {
                 service_instances.exclude(started.error().failed_service_peer_id);
                 metrics_->provider_failure(protocol);
@@ -1918,7 +1940,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                     metrics_->provider_retry(protocol);
                     continue;
                 }
-                co_await send_error(exchange, protocol,
+                co_await send_error(exchange, cat_request, protocol,
                                     LlmError{
                                             .status_code = 502,
                                             .code = "provider_transport_error",
@@ -1947,7 +1969,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                         metrics_->provider_retry(protocol);
                         continue;
                     }
-                    co_await send_error(exchange, protocol,
+                    co_await send_error(exchange, cat_request, protocol,
                                         LlmError{
                                                 .status_code = 502,
                                                 .code = "provider_transport_error",
@@ -1977,7 +1999,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                     continue;
                 }
                 if (!buffered->body || buffered->body.readable() == 0) {
-                    co_await send_error(exchange, protocol,
+                    co_await send_error(exchange, cat_request, protocol,
                                         LlmError{
                                                 .status_code = 502,
                                                 .code = "upstream_invalid_error_response",
@@ -1986,7 +2008,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                         });
                     co_return;
                 }
-                co_await send_body(exchange, buffered->status_code, buffered->content_type, buffered->body,
+                co_await send_body(exchange, cat_request, buffered->status_code, buffered->content_type, buffered->body,
                                    buffered->request_id);
                 co_return;
             }
@@ -2001,7 +2023,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                        false, false, "invalid_content_type");
                 (void) started->abort(common::IoErr::Invalid);
                 started->report_instance(InstanceReportOutcome::Failure);
-                co_await send_error(exchange, protocol,
+                co_await send_error(exchange, cat_request, protocol,
                                     LlmError{
                                             .status_code = 502,
                                             .code = "upstream_invalid_response",
@@ -2010,7 +2032,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                     });
                 co_return;
             }
-            if (!co_await send_sse_header(exchange, started->status_code())) {
+            if (!co_await send_sse_header(exchange, cat_request, started->status_code())) {
                 audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
                                        std::chrono::duration_cast<std::chrono::microseconds>(
                                                event::EventLoop::current().now() - attempt_started),
@@ -2055,7 +2077,9 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         metrics_->provider_attempt(protocol);
         const auto attempt_started = event::EventLoop::current().now();
         auto response = co_await provider_client_->execute_buffered(
-                attempt, false, std::move(*rewritten), exchange.pool(), kMaxProviderResponseBytes, service_selection);
+                attempt, false, std::move(*rewritten), exchange.pool(), kMaxProviderResponseBytes, service_selection,
+                provider_cat_context ? &*provider_cat_context : nullptr,
+                cat_request ? cat_request->trace_state() : std::string_view{});
         if (!response) {
             service_instances.exclude(response.error().failed_service_peer_id);
             metrics_->provider_failure(protocol);
@@ -2069,7 +2093,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 metrics_->provider_retry(protocol);
                 continue;
             }
-            co_await send_error(exchange, protocol,
+            co_await send_error(exchange, cat_request, protocol,
                                 LlmError{
                                         .status_code = 502,
                                         .code = "provider_transport_error",
@@ -2097,7 +2121,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 metrics_->token_usage(authenticated->principal().username(), attempt.provider->name, protocol, *usage);
             }
             rate_limit.settle_async(usage ? usage->total_tokens : std::optional<std::int64_t>{});
-            co_await send_body(exchange, response->status_code, response->content_type, response->body,
+            co_await send_body(exchange, cat_request, response->status_code, response->content_type, response->body,
                                response->request_id);
             co_return;
         }
@@ -2120,7 +2144,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             continue;
         }
         if (!response->body || response->body.readable() == 0) {
-            co_await send_error(exchange, protocol,
+            co_await send_error(exchange, cat_request, protocol,
                                 LlmError{
                                         .status_code = 502,
                                         .code = "upstream_invalid_error_response",
@@ -2129,12 +2153,12 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                 });
             co_return;
         }
-        co_await send_body(exchange, response->status_code, response->content_type, response->body,
+        co_await send_body(exchange, cat_request, response->status_code, response->content_type, response->body,
                            response->request_id);
         co_return;
     }
 
-    co_await send_error(exchange, protocol,
+    co_await send_error(exchange, cat_request, protocol,
                         LlmError{
                                 .status_code = 503,
                                 .code = "provider_config_unavailable",

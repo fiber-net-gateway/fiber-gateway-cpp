@@ -17,8 +17,12 @@
 #include <async/WaitGroup.h>
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
+#include <fiber/cat/PropagationContext.h>
+#include <fiber/cat/Transaction.h>
 
 namespace fiber::ai_server {
+
+class AiServerCatRequest;
 
 enum class RateLimitCoordinatorErrorCode : std::uint8_t {
     RingUnavailable,
@@ -66,11 +70,12 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] async::Task<std::expected<CoordinatedRateLimitCheck, RateLimitCoordinatorError>>
-    check(std::string_view user_id, const CompiledModelRoute &model, std::int64_t now_millis) noexcept;
+    check(std::string_view user_id, const CompiledModelRoute &model, std::int64_t now_millis,
+          AiServerCatRequest *cat_request = nullptr) noexcept;
 
     void settle(RateLimitNode owner, std::string_view user_id, std::string_view model_name, TokenRateLimitTicket ticket,
-                std::int64_t tokens, bool count_usage, std::int64_t now_millis,
-                RateLimitSettleCompletion completion) noexcept;
+                std::int64_t tokens, bool count_usage, std::int64_t now_millis, RateLimitSettleCompletion completion,
+                AiServerCatRequest *cat_request = nullptr) noexcept;
 
     [[nodiscard]] async::Task<std::expected<RateLimitSettleResponse, RateLimitCoordinatorError>>
     settle_and_wait(RateLimitNode owner, std::string_view user_id, std::string_view model_name,
@@ -80,11 +85,16 @@ public:
 private:
     [[nodiscard]] async::Task<std::expected<RateLimitSettleResponse, RateLimitCoordinatorError>>
     settle_remote_and_wait(const RateLimitNode &owner, std::string_view user_id, std::string_view model_name,
-                           TokenRateLimitTicket ticket, std::int64_t tokens, bool count_usage) noexcept;
+                           TokenRateLimitTicket ticket, std::int64_t tokens, bool count_usage,
+                           const cat::PropagationContext *cat_context = nullptr,
+                           std::string_view trace_state = {}) noexcept;
 
     [[nodiscard]] async::DetachedTask settle_remote(RateLimitNode owner, std::string user_id, std::string model_name,
                                                     TokenRateLimitTicket ticket, std::int64_t tokens, bool count_usage,
-                                                    RateLimitSettleCompletion completion) noexcept;
+                                                    RateLimitSettleCompletion completion,
+                                                    std::optional<cat::Transaction> cat_transaction,
+                                                    std::optional<cat::PropagationContext> cat_context,
+                                                    std::string trace_state) noexcept;
 
     TokenRateLimitService *local_service_ = nullptr;
     RateLimitShardRing *ring_ = nullptr;

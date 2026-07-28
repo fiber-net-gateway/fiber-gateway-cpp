@@ -1,0 +1,62 @@
+#ifndef FIBER_AI_SERVER_AI_SERVER_CAT_REQUEST_H
+#define FIBER_AI_SERVER_AI_SERVER_CAT_REQUEST_H
+
+#include <cstddef>
+#include <expected>
+#include <optional>
+#include <string_view>
+
+#include <common/NonCopyable.h>
+#include <common/NonMovable.h>
+#include <fiber/cat/Event.h>
+#include <fiber/cat/MessageTrace.h>
+#include <fiber/cat/PropagationContext.h>
+#include <fiber/cat/Transaction.h>
+
+namespace fiber::cat {
+class CatClient;
+}
+
+namespace fiber::http {
+class HttpExchange;
+class HttpHeaders;
+} // namespace fiber::http
+
+namespace fiber::ai_server {
+
+inline constexpr std::size_t kMaxAiServerTraceStateBytes = 512;
+
+[[nodiscard]] cat::MessageTraceContext read_cat_trace_context(const http::HttpHeaders &headers) noexcept;
+
+[[nodiscard]] bool inject_cat_headers(http::HttpHeaders &headers, const cat::PropagationContext *context,
+                                      std::string_view trace_state = {}) noexcept;
+
+class AiServerCatRequest final : public common::NonCopyable, public common::NonMovable {
+public:
+    AiServerCatRequest(http::HttpExchange &exchange, cat::CatClient *client) noexcept;
+    ~AiServerCatRequest();
+
+    [[nodiscard]] cat::Transaction *root_transaction() noexcept { return root_ && root_->valid() ? &*root_ : nullptr; }
+    [[nodiscard]] std::string_view request_id() const noexcept;
+    [[nodiscard]] std::string_view trace_state() const noexcept { return trace_state_; }
+    void inject_response_header(http::HttpHeaders &headers) const noexcept;
+
+    [[nodiscard]] std::expected<cat::PropagationContext, cat::RecordError>
+    create_remote_context(cat::Transaction *parent = nullptr) noexcept;
+    [[nodiscard]] std::expected<cat::Event, cat::RecordError> start_event(std::string_view type,
+                                                                          std::string_view name) noexcept;
+    [[nodiscard]] std::expected<cat::Transaction, cat::RecordError> start_transaction(std::string_view type,
+                                                                                      std::string_view name) noexcept;
+
+private:
+    http::HttpExchange *exchange_ = nullptr;
+    cat::CatClient *client_ = nullptr;
+    std::optional<cat::MessageTrace> trace_;
+    std::optional<cat::Transaction> root_;
+    std::optional<cat::PropagationContext> context_;
+    std::string_view trace_state_;
+};
+
+} // namespace fiber::ai_server
+
+#endif // FIBER_AI_SERVER_AI_SERVER_CAT_REQUEST_H

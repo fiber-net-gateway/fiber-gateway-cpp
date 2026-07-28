@@ -1,5 +1,7 @@
 #include "ProviderHttpClient.h"
 
+#include "../observability/AiServerCatRequest.h"
+
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -79,31 +81,31 @@ bool append_chain(mem::IoBuf &buffer, mem::IoBufChain &chunk, std::size_t max_by
 
 common::IoResult<void> build_request_headers(const ProviderConnectionLease &connection,
                                              const ResolvedProviderAttempt &attempt, bool stream,
-                                             http::HttpHeaders &headers) noexcept {
+                                             http::HttpHeaders &headers, const cat::PropagationContext *cat_context,
+                                             std::string_view trace_state) noexcept {
     if (!headers.set("Host", connection.host_header) || !headers.set_view("Content-Type", "application/json") ||
         !headers.set_view("Accept", stream ? "text/event-stream" : "application/json")) {
         return std::unexpected(common::IoErr::NoMem);
     }
-    if (!attempt.api_token) {
-        return {};
-    }
+    if (attempt.api_token) {
+        const std::string &token = attempt.api_token->token;
+        if (token.size() > std::numeric_limits<std::size_t>::max() - kBearerPrefix.size()) {
+            return std::unexpected(common::IoErr::MessageTooLarge);
+        }
+        const std::size_t authorization_size = kBearerPrefix.size() + token.size();
+        auto *authorization = headers.pool().alloc<char>(authorization_size);
+        if (!authorization) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+        std::memcpy(authorization, kBearerPrefix.data(), kBearerPrefix.size());
+        std::memcpy(authorization + kBearerPrefix.size(), token.data(), token.size());
 
-    const std::string &token = attempt.api_token->token;
-    if (token.size() > std::numeric_limits<std::size_t>::max() - kBearerPrefix.size()) {
-        return std::unexpected(common::IoErr::MessageTooLarge);
+        if (!headers.set_view(kAuthorizationName, std::string_view(authorization, authorization_size),
+                              kAuthorizationLowcaseName.data(), kAuthorizationHash)) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
     }
-    const std::size_t authorization_size = kBearerPrefix.size() + token.size();
-    auto *authorization = headers.pool().alloc<char>(authorization_size);
-    if (!authorization) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    std::memcpy(authorization, kBearerPrefix.data(), kBearerPrefix.size());
-    std::memcpy(authorization + kBearerPrefix.size(), token.data(), token.size());
-
-    if (!headers.set_view(kAuthorizationName, std::string_view(authorization, authorization_size),
-                          kAuthorizationLowcaseName.data(), kAuthorizationHash)) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
+    (void) inject_cat_headers(headers, cat_context, trace_state);
     return {};
 }
 
@@ -114,11 +116,12 @@ std::string header_copy(const http::HttpHeaders &headers, std::string_view name)
 
 } // namespace
 
-async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>>
-ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
-                                     mem::BufPool &request_pool, std::size_t max_response_bytes,
-                                     ProviderServiceSelection service_selection) noexcept {
-    auto started = co_await start(attempt, stream, std::move(request_body), request_pool, service_selection);
+async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> ProviderHttpClient::execute_buffered(
+        const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body, mem::BufPool &request_pool,
+        std::size_t max_response_bytes, ProviderServiceSelection service_selection,
+        const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
+    auto started = co_await start(attempt, stream, std::move(request_body), request_pool, service_selection,
+                                  cat_context, trace_state);
     if (!started) {
         co_return std::unexpected(started.error());
     }
@@ -161,7 +164,8 @@ ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, boo
 
 async::Task<std::expected<ProviderHttpResponseStream, ProviderHttpError>>
 ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
-                          mem::BufPool &request_pool, ProviderServiceSelection service_selection) noexcept {
+                          mem::BufPool &request_pool, ProviderServiceSelection service_selection,
+                          const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
     auto acquired = co_await connections_->acquire(attempt, kConnectTimeout, service_selection);
     if (!acquired) {
         co_return std::unexpected(error(ProviderHttpErrorCode::Connect, acquired.error().io_error,
@@ -176,7 +180,7 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
                 error(ProviderHttpErrorCode::Connect, common::IoErr::NoMem, "failed to allocate provider exchange"));
     }
     http::HttpHeaders request_headers(request_pool);
-    auto built_headers = build_request_headers(connection, attempt, stream, request_headers);
+    auto built_headers = build_request_headers(connection, attempt, stream, request_headers, cat_context, trace_state);
     if (!built_headers) {
         co_return std::unexpected(error(ProviderHttpErrorCode::SendHeader, built_headers.error(),
                                         "failed to build provider request headers"));
