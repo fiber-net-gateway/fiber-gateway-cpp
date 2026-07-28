@@ -297,6 +297,10 @@ OpenAI 用 `prompt_tokens_details.cached_tokens` 作为缓存输入并从
 `prompt_tokens` 中扣除；Anthropic 只把 `cache_read_input_tokens` 计入缓存命中，
 `input_tokens + cache_creation_input_tokens` 计入非缓存输入。有效 usage 同时写入
 CAT `LLMTokenUsage` 子 Event。
+模型配置 `allow_user_groups` 时，每次检查还会生成 name 为 username 的 CAT `Auth`
+子 Event。最终放行时 status 为 `Success`，命中用户组时 `allowed_user_group` 为按
+模型配置顺序命中的第一个组；最终拒绝时 status 为 `Error`。现有 `zhangwang` 旁路
+记录 `Success`，但因未实际命中用户组而不写 `allowed_user_group`。
 
 request body 只写一次，不再构造或输出 `llm.input.prompt_parts`。UTF-8 body 作为
 JSON string 保留原始字节，非 UTF-8 body 使用 base64；因此多模态 URL、base64 和音频

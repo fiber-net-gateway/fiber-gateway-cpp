@@ -2045,7 +2045,8 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
     const LlmRoutingData &routing = parsed->routing();
     audit.input(routing);
     const std::string_view requested_model = routing.model.is_present() ? *routing.model : std::string_view{};
-    auto authorized = authorize_model(authenticated->config(), authenticated->principal().username(), requested_model);
+    auto authorized = authorize_model(authenticated->config(), authenticated->principal().username(), requested_model,
+                                      cat_request ? cat_request->root_transaction() : nullptr);
     if (!authorized) {
         audit.authz_denied(requested_model);
         co_await send_error(exchange, cat_request, protocol, model_error(protocol, authorized.error()));

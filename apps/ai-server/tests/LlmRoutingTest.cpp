@@ -90,9 +90,9 @@ TEST(LlmRoutingTest, AuthorizesGroupMembersAndZhangwangBypass) {
     };
     LlmConfigSnapshot config{.project = make_project(std::move(route), {provider})};
 
-    auto allowed = fiber::ai_server::authorize_model(config, "alice", "chat.public");
-    auto bypassed = fiber::ai_server::authorize_model(config, "zhangwang", "chat.public");
-    auto denied = fiber::ai_server::authorize_model(config, "mallory", "chat.public");
+    auto allowed = fiber::ai_server::authorize_model(config, "alice", "chat.public", nullptr);
+    auto bypassed = fiber::ai_server::authorize_model(config, "zhangwang", "chat.public", nullptr);
+    auto denied = fiber::ai_server::authorize_model(config, "mallory", "chat.public", nullptr);
 
     ASSERT_TRUE(allowed);
     EXPECT_EQ(allowed->model_name, "chat.public");
@@ -104,9 +104,9 @@ TEST(LlmRoutingTest, AuthorizesGroupMembersAndZhangwangBypass) {
 
 TEST(LlmRoutingTest, ValidatesModelAndHidesMissingFromUnauthorized) {
     LlmConfigSnapshot unavailable;
-    auto missing = fiber::ai_server::authorize_model(unavailable, "alice", "");
-    auto invalid = fiber::ai_server::authorize_model(unavailable, "alice", "../secret");
-    auto no_config = fiber::ai_server::authorize_model(unavailable, "alice", "chat");
+    auto missing = fiber::ai_server::authorize_model(unavailable, "alice", "", nullptr);
+    auto invalid = fiber::ai_server::authorize_model(unavailable, "alice", "../secret", nullptr);
+    auto no_config = fiber::ai_server::authorize_model(unavailable, "alice", "chat", nullptr);
 
     ASSERT_FALSE(missing);
     EXPECT_EQ(missing.error().code, ModelAuthorizationErrorCode::ModelRequired);

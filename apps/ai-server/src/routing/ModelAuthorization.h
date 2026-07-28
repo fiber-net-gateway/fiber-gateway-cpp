@@ -7,6 +7,10 @@
 #include <expected>
 #include <string_view>
 
+namespace fiber::cat {
+class Transaction;
+}
+
 namespace fiber::ai_server {
 
 enum class ModelAuthorizationErrorCode : std::uint8_t {
@@ -29,7 +33,8 @@ struct AuthorizedModel {
 [[nodiscard]] bool valid_llm_model_name(std::string_view name) noexcept;
 
 [[nodiscard]] std::expected<AuthorizedModel, ModelAuthorizationError>
-authorize_model(const LlmConfigSnapshot &config, std::string_view username, std::string_view requested_model) noexcept;
+authorize_model(const LlmConfigSnapshot &config, std::string_view username, std::string_view requested_model,
+                cat::Transaction *cat_transaction = nullptr) noexcept;
 
 } // namespace fiber::ai_server
 
