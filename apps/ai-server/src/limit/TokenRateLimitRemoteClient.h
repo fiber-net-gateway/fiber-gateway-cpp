@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <string_view>
 
 #include <async/Task.h>
 #include <common/IoError.h>
@@ -14,6 +15,10 @@
 #include <common/NonMovable.h>
 #include <event/EventLoopGroup.h>
 #include <http/LocalHttp1ConnectionPoolSet.h>
+
+namespace fiber::cat {
+class PropagationContext;
+}
 
 namespace fiber::ai_server {
 
@@ -43,14 +48,17 @@ public:
     [[nodiscard]] async::Task<void> shutdown() noexcept;
 
     [[nodiscard]] async::Task<std::expected<RateLimitCheckResponse, RateLimitRemoteError>>
-    check(const RateLimitNode &node, const RateLimitCheckRequest &request) noexcept;
+    check(const RateLimitNode &node, const RateLimitCheckRequest &request,
+          const cat::PropagationContext *cat_context = nullptr, std::string_view trace_state = {}) noexcept;
 
     [[nodiscard]] async::Task<std::expected<RateLimitSettleResponse, RateLimitRemoteError>>
-    settle(const RateLimitNode &node, const RateLimitSettleRequest &request) noexcept;
+    settle(const RateLimitNode &node, const RateLimitSettleRequest &request,
+           const cat::PropagationContext *cat_context = nullptr, std::string_view trace_state = {}) noexcept;
 
 private:
     [[nodiscard]] async::Task<std::expected<std::string, RateLimitRemoteError>>
-    post(const RateLimitNode &node, std::string_view path, std::string request_body) noexcept;
+    post(const RateLimitNode &node, std::string_view path, std::string request_body,
+         const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept;
 
     http::LocalHttp1ConnectionPoolSet pool_;
     bool initialized_ = false;

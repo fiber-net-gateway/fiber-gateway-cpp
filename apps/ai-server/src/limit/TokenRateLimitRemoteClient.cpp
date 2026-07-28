@@ -1,5 +1,7 @@
 #include "TokenRateLimitRemoteClient.h"
 
+#include "../observability/AiServerCatRequest.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -81,7 +83,8 @@ async::Task<void> TokenRateLimitRemoteClient::shutdown() noexcept {
 }
 
 async::Task<std::expected<RateLimitCheckResponse, RateLimitRemoteError>>
-TokenRateLimitRemoteClient::check(const RateLimitNode &node, const RateLimitCheckRequest &request) noexcept {
+TokenRateLimitRemoteClient::check(const RateLimitNode &node, const RateLimitCheckRequest &request,
+                                  const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
     auto encoded = encode_rate_limit_check_request(request);
     if (!encoded) {
         co_return std::unexpected(
@@ -89,7 +92,7 @@ TokenRateLimitRemoteClient::check(const RateLimitNode &node, const RateLimitChec
                                                                      ? common::IoErr::MessageTooLarge
                                                                      : common::IoErr::Invalid));
     }
-    auto response = co_await post(node, kCheckPath, std::move(*encoded));
+    auto response = co_await post(node, kCheckPath, std::move(*encoded), cat_context, trace_state);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -105,7 +108,8 @@ TokenRateLimitRemoteClient::check(const RateLimitNode &node, const RateLimitChec
 }
 
 async::Task<std::expected<RateLimitSettleResponse, RateLimitRemoteError>>
-TokenRateLimitRemoteClient::settle(const RateLimitNode &node, const RateLimitSettleRequest &request) noexcept {
+TokenRateLimitRemoteClient::settle(const RateLimitNode &node, const RateLimitSettleRequest &request,
+                                   const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
     auto encoded = encode_rate_limit_settle_request(request);
     if (!encoded) {
         co_return std::unexpected(
@@ -113,7 +117,7 @@ TokenRateLimitRemoteClient::settle(const RateLimitNode &node, const RateLimitSet
                                                                      ? common::IoErr::MessageTooLarge
                                                                      : common::IoErr::Invalid));
     }
-    auto response = co_await post(node, kSettlePath, std::move(*encoded));
+    auto response = co_await post(node, kSettlePath, std::move(*encoded), cat_context, trace_state);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -129,7 +133,8 @@ TokenRateLimitRemoteClient::settle(const RateLimitNode &node, const RateLimitSet
 }
 
 async::Task<std::expected<std::string, RateLimitRemoteError>>
-TokenRateLimitRemoteClient::post(const RateLimitNode &node, std::string_view path, std::string request_body) noexcept {
+TokenRateLimitRemoteClient::post(const RateLimitNode &node, std::string_view path, std::string request_body,
+                                 const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
     if (!initialized_) {
         co_return std::unexpected(error(RateLimitRemoteErrorCode::PoolUnavailable, common::IoErr::Canceled));
     }
@@ -165,6 +170,7 @@ TokenRateLimitRemoteClient::post(const RateLimitNode &node, std::string_view pat
     headers.set("Host", host);
     headers.set_view("Content-Type", "application/json");
     headers.set_view("Accept", "application/json");
+    (void) inject_cat_headers(headers, cat_context, trace_state);
     http::Http1RequestHead head{
             .method = http::HttpMethod::Post,
             .target = path,

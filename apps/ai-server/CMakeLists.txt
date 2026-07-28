@@ -19,6 +19,7 @@ add_library(ai_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/TokenRateLimitRemoteClient.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/TokenRateLimitService.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/TokenRateLimiter.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/observability/AiServerCatRequest.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AiServerMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/provider/ProviderConnectionManager.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/provider/ProviderErrorClassifier.cpp"
@@ -60,6 +61,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 
     add_executable(fiber_ai_server_tests
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AiServerCatRequestTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AiServerConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AiServerLoggingTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/AiServerMetricsTest.cpp"

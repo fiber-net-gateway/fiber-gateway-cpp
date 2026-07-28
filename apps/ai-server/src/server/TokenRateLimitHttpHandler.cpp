@@ -1,18 +1,24 @@
 #include "TokenRateLimitHttpHandler.h"
 
 #include "../limit/RateLimitHttpCodec.h"
+#include "../observability/AiServerCatRequest.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 
 #include <common/IoError.h>
 #include <common/mem/IoBuf.h>
 #include <event/EventLoop.h>
+#include <fiber/cat/Status.h>
 #include <http/HttpBodySpec.h>
 #include <http/HttpExchange.h>
 #include <http/HttpExchangeIo.h>
@@ -26,6 +32,32 @@ enum class BodyReadError : std::uint8_t {
     TooLarge,
     OutOfMemory,
 };
+
+template<typename Integer>
+void add_cat_integer(cat::Event *event, std::string_view key, Integer value) noexcept {
+    if (!event) {
+        return;
+    }
+    std::array<char, std::numeric_limits<Integer>::digits10 + 3> buffer{};
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (converted.ec == std::errc{}) {
+        (void) event->add_data(
+                key, std::string_view(buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())));
+    }
+}
+
+std::optional<cat::Event> start_local_rate_limit_event(AiServerCatRequest *cat_request, std::string_view type,
+                                                       std::string_view model_name) noexcept {
+    if (!cat_request) {
+        return std::nullopt;
+    }
+    auto event = cat_request->start_event(type, "local");
+    if (!event) {
+        return std::nullopt;
+    }
+    (void) event->add_data("model", model_name);
+    return std::move(*event);
+}
 
 std::int64_t wall_now_millis() noexcept {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -136,12 +168,15 @@ async::Task<std::expected<mem::IoBuf, BodyReadError>> read_body(http::HttpExchan
     co_return std::move(body);
 }
 
-async::Task<void> send_json(http::HttpExchange &exchange, int status, std::string_view body,
-                            bool allow_post = false) noexcept {
+async::Task<void> send_json(http::HttpExchange &exchange, AiServerCatRequest *cat_request, int status,
+                            std::string_view body, bool allow_post = false) noexcept {
     http::HttpHeaders headers(exchange.pool());
     headers.set_view("Content-Type", "application/json");
     if (allow_post) {
         headers.set_view("Allow", "POST");
+    }
+    if (cat_request) {
+        cat_request->inject_response_header(headers);
     }
     auto sent = co_await exchange.send_header({
             .kind = http::OutgoingHeaderKind::Final,
@@ -157,15 +192,16 @@ async::Task<void> send_json(http::HttpExchange &exchange, int status, std::strin
     (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
 }
 
-async::Task<bool> prepare_request(http::HttpExchange &exchange,
+async::Task<bool> prepare_request(http::HttpExchange &exchange, AiServerCatRequest *cat_request,
                                   std::expected<mem::IoBuf, BodyReadError> &body) noexcept {
     if (exchange.method() != http::HttpMethod::Post) {
-        co_await send_json(exchange, 405, R"({"ok":false,"message":"method not allowed"})", true);
+        co_await send_json(exchange, cat_request, 405, R"({"ok":false,"message":"method not allowed"})", true);
         co_return false;
     }
     const auto *content_type = exchange.content_type_header();
     if (!content_type || !is_json_content_type(content_type->value_view())) {
-        co_await send_json(exchange, 415, R"({"ok":false,"message":"content-type must be application/json"})");
+        co_await send_json(exchange, cat_request, 415,
+                           R"({"ok":false,"message":"content-type must be application/json"})");
         co_return false;
     }
     body = co_await read_body(exchange);
@@ -173,11 +209,11 @@ async::Task<bool> prepare_request(http::HttpExchange &exchange,
         co_return true;
     }
     if (body.error() == BodyReadError::TooLarge) {
-        co_await send_json(exchange, 413, R"({"ok":false,"message":"request body is too large"})");
+        co_await send_json(exchange, cat_request, 413, R"({"ok":false,"message":"request body is too large"})");
     } else if (body.error() == BodyReadError::OutOfMemory) {
-        co_await send_json(exchange, 500, R"({"ok":false,"message":"process request failed"})");
+        co_await send_json(exchange, cat_request, 500, R"({"ok":false,"message":"process request failed"})");
     } else {
-        co_await send_json(exchange, 400, R"({"ok":false,"message":"invalid json request body"})");
+        co_await send_json(exchange, cat_request, 400, R"({"ok":false,"message":"invalid json request body"})");
     }
     co_return false;
 }
@@ -187,30 +223,33 @@ std::string_view body_view(const mem::IoBuf &body) noexcept {
                 : std::string_view{};
 }
 
-async::Task<void> send_payload_error(http::HttpExchange &exchange, const RateLimitPayloadError &error) noexcept {
+async::Task<void> send_payload_error(http::HttpExchange &exchange, AiServerCatRequest *cat_request,
+                                     const RateLimitPayloadError &error) noexcept {
     if (error.code == RateLimitPayloadErrorCode::TooLarge) {
-        co_await send_json(exchange, 413, R"({"ok":false,"message":"request body is too large"})");
+        co_await send_json(exchange, cat_request, 413, R"({"ok":false,"message":"request body is too large"})");
         co_return;
     }
     if (error.code == RateLimitPayloadErrorCode::InvalidValue) {
-        co_await send_json(exchange, 400, R"({"ok":false,"message":"invalid rate limit request"})");
+        co_await send_json(exchange, cat_request, 400, R"({"ok":false,"message":"invalid rate limit request"})");
         co_return;
     }
-    co_await send_json(exchange, 400, R"({"ok":false,"message":"invalid json request body"})");
+    co_await send_json(exchange, cat_request, 400, R"({"ok":false,"message":"invalid json request body"})");
 }
 
 } // namespace
 
 async::Task<void> TokenRateLimitHttpHandler::handle_check(http::HttpExchange &exchange) noexcept {
     std::expected<mem::IoBuf, BodyReadError> body = std::unexpected(BodyReadError::Read);
-    if (!co_await prepare_request(exchange, body)) {
+    if (!co_await prepare_request(exchange, cat_request_, body)) {
         co_return;
     }
     auto request = decode_rate_limit_check_request(body_view(*body), exchange.pool());
     if (!request) {
-        co_await send_payload_error(exchange, request.error());
+        co_await send_payload_error(exchange, cat_request_, request.error());
         co_return;
     }
+    auto cat_event = start_local_rate_limit_event(cat_request_, "RateLimit.Check", request->model_name);
+    add_cat_integer(cat_event ? &*cat_event : nullptr, "rule_revision", request->rule_revision);
     const TokenRateLimitCheckResult result =
             service_->check(request->user_id, request->model_name,
                             CompiledModelRateLimitRule{
@@ -219,23 +258,37 @@ async::Task<void> TokenRateLimitHttpHandler::handle_check(http::HttpExchange &ex
                                     .max_tokens_per_window = request->max_tokens_per_window,
                             },
                             wall_now_millis());
+    if (cat_event) {
+        add_cat_integer(&*cat_event, "used", result.used_tokens);
+        add_cat_integer(&*cat_event, "max", result.max_tokens);
+        add_cat_integer(&*cat_event, "recover_at", result.recover_at_millis);
+        (void) cat_event->add_data("result", result.allowed ? std::string_view("allow") : std::string_view("deny"));
+        (void) cat_event->complete(cat::status::Success);
+    }
     auto encoded = encode_rate_limit_check_response(to_http_response(result));
     if (!encoded) {
-        co_await send_json(exchange, 500, R"({"ok":false,"message":"process request failed"})");
+        co_await send_json(exchange, cat_request_, 500, R"({"ok":false,"message":"process request failed"})");
         co_return;
     }
-    co_await send_json(exchange, 200, *encoded);
+    co_await send_json(exchange, cat_request_, 200, *encoded);
 }
 
 async::Task<void> TokenRateLimitHttpHandler::handle_settle(http::HttpExchange &exchange) noexcept {
     std::expected<mem::IoBuf, BodyReadError> body = std::unexpected(BodyReadError::Read);
-    if (!co_await prepare_request(exchange, body)) {
+    if (!co_await prepare_request(exchange, cat_request_, body)) {
         co_return;
     }
     auto request = decode_rate_limit_settle_request(body_view(*body), exchange.pool());
     if (!request) {
-        co_await send_payload_error(exchange, request.error());
+        co_await send_payload_error(exchange, cat_request_, request.error());
         co_return;
+    }
+    auto cat_event = start_local_rate_limit_event(cat_request_, "RateLimit.Settle", request->model_name);
+    if (cat_event) {
+        add_cat_integer(&*cat_event, "rule_revision", request->ticket->rule_revision);
+        add_cat_integer(&*cat_event, "tokens", request->tokens);
+        (void) cat_event->add_data("count_usage",
+                                   request->count_usage ? std::string_view("true") : std::string_view("false"));
     }
     const TokenRateLimitSettleResult result =
             service_->settle(request->user_id, request->model_name,
@@ -245,12 +298,16 @@ async::Task<void> TokenRateLimitHttpHandler::handle_settle(http::HttpExchange &e
                                      .window_start_millis = request->ticket->window_start_millis,
                              },
                              request->tokens, request->count_usage, wall_now_millis());
+    if (cat_event) {
+        (void) cat_event->add_data("result", result.applied ? std::string_view("applied") : std::string_view("stale"));
+        (void) cat_event->complete(cat::status::Success);
+    }
     auto encoded = encode_rate_limit_settle_response(to_http_response(result));
     if (!encoded) {
-        co_await send_json(exchange, 500, R"({"ok":false,"message":"process request failed"})");
+        co_await send_json(exchange, cat_request_, 500, R"({"ok":false,"message":"process request failed"})");
         co_return;
     }
-    co_await send_json(exchange, 200, *encoded);
+    co_await send_json(exchange, cat_request_, 200, *encoded);
 }
 
 } // namespace fiber::ai_server

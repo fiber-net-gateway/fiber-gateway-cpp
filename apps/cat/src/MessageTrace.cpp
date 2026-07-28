@@ -35,10 +35,6 @@ std::expected<MessageTrace, RecordError> MessageTrace::create(CatClient &client,
 
     std::optional<detail::GeneratedMessageId> generated_id;
     if (context.message_id.empty()) {
-        if (!context.root_message_id.empty() || !context.parent_message_id.empty()) {
-            core->on_context_failure(RecordError::InvalidContext);
-            return std::unexpected(RecordError::InvalidContext);
-        }
         auto generated = core->create_message_id();
         if (!generated) {
             return std::unexpected(generated.error());

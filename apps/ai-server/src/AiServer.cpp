@@ -1,4 +1,5 @@
 #include "AiServer.h"
+#include "observability/AiServerCatRequest.h"
 #include "observability/AiServerLogCategories.h"
 #include "server/LlmRequestHandler.h"
 #include "server/TokenRateLimitHttpHandler.h"
@@ -50,13 +51,14 @@ http::HttpServerOptions make_server_options() noexcept {
     return options;
 }
 
-async::Task<void> send_json(http::HttpExchange &exchange, int status_code, std::string_view body,
-                            bool allow_get = false) {
+async::Task<void> send_json(http::HttpExchange &exchange, const AiServerCatRequest &cat_request, int status_code,
+                            std::string_view body, bool allow_get = false) {
     http::HttpHeaders headers(exchange.pool());
     headers.set_view("Content-Type", "application/json");
     if (allow_get) {
         headers.set_view("Allow", "GET");
     }
+    cat_request.inject_response_header(headers);
 
     auto header_result = co_await exchange.send_header({
             .kind = http::OutgoingHeaderKind::Final,
@@ -256,9 +258,10 @@ AiServer::WorkerState &AiServer::current_worker() noexcept {
 }
 
 async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
+    AiServerCatRequest cat_request(exchange, cat_client_);
     const std::string_view path = exchange.uri().path;
     if (path == kRateLimitCheckPath || path == kRateLimitSettlePath) {
-        TokenRateLimitHttpHandler handler(rate_limiters_);
+        TokenRateLimitHttpHandler handler(rate_limiters_, &cat_request);
         if (path == kRateLimitCheckPath) {
             co_await handler.handle_check(exchange);
         } else {
@@ -268,7 +271,7 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
     }
     if (path == kMetricsPath || path == kMetricsAliasPath) {
         if (exchange.method() != http::HttpMethod::Get) {
-            co_await send_json(exchange, 405, kMethodNotAllowedBody, true);
+            co_await send_json(exchange, cat_request, 405, kMethodNotAllowedBody, true);
             co_return;
         }
         const auto ring = rate_limit_ring_.snapshot();
@@ -276,7 +279,7 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         auto collected = co_await metrics_.collect(event::EventLoop::current().io_buf_node_pool(),
                                                    rate_limiters_.stats(), ring ? ring->nodes.size() : 0, &audit_stats);
         if (!collected) {
-            co_await send_json(exchange, collected.error() == common::IoErr::Busy ? 503 : 500,
+            co_await send_json(exchange, cat_request, collected.error() == common::IoErr::Busy ? 503 : 500,
                                collected.error() == common::IoErr::Busy
                                        ? std::string_view("{\"error\":\"metrics_busy\"}\n")
                                        : std::string_view("{\"error\":\"metrics_unavailable\"}\n"));
@@ -284,6 +287,7 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         }
         http::HttpHeaders headers(exchange.pool());
         headers.set_view("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+        cat_request.inject_response_header(headers);
         const std::size_t size = collected->readable_bytes();
         auto header = co_await exchange.send_header({
                 .kind = http::OutgoingHeaderKind::Final,
@@ -307,33 +311,33 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         metrics.request_started(protocol);
         const auto started = event::EventLoop::current().now();
         LlmRequestHandler handler(provider_client_, worker.provider_runtime, rate_limit_coordinator_, metrics,
-                                  cat_client_, audit_max_record_bytes_);
-        co_await handler.handle(exchange, protocol, worker.config);
+                                  audit_max_record_bytes_);
+        co_await handler.handle(exchange, protocol, worker.config, &cat_request);
         metrics.request_finished(
                 protocol, exchange.response_stats(),
                 std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started));
         co_return;
     }
     if (path != kHealthPath && path != kReadyPath) {
-        co_await send_json(exchange, 404, kNotFoundBody);
+        co_await send_json(exchange, cat_request, 404, kNotFoundBody);
         co_return;
     }
     if (exchange.method() != http::HttpMethod::Get) {
-        co_await send_json(exchange, 405, kMethodNotAllowedBody, true);
+        co_await send_json(exchange, cat_request, 405, kMethodNotAllowedBody, true);
         co_return;
     }
 
     if (path == kHealthPath) {
-        co_await send_json(exchange, 200, kHealthBody);
+        co_await send_json(exchange, cat_request, 200, kHealthBody);
         co_return;
     }
     const auto config = current_config();
     const auto ring = rate_limit_ring_.snapshot();
     if (config && ring && !ring->entries.empty()) {
-        co_await send_json(exchange, 200, kReadyBody);
+        co_await send_json(exchange, cat_request, 200, kReadyBody);
         co_return;
     }
-    co_await send_json(exchange, 503, kNotReadyBody);
+    co_await send_json(exchange, cat_request, 503, kNotReadyBody);
 }
 
 } // namespace fiber::ai_server

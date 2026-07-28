@@ -72,7 +72,7 @@ HTTP 和集群成员：
 - `AI_SERVER_LISTEN_PORT`：默认 `8080`，`0` 可用于本地测试；
 - `AI_SERVER_ADVERTISE_ADDRESS`：可选的 Nacos 注册 IPv4；未配置时选择第一个
   非 loopback IPv4，找不到时使用 `127.0.0.1`；
-- `AI_SERVER_SERVICE_NAME`：默认 `ploto-ai-server`；
+- `AI_SERVER_SERVICE_NAME`：默认 `fiber-ai-server`；
 - `AI_SERVER_SERVICE_GROUP`：默认 `DEFAULT_GROUP`；
 - `AI_SERVER_ZONE`：默认 `daily1`，与 Java `dev` 环境默认值一致；
 - `AI_SERVER_CLUSTER`：默认 `dev`，与 `AI_SERVER_ZONE` 组合成实例注册的 Nacos
@@ -102,6 +102,17 @@ CAT 默认关闭。只要任意 CAT 值非空，就必须同时提供：
 - `CAT_ROUTER_ADDRESSES` 或 `CAT_COLLECTOR_ADDRESSES` 至少一个。
 
 CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配置中解析域名。
+启用 CAT 后，每个 HTTP 请求都会创建一个 `URL` 根 Transaction。入站
+`HI-TRACE-ID`、`HI-SPAN-ID-PARENT`、`HI-SPAN-ID` 分别恢复 CAT 的 root、parent
+和当前 message ID；缺少当前 span 时会生成新 ID。所有 HTTP 最终响应都会在
+`HI-TRACE-ID` 中返回本次请求的 root/request ID。Provider 调用和远程限流调用会为
+每次尝试生成独立 child span 并继续发送这三个请求 header，最多 512 字节的
+`tracestate` 会原样透传。CAT 上下文或记录失败只会关闭本次观测，不改变业务请求结果。
+
+配置限流规则后，本地 check/settle 记录 `RateLimit.Check/Settle` Event，远程 owner
+调用记录同类型 Transaction；allow、deny 和 stale 属于正常业务结果，网络、成员环
+或响应错误才将 CAT 状态标记为失败。
+
 可直接复制并修改 [`ai-server.env.example`](ai-server.env.example) 和
 [`ai-server.logging.json.example`](ai-server.logging.json.example)。
 

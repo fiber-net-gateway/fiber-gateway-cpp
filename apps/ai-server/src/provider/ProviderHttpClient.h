@@ -18,6 +18,10 @@
 #include <common/mem/IoBufChain.h>
 #include <http/ClientHttp1Exchange.h>
 
+namespace fiber::cat {
+class PropagationContext;
+}
+
 namespace fiber::ai_server {
 
 enum class ProviderHttpErrorCode : std::uint8_t {
@@ -94,12 +98,14 @@ public:
 
     [[nodiscard]] async::Task<std::expected<ProviderHttpResponseStream, ProviderHttpError>>
     start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body, mem::BufPool &request_pool,
-          ProviderServiceSelection service_selection = {}) noexcept;
+          ProviderServiceSelection service_selection = {}, const cat::PropagationContext *cat_context = nullptr,
+          std::string_view trace_state = {}) noexcept;
 
     [[nodiscard]] async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>>
     execute_buffered(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
                      mem::BufPool &request_pool, std::size_t max_response_bytes = 32 * 1024 * 1024,
-                     ProviderServiceSelection service_selection = {}) noexcept;
+                     ProviderServiceSelection service_selection = {},
+                     const cat::PropagationContext *cat_context = nullptr, std::string_view trace_state = {}) noexcept;
 
 private:
     ProviderConnectionManager *connections_ = nullptr;

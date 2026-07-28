@@ -28,6 +28,7 @@
 #include <common/json/JsonStructDecode.h>
 #include <event/EventLoop.h>
 #include <event/EventLoopGroup.h>
+#include <fiber/cat/Cat.h>
 #include <http/ClientHttp1Exchange.h>
 #include <http/ClientHttp1Types.h>
 #include <http/Http1ClientConnection.h>
@@ -44,6 +45,7 @@
 #include "limit/TokenRateLimitCoordinator.h"
 #include "limit/TokenRateLimitRemoteClient.h"
 #include "limit/TokenRateLimitService.h"
+#include "observability/AiServerCatRequest.h"
 #include "observability/AiServerMetrics.h"
 #include "provider/ProviderConnectionManager.h"
 #include "provider/ProviderHttpClient.h"
@@ -93,11 +95,31 @@ struct MockReply {
 struct ObservedProviderRequest {
     std::string path;
     std::string authorization;
+    std::string trace_id;
+    std::string parent_span_id;
+    std::string span_id;
+    std::string trace_state;
     std::string body;
+};
+
+struct ObservedRateLimitRequest {
+    std::string path;
+    std::string trace_id;
+    std::string parent_span_id;
+    std::string span_id;
+    std::string trace_state;
+};
+
+struct ClientCatHeaders {
+    std::string trace_id;
+    std::string parent_span_id;
+    std::string span_id;
+    std::string trace_state;
 };
 
 struct RawHttpResponse {
     int status = 0;
+    std::string trace_id;
     std::string body;
     bool complete = false;
     int system_error = 0;
@@ -202,89 +224,104 @@ std::string issue_token() {
     return signing_input;
 }
 
-RawHttpResponse post_json(std::uint16_t port, std::string_view token, std::string_view body) {
+RawHttpResponse post_json(std::uint16_t port, std::string_view token, std::string_view body,
+                          ClientCatHeaders cat_headers = {}, std::string_view target = "/v1/chat/completions") {
     fiber::event::EventLoop loop;
     std::promise<RawHttpResponse> promise;
     auto future = promise.get_future();
-    fiber::async::spawn(loop,
-                        [&loop, port, token = std::string(token), body = std::string(body),
-                         &promise]() mutable -> fiber::async::DetachedTask {
-                            RawHttpResponse response;
-                            fiber::http::Http1ClientConnectionOptions options;
-                            options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-                            fiber::http::Http1ClientConnection connection(loop, std::move(options));
-                            auto connected = co_await connection.connect(5s);
-                            if (!connected) {
-                                response.system_error = static_cast<int>(connected.error());
-                                promise.set_value(std::move(response));
-                                loop.stop();
-                                co_return;
-                            }
+    fiber::async::spawn(
+            loop,
+            [&loop, port, token = std::string(token), body = std::string(body), cat_headers = std::move(cat_headers),
+             target = std::string(target), &promise]() mutable -> fiber::async::DetachedTask {
+                RawHttpResponse response;
+                fiber::http::Http1ClientConnectionOptions options;
+                options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+                fiber::http::Http1ClientConnection connection(loop, std::move(options));
+                auto connected = co_await connection.connect(5s);
+                if (!connected) {
+                    response.system_error = static_cast<int>(connected.error());
+                    promise.set_value(std::move(response));
+                    loop.stop();
+                    co_return;
+                }
 
-                            fiber::mem::BufPool pool;
-                            fiber::http::HttpHeaders headers(pool);
-                            headers.set_view("Host", "127.0.0.1");
-                            headers.set_view("Content-Type", "application/json");
-                            std::string authorization = "Bearer ";
-                            authorization.append(token);
-                            headers.set("Authorization", authorization);
-                            fiber::http::ClientHttp1Exchange exchange(connection, pool);
-                            auto sent_header = co_await exchange.send_header(
-                                    fiber::http::Http1RequestHead{
-                                            .method = fiber::http::HttpMethod::Post,
-                                            .target = "/v1/chat/completions",
-                                            .headers = &headers,
-                                            .body = fiber::http::HttpBodySpec::ContentLength(body.size()),
-                                    },
-                                    body.empty(), 5s);
-                            if (!sent_header) {
-                                response.system_error = static_cast<int>(sent_header.error());
-                                promise.set_value(std::move(response));
-                                loop.stop();
-                                co_return;
-                            }
-                            if (!body.empty()) {
-                                auto written = co_await exchange.write_body(
-                                        reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true, 5s);
-                                if (!written) {
-                                    response.system_error = static_cast<int>(written.error());
-                                    promise.set_value(std::move(response));
-                                    loop.stop();
-                                    co_return;
-                                }
-                            }
+                fiber::mem::BufPool pool;
+                fiber::http::HttpHeaders headers(pool);
+                headers.set_view("Host", "127.0.0.1");
+                headers.set_view("Content-Type", "application/json");
+                std::string authorization = "Bearer ";
+                authorization.append(token);
+                headers.set("Authorization", authorization);
+                if (!cat_headers.trace_id.empty()) {
+                    headers.set("HI-TRACE-ID", cat_headers.trace_id);
+                }
+                if (!cat_headers.parent_span_id.empty()) {
+                    headers.set("HI-SPAN-ID-PARENT", cat_headers.parent_span_id);
+                }
+                if (!cat_headers.span_id.empty()) {
+                    headers.set("HI-SPAN-ID", cat_headers.span_id);
+                }
+                if (!cat_headers.trace_state.empty()) {
+                    headers.set("tracestate", cat_headers.trace_state);
+                }
+                fiber::http::ClientHttp1Exchange exchange(connection, pool);
+                auto sent_header = co_await exchange.send_header(
+                        fiber::http::Http1RequestHead{
+                                .method = fiber::http::HttpMethod::Post,
+                                .target = target,
+                                .headers = &headers,
+                                .body = fiber::http::HttpBodySpec::ContentLength(body.size()),
+                        },
+                        body.empty(), 5s);
+                if (!sent_header) {
+                    response.system_error = static_cast<int>(sent_header.error());
+                    promise.set_value(std::move(response));
+                    loop.stop();
+                    co_return;
+                }
+                if (!body.empty()) {
+                    auto written = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()),
+                                                                body.size(), true, 5s);
+                    if (!written) {
+                        response.system_error = static_cast<int>(written.error());
+                        promise.set_value(std::move(response));
+                        loop.stop();
+                        co_return;
+                    }
+                }
 
-                            const fiber::http::Http1ResponseHead *head = nullptr;
-                            for (;;) {
-                                auto received = co_await exchange.read_header(5s);
-                                if (!received) {
-                                    response.system_error = static_cast<int>(received.error());
-                                    promise.set_value(std::move(response));
-                                    loop.stop();
-                                    co_return;
-                                }
-                                if (!(*received)->is_informational()) {
-                                    head = *received;
-                                    break;
-                                }
-                            }
-                            response.status = head->status_code;
-                            for (;;) {
-                                auto chunk = co_await exchange.read_body(64 * 1024, 5s);
-                                if (!chunk) {
-                                    response.system_error = static_cast<int>(chunk.error());
-                                    break;
-                                }
-                                const bool complete = chunk->complete();
-                                response.body.append(consume_chain(std::move(*chunk)));
-                                if (complete) {
-                                    response.complete = true;
-                                    break;
-                                }
-                            }
-                            promise.set_value(std::move(response));
-                            loop.stop();
-                        });
+                const fiber::http::Http1ResponseHead *head = nullptr;
+                for (;;) {
+                    auto received = co_await exchange.read_header(5s);
+                    if (!received) {
+                        response.system_error = static_cast<int>(received.error());
+                        promise.set_value(std::move(response));
+                        loop.stop();
+                        co_return;
+                    }
+                    if (!(*received)->is_informational()) {
+                        head = *received;
+                        break;
+                    }
+                }
+                response.status = head->status_code;
+                response.trace_id = std::string(head->headers.get("hi-trace-id"));
+                for (;;) {
+                    auto chunk = co_await exchange.read_body(64 * 1024, 5s);
+                    if (!chunk) {
+                        response.system_error = static_cast<int>(chunk.error());
+                        break;
+                    }
+                    const bool complete = chunk->complete();
+                    response.body.append(consume_chain(std::move(*chunk)));
+                    if (complete) {
+                        response.complete = true;
+                        break;
+                    }
+                }
+                promise.set_value(std::move(response));
+                loop.stop();
+            });
     loop.run();
     return future.get();
 }
@@ -297,11 +334,12 @@ std::string bearer_token_name(std::string_view authorization) {
 class ProxyFixture {
 public:
     ProxyFixture(fiber::event::EventLoopGroup &group, std::vector<MockReply> replies, bool fail_settle,
-                 bool service_rendezvous, std::size_t audit_max_record_bytes) :
+                 bool service_rendezvous, std::size_t audit_max_record_bytes, bool enable_cat) :
         group_(&group), replies_(std::move(replies)), fail_settle_(fail_settle),
-        service_rendezvous_(service_rendezvous), audit_max_record_bytes_(audit_max_record_bytes), rate_limiters_(1),
-        rate_limit_handler_(rate_limiters_), remote_client_(group), coordinator_(rate_limiters_, ring_, remote_client_),
-        connections_(group), provider_client_(connections_), metrics_(group),
+        service_rendezvous_(service_rendezvous), audit_max_record_bytes_(audit_max_record_bytes),
+        enable_cat_(enable_cat), rate_limiters_(1), remote_client_(group),
+        coordinator_(rate_limiters_, ring_, remote_client_), connections_(group), provider_client_(connections_),
+        metrics_(group),
         provider_server_(group.at(0),
                          [this](fiber::http::HttpExchange &exchange) { return handle_provider(exchange); }),
         failing_provider_server_(
@@ -317,6 +355,10 @@ public:
             co_return;
         }
         initialized_ = true;
+        if (enable_cat_ && !start_cat()) {
+            promise->set_value(ports);
+            co_return;
+        }
 
         const fiber::net::SocketAddress address(fiber::net::IpAddress::loopback_v4(), 0);
         if (!provider_server_.bind(address, {})) {
@@ -389,6 +431,10 @@ public:
         if (service_rendezvous_) {
             co_await failing_provider_server_.shutdown_and_wait();
         }
+        if (cat_client_) {
+            (void) co_await cat_client_->detach_current_event_loop();
+            co_await cat_client_->shutdown();
+        }
         metrics_.stop_collecting();
         co_await metrics_.wait_for_idle();
         promise->set_value();
@@ -419,6 +465,11 @@ public:
         return observed_;
     }
 
+    std::vector<ObservedRateLimitRequest> observed_rate_limits() const {
+        std::lock_guard lock(mutex_);
+        return observed_rate_limits_;
+    }
+
     [[nodiscard]] int entry_calls() const noexcept { return entry_calls_.load(std::memory_order_acquire); }
     [[nodiscard]] int completed_entry_calls() const noexcept {
         return completed_entry_calls_.load(std::memory_order_acquire);
@@ -429,6 +480,42 @@ public:
     [[nodiscard]] std::string_view rendezvous_route_key() const noexcept { return rendezvous_route_key_; }
 
 private:
+    bool start_cat() noexcept {
+        fiber::cat::CatClientConfigParams params{
+                .app_key = "ai-server-test",
+                .hostname = "test-host",
+                .ip = "127.0.0.1",
+                .thread_group_name = "test",
+                .thread_id = "0",
+                .thread_name = "worker",
+        };
+        params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), 9);
+        auto config = fiber::cat::CatClientConfig::create(std::move(params));
+        if (!config) {
+            return false;
+        }
+        fiber::cat::CatClientOptions options;
+        options.enable_heartbeat = false;
+        options.enable_system_stats = false;
+        options.collector_connect_timeout = 10ms;
+        options.collector_write_timeout = 10ms;
+        options.reconnect_initial_delay = 10ms;
+        options.reconnect_max_delay = 10ms;
+        options.shutdown_drain_timeout = 20ms;
+        options.aggregation_flush_interval = 10ms;
+        auto created = fiber::cat::CatClient::create(group_->at(0), std::move(*config), options);
+        if (!created) {
+            return false;
+        }
+        cat_client_ = std::move(*created);
+        const auto started = cat_client_->start();
+        if (!started) {
+            cat_client_.reset();
+            return false;
+        }
+        return true;
+    }
+
     static DiscoveredInstance make_discovered_instance(std::string id, std::uint16_t port) {
         const fiber::net::IpAddress ip = fiber::net::IpAddress::loopback_v4();
         return DiscoveredInstance{
@@ -553,6 +640,10 @@ private:
             observed_.push_back(ObservedProviderRequest{
                     .path = std::string(exchange.uri().path),
                     .authorization = std::string(exchange.request_headers().get("authorization")),
+                    .trace_id = std::string(exchange.request_headers().get("hi-trace-id")),
+                    .parent_span_id = std::string(exchange.request_headers().get("hi-span-id-parent")),
+                    .span_id = std::string(exchange.request_headers().get("hi-span-id")),
+                    .trace_state = std::string(exchange.request_headers().get("tracestate")),
                     .body = std::move(*body),
             });
             if (reply_index_ < replies_.size()) {
@@ -618,8 +709,20 @@ private:
     }
 
     fiber::async::Task<void> handle_entry(fiber::http::HttpExchange &exchange) noexcept {
+        fiber::ai_server::AiServerCatRequest cat_request(exchange, cat_client_.get());
         if (exchange.uri().path == "/internal/llm/rate-limit/check") {
-            co_await rate_limit_handler_.handle_check(exchange);
+            {
+                std::lock_guard lock(mutex_);
+                observed_rate_limits_.push_back(ObservedRateLimitRequest{
+                        .path = std::string(exchange.uri().path),
+                        .trace_id = std::string(exchange.request_headers().get("hi-trace-id")),
+                        .parent_span_id = std::string(exchange.request_headers().get("hi-span-id-parent")),
+                        .span_id = std::string(exchange.request_headers().get("hi-span-id")),
+                        .trace_state = std::string(exchange.request_headers().get("tracestate")),
+                });
+            }
+            fiber::ai_server::TokenRateLimitHttpHandler handler(rate_limiters_, &cat_request);
+            co_await handler.handle_check(exchange);
             co_return;
         }
         if (exchange.uri().path == "/internal/llm/rate-limit/settle") {
@@ -627,15 +730,26 @@ private:
                 (void) exchange.abort(fiber::common::IoErr::Canceled);
                 co_return;
             }
-            co_await rate_limit_handler_.handle_settle(exchange);
+            {
+                std::lock_guard lock(mutex_);
+                observed_rate_limits_.push_back(ObservedRateLimitRequest{
+                        .path = std::string(exchange.uri().path),
+                        .trace_id = std::string(exchange.request_headers().get("hi-trace-id")),
+                        .parent_span_id = std::string(exchange.request_headers().get("hi-span-id-parent")),
+                        .span_id = std::string(exchange.request_headers().get("hi-span-id")),
+                        .trace_state = std::string(exchange.request_headers().get("tracestate")),
+                });
+            }
+            fiber::ai_server::TokenRateLimitHttpHandler handler(rate_limiters_, &cat_request);
+            co_await handler.handle_settle(exchange);
             co_return;
         }
         entry_calls_.fetch_add(1, std::memory_order_release);
         AiServerMetrics::Worker &metrics = metrics_.worker(0);
         metrics.request_started(LlmWireProtocol::OpenAiChatCompletions);
         const auto started = fiber::event::EventLoop::current().now();
-        LlmRequestHandler handler(provider_client_, runtime_, coordinator_, metrics, nullptr, audit_max_record_bytes_);
-        co_await handler.handle(exchange, LlmWireProtocol::OpenAiChatCompletions, config_);
+        LlmRequestHandler handler(provider_client_, runtime_, coordinator_, metrics, audit_max_record_bytes_);
+        co_await handler.handle(exchange, LlmWireProtocol::OpenAiChatCompletions, config_, &cat_request);
         metrics.request_finished(LlmWireProtocol::OpenAiChatCompletions, exchange.response_stats(),
                                  std::chrono::duration_cast<std::chrono::microseconds>(
                                          fiber::event::EventLoop::current().now() - started));
@@ -646,6 +760,7 @@ private:
     mutable std::mutex mutex_;
     std::vector<MockReply> replies_;
     std::vector<ObservedProviderRequest> observed_;
+    std::vector<ObservedRateLimitRequest> observed_rate_limits_;
     std::size_t reply_index_ = 0;
     std::atomic<int> entry_calls_{0};
     std::atomic<int> completed_entry_calls_{0};
@@ -653,9 +768,10 @@ private:
     bool fail_settle_ = false;
     bool service_rendezvous_ = false;
     std::size_t audit_max_record_bytes_ = 0;
+    bool enable_cat_ = false;
     std::string rendezvous_route_key_;
+    std::unique_ptr<fiber::cat::CatClient> cat_client_;
     fiber::ai_server::TokenRateLimitService rate_limiters_;
-    fiber::ai_server::TokenRateLimitHttpHandler rate_limit_handler_;
     fiber::ai_server::RateLimitShardRing ring_;
     fiber::ai_server::TokenRateLimitRemoteClient remote_client_;
     fiber::ai_server::TokenRateLimitCoordinator coordinator_;
@@ -673,7 +789,8 @@ private:
 class FixtureHarness {
 public:
     explicit FixtureHarness(std::vector<MockReply> replies, bool fail_settle = false, bool service_rendezvous = false,
-                            std::size_t audit_max_record_bytes = fiber::ai_server::kDefaultLlmAuditMaxRecordBytes) {
+                            std::size_t audit_max_record_bytes = fiber::ai_server::kDefaultLlmAuditMaxRecordBytes,
+                            bool enable_cat = false) {
         fiber::log::LoggerManager::global().shutdown();
         char path[] = "/tmp/fiber-llm-audit-XXXXXX";
         const int fd = ::mkstemp(path);
@@ -724,7 +841,7 @@ public:
         }
         logging_started_ = true;
         fixture_ = std::make_unique<ProxyFixture>(group_, std::move(replies), fail_settle, service_rendezvous,
-                                                  audit_max_record_bytes);
+                                                  audit_max_record_bytes, enable_cat);
         group_.start();
         groups_started_ = true;
         std::promise<FixturePorts> promise;
@@ -760,6 +877,19 @@ public:
     [[nodiscard]] std::uint16_t entry_port() const noexcept { return ports_.entry; }
 
     [[nodiscard]] std::vector<ObservedProviderRequest> observed() const { return fixture_->observed(); }
+    [[nodiscard]] std::vector<ObservedRateLimitRequest> observed_rate_limits() const {
+        return fixture_->observed_rate_limits();
+    }
+
+    [[nodiscard]] bool wait_for_rate_limit_requests(std::size_t count) const {
+        for (std::size_t i = 0; i < 5000; ++i) {
+            if (fixture_->observed_rate_limits().size() >= count) {
+                return true;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        return false;
+    }
 
     [[nodiscard]] int entry_calls() const noexcept { return fixture_->entry_calls(); }
     [[nodiscard]] int completed_entry_calls() const noexcept { return fixture_->completed_entry_calls(); }
@@ -866,6 +996,79 @@ TEST(LlmProxyIntegrationTest, RetriesTransportAuthRateLimitAndFallbackFromOrigin
     EXPECT_TRUE(fixture.token_available(rate_limited, 121s));
 }
 
+TEST(LlmProxyIntegrationTest, PropagatesCatContextToRemoteLimiterAndEveryProviderAttempt) {
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 401,
+                            .body = R"({"error":{"type":"authentication_error","code":"invalid_api_key"}})",
+                    },
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"ok","usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}})",
+                    },
+            },
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse auth_error =
+            post_json(fixture.entry_port(), "invalid-token", R"({"model":"logical","stream":false})",
+                      ClientCatHeaders{
+                              .trace_id = "auth-error-root",
+                      });
+    EXPECT_EQ(auth_error.system_error, 0);
+    EXPECT_EQ(auth_error.status, 401);
+    EXPECT_TRUE(auth_error.complete);
+    EXPECT_EQ(auth_error.trace_id, "auth-error-root");
+
+    const RawHttpResponse response = post_json(fixture.entry_port(), token, R"({"model":"logical","stream":false})",
+                                               ClientCatHeaders{
+                                                       .trace_id = "upstream-root",
+                                                       .parent_span_id = "upstream-parent",
+                                                       .span_id = "upstream-span",
+                                                       .trace_state = "tenant=blue",
+                                               });
+
+    EXPECT_EQ(response.system_error, 0);
+    EXPECT_EQ(response.status, 200);
+    EXPECT_TRUE(response.complete);
+    EXPECT_EQ(response.trace_id, "upstream-root");
+    const auto providers = fixture.observed();
+    ASSERT_EQ(providers.size(), 2U);
+    for (const ObservedProviderRequest &provider: providers) {
+        EXPECT_EQ(provider.trace_id, "upstream-root");
+        EXPECT_EQ(provider.parent_span_id, "upstream-span");
+        EXPECT_FALSE(provider.span_id.empty());
+        EXPECT_EQ(provider.trace_state, "tenant=blue");
+    }
+    EXPECT_NE(providers[0].span_id, providers[1].span_id);
+
+    ASSERT_TRUE(fixture.wait_for_rate_limit_requests(2));
+    const auto rate_limits = fixture.observed_rate_limits();
+    ASSERT_GE(rate_limits.size(), 2U);
+    EXPECT_EQ(rate_limits[0].path, "/internal/llm/rate-limit/check");
+    EXPECT_EQ(rate_limits[1].path, "/internal/llm/rate-limit/settle");
+    for (const ObservedRateLimitRequest &rate_limit: rate_limits) {
+        EXPECT_EQ(rate_limit.trace_id, "upstream-root");
+        EXPECT_EQ(rate_limit.parent_span_id, "upstream-span");
+        EXPECT_FALSE(rate_limit.span_id.empty());
+        EXPECT_EQ(rate_limit.trace_state, "tenant=blue");
+        EXPECT_NE(rate_limit.span_id, providers[0].span_id);
+        EXPECT_NE(rate_limit.span_id, providers[1].span_id);
+    }
+    EXPECT_NE(rate_limits[0].span_id, rate_limits[1].span_id);
+
+    const RawHttpResponse internal_error =
+            post_json(fixture.entry_port(), {}, "{}", ClientCatHeaders{.trace_id = "internal-error-root"},
+                      "/internal/llm/rate-limit/check");
+    EXPECT_EQ(internal_error.system_error, 0);
+    EXPECT_EQ(internal_error.status, 400);
+    EXPECT_TRUE(internal_error.complete);
+    EXPECT_EQ(internal_error.trace_id, "internal-error-root");
+}
+
 TEST(LlmProxyIntegrationTest, WeightedRendezvousRetryExcludesFailedServiceInstance) {
     FixtureHarness fixture(
             {
@@ -898,43 +1101,55 @@ TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterRespons
     constexpr std::string_view expected =
             ": ping\r\nid: 7\r\ndata:{\"choices\":[],\"usage\":{\"prompt_tokens\":2"
             ",\"completion_tokens\":3,\"total_tokens\":5}}\r\n\r\ndata: [DONE]\r\n\r\ndata: [DONE]\n\n";
-    FixtureHarness fixture({
-            MockReply{
-                    .status = 200,
-                    .content_type = "text/event-stream",
-                    .chunks =
-                            {
-                                    ": ping\r\nid: 7\r\ndata:{\"choices\":[],\"usage\":{\"prompt_tokens\":2",
-                                    ",\"completion_tokens\":3,\"total_tokens\":5}}\r\n\r\ndata: [DONE]\r\n\r\n"
-                                    "data: [DONE]\n\n",
-                            },
-                    .stream = true,
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .content_type = "text/event-stream",
+                            .chunks =
+                                    {
+                                            ": ping\r\nid: 7\r\ndata:{\"choices\":[],\"usage\":{\"prompt_tokens\":2",
+                                            ",\"completion_tokens\":3,\"total_tokens\":5}}\r\n\r\ndata: [DONE]\r\n\r\n"
+                                            "data: [DONE]\n\n",
+                                    },
+                            .stream = true,
+                    },
+                    MockReply{
+                            .status = 200,
+                            .content_type = "text/event-stream",
+                            .chunks =
+                                    {
+                                            "data: {\"choices\":[]}\n\n",
+                                    },
+                            .stream = true,
+                            .abort_after_chunks = true,
+                    },
             },
-            MockReply{
-                    .status = 200,
-                    .content_type = "text/event-stream",
-                    .chunks =
-                            {
-                                    "data: {\"choices\":[]}\n\n",
-                            },
-                    .stream = true,
-                    .abort_after_chunks = true,
-            },
-    });
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
     ASSERT_TRUE(fixture.valid());
     const std::string token = issue_token();
     ASSERT_FALSE(token.empty());
     constexpr std::string_view request =
             R"({"model":"logical","stream":true,"messages":[{"role":"user","content":"hello"}]})";
 
-    const RawHttpResponse success = post_json(fixture.entry_port(), token, request);
+    const RawHttpResponse success = post_json(fixture.entry_port(), token, request,
+                                              ClientCatHeaders{
+                                                      .trace_id = "sse-success-root",
+                                                      .span_id = "sse-success-span",
+                                              });
     EXPECT_EQ(success.status, 200);
     EXPECT_TRUE(success.complete);
+    EXPECT_EQ(success.trace_id, "sse-success-root");
     EXPECT_EQ(success.body, expected);
 
-    const RawHttpResponse truncated = post_json(fixture.entry_port(), token, request);
+    const RawHttpResponse truncated = post_json(fixture.entry_port(), token, request,
+                                                ClientCatHeaders{
+                                                        .trace_id = "sse-truncated-root",
+                                                        .span_id = "sse-truncated-span",
+                                                });
     EXPECT_EQ(truncated.status, 200);
     EXPECT_TRUE(truncated.complete);
+    EXPECT_EQ(truncated.trace_id, "sse-truncated-root");
     EXPECT_EQ(truncated.body.find("data: [DONE]"), std::string::npos);
     EXPECT_EQ(fixture.observed().size(), 2u);
 }
