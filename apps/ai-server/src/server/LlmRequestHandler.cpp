@@ -718,24 +718,10 @@ std::string_view provider_upstream_error_event_name(const ProviderAttemptObserva
     if (observation.outcome == "success") {
         return {};
     }
-    switch (observation.failure_code) {
-        case ProviderHttpErrorCode::Dns:
-            return "upstream_dns_error";
-        case ProviderHttpErrorCode::InvalidEndpoint:
-        case ProviderHttpErrorCode::NoServiceEndpoint:
-        case ProviderHttpErrorCode::PoolShutdown:
-        case ProviderHttpErrorCode::Connect:
-            return "upstream_connect_error";
-        case ProviderHttpErrorCode::SendHeader:
-        case ProviderHttpErrorCode::SendBody:
-        case ProviderHttpErrorCode::ReadHeader:
-        case ProviderHttpErrorCode::ReadBody:
-        case ProviderHttpErrorCode::ResponseTooLarge:
-        case ProviderHttpErrorCode::InvalidResponse:
-        case ProviderHttpErrorCode::Count:
-            return "upstream_request_error";
+    if (observation.failure_code != ProviderHttpErrorCode::Count) {
+        return provider_http_error_code_name(observation.failure_code);
     }
-    return "upstream_request_error";
+    return observation.outcome;
 }
 
 void add_provider_upstream_error_data(cat::Event &event, const ProviderAttemptObservation &observation) noexcept {

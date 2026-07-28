@@ -341,10 +341,10 @@ tokenizer 的精确边界。只输出已经观察到的里程碑，非流式响�
 SSE 的 body transfer 包含交替下游写入形成的背压时间。
 每个 Provider 的 `RemoteCall` Event 归属相应的 `LLM.Provider` Transaction。失败
 attempt 保持父 Transaction 的失败状态，并增加 `LLM.UpstreamError` 子 Event：
-DNS、连接/endpoint 获取和请求发送/响应读取（含非 2xx）分别使用
-`upstream_dns_error`、`upstream_connect_error`、`upstream_request_error`。Event
-data 继续给出精确 failure phase、I/O error、上游状态和 retry target；成功 attempt
-不生成错误 Event。
+存在传输 `failure_code` 时，Event name 使用其小写 snake_case 名称，例如 `dns`、
+`connect`、`read_header`；非 2xx 响应没有传输错误码，使用 `upstream_error`。
+Event data 继续给出精确 failure phase、I/O error、上游状态和 retry target；成功
+attempt 不生成错误 Event。
 
 listener 只在完整首个配置安装到所有 worker 后绑定；服务注册使用启动配置
 `<AI_SERVER_ZONE>-<AI_SERVER_CLUSTER>` 作为 Nacos cluster，注册和初始本机限流节点
