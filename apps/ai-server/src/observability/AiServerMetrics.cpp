@@ -332,6 +332,10 @@ void AiServerMetrics::Worker::sse_failure(LlmWireProtocol protocol) noexcept {
     sse_failures_[protocol_index(protocol)].inc();
 }
 
+void AiServerMetrics::Worker::sse_drain(LlmWireProtocol protocol, SseDrainMetric result) noexcept {
+    sse_drains_[protocol_index(protocol)][static_cast<std::size_t>(result)].inc();
+}
+
 void AiServerMetrics::Worker::audit_generated() noexcept { audit_generated_.inc(); }
 
 void AiServerMetrics::Worker::audit_generation_failed() noexcept { audit_generation_failures_.inc(); }
@@ -354,10 +358,12 @@ AiServerMetrics::~AiServerMetrics() { FIBER_ASSERT(!valid_ || collecting_stopped
 bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     constexpr std::array<std::string_view, 1> kProtocolLabel{"protocol"};
     constexpr std::array<std::string_view, 2> kRequestLabels{"protocol", "result"};
+    constexpr std::array<std::string_view, 2> kSseDrainLabels{"protocol", "result"};
     constexpr std::array<std::string_view, 1> kResultLabel{"result"};
     constexpr std::array<std::string_view, 4> kRequestResults{"success", "client_error", "server_error", "canceled"};
     constexpr std::array<std::string_view, 4> kCheckResults{"bypass", "allowed", "denied", "error"};
     constexpr std::array<std::string_view, 3> kSettleResults{"usage", "no_usage", "error"};
+    constexpr std::array<std::string_view, 3> kSseDrainResults{"completed", "upstream_error", "timeout"};
     constexpr std::array<std::uint64_t, 15> kDurationBounds{
             1000,    5000,    10000,   25000,    50000,    100000,   250000,    500000,
             1000000, 2500000, 5000000, 10000000, 30000000, 60000000, 300000000,
@@ -381,8 +387,10 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                                                   "Token rate limit check outcomes.", kResultLabel);
     auto rate_settles = registry_.register_counter("ai_server_rate_limit_settlements_total",
                                                    "Token rate limit settlements.", kResultLabel);
-    auto sse_failures = registry_.register_counter("ai_server_sse_failures_total", "SSE failures after response start.",
+    auto sse_failures = registry_.register_counter("ai_server_sse_failures_total", "SSE relay or delivery failures.",
                                                    kProtocolLabel);
+    auto sse_drains = registry_.register_counter(
+            "ai_server_sse_drains_total", "Upstream SSE drains after downstream delivery failure.", kSseDrainLabels);
     auto audit_generated =
             registry_.register_counter("ai_server_audit_generated_records_total", "LLM audit records generated.");
     auto audit_generation_failures = registry_.register_counter("ai_server_audit_generation_failures_total",
@@ -390,7 +398,7 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     auto audit_capture_incomplete = registry_.register_counter(
             "ai_server_audit_capture_incomplete_total", "LLM audit records with incomplete request observations.");
     if (!requests || !duration || !inflight || !provider_attempts || !provider_failures || !provider_retries ||
-        !provider_circuit_opens || !rate_checks || !rate_settles || !sse_failures || !audit_generated ||
+        !provider_circuit_opens || !rate_checks || !rate_settles || !sse_failures || !sse_drains || !audit_generated ||
         !audit_generation_failures || !audit_capture_incomplete) {
         return false;
     }
@@ -410,6 +418,7 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
     std::array<prometheus::SeriesId, 2> retry_series;
     std::array<prometheus::SeriesId, 2> circuit_open_series;
     std::array<prometheus::SeriesId, 2> sse_series;
+    std::array<std::array<prometheus::SeriesId, 3>, 2> sse_drain_series;
     std::array<prometheus::SeriesId, 4> check_series;
     std::array<prometheus::SeriesId, 3> settle_series;
     for (std::size_t protocol = 0; protocol < kProtocolNames.size(); ++protocol) {
@@ -439,6 +448,14 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
                 registry_.register_series(*sse_failures, std::array<std::string_view, 1>{kProtocolNames[protocol]});
         if (!duration_id || !inflight_id || !attempt_id || !failure_id || !retry_id || !circuit_open_id || !sse_id) {
             return false;
+        }
+        for (std::size_t result = 0; result < kSseDrainResults.size(); ++result) {
+            auto drain_id = registry_.register_series(
+                    *sse_drains, std::array<std::string_view, 2>{kProtocolNames[protocol], kSseDrainResults[result]});
+            if (!drain_id) {
+                return false;
+            }
+            sse_drain_series[protocol][result] = *drain_id;
         }
         duration_series[protocol] = *duration_id;
         inflight_series[protocol] = *inflight_id;
@@ -519,6 +536,13 @@ bool AiServerMetrics::initialize(event::EventLoopGroup &worker_group) {
             worker.provider_retries_[protocol] = *retry_value;
             worker.provider_circuit_opens_[protocol] = *circuit_open_value;
             worker.sse_failures_[protocol] = *sse_value;
+            for (std::size_t result = 0; result < kSseDrainResults.size(); ++result) {
+                auto drain_value = shard->counter(sse_drain_series[protocol][result]);
+                if (!drain_value) {
+                    return false;
+                }
+                worker.sse_drains_[protocol][result] = *drain_value;
+            }
         }
         for (std::size_t i = 0; i < check_series.size(); ++i) {
             auto value = shard->counter(check_series[i]);

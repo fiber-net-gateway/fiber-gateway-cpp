@@ -206,7 +206,10 @@ CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配�
 - Provider 整体调用上限 300 秒；
 - 401/403/429、配置的 retryable status 和传输错误可在响应开始前重试；
 - SSE header 写给客户端后不再切换 token、Provider 或 fallback；
-- 客户端断开会中止上游 exchange，损坏的连接不会回到连接池；
+- 重试还要求 response channel 可用；一旦观察到客户端关闭或下游写失败，当前请求
+  不再切换 token、Provider 或 fallback；
+- SSE 下游写失败后只停止客户端写出，当前 upstream 继续读到完成或超时，以提取
+  最终 usage 并完成 token 结算；完整 drain 的连接可正常回池；
 - 请求 pin 住进入时的不可变配置快照，认证、授权、限流和 Provider 选择不会跨刷新
   混用配置；
 - Provider 执行后的 token usage settle 为 tracked best effort；失败只进入固定指标和
@@ -277,6 +280,11 @@ Prometheus 输出两个累计 Counter family：
 
 - `ai_server_user_token_usage_total{username,token_type}`；
 - `ai_server_provider_token_usage_total{provider_name,protocol,token_type}`。
+
+下游交付失败后的 SSE drain 另由
+`ai_server_sse_drains_total{protocol,result}` 记录，`result` 固定为
+`completed`、`upstream_error`、`timeout`。即使客户端未收到最终内容，只要网关从
+当前 upstream 观察到 usage，仍会写入上述 token usage Counter 并用于限流结算。
 
 其中 `token_type` 固定为 `in_cache`、`in_nocache`、`out`。username 是需求指定的
 高基数 label；进程会保留首次出现的 username/Provider series 直至退出，部署时应

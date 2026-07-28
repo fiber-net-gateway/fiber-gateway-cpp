@@ -184,6 +184,9 @@ Provider 的实例级失败会加入请求级排除集合，后续 token 尝试�
 - 普通 4xx 不重试；
 - 尝试耗尽后，同协议上游状态、Content-Type 和正文原样返回。
 
+重试还要求客户端响应尚未开始且 response channel 仍然可用。任何下游关闭或写失败
+一旦被当前请求观察到，都不会再切换 token、Provider 或 fallback。
+
 SSE 路径先读取并验证上游最终 header。非 2xx 仍按同步错误正文分类；2xx 后发送
 客户端 header，此刻设置 `response_started=true`。之后任何读取、SSE 解析或写出错误
 只终止当前流，不再重试。
@@ -198,7 +201,11 @@ SSE parser 借助 `http::SseCursor` 处理跨 chunk 的 CRLF、多个 `data:` �
 - OpenAI `[DONE]` 不补充、不去重，信任上游合法输出；
 - usage collector 只旁路解析 data JSON 的少量 usage 路径，提取失败不改变响应；
 - 每次下游 chain write 完成后才继续读取上游，保持背压；
-- 客户端断开立即 abort 上游 exchange，lease 不回到可复用池。
+- 下游 header/body 写失败后停止继续写客户端，但当前 upstream 仍由同一请求协程读到
+  完成或 300 秒读超时，继续执行 SSE 解析、审计和 usage 提取；
+- drain 完成后按观察到的 usage 结算 token；没有观察到 usage 才 settleNoUsage；
+- drain 期间的上游错误只标记当前 Provider attempt 失败，绝不触发重试；完整读完的
+  upstream 仍按 Provider 成功处理，连接可正常回池。
 
 ## 8. token 限流
 
@@ -216,6 +223,8 @@ SSE parser 借助 `http::SseCursor` 处理跨 chunk 的 CRLF、多个 `data:` �
 - 成功 usage settle 计数，其余路径 settleNoUsage；
 - Provider 执行后的 settle 为 tracked best effort：同步响应和 SSE 都不等待远端
   settle，结算失败不会替换或中止 Provider 响应；
+- SSE 下游断开后仍以当前 upstream 最终观察到的 usage 结算，避免已经消耗的 token
+  因客户端交付失败而漏计；
 - settle 完成后记录 usage/no_usage/error 固定指标，stale、远端错误和 shutdown
   拒绝同时写 WARN 日志；
 - shutdown 先排空已经接受的远端 settle，再停止 metrics 和限流远端 client；
@@ -298,6 +307,8 @@ Authorization、Provider token 值、BT1 token 和配置 secret 不作为独立�
 
 Prometheus 的常规运行指标继续使用固定低基数 label，包含请求数/延迟/在途、
 Provider 尝试与失败、重试、熔断、限流准入/拒绝/settle、配置代际和 SSE 中途失败。
+`ai_server_sse_drains_total{protocol,result}` 记录下游交付失败后的 upstream drain，
+`result` 固定为 `completed`、`upstream_error`、`timeout`。
 审计另有 generated/generation failure/capture incomplete，以及 FileAppender 的
 written/dropped/write/reopen/rotation/retention/active-bytes 指标，用于观测
 best-effort 链路，不作为请求或 readiness 条件。

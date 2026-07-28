@@ -42,6 +42,13 @@ enum class RateLimitSettleMetric : std::uint8_t {
     Count,
 };
 
+enum class SseDrainMetric : std::uint8_t {
+    Completed,
+    UpstreamError,
+    Timeout,
+    Count,
+};
+
 class AiServerMetrics final : public common::NonCopyable, public common::NonMovable {
     class TokenUsageStore;
     class WorkerTokenUsageCache;
@@ -67,6 +74,7 @@ public:
         void rate_limit_check(RateLimitCheckMetric result) noexcept;
         void rate_limit_settle(RateLimitSettleMetric result) noexcept;
         void sse_failure(LlmWireProtocol protocol) noexcept;
+        void sse_drain(LlmWireProtocol protocol, SseDrainMetric result) noexcept;
         void audit_generated() noexcept;
         void audit_generation_failed() noexcept;
         void audit_capture_incomplete() noexcept;
@@ -89,6 +97,8 @@ public:
         std::array<prometheus::CounterRef, static_cast<std::size_t>(RateLimitCheckMetric::Count)> rate_limit_checks_;
         std::array<prometheus::CounterRef, static_cast<std::size_t>(RateLimitSettleMetric::Count)> rate_limit_settles_;
         std::array<prometheus::CounterRef, kProtocolCount> sse_failures_;
+        std::array<std::array<prometheus::CounterRef, static_cast<std::size_t>(SseDrainMetric::Count)>, kProtocolCount>
+                sse_drains_;
         prometheus::CounterRef audit_generated_;
         prometheus::CounterRef audit_generation_failures_;
         prometheus::CounterRef audit_capture_incomplete_;

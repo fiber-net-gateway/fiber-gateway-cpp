@@ -1646,10 +1646,10 @@ async::Task<bool> send_sse_header(http::HttpExchange &exchange, AiServerCatReque
     co_return sent.has_value();
 }
 
-enum class SseRelayResult : std::uint8_t {
-    Success,
-    ProviderError,
-    ClientError,
+struct SseRelayResult {
+    common::IoErr upstream_error = common::IoErr::None;
+    bool upstream_complete = false;
+    bool downstream_delivery_failed = false;
 };
 
 common::IoErr sse_parser_io_error(SseParseError error) noexcept {
@@ -1665,10 +1665,11 @@ common::IoErr sse_parser_io_error(SseParseError error) noexcept {
 }
 
 async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttpResponseStream &upstream,
-                                      LlmWireProtocol protocol, RateLimitSession &rate_limit,
+                                      LlmWireProtocol protocol, bool downstream_delivery_open,
                                       std::optional<LlmTokenUsage> &usage, LlmRequestAudit &audit) noexcept {
     SseParser parser;
     mem::BufPool usage_pool;
+    bool downstream_delivery_failed = !downstream_delivery_open;
     auto drain_parser = [&]() noexcept -> SseParseStatus {
         for (;;) {
             const SseParseStatus status = parser.next();
@@ -1697,8 +1698,21 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
     for (;;) {
         auto chunk = co_await upstream.read_body(kBodyChunkBytes, kProviderTimeout);
         if (!chunk) {
-            (void) exchange.abort(chunk.error());
-            co_return SseRelayResult::ProviderError;
+            if (downstream_delivery_open && exchange.response_channel_closed()) {
+                downstream_delivery_open = false;
+                downstream_delivery_failed = true;
+            }
+            if (downstream_delivery_open) {
+                (void) exchange.abort(chunk.error());
+            }
+            co_return SseRelayResult{
+                    .upstream_error = chunk.error(),
+                    .downstream_delivery_failed = downstream_delivery_failed,
+            };
+        }
+        if (downstream_delivery_open && exchange.response_channel_closed()) {
+            downstream_delivery_open = false;
+            downstream_delivery_failed = true;
         }
         const bool complete = chunk->complete();
         const std::size_t expected_bytes = chunk->readable_bytes();
@@ -1712,34 +1726,67 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
             if (!parser.feed(node->buf)) {
                 const common::IoErr error = sse_parser_io_error(parser.error());
                 (void) upstream.abort(error);
-                (void) exchange.abort(error);
-                co_return SseRelayResult::ProviderError;
+                if (downstream_delivery_open) {
+                    (void) exchange.abort(error);
+                }
+                co_return SseRelayResult{
+                        .upstream_error = error,
+                        .downstream_delivery_failed = downstream_delivery_failed,
+                };
             }
             const SseParseStatus status = drain_parser();
             if (status != SseParseStatus::NeedMore) {
                 const common::IoErr error =
                         status == SseParseStatus::Error ? sse_parser_io_error(parser.error()) : common::IoErr::Invalid;
                 (void) upstream.abort(error);
-                (void) exchange.abort(error);
-                co_return SseRelayResult::ProviderError;
+                if (downstream_delivery_open) {
+                    (void) exchange.abort(error);
+                }
+                co_return SseRelayResult{
+                        .upstream_error = error,
+                        .downstream_delivery_failed = downstream_delivery_failed,
+                };
             }
         }
 
         if (complete) {
             if (!parser.finish()) {
                 const common::IoErr error = sse_parser_io_error(parser.error());
-                (void) exchange.abort(error);
-                co_return SseRelayResult::ProviderError;
+                (void) upstream.abort(error);
+                if (downstream_delivery_open) {
+                    (void) exchange.abort(error);
+                }
+                co_return SseRelayResult{
+                        .upstream_error = error,
+                        .downstream_delivery_failed = downstream_delivery_failed,
+                };
             }
             const SseParseStatus status = drain_parser();
             if (status != SseParseStatus::Complete) {
                 const common::IoErr error =
                         status == SseParseStatus::Error ? sse_parser_io_error(parser.error()) : common::IoErr::Invalid;
-                (void) exchange.abort(error);
-                co_return SseRelayResult::ProviderError;
+                (void) upstream.abort(error);
+                if (downstream_delivery_open) {
+                    (void) exchange.abort(error);
+                }
+                co_return SseRelayResult{
+                        .upstream_error = error,
+                        .downstream_delivery_failed = downstream_delivery_failed,
+                };
             }
-            rate_limit.settle_async(usage ? usage->total_tokens : std::optional<std::int64_t>{});
-            relay_chunk.mark_complete();
+            if (downstream_delivery_open) {
+                relay_chunk.mark_complete();
+            }
+        }
+
+        if (!downstream_delivery_open) {
+            if (complete) {
+                co_return SseRelayResult{
+                        .upstream_complete = true,
+                        .downstream_delivery_failed = downstream_delivery_failed,
+                };
+            }
+            continue;
         }
 
         if (expected_bytes == 0 && !complete) {
@@ -1747,13 +1794,23 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
         }
         auto written = co_await exchange.write_body(std::move(relay_chunk));
         if (!written || *written != expected_bytes) {
-            (void) upstream.abort(written ? common::IoErr::Invalid : written.error());
-            co_return SseRelayResult::ClientError;
+            (void) exchange.abort(written ? common::IoErr::Invalid : written.error());
+            downstream_delivery_open = false;
+            downstream_delivery_failed = true;
         }
         if (complete) {
-            co_return SseRelayResult::Success;
+            co_return SseRelayResult{
+                    .upstream_complete = true,
+                    .downstream_delivery_failed = downstream_delivery_failed,
+            };
         }
     }
+}
+
+bool should_retry_provider(const http::HttpExchange &exchange, const ProviderErrorDecision &decision,
+                           bool response_started, std::size_t attempt_index, std::size_t attempt_count) noexcept {
+    return decision.retryable && !response_started && attempt_index + 1 < attempt_count &&
+           !exchange.response_channel_closed();
 }
 
 } // namespace
@@ -1899,6 +1956,9 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
 
     const bool stream = routing.stream.is_present() && *routing.stream;
     for (std::size_t index = 0; index < plan->attempts.size(); ++index) {
+        if (exchange.response_channel_closed()) {
+            co_return;
+        }
         const ResolvedProviderAttempt &attempt = plan->attempts[index];
         const ProviderServiceSelection service_selection = service_instances.selection(attempt);
         auto rewritten =
@@ -1936,9 +1996,12 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                        std::chrono::duration_cast<std::chrono::microseconds>(
                                                event::EventLoop::current().now() - attempt_started),
                                        decision.retryable, false, "transport_error");
-                if (decision.retryable && index + 1 < plan->attempts.size()) {
+                if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
                     metrics_->provider_retry(protocol);
                     continue;
+                }
+                if (exchange.response_channel_closed()) {
+                    co_return;
                 }
                 co_await send_error(exchange, cat_request, protocol,
                                     LlmError{
@@ -1965,9 +2028,12 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                            std::chrono::duration_cast<std::chrono::microseconds>(
                                                    event::EventLoop::current().now() - attempt_started),
                                            decision.retryable, false, "response_read_error");
-                    if (decision.retryable && index + 1 < plan->attempts.size()) {
+                    if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
                         metrics_->provider_retry(protocol);
                         continue;
+                    }
+                    if (exchange.response_channel_closed()) {
+                        co_return;
                     }
                     co_await send_error(exchange, cat_request, protocol,
                                         LlmError{
@@ -1994,9 +2060,12 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                        std::chrono::duration_cast<std::chrono::microseconds>(
                                                event::EventLoop::current().now() - attempt_started),
                                        decision.retryable, false, "upstream_error");
-                if (decision.retryable && index + 1 < plan->attempts.size()) {
+                if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
                     metrics_->provider_retry(protocol);
                     continue;
+                }
+                if (exchange.response_channel_closed()) {
+                    co_return;
                 }
                 if (!buffered->body || buffered->body.readable() == 0) {
                     co_await send_error(exchange, cat_request, protocol,
@@ -2023,6 +2092,9 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                        false, false, "invalid_content_type");
                 (void) started->abort(common::IoErr::Invalid);
                 started->report_instance(InstanceReportOutcome::Failure);
+                if (exchange.response_channel_closed()) {
+                    co_return;
+                }
                 co_await send_error(exchange, cat_request, protocol,
                                     LlmError{
                                             .status_code = 502,
@@ -2032,41 +2104,38 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                     });
                 co_return;
             }
-            if (!co_await send_sse_header(exchange, cat_request, started->status_code())) {
-                audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
-                                       std::chrono::duration_cast<std::chrono::microseconds>(
-                                               event::EventLoop::current().now() - attempt_started),
-                                       false, false, "client_header_error");
-                (void) started->abort(common::IoErr::Canceled);
-                started->report_instance(InstanceReportOutcome::Neutral);
-                co_return;
-            }
+            const bool response_started = co_await send_sse_header(exchange, cat_request, started->status_code());
             std::optional<LlmTokenUsage> usage;
             const SseRelayResult relay_result =
-                    co_await relay_sse(exchange, *started, protocol, rate_limit, usage, audit);
-            audit.output_complete(relay_result == SseRelayResult::Success);
-            if (relay_result == SseRelayResult::Success) {
+                    co_await relay_sse(exchange, *started, protocol, response_started, usage, audit);
+            rate_limit.settle_async(usage ? usage->total_tokens : std::optional<std::int64_t>{});
+            audit.output_complete(relay_result.upstream_complete);
+            if (relay_result.upstream_complete) {
                 started->report_instance(InstanceReportOutcome::Success);
                 attempt.runtime->record_success(attempt.api_token ? attempt.api_token->name : std::string_view{});
             } else {
-                metrics_->sse_failure(protocol);
-                if (relay_result == SseRelayResult::ProviderError) {
-                    started->report_instance(InstanceReportOutcome::Failure);
-                    metrics_->provider_failure(protocol);
-                    apply_observed_provider_error(attempt, classify_provider_transport_error(true),
-                                                  event::EventLoop::current().now(), *metrics_, protocol);
-                } else {
-                    started->report_instance(InstanceReportOutcome::Neutral);
-                }
+                started->report_instance(InstanceReportOutcome::Failure);
+                metrics_->provider_failure(protocol);
+                apply_observed_provider_error(attempt, classify_provider_transport_error(true),
+                                              event::EventLoop::current().now(), *metrics_, protocol);
             }
-            const std::string_view outcome = relay_result == SseRelayResult::Success ? std::string_view("success")
-                                             : relay_result == SseRelayResult::ProviderError
-                                                     ? std::string_view("stream_error")
-                                                     : std::string_view("client_stream_error");
+            if (relay_result.downstream_delivery_failed || !relay_result.upstream_complete) {
+                metrics_->sse_failure(protocol);
+            }
+            if (relay_result.downstream_delivery_failed) {
+                const SseDrainMetric drain_result = relay_result.upstream_complete
+                                                            ? SseDrainMetric::Completed
+                                                            : (relay_result.upstream_error == common::IoErr::TimedOut
+                                                                       ? SseDrainMetric::Timeout
+                                                                       : SseDrainMetric::UpstreamError);
+                metrics_->sse_drain(protocol, drain_result);
+            }
+            const std::string_view outcome =
+                    relay_result.upstream_complete ? std::string_view("success") : std::string_view("stream_error");
             audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
-                                   false, true, outcome);
+                                   false, response_started, outcome);
             audit.usage(usage, attempt);
             if (usage) {
                 metrics_->token_usage(authenticated->principal().username(), attempt.provider->name, protocol, *usage);
@@ -2089,9 +2158,12 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
                                    decision.retryable, false, "transport_error");
-            if (decision.retryable && index + 1 < plan->attempts.size()) {
+            if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
                 metrics_->provider_retry(protocol);
                 continue;
+            }
+            if (exchange.response_channel_closed()) {
+                co_return;
             }
             co_await send_error(exchange, cat_request, protocol,
                                 LlmError{
@@ -2139,9 +2211,12 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() -
                                                                                      attempt_started),
                                decision.retryable, false, "upstream_error");
-        if (decision.retryable && index + 1 < plan->attempts.size()) {
+        if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
             metrics_->provider_retry(protocol);
             continue;
+        }
+        if (exchange.response_channel_closed()) {
+            co_return;
         }
         if (!response->body || response->body.readable() == 0) {
             co_await send_error(exchange, cat_request, protocol,
