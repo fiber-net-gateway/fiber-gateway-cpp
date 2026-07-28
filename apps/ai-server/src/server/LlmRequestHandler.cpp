@@ -76,6 +76,19 @@ void add_cat_integer(cat::Event &event, std::string_view key, const std::optiona
     }
 }
 
+void append_cat_duration(std::string &data, std::string_view key, std::chrono::microseconds duration) noexcept {
+    std::array<char, std::numeric_limits<std::int64_t>::digits10 + 3> buffer{};
+    const auto value = std::max<std::int64_t>(duration.count(), 0);
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (converted.ec != std::errc{}) {
+        return;
+    }
+    data.push_back(' ');
+    data.append(key);
+    data.push_back('=');
+    data.append(buffer.data(), converted.ptr);
+}
+
 template<std::size_t Capacity>
 class FixedAuditText {
 public:
@@ -835,8 +848,8 @@ public:
     }
 
     void provider_attempt(const ResolvedProviderAttempt &attempt, std::size_t index, std::size_t total, int status,
-                          std::chrono::microseconds duration, bool retryable, bool response_started,
-                          std::string_view outcome) noexcept {
+                          std::chrono::microseconds duration, const ProviderHttpTiming &timing, bool retryable,
+                          bool response_started, std::string_view outcome) noexcept {
         if (audit_enabled_ && !generation_disabled_) {
             ++attempts_observed_;
             if (attempts_size_ < attempts_capacity_) {
@@ -861,7 +874,7 @@ public:
         if (cat_transaction_ && cat_transaction_->valid()) {
             std::string data;
             data.reserve(attempt.protocol->model.size() + attempt.protocol->path.size() +
-                         (attempt.api_token ? attempt.api_token->name.size() : 0) + 128);
+                         (attempt.api_token ? attempt.api_token->name.size() : 0) + 256);
             data.append("token_name=");
             if (attempt.api_token) {
                 data.append(attempt.api_token->name);
@@ -875,6 +888,15 @@ public:
             auto converted = std::to_chars(status_text.data(), status_text.data() + status_text.size(), status);
             if (converted.ec == std::errc{}) {
                 data.append(status_text.data(), converted.ptr);
+            }
+            if (timing.response_header_observed) {
+                append_cat_duration(data, "time_to_response_header_us", timing.time_to_response_header);
+            }
+            if (timing.first_token_observed) {
+                append_cat_duration(data, "time_to_first_token_us", timing.time_to_first_token);
+            }
+            if (timing.body_transfer_observed) {
+                append_cat_duration(data, "body_transfer_us", timing.body_transfer);
             }
             data.append(" fallback=");
             data.append(attempt.fallback ? "true" : "false");
@@ -1593,38 +1615,45 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
         auto chunk = co_await upstream.read_body(kBodyChunkBytes, kProviderTimeout);
         if (!chunk) {
             const std::uint64_t failed_service_peer_id = upstream.service_peer_id();
+            const ProviderHttpTiming timing = upstream.timing();
             upstream.report_instance(InstanceReportOutcome::Failure);
             co_return std::unexpected(ProviderHttpError{
                     .code = ProviderHttpErrorCode::ReadBody,
                     .io_error = chunk.error(),
                     .message = "failed to read provider response body",
                     .failed_service_peer_id = failed_service_peer_id,
+                    .timing = timing,
             });
         }
         const bool complete = chunk->complete();
         const std::size_t current = response.body ? response.body.readable() : 0;
         if (chunk->readable_bytes() > maximum || current > maximum - chunk->readable_bytes()) {
+            const ProviderHttpTiming timing = upstream.timing();
             (void) upstream.abort(common::IoErr::MessageTooLarge);
             upstream.report_instance(InstanceReportOutcome::Neutral);
             co_return std::unexpected(ProviderHttpError{
                     .code = ProviderHttpErrorCode::ResponseTooLarge,
                     .io_error = common::IoErr::MessageTooLarge,
                     .message = "provider response body is too large",
+                    .timing = timing,
             });
         }
         if (!append_chain(response.body, *chunk, maximum)) {
+            const ProviderHttpTiming timing = upstream.timing();
             (void) upstream.abort(common::IoErr::NoMem);
             upstream.report_instance(InstanceReportOutcome::Neutral);
             co_return std::unexpected(ProviderHttpError{
                     .code = ProviderHttpErrorCode::ReadBody,
                     .io_error = common::IoErr::NoMem,
                     .message = "failed to buffer provider response body",
+                    .timing = timing,
             });
         }
         if (complete) {
             break;
         }
     }
+    response.timing = upstream.timing();
     response.load_balance = upstream.take_load_balance();
     co_return std::move(response);
 }
@@ -1684,16 +1713,19 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
                 (protocol == LlmWireProtocol::OpenAiChatCompletions && data == std::string_view("[DONE]"))) {
                 continue;
             }
-            audit.output(data, true);
             usage_pool.reset();
-            auto extracted = extract_token_usage(protocol, data, true, usage_pool);
-            if (!extracted) {
+            LlmStreamEventObservation observation = analyze_stream_event(protocol, data, usage_pool);
+            if (observation.output_token_observed) {
+                upstream.observe_first_token();
+            }
+            audit.output(data, true);
+            if (!observation.usage) {
                 continue;
             }
             if (usage) {
-                usage->merge(*extracted);
+                usage->merge(*observation.usage);
             } else {
-                usage = *extracted;
+                usage = *observation.usage;
             }
         }
     };
@@ -2001,7 +2033,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 audit.provider_attempt(attempt, index, plan->attempts.size(), 0,
                                        std::chrono::duration_cast<std::chrono::microseconds>(
                                                event::EventLoop::current().now() - attempt_started),
-                                       decision.retryable, false, "transport_error");
+                                       started.error().timing, decision.retryable, false, "transport_error");
                 if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
                     metrics_->provider_retry(protocol);
                     continue;
@@ -2033,7 +2065,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                     audit.provider_attempt(attempt, index, plan->attempts.size(), upstream_status,
                                            std::chrono::duration_cast<std::chrono::microseconds>(
                                                    event::EventLoop::current().now() - attempt_started),
-                                           decision.retryable, false, "response_read_error");
+                                           buffered.error().timing, decision.retryable, false, "response_read_error");
                     if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
                         metrics_->provider_retry(protocol);
                         continue;
@@ -2065,7 +2097,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 audit.provider_attempt(attempt, index, plan->attempts.size(), buffered->status_code,
                                        std::chrono::duration_cast<std::chrono::microseconds>(
                                                event::EventLoop::current().now() - attempt_started),
-                                       decision.retryable, false, "upstream_error");
+                                       buffered->timing, decision.retryable, false, "upstream_error");
                 if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
                     metrics_->provider_retry(protocol);
                     continue;
@@ -2095,7 +2127,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
                                        std::chrono::duration_cast<std::chrono::microseconds>(
                                                event::EventLoop::current().now() - attempt_started),
-                                       false, false, "invalid_content_type");
+                                       started->timing(), false, false, "invalid_content_type");
                 (void) started->abort(common::IoErr::Invalid);
                 started->report_instance(InstanceReportOutcome::Failure);
                 if (exchange.response_channel_closed()) {
@@ -2141,7 +2173,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
-                                   false, response_started, outcome);
+                                   started->timing(), false, response_started, outcome);
             audit.usage(usage, attempt);
             if (usage) {
                 metrics_->token_usage(authenticated->principal().username(), attempt.provider->name, protocol, *usage);
@@ -2163,7 +2195,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             audit.provider_attempt(attempt, index, plan->attempts.size(), 0,
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
-                                   decision.retryable, false, "transport_error");
+                                   response.error().timing, decision.retryable, false, "transport_error");
             if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
                 metrics_->provider_retry(protocol);
                 continue;
@@ -2193,7 +2225,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
-                                   false, false, "success");
+                                   response->timing, false, false, "success");
             audit.usage(usage, attempt);
             if (usage) {
                 metrics_->token_usage(authenticated->principal().username(), attempt.provider->name, protocol, *usage);
@@ -2216,7 +2248,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,
                                std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() -
                                                                                      attempt_started),
-                               decision.retryable, false, "upstream_error");
+                               response->timing, decision.retryable, false, "upstream_error");
         if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
             metrics_->provider_retry(protocol);
             continue;

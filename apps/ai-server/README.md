@@ -113,6 +113,17 @@ model 鉴权失败仍保留原始 path。请求体解析成功后，根 Transact
 每次尝试生成独立 child span 并继续发送这三个请求 header，最多 512 字节的
 `tracestate` 会原样透传。CAT 上下文或记录失败只会关闭本次观测，不改变业务请求结果。
 
+每个 `LLM.Provider` child Transaction 的原生 duration 仍表示整个 Provider attempt；
+其 data 另外按微秒记录 `time_to_response_header_us`、`time_to_first_token_us` 和
+`body_transfer_us`。计时从取得连接并开始发送 HTTP header 前开始，response header
+只认最终非 1xx header。first token 只在流式响应中记录，表示 SSE 解析出首个非空模型
+输出增量的时间；OpenAI 的文本、拒绝和 tool-call 增量以及 Anthropic 的文本和 tool-use
+增量都计入，role、心跳、usage、空字符串和 `[DONE]` 不计入。SSE delta 可能合并多个
+token，因此该字段表示网关可观测 TTFT，而不是 Provider 内部 tokenizer 的精确边界。
+body transfer 从首个非空 HTTP body chunk 持续到完整 body 结束。未到达的里程碑不输出
+对应字段，非流式响应不输出 first token；SSE body 读取与下游写入交替进行，因此 body
+transfer 会反映下游背压。
+
 配置限流规则后，本地 check/settle 记录 `RateLimit.Check/Settle` Event，远程 owner
 调用记录同类型 Transaction；allow、deny 和 stale 属于正常业务结果，网络、成员环
 或响应错误才将 CAT 状态标记为失败。

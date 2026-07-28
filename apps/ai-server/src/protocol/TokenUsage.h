@@ -22,8 +22,16 @@ struct LlmTokenUsage {
     void merge(const LlmTokenUsage &next) noexcept;
 };
 
+struct LlmStreamEventObservation {
+    std::optional<LlmTokenUsage> usage;
+    bool output_token_observed = false;
+};
+
 [[nodiscard]] std::optional<LlmTokenUsage> extract_token_usage(LlmWireProtocol protocol, std::string_view json,
                                                                bool streaming_event, mem::BufPool &pool) noexcept;
+
+[[nodiscard]] LlmStreamEventObservation analyze_stream_event(LlmWireProtocol protocol, std::string_view json,
+                                                             mem::BufPool &pool) noexcept;
 
 } // namespace fiber::ai_server
 
