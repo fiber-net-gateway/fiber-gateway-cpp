@@ -1,4 +1,5 @@
 #include "ServiceDiscovery.h"
+#include "../observability/AiServerLogCategories.h"
 
 #include <array>
 #include <charconv>
@@ -15,7 +16,7 @@
 namespace fiber::ai_server {
 namespace {
 
-DEFINE_LOGGER(LOG_DISCOVERY, "ai_server.discovery");
+DEFINE_LOGGER(LOG_DISCOVERY, kAiServerDiscoveryLogger);
 
 std::string make_host_header(const net::IpAddress &ip, std::uint16_t port) {
     const std::string address = ip.to_string();

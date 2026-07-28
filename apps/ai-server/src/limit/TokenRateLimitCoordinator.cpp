@@ -1,4 +1,5 @@
 #include "TokenRateLimitCoordinator.h"
+#include "../observability/AiServerLogCategories.h"
 
 #include <utility>
 
@@ -9,7 +10,7 @@
 namespace fiber::ai_server {
 namespace {
 
-DEFINE_LOGGER(LOG_RATE_LIMIT, "ai_server.rate_limit");
+DEFINE_LOGGER(LOG_RATE_LIMIT, kAiServerRateLimitLogger);
 
 RateLimitCoordinatorError coordinator_error(RateLimitCoordinatorErrorCode code,
                                             RateLimitRemoteError remote = {}) noexcept {

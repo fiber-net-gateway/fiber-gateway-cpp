@@ -1,12 +1,15 @@
 #include "AiServerConfig.h"
 #include "AiServerLogging.h"
 #include "AiServerRuntime.h"
+#include "observability/AiServerLogCategories.h"
 
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <expected>
 #include <iostream>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -27,7 +30,7 @@
 
 namespace {
 
-DEFINE_LOGGER(LOG_LIFECYCLE, "ai_server.lifecycle");
+DEFINE_LOGGER(LOG_LIFECYCLE, fiber::ai_server::kAiServerLifecycleLogger);
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) noexcept {
     sockaddr_storage bound{};
@@ -99,8 +102,26 @@ void log_runtime_error(const fiber::ai_server::AiServerRuntimeError &error) noex
     }
 }
 
-void print_log_error(const fiber::log::LogConfigError &error) {
-    std::cerr << "failed to initialize logging: " << error.message;
+void print_logging_config_error(std::string_view path, const fiber::ai_server::AiServerLoggingError &error) {
+    std::cerr << "logging configuration error in " << path;
+    if (error.line != 0) {
+        std::cerr << ':' << error.line;
+        if (error.column != 0) {
+            std::cerr << ':' << error.column;
+        }
+    }
+    if (!error.field.empty()) {
+        std::cerr << " [" << error.field << ']';
+    }
+    std::cerr << ": " << error.detail;
+    if (error.system_error != 0) {
+        std::cerr << ": " << std::strerror(error.system_error);
+    }
+    std::cerr << '\n';
+}
+
+void print_logging_initialization_error(std::string_view path, const fiber::log::LogConfigError &error) {
+    std::cerr << "failed to initialize logging from " << path << ": " << error.message;
     if (error.system_error != 0) {
         std::cerr << ": " << std::strerror(error.system_error);
     }
@@ -136,32 +157,36 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    auto log_config = fiber::ai_server::make_log_config(config.audit_log_options());
+    auto log_config = fiber::ai_server::load_ai_server_log_config(config.logging_config_path());
     if (!log_config) {
-        print_log_error(log_config.error());
+        print_logging_config_error(config.logging_config_path(), log_config.error());
         return 1;
     }
     const fiber::log::AppenderId audit_appender_id = log_config->audit_appender_id;
+    const std::size_t audit_max_record_bytes = log_config->audit.max_record_bytes;
+    const std::string audit_path = log_config->audit.path;
     auto logging_started = fiber::log::LoggerManager::global().initialize(std::move(log_config->config));
     if (!logging_started) {
-        print_log_error(logging_started.error());
+        print_logging_initialization_error(config.logging_config_path(), logging_started.error());
         return 1;
     }
+    LoggingShutdownGuard logging_guard;
 
     fiber::event::EventLoop accept_loop;
     fiber::event::EventLoopGroup http_workers(fiber::ai_server::default_http_worker_count());
     fiber::event::EventLoopGroup nacos_group(1);
     fiber::event::EventLoopGroup cat_group(1);
-    LoggingShutdownGuard logging_guard;
     fiber::net::ListenOptions listen_options{};
     LOG(LOG_LIFECYCLE, INFO) << "configuration loaded path=" << fiber::log::quoted(config_path)
+                             << " logging_config_path=" << fiber::log::quoted(config.logging_config_path())
                              << " listen=" << fiber::log::quoted(config.listen_address().to_string())
                              << " http_workers=" << http_workers.size()
                              << " nacos_servers=" << config.nacos_config().server_ips().size()
-                             << " audit_path=" << fiber::log::quoted(config.audit_log_options().path);
+                             << " audit_path=" << fiber::log::quoted(audit_path);
 
-    auto runtime_result = fiber::ai_server::AiServerRuntime::create(
-            accept_loop, nacos_group.at(0), cat_group.at(0), http_workers, config, audit_appender_id, listen_options);
+    auto runtime_result = fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0),
+                                                                    http_workers, config, audit_max_record_bytes,
+                                                                    audit_appender_id, listen_options);
     if (!runtime_result) {
         log_runtime_error(runtime_result.error());
         return 1;

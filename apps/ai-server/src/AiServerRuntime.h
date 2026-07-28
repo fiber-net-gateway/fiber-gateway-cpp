@@ -71,8 +71,8 @@ class AiServerRuntime final : public common::NonCopyable, public common::NonMova
 public:
     [[nodiscard]] static std::expected<std::unique_ptr<AiServerRuntime>, AiServerRuntimeError>
     create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
-           event::EventLoopGroup &http_workers, const AiServerConfig &config, log::AppenderId audit_appender_id,
-           const net::ListenOptions &listen_options = {});
+           event::EventLoopGroup &http_workers, const AiServerConfig &config, std::size_t audit_max_record_bytes,
+           log::AppenderId audit_appender_id, const net::ListenOptions &listen_options = {});
 
     ~AiServerRuntime();
 

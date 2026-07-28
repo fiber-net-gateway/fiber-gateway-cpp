@@ -55,8 +55,8 @@ CAT EventLoop
 └── CatClient sender ownership
 
 log EventLoop
-├── stderr Appender
-└── audit FileAppender
+├── configured operational Appenders
+└── code-owned audit FileAppender
 ```
 
 核心约束：
@@ -70,6 +70,8 @@ log EventLoop
 - DNS resolver 和 HTTP pool 每个 worker 一份 owner-loop state；
 - 请求 pin 住进入时的配置快照，刷新不改变执行中的认证、授权、限流规则和
   Provider 集合；
+- 启动顺序为 dotenv -> 独立日志 JSON -> LoggerManager -> 业务 EventLoop；日志
+  初始化成功后立即建立 shutdown guard，保证后续任意启动失败也会 drain/关闭；
 - shutdown 顺序为 listener/drain -> metrics/limit/provider runtime -> CAT ->
   config manager/registration -> Nacos services -> 业务 EventLoopGroup -> log drain。
 
@@ -229,6 +231,25 @@ owner，settle 用 ticket 回到同一版本状态。远端调用 64 KiB 内部 
 该边界。
 
 ## 9. 错误、审计和指标
+
+dotenv 只保存必填的 `AI_SERVER_LOG_CONFIG_PATH`，不再承载 level、queue 或 audit
+参数。相对路径以 dotenv 文件目录为基准；日志 JSON 内的相对 file/audit 路径再以
+日志 JSON 目录为基准。日志 JSON 最大 1 MiB，仅在启动时加载，不参与 Nacos 热更新。
+解析器按 `version=1` 严格校验未知字段、重复字段、类型、范围、appender 引用和路径
+冲突，任何错误都在创建业务 EventLoop 前让进程失败。
+
+JSON 是常规运行日志、异步队列容量和 audit 参数的唯一来源。常规配置支持 stderr
+console、file、level range、buffer/flush、rotation、root logger，以及
+`ai_server`、`ai_server.lifecycle`、`ai_server.config`、`ai_server.http`、
+`ai_server.llm`、`ai_server.discovery`、`ai_server.rate_limit` 的精确 category
+覆盖。所有常规 appender 必须被引用；console 只能选择 stderr。listener 成功后
+main 向 stdout 输出的单行地址是服务发现通道，不经过 LoggerManager，也不受该 JSON
+控制。
+
+进程固定异步队列策略为 `DropNewest`。`ai_server.audit` 及
+`ai_server_audit_file` 为代码保留名：外部配置只能给出 audit 路径、单条记录上限、
+轮转阈值和归档数，不能改变 INFO、`additive=false`、`0600`、unbuffered、
+no-follow、普通文件限定、权限强制和不完整尾部恢复。
 
 错误层维护一个内部 `LlmError`，包含 HTTP status、稳定 code、公开 message、field
 和是否可重试。序列化器按入站协议生成 OpenAI 或 Anthropic 外观，绝不把 C++ 错误、

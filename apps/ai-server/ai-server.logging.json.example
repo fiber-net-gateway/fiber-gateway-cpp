@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "queue": {
+    "capacity_bytes": 67108864
+  },
+  "appenders": [
+    {
+      "name": "ai_server_stderr",
+      "type": "console",
+      "stream": "stderr",
+      "min_level": "trace",
+      "max_level": "fatal"
+    }
+  ],
+  "root_logger": {
+    "level": "debug",
+    "verbosity": 0,
+    "appenders": [
+      "ai_server_stderr"
+    ]
+  },
+  "loggers": [],
+  "audit": {
+    "path": "ai-server-audit.ndjson",
+    "max_record_bytes": 134217728,
+    "rotate_bytes": 1073741824,
+    "max_archives": 30
+  }
+}

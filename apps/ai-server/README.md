@@ -50,6 +50,7 @@ owner 会直接信任这些字段；因此限流节点还必须运行兼容协�
 cmake -S . -B build -DFIBER_BUILD_APPS=ON
 cmake --build build --target fiber_app_ai_server
 cp apps/ai-server/ai-server.env.example ai-server.env
+cp apps/ai-server/ai-server.logging.json.example ai-server.logging.json
 ./build/apps/ai-server
 ```
 
@@ -61,6 +62,7 @@ cp apps/ai-server/ai-server.env.example ai-server.env
 
 未传参数时读取当前目录的 `ai-server.env`。配置解析支持空行、注释、可选
 `export`、单/双引号和行尾注释；重复键、未知键和非法值都会让启动失败。
+日志使用独立的严格 JSON 文件，dotenv 中只保留它的路径。
 
 ## 启动配置
 
@@ -74,12 +76,10 @@ HTTP 和集群成员：
 - `AI_SERVER_SERVICE_GROUP`：默认 `DEFAULT_GROUP`；
 - `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS`：默认 `60000`，`0` 表示无限等待。
 
-LLM 审计：
+日志：
 
-- `AI_SERVER_AUDIT_LOG_PATH`：默认 `ai-server-audit.ndjson`；
-- `AI_SERVER_AUDIT_MAX_RECORD_BYTES`：默认 128 MiB；
-- `AI_SERVER_AUDIT_ROTATE_BYTES`：默认 1 GiB，`0` 禁用轮转；
-- `AI_SERVER_AUDIT_MAX_ARCHIVES`：默认 30。
+- `AI_SERVER_LOG_CONFIG_PATH`：必填，指向独立日志 JSON；相对路径以 dotenv 文件所在
+  目录为基准，最多 4096 字节。
 
 Nacos：
 
@@ -97,7 +97,59 @@ CAT 默认关闭。只要任意 CAT 值非空，就必须同时提供：
 - `CAT_ROUTER_ADDRESSES` 或 `CAT_COLLECTOR_ADDRESSES` 至少一个。
 
 CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配置中解析域名。
-可直接复制并修改 [`ai-server.env.example`](ai-server.env.example)。
+可直接复制并修改 [`ai-server.env.example`](ai-server.env.example) 和
+[`ai-server.logging.json.example`](ai-server.logging.json.example)。
+
+## 日志配置
+
+日志配置只在进程启动时加载，不热更新。文件最大 1 MiB，必须是严格 JSON；未知字段、
+重复字段、缺少必填字段、非法引用或无效值都会让启动失败。所有相对日志文件路径都以
+日志 JSON 所在目录为基准。
+
+顶层字段全部必填：
+
+| 字段 | 规则 |
+| --- | --- |
+| `version` | 当前只能为整数 `1` |
+| `queue.capacity_bytes` | 正整数；队列满策略固定为 `DropNewest`，不能从配置改成阻塞 |
+| `appenders` | 常规运行日志 appender 数组 |
+| `root_logger` | 必须配置 `level` 和至少一个 appender；`verbosity` 可选 |
+| `loggers` | category 覆盖数组，可以为空 |
+| `audit` | 对话审计文件和记录上限 |
+
+常规 appender 的 `name` 在文件内唯一，`min_level`/`max_level` 可选，level 取值为
+`trace`、`debug`、`info`、`warn`、`error`、`fatal`：
+
+- console appender 使用 `type: "console"`，必须显式配置 `stream: "stderr"`；
+  `stdout` 不属于日志配置；
+- file appender 使用 `type: "file"` 并提供 `path`；可选 `mode`（四位八进制字符串，
+  默认 `"0644"`）；
+- file appender 的 `buffer_bytes` 和 `flush_interval_ms` 必须同时出现且都是正整数；
+- 可选 `rotation` 必须同时提供正整数 `max_bytes`、`max_archives` 和
+  `archive_name`。归档名只能使用安全文件名字符及 `{base}`、`{utc}`、`{seq}`
+  占位符，其中 `{base}` 和 `{seq}` 各出现一次；
+- 每个常规 appender 必须被 root 或某个 category 引用，同一 logger 不能重复引用，
+  不允许两个 file appender 或 audit 使用同一规范化路径。
+
+`root_logger` 和 category 的 `verbosity` 是非负整数。category 可覆盖 `level`、
+`verbosity`、`appenders` 和 `additive`，但名字只允许：
+
+- `ai_server`
+- `ai_server.lifecycle`
+- `ai_server.config`
+- `ai_server.http`
+- `ai_server.llm`
+- `ai_server.discovery`
+- `ai_server.rate_limit`
+
+`ai_server.audit` 和内部 appender 名 `ai_server_audit_file` 由代码保留，不能覆盖。
+`audit` 必须提供 `path`、正整数 `max_record_bytes`、非负整数 `rotate_bytes` 和正整数
+`max_archives`；`rotate_bytes: 0` 禁用轮转。审计 appender 始终为 unbuffered、
+`0600`、no-follow、普通文件限定、启动尾部恢复，logger 始终为精确
+`ai_server.audit`、INFO、`additive=false`。这些安全和隔离约束不开放配置。
+
+进程仍会在 listener 成功后向 stdout 输出一行服务发现信息。这不是运行日志，不受
+日志 JSON 控制，便于本地启动脚本发现实际绑定端口。
 
 ## Nacos 业务配置
 
@@ -166,8 +218,10 @@ ai-server 在静态初始化边界编译 OpenAI/Anthropic 路径。请求只解�
 
 ## 可观测性与敏感信息
 
-常规运行日志固定输出 stderr/INFO，主要 category 为 `ai_server.lifecycle`、
-`ai_server.config`、`ai_server.http`、`ai_server.llm` 和 `ai_server.rate_limit`。
+常规运行日志的 appender、level、verbosity 和 category 继承关系由独立日志 JSON
+配置，主要 category 为 `ai_server.lifecycle`、`ai_server.config`、
+`ai_server.http`、`ai_server.llm`、`ai_server.discovery` 和
+`ai_server.rate_limit`。
 LLM 对话审计使用独立的 `ai_server.audit` logger，不向 stderr 传播。请求 worker
 直接生成 JSON 并构造一条 `audit_json=<json>` 日志记录，随后投递给进程共享的异步
 日志线程；文件中的每行因此是常规日志前缀加稳定标记 `audit_json=` 和一个完整 JSON，
@@ -183,7 +237,8 @@ usage 等信息与它位于同一对象。
 同步和 SSE 共用同一个 `llm.output` 聚合器。SSE delta 在转发前依次追加，最终
 `role/content/tool_names/tool_arguments/finish_reason` 的形态与同步响应一致；
 `complete` 表示 Provider 流完整结束，`canonical_complete` 还要求解析和聚合均成功。
-内容不做截断。审计是 best effort：记录超过 `AI_SERVER_AUDIT_MAX_RECORD_BYTES`、
+内容不做截断。审计是 best effort：记录超过日志 JSON 中的
+`audit.max_record_bytes`、
 内存分配/JSON 生成失败、日志 backlog 满或文件写入失败时，丢弃受影响的审计记录，
 不会改变 HTTP 状态、Provider 调用、同步正文或 SSE 转发结果。ai-server 把日志系统
 配置为 `DropNewest`，请求线程不等待日志容量，也不读取投递结果。

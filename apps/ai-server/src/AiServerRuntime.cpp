@@ -1,4 +1,5 @@
 #include "AiServerRuntime.h"
+#include "observability/AiServerLogCategories.h"
 
 #include <thread>
 
@@ -24,7 +25,7 @@
 namespace fiber::ai_server {
 namespace {
 
-DEFINE_LOGGER(LOG_LIFECYCLE, "ai_server.lifecycle");
+DEFINE_LOGGER(LOG_LIFECYCLE, kAiServerLifecycleLogger);
 
 AiServerRuntimeError create_error(AiServerRuntimeErrorCode code, nacos::NacosCreateError error) noexcept {
     return AiServerRuntimeError{
@@ -114,7 +115,8 @@ std::size_t default_http_worker_count() noexcept {
 std::expected<std::unique_ptr<AiServerRuntime>, AiServerRuntimeError>
 AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
                         event::EventLoopGroup &http_workers, const AiServerConfig &config,
-                        log::AppenderId audit_appender_id, const net::ListenOptions &listen_options) {
+                        std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id,
+                        const net::ListenOptions &listen_options) {
     auto client = nacos::NacosClient::create(nacos_loop, config.nacos_config());
     if (!client) {
         return std::unexpected(create_error(AiServerRuntimeErrorCode::CreateNacosClient, client.error()));
@@ -142,8 +144,8 @@ AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_l
     auto runtime = std::unique_ptr<AiServerRuntime>(new (std::nothrow) AiServerRuntime(
             accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), listen_options,
             config.initial_config_timeout(), config.advertise_address(), std::string(config.service_name()),
-            std::string(config.service_group()), std::move(cat_client), config.audit_log_options().max_record_bytes,
-            audit_appender_id, std::move(*client), std::move(*service), std::move(*naming)));
+            std::string(config.service_group()), std::move(cat_client), audit_max_record_bytes, audit_appender_id,
+            std::move(*client), std::move(*service), std::move(*naming)));
     if (!runtime) {
         return std::unexpected(AiServerRuntimeError{
                 .code = AiServerRuntimeErrorCode::AllocateRuntime,
