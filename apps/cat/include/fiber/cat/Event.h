@@ -28,6 +28,8 @@ public:
 
     RecordError add_data(std::string_view data) noexcept;
     RecordError add_data(std::string_view key, std::string_view value) noexcept;
+    RecordError set_type(std::string_view type) noexcept;
+    RecordError set_name(std::string_view name) noexcept;
     RecordError set_status(std::string_view status) noexcept;
     RecordError set_timestamp(std::uint64_t timestamp_millis) noexcept;
     RecordError complete() noexcept;

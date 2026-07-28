@@ -82,6 +82,66 @@ TEST(CatMessageTest, BuildsNestedMessagesAndConsumesCompletedHandles) {
     });
 }
 
+TEST(CatMessageTest, RenamesTransactionsAndEventsBeforeCompletion) {
+    run_on_loop([] {
+        auto root_result = Transaction::create_root("URL", "/v1/chat/completions");
+        ASSERT_TRUE(root_result);
+        Transaction root = std::move(*root_result);
+        EXPECT_EQ(root.set_type("LLM"), RecordError::None);
+        EXPECT_EQ(root.set_name("/v1/chat/completions:gpt-5.5"), RecordError::None);
+
+        auto event_result = root.start_event("Attempt", "pending");
+        ASSERT_TRUE(event_result);
+        Event event = std::move(*event_result);
+        EXPECT_EQ(event.set_type("ProviderAttempt"), RecordError::None);
+        EXPECT_EQ(event.set_name("primary"), RecordError::None);
+        EXPECT_EQ(event.complete(), RecordError::None);
+
+        EXPECT_EQ(root.complete(), RecordError::None);
+        EXPECT_EQ(root.set_type("late"), RecordError::Completed);
+        EXPECT_EQ(root.set_name("late"), RecordError::Completed);
+        EXPECT_EQ(event.set_type("late"), RecordError::Completed);
+        EXPECT_EQ(event.set_name("late"), RecordError::Completed);
+    });
+}
+
+TEST(CatMessageTest, RenameLimitsAreAtomicAndChargeOnlyChangedNonEmptyValues) {
+    run_on_loop([] {
+        RecordLimits limits;
+        limits.max_type_bytes = 4;
+        limits.max_name_bytes = 8;
+        auto root_result = fiber::cat::detail::create_transaction_root("URL", "old", limits);
+        ASSERT_TRUE(root_result);
+        auto *root = *root_result;
+        auto *trace = root->trace;
+
+        const std::size_t initial_payload = trace->data->payload_bytes;
+        EXPECT_EQ(fiber::cat::detail::set_type(root, "URL"), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::set_name(root, "old"), RecordError::None);
+        EXPECT_EQ(trace->data->payload_bytes, initial_payload);
+
+        EXPECT_EQ(fiber::cat::detail::set_type(root, "LLM"), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::set_name(root, "renamed"), RecordError::None);
+        EXPECT_EQ(root->type.view(), "LLM");
+        EXPECT_EQ(root->name.view(), "renamed");
+        EXPECT_EQ(trace->data->payload_bytes, initial_payload + 3 + 7);
+
+        const std::size_t renamed_payload = trace->data->payload_bytes;
+        EXPECT_EQ(fiber::cat::detail::set_type(root, "model"), RecordError::LimitExceeded);
+        EXPECT_EQ(fiber::cat::detail::set_name(root, "too-long!"), RecordError::LimitExceeded);
+        EXPECT_EQ(root->type.view(), "LLM");
+        EXPECT_EQ(root->name.view(), "renamed");
+        EXPECT_EQ(trace->data->payload_bytes, renamed_payload);
+
+        EXPECT_EQ(fiber::cat::detail::set_type(root, ""), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::set_name(root, ""), RecordError::None);
+        EXPECT_TRUE(root->type.view().empty());
+        EXPECT_TRUE(root->name.view().empty());
+        EXPECT_EQ(trace->data->payload_bytes, renamed_payload);
+        EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
+    });
+}
+
 TEST(CatMessageTest, RootCanCompleteBeforeExistingChild) {
     run_on_loop([] {
         auto root_result = Transaction::create_root("URL", "/parallel");

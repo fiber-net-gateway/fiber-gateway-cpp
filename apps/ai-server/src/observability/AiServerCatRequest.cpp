@@ -2,6 +2,7 @@
 
 #include <array>
 #include <charconv>
+#include <cstring>
 #include <limits>
 #include <utility>
 
@@ -164,6 +165,31 @@ void AiServerCatRequest::inject_response_header(http::HttpHeaders &headers) cons
     if (!trace_id.empty()) {
         (void) headers.set_view(kTraceIdHeader, trace_id, kTraceIdLowcaseHeader.data(), kTraceIdHeaderHash);
     }
+}
+
+cat::RecordError AiServerCatRequest::set_root_model_name(std::string_view model) noexcept {
+    cat::Transaction *root = root_transaction();
+    if (!root) {
+        return cat::RecordError::Completed;
+    }
+    if (model.empty()) {
+        return cat::RecordError::InvalidArgument;
+    }
+
+    const std::string_view path = exchange_->uri().path;
+    if (path.size() == std::numeric_limits<std::size_t>::max() ||
+        model.size() > std::numeric_limits<std::size_t>::max() - path.size() - 1) {
+        return cat::RecordError::LimitExceeded;
+    }
+    const std::size_t size = path.size() + 1 + model.size();
+    char *name = exchange_->pool().alloc<char>(size);
+    if (!name) {
+        return cat::RecordError::NoMemory;
+    }
+    std::memcpy(name, path.data(), path.size());
+    name[path.size()] = ':';
+    std::memcpy(name + path.size() + 1, model.data(), model.size());
+    return root->set_name(std::string_view(name, size));
 }
 
 std::expected<cat::PropagationContext, cat::RecordError>

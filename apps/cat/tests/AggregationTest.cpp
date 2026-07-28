@@ -66,18 +66,22 @@ TEST(CatAggregationTest, AggregatesTransactionEventErrorsAndDurationsByKey) {
                 fiber::cat::detail::AggregationShard::create(fiber::event::EventLoop::current(), 8, 128, 64 * 1024, 16);
         ASSERT_NE(shard, nullptr);
 
-        auto root_created = fiber::cat::detail::create_transaction_root("Call", "same", {});
+        auto root_created = fiber::cat::detail::create_transaction_root("OldCall", "old-root", {});
         ASSERT_TRUE(root_created);
         auto *root = *root_created;
         auto *trace = root->trace;
+        ASSERT_EQ(fiber::cat::detail::set_type(root, "Call"), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::set_name(root, "same"), RecordError::None);
         ASSERT_EQ(fiber::cat::detail::set_duration(root, 1500us), RecordError::None);
         ASSERT_EQ(fiber::cat::detail::set_status(root, "ERROR"), RecordError::None);
 
         auto child_created = fiber::cat::detail::create_transaction(*root, "Call", "same");
         ASSERT_TRUE(child_created);
         ASSERT_EQ(fiber::cat::detail::set_duration(*child_created, 2500us), RecordError::None);
-        auto event_created = fiber::cat::detail::create_event(**child_created, "Remote", "failure");
+        auto event_created = fiber::cat::detail::create_event(**child_created, "OldRemote", "old-failure");
         ASSERT_TRUE(event_created);
+        ASSERT_EQ(fiber::cat::detail::set_type(*event_created, "Remote"), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::set_name(*event_created, "failure"), RecordError::None);
         ASSERT_EQ(fiber::cat::detail::set_status(*event_created, "ERROR"), RecordError::None);
 
         freeze_message(*trace->data->root);
@@ -98,6 +102,8 @@ TEST(CatAggregationTest, AggregatesTransactionEventErrorsAndDurationsByKey) {
         EXPECT_EQ(values[0].error_count, 1);
         EXPECT_EQ(values[0].duration_sum_millis, 3);
         EXPECT_EQ(values[1].kind, AggregateKind::Event);
+        EXPECT_EQ(values[1].type, "Remote");
+        EXPECT_EQ(values[1].name, "failure");
         EXPECT_EQ(values[1].count, 1);
         EXPECT_EQ(values[1].error_count, 1);
         delete shard;

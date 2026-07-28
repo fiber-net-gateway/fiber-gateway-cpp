@@ -40,6 +40,7 @@ public:
     [[nodiscard]] std::string_view request_id() const noexcept;
     [[nodiscard]] std::string_view trace_state() const noexcept { return trace_state_; }
     void inject_response_header(http::HttpHeaders &headers) const noexcept;
+    cat::RecordError set_root_model_name(std::string_view model) noexcept;
 
     [[nodiscard]] std::expected<cat::PropagationContext, cat::RecordError>
     create_remote_context(cat::Transaction *parent = nullptr) noexcept;

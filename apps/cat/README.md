@@ -142,6 +142,8 @@ if (root_result) {
 Event completes it with `CAT_CLIENT_INCOMPLETE`, preventing an abandoned operation from being reported as success.
 `log_error()` emits the official `Exception`/`ERROR` event form. `log_completed_transaction()` records a transaction
 whose supplied duration ends at the current wall-clock time, without introducing an implicit transaction stack.
+`set_type()` and `set_name()` allow a Transaction or Event to bind routing information discovered after creation.
+They are owner-EventLoop-local and affect the final encoded and aggregated key only while the handle remains valid.
 
 A parent may complete before children that were already created. Its internal data remains in the trace arena until
 the final open child completes, but the consumed parent handle cannot add more children. The final completion destroys
@@ -149,7 +151,8 @@ the complete trace arena in one operation. Views into the internal tree are inte
 
 Type, name, status, message count, child count, per-message data, and total tree memory are bounded by `RecordLimits`.
 Message strings and rendered data are copied into trace-owned pooled storage at record time. Transactions store child
-pointers in linked fixed-capacity chunks of 16; message data is rendered into linked byte chunks.
+pointers in linked fixed-capacity chunks of 16; message data is rendered into linked byte chunks. Replacing a type or
+name does not reclaim its previous arena bytes, so repeated changes continue to consume the bounded tree budget.
 
 ## Encoding, sampling, and aggregation
 

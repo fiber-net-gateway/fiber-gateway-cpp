@@ -102,7 +102,11 @@ CAT 默认关闭。只要任意 CAT 值非空，就必须同时提供：
 - `CAT_ROUTER_ADDRESSES` 或 `CAT_COLLECTOR_ADDRESSES` 至少一个。
 
 CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配置中解析域名。
-启用 CAT 后，每个 HTTP 请求都会创建一个 `URL` 根 Transaction。入站
+启用 CAT 后，每个 HTTP 请求都会创建一个 `URL` 根 Transaction。OpenAI Chat Completions
+和 Anthropic Messages 请求在逻辑 model 鉴权成功后，将根 Transaction name 从原始 path
+改为 `<path>:<model>`，例如 `/v1/chat/completions:gpt-5.5`；早期认证、请求格式和
+model 鉴权失败仍保留原始 path。请求体解析成功后，根 Transaction data 还会记录协议
+实际采用的 `stream=true|false`。入站
 `HI-TRACE-ID`、`HI-SPAN-ID-PARENT`、`HI-SPAN-ID` 分别恢复 CAT 的 root、parent
 和当前 message ID；缺少当前 span 时会生成新 ID。所有 HTTP 最终响应都会在
 `HI-TRACE-ID` 中返回本次请求的 root/request ID。Provider 调用和远程限流调用会为

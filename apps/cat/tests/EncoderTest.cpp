@@ -112,10 +112,12 @@ TEST(CatEncoderTest, EncodesEventRootAsOfficialNt1Frame) {
                 .parent_message_id = "p",
                 .session_token = "s",
         };
-        auto created = fiber::cat::detail::create_event_root("E", "n", {}, std::move(context));
+        auto created = fiber::cat::detail::create_event_root("old-type", "old-name", {}, std::move(context));
         ASSERT_TRUE(created);
         auto *event = *created;
         auto *trace = event->trace;
+        ASSERT_EQ(fiber::cat::detail::set_type(event, "E"), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::set_name(event, "n"), RecordError::None);
         make_time_deterministic(*event->trace->data, 123);
         event->time = std::chrono::steady_clock::time_point{};
         freeze_trace(*trace);
@@ -456,16 +458,20 @@ TEST(CatEncoderTest, EncodesOfficialPt1NestedTextAndPreservesRawControlCharacter
         ASSERT_EQ(::setenv("TZ", "UTC", 1), 0);
         ::tzset();
 
-        auto created = fiber::cat::detail::create_transaction_root("T", "root", {});
+        auto created = fiber::cat::detail::create_transaction_root("old-type", "old-root", {});
         ASSERT_TRUE(created);
         auto *root = *created;
         auto *trace = root->trace;
+        ASSERT_EQ(fiber::cat::detail::set_type(root, "T"), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::set_name(root, "root"), RecordError::None);
         make_time_deterministic(*trace->data, 123);
         root->time = std::chrono::steady_clock::time_point{};
         ASSERT_EQ(fiber::cat::detail::set_duration(root, 1500us), RecordError::None);
-        auto child_created = fiber::cat::detail::create_event(*root, "E", "child");
+        auto child_created = fiber::cat::detail::create_event(*root, "old-event", "old-child");
         ASSERT_TRUE(child_created);
         auto *child = *child_created;
+        ASSERT_EQ(fiber::cat::detail::set_type(child, "E"), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::set_name(child, "child"), RecordError::None);
         child->time = std::chrono::steady_clock::time_point(1ms);
         ASSERT_EQ(fiber::cat::detail::set_status(child, "ERR"), RecordError::None);
         ASSERT_EQ(fiber::cat::detail::add_data(child, "a\tb\n\\"), RecordError::None);
