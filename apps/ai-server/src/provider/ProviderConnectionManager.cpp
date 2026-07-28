@@ -27,13 +27,14 @@ struct DialTarget {
 };
 
 ProviderConnectionError error(ProviderConnectionErrorCode code, const char *message,
-                              common::IoErr io_error = common::IoErr::None,
-                              std::uint64_t failed_service_peer_id = 0) noexcept {
+                              common::IoErr io_error = common::IoErr::None, std::uint64_t failed_service_peer_id = 0,
+                              bool dns_backoff_hit = false) noexcept {
     return ProviderConnectionError{
             .code = code,
             .io_error = io_error,
             .message = message,
             .failed_service_peer_id = failed_service_peer_id,
+            .dns_backoff_hit = dns_backoff_hit,
     };
 }
 
@@ -100,12 +101,16 @@ http::Http1ClientConnectionOptions connection_options(const net::IpAddress &ip, 
 } // namespace
 
 ProviderConnectionManager::ProviderConnectionManager(event::EventLoopGroup &workers) noexcept :
-    workers_(&workers), pool_(workers, http::Http1ConnectionPoolCore::Options{
-                                               .max_idle_per_group = 4,
-                                               .max_idle_total = 256,
-                                               .idle_timeout = std::chrono::seconds(30),
-                                               .initial_group_capacity = 16,
-                                       }) {}
+    ProviderConnectionManager(workers, {}) {}
+
+ProviderConnectionManager::ProviderConnectionManager(event::EventLoopGroup &workers,
+                                                     WorkerDnsService::Options dns_options) noexcept :
+    workers_(&workers), dns_(std::move(dns_options)), pool_(workers, http::Http1ConnectionPoolCore::Options{
+                                                                             .max_idle_per_group = 4,
+                                                                             .max_idle_total = 256,
+                                                                             .idle_timeout = std::chrono::seconds(30),
+                                                                             .initial_group_capacity = 16,
+                                                                     }) {}
 
 ProviderConnectionManager::~ProviderConnectionManager() { FIBER_ASSERT(!initialized_); }
 
@@ -214,8 +219,8 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
     if (dial.addresses.size == 0) {
         auto resolved = co_await dns_.resolve(dial.endpoint.host);
         if (!resolved) {
-            co_return std::unexpected(
-                    error(ProviderConnectionErrorCode::Dns, "provider DNS resolution failed", resolved.error()));
+            co_return std::unexpected(error(ProviderConnectionErrorCode::Dns, "provider DNS resolution failed",
+                                            resolved.error().io_error, 0, resolved.error().backoff_hit));
         }
         dial.addresses = *resolved;
     }

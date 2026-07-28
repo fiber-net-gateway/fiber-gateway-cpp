@@ -681,15 +681,80 @@ struct ProviderAttemptAudit {
     std::string_view upstream_model;
     std::string_view path;
     std::string_view outcome;
+    std::string_view failure_phase;
+    std::string_view io_error;
+    std::string_view failure_source;
+    std::string_view retry_target;
     std::size_t index = 0;
     std::size_t total = 0;
+    std::size_t skipped_attempts = 0;
     std::int64_t latency_us = 0;
     std::int32_t provider_config_version = 0;
     int status = 0;
     bool fallback = false;
     bool retryable = false;
+    bool retry_performed = false;
     bool response_started = false;
 };
+
+struct ProviderAttemptObservation {
+    ProviderHttpTiming timing;
+    std::string_view failure_source;
+    std::string_view outcome;
+    common::IoErr io_error = common::IoErr::None;
+    ProviderRetrySelection retry;
+    ProviderHttpErrorCode failure_code = ProviderHttpErrorCode::Count;
+    int status = 0;
+    bool response_started = false;
+};
+
+std::string_view provider_failure_phase(const ProviderAttemptObservation &observation) noexcept {
+    return observation.failure_code == ProviderHttpErrorCode::Count
+                   ? std::string_view{}
+                   : provider_http_error_code_name(observation.failure_code);
+}
+
+std::string_view provider_upstream_error_event_name(const ProviderAttemptObservation &observation) noexcept {
+    if (observation.outcome == "success") {
+        return {};
+    }
+    switch (observation.failure_code) {
+        case ProviderHttpErrorCode::Dns:
+            return "upstream_dns_error";
+        case ProviderHttpErrorCode::InvalidEndpoint:
+        case ProviderHttpErrorCode::NoServiceEndpoint:
+        case ProviderHttpErrorCode::PoolShutdown:
+        case ProviderHttpErrorCode::Connect:
+            return "upstream_connect_error";
+        case ProviderHttpErrorCode::SendHeader:
+        case ProviderHttpErrorCode::SendBody:
+        case ProviderHttpErrorCode::ReadHeader:
+        case ProviderHttpErrorCode::ReadBody:
+        case ProviderHttpErrorCode::ResponseTooLarge:
+        case ProviderHttpErrorCode::InvalidResponse:
+        case ProviderHttpErrorCode::Count:
+            return "upstream_request_error";
+    }
+    return "upstream_request_error";
+}
+
+void add_provider_upstream_error_data(cat::Event &event, const ProviderAttemptObservation &observation) noexcept {
+    const std::string_view failure_phase = provider_failure_phase(observation);
+    (void) event.add_data("failure_phase", failure_phase.empty() ? std::string_view("none") : failure_phase);
+    (void) event.add_data("io_error", observation.io_error == common::IoErr::None
+                                              ? std::string_view("none")
+                                              : common::io_err_name(observation.io_error));
+    (void) event.add_data("failure_source",
+                          observation.failure_source.empty() ? std::string_view("none") : observation.failure_source);
+    (void) event.add_data("retry_target", provider_retry_target_name(observation.retry.retry_target));
+    std::array<char, 16> status_text{};
+    const auto converted =
+            std::to_chars(status_text.data(), status_text.data() + status_text.size(), observation.status);
+    if (converted.ec == std::errc{}) {
+        (void) event.add_data("status", std::string_view(status_text.data(),
+                                                         static_cast<std::size_t>(converted.ptr - status_text.data())));
+    }
+}
 
 class LlmRequestAudit {
 public:
@@ -825,6 +890,18 @@ public:
 
     void rate_limit_error() noexcept { rate_limit_result_ = "error"; }
 
+    [[nodiscard]] std::optional<cat::Transaction>
+    start_provider_transaction(const ResolvedProviderAttempt &attempt) noexcept {
+        if (!cat_transaction_ || !cat_transaction_->valid()) {
+            return std::nullopt;
+        }
+        auto transaction = cat_transaction_->start_transaction("LLM.Provider", attempt.provider->name);
+        if (!transaction) {
+            return std::nullopt;
+        }
+        return std::optional<cat::Transaction>(std::move(*transaction));
+    }
+
     void usage(const std::optional<LlmTokenUsage> &usage, const ResolvedProviderAttempt &attempt) noexcept {
         if (!usage) {
             return;
@@ -847,9 +924,12 @@ public:
         cat_usage_emitted_ = true;
     }
 
-    void provider_attempt(const ResolvedProviderAttempt &attempt, std::size_t index, std::size_t total, int status,
-                          std::chrono::microseconds duration, const ProviderHttpTiming &timing, bool retryable,
-                          bool response_started, std::string_view outcome) noexcept {
+    void provider_attempt(const ResolvedProviderAttempt &attempt, std::size_t index, std::size_t total,
+                          std::chrono::microseconds duration, const ProviderAttemptObservation &observation,
+                          cat::Transaction *cat_provider_transaction) noexcept {
+        attempts_skipped_ += observation.retry.skipped_attempts;
+        const bool retryable = observation.retry.retry_target != ProviderRetryTarget::None;
+        const std::string_view failure_phase = provider_failure_phase(observation);
         if (audit_enabled_ && !generation_disabled_) {
             ++attempts_observed_;
             if (attempts_size_ < attempts_capacity_) {
@@ -858,20 +938,28 @@ public:
                 record.token_name = attempt.api_token ? std::string_view(attempt.api_token->name) : std::string_view{};
                 record.upstream_model = attempt.protocol->model;
                 record.path = attempt.protocol->path;
-                record.outcome = outcome;
+                record.outcome = observation.outcome;
+                record.failure_phase = failure_phase;
+                record.io_error = observation.io_error == common::IoErr::None
+                                          ? std::string_view{}
+                                          : common::io_err_name(observation.io_error);
+                record.failure_source = observation.failure_source;
+                record.retry_target = provider_retry_target_name(observation.retry.retry_target);
                 record.index = index + 1;
                 record.total = total;
+                record.skipped_attempts = observation.retry.skipped_attempts;
                 record.provider_config_version = attempt.provider->config->metadata.version;
-                record.status = status;
+                record.status = observation.status;
                 record.latency_us = std::max<std::int64_t>(duration.count(), 0);
                 record.fallback = attempt.fallback;
                 record.retryable = retryable;
-                record.response_started = response_started;
+                record.retry_performed = observation.retry.retry_performed;
+                record.response_started = observation.response_started;
             } else {
                 capture_error_ = "audit_attempt_overflow";
             }
         }
-        if (cat_transaction_ && cat_transaction_->valid()) {
+        if (cat_provider_transaction && cat_provider_transaction->valid()) {
             std::string data;
             data.reserve(attempt.protocol->model.size() + attempt.protocol->path.size() +
                          (attempt.api_token ? attempt.api_token->name.size() : 0) + 256);
@@ -885,30 +973,58 @@ public:
             data.append(attempt.protocol->path);
             data.append(" status=");
             std::array<char, 16> status_text{};
-            auto converted = std::to_chars(status_text.data(), status_text.data() + status_text.size(), status);
+            auto converted =
+                    std::to_chars(status_text.data(), status_text.data() + status_text.size(), observation.status);
             if (converted.ec == std::errc{}) {
                 data.append(status_text.data(), converted.ptr);
             }
-            if (timing.response_header_observed) {
-                append_cat_duration(data, "time_to_response_header_us", timing.time_to_response_header);
+            if (observation.timing.response_header_observed) {
+                append_cat_duration(data, "time_to_response_header_us", observation.timing.time_to_response_header);
             }
-            if (timing.first_token_observed) {
-                append_cat_duration(data, "time_to_first_token_us", timing.time_to_first_token);
+            if (observation.timing.first_token_observed) {
+                append_cat_duration(data, "time_to_first_token_us", observation.timing.time_to_first_token);
             }
-            if (timing.body_transfer_observed) {
-                append_cat_duration(data, "body_transfer_us", timing.body_transfer);
+            if (observation.timing.body_transfer_observed) {
+                append_cat_duration(data, "body_transfer_us", observation.timing.body_transfer);
             }
             data.append(" fallback=");
             data.append(attempt.fallback ? "true" : "false");
+            data.append(" failure_phase=");
+            data.append(failure_phase.empty() ? std::string_view("none") : failure_phase);
+            data.append(" io_error=");
+            data.append(observation.io_error == common::IoErr::None ? std::string_view("none")
+                                                                    : common::io_err_name(observation.io_error));
+            data.append(" failure_source=");
+            data.append(observation.failure_source.empty() ? std::string_view("none") : observation.failure_source);
+            data.append(" retry_target=");
+            data.append(provider_retry_target_name(observation.retry.retry_target));
             data.append(" retryable=");
             data.append(retryable ? "true" : "false");
+            data.append(" retry_performed=");
+            data.append(observation.retry.retry_performed ? "true" : "false");
+            data.append(" skipped_attempts=");
+            std::array<char, 24> skipped_text{};
+            converted = std::to_chars(skipped_text.data(), skipped_text.data() + skipped_text.size(),
+                                      observation.retry.skipped_attempts);
+            if (converted.ec == std::errc{}) {
+                data.append(skipped_text.data(), converted.ptr);
+            }
             data.append(" response_started=");
-            data.append(response_started ? "true" : "false");
+            data.append(observation.response_started ? "true" : "false");
             data.append(" outcome=");
-            data.append(outcome);
-            (void) cat_transaction_->log_completed_transaction(
-                    "LLM.Provider", attempt.provider->name, duration,
-                    outcome == "success" ? cat::status::Success : cat::status::Fail, data);
+            data.append(observation.outcome);
+            (void) cat_provider_transaction->add_data(data);
+            const std::string_view upstream_error_name = provider_upstream_error_event_name(observation);
+            if (!upstream_error_name.empty()) {
+                auto event = cat_provider_transaction->start_event("LLM.UpstreamError", upstream_error_name);
+                if (event) {
+                    add_provider_upstream_error_data(*event, observation);
+                    (void) event->complete(cat::status::Error);
+                }
+            }
+            (void) cat_provider_transaction->set_duration(duration);
+            (void) cat_provider_transaction->complete(observation.outcome == "success" ? cat::status::Success
+                                                                                       : cat::status::Fail);
         }
     }
 
@@ -922,7 +1038,7 @@ private:
         capture_incomplete_ = !capture_complete;
 
         json.object_open();
-        json.field("schema_version", 3);
+        json.field("schema_version", 4);
         json.field("event", "llm_request");
 
         json.key("audit");
@@ -1034,13 +1150,32 @@ private:
             json.field("fallback", attempt.fallback);
             json.field("status", attempt.status);
             json.field("latency_us", attempt.latency_us);
+            if (attempt.failure_phase.empty()) {
+                json.null_field("failure_phase");
+            } else {
+                json.field("failure_phase", attempt.failure_phase);
+            }
+            if (attempt.io_error.empty()) {
+                json.null_field("io_error");
+            } else {
+                json.field("io_error", attempt.io_error);
+            }
+            if (attempt.failure_source.empty()) {
+                json.null_field("failure_source");
+            } else {
+                json.field("failure_source", attempt.failure_source);
+            }
+            json.field("retry_target", attempt.retry_target);
             json.field("retryable", attempt.retryable);
+            json.field("retry_performed", attempt.retry_performed);
+            json.field("skipped_attempts", static_cast<std::int64_t>(attempt.skipped_attempts));
             json.field("response_started", attempt.response_started);
             json.field("outcome", attempt.outcome);
             json.object_close();
         }
         json.array_close();
         json.field("provider_attempt_count", static_cast<std::int64_t>(attempts_observed_));
+        json.field("provider_attempt_skipped_count", static_cast<std::int64_t>(attempts_skipped_));
 
         json.key("response");
         json.object_open();
@@ -1123,6 +1258,7 @@ private:
     std::size_t attempts_capacity_ = 0;
     std::size_t attempts_size_ = 0;
     std::size_t attempts_observed_ = 0;
+    std::size_t attempts_skipped_ = 0;
     std::int64_t rate_used_ = 0;
     std::int64_t rate_max_ = 0;
     std::int64_t rate_recover_at_ = 0;
@@ -1842,10 +1978,27 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
     }
 }
 
-bool should_retry_provider(const http::HttpExchange &exchange, const ProviderErrorDecision &decision,
-                           bool response_started, std::size_t attempt_index, std::size_t attempt_count) noexcept {
-    return decision.retryable && !response_started && attempt_index + 1 < attempt_count &&
-           !exchange.response_channel_closed();
+ProviderRetrySelection retry_selection(const http::HttpExchange &exchange,
+                                       const json::JsonArray<ResolvedProviderAttempt> &attempts,
+                                       std::size_t attempt_index, const ProviderErrorDecision &decision,
+                                       bool response_started, ProviderRuntimeState::TimePoint now) noexcept {
+    ProviderRetrySelection selection =
+            select_provider_retry(std::span<const ResolvedProviderAttempt>(attempts.data(), attempts.size()),
+                                  attempt_index, decision, response_started, now);
+    if (exchange.response_channel_closed()) {
+        selection.retry_performed = false;
+    }
+    return selection;
+}
+
+void record_retry_metrics(AiServerMetrics::Worker &metrics, LlmWireProtocol protocol,
+                          const ProviderRetrySelection &selection) noexcept {
+    if (selection.skipped_attempts != 0) {
+        metrics.provider_attempts_skipped(protocol, selection.skipped_attempts);
+    }
+    if (selection.retry_performed) {
+        metrics.provider_retry(protocol);
+    }
 }
 
 } // namespace
@@ -1993,7 +2146,8 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
     }
 
     const bool stream = routing.stream.is_present() && *routing.stream;
-    for (std::size_t index = 0; index < plan->attempts.size(); ++index) {
+    std::size_t index = 0;
+    while (index < plan->attempts.size()) {
         if (exchange.response_channel_closed()) {
             co_return;
         }
@@ -2009,17 +2163,20 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             co_return;
         }
 
+        metrics_->provider_attempt(protocol);
+        const auto attempt_started = event::EventLoop::current().now();
+        std::optional<cat::Transaction> provider_cat_transaction = audit.start_provider_transaction(attempt);
+        cat::Transaction *provider_cat_parent =
+                provider_cat_transaction && provider_cat_transaction->valid() ? &*provider_cat_transaction : nullptr;
         std::optional<cat::PropagationContext> provider_cat_context;
         if (cat_request) {
-            auto remote_context = cat_request->create_remote_context();
+            auto remote_context = cat_request->create_remote_context(provider_cat_parent);
             if (remote_context) {
                 provider_cat_context.emplace(std::move(*remote_context));
             }
         }
 
         if (stream) {
-            metrics_->provider_attempt(protocol);
-            const auto attempt_started = event::EventLoop::current().now();
             auto started = co_await provider_client_->start(
                     attempt, true, std::move(*rewritten), exchange.pool(), service_selection,
                     provider_cat_context ? &*provider_cat_context : nullptr,
@@ -2027,15 +2184,31 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             if (!started) {
                 service_instances.exclude(started.error().failed_service_peer_id);
                 metrics_->provider_failure(protocol);
-                const ProviderErrorDecision decision = classify_provider_transport_error(false);
-                apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_,
-                                              protocol);
-                audit.provider_attempt(attempt, index, plan->attempts.size(), 0,
-                                       std::chrono::duration_cast<std::chrono::microseconds>(
-                                               event::EventLoop::current().now() - attempt_started),
-                                       started.error().timing, decision.retryable, false, "transport_error");
-                if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
-                    metrics_->provider_retry(protocol);
+                metrics_->provider_transport_failure(protocol, started.error().code);
+                if (started.error().dns_backoff_hit) {
+                    metrics_->dns_backoff_hit(protocol);
+                }
+                const ProviderErrorDecision decision = classify_provider_transport_error(started.error(), false);
+                const auto observed_at = event::EventLoop::current().now();
+                apply_observed_provider_error(attempt, decision, observed_at, *metrics_, protocol);
+                const ProviderRetrySelection selection =
+                        retry_selection(exchange, plan->attempts, index, decision, false, observed_at);
+                record_retry_metrics(*metrics_, protocol, selection);
+                audit.provider_attempt(
+                        attempt, index, plan->attempts.size(),
+                        std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
+                        ProviderAttemptObservation{
+                                .timing = started.error().timing,
+                                .failure_source = started.error().dns_backoff_hit ? std::string_view("dns_backoff")
+                                                                                  : std::string_view("io"),
+                                .outcome = "transport_error",
+                                .io_error = started.error().io_error,
+                                .retry = selection,
+                                .failure_code = started.error().code,
+                        },
+                        provider_cat_parent);
+                if (selection.retry_performed) {
+                    index = selection.next_index;
                     continue;
                 }
                 if (exchange.response_channel_closed()) {
@@ -2059,15 +2232,28 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                 if (!buffered) {
                     service_instances.exclude(buffered.error().failed_service_peer_id);
                     metrics_->provider_failure(protocol);
-                    const ProviderErrorDecision decision = classify_provider_transport_error(false);
-                    apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_,
-                                                  protocol);
-                    audit.provider_attempt(attempt, index, plan->attempts.size(), upstream_status,
-                                           std::chrono::duration_cast<std::chrono::microseconds>(
-                                                   event::EventLoop::current().now() - attempt_started),
-                                           buffered.error().timing, decision.retryable, false, "response_read_error");
-                    if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
-                        metrics_->provider_retry(protocol);
+                    metrics_->provider_transport_failure(protocol, buffered.error().code);
+                    const ProviderErrorDecision decision = classify_provider_transport_error(buffered.error(), false);
+                    const auto observed_at = event::EventLoop::current().now();
+                    apply_observed_provider_error(attempt, decision, observed_at, *metrics_, protocol);
+                    const ProviderRetrySelection selection =
+                            retry_selection(exchange, plan->attempts, index, decision, false, observed_at);
+                    record_retry_metrics(*metrics_, protocol, selection);
+                    audit.provider_attempt(
+                            attempt, index, plan->attempts.size(),
+                            std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
+                            ProviderAttemptObservation{
+                                    .timing = buffered.error().timing,
+                                    .failure_source = "io",
+                                    .outcome = "response_read_error",
+                                    .io_error = buffered.error().io_error,
+                                    .retry = selection,
+                                    .failure_code = buffered.error().code,
+                                    .status = upstream_status,
+                            },
+                            provider_cat_parent);
+                    if (selection.retry_performed) {
+                        index = selection.next_index;
                         continue;
                     }
                     if (exchange.response_channel_closed()) {
@@ -2091,15 +2277,24 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                     service_instances.exclude(buffered->load_balance.peer_id());
                 }
                 buffered->load_balance.report(decision.instance_outcome);
-                apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_,
-                                              protocol);
+                const auto observed_at = event::EventLoop::current().now();
+                apply_observed_provider_error(attempt, decision, observed_at, *metrics_, protocol);
                 metrics_->provider_failure(protocol);
-                audit.provider_attempt(attempt, index, plan->attempts.size(), buffered->status_code,
-                                       std::chrono::duration_cast<std::chrono::microseconds>(
-                                               event::EventLoop::current().now() - attempt_started),
-                                       buffered->timing, decision.retryable, false, "upstream_error");
-                if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
-                    metrics_->provider_retry(protocol);
+                const ProviderRetrySelection selection =
+                        retry_selection(exchange, plan->attempts, index, decision, false, observed_at);
+                record_retry_metrics(*metrics_, protocol, selection);
+                audit.provider_attempt(
+                        attempt, index, plan->attempts.size(),
+                        std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
+                        ProviderAttemptObservation{
+                                .timing = buffered->timing,
+                                .outcome = "upstream_error",
+                                .retry = selection,
+                                .status = buffered->status_code,
+                        },
+                        provider_cat_parent);
+                if (selection.retry_performed) {
+                    index = selection.next_index;
                     continue;
                 }
                 if (exchange.response_channel_closed()) {
@@ -2121,13 +2316,23 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             }
             if (!is_event_stream_content_type(started->content_type())) {
                 metrics_->provider_failure(protocol);
-                const ProviderErrorDecision decision = classify_provider_transport_error(true);
+                metrics_->provider_transport_failure(protocol, ProviderHttpErrorCode::InvalidResponse);
+                const ProviderErrorDecision decision =
+                        classify_provider_transport_error(ProviderHttpErrorCode::InvalidResponse, true);
                 apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_,
                                               protocol);
-                audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
+                audit.provider_attempt(attempt, index, plan->attempts.size(),
                                        std::chrono::duration_cast<std::chrono::microseconds>(
                                                event::EventLoop::current().now() - attempt_started),
-                                       started->timing(), false, false, "invalid_content_type");
+                                       ProviderAttemptObservation{
+                                               .timing = started->timing(),
+                                               .failure_source = "io",
+                                               .outcome = "invalid_content_type",
+                                               .io_error = common::IoErr::Invalid,
+                                               .failure_code = ProviderHttpErrorCode::InvalidResponse,
+                                               .status = started->status_code(),
+                                       },
+                                       provider_cat_parent);
                 (void) started->abort(common::IoErr::Invalid);
                 started->report_instance(InstanceReportOutcome::Failure);
                 if (exchange.response_channel_closed()) {
@@ -2154,8 +2359,10 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             } else {
                 started->report_instance(InstanceReportOutcome::Failure);
                 metrics_->provider_failure(protocol);
-                apply_observed_provider_error(attempt, classify_provider_transport_error(true),
+                apply_observed_provider_error(attempt,
+                                              classify_provider_transport_error(ProviderHttpErrorCode::ReadBody, true),
                                               event::EventLoop::current().now(), *metrics_, protocol);
+                metrics_->provider_transport_failure(protocol, ProviderHttpErrorCode::ReadBody);
             }
             if (relay_result.downstream_delivery_failed || !relay_result.upstream_complete) {
                 metrics_->sse_failure(protocol);
@@ -2170,10 +2377,22 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             }
             const std::string_view outcome =
                     relay_result.upstream_complete ? std::string_view("success") : std::string_view("stream_error");
-            audit.provider_attempt(attempt, index, plan->attempts.size(), started->status_code(),
+            audit.provider_attempt(attempt, index, plan->attempts.size(),
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
-                                   started->timing(), false, response_started, outcome);
+                                   ProviderAttemptObservation{
+                                           .timing = started->timing(),
+                                           .failure_source = relay_result.upstream_complete ? std::string_view{}
+                                                                                            : std::string_view("io"),
+                                           .outcome = outcome,
+                                           .io_error = relay_result.upstream_error,
+                                           .failure_code = relay_result.upstream_complete
+                                                                   ? ProviderHttpErrorCode::Count
+                                                                   : ProviderHttpErrorCode::ReadBody,
+                                           .status = started->status_code(),
+                                           .response_started = response_started,
+                                   },
+                                   provider_cat_parent);
             audit.usage(usage, attempt);
             if (usage) {
                 metrics_->token_usage(authenticated->principal().username(), attempt.provider->name, protocol, *usage);
@@ -2181,8 +2400,6 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             co_return;
         }
 
-        metrics_->provider_attempt(protocol);
-        const auto attempt_started = event::EventLoop::current().now();
         auto response = co_await provider_client_->execute_buffered(
                 attempt, false, std::move(*rewritten), exchange.pool(), kMaxProviderResponseBytes, service_selection,
                 provider_cat_context ? &*provider_cat_context : nullptr,
@@ -2190,14 +2407,31 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         if (!response) {
             service_instances.exclude(response.error().failed_service_peer_id);
             metrics_->provider_failure(protocol);
-            const ProviderErrorDecision decision = classify_provider_transport_error(false);
-            apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_, protocol);
-            audit.provider_attempt(attempt, index, plan->attempts.size(), 0,
-                                   std::chrono::duration_cast<std::chrono::microseconds>(
-                                           event::EventLoop::current().now() - attempt_started),
-                                   response.error().timing, decision.retryable, false, "transport_error");
-            if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
-                metrics_->provider_retry(protocol);
+            metrics_->provider_transport_failure(protocol, response.error().code);
+            if (response.error().dns_backoff_hit) {
+                metrics_->dns_backoff_hit(protocol);
+            }
+            const ProviderErrorDecision decision = classify_provider_transport_error(response.error(), false);
+            const auto observed_at = event::EventLoop::current().now();
+            apply_observed_provider_error(attempt, decision, observed_at, *metrics_, protocol);
+            const ProviderRetrySelection selection =
+                    retry_selection(exchange, plan->attempts, index, decision, false, observed_at);
+            record_retry_metrics(*metrics_, protocol, selection);
+            audit.provider_attempt(attempt, index, plan->attempts.size(),
+                                   std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
+                                   ProviderAttemptObservation{
+                                           .timing = response.error().timing,
+                                           .failure_source = response.error().dns_backoff_hit
+                                                                     ? std::string_view("dns_backoff")
+                                                                     : std::string_view("io"),
+                                           .outcome = "transport_error",
+                                           .io_error = response.error().io_error,
+                                           .retry = selection,
+                                           .failure_code = response.error().code,
+                                   },
+                                   provider_cat_parent);
+            if (selection.retry_performed) {
+                index = selection.next_index;
                 continue;
             }
             if (exchange.response_channel_closed()) {
@@ -2222,10 +2456,15 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             audit.output_complete(true);
             response->load_balance.report(InstanceReportOutcome::Success);
             attempt.runtime->record_success(attempt.api_token ? attempt.api_token->name : std::string_view{});
-            audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,
+            audit.provider_attempt(attempt, index, plan->attempts.size(),
                                    std::chrono::duration_cast<std::chrono::microseconds>(
                                            event::EventLoop::current().now() - attempt_started),
-                                   response->timing, false, false, "success");
+                                   ProviderAttemptObservation{
+                                           .timing = response->timing,
+                                           .outcome = "success",
+                                           .status = response->status_code,
+                                   },
+                                   provider_cat_parent);
             audit.usage(usage, attempt);
             if (usage) {
                 metrics_->token_usage(authenticated->principal().username(), attempt.provider->name, protocol, *usage);
@@ -2243,14 +2482,23 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
             service_instances.exclude(response->load_balance.peer_id());
         }
         response->load_balance.report(decision.instance_outcome);
-        apply_observed_provider_error(attempt, decision, event::EventLoop::current().now(), *metrics_, protocol);
+        const auto observed_at = event::EventLoop::current().now();
+        apply_observed_provider_error(attempt, decision, observed_at, *metrics_, protocol);
         metrics_->provider_failure(protocol);
-        audit.provider_attempt(attempt, index, plan->attempts.size(), response->status_code,
-                               std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() -
-                                                                                     attempt_started),
-                               response->timing, decision.retryable, false, "upstream_error");
-        if (should_retry_provider(exchange, decision, false, index, plan->attempts.size())) {
-            metrics_->provider_retry(protocol);
+        const ProviderRetrySelection selection =
+                retry_selection(exchange, plan->attempts, index, decision, false, observed_at);
+        record_retry_metrics(*metrics_, protocol, selection);
+        audit.provider_attempt(attempt, index, plan->attempts.size(),
+                               std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
+                               ProviderAttemptObservation{
+                                       .timing = response->timing,
+                                       .outcome = "upstream_error",
+                                       .retry = selection,
+                                       .status = response->status_code,
+                               },
+                               provider_cat_parent);
+        if (selection.retry_performed) {
+            index = selection.next_index;
             continue;
         }
         if (exchange.response_channel_closed()) {

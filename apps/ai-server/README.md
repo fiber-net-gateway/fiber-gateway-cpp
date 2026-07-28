@@ -124,6 +124,12 @@ body transfer 从首个非空 HTTP body chunk 持续到完整 body 结束。未�
 对应字段，非流式响应不输出 first token；SSE body 读取与下游写入交替进行，因此 body
 transfer 会反映下游背压。
 
+Provider 的 `RemoteCall` 和失败分类都挂在对应 `LLM.Provider` Transaction 下。
+失败 attempt 的 Transaction 状态仍为失败，以保留 CAT Transaction 报表的失败率；
+同时生成 `LLM.UpstreamError` Event，name 固定为 `upstream_dns_error`、
+`upstream_connect_error` 或 `upstream_request_error`。Event data 保留具体
+`failure_phase`、`io_error`、上游状态和重试目标，成功 attempt 不生成该 Event。
+
 配置限流规则后，本地 check/settle 记录 `RateLimit.Check/Settle` Event，远程 owner
 调用记录同类型 Transaction；allow、deny 和 stale 属于正常业务结果，网络、成员环
 或响应错误才将 CAT 状态标记为失败。
@@ -219,7 +225,9 @@ transfer 会反映下游背压。
 - 同步成功响应最大 32 MiB，Provider 错误正文最大 4 MiB；
 - 内部限流正文最大 64 KiB，远端 owner 调用超时 3 秒；
 - Provider 整体调用上限 300 秒；
-- 401/403/429、配置的 retryable status 和传输错误可在响应开始前重试；
+- 401/403/429、配置的 retryable status 和传输错误可在响应开始前重试；token/status
+  错误进入下一 attempt，DNS 错误直接进入下一 Provider，不会逐个重试同一域名下的
+  剩余 token；
 - SSE header 写给客户端后不再切换 token、Provider 或 fallback；
 - 重试还要求 response channel 可用；一旦观察到客户端关闭或下游写失败，当前请求
   不再切换 token、Provider 或 fallback；
@@ -261,12 +269,14 @@ LLM 对话审计使用独立的 `ai_server.audit` logger，不向 stderr 传播�
 日志线程；文件中的每行因此是常规日志前缀加稳定标记 `audit_json=` 和一个完整 JSON，
 采集端应从该标记后解析 JSON。
 
-当前审计 schema 为 `schema_version=3`。`request.body` 是入站 body 的唯一完整副本：
+当前审计 schema 为 `schema_version=4`。`request.body` 是入站 body 的唯一完整副本：
 合法 UTF-8 以 `body_encoding=json_text` 保存，非法 UTF-8 以 base64 保存；图片 URL、
 音频/base64 等多模态字段不会再被过滤。为了让采集服务不必解析 body，`request`
 还直接提供 `request_model_name`、有效 `stream`、`messages_count` 和 `tools_count`。
 `routing.resolved_model_name`、identity、rate-limit、完整 `provider_attempts`、response、
-usage 等信息与它位于同一对象。
+usage 等信息与它位于同一对象。每个 Provider attempt 还记录
+`failure_phase`、`io_error`、`failure_source`、`retry_target`、`retry_performed` 和
+`skipped_attempts`；请求级 `provider_attempt_skipped_count` 汇总被剪枝的计划项。
 
 同步和 SSE 共用同一个 `llm.output` 聚合器。SSE delta 在转发前依次追加，最终
 `role/content/tool_names/tool_arguments/finish_reason` 的形态与同步响应一致；
@@ -300,6 +310,11 @@ Prometheus 输出两个累计 Counter family：
 `ai_server_sse_drains_total{protocol,result}` 记录，`result` 固定为
 `completed`、`upstream_error`、`timeout`。即使客户端未收到最终内容，只要网关从
 当前 upstream 观察到 usage，仍会写入上述 token usage Counter 并用于限流结算。
+DNS/重试剪枝另由
+`ai_server_provider_transport_failures_total{protocol,phase}`、
+`ai_server_provider_attempts_skipped_total{protocol}` 和
+`ai_server_dns_backoff_hits_total{protocol}` 记录；`phase` 是固定错误阶段，不包含
+Provider、host 或 token 等高基数值。
 
 其中 `token_type` 固定为 `in_cache`、`in_nocache`、`out`。username 是需求指定的
 高基数 label；进程会保留首次出现的 username/Provider series 直至退出，部署时应

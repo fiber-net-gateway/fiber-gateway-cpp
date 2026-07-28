@@ -3,6 +3,7 @@
 
 #include "../limit/TokenRateLimiter.h"
 #include "../protocol/TokenUsage.h"
+#include "../provider/ProviderHttpClient.h"
 
 #include <array>
 #include <atomic>
@@ -70,6 +71,9 @@ public:
         void provider_attempt(LlmWireProtocol protocol) noexcept;
         void provider_failure(LlmWireProtocol protocol) noexcept;
         void provider_retry(LlmWireProtocol protocol) noexcept;
+        void provider_transport_failure(LlmWireProtocol protocol, ProviderHttpErrorCode phase) noexcept;
+        void provider_attempts_skipped(LlmWireProtocol protocol, std::size_t count) noexcept;
+        void dns_backoff_hit(LlmWireProtocol protocol) noexcept;
         void provider_circuit_open(LlmWireProtocol protocol) noexcept;
         void rate_limit_check(RateLimitCheckMetric result) noexcept;
         void rate_limit_settle(RateLimitSettleMetric result) noexcept;
@@ -93,6 +97,11 @@ public:
         std::array<prometheus::CounterRef, kProtocolCount> provider_attempts_;
         std::array<prometheus::CounterRef, kProtocolCount> provider_failures_;
         std::array<prometheus::CounterRef, kProtocolCount> provider_retries_;
+        std::array<std::array<prometheus::CounterRef, static_cast<std::size_t>(ProviderHttpErrorCode::Count)>,
+                   kProtocolCount>
+                provider_transport_failures_;
+        std::array<prometheus::CounterRef, kProtocolCount> provider_attempts_skipped_;
+        std::array<prometheus::CounterRef, kProtocolCount> dns_backoff_hits_;
         std::array<prometheus::CounterRef, kProtocolCount> provider_circuit_opens_;
         std::array<prometheus::CounterRef, static_cast<std::size_t>(RateLimitCheckMetric::Count)> rate_limit_checks_;
         std::array<prometheus::CounterRef, static_cast<std::size_t>(RateLimitSettleMetric::Count)> rate_limit_settles_;

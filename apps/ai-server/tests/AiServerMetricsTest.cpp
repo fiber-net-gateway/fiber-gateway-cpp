@@ -17,6 +17,7 @@ using namespace std::chrono_literals;
 using fiber::ai_server::AiServerMetrics;
 using fiber::ai_server::LlmTokenUsage;
 using fiber::ai_server::LlmWireProtocol;
+using fiber::ai_server::ProviderHttpErrorCode;
 using fiber::ai_server::RateLimitCheckMetric;
 using fiber::ai_server::RateLimitSettleMetric;
 using fiber::ai_server::SseDrainMetric;
@@ -37,6 +38,11 @@ fiber::async::DetachedTask record_worker_metrics(AiServerMetrics::Worker *worker
     worker->provider_attempt(protocol);
     worker->provider_failure(protocol);
     worker->provider_retry(protocol);
+    worker->provider_transport_failure(protocol, protocol == LlmWireProtocol::OpenAiChatCompletions
+                                                         ? ProviderHttpErrorCode::Dns
+                                                         : ProviderHttpErrorCode::ReadHeader);
+    worker->provider_attempts_skipped(protocol, protocol == LlmWireProtocol::OpenAiChatCompletions ? 2 : 3);
+    worker->dns_backoff_hit(protocol);
     worker->provider_circuit_open(protocol);
     worker->rate_limit_check(RateLimitCheckMetric::Allowed);
     worker->rate_limit_settle(RateLimitSettleMetric::Usage);
@@ -141,6 +147,14 @@ TEST(AiServerMetricsTest, AggregatesRuntimeAndDynamicTokenUsageMetrics) {
     EXPECT_NE(result->find("ai_server_requests_total{protocol=\"anthropic\",result=\"client_error\"} 1"),
               std::string::npos);
     EXPECT_NE(result->find("ai_server_provider_attempts_total{protocol=\"openai\"} 1"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_provider_transport_failures_total{protocol=\"openai\",phase=\"dns\"} 1"),
+              std::string::npos);
+    EXPECT_NE(
+            result->find("ai_server_provider_transport_failures_total{protocol=\"anthropic\",phase=\"read_header\"} 1"),
+            std::string::npos);
+    EXPECT_NE(result->find("ai_server_provider_attempts_skipped_total{protocol=\"openai\"} 2"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_provider_attempts_skipped_total{protocol=\"anthropic\"} 3"), std::string::npos);
+    EXPECT_NE(result->find("ai_server_dns_backoff_hits_total{protocol=\"openai\"} 1"), std::string::npos);
     EXPECT_NE(result->find("ai_server_provider_circuit_opens_total{protocol=\"anthropic\"} 1"), std::string::npos);
     EXPECT_NE(result->find("ai_server_sse_drains_total{protocol=\"openai\",result=\"completed\"} 1"),
               std::string::npos);

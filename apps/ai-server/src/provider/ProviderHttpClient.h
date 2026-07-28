@@ -25,6 +25,10 @@ class PropagationContext;
 namespace fiber::ai_server {
 
 enum class ProviderHttpErrorCode : std::uint8_t {
+    InvalidEndpoint,
+    NoServiceEndpoint,
+    Dns,
+    PoolShutdown,
     Connect,
     SendHeader,
     SendBody,
@@ -32,7 +36,10 @@ enum class ProviderHttpErrorCode : std::uint8_t {
     ReadBody,
     ResponseTooLarge,
     InvalidResponse,
+    Count,
 };
+
+[[nodiscard]] std::string_view provider_http_error_code_name(ProviderHttpErrorCode code) noexcept;
 
 struct ProviderHttpTiming {
     std::chrono::microseconds time_to_response_header{};
@@ -48,6 +55,7 @@ struct ProviderHttpError {
     common::IoErr io_error = common::IoErr::None;
     const char *message = nullptr;
     std::uint64_t failed_service_peer_id = 0;
+    bool dns_backoff_hit = false;
     ProviderHttpTiming timing;
 };
 
