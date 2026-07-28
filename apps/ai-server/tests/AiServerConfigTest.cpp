@@ -24,6 +24,8 @@ AI_SERVER_LISTEN_PORT=18080
 AI_SERVER_ADVERTISE_ADDRESS=127.0.0.2
 AI_SERVER_SERVICE_NAME=custom-ai-server
 AI_SERVER_SERVICE_GROUP=AI_GROUP
+AI_SERVER_ZONE=daily1
+AI_SERVER_CLUSTER=gray
 NACOS_SERVER_ADDRESSES=127.0.0.1, [2001:db8::1], 127.0.0.1
 NACOS_HTTP_PORT=18848
 NACOS_GRPC_PORT=19848
@@ -49,6 +51,9 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
     EXPECT_EQ(result->advertise_address()->to_string(), "127.0.0.2");
     EXPECT_EQ(result->service_name(), "custom-ai-server");
     EXPECT_EQ(result->service_group(), "AI_GROUP");
+    EXPECT_EQ(result->zone(), "daily1");
+    EXPECT_EQ(result->cluster(), "gray");
+    EXPECT_EQ(result->nacos_cluster(), "daily1-gray");
     const auto &nacos = result->nacos_config();
     ASSERT_EQ(nacos.server_ips().size(), 2u);
     EXPECT_EQ(nacos.server_ips()[0].to_string(), "127.0.0.1");
@@ -88,6 +93,9 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_FALSE(result->advertise_address());
     EXPECT_EQ(result->service_name(), "ploto-ai-server");
     EXPECT_EQ(result->service_group(), "DEFAULT_GROUP");
+    EXPECT_EQ(result->zone(), "daily1");
+    EXPECT_EQ(result->cluster(), "dev");
+    EXPECT_EQ(result->nacos_cluster(), "daily1-dev");
     EXPECT_FALSE(result->cat_config());
     EXPECT_EQ(result->logging_config_path(), "ai-server.logging.json");
 }
@@ -180,6 +188,28 @@ TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {
                                                                  "CAT_ROUTER_ADDRESSES=localhost:8080\n");
     ASSERT_FALSE(invalid_cat_endpoint);
     EXPECT_EQ(invalid_cat_endpoint.error().code, AiServerConfigErrorCode::InvalidValue);
+}
+
+TEST(AiServerConfigTest, RejectsInvalidNacosClusterComponents) {
+    auto empty_zone = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "AI_SERVER_ZONE=\n"
+                                                       "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n");
+    ASSERT_FALSE(empty_zone);
+    EXPECT_EQ(empty_zone.error().code, AiServerConfigErrorCode::InvalidValue);
+    EXPECT_EQ(empty_zone.error().key, "AI_SERVER_ZONE");
+
+    const std::string oversized = "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                  "AI_SERVER_ZONE=" +
+                                  std::string(200, 'z') +
+                                  "\n"
+                                  "AI_SERVER_CLUSTER=" +
+                                  std::string(100, 'c') +
+                                  "\n"
+                                  "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n";
+    auto oversized_cluster = AiServerConfig::load_from_string(oversized);
+    ASSERT_FALSE(oversized_cluster);
+    EXPECT_EQ(oversized_cluster.error().code, AiServerConfigErrorCode::InvalidValue);
+    EXPECT_EQ(oversized_cluster.error().key, "AI_SERVER_CLUSTER");
 }
 
 TEST(AiServerConfigTest, ReportsMissingFiles) {

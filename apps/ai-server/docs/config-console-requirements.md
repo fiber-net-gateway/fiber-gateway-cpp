@@ -705,7 +705,12 @@ token 生命周期已经结束。
 | `AI_SERVER_ADVERTISE_ADDRESS` | 自动选择 | 指定的单播 IPv4，不允许 unspecified/multicast |
 | `AI_SERVER_SERVICE_NAME` | `ploto-ai-server` | 1..255 字节 |
 | `AI_SERVER_SERVICE_GROUP` | `DEFAULT_GROUP` | 1..255 字节 |
+| `AI_SERVER_ZONE` | `daily1` | 1..255 字节 |
+| `AI_SERVER_CLUSTER` | `dev` | 1..255 字节；与 zone 组合后的 `<zone>-<cluster>` 不超过 255 字节 |
 | `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS` | `60000` | 非负毫秒；0 表示无限等待 |
+
+实例注册的 Nacos cluster 固定由 `AI_SERVER_ZONE` 和 `AI_SERVER_CLUSTER` 组合，不单独
+提供完整 cluster 名配置项；默认注册为 `daily1-dev`。
 
 ### 13.3 独立日志配置
 
@@ -988,7 +993,10 @@ Nacos 写入
   },
   "cluster": {
     "serviceName": "ploto-ai-server",
-    "serviceGroup": "DEFAULT_GROUP"
+    "serviceGroup": "DEFAULT_GROUP",
+    "zone": "daily1",
+    "name": "dev",
+    "nacosCluster": "daily1-dev"
   },
   "releasePolicy": {
     "approvalRequired": true,

@@ -309,7 +309,8 @@ token usage 另有两个累计 Counter family：
 名仍不能作为 label。CAT transaction 在独立 sender loop 发送，业务 worker 只提交
 轻量消息。
 
-listener 只在完整首个配置安装到所有 worker 后绑定；服务注册和初始本机限流节点
+listener 只在完整首个配置安装到所有 worker 后绑定；服务注册使用启动配置
+`<AI_SERVER_ZONE>-<AI_SERVER_CLUSTER>` 作为 Nacos cluster，注册和初始本机限流节点
 建立后才启动 accept。`/ready` 实时检查配置快照和非空成员环；审计运行状态不影响
 readiness。
 

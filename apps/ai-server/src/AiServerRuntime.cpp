@@ -144,8 +144,8 @@ AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_l
     auto runtime = std::unique_ptr<AiServerRuntime>(new (std::nothrow) AiServerRuntime(
             accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), listen_options,
             config.initial_config_timeout(), config.advertise_address(), std::string(config.service_name()),
-            std::string(config.service_group()), std::move(cat_client), audit_max_record_bytes, audit_appender_id,
-            std::move(*client), std::move(*service), std::move(*naming)));
+            std::string(config.service_group()), config.nacos_cluster(), std::move(cat_client), audit_max_record_bytes,
+            audit_appender_id, std::move(*client), std::move(*service), std::move(*naming)));
     if (!runtime) {
         return std::unexpected(AiServerRuntimeError{
                 .code = AiServerRuntimeErrorCode::AllocateRuntime,
@@ -160,9 +160,9 @@ AiServerRuntime::AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop
                                  net::SocketAddress listen_address, net::ListenOptions listen_options,
                                  std::chrono::milliseconds initial_config_timeout,
                                  std::optional<net::IpAddress> advertise_address, std::string service_name,
-                                 std::string service_group, std::unique_ptr<cat::CatClient> cat_client,
-                                 std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id,
-                                 std::unique_ptr<nacos::NacosClient> nacos_client,
+                                 std::string service_group, std::string nacos_cluster,
+                                 std::unique_ptr<cat::CatClient> cat_client, std::size_t audit_max_record_bytes,
+                                 log::AppenderId audit_appender_id, std::unique_ptr<nacos::NacosClient> nacos_client,
                                  std::unique_ptr<nacos::ConfigService> config_service,
                                  std::unique_ptr<nacos::NamingService> naming_service) noexcept :
     accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop),
@@ -173,7 +173,7 @@ AiServerRuntime::AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop
     config_manager_(nacos_loop, *config_service_, *naming_service_),
     server_(accept_loop, http_workers, cat_client_.get(), audit_max_record_bytes, audit_appender_id),
     rate_limit_membership_(nacos_loop, *naming_service_, server_.rate_limit_ring(), std::move(service_name),
-                           std::move(service_group)) {
+                           std::move(service_group), std::move(nacos_cluster)) {
     FIBER_ASSERT(nacos_client_ != nullptr);
     FIBER_ASSERT(config_service_ != nullptr);
     FIBER_ASSERT(naming_service_ != nullptr);

@@ -46,7 +46,7 @@ struct Instance {
     bool healthy = true;
     bool enabled = true;
     bool ephemeral = true;
-    std::string cluster_name;
+    std::string cluster_name = "DEFAULT";
     std::string service_name;
     std::vector<NamingMetadataEntry> metadata;
 };
