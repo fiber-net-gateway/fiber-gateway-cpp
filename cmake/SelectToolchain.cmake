@@ -209,6 +209,12 @@ function(_fiber_find_best_cxx_compiler compiler_family output_path_var output_ve
     set(fiber_best_version "")
     set(fiber_seen_paths "")
     foreach(fiber_candidate_name IN LISTS fiber_candidate_names)
+        # unset before each search: with NO_CACHE, find_program leaves a
+        # previously-found value in place instead of searching again, so a
+        # reused variable would make every later candidate resolve to the
+        # first hit (e.g. all clang++-N -> /usr/bin/clang++) and get skipped
+        # by the dedup below.
+        unset(fiber_candidate_path)
         find_program(fiber_candidate_path NAMES "${fiber_candidate_name}" NO_CACHE)
         if (NOT fiber_candidate_path)
             continue()
@@ -362,6 +368,15 @@ macro(_fiber_configure_clang_stdlib)
                 list(APPEND FIBER_STDLIB_LINK_LIBRARIES "${fiber_libunwind_static}")
             endif()
             list(APPEND FIBER_STDLIB_LINK_LIBRARIES -Wl,-Bdynamic)
+            # Static libunwind.a references dladdr (libdl) and pthread_rwlock_*
+            # (libpthread). With -nostdlib++ above, these are no longer pulled in
+            # implicitly, so link them dynamically on Linux or the link fails with
+            # "undefined reference to dladdr / pthread_rwlock_*".
+            # NOTE: this macro runs before project(), so CMAKE_SYSTEM_NAME is not
+            # set yet; use CMAKE_HOST_SYSTEM_NAME instead.
+            if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+                list(APPEND FIBER_STDLIB_LINK_LIBRARIES dl pthread)
+            endif()
         endif()
     endif()
 endmacro()
