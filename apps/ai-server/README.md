@@ -301,6 +301,10 @@ Authorization、Provider token 值、BT1 secret 和 Nacos 凭据不会作为独�
 `cache_read_input_tokens`，`in_nocache` 为 `input_tokens +
 cache_creation_input_tokens`。配置 CAT 后，每份有效 usage 还会生成
 `LLMTokenUsage` 子 Event，携带相同三个用量字段、协议、上游模型和实际 Provider。
+模型配置 `allow_user_groups` 时，每次检查还会生成 name 为 username 的 `Auth`
+子 Event。最终放行时 status 为 `Success`，命中用户组时 `allowed_user_group` 为按
+模型配置顺序命中的第一个组；最终拒绝时 status 为 `Error`。现有 `zhangwang` 旁路
+记录 `Success`，但因未实际命中用户组而不写 `allowed_user_group`。
 
 Prometheus 输出两个累计 Counter family：
 

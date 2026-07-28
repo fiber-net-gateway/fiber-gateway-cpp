@@ -1,6 +1,26 @@
 #include "ModelAuthorization.h"
 
+#include <fiber/cat/Transaction.h>
+
 namespace fiber::ai_server {
+namespace {
+
+void record_user_group_authorization(cat::Transaction *transaction, std::string_view username,
+                                     const UserGroupSnapshot *allowed_user_group, bool allowed) noexcept {
+    if (!transaction || !transaction->valid()) {
+        return;
+    }
+    auto event = transaction->start_event("Auth", username);
+    if (!event) {
+        return;
+    }
+    if (allowed_user_group) {
+        (void) event->add_data("allowed_user_group", allowed_user_group->name);
+    }
+    (void) event->complete(allowed ? cat::status::Success : cat::status::Error);
+}
+
+} // namespace
 
 bool valid_llm_model_name(std::string_view name) noexcept {
     if (name.empty() || name.size() > 128) {
@@ -16,8 +36,10 @@ bool valid_llm_model_name(std::string_view name) noexcept {
     return true;
 }
 
-std::expected<AuthorizedModel, ModelAuthorizationError>
-authorize_model(const LlmConfigSnapshot &config, std::string_view username, std::string_view requested_model) noexcept {
+std::expected<AuthorizedModel, ModelAuthorizationError> authorize_model(const LlmConfigSnapshot &config,
+                                                                        std::string_view username,
+                                                                        std::string_view requested_model,
+                                                                        cat::Transaction *cat_transaction) noexcept {
     if (requested_model.empty()) {
         return std::unexpected(ModelAuthorizationError{
                 .code = ModelAuthorizationErrorCode::ModelRequired,
@@ -44,16 +66,18 @@ authorize_model(const LlmConfigSnapshot &config, std::string_view username, std:
                 .message = "model is not available",
         });
     }
+    const UserGroupSnapshot *allowed_user_group = nullptr;
     if (!route->allow_user_groups.empty()) {
-        bool allowed = false;
         for (const auto &group: route->allow_user_groups) {
             if (group && group->contains(username)) {
-                allowed = true;
+                allowed_user_group = group.get();
                 break;
             }
         }
 
-        if (!allowed && "zhangwang" != username) {
+        const bool allowed = allowed_user_group || "zhangwang" == username;
+        record_user_group_authorization(cat_transaction, username, allowed_user_group, allowed);
+        if (!allowed) {
             return std::unexpected(ModelAuthorizationError{
                     .code = ModelAuthorizationErrorCode::ModelNotAvailable,
                     .message = "model is not available",

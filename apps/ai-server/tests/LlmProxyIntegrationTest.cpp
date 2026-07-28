@@ -200,6 +200,14 @@ std::string cat_nt1_type_and_name(std::string_view type, std::string_view name) 
     return encoded;
 }
 
+std::string cat_nt1_type_name_and_status(std::string_view type, std::string_view name, std::string_view status) {
+    FIBER_ASSERT(status.size() < 128);
+    std::string encoded = cat_nt1_type_and_name(type, name);
+    encoded.push_back(static_cast<char>(status.size()));
+    encoded.append(status);
+    return encoded;
+}
+
 fiber::async::Task<fiber::common::IoResult<std::string>> read_body(fiber::http::HttpExchange &exchange) noexcept {
     std::string output;
     for (;;) {
@@ -261,7 +269,7 @@ std::string base64url_encode(std::string_view bytes) {
     return output;
 }
 
-std::string issue_token() {
+std::string issue_token(std::string_view username = "alice") {
     const auto expires =
             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
                     .count() +
@@ -269,7 +277,7 @@ std::string issue_token() {
     std::string signing_input = "BT1.";
     signing_input.append(kBt1Kid);
     signing_input.push_back('.');
-    signing_input.append(base64url_encode("alice"));
+    signing_input.append(base64url_encode(username));
     signing_input.push_back('.');
     signing_input.append(std::to_string(expires));
     signing_input.push_back('.');
@@ -822,6 +830,10 @@ private:
         CompiledModelRoute route;
         route.model_name = "logical";
         route.providers.push_back(primary);
+        auto allowed_group = std::make_shared<fiber::ai_server::UserGroupSnapshot>();
+        allowed_group->name = "integration-users";
+        allowed_group->users.push_back("alice");
+        route.allow_user_groups.push_back(std::move(allowed_group));
         if (fallback_enabled_) {
             route.fallback_provider = fallback;
         }
@@ -1519,11 +1531,19 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
                             .status = 200,
                             .body = R"({"id":"anthropic-alias","type":"message","role":"assistant","content":[],"model":"upstream-anthropic-primary","stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":3}})",
                     },
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"zhangwang","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3}})",
+                    },
             },
             false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
     ASSERT_TRUE(fixture.valid());
     const std::string token = issue_token();
+    const std::string zhangwang_token = issue_token("zhangwang");
+    const std::string mallory_token = issue_token("mallory");
     ASSERT_FALSE(token.empty());
+    ASSERT_FALSE(zhangwang_token.empty());
+    ASSERT_FALSE(mallory_token.empty());
 
     const RawHttpResponse openai =
             post_json(fixture.entry_port(), token, R"({"model":"logical","stream":false,"messages":[]})");
@@ -1532,6 +1552,10 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
                       {}, "/v1/messages");
     const RawHttpResponse anthropic_alias = post_json(
             fixture.entry_port(), token, R"({"model":"logical","max_tokens":16,"messages":[]})", {}, "/v1/message");
+    const RawHttpResponse zhangwang =
+            post_json(fixture.entry_port(), zhangwang_token, R"({"model":"logical","stream":false,"messages":[]})");
+    const RawHttpResponse mallory =
+            post_json(fixture.entry_port(), mallory_token, R"({"model":"logical","stream":false,"messages":[]})");
 
     EXPECT_EQ(openai.system_error, 0);
     EXPECT_EQ(openai.status, 200);
@@ -1542,9 +1566,22 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
     EXPECT_EQ(anthropic_alias.system_error, 0);
     EXPECT_EQ(anthropic_alias.status, 200);
     EXPECT_TRUE(anthropic_alias.complete);
+    EXPECT_EQ(zhangwang.system_error, 0);
+    EXPECT_EQ(zhangwang.status, 200);
+    EXPECT_TRUE(zhangwang.complete);
+    EXPECT_EQ(mallory.system_error, 0);
+    EXPECT_EQ(mallory.status, 403);
+    EXPECT_TRUE(mallory.complete);
     EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/chat/completions:logical", "stream=false"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/messages:logical", "stream=true"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/message:logical", "stream=false"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_name_and_status("Auth", "alice", fiber::cat::status::Success),
+                                           "allowed_user_group=integration-users"));
+    EXPECT_TRUE(
+            fixture.wait_for_cat_frame(cat_nt1_type_name_and_status("Auth", "zhangwang", fiber::cat::status::Success)));
+    EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_name_and_status("Auth", "mallory", fiber::cat::status::Error)));
+    EXPECT_FALSE(fixture.cat_frame_contains(cat_nt1_type_and_name("Auth", "zhangwang"), "allowed_user_group="));
+    EXPECT_FALSE(fixture.cat_frame_contains(cat_nt1_type_and_name("Auth", "mallory"), "allowed_user_group="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "time_to_response_header_us="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "failure_phase=none"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "retry_target=none"));
