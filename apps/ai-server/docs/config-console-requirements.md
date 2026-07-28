@@ -707,18 +707,45 @@ token 生命周期已经结束。
 | `AI_SERVER_SERVICE_GROUP` | `DEFAULT_GROUP` | 1..255 字节 |
 | `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS` | `60000` | 非负毫秒；0 表示无限等待 |
 
-### 13.3 LLM 审计
+### 13.3 独立日志配置
+
+dotenv 中只保留一个必填日志参数：
 
 | 参数 | 默认值 | 控件与规则 |
 | --- | --- | --- |
-| `AI_SERVER_AUDIT_LOG_PATH` | `ai-server-audit.ndjson` | 非空文件路径，最多 4096 字节 |
-| `AI_SERVER_AUDIT_MAX_RECORD_BYTES` | `134217728` | 正整数；单条记录超限时丢弃该审计，不改变请求结果 |
-| `AI_SERVER_AUDIT_ROTATE_BYTES` | `1073741824` | 非负字节数；0 禁用轮转 |
-| `AI_SERVER_AUDIT_MAX_ARCHIVES` | `30` | 正整数 |
+| `AI_SERVER_LOG_CONFIG_PATH` | 无 | 必填；独立日志 JSON 路径，最多 4096 字节；相对路径以 dotenv 所在目录为基准 |
 
-运行时审计使用共享异步日志线程和 `DropNewest` 策略。请求线程只生成并投递
+控制台应把日志 JSON 作为一个启动期部署制品维护，不把它拆回多个 dotenv 字段。
+日志配置只在进程启动时加载，修改后必须重启或滚动发布；当前没有热更新接口。
+文件最大 1 MiB，`version` 当前固定为 `1`，未知字段、重复字段、缺少必填字段、非法
+类型/范围/引用/路径冲突都必须在部署前校验。
+
+顶层结构：
+
+| 字段 | 控件与规则 |
+| --- | --- |
+| `queue.capacity_bytes` | 正整数；满队列策略固定 `DropNewest`，不提供可编辑项 |
+| `appenders` | 常规 stderr/file appender；支持 level range、file mode、成对 buffer/flush 和 rotation |
+| `root_logger` | 必填 level 和非空 appender 引用；verbosity 可选 |
+| `loggers` | 只允许 ai-server 已知 category 的 level/verbosity/appender/additive 覆盖 |
+| `audit.path` | 必填，非空路径，最多 4096 字节；相对路径以日志 JSON 所在目录为基准 |
+| `audit.max_record_bytes` | 必填正整数；单条记录超限时丢弃该审计，不改变请求结果 |
+| `audit.rotate_bytes` | 必填非负整数；0 禁用轮转 |
+| `audit.max_archives` | 必填正整数，最大 10000 |
+
+常规 console 只能选择 stderr；stdout 的 listener 地址提示是独立服务发现输出，不是
+可配置日志。category 只允许 `ai_server`、`ai_server.lifecycle`、
+`ai_server.config`、`ai_server.http`、`ai_server.llm`、
+`ai_server.discovery`、`ai_server.rate_limit`。`ai_server.audit` 和
+`ai_server_audit_file` 是保留名，控制台不得生成。
+
+运行时审计使用共享异步日志线程和固定 `DropNewest` 策略。审计 appender 的
+unbuffered、`0600`、no-follow、普通文件限定、权限强制、尾部恢复，以及 logger 的
+INFO/`additive=false` 都是代码不变量，不提供控件。请求线程只生成并投递
 `audit_json=<json>`，不等待容量或写入结果；队列满、生成失败和 I/O 失败均通过指标
-暴露，不参与请求成功判定或 `/ready`。
+暴露，不参与请求成功判定或 `/ready`。界面可以用当前示例值 `67108864`（queue）、
+`ai-server-audit.ndjson`、`134217728`、`1073741824`、`30` 初始化模板，但 JSON
+中的这些字段仍全部显式必填。
 
 ### 13.4 Nacos
 
@@ -1284,7 +1311,7 @@ ai-server 当前未在 codec 中限制数组规模，控制台后台必须结合
 | 后台与 C++ codec 可能漂移 | 控制台校验通过但实例拒绝 | 共享测试语料或复用 C++ validator |
 | Secret 必须物化到 Nacos | Nacos 侧存在明文风险 | ACL、网络隔离、专用账号、审计 |
 | NotFound 不会清除运行旧值 | 删除不等于立即失效 | 先取消引用，删除仅作清理 |
-| 启动配置不能热更新 | 控制台按钮可能误导 | 接入部署系统或只提供模板/导出 |
+| dotenv/日志启动配置不能热更新 | 控制台按钮可能误导 | 接入部署系统或只提供模板/导出 |
 
 ### 18.2 严格原子发布的后续方案
 

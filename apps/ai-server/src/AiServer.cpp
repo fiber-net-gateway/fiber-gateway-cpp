@@ -1,4 +1,5 @@
 #include "AiServer.h"
+#include "observability/AiServerLogCategories.h"
 #include "server/LlmRequestHandler.h"
 #include "server/TokenRateLimitHttpHandler.h"
 
@@ -20,7 +21,7 @@ namespace fiber::ai_server {
 
 namespace {
 
-DEFINE_LOGGER(LOG_HTTP, "ai_server.http");
+DEFINE_LOGGER(LOG_HTTP, kAiServerHttpLogger);
 
 constexpr std::string_view kHealthPath = "/health";
 constexpr std::string_view kHealthBody = "{\"status\":\"ok\"}\n";

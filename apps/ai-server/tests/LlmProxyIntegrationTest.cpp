@@ -682,11 +682,35 @@ public:
         }
         (void) ::close(fd);
         audit_path_ = path;
-        auto log_config = fiber::ai_server::make_log_config({
-                .path = audit_path_,
-                .max_record_bytes = audit_max_record_bytes,
-                .rotate_bytes = 0,
-        });
+        const std::string logging_config =
+                R"({
+  "version": 1,
+  "queue": {"capacity_bytes": 67108864},
+  "appenders": [
+    {
+      "name": "test_stderr",
+      "type": "console",
+      "stream": "stderr",
+      "min_level": "fatal",
+      "max_level": "fatal"
+    }
+  ],
+  "root_logger": {
+    "level": "fatal",
+    "appenders": ["test_stderr"]
+  },
+  "loggers": [],
+  "audit": {
+    "path": ")" +
+                audit_path_ + R"(",
+    "max_record_bytes": )" +
+                std::to_string(audit_max_record_bytes) + R"(,
+    "rotate_bytes": 0,
+    "max_archives": 30
+  }
+})";
+        auto log_config =
+                fiber::ai_server::parse_ai_server_log_config(logging_config, "/tmp/ai-server-test-logging.json");
         if (!log_config) {
             (void) ::unlink(audit_path_.c_str());
             audit_path_.clear();

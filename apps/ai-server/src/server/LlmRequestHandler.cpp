@@ -2,6 +2,7 @@
 
 #include "../audit/LlmAuditLog.h"
 #include "../auth/LlmRequestAuthenticator.h"
+#include "../observability/AiServerLogCategories.h"
 #include "../protocol/LlmError.h"
 #include "../protocol/SseParser.h"
 #include "../protocol/TokenUsage.h"
@@ -47,8 +48,8 @@
 namespace fiber::ai_server {
 namespace {
 
-DEFINE_LOGGER(LOG_LLM, "ai_server.llm");
-DEFINE_LOGGER(LOG_LLM_AUDIT, "ai_server.audit");
+DEFINE_LOGGER(LOG_LLM, kAiServerLlmLogger);
+DEFINE_LOGGER(LOG_LLM_AUDIT, kAiServerAuditLogger);
 
 constexpr std::size_t kMaxRequestBodyBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaxProviderErrorBytes = 4 * 1024 * 1024;

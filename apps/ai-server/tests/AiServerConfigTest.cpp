@@ -1,10 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
 #include <string>
 #include <string_view>
-
-#include <unistd.h>
 
 #include <event/EventLoop.h>
 #include <event/EventLoopGroup.h>
@@ -39,10 +38,7 @@ CAT_HOSTNAME=ai-host-1
 CAT_IP=127.0.0.2
 CAT_ROUTER_ADDRESSES=127.0.0.10:8080,[2001:db8::10]:8081
 CAT_COLLECTOR_ADDRESSES=127.0.0.11:2280
-AI_SERVER_AUDIT_LOG_PATH=/tmp/custom-ai-audit.ndjson
-AI_SERVER_AUDIT_MAX_RECORD_BYTES=67108864
-AI_SERVER_AUDIT_ROTATE_BYTES=268435456
-AI_SERVER_AUDIT_MAX_ARCHIVES=7
+AI_SERVER_LOG_CONFIG_PATH=/tmp/custom-ai-server.logging.json
 AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
 )";
 
@@ -75,14 +71,12 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
     EXPECT_EQ(result->cat_config()->routers()[1].host, "2001:db8::10");
     ASSERT_EQ(result->cat_config()->bootstrap_collectors().size(), 1u);
     EXPECT_EQ(result->cat_config()->bootstrap_collectors()[0].to_string(), "127.0.0.11:2280");
-    EXPECT_EQ(result->audit_log_options().path, "/tmp/custom-ai-audit.ndjson");
-    EXPECT_EQ(result->audit_log_options().max_record_bytes, 67108864u);
-    EXPECT_EQ(result->audit_log_options().rotate_bytes, 268435456u);
-    EXPECT_EQ(result->audit_log_options().max_archives, 7u);
+    EXPECT_EQ(result->logging_config_path(), "/tmp/custom-ai-server.logging.json");
 }
 
 TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
-    auto result = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
+    auto result = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                   "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n");
 
     ASSERT_TRUE(result) << result.error().detail;
     EXPECT_EQ(result->listen_address().to_string(), "0.0.0.0:8080");
@@ -96,15 +90,24 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_EQ(result->service_name(), "ploto-ai-server");
     EXPECT_EQ(result->service_group(), "DEFAULT_GROUP");
     EXPECT_FALSE(result->cat_config());
-    EXPECT_EQ(result->audit_log_options().path, "ai-server-audit.ndjson");
+    EXPECT_EQ(result->logging_config_path(), "ai-server.logging.json");
 }
 
 TEST(AiServerConfigTest, RequiresNacosServerAddresses) {
-    auto result = AiServerConfig::load_from_string("AI_SERVER_LISTEN_PORT=8080\n");
+    auto result = AiServerConfig::load_from_string("AI_SERVER_LISTEN_PORT=8080\n"
+                                                   "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n");
 
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code, AiServerConfigErrorCode::MissingRequiredKey);
     EXPECT_EQ(result.error().key, "NACOS_SERVER_ADDRESSES");
+}
+
+TEST(AiServerConfigTest, RequiresLoggingConfigPath) {
+    auto result = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n");
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, AiServerConfigErrorCode::MissingRequiredKey);
+    EXPECT_EQ(result.error().key, "AI_SERVER_LOG_CONFIG_PATH");
 }
 
 TEST(AiServerConfigTest, RejectsDuplicateAndUnknownKeys) {
@@ -118,6 +121,13 @@ TEST(AiServerConfigTest, RejectsDuplicateAndUnknownKeys) {
     ASSERT_FALSE(unknown);
     EXPECT_EQ(unknown.error().code, AiServerConfigErrorCode::UnknownKey);
     EXPECT_EQ(unknown.error().key, "NACOS_SERVER_ADDRESS");
+
+    auto legacy_audit = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                         "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n"
+                                                         "AI_SERVER_AUDIT_LOG_PATH=ai-server-audit.ndjson\n");
+    ASSERT_FALSE(legacy_audit);
+    EXPECT_EQ(legacy_audit.error().code, AiServerConfigErrorCode::UnknownKey);
+    EXPECT_EQ(legacy_audit.error().key, "AI_SERVER_AUDIT_LOG_PATH");
 }
 
 TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {
@@ -127,8 +137,9 @@ TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {
     EXPECT_EQ(invalid_port.error().code, AiServerConfigErrorCode::InvalidValue);
     EXPECT_EQ(invalid_port.error().line, 2u);
 
-    auto partial_credentials =
-            AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\nNACOS_USERNAME=nacos\n");
+    auto partial_credentials = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                                "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n"
+                                                                "NACOS_USERNAME=nacos\n");
     ASSERT_FALSE(partial_credentials);
     EXPECT_EQ(partial_credentials.error().code, AiServerConfigErrorCode::InvalidNacosConfig);
     EXPECT_EQ(partial_credentials.error().key, "NACOS_PASSWORD");
@@ -145,6 +156,7 @@ TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {
     EXPECT_EQ(invalid_advertise.error().code, AiServerConfigErrorCode::InvalidValue);
 
     auto partial_cat = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                        "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n"
                                                         "CAT_APP_KEY=ploto-ai-server\n"
                                                         "CAT_ROUTER_ADDRESSES=127.0.0.10:8080\n");
     ASSERT_FALSE(partial_cat);
@@ -152,6 +164,7 @@ TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {
     EXPECT_EQ(partial_cat.error().key, "CAT_HOSTNAME");
 
     auto invalid_cat_endpoint = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                                 "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n"
                                                                  "CAT_APP_KEY=ploto-ai-server\n"
                                                                  "CAT_HOSTNAME=host-a\n"
                                                                  "CAT_IP=127.0.0.1\n"
@@ -175,17 +188,16 @@ TEST(AiServerConfigTest, LoadsExampleFile) {
     ASSERT_EQ(result->nacos_config().server_ips().size(), 1u);
     EXPECT_EQ(result->nacos_config().server_ips()[0].to_string(), "127.0.0.1");
     EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(60000));
+    const auto expected_logging_path =
+            (std::filesystem::path(FIBER_AI_SERVER_TEST_ENV_PATH).parent_path() / "ai-server.logging.json")
+                    .lexically_normal();
+    EXPECT_EQ(result->logging_config_path(), expected_logging_path.string());
 }
 
 TEST(AiServerRuntimeTest, CreateDoesNotBindListener) {
-    char audit_path[] = "/tmp/fiber-ai-runtime-audit-XXXXXX";
-    const int audit_fd = ::mkstemp(audit_path);
-    ASSERT_GE(audit_fd, 0);
-    ASSERT_EQ(::close(audit_fd), 0);
     const std::string config_text = "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
                                     "AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=0\n"
-                                    "AI_SERVER_AUDIT_LOG_PATH=" +
-                                    std::string(audit_path) + "\n";
+                                    "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n";
     auto config = AiServerConfig::load_from_string(config_text);
     ASSERT_TRUE(config);
 
@@ -194,13 +206,12 @@ TEST(AiServerRuntimeTest, CreateDoesNotBindListener) {
     fiber::event::EventLoop cat_loop;
     fiber::event::EventLoopGroup workers(1);
     auto runtime = fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_loop, cat_loop, workers, *config,
-                                                             fiber::log::kInvalidAppenderId);
+                                                             128 * 1024 * 1024, fiber::log::kInvalidAppenderId);
 
     ASSERT_TRUE(runtime);
     EXPECT_EQ((*runtime)->state(), fiber::ai_server::AiServerRuntimeState::Created);
     EXPECT_LT((*runtime)->fd(), 0);
     runtime->reset();
-    EXPECT_EQ(::unlink(audit_path), 0);
 }
 
 TEST(AiServerRuntimeTest, DefaultWorkerCountIsNeverZero) {

@@ -1,8 +1,6 @@
 #ifndef FIBER_AI_SERVER_AI_SERVER_CONFIG_H
 #define FIBER_AI_SERVER_AI_SERVER_CONFIG_H
 
-#include "audit/LlmAuditLog.h"
-
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -48,13 +46,13 @@ public:
     [[nodiscard]] std::string_view service_name() const noexcept { return service_name_; }
     [[nodiscard]] std::string_view service_group() const noexcept { return service_group_; }
     [[nodiscard]] const std::optional<cat::CatClientConfig> &cat_config() const noexcept { return cat_config_; }
-    [[nodiscard]] const LlmAuditLogOptions &audit_log_options() const noexcept { return audit_log_options_; }
+    [[nodiscard]] std::string_view logging_config_path() const noexcept { return logging_config_path_; }
 
 private:
     AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config,
                    std::chrono::milliseconds initial_config_timeout, std::optional<net::IpAddress> advertise_address,
                    std::string service_name, std::string service_group, std::optional<cat::CatClientConfig> cat_config,
-                   LlmAuditLogOptions audit_log_options) noexcept;
+                   std::string logging_config_path) noexcept;
 
     net::SocketAddress listen_address_;
     nacos::NacosClientConfig nacos_config_;
@@ -63,7 +61,7 @@ private:
     std::string service_name_;
     std::string service_group_;
     std::optional<cat::CatClientConfig> cat_config_;
-    LlmAuditLogOptions audit_log_options_;
+    std::string logging_config_path_;
 };
 
 } // namespace fiber::ai_server

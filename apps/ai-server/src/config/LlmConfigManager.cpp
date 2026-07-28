@@ -2,6 +2,7 @@
 
 #include "../discovery/ServiceDiscovery.h"
 #include "../limit/RateLimitHash.h"
+#include "../observability/AiServerLogCategories.h"
 #include "ConfigNodePool.h"
 
 #include <algorithm>
@@ -22,7 +23,7 @@
 namespace fiber::ai_server {
 namespace {
 
-DEFINE_LOGGER(LOG_CONFIG, "ai_server.config");
+DEFINE_LOGGER(LOG_CONFIG, kAiServerConfigLogger);
 
 void log_config_rejection(bool serving_ready, std::string_view data_id, std::string_view md5,
                           const LlmConfigError &error) noexcept {
