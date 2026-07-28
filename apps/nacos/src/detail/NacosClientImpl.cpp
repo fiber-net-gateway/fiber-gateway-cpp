@@ -20,7 +20,7 @@
 namespace fiber::nacos::detail {
 namespace {
 
-constexpr std::string_view kLoginPath = "/v1/auth/users/login";
+constexpr std::string_view kLoginTarget = "/nacos/v1/auth/users/login";
 constexpr std::chrono::seconds kRefreshFailureDelay{5};
 
 http::Http1ClientConnectionOptions make_connection_options(const NacosClientConfig &config, std::size_t server_index) {
@@ -42,15 +42,6 @@ std::string make_host_header(const NacosClientConfig &config, std::size_t server
     host.push_back(':');
     host.append(std::to_string(config.http_port()));
     return host;
-}
-
-std::string make_login_target(const NacosClientConfig &config) {
-    std::string target = config.context_path();
-    if (target == "/") {
-        target.clear();
-    }
-    target.append(kLoginPath);
-    return target;
 }
 
 std::chrono::seconds refresh_delay(std::int64_t token_ttl) noexcept {
@@ -172,7 +163,6 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
     auth_body.append("&password=");
     util::form_encode(config_->password(), auth_body);
 
-    const std::string target = make_login_target(*config_);
     std::string access_token;
     std::size_t preferred_server_index = 0;
     auto retry_delay = options_.retry_initial_delay;
@@ -204,7 +194,7 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
         const std::size_t server_count = config_->server_ips().size();
         for (std::size_t offset = 0; offset < server_count && running(); ++offset) {
             const std::size_t server_index = (preferred_server_index + offset) % server_count;
-            auto result = co_await login(server_index, target, auth_body);
+            auto result = co_await login(server_index, kLoginTarget, auth_body);
             if (!running()) {
                 break;
             }

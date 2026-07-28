@@ -31,7 +31,6 @@ NACOS_NAMESPACE_ID='llm-dev'
 NACOS_TENANT=tenant-a
 NACOS_USERNAME=nacos
 NACOS_PASSWORD="pa\"ss"
-NACOS_CONTEXT_PATH=/nacos/
 NACOS_CLIENT_VERSION=fiber-ai-server/1.0 # inline comment
 CAT_APP_KEY=ploto-ai-server
 CAT_HOSTNAME=ai-host-1
@@ -60,7 +59,6 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
     EXPECT_EQ(nacos.tenant(), "tenant-a");
     EXPECT_EQ(nacos.username(), "nacos");
     EXPECT_EQ(nacos.password(), "pa\"ss");
-    EXPECT_EQ(nacos.context_path(), "/nacos");
     EXPECT_EQ(nacos.client_version(), "fiber-ai-server/1.0");
     EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(15000));
     ASSERT_TRUE(result->cat_config());
@@ -82,9 +80,10 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_EQ(result->listen_address().to_string(), "0.0.0.0:8080");
     EXPECT_EQ(result->nacos_config().http_port(), 8848);
     EXPECT_EQ(result->nacos_config().grpc_port(), 9848);
+    EXPECT_EQ(result->nacos_config().namespace_id(), "public");
+    EXPECT_TRUE(result->nacos_config().tenant().empty());
     EXPECT_TRUE(result->nacos_config().username().empty());
     EXPECT_TRUE(result->nacos_config().password().empty());
-    EXPECT_EQ(result->nacos_config().context_path(), "/nacos");
     EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(60000));
     EXPECT_FALSE(result->advertise_address());
     EXPECT_EQ(result->service_name(), "ploto-ai-server");
@@ -128,6 +127,16 @@ TEST(AiServerConfigTest, RejectsDuplicateAndUnknownKeys) {
     ASSERT_FALSE(legacy_audit);
     EXPECT_EQ(legacy_audit.error().code, AiServerConfigErrorCode::UnknownKey);
     EXPECT_EQ(legacy_audit.error().key, "AI_SERVER_AUDIT_LOG_PATH");
+}
+
+TEST(AiServerConfigTest, RejectsConfigurableNacosContextPath) {
+    auto result = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                   "NACOS_CONTEXT_PATH=/custom\n"
+                                                   "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n");
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, AiServerConfigErrorCode::UnknownKey);
+    EXPECT_EQ(result.error().key, "NACOS_CONTEXT_PATH");
 }
 
 TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {

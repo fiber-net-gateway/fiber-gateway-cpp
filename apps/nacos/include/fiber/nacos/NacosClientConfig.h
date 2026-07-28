@@ -21,7 +21,6 @@ struct NacosClientConfigParams {
     std::string namespace_id;
     std::string tenant;
     std::string client_version = "fiber-nacos/1.0";
-    std::string context_path = "/nacos";
 };
 
 enum class NacosConfigErrorCode : std::uint8_t {
@@ -31,7 +30,6 @@ enum class NacosConfigErrorCode : std::uint8_t {
     InvalidGrpcPort,
     EmptyUsername,
     EmptyPassword,
-    InvalidContextPath,
 };
 
 struct NacosConfigError {
@@ -51,7 +49,6 @@ public:
     [[nodiscard]] const std::string &namespace_id() const noexcept { return namespace_id_; }
     [[nodiscard]] const std::string &tenant() const noexcept { return tenant_; }
     [[nodiscard]] const std::string &client_version() const noexcept { return client_version_; }
-    [[nodiscard]] const std::string &context_path() const noexcept { return context_path_; }
 
 private:
     explicit NacosClientConfig(NacosClientConfigParams params) noexcept;
@@ -64,7 +61,6 @@ private:
     std::string namespace_id_;
     std::string tenant_;
     std::string client_version_;
-    std::string context_path_;
 };
 
 struct NacosClientOptions {
