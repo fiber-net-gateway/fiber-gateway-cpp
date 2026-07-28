@@ -21,6 +21,8 @@ constexpr std::string_view kInitialConfigTimeoutKey = "AI_SERVER_INITIAL_CONFIG_
 constexpr std::string_view kAdvertiseAddressKey = "AI_SERVER_ADVERTISE_ADDRESS";
 constexpr std::string_view kServiceNameKey = "AI_SERVER_SERVICE_NAME";
 constexpr std::string_view kServiceGroupKey = "AI_SERVER_SERVICE_GROUP";
+constexpr std::string_view kZoneKey = "AI_SERVER_ZONE";
+constexpr std::string_view kClusterKey = "AI_SERVER_CLUSTER";
 constexpr std::string_view kNacosServerAddressesKey = "NACOS_SERVER_ADDRESSES";
 constexpr std::string_view kNacosHttpPortKey = "NACOS_HTTP_PORT";
 constexpr std::string_view kNacosGrpcPortKey = "NACOS_GRPC_PORT";
@@ -36,13 +38,15 @@ constexpr std::string_view kCatRouterAddressesKey = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectorAddressesKey = "CAT_COLLECTOR_ADDRESSES";
 constexpr std::string_view kLogConfigPathKey = "AI_SERVER_LOG_CONFIG_PATH";
 
-constexpr std::array<std::string_view, 20> kKnownKeys = {
+constexpr std::array<std::string_view, 22> kKnownKeys = {
         kListenAddressKey,
         kListenPortKey,
         kInitialConfigTimeoutKey,
         kAdvertiseAddressKey,
         kServiceNameKey,
         kServiceGroupKey,
+        kZoneKey,
+        kClusterKey,
         kNacosServerAddressesKey,
         kNacosHttpPortKey,
         kNacosGrpcPortKey,
@@ -69,6 +73,8 @@ struct FieldLines {
     std::size_t server_addresses = 0;
     std::size_t http_port = 0;
     std::size_t grpc_port = 0;
+    std::size_t zone = 0;
+    std::size_t cluster = 0;
     std::size_t username = 0;
     std::size_t password = 0;
     std::size_t cat_app_key = 0;
@@ -381,9 +387,9 @@ std::expected<std::vector<net::IpAddress>, AiServerConfigError> parse_server_add
 std::expected<void, AiServerConfigError>
 apply_entry(const EnvEntry &entry, net::IpAddress &listen_ip, std::uint16_t &listen_port,
             std::chrono::milliseconds &initial_config_timeout, std::optional<net::IpAddress> &advertise_address,
-            std::string &service_name, std::string &service_group, cat::CatClientConfigParams &cat_params,
-            bool &cat_setting_present, nacos::NacosClientConfigParams &nacos_params, FieldLines &field_lines,
-            std::string &logging_config_path) {
+            std::string &service_name, std::string &service_group, std::string &zone, std::string &cluster,
+            cat::CatClientConfigParams &cat_params, bool &cat_setting_present,
+            nacos::NacosClientConfigParams &nacos_params, FieldLines &field_lines, std::string &logging_config_path) {
     if (entry.key == kListenAddressKey) {
         if (!net::IpAddress::parse(entry.value, listen_ip)) {
             return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
@@ -417,6 +423,20 @@ apply_entry(const EnvEntry &entry, net::IpAddress &listen_ip, std::uint16_t &lis
             service_name = entry.value;
         } else {
             service_group = entry.value;
+        }
+        return {};
+    }
+    if (entry.key == kZoneKey || entry.key == kClusterKey) {
+        if (entry.value.empty() || entry.value.size() > 255) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                              "expected a non-empty value of at most 255 bytes"));
+        }
+        if (entry.key == kZoneKey) {
+            zone = entry.value;
+            field_lines.zone = entry.line;
+        } else {
+            cluster = entry.value;
+            field_lines.cluster = entry.line;
         }
         return {};
     }
@@ -579,12 +599,23 @@ AiServerConfigError from_cat_error(cat::CatConfigError error, const FieldLines &
 AiServerConfig::AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config,
                                std::chrono::milliseconds initial_config_timeout,
                                std::optional<net::IpAddress> advertise_address, std::string service_name,
-                               std::string service_group, std::optional<cat::CatClientConfig> cat_config,
-                               std::string logging_config_path) noexcept :
+                               std::string service_group, std::string zone, std::string cluster,
+                               std::optional<cat::CatClientConfig> cat_config, std::string logging_config_path) noexcept
+    :
     listen_address_(std::move(listen_address)), nacos_config_(std::move(nacos_config)),
     initial_config_timeout_(initial_config_timeout), advertise_address_(std::move(advertise_address)),
-    service_name_(std::move(service_name)), service_group_(std::move(service_group)),
-    cat_config_(std::move(cat_config)), logging_config_path_(std::move(logging_config_path)) {}
+    service_name_(std::move(service_name)), service_group_(std::move(service_group)), zone_(std::move(zone)),
+    cluster_(std::move(cluster)), cat_config_(std::move(cat_config)),
+    logging_config_path_(std::move(logging_config_path)) {}
+
+std::string AiServerConfig::nacos_cluster() const {
+    std::string result;
+    result.reserve(zone_.size() + 1 + cluster_.size());
+    result.append(zone_);
+    result.push_back('-');
+    result.append(cluster_);
+    return result;
+}
 
 std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_file(std::string_view path) {
     std::ifstream input(std::string(path), std::ios::binary);
@@ -626,6 +657,8 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     std::optional<net::IpAddress> advertise_address;
     std::string service_name = "ploto-ai-server";
     std::string service_group = "DEFAULT_GROUP";
+    std::string zone = "daily1";
+    std::string cluster = "dev";
     cat::CatClientConfigParams cat_params{
             .thread_group_name = "ai-server-cat",
             .thread_id = "0",
@@ -638,11 +671,17 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     std::string logging_config_path;
     for (const EnvEntry &entry: *entries) {
         auto result = apply_entry(entry, listen_ip, listen_port, initial_config_timeout, advertise_address,
-                                  service_name, service_group, cat_params, cat_setting_present, nacos_params,
-                                  field_lines, logging_config_path);
+                                  service_name, service_group, zone, cluster, cat_params, cat_setting_present,
+                                  nacos_params, field_lines, logging_config_path);
         if (!result) {
             return std::unexpected(std::move(result.error()));
         }
+    }
+    if (zone.size() + 1 + cluster.size() > 255) {
+        const bool report_cluster = field_lines.cluster >= field_lines.zone;
+        return std::unexpected(make_error(
+                AiServerConfigErrorCode::InvalidValue, report_cluster ? field_lines.cluster : field_lines.zone,
+                report_cluster ? kClusterKey : kZoneKey, "combined Nacos cluster name exceeds 255 bytes"));
     }
     if (logging_config_path.empty()) {
         return std::unexpected(make_error(AiServerConfigErrorCode::MissingRequiredKey, 0, kLogConfigPathKey,
@@ -667,7 +706,7 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     }
     return AiServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(*nacos_config), initial_config_timeout,
                           std::move(advertise_address), std::move(service_name), std::move(service_group),
-                          std::move(cat_config), std::move(logging_config_path));
+                          std::move(zone), std::move(cluster), std::move(cat_config), std::move(logging_config_path));
 }
 
 } // namespace fiber::ai_server

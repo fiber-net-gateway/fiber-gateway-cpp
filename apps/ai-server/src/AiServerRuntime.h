@@ -102,7 +102,7 @@ private:
                     event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
                     net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
                     std::optional<net::IpAddress> advertise_address, std::string service_name,
-                    std::string service_group, std::unique_ptr<cat::CatClient> cat_client,
+                    std::string service_group, std::string nacos_cluster, std::unique_ptr<cat::CatClient> cat_client,
                     std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id,
                     std::unique_ptr<nacos::NacosClient> nacos_client,
                     std::unique_ptr<nacos::ConfigService> config_service,

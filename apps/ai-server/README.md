@@ -74,6 +74,9 @@ HTTP 和集群成员：
   非 loopback IPv4，找不到时使用 `127.0.0.1`；
 - `AI_SERVER_SERVICE_NAME`：默认 `ploto-ai-server`；
 - `AI_SERVER_SERVICE_GROUP`：默认 `DEFAULT_GROUP`；
+- `AI_SERVER_ZONE`：默认 `daily1`，与 Java `dev` 环境默认值一致；
+- `AI_SERVER_CLUSTER`：默认 `dev`，与 `AI_SERVER_ZONE` 组合成实例注册的 Nacos
+  cluster（默认 `daily1-dev`）；
 - `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS`：默认 `60000`，`0` 表示无限等待。
 
 日志：

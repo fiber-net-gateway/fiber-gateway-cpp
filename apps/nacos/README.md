@@ -219,6 +219,9 @@ fiber::nacos::Instance instance{
 auto registration = (*naming)->registry("gateway", "DEFAULT_GROUP", std::move(instance));
 ```
 
+`Instance::cluster_name` defaults to `DEFAULT`. Applications that use a
+deployment-specific cluster must set it explicitly before calling `registry()`.
+
 `get()` first uses a successful live-subscription value for the same key, then
 falls back to `ServiceQueryRequest`; query results are not inserted into the
 subscription cache. Multiple local subscribers for one `(serviceName, group)`

@@ -45,14 +45,17 @@ public:
     [[nodiscard]] const std::optional<net::IpAddress> &advertise_address() const noexcept { return advertise_address_; }
     [[nodiscard]] std::string_view service_name() const noexcept { return service_name_; }
     [[nodiscard]] std::string_view service_group() const noexcept { return service_group_; }
+    [[nodiscard]] std::string_view zone() const noexcept { return zone_; }
+    [[nodiscard]] std::string_view cluster() const noexcept { return cluster_; }
+    [[nodiscard]] std::string nacos_cluster() const;
     [[nodiscard]] const std::optional<cat::CatClientConfig> &cat_config() const noexcept { return cat_config_; }
     [[nodiscard]] std::string_view logging_config_path() const noexcept { return logging_config_path_; }
 
 private:
     AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config,
                    std::chrono::milliseconds initial_config_timeout, std::optional<net::IpAddress> advertise_address,
-                   std::string service_name, std::string service_group, std::optional<cat::CatClientConfig> cat_config,
-                   std::string logging_config_path) noexcept;
+                   std::string service_name, std::string service_group, std::string zone, std::string cluster,
+                   std::optional<cat::CatClientConfig> cat_config, std::string logging_config_path) noexcept;
 
     net::SocketAddress listen_address_;
     nacos::NacosClientConfig nacos_config_;
@@ -60,6 +63,8 @@ private:
     std::optional<net::IpAddress> advertise_address_;
     std::string service_name_;
     std::string service_group_;
+    std::string zone_;
+    std::string cluster_;
     std::optional<cat::CatClientConfig> cat_config_;
     std::string logging_config_path_;
 };

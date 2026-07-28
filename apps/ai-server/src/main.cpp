@@ -182,6 +182,8 @@ int main(int argc, char **argv) {
                              << " listen=" << fiber::log::quoted(config.listen_address().to_string())
                              << " http_workers=" << http_workers.size()
                              << " nacos_servers=" << config.nacos_config().server_ips().size()
+                             << " zone=" << fiber::log::quoted(config.zone())
+                             << " cluster=" << fiber::log::quoted(config.cluster())
                              << " audit_path=" << fiber::log::quoted(audit_path);
 
     auto runtime_result = fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0),

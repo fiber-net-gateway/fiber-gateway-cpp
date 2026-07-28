@@ -23,7 +23,7 @@ namespace fiber::ai_server {
 class RateLimitClusterMembership final : public common::NonCopyable, public common::NonMovable {
 public:
     RateLimitClusterMembership(event::EventLoop &loop, nacos::NamingService &naming_service, RateLimitShardRing &ring,
-                               std::string service_name, std::string group);
+                               std::string service_name, std::string group, std::string cluster_name);
     ~RateLimitClusterMembership();
 
     [[nodiscard]] std::expected<void, nacos::NamingServiceError> start(std::string advertise_ipv4, std::uint16_t port);
@@ -43,6 +43,7 @@ private:
     RateLimitShardRing *ring_ = nullptr;
     std::string service_name_;
     std::string group_;
+    std::string cluster_name_;
     std::string advertise_ipv4_;
     std::string self_node_id_;
     std::optional<nacos::Subscription<nacos::ServiceInfo>> subscription_;

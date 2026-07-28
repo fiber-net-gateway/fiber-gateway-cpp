@@ -27,9 +27,9 @@ nacos::NamingServiceError invalid_argument(std::string message) {
 
 RateLimitClusterMembership::RateLimitClusterMembership(event::EventLoop &loop, nacos::NamingService &naming_service,
                                                        RateLimitShardRing &ring, std::string service_name,
-                                                       std::string group) :
+                                                       std::string group, std::string cluster_name) :
     loop_(&loop), naming_service_(&naming_service), ring_(&ring), service_name_(std::move(service_name)),
-    group_(std::move(group)) {
+    group_(std::move(group)), cluster_name_(std::move(cluster_name)) {
     stop_publisher_ = stop_.acquire_publisher();
     FIBER_ASSERT(stop_publisher_.has_value());
 }
@@ -60,6 +60,7 @@ std::expected<void, nacos::NamingServiceError> RateLimitClusterMembership::start
             .healthy = true,
             .enabled = true,
             .ephemeral = true,
+            .cluster_name = cluster_name_,
     };
     auto registered = naming_service_->registry(service_name_, group_, std::move(instance));
     if (!registered) {
@@ -93,7 +94,8 @@ std::expected<void, nacos::NamingServiceError> RateLimitClusterMembership::start
     async::spawn([this]() { return watch_service(); });
     async::spawn([this]() { return watch_registration(); });
     LOG(LOG_RATE_LIMIT, INFO) << "token rate limit cluster started service=" << log::quoted(service_name_)
-                              << " group=" << log::quoted(group_) << " node=" << log::quoted(self_node_id_);
+                              << " group=" << log::quoted(group_) << " cluster=" << log::quoted(cluster_name_)
+                              << " node=" << log::quoted(self_node_id_);
     return {};
 }
 

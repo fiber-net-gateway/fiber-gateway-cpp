@@ -703,6 +703,10 @@ TEST(NacosNamingServiceTest, QuerySubscriptionRegistrationAndShutdown) {
     EXPECT_GT(result.notify_acks, 0u);
 }
 
+TEST(NacosNamingServiceTest, InstanceDefaultsToDefaultCluster) {
+    EXPECT_EQ(fiber::nacos::Instance{}.cluster_name, "DEFAULT");
+}
+
 TEST(NacosNamingServiceTest, RestoresSubscriptionAndRegistrationAfterReconnect) {
     const NamingCaseResult result = execute_case(true);
     EXPECT_TRUE(result.ready);
