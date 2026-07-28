@@ -36,6 +36,12 @@ public:
     [[nodiscard]] bool require_server_identity() const noexcept { return require_server_identity_; }
     void set_early_data_enabled(bool enabled) noexcept;
 
+    // Resolves a system CA bundle path to load when a client context has
+    // verify_peer enabled but no explicit ca_file. Probes SSL_CERT_FILE and the
+    // standard Linux/BSD locations once per process; returns an empty string
+    // when none is found (callers fall back to SSL_CTX_set_default_verify_paths).
+    [[nodiscard]] static const std::string &system_ca_bundle_path() noexcept;
+
 private:
     static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in,
                               unsigned int inlen, void *arg);
