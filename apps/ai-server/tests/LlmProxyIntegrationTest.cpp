@@ -1086,6 +1086,10 @@ public:
         return false;
     }
 
+    [[nodiscard]] bool cat_frame_contains(std::string_view first, std::string_view second = {}) const {
+        return fixture_->cat_frame_contains(first, second);
+    }
+
     [[nodiscard]] int entry_calls() const noexcept { return fixture_->entry_calls(); }
     [[nodiscard]] int completed_entry_calls() const noexcept { return fixture_->completed_entry_calls(); }
     [[nodiscard]] int failing_provider_calls() const noexcept { return fixture_->failing_provider_calls(); }
@@ -1329,6 +1333,12 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
                                             "event: message_start\n"
                                             "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_"
                                             "tokens\":2,\"output_tokens\":0}}}\n\n",
+                                            "event: content_block_start\n"
+                                            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{"
+                                            "\"type\":\"text\",\"text\":\"\"}}\n\n"
+                                            "event: content_block_delta\n"
+                                            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{"
+                                            "\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
                                             "event: message_delta\n"
                                             "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n"
                                             "event: message_stop\n"
@@ -1366,6 +1376,34 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
     EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/chat/completions:logical", "stream=false"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/messages:logical", "stream=true"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("/v1/message:logical", "stream=false"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "time_to_response_header_us="));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("upstream_model=upstream-anthropic-primary", "time_to_first_token_us="));
+    EXPECT_FALSE(fixture.cat_frame_contains("upstream_model=upstream-primary", "time_to_first_token_us="));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "body_transfer_us="));
+}
+
+TEST(LlmProxyIntegrationTest, CatProviderTransactionOmitsFirstTokenAndBodyTransferForEmptyResponse) {
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                    },
+            },
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse response =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":false,"messages":[]})");
+
+    EXPECT_EQ(response.system_error, 0);
+    EXPECT_EQ(response.status, 200);
+    EXPECT_TRUE(response.complete);
+    EXPECT_TRUE(response.body.empty());
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "time_to_response_header_us="));
+    EXPECT_FALSE(fixture.cat_frame_contains("LLM.Provider", "time_to_first_token_us="));
+    EXPECT_FALSE(fixture.cat_frame_contains("LLM.Provider", "body_transfer_us="));
 }
 
 TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterResponseStart) {
@@ -1423,6 +1461,8 @@ TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterRespons
     EXPECT_EQ(truncated.trace_id, "sse-truncated-root");
     EXPECT_EQ(truncated.body.find("data: [DONE]"), std::string::npos);
     EXPECT_EQ(fixture.observed().size(), 2u);
+    EXPECT_TRUE(fixture.wait_for_cat_frame("outcome=success", "body_transfer_us="));
+    EXPECT_FALSE(fixture.cat_frame_contains("outcome=success", "time_to_first_token_us="));
 }
 
 TEST(LlmProxyIntegrationTest, DrainsSseUsageAfterClientDisconnectAndDoesNotRetry) {
@@ -1510,22 +1550,24 @@ TEST(LlmProxyIntegrationTest, DoesNotRetryWhenUpstreamFailsWhileDrainingAfterCli
     std::string drain_chunk = ":";
     drain_chunk.append(64 * 1024 - 2, 'y');
     drain_chunk.push_back('\n');
-    FixtureHarness fixture({
-            MockReply{
-                    .status = 200,
-                    .content_type = "text/event-stream",
-                    .chunks = {std::move(first_chunk), std::move(drain_chunk)},
-                    .stream = true,
-                    .abort_after_chunks = true,
-                    .pause_after_chunks = 1,
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .content_type = "text/event-stream",
+                            .chunks = {std::move(first_chunk), std::move(drain_chunk)},
+                            .stream = true,
+                            .abort_after_chunks = true,
+                            .pause_after_chunks = 1,
+                    },
+                    MockReply{
+                            .status = 200,
+                            .content_type = "text/event-stream",
+                            .chunks = {"data: {\"choices\":[]}\n\n"},
+                            .stream = true,
+                    },
             },
-            MockReply{
-                    .status = 200,
-                    .content_type = "text/event-stream",
-                    .chunks = {"data: {\"choices\":[]}\n\n"},
-                    .stream = true,
-            },
-    });
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
     ASSERT_TRUE(fixture.valid());
     const std::string token = issue_token();
     ASSERT_FALSE(token.empty());
@@ -1566,6 +1608,8 @@ TEST(LlmProxyIntegrationTest, DoesNotRetryWhenUpstreamFailsWhileDrainingAfterCli
     EXPECT_NE(audit.find(R"("response_started":true,"outcome":"stream_error")"), std::string::npos);
     EXPECT_NE(audit.find(R"("complete":false,"canonical_complete":false)"), std::string::npos);
     EXPECT_NE(audit.find(R"("completed":false)"), std::string::npos);
+    EXPECT_TRUE(fixture.wait_for_cat_frame("outcome=stream_error", "time_to_first_token_us="));
+    EXPECT_FALSE(fixture.cat_frame_contains("outcome=stream_error", "body_transfer_us="));
 }
 
 TEST(LlmProxyIntegrationTest, DrainsSseWhenClientDisconnectsBeforeResponseHeader) {

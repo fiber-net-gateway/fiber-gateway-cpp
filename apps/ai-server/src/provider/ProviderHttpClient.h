@@ -34,11 +34,21 @@ enum class ProviderHttpErrorCode : std::uint8_t {
     InvalidResponse,
 };
 
+struct ProviderHttpTiming {
+    std::chrono::microseconds time_to_response_header{};
+    std::chrono::microseconds time_to_first_token{};
+    std::chrono::microseconds body_transfer{};
+    bool response_header_observed = false;
+    bool first_token_observed = false;
+    bool body_transfer_observed = false;
+};
+
 struct ProviderHttpError {
     ProviderHttpErrorCode code = ProviderHttpErrorCode::Connect;
     common::IoErr io_error = common::IoErr::None;
     const char *message = nullptr;
     std::uint64_t failed_service_peer_id = 0;
+    ProviderHttpTiming timing;
 };
 
 struct BufferedProviderResponse {
@@ -48,6 +58,7 @@ struct BufferedProviderResponse {
     std::string request_id;
     mem::IoBuf body;
     ProviderLoadBalanceLease load_balance;
+    ProviderHttpTiming timing;
 };
 
 class ProviderHttpResponseStream {
@@ -66,9 +77,11 @@ public:
     [[nodiscard]] std::string_view request_id() const noexcept { return request_id_; }
     [[nodiscard]] bool valid() const noexcept { return upstream_ != nullptr; }
     [[nodiscard]] std::uint64_t service_peer_id() const noexcept { return connection_.load_balance.peer_id(); }
+    [[nodiscard]] const ProviderHttpTiming &timing() const noexcept { return timing_; }
 
     [[nodiscard]] async::Task<common::IoResult<mem::IoBufChain>>
     read_body(std::size_t max_bytes, std::chrono::milliseconds timeout = std::chrono::seconds(300)) noexcept;
+    void observe_first_token() noexcept;
     common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void report_instance(InstanceReportOutcome outcome) noexcept { connection_.load_balance.report(outcome); }
     [[nodiscard]] ProviderLoadBalanceLease take_load_balance() noexcept { return std::move(connection_.load_balance); }
@@ -76,10 +89,11 @@ public:
 private:
     ProviderHttpResponseStream(ProviderConnectionLease connection, std::unique_ptr<http::ClientHttp1Exchange> upstream,
                                int status_code, std::string content_type, std::string retry_after,
-                               std::string request_id) noexcept :
+                               std::string request_id, std::chrono::steady_clock::time_point request_send_started,
+                               ProviderHttpTiming timing) noexcept :
         connection_(std::move(connection)), upstream_(std::move(upstream)), status_code_(status_code),
         content_type_(std::move(content_type)), retry_after_(std::move(retry_after)),
-        request_id_(std::move(request_id)) {}
+        request_id_(std::move(request_id)), request_send_started_(request_send_started), timing_(timing) {}
 
     friend class ProviderHttpClient;
 
@@ -90,6 +104,10 @@ private:
     std::string content_type_;
     std::string retry_after_;
     std::string request_id_;
+    std::chrono::steady_clock::time_point request_send_started_{};
+    std::chrono::steady_clock::time_point first_body_observed_at_{};
+    ProviderHttpTiming timing_;
+    bool first_body_observed_ = false;
 };
 
 class ProviderHttpClient {

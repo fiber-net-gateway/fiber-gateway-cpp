@@ -15,6 +15,7 @@ enum class UsageAction : std::uint32_t {
     Total,
     CacheCreation,
     CacheRead,
+    OutputToken,
 };
 
 struct RawUsage {
@@ -23,6 +24,7 @@ struct RawUsage {
     std::optional<std::int64_t> total;
     std::optional<std::int64_t> cache_creation;
     std::optional<std::int64_t> cache_read;
+    bool output_token_observed = false;
 
     [[nodiscard]] bool empty() const noexcept { return !input && !output && !total && !cache_creation && !cache_read; }
 };
@@ -35,6 +37,30 @@ const json::JsonPathProgram &openai_program() {
                 {.expression = "$.usage.total_tokens", .action = static_cast<std::uint32_t>(UsageAction::Total)},
                 {.expression = "$.usage.prompt_tokens_details.cached_tokens",
                  .action = static_cast<std::uint32_t>(UsageAction::CacheRead)},
+        };
+        auto compiled = json::JsonPathProgram::compile(rules);
+        FIBER_ASSERT(compiled.has_value());
+        return std::move(*compiled);
+    }();
+    return program;
+}
+
+const json::JsonPathProgram &openai_event_program() {
+    static const json::JsonPathProgram program = [] {
+        constexpr json::JsonPathRule rules[] = {
+                {.expression = "$.usage.prompt_tokens", .action = static_cast<std::uint32_t>(UsageAction::Input)},
+                {.expression = "$.usage.completion_tokens", .action = static_cast<std::uint32_t>(UsageAction::Output)},
+                {.expression = "$.usage.total_tokens", .action = static_cast<std::uint32_t>(UsageAction::Total)},
+                {.expression = "$.usage.prompt_tokens_details.cached_tokens",
+                 .action = static_cast<std::uint32_t>(UsageAction::CacheRead)},
+                {.expression = "$.choices[*choice].delta.content",
+                 .action = static_cast<std::uint32_t>(UsageAction::OutputToken)},
+                {.expression = "$.choices[*choice].delta.refusal",
+                 .action = static_cast<std::uint32_t>(UsageAction::OutputToken)},
+                {.expression = "$.choices[*choice].delta.tool_calls[*tool].function.name",
+                 .action = static_cast<std::uint32_t>(UsageAction::OutputToken)},
+                {.expression = "$.choices[*choice].delta.tool_calls[*tool].function.arguments",
+                 .action = static_cast<std::uint32_t>(UsageAction::OutputToken)},
         };
         auto compiled = json::JsonPathProgram::compile(rules);
         FIBER_ASSERT(compiled.has_value());
@@ -77,6 +103,10 @@ const json::JsonPathProgram &anthropic_event_program() {
                  .action = static_cast<std::uint32_t>(UsageAction::CacheCreation)},
                 {.expression = "$.usage.cache_read_input_tokens",
                  .action = static_cast<std::uint32_t>(UsageAction::CacheRead)},
+                {.expression = "$.content_block.text", .action = static_cast<std::uint32_t>(UsageAction::OutputToken)},
+                {.expression = "$.content_block.name", .action = static_cast<std::uint32_t>(UsageAction::OutputToken)},
+                {.expression = "$.delta.text", .action = static_cast<std::uint32_t>(UsageAction::OutputToken)},
+                {.expression = "$.delta.partial_json", .action = static_cast<std::uint32_t>(UsageAction::OutputToken)},
         };
         auto compiled = json::JsonPathProgram::compile(rules);
         FIBER_ASSERT(compiled.has_value());
@@ -93,12 +123,19 @@ std::optional<std::int64_t> add(std::optional<std::int64_t> left, std::optional<
 }
 
 bool on_usage(void *opaque, const json::JsonPathMatch &match) noexcept {
+    auto &usage = *static_cast<RawUsage *>(opaque);
+    const auto action = static_cast<UsageAction>(match.action);
+    if (action == UsageAction::OutputToken) {
+        if (match.token.kind == json::TokenKind::Text && !match.token.view.empty()) {
+            usage.output_token_observed = true;
+        }
+        return true;
+    }
     if (match.token.kind != json::TokenKind::Integer || match.token.inum < 0) {
         return true;
     }
-    auto &usage = *static_cast<RawUsage *>(opaque);
     const std::int64_t value = match.token.inum;
-    switch (static_cast<UsageAction>(match.action)) {
+    switch (action) {
         case UsageAction::Input:
             usage.input = value;
             break;
@@ -114,8 +151,23 @@ bool on_usage(void *opaque, const json::JsonPathMatch &match) noexcept {
         case UsageAction::CacheRead:
             usage.cache_read = value;
             break;
+        case UsageAction::OutputToken:
+            break;
     }
     return true;
+}
+
+bool extract_raw(LlmWireProtocol protocol, std::string_view input, bool streaming_event, mem::BufPool &pool,
+                 RawUsage &raw) noexcept {
+    if (input.empty()) {
+        return false;
+    }
+    const json::JsonPathProgram &program =
+            protocol == LlmWireProtocol::OpenAiChatCompletions
+                    ? (streaming_event ? openai_event_program() : openai_program())
+                    : (streaming_event ? anthropic_event_program() : anthropic_program());
+    return json::visit_json_paths(program, input, pool, json::JsonPathVisitor{.context = &raw, .on_match = &on_usage})
+            .has_value();
 }
 
 std::optional<LlmTokenUsage> to_openai(const RawUsage &raw) noexcept {
@@ -192,20 +244,25 @@ void LlmTokenUsage::merge(const LlmTokenUsage &next) noexcept {
 
 std::optional<LlmTokenUsage> extract_token_usage(LlmWireProtocol protocol, std::string_view input, bool streaming_event,
                                                  mem::BufPool &pool) noexcept {
-    if (input.empty()) {
-        return std::nullopt;
-    }
     RawUsage raw;
-    const json::JsonPathProgram &program =
-            protocol == LlmWireProtocol::OpenAiChatCompletions
-                    ? openai_program()
-                    : (streaming_event ? anthropic_event_program() : anthropic_program());
-    auto visited =
-            json::visit_json_paths(program, input, pool, json::JsonPathVisitor{.context = &raw, .on_match = &on_usage});
-    if (!visited || raw.empty()) {
+    if (!extract_raw(protocol, input, streaming_event, pool, raw) || raw.empty()) {
         return std::nullopt;
     }
     return protocol == LlmWireProtocol::OpenAiChatCompletions ? to_openai(raw) : to_anthropic(raw, streaming_event);
+}
+
+LlmStreamEventObservation analyze_stream_event(LlmWireProtocol protocol, std::string_view input,
+                                               mem::BufPool &pool) noexcept {
+    RawUsage raw;
+    if (!extract_raw(protocol, input, true, pool, raw)) {
+        return {};
+    }
+    return LlmStreamEventObservation{
+            .usage = raw.empty() ? std::nullopt
+                                 : (protocol == LlmWireProtocol::OpenAiChatCompletions ? to_openai(raw)
+                                                                                       : to_anthropic(raw, true)),
+            .output_token_observed = raw.output_token_observed,
+    };
 }
 
 } // namespace fiber::ai_server

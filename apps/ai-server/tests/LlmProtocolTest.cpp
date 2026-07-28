@@ -113,6 +113,62 @@ TEST(LlmProtocolTest, ExtractsAnthropicResponseAndPartialEventUsage) {
     EXPECT_EQ(no_cache_fields->total_tokens, 8);
 }
 
+TEST(LlmProtocolTest, AnalyzesOpenAiStreamingOutputTokens) {
+    mem::BufPool pool;
+    auto role = analyze_stream_event(LlmWireProtocol::OpenAiChatCompletions,
+                                     R"({"choices":[{"delta":{"role":"assistant"}}]})", pool);
+    EXPECT_FALSE(role.output_token_observed);
+    EXPECT_FALSE(role.usage.has_value());
+
+    pool.reset();
+    auto empty = analyze_stream_event(LlmWireProtocol::OpenAiChatCompletions,
+                                      R"({"choices":[{"delta":{"content":""}}]})", pool);
+    EXPECT_FALSE(empty.output_token_observed);
+
+    pool.reset();
+    auto content = analyze_stream_event(
+            LlmWireProtocol::OpenAiChatCompletions,
+            R"({"choices":[{"delta":{"content":"hello"}}],"usage":{"completion_tokens":1}})", pool);
+    EXPECT_TRUE(content.output_token_observed);
+    ASSERT_TRUE(content.usage.has_value());
+    EXPECT_EQ(content.usage->out, 1);
+
+    pool.reset();
+    auto tool =
+            analyze_stream_event(LlmWireProtocol::OpenAiChatCompletions,
+                                 R"({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{"}}]}}]})", pool);
+    EXPECT_TRUE(tool.output_token_observed);
+}
+
+TEST(LlmProtocolTest, AnalyzesAnthropicStreamingOutputTokens) {
+    mem::BufPool pool;
+    auto metadata = analyze_stream_event(
+            LlmWireProtocol::AnthropicMessages,
+            R"({"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":2,"output_tokens":0}}})",
+            pool);
+    EXPECT_FALSE(metadata.output_token_observed);
+    ASSERT_TRUE(metadata.usage.has_value());
+    EXPECT_EQ(metadata.usage->in_nocache, 2);
+
+    pool.reset();
+    auto empty =
+            analyze_stream_event(LlmWireProtocol::AnthropicMessages,
+                                 R"({"type":"content_block_start","content_block":{"type":"text","text":""}})", pool);
+    EXPECT_FALSE(empty.output_token_observed);
+
+    pool.reset();
+    auto content = analyze_stream_event(
+            LlmWireProtocol::AnthropicMessages,
+            R"({"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}})", pool);
+    EXPECT_TRUE(content.output_token_observed);
+
+    pool.reset();
+    auto tool = analyze_stream_event(
+            LlmWireProtocol::AnthropicMessages,
+            R"({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}})", pool);
+    EXPECT_TRUE(tool.output_token_observed);
+}
+
 TEST(LlmProtocolTest, ParsesSseAcrossChunksAndAssemblesSplitData) {
     SseParser parser;
     mem::IoBuf first = make_buffer("event: message_start\r\ndata: {\"type\":");

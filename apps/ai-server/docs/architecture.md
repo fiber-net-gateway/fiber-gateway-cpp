@@ -320,7 +320,14 @@ token usage 另有两个累计 Counter family：
 `token_type` 固定为 `in_cache`、`in_nocache`、`out`。username series 按需求保留原文
 并具有高基数风险；series 在进程生命周期内不回收。request ID、model 原文和 token
 名仍不能作为 label。CAT transaction 在独立 sender loop 发送，业务 worker 只提交
-轻量消息。
+轻量消息。`LLM.Provider` 保留整个 attempt 作为原生 duration，并在 data 中记录三个
+Provider 里程碑：开始发送到最终 response header、开始发送到流式响应首个非空模型
+输出增量，以及首个非空 body chunk 到完整 body 结束，字段分别为
+`time_to_response_header_us`、`time_to_first_token_us`、`body_transfer_us`。first
+token 是网关解析完整 SSE 事件后观测到的 TTFT：OpenAI 文本、拒绝和 tool-call 增量及
+Anthropic 文本和 tool-use 增量均计入，纯元数据事件不计入；它不表示 Provider 内部
+tokenizer 的精确边界。只输出已经观察到的里程碑，非流式响应不输出 first token；
+SSE 的 body transfer 包含交替下游写入形成的背压时间。
 
 listener 只在完整首个配置安装到所有 worker 后绑定；服务注册使用启动配置
 `<AI_SERVER_ZONE>-<AI_SERVER_CLUSTER>` 作为 Nacos cluster，注册和初始本机限流节点
