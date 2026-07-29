@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 
+#include "ScriptTestHelpers.h"
 #include "script/ScriptCompiler.h"
 #include "script/gc/GcInternal.h"
 #include "script/std/StdLibrary.h"
@@ -13,18 +14,9 @@ using fiber::script::JsNodeType;
 using fiber::script::JsValue;
 using fiber::script::ScriptResult;
 using fiber::script::std_lib::StdLibrary;
+using fiber::test::run_script;
 
 namespace {
-
-ScriptResult run_script(std::string_view source, GcHeap &heap) {
-    auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
-    EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
-    if (!compiled) {
-        return ScriptResult::abort(fiber::script::ScriptAbortReason::Internal);
-    }
-    JsValue root = JsValue::make_undefined();
-    return compiled->exec_sync(root, nullptr, heap);
-}
 
 void expect_script_int(std::string_view source, std::int64_t expected) {
     GcHeap heap;

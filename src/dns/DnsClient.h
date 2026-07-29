@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <memory>
 
-#include "../async/Spawn.h"
 #include "../async/Task.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -73,6 +72,25 @@ private:
         InflightCancelFn cancel = nullptr;
     };
 
+    // Completing a slot resumes upper-layer code synchronously. That code may close,
+    // release, or destroy this client before the read callback regains control.
+    class UdpReadDispatchGuard {
+    public:
+        explicit UdpReadDispatchGuard(DnsClient &owner) noexcept;
+        ~UdpReadDispatchGuard() noexcept;
+
+        UdpReadDispatchGuard(const UdpReadDispatchGuard &) = delete;
+        UdpReadDispatchGuard &operator=(const UdpReadDispatchGuard &) = delete;
+        UdpReadDispatchGuard(UdpReadDispatchGuard &&) = delete;
+        UdpReadDispatchGuard &operator=(UdpReadDispatchGuard &&) = delete;
+
+        [[nodiscard]] bool invalidated() const noexcept { return invalidated_; }
+
+    private:
+        DnsClient *owner_ = nullptr;
+        bool invalidated_ = false;
+    };
+
     class ResponseAwaiter {
     public:
         ResponseAwaiter(DnsClient &client, std::uint16_t slot_index) noexcept;
@@ -89,10 +107,13 @@ private:
         bool armed_ = false;
     };
 
-    async::Task<void> recv_loop() noexcept;
     async::Task<common::IoResult<std::size_t>> query_tcp(std::uint16_t slot_index) noexcept;
 
     [[nodiscard]] bool init_storage() noexcept;
+    [[nodiscard]] common::IoErr ensure_udp_read_callback() noexcept;
+    void drain_udp_reads() noexcept;
+    void invalidate_udp_read_dispatch() noexcept;
+    static void on_udp_readable(void *ctx, common::IoErr err) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> prepare_request(InflightSlot &slot,
                                                                 const QuestionSpec &question) noexcept;
     void reset_state() noexcept;
@@ -122,8 +143,10 @@ private:
     std::unique_ptr<std::uint8_t[]> request_buffers_{};
     std::unique_ptr<std::uint8_t[]> recv_buffer_{};
     detail::DnsUdpSendQueue udp_send_queue_{};
+    bool *udp_read_dispatch_invalidated_observer_ = nullptr;
     std::uint16_t free_head_ = kInvalidSlot;
     bool closing_ = false;
+    bool udp_read_callback_registered_ = false;
 };
 
 } // namespace fiber::dns

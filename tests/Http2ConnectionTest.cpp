@@ -992,7 +992,9 @@ std::string make_frame(std::uint32_t length, std::uint8_t type, std::uint8_t fla
     out[6] = static_cast<char>((stream_id >> 16) & 0xffU);
     out[7] = static_cast<char>((stream_id >> 8) & 0xffU);
     out[8] = static_cast<char>(stream_id & 0xffU);
-    std::memcpy(out.data() + 9, payload.data(), payload.size());
+    if (!payload.empty()) {
+        std::memcpy(out.data() + 9, payload.data(), payload.size());
+    }
     return out;
 }
 
@@ -1997,7 +1999,7 @@ private:
 
 using SendScript = std::function<fiber::common::IoErr(SendingHttp2Connection &)>;
 using ControlScript =
-        std::function<void(ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &)>;
+        std::function<void(ControlHttp2Connection &, fiber::http::Http2Stream *, fiber::http::Http2Stream *)>;
 
 DetachedTask run_http2_connection_task(fiber::http::Http2Connection *connection,
                                        std::shared_ptr<std::atomic_bool> done = nullptr) {
@@ -2014,7 +2016,6 @@ struct ControlSetupContext {
     ControlHttp2Connection *connection = nullptr;
     FakeHttpTransport *fake_transport = nullptr;
     ControlScript setup;
-    bool open_streams_for_setup = true;
     bool block_reads_for_setup = false;
     bool strip_initial_flight = false;
     bool snapshot_before_shutdown = false;
@@ -2070,17 +2071,12 @@ DetachedTask run_control_setup_task(ControlSetupContext ctx) {
     }
 
     if (ctx.block_reads_for_setup) {
-        if (ctx.open_streams_for_setup) {
-            set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.local_stream1);
-            set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.local_stream3);
-        } else {
-            set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.local_stream1);
-            set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.local_stream3);
-        }
-        ctx.setup(*ctx.connection, **ctx.stream1, **ctx.stream3);
+        set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.local_stream1);
+        set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.local_stream3);
+        ctx.setup(*ctx.connection, *ctx.stream1, *ctx.stream3);
         ctx.fake_transport->release_reads();
     } else if (ctx.setup) {
-        ctx.setup(*ctx.connection, *ctx.local_stream1, *ctx.local_stream3);
+        ctx.setup(*ctx.connection, ctx.local_stream1, ctx.local_stream3);
         set_control_stream_slot(ctx.stream1, ctx.stream1_id, ctx.local_stream1);
         set_control_stream_slot(ctx.stream3, ctx.stream3_id, ctx.local_stream3);
     }
@@ -2220,7 +2216,6 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
         ControlSetupContext setup_ctx{&connection,
                                       fake_transport,
                                       setup,
-                                      open_streams_for_setup,
                                       block_reads_for_setup,
                                       options.role == fiber::http::Http2Connection::ConnectionRole::Client &&
                                               (static_cast<bool>(setup) || !preserve_initial_flight),
@@ -2244,7 +2239,6 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
         ControlSetupContext setup_ctx{&connection,
                                       fake_transport,
                                       setup,
-                                      open_streams_for_setup,
                                       block_reads_for_setup,
                                       options.role == fiber::http::Http2Connection::ConnectionRole::Client &&
                                               (static_cast<bool>(setup) || !preserve_initial_flight),
@@ -2260,7 +2254,7 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
         outcome.result = co_await connection.wait_closed();
     } else {
         if (setup) {
-            setup(connection, *local_stream1, *local_stream3);
+            setup(connection, local_stream1.get(), local_stream3.get());
             stream1 = local_stream1.get();
             stream3 = local_stream3.get();
             stream1_id = local_stream1->stream_id();
@@ -3132,7 +3126,7 @@ TEST(Http2ConnectionTest, SettingsFrameUpdatesPeerStateAndSendsAck) {
     std::string settings = make_frame(static_cast<std::uint32_t>(payload.size()), 0x4, 0x0, 0, payload);
 
     ControlRunOutcome outcome = execute_control_connection(
-            {settings}, [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {},
+            {settings}, [](ControlHttp2Connection &, fiber::http::Http2Stream *, fiber::http::Http2Stream *) {},
             options, true, true, true);
 
     ASSERT_TRUE(outcome.result.has_value());
@@ -3154,8 +3148,9 @@ TEST(Http2ConnectionTest, InitialStreamWindowOverflowIsConnectionFatal) {
     std::string payload("\0\x04\x7f\xff\xff\xff", 6);
     ControlRunOutcome outcome = execute_control_connection(
             {make_frame(6, 0x4, 0x0, 0, payload)},
-            [](ControlHttp2Connection &, fiber::http::Http2Stream &stream1, fiber::http::Http2Stream &) {
-                stream1.send_window_ = 0x7fffffff;
+            [](ControlHttp2Connection &, fiber::http::Http2Stream *stream1, fiber::http::Http2Stream *) {
+                ASSERT_NE(stream1, nullptr);
+                stream1->send_window_ = 0x7fffffff;
             },
             options);
 
@@ -3285,7 +3280,7 @@ TEST(Http2ConnectionTest, WindowUpdateIncreasesConnectionAndStreamSendWindow) {
 
     ControlRunOutcome outcome = execute_control_connection(
             {make_frame(4, 0x8, 0x0, 1, stream_update_payload), make_frame(4, 0x8, 0x0, 0, conn_update_payload)},
-            [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {}, options, true,
+            [](ControlHttp2Connection &, fiber::http::Http2Stream *, fiber::http::Http2Stream *) {}, options, true,
             true, true);
 
     ASSERT_TRUE(outcome.result.has_value());
@@ -3318,7 +3313,7 @@ TEST(Http2ConnectionTest, RstStreamClosesActiveStream) {
     payload[3] = '\x8';
     ControlRunOutcome outcome = execute_control_connection(
             {make_frame(4, 0x3, 0x0, 1, payload)},
-            [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {}, options, true,
+            [](ControlHttp2Connection &, fiber::http::Http2Stream *, fiber::http::Http2Stream *) {}, options, true,
             true, true);
 
     ASSERT_TRUE(outcome.result.has_value());
@@ -3343,7 +3338,7 @@ TEST(Http2ConnectionTest, HeadersWithContinuationCompleteExistingLocalStreamHead
 
     ControlRunOutcome outcome = execute_control_connection(
             {make_frame(1, 0x1, 0x0, 1, std::string("\x82", 1)), make_frame(1, 0x9, 0x4, 1, std::string("\x84", 1))},
-            [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {}, options, false,
+            [](ControlHttp2Connection &, fiber::http::Http2Stream *, fiber::http::Http2Stream *) {}, options, false,
             true, true);
 
     ASSERT_TRUE(outcome.result.has_value());
@@ -3410,7 +3405,7 @@ TEST(Http2ConnectionTest, GoawayClosesOnlyLocalStreamsAfterLastStreamId) {
     payload[3] = '\x1';
     ControlRunOutcome outcome = execute_control_connection(
             {make_frame(8, 0x7, 0x0, 0, payload)},
-            [](ControlHttp2Connection &, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {}, options, true,
+            [](ControlHttp2Connection &, fiber::http::Http2Stream *, fiber::http::Http2Stream *) {}, options, true,
             true, true);
 
     ASSERT_TRUE(outcome.result.has_value());
@@ -4579,7 +4574,7 @@ TEST(Http2ConnectionTest, GracefulShutdownSendsGoawayAndClosesTransportAfterQueu
 
     ControlRunOutcome outcome = execute_control_connection(
             {},
-            [](ControlHttp2Connection &connection, fiber::http::Http2Stream &, fiber::http::Http2Stream &) {
+            [](ControlHttp2Connection &connection, fiber::http::Http2Stream *, fiber::http::Http2Stream *) {
                 connection.request_graceful_close();
                 EXPECT_EQ(connection.open_stream(1), nullptr);
             },
@@ -5300,14 +5295,16 @@ TEST(Http2ConnectionTest, ServerReadBodyReplenishesStreamWindowAfterCrossingLowW
                                          false);
     request += make_frame(static_cast<std::uint32_t>(body.size()), 0x0, 0x1, 1, body);
 
-    auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
+    auto read_result = std::make_shared<fiber::common::IoResult<void>>();
     auto header_result = std::make_shared<fiber::common::IoResult<void>>();
     fiber::http::HttpHandler handler =
             [read_result, header_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        *read_result = co_await exchange.read_body(34);
-        if (!*read_result) {
+        auto body_result = co_await exchange.read_body(34);
+        if (!body_result) {
+            *read_result = std::unexpected(body_result.error());
             co_return;
         }
+        *read_result = {};
 
         fiber::http::HttpHeaders headers(exchange.pool());
         headers.set("server", "fiber");

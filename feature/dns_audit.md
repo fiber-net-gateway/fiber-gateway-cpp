@@ -4,7 +4,7 @@
 >
 > 后续状态：旧 `DnsCache`/`SharedDnsCache` 与 `NameSnapshot` 已由 `DnsCache2`/`SharedDnsCache2` 和固定容量 `DnsAddressSet` 替代；下文涉及旧缓存实现的行号与结论保留为历史审计记录。
 >
-> 核验事实：`RWMutex::ReadLockAwaiter::await_ready` 在无写锁竞争时 `try_lock_shared()` 返回 true、`co_await lock_shared()` 不挂起（`src/async/RWMutex.cpp:153-162,200-207`）；`RWFd::close()` 同步 `resume()` 挂起的读等待者并置 `Canceled`（`src/net/detail/RWFd.cpp:38-71`），故 `~DnsClient`->`close()`->`socket_->close()` 会在析构成员前同步排空 `recv_loop`，recv_loop 无 UAF；open-addressing 的 tombstone/探查不变量正确；`NameSnapshot` 自包含拷贝、无悬空指针。
+> 核验事实：`RWMutex::ReadLockAwaiter::await_ready` 在无写锁竞争时 `try_lock_shared()` 返回 true、`co_await lock_shared()` 不挂起（`src/async/RWMutex.cpp:153-162,200-207`）；`DnsClient` 的 UDP 接收由 `RWFd` read callback 驱动，回调恢复查询协程后通过栈上 dispatch invalidation observer 判断 client 是否已被同步 `close()`/`release()`/析构，失效后不再访问 client；open-addressing 的 tombstone/探查不变量正确；`NameSnapshot` 自包含拷贝、无悬空指针。
 >
 > 状态（2026-07-13 复核）：HIGH #1、#2、#3 及 MEDIUM #4、#5 均已修复；MEDIUM #6 已确认是符合 NXDOMAIN 语义的有意行为；LOW #1、#13 已随对应 HIGH 项修复，其余排期。
 >
@@ -143,7 +143,7 @@ V6First 也会同时发 A 查询并等齐两者才合并，上游查询量翻倍
 11. **`NameSnapshot` 同时 NonCopyable+NonMovable**：`DnsCache.h:20`。强制按出参传递或堆间接，去掉 NonMovable 即可移动。
 12. **`pick_status_family` 双失败时返回更严重的状态**：`DnsResolver.cpp:72-86`。NxDomain(确定) vs ServerFailure(瞬时)，返回 NxDomain 更利于调用方缓存负结果。
 13. **✅ 已修复：`query_tcp` 未校验响应 ID**。UDP/TCP 现共用 `response_matches_query`，校验 ID 和完整 question；TCP 不匹配返回 `Invalid`（`DnsClient.cpp:367-392`）。
-14. **`recv_loop` 对非 Canceled/BadFd 错误不 yield**：`DnsClient.cpp:276-285`。UDP ICMP 错误单次会被 recvmsg 消费，但错误洪流下可能短时忙等。
+14. **✅ 已修复：`recv_loop` 对非 Canceled/BadFd 错误不 yield**。独立接收协程已删除；持久 read callback 每次就绪使用非阻塞 `try_recv_from` 排空 socket，遇到任意读取错误即返回 EventLoop，不会在单次 dispatch 内忙等。
 
 ---
 
@@ -170,4 +170,4 @@ V6First 也会同时发 A 查询并等齐两者才合并，上游查询量翻倍
 - `handle_response` 校验响应 question 段匹配 qname/qtype/qclass（`DnsResolverLocal.cpp:732-747`）。
 - SOA 负 TTL = `min(record.ttl, minimum)`（RFC 2308）（`DnsResolverLocal.cpp:106`）。
 - literal IP 直返不查 DNS、按 policy 过滤（`DnsResolver.cpp:266-281`）。
-- `RWFd::close()` 同步 resume 读等待者，`recv_loop` 在析构前被排空，无 UAF（`RWFd.cpp:38-71`）。
+- `DnsClient` UDP read callback 恢复查询协程后，先检查栈上 dispatch invalidation observer；若恢复路径同步关闭、释放或析构 client，则立即停止本轮排空，不再读取 client 成员。

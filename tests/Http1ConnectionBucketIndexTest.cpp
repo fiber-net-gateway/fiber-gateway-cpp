@@ -49,14 +49,14 @@ TEST(Http1ConnectionBucketIndexTest, InitializesRequestedCapacityAsPowerOfTwo) {
 }
 
 TEST(Http1ConnectionBucketIndexTest, InsertsFindsAndRejectsDuplicateKeys) {
+    Http1ConnectionPoolGroupBucket bucket1;
+    Http1ConnectionPoolGroupBucket bucket2;
+    Http1ConnectionPoolGroupBucket duplicate_bucket;
     Http1ConnectionBucketIndex index;
     ASSERT_TRUE(index.init(2));
 
     const auto key1 = make_ip_key(1, 80, Http1ConnectionGroupKey::Scheme::Http);
     const auto key2 = make_ip_key(2, 443, Http1ConnectionGroupKey::Scheme::Https);
-    Http1ConnectionPoolGroupBucket bucket1;
-    Http1ConnectionPoolGroupBucket bucket2;
-    Http1ConnectionPoolGroupBucket duplicate_bucket;
 
     EXPECT_EQ(index.insert(key1, bucket1), IoErr::None);
     EXPECT_EQ(index.insert(key2, bucket2), IoErr::None);
@@ -74,6 +74,9 @@ TEST(Http1ConnectionBucketIndexTest, InsertsFindsAndRejectsDuplicateKeys) {
 }
 
 TEST(Http1ConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdatesSlotIndices) {
+    Http1ConnectionPoolGroupBucket bucket_a;
+    Http1ConnectionPoolGroupBucket bucket_b;
+    Http1ConnectionPoolGroupBucket bucket_c;
     Http1ConnectionBucketIndex index;
     ASSERT_TRUE(index.init(4));
 
@@ -81,9 +84,6 @@ TEST(Http1ConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdate
     const auto key_a = make_ip_key(octets[0]);
     const auto key_b = make_ip_key(octets[1]);
     const auto key_c = make_ip_key(octets[2]);
-    Http1ConnectionPoolGroupBucket bucket_a;
-    Http1ConnectionPoolGroupBucket bucket_b;
-    Http1ConnectionPoolGroupBucket bucket_c;
 
     ASSERT_EQ(index.insert(key_a, bucket_a), IoErr::None);
     ASSERT_EQ(index.insert(key_b, bucket_b), IoErr::None);
@@ -108,11 +108,11 @@ TEST(Http1ConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdate
 }
 
 TEST(Http1ConnectionBucketIndexTest, GrowsAndRewritesBucketSlotIndices) {
+    std::array<Http1ConnectionPoolGroupBucket, 5> buckets{};
     Http1ConnectionBucketIndex index;
     ASSERT_TRUE(index.init(0));
     EXPECT_EQ(index.slot_capacity(), 0u);
 
-    std::array<Http1ConnectionPoolGroupBucket, 5> buckets{};
     const auto key1 = make_ip_key(1);
     const auto key2 = make_ip_key(2);
     const auto key3 = make_ip_key(3);

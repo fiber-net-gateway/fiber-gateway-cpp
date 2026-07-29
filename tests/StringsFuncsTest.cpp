@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 
+#include "ScriptTestHelpers.h"
 #include "script/JsGc.h"
 #include "script/ScriptCompiler.h"
 #include "script/gc/GcInternal.h"
@@ -18,6 +19,7 @@ using fiber::script::JsValue;
 using fiber::script::ScriptAbortReason;
 using fiber::script::ScriptResult;
 using fiber::script::std_lib::StdLibrary;
+using fiber::test::run_script;
 
 namespace {
 
@@ -35,16 +37,6 @@ std::string string_to_utf8(const JsValue &value) {
         EXPECT_TRUE(fiber::script::gc_string_to_utf8(str, out));
     }
     return out;
-}
-
-ScriptResult run_script(std::string_view source, GcHeap &heap) {
-    auto compiled = fiber::script::compile_script(StdLibrary::instance(), source);
-    EXPECT_TRUE(compiled.has_value()) << (compiled ? "" : compiled.error().message);
-    if (!compiled) {
-        return ScriptResult::abort(ScriptAbortReason::Internal);
-    }
-    JsValue root = JsValue::make_undefined();
-    return compiled->exec_sync(root, nullptr, heap);
 }
 
 void expect_script_bool(std::string_view source, bool expected) {

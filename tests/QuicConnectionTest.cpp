@@ -1594,6 +1594,7 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     ASSERT_TRUE(conn.recv_stream_frame(data, slice_of("abc")).has_value());
     auto *stream = conn.find_stream(kStreamId);
     ASSERT_NE(stream, nullptr);
+    auto retained_stream = stream->lease();
     EXPECT_FALSE(stream->has_final_size());
 
     fiber::mem::IoBufChain out(conn.recv_extent_pool());
@@ -1611,8 +1612,8 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     fin.offset = 3; // final_size == already-consumed offset
     fin.fin = true;
     ASSERT_TRUE(conn.recv_stream_frame(fin, {}).has_value());
-    EXPECT_TRUE(stream->has_final_size());
-    EXPECT_EQ(stream->final_size(), 3U);
+    EXPECT_TRUE(retained_stream->has_final_size());
+    EXPECT_EQ(retained_stream->final_size(), 3U);
     // recv_done → peer-uni retires.
     EXPECT_EQ(conn.find_stream(kStreamId), nullptr);
     EXPECT_EQ(conn.active_stream_count(), 0U);
