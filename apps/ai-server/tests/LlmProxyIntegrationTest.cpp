@@ -121,6 +121,7 @@ struct ClientCatHeaders {
     std::string parent_span_id;
     std::string span_id;
     std::string trace_state;
+    std::string user_agent;
 };
 
 struct RawHttpResponse {
@@ -335,6 +336,9 @@ RawHttpResponse post_json(std::uint16_t port, std::string_view token, std::strin
                 }
                 if (!cat_headers.trace_state.empty()) {
                     headers.set("tracestate", cat_headers.trace_state);
+                }
+                if (!cat_headers.user_agent.empty()) {
+                    headers.set("User-Agent", cat_headers.user_agent);
                 }
                 fiber::http::ClientHttp1Exchange exchange(connection, pool);
                 auto sent_header = co_await exchange.send_header(
@@ -1348,10 +1352,12 @@ TEST(LlmProxyIntegrationTest, DnsTimeoutSkipsRemainingTokensAndBacksOffRepeatedL
     EXPECT_NE(audit.find(R"("retry_target":"next_provider")"), std::string::npos);
     EXPECT_NE(audit.find(R"("retry_performed":true,"skipped_attempts":2)"), std::string::npos);
     EXPECT_NE(audit.find(R"("provider_attempt_count":2,"provider_attempt_skipped_count":2)"), std::string::npos);
-    EXPECT_TRUE(fixture.wait_for_cat_frame("failure_phase=dns", "failure_source=io"));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("failure_phase=dns", "failure_source=dns_backoff"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("io_error=timed_out", "failure_source=io"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("failure_source=dns_backoff", "retry_target=next_provider"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("retry_target=next_provider", "skipped_attempts=2"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("retry_performed=true", "skipped_attempts=2"));
     EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_and_name("LLM.UpstreamError", "dns")));
+    EXPECT_FALSE(fixture.cat_frame_contains("failure_phase="));
 
     auto metrics = fixture.settlement_metrics();
     ASSERT_TRUE(metrics);
@@ -1583,14 +1589,63 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
     EXPECT_FALSE(fixture.cat_frame_contains(cat_nt1_type_and_name("Auth", "zhangwang"), "allowed_user_group="));
     EXPECT_FALSE(fixture.cat_frame_contains(cat_nt1_type_and_name("Auth", "mallory"), "allowed_user_group="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "time_to_response_header_us="));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "failure_phase=none"));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "retry_target=none"));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "retry_performed=false"));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "skipped_attempts=0"));
+    EXPECT_FALSE(fixture.cat_frame_contains("failure_phase="));
+    EXPECT_FALSE(fixture.cat_frame_contains("io_error="));
+    EXPECT_FALSE(fixture.cat_frame_contains("failure_source="));
+    EXPECT_FALSE(fixture.cat_frame_contains("retry_target="));
+    EXPECT_FALSE(fixture.cat_frame_contains("retryable="));
+    EXPECT_FALSE(fixture.cat_frame_contains("retry_performed="));
+    EXPECT_FALSE(fixture.cat_frame_contains("skipped_attempts="));
+    EXPECT_FALSE(fixture.cat_frame_contains("response_started="));
+    EXPECT_FALSE(fixture.cat_frame_contains("outcome="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("upstream_model=upstream-anthropic-primary", "time_to_first_token_us="));
     EXPECT_FALSE(fixture.cat_frame_contains("upstream_model=upstream-primary", "time_to_first_token_us="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "body_transfer_us="));
     EXPECT_FALSE(fixture.cat_frame_contains("LLM.UpstreamError"));
+}
+
+TEST(LlmProxyIntegrationTest, CatUrlTransactionUsesSpaceSeparatedDataAndBoundsUserAgent) {
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"normal","choices":[]})",
+                    },
+                    MockReply{
+                            .status = 200,
+                            .body = R"({"id":"truncated","choices":[]})",
+                    },
+            },
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+    constexpr std::string_view request = R"({"model":"logical","stream":false,"messages":[]})";
+    constexpr std::string_view user_agent = "ai-server-integration/1.0 with spaces";
+
+    const RawHttpResponse normal =
+            post_json(fixture.entry_port(), token, request, ClientCatHeaders{.user_agent = std::string(user_agent)});
+    std::string oversized_user_agent(fiber::ai_server::kMaxAiServerCatUserAgentBytes + 16, 'u');
+    const RawHttpResponse truncated = post_json(fixture.entry_port(), token, request,
+                                                ClientCatHeaders{.user_agent = std::move(oversized_user_agent)});
+
+    EXPECT_EQ(normal.status, 200);
+    EXPECT_TRUE(normal.complete);
+    EXPECT_EQ(truncated.status, 200);
+    EXPECT_TRUE(truncated.complete);
+
+    const std::string root_name = cat_nt1_type_and_name("URL", "/v1/chat/completions:logical");
+    const std::string root_data =
+            "method=POST host=127.0.0.1 content_type=application/json trace_context=new protocol=openai "
+            "user=alice kid=test1 stream=false model=logical status=200 user_agent=" +
+            std::string(user_agent);
+    EXPECT_TRUE(fixture.wait_for_cat_frame(root_name, root_data));
+    EXPECT_FALSE(fixture.cat_frame_contains("&host="));
+    EXPECT_FALSE(fixture.cat_frame_contains("&protocol="));
+
+    const std::string bounded_user_agent(fiber::ai_server::kMaxAiServerCatUserAgentBytes, 'u');
+    EXPECT_TRUE(fixture.wait_for_cat_frame(root_name, "user_agent_truncated=true user_agent=" + bounded_user_agent));
+    EXPECT_FALSE(fixture.cat_frame_contains(std::string(fiber::ai_server::kMaxAiServerCatUserAgentBytes + 1, 'u')));
 }
 
 TEST(LlmProxyIntegrationTest, CatProviderTransactionOmitsFirstTokenAndBodyTransferForEmptyResponse) {
@@ -1672,8 +1727,8 @@ TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterRespons
     EXPECT_EQ(truncated.trace_id, "sse-truncated-root");
     EXPECT_EQ(truncated.body.find("data: [DONE]"), std::string::npos);
     EXPECT_EQ(fixture.observed().size(), 2u);
-    EXPECT_TRUE(fixture.wait_for_cat_frame("outcome=success", "body_transfer_us="));
-    EXPECT_FALSE(fixture.cat_frame_contains("outcome=success", "time_to_first_token_us="));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("upstream_model=upstream-primary", "body_transfer_us="));
+    EXPECT_FALSE(fixture.cat_frame_contains("upstream_model=upstream-primary", "time_to_first_token_us="));
 }
 
 TEST(LlmProxyIntegrationTest, DrainsSseUsageAfterClientDisconnectAndDoesNotRetry) {
@@ -1819,8 +1874,10 @@ TEST(LlmProxyIntegrationTest, DoesNotRetryWhenUpstreamFailsWhileDrainingAfterCli
     EXPECT_NE(audit.find(R"("response_started":true,"outcome":"stream_error")"), std::string::npos);
     EXPECT_NE(audit.find(R"("complete":false,"canonical_complete":false)"), std::string::npos);
     EXPECT_NE(audit.find(R"("completed":false)"), std::string::npos);
-    EXPECT_TRUE(fixture.wait_for_cat_frame("outcome=stream_error", "time_to_first_token_us="));
-    EXPECT_FALSE(fixture.cat_frame_contains("outcome=stream_error", "body_transfer_us="));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("upstream_model=upstream-primary", "time_to_first_token_us="));
+    EXPECT_FALSE(fixture.cat_frame_contains("upstream_model=upstream-primary", "body_transfer_us="));
+    EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_and_name("LLM.UpstreamError", "read_body"),
+                                           "response_started=true"));
 }
 
 TEST(LlmProxyIntegrationTest, DrainsSseWhenClientDisconnectsBeforeResponseHeader) {

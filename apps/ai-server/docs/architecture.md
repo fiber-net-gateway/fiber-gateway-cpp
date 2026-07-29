@@ -335,20 +335,24 @@ token usage 另有两个累计 Counter family：
 `token_type` 固定为 `in_cache`、`in_nocache`、`out`。username series 按需求保留原文
 并具有高基数风险；series 在进程生命周期内不回收。request ID、model 原文和 token
 名仍不能作为 label。CAT transaction 在独立 sender loop 发送，业务 worker 只提交
-轻量消息。`LLM.Provider` 保留整个 attempt 作为原生 duration，并在 data 中记录三个
-Provider 里程碑：开始发送到最终 response header、开始发送到流式响应首个非空模型
-输出增量，以及首个非空 body chunk 到完整 body 结束，字段分别为
+轻量消息。`URL` root data 使用空格分隔的 `key=value` 字段，并把最多 1024 字节的入站
+`User-Agent` 作为最后一个 `user_agent` 字段；超出时同时记录
+`user_agent_truncated=true`。CAT 客户端的其他消息仍默认使用官方 `&` 分隔规则。
+`LLM.Provider` 保留整个 attempt 作为原生 duration，data 只保留 attempt 身份、实际
+HTTP status、fallback 标记和三个 Provider 里程碑：开始发送到最终 response header、
+开始发送到流式响应首个非空模型输出增量，以及首个非空 body chunk 到完整 body 结束，字段分别为
 `time_to_response_header_us`、`time_to_first_token_us`、`body_transfer_us`。first
 token 是网关解析完整 SSE 事件后观测到的 TTFT：OpenAI 文本、拒绝和 tool-call 增量及
 Anthropic 文本和 tool-use 增量均计入，纯元数据事件不计入；它不表示 Provider 内部
-tokenizer 的精确边界。只输出已经观察到的里程碑，非流式响应不输出 first token；
-SSE 的 body transfer 包含交替下游写入形成的背压时间。
+tokenizer 的精确边界。只输出实际收到的 HTTP status 和已经观察到的里程碑，非流式响应
+不输出 first token；SSE 的 body transfer 包含交替下游写入形成的背压时间。
 每个 Provider 的 `RemoteCall` Event 归属相应的 `LLM.Provider` Transaction。失败
 attempt 保持父 Transaction 的失败状态，并增加 `LLM.UpstreamError` 子 Event：
 存在传输 `failure_code` 时，Event name 使用其小写 snake_case 名称，例如 `dns`、
 `connect`、`read_header`；非 2xx 响应没有传输错误码，使用 `upstream_error`。
-Event data 继续给出精确 failure phase、I/O error、上游状态和 retry target；成功
-attempt 不生成错误 Event。
+Event name 本身承载 failure phase；Event data 按实际存在的值记录 I/O error、
+failure source、上游状态、retry target、是否执行重试、跳过的 attempt 数和响应是否
+已经开始，默认的 `none`、`false`、`0` 不输出。成功 attempt 不生成错误 Event。
 
 listener 只在完整首个配置安装到所有 worker 后绑定；服务注册使用启动配置
 `<AI_SERVER_ZONE>-<AI_SERVER_CLUSTER>` 作为 Nacos cluster，注册和初始本机限流节点

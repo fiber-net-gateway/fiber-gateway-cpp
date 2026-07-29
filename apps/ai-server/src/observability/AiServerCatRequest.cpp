@@ -31,6 +31,8 @@ constexpr std::string_view kHostHeader = "host";
 constexpr std::uint64_t kHostHeaderHash = http::http_header_name_hash(kHostHeader);
 constexpr std::string_view kContentTypeHeader = "content-type";
 constexpr std::uint64_t kContentTypeHeaderHash = http::http_header_name_hash(kContentTypeHeader);
+constexpr std::string_view kUserAgentHeader = "user-agent";
+constexpr std::uint64_t kUserAgentHeaderHash = http::http_header_name_hash(kUserAgentHeader);
 
 bool has_inbound_context(const cat::MessageTraceContext &context) noexcept {
     return !context.message_id.empty() || !context.root_message_id.empty() || !context.parent_message_id.empty();
@@ -40,11 +42,11 @@ bool can_fallback_from(cat::RecordError error) noexcept {
     return error == cat::RecordError::InvalidContext || error == cat::RecordError::LimitExceeded;
 }
 
-void add_status_code(cat::Transaction &transaction, int status_code) noexcept {
+void add_status_code(AiServerCatRequest &request, int status_code) noexcept {
     std::array<char, std::numeric_limits<int>::digits10 + 3> buffer{};
     const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), status_code);
     if (converted.ec == std::errc{}) {
-        (void) transaction.add_data(
+        (void) request.add_root_data(
                 "status", std::string_view(buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())));
     }
 }
@@ -97,13 +99,13 @@ AiServerCatRequest::AiServerCatRequest(http::HttpExchange &exchange, cat::CatCli
         return;
     }
 
-    const std::string_view inbound_trace_state =
-            exchange.request_headers().get(kTraceStateHeader, kTraceStateHeaderHash);
+    const http::HttpHeaders &request_headers = exchange.request_headers();
+    const std::string_view inbound_trace_state = request_headers.get(kTraceStateHeader, kTraceStateHeaderHash);
     if (inbound_trace_state.size() <= kMaxAiServerTraceStateBytes) {
         trace_state_ = inbound_trace_state;
     }
 
-    const cat::MessageTraceContext inbound = read_cat_trace_context(exchange.request_headers());
+    const cat::MessageTraceContext inbound = read_cat_trace_context(request_headers);
     const bool inherited = has_inbound_context(inbound);
     bool invalid_fallback = false;
     auto created = cat::MessageTrace::create(*client_, {}, inbound);
@@ -128,18 +130,20 @@ AiServerCatRequest::AiServerCatRequest(http::HttpExchange &exchange, cat::CatCli
         return;
     }
     root_.emplace(std::move(*transaction));
-    (void) root_->add_data("method", exchange.method_view());
-    const std::string_view host = exchange.request_headers().get(kHostHeader, kHostHeaderHash);
+    (void) root_->set_data_separator(' ');
+    (void) add_root_data("method", exchange.method_view());
+    const std::string_view host = request_headers.get(kHostHeader, kHostHeaderHash);
     if (!host.empty()) {
-        (void) root_->add_data("host", host);
+        (void) add_root_data("host", host);
     }
-    const std::string_view content_type = exchange.request_headers().get(kContentTypeHeader, kContentTypeHeaderHash);
+    const std::string_view content_type = request_headers.get(kContentTypeHeader, kContentTypeHeaderHash);
     if (!content_type.empty()) {
-        (void) root_->add_data("content_type", content_type);
+        (void) add_root_data("content_type", content_type);
     }
-    (void) root_->add_data("trace_context",
-                           invalid_fallback ? std::string_view("invalid_fallback")
-                                            : (inherited ? std::string_view("continued") : std::string_view("new")));
+    (void) add_root_data("trace_context",
+                         invalid_fallback ? std::string_view("invalid_fallback")
+                                          : (inherited ? std::string_view("continued") : std::string_view("new")));
+    user_agent_ = request_headers.get(kUserAgentHeader, kUserAgentHeaderHash);
 }
 
 AiServerCatRequest::~AiServerCatRequest() {
@@ -147,7 +151,13 @@ AiServerCatRequest::~AiServerCatRequest() {
         return;
     }
     const http::HttpResponseStats &response = exchange_->response_stats();
-    add_status_code(*root_, response.status_code);
+    add_status_code(*this, response.status_code);
+    if (!user_agent_.empty()) {
+        if (user_agent_.size() > kMaxAiServerCatUserAgentBytes) {
+            (void) add_root_data("user_agent_truncated", "true");
+        }
+        (void) add_root_data("user_agent", user_agent_.substr(0, kMaxAiServerCatUserAgentBytes));
+    }
     const bool success = response.completed && response.terminal_error == common::IoErr::None &&
                          response.status_code >= 200 && response.status_code < 400;
     (void) root_->complete(success ? cat::status::Success : cat::status::Fail);
@@ -165,6 +175,11 @@ void AiServerCatRequest::inject_response_header(http::HttpHeaders &headers) cons
     if (!trace_id.empty()) {
         (void) headers.set_view(kTraceIdHeader, trace_id, kTraceIdLowcaseHeader.data(), kTraceIdHeaderHash);
     }
+}
+
+cat::RecordError AiServerCatRequest::add_root_data(std::string_view key, std::string_view value) noexcept {
+    cat::Transaction *root = root_transaction();
+    return root ? root->add_data(key, value) : cat::RecordError::Completed;
 }
 
 cat::RecordError AiServerCatRequest::set_root_model_name(std::string_view model) noexcept {

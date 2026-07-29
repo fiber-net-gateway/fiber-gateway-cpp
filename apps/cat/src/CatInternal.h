@@ -59,6 +59,7 @@ struct MessageData {
     DataChunk *data_tail = nullptr;
     std::chrono::steady_clock::time_point time{};
     std::size_t data_size = 0;
+    char data_separator = '&';
     bool has_data = false;
     bool completed = false;
 };
@@ -196,6 +197,7 @@ create_heartbeat(TransactionData &parent, std::string_view type, std::string_vie
 
 RecordError add_data(MessageData *message, std::string_view data) noexcept;
 RecordError add_data(MessageData *message, std::string_view key, std::string_view value) noexcept;
+RecordError set_data_separator(MessageData *message, char separator) noexcept;
 RecordError set_type(MessageData *message, std::string_view value) noexcept;
 RecordError set_name(MessageData *message, std::string_view value) noexcept;
 RecordError set_status(MessageData *message, std::string_view value) noexcept;

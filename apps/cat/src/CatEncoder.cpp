@@ -195,7 +195,8 @@ bool write_data_contents(Writer &writer, const MessageData &message, const Messa
         return false;
     }
     return !append_marker ||
-           ((!message.has_data || writer.write_byte('&')) && writer.write_bytes(marker.data(), marker.size()));
+           ((!message.has_data || writer.write_byte(static_cast<std::uint8_t>(message.data_separator))) &&
+            writer.write_bytes(marker.data(), marker.size()));
 }
 
 template<typename Writer>

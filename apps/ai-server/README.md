@@ -106,7 +106,9 @@ CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配�
 和 Anthropic Messages 请求在逻辑 model 鉴权成功后，将根 Transaction name 从原始 path
 改为 `<path>:<model>`，例如 `/v1/chat/completions:gpt-5.5`；早期认证、请求格式和
 model 鉴权失败仍保留原始 path。请求体解析成功后，根 Transaction data 还会记录协议
-实际采用的 `stream=true|false`。入站
+实际采用的 `stream=true|false`。根 data 使用空格分隔 `key=value` 字段，不改变 CAT
+客户端其他消息默认使用的 `&` 分隔规则。存在入站 `User-Agent` 时，最后追加
+`user_agent`；最多保留 1024 字节，超出时先记录 `user_agent_truncated=true`。入站
 `HI-TRACE-ID`、`HI-SPAN-ID-PARENT`、`HI-SPAN-ID` 分别恢复 CAT 的 root、parent
 和当前 message ID；缺少当前 span 时会生成新 ID。所有 HTTP 最终响应都会在
 `HI-TRACE-ID` 中返回本次请求的 root/request ID。Provider 调用和远程限流调用会为
@@ -114,22 +116,25 @@ model 鉴权失败仍保留原始 path。请求体解析成功后，根 Transact
 `tracestate` 会原样透传。CAT 上下文或记录失败只会关闭本次观测，不改变业务请求结果。
 
 每个 `LLM.Provider` child Transaction 的原生 duration 仍表示整个 Provider attempt；
-其 data 另外按微秒记录 `time_to_response_header_us`、`time_to_first_token_us` 和
-`body_transfer_us`。计时从取得连接并开始发送 HTTP header 前开始，response header
-只认最终非 1xx header。first token 只在流式响应中记录，表示 SSE 解析出首个非空模型
-输出增量的时间；OpenAI 的文本、拒绝和 tool-call 增量以及 Anthropic 的文本和 tool-use
-增量都计入，role、心跳、usage、空字符串和 `[DONE]` 不计入。SSE delta 可能合并多个
-token，因此该字段表示网关可观测 TTFT，而不是 Provider 内部 tokenizer 的精确边界。
-body transfer 从首个非空 HTTP body chunk 持续到完整 body 结束。未到达的里程碑不输出
-对应字段，非流式响应不输出 first token；SSE body 读取与下游写入交替进行，因此 body
-transfer 会反映下游背压。
+其 data 保留 token 名、上游 model/path、实际 HTTP status、fallback 标记，并按微秒记录
+`time_to_response_header_us`、`time_to_first_token_us` 和 `body_transfer_us`。没有收到
+HTTP response header 时不输出 `status`。计时从取得连接并开始发送 HTTP header 前开始，
+response header 只认最终非 1xx header。first token 只在流式响应中记录，表示 SSE
+解析出首个非空模型输出增量的时间；OpenAI 的文本、拒绝和 tool-call 增量以及 Anthropic
+的文本和 tool-use 增量都计入，role、心跳、usage、空字符串和 `[DONE]` 不计入。SSE
+delta 可能合并多个 token，因此该字段表示网关可观测 TTFT，而不是 Provider 内部
+tokenizer 的精确边界。body transfer 从首个非空 HTTP body chunk 持续到完整 body 结束。
+未到达的里程碑不输出对应字段，非流式响应不输出 first token；SSE body 读取与下游写入
+交替进行，因此 body transfer 会反映下游背压。
 
 Provider 的 `RemoteCall` 和失败分类都挂在对应 `LLM.Provider` Transaction 下。
 失败 attempt 的 Transaction 状态仍为失败，以保留 CAT Transaction 报表的失败率；
 同时生成 `LLM.UpstreamError` Event。存在传输 `failure_code` 时，Event name 使用其
 小写 snake_case 名称，例如 `dns`、`connect` 或 `read_header`；非 2xx 响应没有传输
-错误码，name 使用 `upstream_error`。Event data 保留具体 `failure_phase`、
-`io_error`、上游状态和重试目标，成功 attempt 不生成该 Event。
+错误码，name 使用 `upstream_error`。Provider data 不重复失败分类；Event data 按实际
+存在的值记录 `io_error`、`failure_source`、上游状态、重试目标、是否执行重试、被跳过的
+attempt 数和响应是否已经开始，默认的 `none`、`false`、`0` 不输出。成功 attempt 不生成
+该 Event。
 
 配置限流规则后，本地 check/settle 记录 `RateLimit.Check/Settle` Event，远程 owner
 调用记录同类型 Transaction；allow、deny 和 stale 属于正常业务结果，网络、成员环
