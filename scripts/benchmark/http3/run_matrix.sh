@@ -144,7 +144,7 @@ start_sut() {
         lite-steal-on-gso)
             command=("$lite_on" --config "$script_dir/configs/lite_nginx_steal_on.conf")
             ;;
-        nginx)
+        nginx|openresty)
             command=("$nginx" -p "$project_root/" -c scripts/benchmark/http3/configs/nginx_gso_off.conf -g 'daemon off;')
             ;;
         nginx-multi-accept)
@@ -221,10 +221,14 @@ case_settings() {
             target_url=https://127.0.0.1:18443/bench/64k
             expected_bytes=65536
             ;;
-        H3-POST-64K)
+        H3-GET-1M)
+            target_url=https://127.0.0.1:18443/bench/1m
+            expected_bytes=1048576
+            ;;
+        H3-POST-1M)
             target_url=https://127.0.0.1:18443/bench/echo
-            expected_bytes=65536
-            data_options=(-d "$runtime_dir/request_64k.bin")
+            expected_bytes=1048576
+            data_options=(-d "$runtime_dir/request_1m.bin")
             ;;
         *)
             echo "unknown case: $1" >&2
@@ -384,7 +388,7 @@ cp "$lite_on_build_dir/CMakeCache.txt" "$result_dir/CMakeCache-lite-on.txt"
 start_backend || { echo "backend failed to start" >&2; exit 1; }
 snapshot_unit "$backend_unit" "$result_dir/backend-start.unit"
 
-cases=(H3-GET-1K H3-GET-64K H3-POST-64K)
+cases=(H3-GET-1K H3-GET-64K H3-GET-1M H3-POST-1M)
 sequence=0
 for case_name in "${cases[@]}"; do
     [[ -z "$case_filter" || "$case_name" == *"$case_filter"* ]] || continue

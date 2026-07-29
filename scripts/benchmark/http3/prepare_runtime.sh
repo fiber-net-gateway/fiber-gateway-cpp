@@ -8,6 +8,7 @@ runtime_dir="$project_root/temp/http3-benchmark-runtime"
 
 mkdir -p "$runtime_dir/client-body" "$runtime_dir/proxy" "$runtime_dir/qlog"
 truncate -s 65536 "$runtime_dir/request_64k.bin"
+truncate -s 1048576 "$runtime_dir/request_1m.bin"
 
 test -s "$project_root/build/http3-demo/cert.pem"
 test -s "$project_root/build/http3-demo/key.pem"

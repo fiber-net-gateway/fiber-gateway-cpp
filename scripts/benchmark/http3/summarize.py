@@ -320,6 +320,7 @@ def main():
         comparisons = [
             ("lite-steal-on", "lite-steal-off"),
             ("lite-steal-off", "nginx"),
+            ("lite-steal-off", "openresty"),
             ("lite-steal-on-gso", "lite-steal-on"),
             ("lite-steal-off-gso", "lite-steal-off"),
             ("nginx-gso", "nginx"),
@@ -328,6 +329,7 @@ def main():
             ("direct-timerfd", "direct"),
             ("direct-w2", "direct-w1"),
             ("lite", "nginx"),
+            ("lite", "openresty"),
         ]
         for left_name, right_name in comparisons:
             if left_name not in implementations or right_name not in implementations:
