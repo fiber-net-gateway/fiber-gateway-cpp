@@ -70,8 +70,9 @@ public:
     // Read/write callbacks receive None on readiness and Canceled when the fd is
     // closed. The terminal callback is one-shot and independent from both
     // directions; it observes ERR/HUP or an explicit terminal syscall error, but
-    // not RDHUP/EOF. Callers must keep this RWFd alive until dispatch returns.
-    // Clear operations only remove the matching callback and ctx.
+    // not RDHUP/EOF. After removing its callback slot, a callback may
+    // synchronously destroy this RWFd; event dispatch stops immediately in that
+    // case. Clear operations only remove the matching callback and ctx.
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
@@ -92,6 +93,23 @@ private:
     template<fiber::event::IoEvent Event>
     friend class WaitAwaiter;
 
+    class DispatchGuard {
+    public:
+        explicit DispatchGuard(RWFd &owner) noexcept;
+        ~DispatchGuard() noexcept;
+
+        DispatchGuard(const DispatchGuard &) = delete;
+        DispatchGuard &operator=(const DispatchGuard &) = delete;
+        DispatchGuard(DispatchGuard &&) = delete;
+        DispatchGuard &operator=(DispatchGuard &&) = delete;
+
+        [[nodiscard]] bool owner_destroyed() const noexcept { return owner_destroyed_; }
+
+    private:
+        RWFd *owner_ = nullptr;
+        bool owner_destroyed_ = false;
+    };
+
     fiber::common::IoErr begin_wait(RWFdWaiterBase *waiter) noexcept;
     fiber::common::IoErr cancel_wait(RWFdWaiterBase *waiter) noexcept;
     bool remove_callback(fiber::event::IoEvent event, ReadyCallback callback, void *ctx) noexcept;
@@ -111,6 +129,7 @@ private:
     void *terminal_callback_ctx_ = nullptr;
     fiber::common::IoErr terminal_error_ = fiber::common::IoErr::None;
     bool terminal_ = false;
+    bool *dispatch_destroyed_observer_ = nullptr;
 };
 
 struct RWFdCrossThreadWaiter : RWFdWaiterBase {

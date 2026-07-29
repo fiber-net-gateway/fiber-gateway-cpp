@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <future>
 #include <netinet/in.h>
+#include <new>
 #include <utility>
 
 #include <sys/socket.h>
@@ -24,6 +26,29 @@ using fiber::async::DetachedTask;
 using namespace std::chrono_literals;
 
 void noop_ready_callback(void *, fiber::common::IoErr) noexcept {}
+
+struct ReplaceDuringDispatchCtx {
+    fiber::event::EventLoop *loop = nullptr;
+    fiber::net::detail::RWFd *current = nullptr;
+    void *storage = nullptr;
+    int replacement_fd = -1;
+    fiber::net::detail::RWFd *replacement = nullptr;
+    bool called = false;
+    fiber::common::IoErr clear_err = fiber::common::IoErr::Invalid;
+};
+
+void replace_rwfd_on_read(void *raw_ctx, fiber::common::IoErr) noexcept {
+    auto *ctx = static_cast<ReplaceDuringDispatchCtx *>(raw_ctx);
+    ctx->called = true;
+    ctx->clear_err = ctx->current->clear_read_callback(&replace_rwfd_on_read, ctx);
+    ctx->current->~RWFd();
+    const int replacement_fd = std::exchange(ctx->replacement_fd, -1);
+    ctx->replacement = new (ctx->storage) fiber::net::detail::RWFd(*ctx->loop, replacement_fd);
+    // Keep the replacement unwatched. If the old dispatch touches the same
+    // address after this callback, it will incorrectly re-arm this callback.
+    ctx->replacement->read_callback_ = &noop_ready_callback;
+    ctx->replacement->read_callback_ctx_ = nullptr;
+}
 
 struct CallbackResult {
     int calls = 0;
@@ -149,10 +174,12 @@ TEST(RWFdTest, IgnoresLateEventWithoutWaiter) {
 
     fiber::event::EventLoop loop;
     std::atomic<bool> completed = false;
+    bool observer_cleared = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         fiber::net::detail::RWFd rwfd(loop, fds[0]);
         rwfd.handle_events(fiber::event::IoEvent::Read | fiber::event::IoEvent::Write);
+        observer_cleared = rwfd.dispatch_destroyed_observer_ == nullptr;
         rwfd.close();
         ::close(fds[1]);
         completed.store(true, std::memory_order_release);
@@ -162,6 +189,82 @@ TEST(RWFdTest, IgnoresLateEventWithoutWaiter) {
 
     loop.run();
     EXPECT_TRUE(completed.load(std::memory_order_acquire));
+    EXPECT_TRUE(observer_cleared);
+}
+
+TEST(RWFdTest, StopsDispatchAfterCallbackDestroysAndReplacesOwner) {
+    int original_fds[2] = {-1, -1};
+    int replacement_fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, original_fds), 0);
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, replacement_fds), 0);
+
+    fiber::event::EventLoop loop;
+    alignas(fiber::net::detail::RWFd) std::byte storage[sizeof(fiber::net::detail::RWFd)];
+    fiber::common::IoErr set_err = fiber::common::IoErr::Invalid;
+    fiber::common::IoErr clear_err = fiber::common::IoErr::Invalid;
+    fiber::event::IoEvent replacement_watching = fiber::event::IoEvent::Terminal;
+    bool callback_called = false;
+    bool replacement_constructed = false;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        auto *rwfd =
+                new (static_cast<void *>(storage)) fiber::net::detail::RWFd(loop, std::exchange(original_fds[0], -1));
+        ReplaceDuringDispatchCtx ctx{
+                &loop,
+                rwfd,
+                storage,
+                std::exchange(replacement_fds[0], -1),
+                nullptr,
+                false,
+                fiber::common::IoErr::Invalid,
+        };
+
+        set_err = rwfd->set_read_callback(&replace_rwfd_on_read, &ctx);
+        if (set_err == fiber::common::IoErr::None) {
+            rwfd->handle_events(fiber::event::IoEvent::Read);
+            callback_called = ctx.called;
+            clear_err = ctx.clear_err;
+            replacement_constructed = ctx.replacement != nullptr;
+            if (ctx.replacement) {
+                replacement_watching = ctx.replacement->efd_.watching();
+                ctx.replacement->read_callback_ = nullptr;
+                ctx.replacement->read_callback_ctx_ = nullptr;
+                ctx.replacement->close();
+                ctx.replacement->~RWFd();
+            }
+        } else {
+            rwfd->~RWFd();
+            if (ctx.replacement_fd >= 0) {
+                (void) ::close(ctx.replacement_fd);
+                ctx.replacement_fd = -1;
+            }
+        }
+
+        (void) ::close(original_fds[1]);
+        original_fds[1] = -1;
+        (void) ::close(replacement_fds[1]);
+        replacement_fds[1] = -1;
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    for (int fd: original_fds) {
+        if (fd >= 0) {
+            (void) ::close(fd);
+        }
+    }
+    for (int fd: replacement_fds) {
+        if (fd >= 0) {
+            (void) ::close(fd);
+        }
+    }
+
+    EXPECT_EQ(set_err, fiber::common::IoErr::None);
+    EXPECT_TRUE(callback_called);
+    EXPECT_TRUE(replacement_constructed);
+    EXPECT_EQ(clear_err, fiber::common::IoErr::None);
+    EXPECT_EQ(replacement_watching, fiber::event::IoEvent::None);
 }
 
 TEST(RWFdTest, RearmsPersistentReadCallbackAfterOneShotEvent) {
