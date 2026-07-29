@@ -13,7 +13,6 @@
 
 #include <openssl/rand.h>
 
-#include "../async/Spawn.h"
 #include "../async/Timeout.h"
 #include "../common/Assert.h"
 #include "../net/TcpStream.h"
@@ -78,6 +77,21 @@ void cancel_tcp_stream(void *context) noexcept {
 
 DnsClient::DnsClient() noexcept = default;
 
+DnsClient::UdpReadDispatchGuard::UdpReadDispatchGuard(DnsClient &owner) noexcept : owner_(&owner) {
+    FIBER_ASSERT_MSG(owner.udp_read_dispatch_invalidated_observer_ == nullptr,
+                     "DnsClient UDP read dispatch cannot re-enter");
+    owner.udp_read_dispatch_invalidated_observer_ = &invalidated_;
+}
+
+DnsClient::UdpReadDispatchGuard::~UdpReadDispatchGuard() noexcept {
+    if (invalidated_) {
+        return;
+    }
+    FIBER_ASSERT(owner_ != nullptr);
+    FIBER_ASSERT(owner_->udp_read_dispatch_invalidated_observer_ == &invalidated_);
+    owner_->udp_read_dispatch_invalidated_observer_ = nullptr;
+}
+
 DnsClient::ResponseAwaiter::ResponseAwaiter(DnsClient &client, std::uint16_t slot_index) noexcept :
     client_(&client), slot_index_(slot_index) {}
 
@@ -106,6 +120,7 @@ common::IoResult<std::size_t> DnsClient::ResponseAwaiter::await_resume() noexcep
 }
 
 DnsClient::~DnsClient() {
+    invalidate_udp_read_dispatch();
     if (socket_ && socket_->valid()) {
         FIBER_ASSERT(loop_ != nullptr);
         FIBER_ASSERT(loop_->in_loop());
@@ -153,11 +168,11 @@ bool DnsClient::init(event::EventLoop &loop, Options options) noexcept {
         return false;
     }
 
-    async::spawn(loop, [this]() -> async::DetachedTask { co_await recv_loop(); });
     return true;
 }
 
 void DnsClient::close() noexcept {
+    invalidate_udp_read_dispatch();
     if (!loop_) {
         return;
     }
@@ -166,6 +181,7 @@ void DnsClient::close() noexcept {
         return;
     }
     closing_ = true;
+    udp_read_callback_registered_ = false;
     udp_send_queue_.close();
     if (socket_ && socket_->valid()) {
         socket_->close();
@@ -174,6 +190,7 @@ void DnsClient::close() noexcept {
 }
 
 void DnsClient::release() noexcept {
+    invalidate_udp_read_dispatch();
     if (socket_ && socket_->valid()) {
         FIBER_ASSERT(loop_ != nullptr);
         FIBER_ASSERT(loop_->in_loop());
@@ -206,6 +223,10 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSp
     }
     if ((dst == nullptr && cap != 0) || cap < kDnsHeaderSize) {
         co_return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr read_callback_err = ensure_udp_read_callback();
+    if (read_callback_err != common::IoErr::None) {
+        co_return std::unexpected(read_callback_err);
     }
 
     const std::uint16_t slot_index = allocate_slot();
@@ -299,18 +320,54 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSp
     co_return std::unexpected(final_err);
 }
 
-async::Task<void> DnsClient::recv_loop() noexcept {
-    while (socket_ && socket_->valid()) {
-        auto recv_result = co_await socket_->recv_from(recv_buffer_.get(), options_.max_udp_packet_size);
+common::IoErr DnsClient::ensure_udp_read_callback() noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(socket_ && socket_->valid());
+    if (udp_read_callback_registered_) {
+        return common::IoErr::None;
+    }
+
+    const common::IoErr err = socket_->set_read_callback(&DnsClient::on_udp_readable, this);
+    if (err == common::IoErr::None) {
+        udp_read_callback_registered_ = true;
+    }
+    return err;
+}
+
+void DnsClient::drain_udp_reads() noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(socket_ && socket_->valid());
+    UdpReadDispatchGuard dispatch(*this);
+
+    for (;;) {
+        auto recv_result = socket_->try_recv_from(recv_buffer_.get(), options_.max_udp_packet_size);
         if (!recv_result) {
-            if (recv_result.error() == common::IoErr::Canceled || recv_result.error() == common::IoErr::BadFd) {
-                break;
-            }
-            continue;
+            return;
         }
         handle_udp_packet(recv_buffer_.get(), recv_result->size, recv_result->peer);
+        if (dispatch.invalidated()) {
+            return;
+        }
     }
-    co_return;
+}
+
+void DnsClient::invalidate_udp_read_dispatch() noexcept {
+    if (!udp_read_dispatch_invalidated_observer_) {
+        return;
+    }
+    *udp_read_dispatch_invalidated_observer_ = true;
+    udp_read_dispatch_invalidated_observer_ = nullptr;
+}
+
+void DnsClient::on_udp_readable(void *ctx, common::IoErr err) noexcept {
+    if (err != common::IoErr::None) {
+        return;
+    }
+    auto *client = static_cast<DnsClient *>(ctx);
+    FIBER_ASSERT(client != nullptr);
+    client->drain_udp_reads();
 }
 
 async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t slot_index) noexcept {
@@ -469,10 +526,12 @@ common::IoResult<std::size_t> DnsClient::prepare_request(InflightSlot &slot, con
 }
 
 void DnsClient::reset_state() noexcept {
+    FIBER_ASSERT(udp_read_dispatch_invalidated_observer_ == nullptr);
     loop_ = nullptr;
     options_ = {};
     free_head_ = kInvalidSlot;
     closing_ = false;
+    udp_read_callback_registered_ = false;
 }
 
 void DnsClient::cancel_all_inflight(common::IoErr err) noexcept {

@@ -82,7 +82,8 @@ TEST(PollerTest, EventReadinessPreemptsInfiniteDeadline) {
     const int count = wait_no_intr(poller, events, 2, std::chrono::steady_clock::time_point::max());
 
     ASSERT_EQ(count, 1);
-    EXPECT_EQ(events[0].data.ptr, &event_fd.item);
+    void *event_owner = events[0].data.ptr;
+    EXPECT_EQ(event_owner, &event_fd.item);
     EXPECT_TRUE(event_fd.drain());
 }
 
@@ -162,7 +163,8 @@ TEST(PollerTest, InfiniteDeadlineDisarmsPreviousTimer) {
 
     ASSERT_TRUE(signal_ok.load(std::memory_order_acquire));
     ASSERT_EQ(count, 1);
-    EXPECT_EQ(events[0].data.ptr, &event_fd.item);
+    void *event_owner = events[0].data.ptr;
+    EXPECT_EQ(event_owner, &event_fd.item);
     EXPECT_TRUE(event_fd.drain());
     EXPECT_GE(elapsed, 15ms);
     EXPECT_LT(elapsed, 1s);
