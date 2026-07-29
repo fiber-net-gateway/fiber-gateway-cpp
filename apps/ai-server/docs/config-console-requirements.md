@@ -712,6 +712,10 @@ token 生命周期已经结束。
 实例注册的 Nacos cluster 固定由 `AI_SERVER_ZONE` 和 `AI_SERVER_CLUSTER` 组合，不单独
 提供完整 cluster 名配置项；默认注册为 `daily1-dev`。
 
+注册地址优先级为显式 `AI_SERVER_ADVERTISE_ADDRESS`、具体的 IPv4 listen address、
+自动网卡选择。自动选择只接受 UP、非 loopback、非 link-local 的单播 IPv4，并按
+interface index、地址字节确定性排序；找不到可用地址时启动失败，不回退到 loopback。
+
 ### 13.3 独立日志配置
 
 dotenv 中只保留一个必填日志参数：
@@ -777,11 +781,12 @@ CAT 默认关闭。启用后：
 | --- | --- | --- |
 | `CAT_APP_KEY` | 是 | 非空 |
 | `CAT_HOSTNAME` | 是 | 非空 |
-| `CAT_IP` | 是 | 指定的单播 IPv4/IPv6 |
+| `CAT_IP` | 否 | 可选覆盖；缺省使用解析出的 Nacos 注册 IPv4；显式值必须是单播 IPv4/IPv6 |
 | `CAT_ROUTER_ADDRESSES` | 条件必填 | `IPv4:port` 或 `[IPv6]:port` |
 | `CAT_COLLECTOR_ADDRESSES` | 条件必填 | 同上 |
 
 Router 和 Collector 至少一类非空；端口为 1..65535；不解析域名。
+CAT 身份地址在进程启动时确定，并在整个进程生命周期内保持不变。
 
 ### 13.6 dotenv 导出
 

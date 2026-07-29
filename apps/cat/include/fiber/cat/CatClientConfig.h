@@ -42,6 +42,7 @@ enum class CatConfigError : std::uint8_t {
     EmptyServerList,
     InvalidRouter,
     InvalidCollector,
+    InvalidIp,
 };
 
 class CatClientConfig {

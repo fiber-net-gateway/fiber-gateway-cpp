@@ -23,21 +23,18 @@
 //     -h, --help             show this help
 
 #include <algorithm>
-#include <arpa/inet.h>
 #include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
-#include <ifaddrs.h>
 #include <iostream>
 #include <iterator>
-#include <netdb.h>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -47,6 +44,7 @@
 #include <event/EventLoop.h>
 #include <fiber/cat/Cat.h>
 #include <net/IpAddress.h>
+#include <net/LocalAddress.h>
 #include <net/SocketAddress.h>
 
 namespace {
@@ -159,32 +157,6 @@ std::string get_hostname() {
         return std::string(buf.data());
     }
     return "localhost";
-}
-
-std::string get_local_ip() {
-    struct ifaddrs *head = nullptr;
-    if (::getifaddrs(&head) != 0) {
-        return "127.0.0.1";
-    }
-    std::string best = "127.0.0.1";
-    for (struct ifaddrs *p = head; p; p = p->ifa_next) {
-        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) {
-            continue;
-        }
-        const auto *sin = reinterpret_cast<const struct sockaddr_in *>(p->ifa_addr);
-        char buf[INET_ADDRSTRLEN] = {};
-        if (::inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf)) == nullptr) {
-            continue;
-        }
-        std::string_view ip{buf};
-        if (ip.starts_with("127.") || ip.starts_with("169.254.")) {
-            continue; // loopback / link-local
-        }
-        best = std::string{ip};
-        break;
-    }
-    ::freeifaddrs(head);
-    return best;
 }
 
 std::optional<std::pair<std::string, std::uint16_t>> split_host_port(std::string_view text) {
@@ -340,7 +312,17 @@ std::optional<DemoConfig> parse_args(int argc, char **argv) {
         cfg.hostname = get_hostname();
     }
     if (cfg.ip.empty()) {
-        cfg.ip = get_local_ip();
+        auto detected = fiber::net::detect_local_ipv4();
+        if (!detected) {
+            std::cerr << "error: no usable local IPv4 address; pass --ip explicitly";
+            if (detected.error().code == fiber::net::LocalIpv4ErrorCode::QueryFailed &&
+                detected.error().system_error != 0) {
+                std::cerr << ": " << std::strerror(detected.error().system_error);
+            }
+            std::cerr << '\n';
+            return std::nullopt;
+        }
+        cfg.ip = detected->address.to_string();
     }
     cfg.app_key = cfg.settings.app_key;
     cfg.encoder = (cfg.settings.encoder == "pt1") ? fiber::cat::CatEncoderType::Pt1 : fiber::cat::CatEncoderType::Nt1;

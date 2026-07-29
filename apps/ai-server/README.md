@@ -70,8 +70,9 @@ HTTP 和集群成员：
 
 - `AI_SERVER_LISTEN_ADDRESS`：默认 `0.0.0.0`；
 - `AI_SERVER_LISTEN_PORT`：默认 `8080`，`0` 可用于本地测试；
-- `AI_SERVER_ADVERTISE_ADDRESS`：可选的 Nacos 注册 IPv4；未配置时选择第一个
-  非 loopback IPv4，找不到时使用 `127.0.0.1`；
+- `AI_SERVER_ADVERTISE_ADDRESS`：可选的 Nacos 注册 IPv4；未配置时优先使用具体的
+  `AI_SERVER_LISTEN_ADDRESS` IPv4，否则从 UP 网卡中确定性选择 index 最小的非
+  loopback、非 link-local IPv4；找不到可用地址时启动失败；
 - `AI_SERVER_SERVICE_NAME`：默认 `fiber-ai-server`；
 - `AI_SERVER_SERVICE_GROUP`：默认 `DEFAULT_GROUP`；
 - `AI_SERVER_ZONE`：默认 `daily1`，与 Java `dev` 环境默认值一致；
@@ -98,8 +99,11 @@ Nacos：
 
 CAT 默认关闭。只要任意 CAT 值非空，就必须同时提供：
 
-- `CAT_APP_KEY`、`CAT_HOSTNAME`、`CAT_IP`；
+- `CAT_APP_KEY`、`CAT_HOSTNAME`；
 - `CAT_ROUTER_ADDRESSES` 或 `CAT_COLLECTOR_ADDRESSES` 至少一个。
+
+`CAT_IP` 是可选覆盖；未配置时使用上面解析出的 Nacos 注册 IPv4。CAT 身份在进程
+生命周期内保持不变。
 
 CAT endpoint 是逗号分隔的 `IPv4:port` 或 `[IPv6]:port`，不在启动配置中解析域名。
 启用 CAT 后，每个 HTTP 请求都会创建一个 `URL` 根 Transaction。OpenAI Chat Completions
