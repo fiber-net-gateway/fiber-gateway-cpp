@@ -320,6 +320,12 @@ Authorization、Provider token 值、BT1 token 和配置 secret 不作为独立�
 
 Prometheus 的常规运行指标继续使用固定低基数 label，包含请求数/延迟/在途、
 Provider 尝试与失败、重试、熔断、限流准入/拒绝/settle、配置代际和 SSE 中途失败。
+进程 CPU、RSS/virtual memory、启动时间和 FD 数使用标准 `process_*` 名称，在
+`/metrics` scrape 慢路径按需读取 Linux `/proc`、进程 CPU clock 和 rlimit；它们不
+进入 worker shard，也不创建后台采集任务。单项读取失败时省略对应 family，不影响
+业务指标输出。整机 CPU、内存和 load 仍由 node_exporter 拥有，Grafana dashboard
+通过独立的 `node_job`、`node_instance` 变量查询，避免把 ai-server target 与
+node_exporter 不同端口的 `instance` label 错误关联。
 Provider 传输失败阶段、计划剪枝和 DNS timeout backoff 分别使用
 `ai_server_provider_transport_failures_total{protocol,phase}`、
 `ai_server_provider_attempts_skipped_total{protocol}` 和

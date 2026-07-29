@@ -1,4 +1,5 @@
 #include "AiServerMetrics.h"
+#include "ProcessMetrics.h"
 
 #include <algorithm>
 #include <array>
@@ -7,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -28,6 +30,7 @@ constexpr std::array<std::string_view, static_cast<std::size_t>(ProviderHttpErro
 constexpr std::string_view kUserTokenUsageMetric = "ai_server_user_token_usage_total";
 constexpr std::string_view kProviderTokenUsageMetric = "ai_server_provider_token_usage_total";
 constexpr std::size_t kMetricsChunkBytes = 4 * 1024;
+constexpr std::uint64_t kNanosecondsPerSecond = 1'000'000'000;
 
 constexpr std::size_t protocol_index(LlmWireProtocol protocol) noexcept {
     return protocol == LlmWireProtocol::OpenAiChatCompletions ? 0 : 1;
@@ -89,6 +92,28 @@ public:
         return append(std::string_view(buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())));
     }
 
+    [[nodiscard]] bool append_seconds(std::uint64_t nanoseconds) noexcept {
+        if (!append_uint(nanoseconds / kNanosecondsPerSecond)) {
+            return false;
+        }
+        const std::uint64_t remainder = nanoseconds % kNanosecondsPerSecond;
+        if (remainder == 0) {
+            return true;
+        }
+
+        std::array<char, 9> fraction{};
+        std::uint64_t value = remainder;
+        for (std::size_t index = fraction.size(); index > 0; --index) {
+            fraction[index - 1] = static_cast<char>('0' + value % 10);
+            value /= 10;
+        }
+        std::size_t length = fraction.size();
+        while (length > 0 && fraction[length - 1] == '0') {
+            --length;
+        }
+        return append(".") && append(std::string_view(fraction.data(), length));
+    }
+
     [[nodiscard]] bool append_label_value(std::string_view value) noexcept {
         std::size_t start = 0;
         for (std::size_t index = 0; index < value.size(); ++index) {
@@ -127,6 +152,47 @@ private:
     return output.append("# HELP ") && output.append(name) && output.append(" ") && output.append(help) &&
            output.append("\n# TYPE ") && output.append(name) && output.append(" counter\n") && output.append(name) &&
            output.append(" ") && output.append_uint(value) && output.append("\n");
+}
+
+[[nodiscard]] bool append_seconds_metric(BoundedTextBuilder &output, std::string_view name, std::string_view help,
+                                         std::string_view type, std::uint64_t nanoseconds) noexcept {
+    return output.append("# HELP ") && output.append(name) && output.append(" ") && output.append(help) &&
+           output.append("\n# TYPE ") && output.append(name) && output.append(" ") && output.append(type) &&
+           output.append("\n") && output.append(name) && output.append(" ") && output.append_seconds(nanoseconds) &&
+           output.append("\n");
+}
+
+[[nodiscard]] bool append_process_metrics(BoundedTextBuilder &output) noexcept {
+    const ProcessMetricsSnapshot metrics = collect_process_metrics();
+    if (metrics.cpu_time_nanoseconds &&
+        !append_seconds_metric(output, "process_cpu_seconds_total", "Total user and system CPU time spent in seconds.",
+                               "counter", *metrics.cpu_time_nanoseconds)) {
+        return false;
+    }
+    if (metrics.resident_memory_bytes &&
+        !append_gauge(output, "process_resident_memory_bytes", "Resident memory size in bytes.",
+                      *metrics.resident_memory_bytes)) {
+        return false;
+    }
+    if (metrics.virtual_memory_bytes && !append_gauge(output, "process_virtual_memory_bytes",
+                                                      "Virtual memory size in bytes.", *metrics.virtual_memory_bytes)) {
+        return false;
+    }
+    if (metrics.start_time_nanoseconds &&
+        !append_seconds_metric(output, "process_start_time_seconds",
+                               "Start time of the process since unix epoch in seconds.", "gauge",
+                               *metrics.start_time_nanoseconds)) {
+        return false;
+    }
+    if (metrics.open_fds &&
+        !append_gauge(output, "process_open_fds", "Number of open file descriptors.", *metrics.open_fds)) {
+        return false;
+    }
+    if (metrics.max_fds &&
+        !append_gauge(output, "process_max_fds", "Maximum number of open file descriptors.", *metrics.max_fds)) {
+        return false;
+    }
+    return true;
 }
 
 struct TokenUsageCounters {
@@ -660,7 +726,7 @@ AiServerMetrics::collect(mem::IoBufNodePool &node_pool, TokenRateLimiterStats li
                       limiter_stats.in_flight_count) ||
         !append_gauge(output, "ai_server_rate_limit_cluster_nodes", "Token rate limit shard ring nodes.",
                       cluster_nodes) ||
-        !token_usage_store_->append_text(output)) {
+        !append_process_metrics(output) || !token_usage_store_->append_text(output)) {
         co_return std::unexpected(output.error());
     }
     if (audit_stats && (!append_counter(output, "ai_server_audit_written_records_total", "LLM audit records written.",
