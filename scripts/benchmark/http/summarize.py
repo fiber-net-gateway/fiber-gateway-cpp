@@ -297,21 +297,33 @@ def main():
         paired[(row["case"], row["repetition"])][row["implementation"]] = row
     paired_rows = []
     for (case_name, repetition), implementations in sorted(paired.items()):
-        if "lite" not in implementations or "nginx" not in implementations:
+        reference_name = (
+            "openresty" if "openresty" in implementations else "nginx"
+        )
+        if "lite" not in implementations or reference_name not in implementations:
             continue
         lite = implementations["lite"]
-        nginx = implementations["nginx"]
+        reference = implementations[reference_name]
         paired_rows.append(
             {
                 "case": case_name,
                 "repetition": repetition,
+                "reference": reference_name,
                 "rps_lite_over_nginx": (
-                    lite["requests_per_second"] / nginx["requests_per_second"]
+                    lite["requests_per_second"] / reference["requests_per_second"]
+                    if reference["requests_per_second"] > 0
+                    else math.nan
                 ),
-                "p99_lite_over_nginx": lite["p99_us"] / nginx["p99_us"],
+                "p99_lite_over_nginx": (
+                    lite["p99_us"] / reference["p99_us"]
+                    if reference["p99_us"] > 0
+                    else math.nan
+                ),
                 "cpu_efficiency_lite_over_nginx": (
                     lite["requests_per_sut_cpu_second"]
-                    / nginx["requests_per_sut_cpu_second"]
+                    / reference["requests_per_sut_cpu_second"]
+                    if reference["requests_per_sut_cpu_second"] > 0
+                    else math.nan
                 ),
             }
         )

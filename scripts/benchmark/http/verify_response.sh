@@ -13,18 +13,20 @@ project_root="$(cd "$script_dir/../../.." && pwd)"
 runtime_dir="$project_root/temp/http-benchmark-runtime"
 output="$runtime_dir/verify-$mode.bin"
 meta="$runtime_dir/verify-$mode.meta"
+plain_port="${PLAIN_PORT:-18080}"
+tls_port="${TLS_PORT:-18443}"
 
 case "$mode" in
     plain)
-        curl_args=(--http1.1 http://127.0.0.1:18080/bench/1k)
+        curl_args=(--http1.1 "http://127.0.0.1:$plain_port/bench/1k")
         expected_version="1.1"
         ;;
     tls-h1)
-        curl_args=(--insecure --http1.1 https://127.0.0.1:18443/bench/1k)
+        curl_args=(--insecure --http1.1 "https://127.0.0.1:$tls_port/bench/1k")
         expected_version="1.1"
         ;;
     h2)
-        curl_args=(--insecure --http2 https://127.0.0.1:18443/bench/1k)
+        curl_args=(--insecure --http2 "https://127.0.0.1:$tls_port/bench/1k")
         expected_version="2"
         ;;
     *)

@@ -24,6 +24,7 @@ namespace {
 
 constexpr std::size_t kBody1kSize = 1024;
 constexpr std::size_t kBody64kSize = 64 * 1024;
+constexpr std::size_t kBody1mSize = 1024 * 1024;
 
 const std::array<std::uint8_t, kBody1kSize> kBody1k = [] {
     std::array<std::uint8_t, kBody1kSize> body{};
@@ -34,6 +35,12 @@ const std::array<std::uint8_t, kBody1kSize> kBody1k = [] {
 const std::array<std::uint8_t, kBody64kSize> kBody64k = [] {
     std::array<std::uint8_t, kBody64kSize> body{};
     body.fill(static_cast<std::uint8_t>('b'));
+    return body;
+}();
+
+const std::array<std::uint8_t, kBody1mSize> kBody1m = [] {
+    std::array<std::uint8_t, kBody1mSize> body{};
+    body.fill(static_cast<std::uint8_t>('c'));
     return body;
 }();
 
@@ -117,6 +124,10 @@ fiber::async::Task<void> handle_request(fiber::http::HttpExchange &exchange) {
     }
     if (path == "/bench/64k") {
         co_await send_fixed(exchange, kBody64k.data(), kBody64k.size());
+        co_return;
+    }
+    if (path == "/bench/1m") {
+        co_await send_fixed(exchange, kBody1m.data(), kBody1m.size());
         co_return;
     }
     if (path == "/bench/echo") {

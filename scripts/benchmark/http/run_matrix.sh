@@ -6,11 +6,16 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "$script_dir/../../.." && pwd)"
 runtime_dir="$project_root/temp/http-benchmark-runtime"
 tool_root="$project_root/temp/http-bench-tools/root"
-h2load="$tool_root/usr/bin/h2load"
+h2load="${H2LOAD_BIN:-$tool_root/usr/bin/h2load}"
 h2load_library_path="$tool_root/usr/lib/x86_64-linux-gnu"
-lite_nginx="$project_root/build-bench/apps/lite_nginx"
-nginx="$project_root/temp/nginx-install/sbin/nginx"
-backend="$project_root/build-bench/example/http_benchmark_backend"
+lite_nginx="${LITE_NGINX_BIN:-$project_root/build-bench/apps/lite_nginx}"
+nginx="${NGINX_BIN:-$project_root/temp/nginx-install/sbin/nginx}"
+backend="${BACKEND_BIN:-$project_root/build-bench/example/http_benchmark_backend}"
+lite_config="${LITE_CONFIG:-$script_dir/configs/lite_nginx_steal_off.conf}"
+nginx_config="${NGINX_CONFIG:-$script_dir/configs/nginx_sut.conf}"
+plain_port="${PLAIN_PORT:-18080}"
+tls_port="${TLS_PORT:-18443}"
+backend_port="${BACKEND_PORT:-19001}"
 
 repetitions="${REPETITIONS:-7}"
 duration="${DURATION:-60}"
@@ -118,7 +123,7 @@ wait_for_backend() {
     local attempt
     for attempt in $(seq 1 100); do
         if curl --silent --fail --output /dev/null \
-            http://127.0.0.1:19001/bench/1k; then
+            "http://127.0.0.1:$backend_port/bench/1k"; then
             return 0
         fi
         sleep 0.1
@@ -127,7 +132,7 @@ wait_for_backend() {
 }
 
 ports_are_clear() {
-    ! ss -H -ltn | rg -q ':(18080|18443)[[:space:]]'
+    ! ss -H -ltn | rg -q ":($plain_port|$tls_port)[[:space:]]"
 }
 
 wait_for_ports_clear() {
@@ -151,7 +156,7 @@ wait_for_sut() {
         fi
         if [[ "$(unit_property "$unit" ActiveState)" == "active" ]] && \
            curl --silent --fail --output /dev/null \
-            http://127.0.0.1:18080/bench/1k; then
+            "http://127.0.0.1:$plain_port/bench/1k"; then
             return 0
         fi
         sleep 0.1
@@ -160,14 +165,18 @@ wait_for_sut() {
 }
 
 start_backend() {
+    local quota_property=()
+    if [[ "$backend_quota" != none ]]; then
+        quota_property=(--property="CPUQuota=$backend_quota")
+    fi
     log "starting backend unit=$backend_unit cpus=$backend_cpus quota=$backend_quota"
     systemd-run --user --unit="$backend_unit" \
         --property="AllowedCPUs=$backend_cpus" \
-        --property="CPUQuota=$backend_quota" \
+        "${quota_property[@]}" \
         --property=CPUAccounting=yes \
         --property=MemoryAccounting=yes \
         --working-directory="$project_root" \
-        "$backend" >/dev/null
+        "$backend" "$backend_port" >/dev/null
     if ! wait_for_backend; then
         journalctl --user --unit="$backend_unit" --no-pager -n 100 >&2
         exit 1
@@ -178,17 +187,17 @@ start_sut() {
     local implementation="$1"
     local unit="$2"
     local command=()
+    local quota_property=()
 
     case "$implementation" in
         lite)
-            command=("$lite_nginx" --config "$script_dir/configs/lite_nginx_steal_off.conf")
+            command=("$lite_nginx" --config "$lite_config")
             ;;
         lite-auto)
             command=("$lite_nginx" --config "$script_dir/configs/lite_nginx.conf")
             ;;
-        nginx)
-            command=("$nginx" -p "$project_root/" -c \
-                scripts/benchmark/http/configs/nginx_sut.conf -g 'daemon off;')
+        nginx|openresty)
+            command=("$nginx" -p "$project_root/" -c "$nginx_config" -g 'daemon off;')
             ;;
         *)
             echo "unknown implementation: $implementation" >&2
@@ -198,14 +207,17 @@ start_sut() {
 
     if ! wait_for_ports_clear; then
         echo "benchmark ports are still occupied before starting $implementation" >&2
-        ss -ltnp | rg ':(18080|18443)' >&2 || true
+        ss -ltnp | rg ":($plain_port|$tls_port)" >&2 || true
         return 1
     fi
     rm -f "$runtime_dir/nginx-sut.pid"
+    if [[ "$sut_quota" != none ]]; then
+        quota_property=(--property="CPUQuota=$sut_quota")
+    fi
     log "starting implementation=$implementation unit=$unit cpus=$sut_cpus quota=$sut_quota"
     systemd-run --user --unit="$unit" \
         --property="AllowedCPUs=$sut_cpus" \
-        --property="CPUQuota=$sut_quota" \
+        "${quota_property[@]}" \
         --property=CPUAccounting=yes \
         --property=MemoryAccounting=yes \
         --working-directory="$project_root" \
@@ -224,7 +236,7 @@ case_settings() {
     h2_clients=128
     h2_streams=1
     verify_mode=plain
-    target_url=http://127.0.0.1:18080/bench/1k
+    target_url="http://127.0.0.1:$plain_port/bench/1k"
 
     case "$case_name" in
         H1-P-1K)
@@ -232,44 +244,55 @@ case_settings() {
             ;;
         H1-P-64K)
             h2_protocol=(--h1)
-            target_url=http://127.0.0.1:18080/bench/64k
+            target_url="http://127.0.0.1:$plain_port/bench/64k"
             ;;
-        H1-P-POST)
+        H1-P-1M)
             h2_protocol=(--h1)
-            h2_data=(-d "$runtime_dir/request_64k.bin")
-            target_url=http://127.0.0.1:18080/bench/echo
+            target_url="http://127.0.0.1:$plain_port/bench/1m"
+            ;;
+        H1-P-POST-1M)
+            h2_protocol=(--h1)
+            h2_data=(-d "$runtime_dir/request_1m.bin")
+            target_url="http://127.0.0.1:$plain_port/bench/echo"
             ;;
         H1-T-1K)
             h2_protocol=(--h1)
             verify_mode=tls-h1
-            target_url=https://127.0.0.1:18443/bench/1k
+            target_url="https://127.0.0.1:$tls_port/bench/1k"
             ;;
         H1-T-64K)
             h2_protocol=(--h1)
             verify_mode=tls-h1
-            target_url=https://127.0.0.1:18443/bench/64k
+            target_url="https://127.0.0.1:$tls_port/bench/64k"
             ;;
         H2-T-1K)
             h2_protocol=(--alpn-list=h2)
             h2_clients=8
             h2_streams=64
             verify_mode=h2
-            target_url=https://127.0.0.1:18443/bench/1k
+            target_url="https://127.0.0.1:$tls_port/bench/1k"
             ;;
         H2-T-64K)
             h2_protocol=(--alpn-list=h2)
             h2_clients=8
             h2_streams=64
             verify_mode=h2
-            target_url=https://127.0.0.1:18443/bench/64k
+            target_url="https://127.0.0.1:$tls_port/bench/64k"
             ;;
-        H2-T-POST)
+        H2-T-1M)
             h2_protocol=(--alpn-list=h2)
-            h2_data=(-d "$runtime_dir/request_64k.bin")
             h2_clients=8
             h2_streams=64
             verify_mode=h2
-            target_url=https://127.0.0.1:18443/bench/echo
+            target_url="https://127.0.0.1:$tls_port/bench/1m"
+            ;;
+        H2-T-POST-1M)
+            h2_protocol=(--alpn-list=h2)
+            h2_data=(-d "$runtime_dir/request_1m.bin")
+            h2_clients=8
+            h2_streams=64
+            verify_mode=h2
+            target_url="https://127.0.0.1:$tls_port/bench/echo"
             ;;
         *)
             echo "unknown case: $case_name" >&2
@@ -303,7 +326,8 @@ run_case() {
         return
     fi
 
-    "$script_dir/verify_response.sh" "$verify_mode" \
+    PLAIN_PORT="$plain_port" TLS_PORT="$tls_port" \
+        "$script_dir/verify_response.sh" "$verify_mode" \
         >"$output_dir/verify.log" 2>&1
     if [[ $? -ne 0 ]]; then
         log "response verification failed: case=$case_name implementation=$implementation"
@@ -400,6 +424,11 @@ mkdir -p "$result_dir/runs"
     printf 'client_cpus=%s\n' "$client_cpus"
     printf 'backend_quota=%s\n' "$backend_quota"
     printf 'sut_quota=%s\n' "$sut_quota"
+    printf 'plain_port=%s\n' "$plain_port"
+    printf 'tls_port=%s\n' "$tls_port"
+    printf 'backend_port=%s\n' "$backend_port"
+    printf 'lite_config=%s\n' "$lite_config"
+    printf 'nginx_config=%s\n' "$nginx_config"
     printf 'git_commit=%s\n' "$(git -C "$project_root" rev-parse HEAD)"
     printf 'started_at=%s\n' "$(date --iso-8601=seconds)"
 } >"$result_dir/run.env"
@@ -413,7 +442,8 @@ sysctl kernel.hostname kernel.osrelease net.ipv4.ip_local_port_range \
     >"$result_dir/sysctl.txt" 2>&1 || true
 git -C "$project_root" status --short >"$result_dir/git-status.txt"
 sha256sum "$lite_nginx" "$nginx" "$backend" >"$result_dir/binary-sha256.txt"
-cp "$project_root/build-bench/CMakeCache.txt" "$result_dir/CMakeCache.txt"
+lite_build_dir="$(cd "$(dirname "$lite_nginx")/.." && pwd)"
+cp "$lite_build_dir/CMakeCache.txt" "$result_dir/CMakeCache.txt"
 env LD_LIBRARY_PATH="$h2load_library_path" "$h2load" --version \
     >"$result_dir/h2load-version.txt" 2>&1
 "$nginx" -V >"$result_dir/nginx-version.txt" 2>&1
@@ -425,12 +455,12 @@ snapshot_unit "$backend_unit" "$result_dir/backend-start.unit"
 cases=(
     H1-P-1K
     H1-P-64K
-    H1-P-POST
-    H1-T-1K
-    H1-T-64K
+    H1-P-1M
+    H1-P-POST-1M
     H2-T-1K
     H2-T-64K
-    H2-T-POST
+    H2-T-1M
+    H2-T-POST-1M
 )
 sequence=0
 for case_name in "${cases[@]}"; do
