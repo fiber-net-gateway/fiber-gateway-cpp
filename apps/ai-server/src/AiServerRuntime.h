@@ -101,8 +101,8 @@ private:
     AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
                     event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
                     net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
-                    std::optional<net::IpAddress> advertise_address, std::string service_name,
-                    std::string service_group, std::string nacos_cluster, std::unique_ptr<cat::CatClient> cat_client,
+                    net::IpAddress advertise_address, std::string service_name, std::string service_group,
+                    std::string nacos_cluster, std::unique_ptr<cat::CatClient> cat_client,
                     std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id,
                     std::unique_ptr<nacos::NacosClient> nacos_client,
                     std::unique_ptr<nacos::ConfigService> config_service,
@@ -123,7 +123,7 @@ private:
     net::SocketAddress listen_address_;
     net::ListenOptions listen_options_;
     std::chrono::milliseconds initial_config_timeout_{0};
-    std::optional<net::IpAddress> advertise_address_;
+    net::IpAddress advertise_address_;
     std::unique_ptr<cat::CatClient> cat_client_;
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;

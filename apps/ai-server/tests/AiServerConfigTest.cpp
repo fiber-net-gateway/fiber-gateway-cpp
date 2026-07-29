@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <expected>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -15,6 +16,19 @@ namespace {
 
 using fiber::ai_server::AiServerConfig;
 using fiber::ai_server::AiServerConfigErrorCode;
+
+std::expected<fiber::net::LocalIpv4Selection, fiber::net::LocalIpv4Error> detect_test_local_ipv4() noexcept {
+    return fiber::net::LocalIpv4Selection{
+            .address = fiber::net::IpAddress::v4({10, 20, 30, 40}),
+            .interface_index = 7,
+    };
+}
+
+std::expected<fiber::net::LocalIpv4Selection, fiber::net::LocalIpv4Error> fail_test_local_ipv4() noexcept {
+    return std::unexpected(fiber::net::LocalIpv4Error{
+            .code = fiber::net::LocalIpv4ErrorCode::NotFound,
+    });
+}
 
 TEST(AiServerConfigTest, LoadsHttpAndNacosSettings) {
     constexpr std::string_view input = R"(
@@ -36,7 +50,7 @@ NACOS_PASSWORD="pa\"ss"
 NACOS_CLIENT_VERSION=fiber-ai-server/1.0 # inline comment
 CAT_APP_KEY=ploto-ai-server
 CAT_HOSTNAME=ai-host-1
-CAT_IP=127.0.0.2
+CAT_IP=127.0.0.3
 CAT_ROUTER_ADDRESSES=127.0.0.10:8080,[2001:db8::10]:8081
 CAT_COLLECTOR_ADDRESSES=127.0.0.11:2280
 AI_SERVER_LOG_CONFIG_PATH=/tmp/custom-ai-server.logging.json
@@ -47,8 +61,8 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
 
     ASSERT_TRUE(result) << result.error().detail;
     EXPECT_EQ(result->listen_address().to_string(), "127.0.0.1:18080");
-    ASSERT_TRUE(result->advertise_address());
-    EXPECT_EQ(result->advertise_address()->to_string(), "127.0.0.2");
+    EXPECT_EQ(result->advertise_address().to_string(), "127.0.0.2");
+    EXPECT_FALSE(result->detected_local_ipv4());
     EXPECT_EQ(result->service_name(), "custom-ai-server");
     EXPECT_EQ(result->service_group(), "AI_GROUP");
     EXPECT_EQ(result->zone(), "daily1");
@@ -69,7 +83,7 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
     ASSERT_TRUE(result->cat_config());
     EXPECT_EQ(result->cat_config()->app_key(), "ploto-ai-server");
     EXPECT_EQ(result->cat_config()->hostname(), "ai-host-1");
-    EXPECT_EQ(result->cat_config()->ip(), "127.0.0.2");
+    EXPECT_EQ(result->cat_config()->ip(), "127.0.0.3");
     ASSERT_EQ(result->cat_config()->routers().size(), 2u);
     EXPECT_EQ(result->cat_config()->routers()[1].host, "2001:db8::10");
     ASSERT_EQ(result->cat_config()->bootstrap_collectors().size(), 1u);
@@ -79,7 +93,8 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
 
 TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     auto result = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
-                                                   "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n");
+                                                   "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n",
+                                                   detect_test_local_ipv4);
 
     ASSERT_TRUE(result) << result.error().detail;
     EXPECT_EQ(result->listen_address().to_string(), "0.0.0.0:8080");
@@ -90,7 +105,9 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_TRUE(result->nacos_config().username().empty());
     EXPECT_TRUE(result->nacos_config().password().empty());
     EXPECT_EQ(result->initial_config_timeout(), std::chrono::milliseconds(60000));
-    EXPECT_FALSE(result->advertise_address());
+    EXPECT_EQ(result->advertise_address().to_string(), "10.20.30.40");
+    ASSERT_TRUE(result->detected_local_ipv4());
+    EXPECT_EQ(result->detected_local_ipv4()->interface_index, 7u);
     EXPECT_EQ(result->service_name(), "fiber-ai-server");
     EXPECT_EQ(result->service_group(), "DEFAULT_GROUP");
     EXPECT_EQ(result->zone(), "daily1");
@@ -98,6 +115,46 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_EQ(result->nacos_cluster(), "daily1-dev");
     EXPECT_FALSE(result->cat_config());
     EXPECT_EQ(result->logging_config_path(), "ai-server.logging.json");
+}
+
+TEST(AiServerConfigTest, UsesResolvedHostIpv4ForNacosAndCatDefaults) {
+    auto result = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                   "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n"
+                                                   "CAT_APP_KEY=ploto-ai-server\n"
+                                                   "CAT_HOSTNAME=host-a\n"
+                                                   "CAT_ROUTER_ADDRESSES=127.0.0.10:8080\n",
+                                                   detect_test_local_ipv4);
+
+    ASSERT_TRUE(result) << result.error().detail;
+    EXPECT_EQ(result->advertise_address().to_string(), "10.20.30.40");
+    ASSERT_TRUE(result->cat_config());
+    EXPECT_EQ(result->cat_config()->ip(), "10.20.30.40");
+}
+
+TEST(AiServerConfigTest, ConcreteListenAddressAvoidsInterfaceDetection) {
+    auto result = AiServerConfig::load_from_string("AI_SERVER_LISTEN_ADDRESS=127.0.0.2\n"
+                                                   "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                   "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n"
+                                                   "CAT_APP_KEY=ploto-ai-server\n"
+                                                   "CAT_HOSTNAME=host-a\n"
+                                                   "CAT_ROUTER_ADDRESSES=127.0.0.10:8080\n",
+                                                   fail_test_local_ipv4);
+
+    ASSERT_TRUE(result) << result.error().detail;
+    EXPECT_EQ(result->advertise_address().to_string(), "127.0.0.2");
+    EXPECT_FALSE(result->detected_local_ipv4());
+    ASSERT_TRUE(result->cat_config());
+    EXPECT_EQ(result->cat_config()->ip(), "127.0.0.2");
+}
+
+TEST(AiServerConfigTest, ReportsMissingUsableLocalIpv4) {
+    auto result = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                   "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n",
+                                                   fail_test_local_ipv4);
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, AiServerConfigErrorCode::LocalAddressUnavailable);
+    EXPECT_EQ(result.error().key, "AI_SERVER_ADVERTISE_ADDRESS");
 }
 
 TEST(AiServerConfigTest, RequiresNacosServerAddresses) {
@@ -175,7 +232,8 @@ TEST(AiServerConfigTest, RejectsInvalidValuesAndPartialCredentials) {
     auto partial_cat = AiServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
                                                         "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n"
                                                         "CAT_APP_KEY=ploto-ai-server\n"
-                                                        "CAT_ROUTER_ADDRESSES=127.0.0.10:8080\n");
+                                                        "CAT_ROUTER_ADDRESSES=127.0.0.10:8080\n",
+                                                        detect_test_local_ipv4);
     ASSERT_FALSE(partial_cat);
     EXPECT_EQ(partial_cat.error().code, AiServerConfigErrorCode::MissingRequiredKey);
     EXPECT_EQ(partial_cat.error().key, "CAT_HOSTNAME");
@@ -237,7 +295,7 @@ TEST(AiServerRuntimeTest, CreateDoesNotBindListener) {
     const std::string config_text = "NACOS_SERVER_ADDRESSES=127.0.0.1\n"
                                     "AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=0\n"
                                     "AI_SERVER_LOG_CONFIG_PATH=ai-server.logging.json\n";
-    auto config = AiServerConfig::load_from_string(config_text);
+    auto config = AiServerConfig::load_from_string(config_text, detect_test_local_ipv4);
     ASSERT_TRUE(config);
 
     fiber::event::EventLoop accept_loop;

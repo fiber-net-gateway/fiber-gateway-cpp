@@ -4,9 +4,6 @@
 #include <thread>
 
 #include <cerrno>
-#include <ifaddrs.h>
-#include <net/if.h>
-#include <netinet/in.h>
 #include <new>
 #include <sys/socket.h>
 #include <utility>
@@ -57,29 +54,6 @@ AiServerRuntimeError naming_error(nacos::NamingServiceError error) {
             .naming_error = error.code,
             .message = std::move(error.message),
     };
-}
-
-std::optional<net::IpAddress> detect_advertise_ipv4() noexcept {
-    ifaddrs *interfaces = nullptr;
-    if (::getifaddrs(&interfaces) != 0) {
-        return std::nullopt;
-    }
-    std::optional<net::IpAddress> result;
-    for (const ifaddrs *item = interfaces; item; item = item->ifa_next) {
-        if (!item->ifa_addr || item->ifa_addr->sa_family != AF_INET || (item->ifa_flags & IFF_UP) == 0) {
-            continue;
-        }
-        net::SocketAddress address;
-        if (!net::SocketAddress::from_sockaddr(item->ifa_addr, sizeof(sockaddr_in), address)) {
-            continue;
-        }
-        if (!address.ip().is_unspecified() && !address.ip().is_loopback() && !address.ip().is_multicast()) {
-            result = address.ip();
-            break;
-        }
-    }
-    ::freeifaddrs(interfaces);
-    return result;
 }
 
 common::IoResult<std::uint16_t> bound_port(int fd) noexcept {
@@ -158,9 +132,8 @@ AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_l
 AiServerRuntime::AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop &nacos_loop,
                                  event::EventLoop &cat_loop, event::EventLoopGroup &http_workers,
                                  net::SocketAddress listen_address, net::ListenOptions listen_options,
-                                 std::chrono::milliseconds initial_config_timeout,
-                                 std::optional<net::IpAddress> advertise_address, std::string service_name,
-                                 std::string service_group, std::string nacos_cluster,
+                                 std::chrono::milliseconds initial_config_timeout, net::IpAddress advertise_address,
+                                 std::string service_name, std::string service_group, std::string nacos_cluster,
                                  std::unique_ptr<cat::CatClient> cat_client, std::size_t audit_max_record_bytes,
                                  log::AppenderId audit_appender_id, std::unique_ptr<nacos::NacosClient> nacos_client,
                                  std::unique_ptr<nacos::ConfigService> config_service,
@@ -413,19 +386,10 @@ async::Task<std::expected<void, AiServerRuntimeError>> AiServerRuntime::start() 
         co_await fail_start();
         co_return std::unexpected(io_error(AiServerRuntimeErrorCode::Bind, error));
     }
-    net::IpAddress advertise = advertise_address_.value_or(net::IpAddress::loopback_v4());
-    if (!advertise_address_) {
-        const auto detected = detect_advertise_ipv4();
-        if (detected) {
-            advertise = *detected;
-        }
-        LOG(LOG_LIFECYCLE, INFO) << "auto-selected ai-server advertise address=" << log::quoted(advertise.to_string());
-    }
-
     auto cluster_status = cluster_start_status_.subscribe();
     auto cluster_snapshot = cluster_status.current();
     cluster_start_tasks_.add();
-    async::spawn(*nacos_loop_, [this, address = advertise.to_string(), port = *port]() mutable {
+    async::spawn(*nacos_loop_, [this, address = advertise_address_.to_string(), port = *port]() mutable {
         return start_rate_limit_cluster(std::move(address), port);
     });
     while (!cluster_snapshot.value) {

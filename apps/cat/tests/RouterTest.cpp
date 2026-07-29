@@ -63,6 +63,11 @@ TEST(CatClientConfigTest, ValidatesRequiredIdentityAndServers) {
 
     params.app_key = "checkout";
     params.hostname = "host-a";
+    params.ip = "not-an-ip";
+    auto invalid_ip = CatClientConfig::create(params);
+    ASSERT_FALSE(invalid_ip);
+    EXPECT_EQ(invalid_ip.error(), CatConfigError::InvalidIp);
+
     params.ip = "127.0.0.1";
     auto no_servers = CatClientConfig::create(params);
     ASSERT_FALSE(no_servers);

@@ -50,6 +50,12 @@ if (config) {
 }
 ```
 
+`CatClientConfigParams::ip` must be a specified unicast IPv4 or IPv6 literal.
+Applications may discover a default with `fiber::net::detect_local_ipv4()` at startup,
+but should retain an explicit deployment override for multi-interface and
+container/NAT environments. The selected CAT identity must remain stable for
+the client lifetime.
+
 `MessageTrace`, `Transaction`, and `Event` are move-only one-pointer handles. A trace permits exactly one root. The
 final open message completion synchronously encodes the tree, submits the independently owned frame to the client,
 destroys `MessageTraceData`, and resets the trace pool. A still-live public trace handle then becomes an inert shell:

@@ -578,8 +578,11 @@ AiServerConfigError from_cat_error(cat::CatConfigError error, const FieldLines &
             return make_error(AiServerConfigErrorCode::MissingRequiredKey, lines.cat_hostname, kCatHostnameKey,
                               "CAT_HOSTNAME is required when CAT is configured");
         case cat::CatConfigError::EmptyIp:
-            return make_error(AiServerConfigErrorCode::MissingRequiredKey, lines.cat_ip, kCatIpKey,
-                              "CAT_IP is required when CAT is configured");
+            return make_error(AiServerConfigErrorCode::InvalidCatConfig, lines.cat_ip, kCatIpKey,
+                              "resolved CAT IP is empty");
+        case cat::CatConfigError::InvalidIp:
+            return make_error(AiServerConfigErrorCode::InvalidCatConfig, lines.cat_ip, kCatIpKey,
+                              "CAT_IP must be a specified unicast IP literal");
         case cat::CatConfigError::EmptyServerList:
             return make_error(AiServerConfigErrorCode::MissingRequiredKey,
                               lines.cat_routers != 0 ? lines.cat_routers : lines.cat_collectors, kCatRouterAddressesKey,
@@ -594,19 +597,34 @@ AiServerConfigError from_cat_error(cat::CatConfigError error, const FieldLines &
     return make_error(AiServerConfigErrorCode::InvalidCatConfig, 0, {}, "invalid CAT configuration");
 }
 
+AiServerConfigError local_address_error(const net::LocalIpv4Error &error) {
+    std::string detail;
+    if (error.code == net::LocalIpv4ErrorCode::QueryFailed) {
+        detail = "failed to query local network interfaces";
+        if (error.system_error != 0) {
+            detail.append(": ");
+            detail.append(std::error_code(error.system_error, std::generic_category()).message());
+        }
+    } else {
+        detail = "no usable UP non-loopback IPv4 interface";
+    }
+    detail.append("; set AI_SERVER_ADVERTISE_ADDRESS explicitly");
+    return make_error(AiServerConfigErrorCode::LocalAddressUnavailable, 0, kAdvertiseAddressKey, std::move(detail));
+}
+
 } // namespace
 
 AiServerConfig::AiServerConfig(net::SocketAddress listen_address, nacos::NacosClientConfig nacos_config,
-                               std::chrono::milliseconds initial_config_timeout,
-                               std::optional<net::IpAddress> advertise_address, std::string service_name,
+                               std::chrono::milliseconds initial_config_timeout, net::IpAddress advertise_address,
+                               std::optional<net::LocalIpv4Selection> detected_local_ipv4, std::string service_name,
                                std::string service_group, std::string zone, std::string cluster,
                                std::optional<cat::CatClientConfig> cat_config, std::string logging_config_path) noexcept
     :
     listen_address_(std::move(listen_address)), nacos_config_(std::move(nacos_config)),
-    initial_config_timeout_(initial_config_timeout), advertise_address_(std::move(advertise_address)),
-    service_name_(std::move(service_name)), service_group_(std::move(service_group)), zone_(std::move(zone)),
-    cluster_(std::move(cluster)), cat_config_(std::move(cat_config)),
-    logging_config_path_(std::move(logging_config_path)) {}
+    initial_config_timeout_(initial_config_timeout), advertise_address_(advertise_address),
+    detected_local_ipv4_(std::move(detected_local_ipv4)), service_name_(std::move(service_name)),
+    service_group_(std::move(service_group)), zone_(std::move(zone)), cluster_(std::move(cluster)),
+    cat_config_(std::move(cat_config)), logging_config_path_(std::move(logging_config_path)) {}
 
 std::string AiServerConfig::nacos_cluster() const {
     std::string result;
@@ -617,7 +635,8 @@ std::string AiServerConfig::nacos_cluster() const {
     return result;
 }
 
-std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_file(std::string_view path) {
+std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_file(std::string_view path,
+                                                                                  LocalIpv4Detector detector) {
     std::ifstream input(std::string(path), std::ios::binary);
     if (!input) {
         return std::unexpected(
@@ -629,7 +648,7 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_fil
         return std::unexpected(
                 make_error(AiServerConfigErrorCode::ReadFailed, 0, {}, "failed to read configuration file"));
     }
-    auto config = load_from_string(contents);
+    auto config = load_from_string(contents, detector);
     if (!config) {
         return config;
     }
@@ -645,7 +664,8 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_fil
     return config;
 }
 
-std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_string(std::string_view input) {
+std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_string(std::string_view input,
+                                                                                    LocalIpv4Detector detector) {
     auto entries = parse_entries(input);
     if (!entries) {
         return std::unexpected(std::move(entries.error()));
@@ -693,11 +713,27 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
         return std::unexpected(from_nacos_error(nacos_config.error(), field_lines));
     }
 
+    std::optional<net::LocalIpv4Selection> detected_local_ipv4;
     if (!advertise_address && listen_ip.is_v4() && !listen_ip.is_unspecified() && !listen_ip.is_multicast()) {
         advertise_address = listen_ip;
     }
+    if (!advertise_address) {
+        if (!detector) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::LocalAddressUnavailable, 0, kAdvertiseAddressKey,
+                                              "local IPv4 detector is unavailable"));
+        }
+        auto detected = detector();
+        if (!detected) {
+            return std::unexpected(local_address_error(detected.error()));
+        }
+        advertise_address = detected->address;
+        detected_local_ipv4 = std::move(*detected);
+    }
     std::optional<cat::CatClientConfig> cat_config;
     if (cat_setting_present) {
+        if (cat_params.ip.empty()) {
+            cat_params.ip = advertise_address->to_string();
+        }
         auto created = cat::CatClientConfig::create(std::move(cat_params));
         if (!created) {
             return std::unexpected(from_cat_error(created.error(), field_lines));
@@ -705,8 +741,9 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
         cat_config = std::move(*created);
     }
     return AiServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(*nacos_config), initial_config_timeout,
-                          std::move(advertise_address), std::move(service_name), std::move(service_group),
-                          std::move(zone), std::move(cluster), std::move(cat_config), std::move(logging_config_path));
+                          *advertise_address, std::move(detected_local_ipv4), std::move(service_name),
+                          std::move(service_group), std::move(zone), std::move(cluster), std::move(cat_config),
+                          std::move(logging_config_path));
 }
 
 } // namespace fiber::ai_server

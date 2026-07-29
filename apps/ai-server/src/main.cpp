@@ -180,11 +180,19 @@ int main(int argc, char **argv) {
     LOG(LOG_LIFECYCLE, INFO) << "configuration loaded path=" << fiber::log::quoted(config_path)
                              << " logging_config_path=" << fiber::log::quoted(config.logging_config_path())
                              << " listen=" << fiber::log::quoted(config.listen_address().to_string())
+                             << " advertise_address=" << fiber::log::quoted(config.advertise_address().to_string())
                              << " http_workers=" << http_workers.size()
                              << " nacos_servers=" << config.nacos_config().server_ips().size()
                              << " zone=" << fiber::log::quoted(config.zone())
                              << " cluster=" << fiber::log::quoted(config.cluster())
                              << " audit_path=" << fiber::log::quoted(audit_path);
+    if (config.detected_local_ipv4()) {
+        LOG(LOG_LIFECYCLE, INFO) << "auto-selected local IPv4 address="
+                                 << fiber::log::quoted(config.detected_local_ipv4()->address.to_string())
+                                 << " interface="
+                                 << fiber::log::quoted(config.detected_local_ipv4()->interface_name_view())
+                                 << " interface_index=" << config.detected_local_ipv4()->interface_index;
+    }
 
     auto runtime_result = fiber::ai_server::AiServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0),
                                                                     http_workers, config, audit_max_record_bytes,

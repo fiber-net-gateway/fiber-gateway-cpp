@@ -16,6 +16,10 @@ std::expected<CatClientConfig, CatConfigError> CatClientConfig::create(CatClient
     if (params.ip.empty()) {
         return std::unexpected(CatConfigError::EmptyIp);
     }
+    net::IpAddress client_ip;
+    if (!net::IpAddress::parse(params.ip, client_ip) || client_ip.is_unspecified() || client_ip.is_multicast()) {
+        return std::unexpected(CatConfigError::InvalidIp);
+    }
     if (params.routers.empty() && params.bootstrap_collectors.empty()) {
         return std::unexpected(CatConfigError::EmptyServerList);
     }
