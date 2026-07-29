@@ -2,6 +2,20 @@
 
 namespace fiber::net::detail {
 
+RWFd::DispatchGuard::DispatchGuard(RWFd &owner) noexcept : owner_(&owner) {
+    FIBER_ASSERT_MSG(owner.dispatch_destroyed_observer_ == nullptr, "RWFd event dispatch cannot re-enter");
+    owner.dispatch_destroyed_observer_ = &owner_destroyed_;
+}
+
+RWFd::DispatchGuard::~DispatchGuard() noexcept {
+    if (owner_destroyed_) {
+        return;
+    }
+    FIBER_ASSERT(owner_ != nullptr);
+    FIBER_ASSERT(owner_->dispatch_destroyed_observer_ == &owner_destroyed_);
+    owner_->dispatch_destroyed_observer_ = nullptr;
+}
+
 void RWFdWaiterBase::on_event(void *ctx, fiber::common::IoErr err) noexcept {
     auto *waiter = static_cast<RWFdWaiterBase *>(ctx);
     FIBER_ASSERT(waiter != nullptr);
@@ -27,6 +41,10 @@ RWFd::RWFd(fiber::event::EventLoop &loop, int fd) :
 }
 
 RWFd::~RWFd() {
+    if (dispatch_destroyed_observer_) {
+        *dispatch_destroyed_observer_ = true;
+        dispatch_destroyed_observer_ = nullptr;
+    }
     if (!valid()) {
         return;
     }
@@ -310,6 +328,7 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
     if (!fiber::event::any(events)) {
         return;
     }
+    DispatchGuard dispatch(*this);
 
     ReadyCallback read_callback = nullptr;
     void *read_callback_ctx = nullptr;
@@ -341,18 +360,27 @@ void RWFd::handle_events(fiber::event::IoEvent events) {
 
     if (terminal_callback) {
         terminal_callback(terminal_callback_ctx, terminal_error_);
+        if (dispatch.owner_destroyed()) {
+            return;
+        }
         if (!valid()) {
             return;
         }
     }
     if (read_callback && read_callback_ == read_callback && read_callback_ctx_ == read_callback_ctx) {
         read_callback(read_callback_ctx, fiber::common::IoErr::None);
+        if (dispatch.owner_destroyed()) {
+            return;
+        }
         if (!valid()) {
             return;
         }
     }
     if (write_callback && write_callback_ == write_callback && write_callback_ctx_ == write_callback_ctx) {
         write_callback(write_callback_ctx, fiber::common::IoErr::None);
+        if (dispatch.owner_destroyed()) {
+            return;
+        }
         if (!valid()) {
             return;
         }
