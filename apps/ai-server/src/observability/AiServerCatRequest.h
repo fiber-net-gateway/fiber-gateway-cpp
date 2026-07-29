@@ -25,6 +25,7 @@ class HttpHeaders;
 namespace fiber::ai_server {
 
 inline constexpr std::size_t kMaxAiServerTraceStateBytes = 512;
+inline constexpr std::size_t kMaxAiServerCatUserAgentBytes = 1024;
 
 [[nodiscard]] cat::MessageTraceContext read_cat_trace_context(const http::HttpHeaders &headers) noexcept;
 
@@ -40,6 +41,7 @@ public:
     [[nodiscard]] std::string_view request_id() const noexcept;
     [[nodiscard]] std::string_view trace_state() const noexcept { return trace_state_; }
     void inject_response_header(http::HttpHeaders &headers) const noexcept;
+    cat::RecordError add_root_data(std::string_view key, std::string_view value) noexcept;
     cat::RecordError set_root_model_name(std::string_view model) noexcept;
 
     [[nodiscard]] std::expected<cat::PropagationContext, cat::RecordError>
@@ -56,6 +58,7 @@ private:
     std::optional<cat::Transaction> root_;
     std::optional<cat::PropagationContext> context_;
     std::string_view trace_state_;
+    std::string_view user_agent_;
 };
 
 } // namespace fiber::ai_server

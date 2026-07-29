@@ -391,7 +391,7 @@ RecordError append_data(MessageData *message, std::string_view key, std::string_
     if (needed > 0) {
         char *out = chunk->data() + chunk->used;
         if (separator_size != 0) {
-            *out++ = '&';
+            *out++ = message->data_separator;
         }
         std::copy(key.begin(), key.end(), out);
         out += key.size();
@@ -930,6 +930,18 @@ RecordError add_data(MessageData *message, std::string_view data) noexcept {
 
 RecordError add_data(MessageData *message, std::string_view key, std::string_view value) noexcept {
     return append_data(message, key, value, true);
+}
+
+RecordError set_data_separator(MessageData *message, char separator) noexcept {
+    const RecordError mutable_result = validate_mutation(message);
+    if (mutable_result != RecordError::None) {
+        return mutable_result;
+    }
+    if ((separator != '&' && separator != ' ') || message->has_data) {
+        return RecordError::InvalidArgument;
+    }
+    message->data_separator = separator;
+    return RecordError::None;
 }
 
 namespace {

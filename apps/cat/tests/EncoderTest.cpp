@@ -450,6 +450,30 @@ TEST(CatEncoderTest, InjectsTruncationMarkerAfterTreeLimitWithoutPoolAllocation)
     });
 }
 
+TEST(CatEncoderTest, UsesConfiguredDataSeparatorBeforeTruncationMarker) {
+    run_on_loop([] {
+        fiber::cat::RecordLimits limits;
+        limits.max_data_bytes_per_message = 4;
+        auto created = fiber::cat::detail::create_transaction_root("T", "root", limits);
+        ASSERT_TRUE(created);
+        auto *root = *created;
+        auto *trace = root->trace;
+        make_time_deterministic(*trace->data, 0);
+        root->time = std::chrono::steady_clock::time_point{};
+        ASSERT_EQ(fiber::cat::detail::set_data_separator(root, ' '), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::add_data(root, "base"), RecordError::None);
+        ASSERT_EQ(fiber::cat::detail::add_data(root, "overflow"), RecordError::LimitExceeded);
+
+        freeze_trace(*trace);
+        auto encoded = fiber::cat::detail::encode_nt1(*trace->data, minimal_context());
+        ASSERT_TRUE(encoded);
+        const auto bytes = encoded_bytes(*encoded);
+        constexpr std::string_view marker = "base CatClient.Truncated=count:0,bytes:8,reason:limit";
+        EXPECT_NE(std::search(bytes.begin(), bytes.end(), marker.begin(), marker.end()), bytes.end());
+        delete trace;
+    });
+}
+
 TEST(CatEncoderTest, EncodesOfficialPt1NestedTextAndPreservesRawControlCharacters) {
     run_on_loop([] {
         const char *old_timezone = std::getenv("TZ");

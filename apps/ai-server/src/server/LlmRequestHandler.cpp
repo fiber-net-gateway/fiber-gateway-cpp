@@ -76,6 +76,15 @@ void add_cat_integer(cat::Event &event, std::string_view key, const std::optiona
     }
 }
 
+void add_cat_size(cat::Event &event, std::string_view key, std::size_t value) noexcept {
+    std::array<char, std::numeric_limits<std::size_t>::digits10 + 2> buffer{};
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (converted.ec == std::errc{}) {
+        (void) event.add_data(key,
+                              std::string_view(buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())));
+    }
+}
+
 void append_cat_duration(std::string &data, std::string_view key, std::chrono::microseconds duration) noexcept {
     std::array<char, std::numeric_limits<std::int64_t>::digits10 + 3> buffer{};
     const auto value = std::max<std::int64_t>(duration.count(), 0);
@@ -725,20 +734,33 @@ std::string_view provider_upstream_error_event_name(const ProviderAttemptObserva
 }
 
 void add_provider_upstream_error_data(cat::Event &event, const ProviderAttemptObservation &observation) noexcept {
-    const std::string_view failure_phase = provider_failure_phase(observation);
-    (void) event.add_data("failure_phase", failure_phase.empty() ? std::string_view("none") : failure_phase);
-    (void) event.add_data("io_error", observation.io_error == common::IoErr::None
-                                              ? std::string_view("none")
-                                              : common::io_err_name(observation.io_error));
-    (void) event.add_data("failure_source",
-                          observation.failure_source.empty() ? std::string_view("none") : observation.failure_source);
-    (void) event.add_data("retry_target", provider_retry_target_name(observation.retry.retry_target));
-    std::array<char, 16> status_text{};
-    const auto converted =
-            std::to_chars(status_text.data(), status_text.data() + status_text.size(), observation.status);
-    if (converted.ec == std::errc{}) {
-        (void) event.add_data("status", std::string_view(status_text.data(),
-                                                         static_cast<std::size_t>(converted.ptr - status_text.data())));
+    if (observation.io_error != common::IoErr::None) {
+        (void) event.add_data("io_error", common::io_err_name(observation.io_error));
+    }
+    if (!observation.failure_source.empty()) {
+        (void) event.add_data("failure_source", observation.failure_source);
+    }
+    if (observation.retry.retry_target != ProviderRetryTarget::None) {
+        (void) event.add_data("retry_target", provider_retry_target_name(observation.retry.retry_target));
+    }
+    if (observation.retry.retry_performed) {
+        (void) event.add_data("retry_performed", "true");
+    }
+    if (observation.retry.skipped_attempts != 0) {
+        add_cat_size(event, "skipped_attempts", observation.retry.skipped_attempts);
+    }
+    if (observation.response_started) {
+        (void) event.add_data("response_started", "true");
+    }
+    if (observation.status > 0) {
+        std::array<char, 16> status_text{};
+        const auto converted =
+                std::to_chars(status_text.data(), status_text.data() + status_text.size(), observation.status);
+        if (converted.ec == std::errc{}) {
+            (void) event.add_data(
+                    "status",
+                    std::string_view(status_text.data(), static_cast<std::size_t>(converted.ptr - status_text.data())));
+        }
     }
 }
 
@@ -746,9 +768,9 @@ class LlmRequestAudit {
 public:
     LlmRequestAudit(http::HttpExchange &exchange, LlmWireProtocol protocol, AiServerCatRequest *cat_request,
                     AiServerMetrics::Worker &metrics, std::size_t max_record_bytes) noexcept :
-        exchange_(&exchange), protocol_(protocol), started_(event::EventLoop::current().now()),
-        started_at_ms_(wall_now_millis()), metrics_(&metrics), max_record_bytes_(max_record_bytes),
-        output_(max_record_bytes),
+        exchange_(&exchange), cat_request_(cat_request), protocol_(protocol),
+        started_(event::EventLoop::current().now()), started_at_ms_(wall_now_millis()), metrics_(&metrics),
+        max_record_bytes_(max_record_bytes), output_(max_record_bytes),
         audit_enabled_(max_record_bytes != 0 && LOG_LLM_AUDIT.get().enabled(log::LogLevel::Info)) {
         static std::atomic<std::uint64_t> sequence{0};
         const std::uint64_t next = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -768,9 +790,7 @@ public:
                 request_id_ = std::string_view(request_id_storage_.data(), size);
             }
             cat_transaction_ = cat_request->root_transaction();
-            if (cat_transaction_) {
-                (void) cat_transaction_->add_data("protocol", protocol_name(protocol_));
-            }
+            (void) cat_request->add_root_data("protocol", protocol_name(protocol_));
         }
     }
 
@@ -786,9 +806,9 @@ public:
         auth_reason_ = -1;
         user_.assign(principal.username());
         kid_.assign(principal.kid());
-        if (cat_transaction_ && cat_transaction_->valid()) {
-            (void) cat_transaction_->add_data("user", principal.username());
-            (void) cat_transaction_->add_data("kid", principal.kid());
+        if (cat_request_) {
+            (void) cat_request_->add_root_data("user", principal.username());
+            (void) cat_request_->add_root_data("kid", principal.kid());
         }
     }
 
@@ -825,8 +845,9 @@ public:
         requested_model_ = routing.model.is_present() ? *routing.model : std::string_view{};
         messages_count_ = routing.messages_count;
         tools_count_ = routing.tools_count;
-        if (cat_transaction_ && cat_transaction_->valid()) {
-            (void) cat_transaction_->add_data("stream", stream_ ? std::string_view("true") : std::string_view("false"));
+        if (cat_request_) {
+            (void) cat_request_->add_root_data("stream",
+                                               stream_ ? std::string_view("true") : std::string_view("false"));
         }
     }
 
@@ -857,8 +878,8 @@ public:
         (void) requested;
         model_ = resolved;
         authz_result_ = "allow";
-        if (cat_transaction_ && cat_transaction_->valid()) {
-            (void) cat_transaction_->add_data("model", resolved);
+        if (cat_request_) {
+            (void) cat_request_->add_root_data("model", resolved);
         }
     }
 
@@ -957,12 +978,14 @@ public:
             data.append(attempt.protocol->model);
             data.append(" path=");
             data.append(attempt.protocol->path);
-            data.append(" status=");
-            std::array<char, 16> status_text{};
-            auto converted =
-                    std::to_chars(status_text.data(), status_text.data() + status_text.size(), observation.status);
-            if (converted.ec == std::errc{}) {
-                data.append(status_text.data(), converted.ptr);
+            if (observation.status > 0) {
+                data.append(" status=");
+                std::array<char, 16> status_text{};
+                const auto converted =
+                        std::to_chars(status_text.data(), status_text.data() + status_text.size(), observation.status);
+                if (converted.ec == std::errc{}) {
+                    data.append(status_text.data(), converted.ptr);
+                }
             }
             if (observation.timing.response_header_observed) {
                 append_cat_duration(data, "time_to_response_header_us", observation.timing.time_to_response_header);
@@ -975,30 +998,6 @@ public:
             }
             data.append(" fallback=");
             data.append(attempt.fallback ? "true" : "false");
-            data.append(" failure_phase=");
-            data.append(failure_phase.empty() ? std::string_view("none") : failure_phase);
-            data.append(" io_error=");
-            data.append(observation.io_error == common::IoErr::None ? std::string_view("none")
-                                                                    : common::io_err_name(observation.io_error));
-            data.append(" failure_source=");
-            data.append(observation.failure_source.empty() ? std::string_view("none") : observation.failure_source);
-            data.append(" retry_target=");
-            data.append(provider_retry_target_name(observation.retry.retry_target));
-            data.append(" retryable=");
-            data.append(retryable ? "true" : "false");
-            data.append(" retry_performed=");
-            data.append(observation.retry.retry_performed ? "true" : "false");
-            data.append(" skipped_attempts=");
-            std::array<char, 24> skipped_text{};
-            converted = std::to_chars(skipped_text.data(), skipped_text.data() + skipped_text.size(),
-                                      observation.retry.skipped_attempts);
-            if (converted.ec == std::errc{}) {
-                data.append(skipped_text.data(), converted.ptr);
-            }
-            data.append(" response_started=");
-            data.append(observation.response_started ? "true" : "false");
-            data.append(" outcome=");
-            data.append(observation.outcome);
             (void) cat_provider_transaction->add_data(data);
             const std::string_view upstream_error_name = provider_upstream_error_event_name(observation);
             if (!upstream_error_name.empty()) {
@@ -1217,6 +1216,7 @@ private:
     }
 
     http::HttpExchange *exchange_ = nullptr;
+    AiServerCatRequest *cat_request_ = nullptr;
     LlmWireProtocol protocol_ = LlmWireProtocol::OpenAiChatCompletions;
     std::chrono::steady_clock::time_point started_;
     std::int64_t started_at_ms_ = 0;

@@ -144,6 +144,9 @@ Event completes it with `CAT_CLIENT_INCOMPLETE`, preventing an abandoned operati
 whose supplied duration ends at the current wall-clock time, without introducing an implicit transaction stack.
 `set_type()` and `set_name()` allow a Transaction or Event to bind routing information discovered after creation.
 They are owner-EventLoop-local and affect the final encoded and aggregated key only while the handle remains valid.
+Repeated `add_data()` calls use CAT's official `&` separator by default. A Transaction may call
+`set_data_separator(' ')` before its first data entry when an application intentionally wants space-separated opaque
+Log View data; only `&` and space are accepted, and changing the separator after data has been added is rejected.
 
 A parent may complete before children that were already created. Its internal data remains in the trace arena until
 the final open child completes, but the consumed parent handle cannot add more children. The final completion destroys

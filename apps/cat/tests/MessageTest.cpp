@@ -335,6 +335,23 @@ TEST(CatMessageTest, EmptyDataStillSeparatesTheNextEntry) {
     });
 }
 
+TEST(CatMessageTest, ExplicitSpaceSeparatorMustBeSetBeforeData) {
+    run_on_loop([] {
+        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        ASSERT_TRUE(root_result);
+        auto *root = *root_result;
+
+        EXPECT_EQ(fiber::cat::detail::set_data_separator(root, '\n'), RecordError::InvalidArgument);
+        EXPECT_EQ(fiber::cat::detail::set_data_separator(root, ' '), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::add_data(root, "method", "GET"), RecordError::None);
+        EXPECT_EQ(fiber::cat::detail::add_data(root, "host", "example.test"), RecordError::None);
+        EXPECT_EQ(flatten_data(*root), "method=GET host=example.test");
+        EXPECT_EQ(fiber::cat::detail::set_data_separator(root, '&'), RecordError::InvalidArgument);
+
+        EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
+    });
+}
+
 struct ObservedContexts {
     std::array<std::string_view, 4> keys{};
     std::array<std::string_view, 4> values{};
