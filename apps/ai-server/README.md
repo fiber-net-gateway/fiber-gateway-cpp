@@ -316,6 +316,24 @@ Prometheus 输出两个累计 Counter family：
 - `ai_server_user_token_usage_total{username,token_type}`；
 - `ai_server_provider_token_usage_total{provider_name,protocol,token_type}`。
 
+`/metrics` 还在每次 scrape 时从当前 Linux 进程读取以下标准进程指标，不启动后台
+采集任务，也不进入请求热路径：
+
+- `process_cpu_seconds_total`；
+- `process_resident_memory_bytes`、`process_virtual_memory_bytes`；
+- `process_start_time_seconds`；
+- `process_open_fds`、`process_max_fds`。
+
+其中 CPU 百分比可用
+`100 * rate(process_cpu_seconds_total[$__rate_interval])` 计算，100% 表示一个逻辑
+CPU，多线程进程可能超过 100%。RSS 是驻留物理内存，不等同于 allocator 堆大小。
+某项 Linux `/proc` 或 rlimit 读取失败时只省略对应进程指标，不影响已有业务指标。
+
+Grafana 面板位于 `docs/grafana/ai-server-dashboard.json`。进程面板直接使用 ai-server
+target；机器 CPU、内存和 load 面板使用 node_exporter，并通过独立的 `node_job`、
+`node_instance` 变量选择机器。ai-server 不重复采集整台机器的资源，Prometheus
+必须在同一数据源中另外抓取 node_exporter。
+
 下游交付失败后的 SSE drain 另由
 `ai_server_sse_drains_total{protocol,result}` 记录，`result` 固定为
 `completed`、`upstream_error`、`timeout`。即使客户端未收到最终内容，只要网关从

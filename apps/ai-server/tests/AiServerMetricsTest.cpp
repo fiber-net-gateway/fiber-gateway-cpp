@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <future>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include <async/Spawn.h>
 #include <common/IoError.h>
@@ -29,6 +33,47 @@ std::string consume_chain(fiber::mem::IoBufChain chain) {
         chain.consume_and_compact(part->readable());
     }
     return output;
+}
+
+std::optional<std::string_view> metric_value(const std::string &metrics, std::string_view name) {
+    std::string marker;
+    marker.reserve(name.size() + 2);
+    marker.push_back('\n');
+    marker.append(name);
+    marker.push_back(' ');
+    const std::size_t line = metrics.find(marker);
+    if (line == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t value = line + marker.size();
+    const std::size_t end = metrics.find('\n', value);
+    if (end == std::string::npos) {
+        return std::nullopt;
+    }
+    return std::string_view(metrics).substr(value, end - value);
+}
+
+std::optional<std::uint64_t> parse_uint_value(std::string_view value) {
+    std::uint64_t parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+std::optional<std::uint64_t> integer_metric_value(const std::string &metrics, std::string_view name) {
+    auto value = metric_value(metrics, name);
+    return value ? parse_uint_value(*value) : std::nullopt;
+}
+
+std::optional<std::uint64_t> seconds_metric_whole_value(const std::string &metrics, std::string_view name) {
+    auto value = metric_value(metrics, name);
+    if (!value) {
+        return std::nullopt;
+    }
+    const std::size_t decimal = value->find('.');
+    return parse_uint_value(value->substr(0, decimal));
 }
 
 fiber::async::DetachedTask record_worker_metrics(AiServerMetrics::Worker *worker, LlmWireProtocol protocol,
@@ -192,6 +237,27 @@ TEST(AiServerMetricsTest, AggregatesRuntimeAndDynamicTokenUsageMetrics) {
     EXPECT_NE(result->find("ai_server_audit_reopen_failures_total 5"), std::string::npos);
     EXPECT_NE(result->find("ai_server_audit_retention_failures_total 6"), std::string::npos);
     EXPECT_NE(result->find("ai_server_audit_active_file_bytes 2048"), std::string::npos);
+
+    EXPECT_NE(result->find("# TYPE process_cpu_seconds_total counter"), std::string::npos);
+    const auto cpu_time = metric_value(*result, "process_cpu_seconds_total");
+    ASSERT_TRUE(cpu_time);
+    EXPECT_EQ(cpu_time->find_first_not_of("0123456789."), std::string_view::npos);
+    const auto resident_memory = integer_metric_value(*result, "process_resident_memory_bytes");
+    const auto virtual_memory = integer_metric_value(*result, "process_virtual_memory_bytes");
+    ASSERT_TRUE(resident_memory);
+    ASSERT_TRUE(virtual_memory);
+    EXPECT_GT(*resident_memory, 0);
+    EXPECT_GE(*virtual_memory, *resident_memory);
+    const auto start_time = metric_value(*result, "process_start_time_seconds");
+    ASSERT_TRUE(start_time);
+    EXPECT_EQ(start_time->find_first_not_of("0123456789."), std::string_view::npos);
+    EXPECT_GT(seconds_metric_whole_value(*result, "process_start_time_seconds").value_or(0), 1'000'000'000);
+    const auto open_fds = integer_metric_value(*result, "process_open_fds");
+    const auto max_fds = integer_metric_value(*result, "process_max_fds");
+    ASSERT_TRUE(open_fds);
+    ASSERT_TRUE(max_fds);
+    EXPECT_GT(*open_fds, 0);
+    EXPECT_GE(*max_fds, *open_fds);
 
     std::promise<void> stopped;
     auto stopped_future = stopped.get_future();
