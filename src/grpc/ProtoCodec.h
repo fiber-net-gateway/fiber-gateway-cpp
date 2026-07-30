@@ -11,7 +11,7 @@
 namespace fiber::grpc {
 
 // Serialize a protobuf lite message into a single-node IoBufChain ready to be
-// handed to ClientHttp2Exchange::write_body. Sized via ByteSizeLong() then
+// handed to ClientHttp2Exchange::write_all. Sized via ByteSizeLong() then
 // SerializeToArray directly into the IoBuf writable region - no std::string.
 // An empty message yields a zero-byte chain.
 common::IoResult<mem::IoBufChain> encode(mem::IoBufNodePool &node_pool,

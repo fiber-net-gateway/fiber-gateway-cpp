@@ -262,7 +262,7 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
                                         "failed to send provider headers", failed_service_peer_id));
     }
     if (request_size > 0) {
-        auto sent_body = co_await upstream->write_body(std::move(request_body), kProviderTimeout);
+        auto sent_body = co_await upstream->write_all(std::move(request_body), kProviderTimeout);
         if (!sent_body || *sent_body != request_size) {
             const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
             connection.load_balance.report(InstanceReportOutcome::Failure);

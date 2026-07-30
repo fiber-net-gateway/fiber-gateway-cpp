@@ -35,8 +35,12 @@ public:
 
     fiber::async::Task<common::IoResult<void>> send_request_header(const Http2RequestHead &head, bool end_stream,
                                                                    std::chrono::milliseconds timeout) noexcept;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(mem::IoBufChain chunk,
-                                                                 std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>> write_all(mem::IoBufChain chunk,
+                                                                std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>> write(mem::IoBufChain &chunk,
+                                                            std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>> write(const std::uint8_t *buf, std::size_t len, bool end_stream,
+                                                            std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<common::IoResult<void>> write_trailer(const HttpHeaders &headers,
                                                              std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
@@ -51,10 +55,12 @@ public:
 
 private:
     struct SendRequestHeaderOp;
-    struct SendRequestBodyOp;
+    struct SendRequestBodyAllOp;
+    struct SendRequestBodySomeOp;
     struct SendRequestTrailerOp;
     using HeaderSendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestHeaderOp>;
-    using BodySendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestBodyOp>;
+    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestBodyAllOp>;
+    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestBodySomeOp>;
     using TrailerSendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestTrailerOp>;
 
     static Http2Stream::Lease create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept;
@@ -76,6 +82,7 @@ private:
     static void on_stream_abort(void *owner, common::IoErr reason) noexcept;
     static void destroy_owner(void *owner) noexcept;
     [[nodiscard]] bool cancel_queued_send() noexcept;
+    void record_request_write_error(common::IoErr error) noexcept;
     void on_stream_aborted(common::IoErr reason) noexcept;
     [[nodiscard]] common::IoErr handle_status(std::string_view value) noexcept;
     [[nodiscard]] common::IoErr commit_field(std::string_view name, std::uint64_t name_hash, std::string_view value,

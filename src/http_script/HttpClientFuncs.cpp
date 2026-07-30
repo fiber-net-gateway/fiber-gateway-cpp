@@ -540,8 +540,8 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
         co_return error_exn(*heap, "http.request: send header failed");
     }
     if (!end_stream) {
-        auto write_result = co_await upstream.write_body(reinterpret_cast<const std::uint8_t *>(body_bytes.data()),
-                                                         body_bytes.size(), true, timeout);
+        auto write_result = co_await upstream.write_all(reinterpret_cast<const std::uint8_t *>(body_bytes.data()),
+                                                        body_bytes.size(), true, timeout);
         if (!write_result) {
             co_return error_exn(*heap, "http.request: write body failed");
         }
@@ -731,7 +731,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
                 co_return error_exn(*heap, "http.proxyPass: read request body failed");
             }
             const bool last = body_result->complete();
-            auto write_result = co_await upstream.write_body(std::move(*body_result), timeout);
+            auto write_result = co_await upstream.write_all(std::move(*body_result), timeout);
             if (!write_result) {
                 co_return error_exn(*heap, "http.proxyPass: write request body failed");
             }
@@ -806,7 +806,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
                     : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)
                                           : fiber::http::HttpBodySpec::Auto());
 
-    // flush is parsed for API parity; C++ write_body already writes through (no buffering to skip).
+    // flush is parsed for API parity; C++ write_all already writes through (no buffering to skip).
     (void) field_bool(*heap, options, "flush", 5, false);
 
     auto response_header_result = co_await exchange.send_header({

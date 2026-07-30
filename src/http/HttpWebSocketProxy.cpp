@@ -100,7 +100,7 @@ fiber::async::Task<fiber::common::IoErr> relay_websocket_uplink(HttpExchange &do
             co_return body_result.error();
         }
         const bool last = body_result->complete();
-        auto write_result = co_await upstream.write_body(std::move(*body_result), write_timeout);
+        auto write_result = co_await upstream.write_all(std::move(*body_result), write_timeout);
         if (!write_result) {
             co_return write_result.error();
         }

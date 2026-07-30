@@ -32,7 +32,7 @@
 旧代理循环把两次结果都原样写给 HTTP/1.1 上游：
 
 1. 第一次写入 65536 字节；
-2. `ClientHttp1Exchange::write_body()` 发现已达到声明的 `Content-Length`，自动把
+2. `ClientHttp1Exchange::write_all()` 发现已达到声明的 `Content-Length`，自动把
    `request_state_` 切换为 `RequestDone`；
 3. 第二次代理再写入空完成标记；
 4. HTTP/1.1 exchange 因已是 `RequestDone` 返回 `IoErr::Already`，代理映射成 502。
@@ -73,7 +73,7 @@ Nginx 在这里作为实现对照，不代表规范要求项目复制其内部�
   DATA frame 且内部没有后续 frame 字节时，把 `complete` 随最后一批 DATA 一起返回；
 - FIN 尚未到达时仍先返回 DATA，等后续读取收到 FIN 后再返回空完成标记；
 - FIN 截断 DATA payload 时立即以 `H3_REQUEST_INCOMPLETE` 终止，不把残缺 DATA 交给应用；
-- `ClientHttp1Exchange::write_body()` 只对已经精确写满 Content-Length 后重复提交的
+- `ClientHttp1Exchange::write_all()` 只对已经精确写满 Content-Length 后重复提交的
   `0 + complete` 作幂等成功处理，非空重复写、非完成空写和 chunked 重复完成仍返回
   `IoErr::Already`。
 
@@ -94,7 +94,7 @@ HTTP/3 的完成判断只使用实际 QUIC FIN，不根据 Content-Length 推断
 - FIN 与最后 DATA 同批到达时，DATA chain 同时带 `complete`；
 - 已读满 Content-Length 但 FIN 延迟到达时，第一次 DATA 不提前完成；
 - FIN 截断 DATA payload 时拒绝请求；
-- HTTP/1 两种 `write_body()` 重载均幂等接受重复空完成，其他重复写仍保持严格错误语义。
+- HTTP/1 两种 `write_all()` 重载均幂等接受重复空完成，其他重复写仍保持严格错误语义。
 
 实际 HTTP/3 回归的 POST response 为 65536 bytes，SHA-256 为：
 

@@ -1122,7 +1122,7 @@ private:
                     co_return result;
                 }
             }
-            auto sent_body = co_await exchange.write_body(
+            auto sent_body = co_await exchange.write_all(
                     std::move(body), remaining_timeout(request_deadline, fiber::event::EventLoop::current().now()));
             if (!sent_body) {
                 result.error = sent_body.error();

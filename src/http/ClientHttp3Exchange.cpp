@@ -45,18 +45,18 @@ ClientHttp3Exchange::send_request_header(const Http3RequestHead &head, bool end_
     co_return co_await (*opened)->send_request_header(head, end_stream, timeout);
 }
 
-async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write_body(mem::IoBufChain chunk,
-                                                                           std::chrono::milliseconds timeout) noexcept {
+async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write_all(mem::IoBufChain chunk,
+                                                                          std::chrono::milliseconds timeout) noexcept {
     ClientHttp3Request *req = request();
     if (req == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await req->write_body(std::move(chunk), timeout);
+    co_return co_await req->write_all(std::move(chunk), timeout);
 }
 
-async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write_body(const std::uint8_t *buf, std::size_t len,
-                                                                           bool end_stream,
-                                                                           std::chrono::milliseconds timeout) noexcept {
+async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write_all(const std::uint8_t *buf, std::size_t len,
+                                                                          bool end_stream,
+                                                                          std::chrono::milliseconds timeout) noexcept {
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -80,7 +80,29 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write_body(const
             co_return std::unexpected(common::IoErr::NoMem);
         }
     }
-    co_return co_await req->write_body(std::move(chunk), timeout);
+    co_return co_await req->write_all(std::move(chunk), timeout);
+}
+
+async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write(mem::IoBufChain &chunk,
+                                                                      std::chrono::milliseconds timeout) noexcept {
+    ClientHttp3Request *req = request();
+    if (req == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await req->write(chunk, timeout);
+}
+
+async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write(const std::uint8_t *buf, std::size_t len,
+                                                                      bool end_stream,
+                                                                      std::chrono::milliseconds timeout) noexcept {
+    if (len != 0 && buf == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    ClientHttp3Request *req = request();
+    if (req == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    co_return co_await req->write(buf, len, end_stream, timeout);
 }
 
 async::Task<common::IoResult<void>> ClientHttp3Exchange::write_trailer(const HttpHeaders &headers,

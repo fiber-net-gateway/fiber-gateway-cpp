@@ -952,7 +952,7 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
                 outcome.protocol = std::string((*header_result)->headers.get("sec-websocket-protocol"));
 
                 static constexpr std::string_view kClientFrame = "client-frame";
-                auto write_result = co_await exchange.write_body(
+                auto write_result = co_await exchange.write_all(
                         reinterpret_cast<const std::uint8_t *>(kClientFrame.data()), kClientFrame.size(), false, 2s);
                 if (!write_result) {
                     outcome.error = write_result.error();

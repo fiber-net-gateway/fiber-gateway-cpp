@@ -290,8 +290,8 @@ NacosClientImpl::login(std::size_t server_index, std::string_view target, std::s
     }
 
     if (!auth_body.empty()) {
-        auto send_body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(auth_body.data()),
-                                                             auth_body.size(), true, options_.request_timeout);
+        auto send_body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(auth_body.data()),
+                                                            auth_body.size(), true, options_.request_timeout);
         if (!running()) {
             co_return std::unexpected(common::IoErr::Canceled);
         }

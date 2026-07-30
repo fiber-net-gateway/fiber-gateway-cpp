@@ -34,8 +34,12 @@ public:
 
     async::Task<common::IoResult<void>> send_request_header(const Http3RequestHead &head, bool end_stream,
                                                             std::chrono::milliseconds timeout) noexcept;
-    async::Task<common::IoResult<std::size_t>> write_body(mem::IoBufChain chunk,
-                                                          std::chrono::milliseconds timeout) noexcept;
+    async::Task<common::IoResult<std::size_t>> write_all(mem::IoBufChain chunk,
+                                                         std::chrono::milliseconds timeout) noexcept;
+    async::Task<common::IoResult<std::size_t>> write(mem::IoBufChain &chunk,
+                                                     std::chrono::milliseconds timeout) noexcept;
+    async::Task<common::IoResult<std::size_t>> write(const std::uint8_t *buf, std::size_t len, bool end_stream,
+                                                     std::chrono::milliseconds timeout) noexcept;
     async::Task<common::IoResult<void>> write_trailer(const HttpHeaders &headers,
                                                       std::chrono::milliseconds timeout) noexcept;
     async::Task<common::IoResult<const Http3ResponseHead *>> read_header(std::chrono::milliseconds timeout) noexcept;
@@ -74,6 +78,8 @@ private:
     static common::IoErr on_value_huffman(void *owner, const std::uint8_t *data, std::size_t len) noexcept;
 
     async::Task<common::IoResult<void>> write_frame(mem::IoBufChain &frame, std::chrono::milliseconds timeout) noexcept;
+    async::Task<common::IoResult<void>> write_data_frame_header(std::size_t payload_len,
+                                                                std::chrono::milliseconds timeout) noexcept;
     async::Task<common::IoResult<void>> read_more_input(std::chrono::milliseconds timeout) noexcept;
     async::Task<common::IoResult<void>> skip_frame_payload(std::uint64_t payload_length,
                                                            std::chrono::milliseconds timeout) noexcept;
@@ -117,6 +123,7 @@ private:
     std::size_t expected_content_length_ = 0;
     std::size_t request_body_sent_ = 0;
     std::size_t request_content_length_ = 0;
+    std::size_t request_data_frame_remaining_ = 0;
     HttpMethod request_method_ = HttpMethod::Unknown;
     Http3ErrorCode response_parse_error_ = Http3ErrorCode::GeneralProtocolError;
     common::IoErr terminal_error_ = common::IoErr::None;
@@ -132,6 +139,8 @@ private:
     bool request_content_length_seen_ = false;
     bool request_headers_sent_ = false;
     bool request_finished_ = false;
+    bool request_data_frame_active_ = false;
+    bool request_data_frame_end_ = false;
     bool final_head_received_ = false;
     bool trailer_received_ = false;
     bool frame_header_in_progress_ = false;

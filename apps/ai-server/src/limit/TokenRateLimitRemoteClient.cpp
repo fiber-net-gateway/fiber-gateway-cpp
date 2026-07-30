@@ -182,8 +182,8 @@ TokenRateLimitRemoteClient::post(const RateLimitNode &node, std::string_view pat
         co_return std::unexpected(error(RateLimitRemoteErrorCode::Send, sent_header.error()));
     }
     if (!request_body.empty()) {
-        auto sent_body = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(request_body.data()),
-                                                      request_body.size(), true, remaining(deadline));
+        auto sent_body = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(request_body.data()),
+                                                     request_body.size(), true, remaining(deadline));
         if (!sent_body || *sent_body != request_body.size()) {
             co_return std::unexpected(
                     error(RateLimitRemoteErrorCode::Send, sent_body ? common::IoErr::Invalid : sent_body.error()));

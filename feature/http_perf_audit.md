@@ -16,7 +16,7 @@
 
 ## 一、最高优先级（热路径，每次请求都付代价）
 
-### 1. HTTP/1 chunked `write_body` 每个 chunk 4 次 syscall ✅ 已修复
+### 1. HTTP/1 chunked `write_all` 每个 chunk 4 次 syscall ✅ 已修复
 - **位置**：`Http1ExchangeIo.cpp:982-994`（server）+ `ClientHttp1Exchange.cpp:807-824`（client，3 次）
 - **问题**：每个 chunk 独立 `co_await write_all(size)`、`write_all("\r\n")`、`write_all(chunk)`、`write_all("\r\n")`，结尾 `"0\r\n\r\n"` 还是单独一次（`:1004`）。而 `write_all(HttpTransport*, IoBufChain&)` 重载（`:178`）已存在——client 自己甚至已把 size+CRLF 合进一个前缀。注意 `:1070-1092` 是第二个 chunked 入口，同样 4 次。
 - **场景**：流式/SSE/代理响应每个 chunk ≥4 syscall 而非 1。

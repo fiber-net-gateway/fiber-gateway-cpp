@@ -428,7 +428,7 @@ DetachedTask run_http1_client_with_body(fiber::event::EventLoop *loop, std::uint
         co_return;
     }
     auto write_result =
-            co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
+            co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
     if (!write_result) {
         result.err = write_result.error();
         promise->set_value(std::move(result));
@@ -558,7 +558,7 @@ DetachedTask run_http2_client_with_body(fiber::event::EventLoop *loop, std::uint
         connection.shutdown();
     } else {
         auto write_result =
-                co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
+                co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
         if (!write_result) {
             result.err = write_result.error();
         } else {
