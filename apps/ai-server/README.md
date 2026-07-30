@@ -140,6 +140,12 @@ Provider 的 `RemoteCall` 和失败分类都挂在对应 `LLM.Provider` Transact
 attempt 数和响应是否已经开始，默认的 `none`、`false`、`0` 不输出。成功 attempt 不生成
 该 Event。
 
+`send_error` 为 ai-server 自己生成的最终错误响应增加 root-level `LLM.ResponseError`
+Event：name 使用稳定的响应 `code`，data 记录 `status`、`type` 和最多 1024 字节的
+`message`；超出时增加 `message_truncated=true`。错误 JSON 编码失败时记录实际回退的
+`internal_error`/500。该 Event 表示准备发送的网关错误，与记录上游失败原因的
+`LLM.UpstreamError` 分工；通过 `send_body` 原样转发的上游非 2xx 响应不生成它。
+
 配置限流规则后，本地 check/settle 记录 `RateLimit.Check/Settle` Event，远程 owner
 调用记录同类型 Transaction；allow、deny 和 stale 属于正常业务结果，网络、成员环
 或响应错误才将 CAT 状态标记为失败。
