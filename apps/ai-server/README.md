@@ -279,18 +279,23 @@ LLM 对话审计使用独立的 `ai_server.audit` logger，不向 stderr 传播�
 日志线程；文件中的每行因此是常规日志前缀加稳定标记 `audit_json=` 和一个完整 JSON，
 采集端应从该标记后解析 JSON。
 
-当前审计 schema 为 `schema_version=4`。`request.body` 是入站 body 的唯一完整副本：
-合法 UTF-8 以 `body_encoding=json_text` 保存，非法 UTF-8 以 base64 保存；图片 URL、
-音频/base64 等多模态字段不会再被过滤。为了让采集服务不必解析 body，`request`
-还直接提供 `request_model_name`、有效 `stream`、`messages_count` 和 `tools_count`。
-`routing.resolved_model_name`、identity、rate-limit、完整 `provider_attempts`、response、
-usage 等信息与它位于同一对象。每个 Provider attempt 还记录
+当前审计 schema 为 `schema_version=5`，按采集端旧列名输出扁平字段。`request_json`
+是入站 body 的唯一完整副本：合法 UTF-8 以 `content_type=json_text` 保存，非法 UTF-8
+以 base64 保存；图片 URL、音频/base64 等多模态字段不会再被过滤。为了让采集服务
+不必解析 body，记录还直接提供 `requested_model`、有效 `stream`、`message_count` 和
+`tool_count`。resolved model、identity、rate-limit、完整 Provider attempts、response、
+usage 等信息位于同一顶层对象。每个 Provider attempt 还记录
 `failure_phase`、`io_error`、`failure_source`、`retry_target`、`retry_performed` 和
 `skipped_attempts`；请求级 `provider_attempt_skipped_count` 汇总被剪枝的计划项。
+`attempts_json` 和 `rate_limit_json` 是包含完整结构的 JSON 字符串，`usage_json`
+是使用 `promptTokens`、`completionTokens`、`total_tokens` 的 JSON 对象，缺失 token
+数按零输出。
 
 同步和 SSE 共用同一个 `llm.output` 聚合器。SSE delta 在转发前依次追加，最终
-`role/content/tool_names/tool_arguments/finish_reason` 的形态与同步响应一致；
-`complete` 表示 Provider 流完整结束，`canonical_complete` 还要求解析和聚合均成功。
+`output_role/response_json/tool_names/tool_arguments/finish_reason` 的形态与同步响应一致；
+`output_complete` 表示 Provider 流完整结束，`output_canonical_complete` 还要求解析和聚合均成功。
+`error_json` 优先使用非 `none` 的终端 I/O 错误，否则使用末条失败 Provider attempt
+的 outcome，全部成功时为空串。`client_aborted` 是最终 `response.completed` 的取反。
 内容不做截断。审计是 best effort：记录超过日志 JSON 中的
 `audit.max_record_bytes`、
 内存分配/JSON 生成失败、日志 backlog 满或文件写入失败时，丢弃受影响的审计记录，

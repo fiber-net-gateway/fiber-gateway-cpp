@@ -26,11 +26,11 @@
 | `response.status` | `status` |                                      |
 | `response.body_bytes` | `response_body_bytes` |                                      |
 | `response.completed` 取反 | `client_aborted` | runtime 取反                           |
-| `response.terminal_error` | `error_json` | 拼装见下                                 |
+| `response.terminal_error` / `provider_attempts` | `error_json` | 按下述优先级拼装                         |
 | `llm.output.content` | `response_json` | available=false 时空串                  |
 | `llm.output.finish_reason` | `finish_reason` |                                      |
 | `llm.output.tool_names` | `tool_names` |                                      |
-| `usage` | `usage_json` | 结构见下                                 |
+| `usage` | `usage_json` | JSON 对象，结构见下                      |
 | `duration_us` | `duration_ms` | ÷1000 换毫秒                            |
 | `provider_attempts[末条].status` | `upstream_status` | 取末次                                  |
 | `provider_attempts[末条].latency_us` | `upstream_latency_ms` | 取末次，÷1000                            |
@@ -41,10 +41,32 @@
 | **缺失** | `real_ip` | runtime 从 request header X-Real-Ip 补 |
 | `request.started_at_ms` | `kafka_ts` / `call_time` | ETL 派生                               |
 
+## error_json 拼装规则
+
+`error_json` 是字符串，按以下优先级输出：
+
+1. `response.terminal_error != "none"` 时，输出 `terminal_error`；
+2. 否则从 `provider_attempts` 尾部反向查找，输出末条 `outcome != "success"` 的 `outcome`；
+3. 没有失败时输出空串。
+
 ## usage_json 内部字段对照
+
+usage 字段缺失或为 null 时按 `0` 处理。
 
 | 当前 usage 字段 | 改为旧字段名 | 转换 |
 |---|---|---|
 | `in_cache` + `in_nocache` | `promptTokens` | 求和 |
 | `out` | `completionTokens` | |
 | `total_tokens` | `total_tokens` | |
+
+## 保留的扁平诊断字段
+
+`schema_version=5` 继续保留 `event=llm_request`，并输出以下扁平诊断字段：
+
+- `capture_complete`、`capture_error`、`auth_reason_code`；
+- `tool_arguments`；
+- `output_available`、`output_role`、`output_complete`、`output_canonical_complete`、
+  `output_event_count`、`output_parse_errors`、`output_sha256`；
+- `output_observed_json_bytes`、`output_observed_text_bytes`、`output_captured_text_bytes`；
+- `response_header_sent`；
+- `provider_attempt_count`、`provider_attempt_skipped_count`。

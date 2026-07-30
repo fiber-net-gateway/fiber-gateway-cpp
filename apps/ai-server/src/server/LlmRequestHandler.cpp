@@ -266,6 +266,16 @@ private:
     std::size_t size_ = 0;
 };
 
+class AuditBufferSink final : public json::OutputSink {
+public:
+    explicit AuditBufferSink(LlmAuditBuffer &buffer) noexcept : buffer_(&buffer) {}
+
+    [[nodiscard]] bool write(const char *data, std::size_t size) override { return buffer_->append(data, size); }
+
+private:
+    LlmAuditBuffer *buffer_ = nullptr;
+};
+
 struct Base64AuditCursor {
     std::string_view input;
     std::size_t offset = 0;
@@ -378,14 +388,6 @@ public:
     void null_field(std::string_view name) noexcept {
         key(name);
         null();
-    }
-    void optional_field(std::string_view name, const std::optional<std::int64_t> &value) noexcept {
-        key(name);
-        if (value) {
-            integer(*value);
-        } else {
-            null();
-        }
     }
 
 private:
@@ -769,8 +771,8 @@ public:
     LlmRequestAudit(http::HttpExchange &exchange, LlmWireProtocol protocol, AiServerCatRequest *cat_request,
                     AiServerMetrics::Worker &metrics, std::size_t max_record_bytes) noexcept :
         exchange_(&exchange), cat_request_(cat_request), protocol_(protocol),
-        started_(event::EventLoop::current().now()), started_at_ms_(wall_now_millis()), metrics_(&metrics),
-        max_record_bytes_(max_record_bytes), output_(max_record_bytes),
+        started_(event::EventLoop::current().now()), metrics_(&metrics), max_record_bytes_(max_record_bytes),
+        output_(max_record_bytes),
         audit_enabled_(max_record_bytes != 0 && LOG_LLM_AUDIT.get().enabled(log::LogLevel::Info)) {
         static std::atomic<std::uint64_t> sequence{0};
         const std::uint64_t next = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1014,112 +1016,7 @@ public:
     }
 
 private:
-    [[nodiscard]] bool encode(AuditJsonWriter &json, const http::HttpResponseStats &response,
-                              std::int64_t duration_us) noexcept {
-        const std::string_view output_error = output_.capture_error();
-        const std::string_view capture_error = !capture_error_.empty() ? capture_error_ : output_error;
-        const bool capture_complete =
-                capture_error.empty() && attempts_observed_ == attempts_size_ && !output_.incomplete();
-        capture_incomplete_ = !capture_complete;
-
-        json.object_open();
-        json.field("schema_version", 4);
-        json.field("event", "llm_request");
-
-        json.key("audit");
-        json.object_open();
-        json.field("id", request_id_);
-        json.field("capture_complete", capture_complete);
-        if (capture_error.empty()) {
-            json.null_field("capture_error");
-        } else {
-            json.field("capture_error", capture_error);
-        }
-        json.object_close();
-
-        json.key("request");
-        json.object_open();
-        json.field("started_at_ms", started_at_ms_);
-        json.field("protocol", protocol_name(protocol_));
-        const std::string remote_addr = exchange_->remote_addr().to_string();
-        json.field("remote_addr", remote_addr);
-        json.field("method", exchange_->method_view());
-        json.field("path", exchange_->uri().path);
-        json.field("request_model_name", requested_model_);
-        json.field("stream", stream_);
-        json.field("messages_count", static_cast<std::int64_t>(messages_count_));
-        json.field("tools_count", static_cast<std::int64_t>(tools_count_));
-        json.field("body_encoding", body_is_utf8_ ? "json_text" : "base64");
-        json.key("body");
-        const std::string_view body =
-                request_body_ ? std::string_view(reinterpret_cast<const char *>(request_body_.readable_data()),
-                                                 request_body_.readable())
-                              : std::string_view{};
-        if (body_is_utf8_) {
-            json.text(body);
-        } else {
-            json.binary_text(body);
-        }
-        json.field("body_bytes", static_cast<std::int64_t>(body_size_));
-        json.field("body_sha256", body_hash_.view());
-        json.object_close();
-
-        json.key("identity");
-        json.object_open();
-        json.field("auth", auth_result_);
-        if (auth_reason_ < 0) {
-            json.null_field("auth_reason");
-            json.null_field("auth_reason_code");
-        } else {
-            json.field("auth_reason", auth_reason_name_);
-            json.field("auth_reason_code", auth_reason_);
-        }
-        json.field("user", user_.view());
-        json.field("kid", kid_.view());
-        json.object_close();
-
-        json.key("routing");
-        json.object_open();
-        json.field("resolved_model_name", model_);
-        json.field("authorization", authz_result_);
-        json.object_close();
-
-        json.key("rate_limit");
-        json.object_open();
-        json.field("result", rate_limit_result_);
-        json.field("used_tokens", rate_used_);
-        json.field("max_tokens", rate_max_);
-        json.field("recover_at_ms", rate_recover_at_);
-        json.object_close();
-
-        json.key("llm");
-        json.object_open();
-        json.key("output");
-        json.object_open();
-        json.field("available", output_.available());
-        json.field("capture_scope", "provider_observed");
-        json.field("role", output_.role());
-        json.field("content", output_.content());
-        json.field("tool_names", output_.tool_names());
-        json.field("tool_arguments", output_.tool_arguments());
-        json.field("finish_reason", output_.finish_reason());
-        json.field("complete", output_.complete());
-        json.field("canonical_complete", output_.canonical_complete());
-        json.field("events", static_cast<std::int64_t>(output_.event_count()));
-        json.field("observed_json_bytes", static_cast<std::int64_t>(output_.observed_json_bytes()));
-        json.field("observed_text_bytes", static_cast<std::int64_t>(output_.observed_text_bytes()));
-        json.field("captured_text_bytes", static_cast<std::int64_t>(output_.captured_text_bytes()));
-        json.field("parse_errors", static_cast<std::int64_t>(output_.parse_errors()));
-        const std::string_view output_hash = output_.hash();
-        if (output_hash.empty()) {
-            json.null_field("sha256");
-        } else {
-            json.field("sha256", output_hash);
-        }
-        json.object_close();
-        json.object_close();
-
-        json.key("provider_attempts");
+    [[nodiscard]] bool encode_provider_attempts(AuditJsonWriter &json) const noexcept {
         json.array_open();
         for (std::size_t i = 0; i < attempts_size_; ++i) {
             const ProviderAttemptAudit &attempt = attempts_[i];
@@ -1159,28 +1056,165 @@ private:
             json.object_close();
         }
         json.array_close();
+        return json.good();
+    }
+
+    [[nodiscard]] bool encode_rate_limit(AuditJsonWriter &json) const noexcept {
+        json.object_open();
+        json.field("result", rate_limit_result_);
+        json.field("used_tokens", rate_used_);
+        json.field("max_tokens", rate_max_);
+        json.field("recover_at_ms", rate_recover_at_);
+        json.object_close();
+        return json.good();
+    }
+
+    [[nodiscard]] std::string_view error_json(const http::HttpResponseStats &response) const noexcept {
+        const std::string_view terminal_error = common::io_err_name(response.terminal_error);
+        if (terminal_error != "none") {
+            return terminal_error;
+        }
+        for (std::size_t i = attempts_size_; i != 0; --i) {
+            const std::string_view outcome = attempts_[i - 1].outcome;
+            if (outcome != "success") {
+                return outcome;
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] static std::int64_t usage_value(const std::optional<std::int64_t> &value) noexcept {
+        return value.value_or(0);
+    }
+
+    [[nodiscard]] static std::int64_t add_usage(std::int64_t left, std::int64_t right) noexcept {
+        if (right > 0 && left > std::numeric_limits<std::int64_t>::max() - right) {
+            return std::numeric_limits<std::int64_t>::max();
+        }
+        if (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right) {
+            return std::numeric_limits<std::int64_t>::min();
+        }
+        return left + right;
+    }
+
+    [[nodiscard]] bool encode(AuditJsonWriter &json, const http::HttpResponseStats &response,
+                              std::int64_t duration_us) noexcept {
+        const std::string_view output_error = output_.capture_error();
+        const std::string_view capture_error = !capture_error_.empty() ? capture_error_ : output_error;
+        const bool capture_complete =
+                capture_error.empty() && attempts_observed_ == attempts_size_ && !output_.incomplete();
+        capture_incomplete_ = !capture_complete;
+
+        LlmAuditBuffer attempts_json(max_record_bytes_);
+        AuditBufferSink attempts_sink(attempts_json);
+        AuditJsonWriter attempts_writer(attempts_sink);
+        if (!encode_provider_attempts(attempts_writer) || attempts_json.failed()) {
+            return false;
+        }
+
+        LlmAuditBuffer rate_limit_json(max_record_bytes_);
+        AuditBufferSink rate_limit_sink(rate_limit_json);
+        AuditJsonWriter rate_limit_writer(rate_limit_sink);
+        if (!encode_rate_limit(rate_limit_writer) || rate_limit_json.failed()) {
+            return false;
+        }
+
+        json.object_open();
+        json.field("schema_version", 5);
+        json.field("event", "llm_request");
+        json.field("request_id", request_id_);
+        json.field("capture_complete", capture_complete);
+        if (capture_error.empty()) {
+            json.null_field("capture_error");
+        } else {
+            json.field("capture_error", capture_error);
+        }
+        json.field("auth_user", user_.view());
+        json.field("auth_kid", kid_.view());
+        json.field("auth", auth_result_);
+        if (auth_reason_ < 0) {
+            json.null_field("authz_reason");
+            json.null_field("auth_reason_code");
+        } else {
+            json.field("authz_reason", auth_reason_name_);
+            json.field("auth_reason_code", auth_reason_);
+        }
+        json.field("authz", authz_result_);
+        json.field("model", model_);
+        json.field("requested_model", requested_model_);
+        json.field("client_protocol", protocol_name(protocol_));
+        json.field("method", exchange_->method_view());
+        json.field("path", exchange_->uri().path);
+        const std::string remote_addr = exchange_->remote_addr().to_string();
+        json.field("remote_addr", remote_addr);
+        json.field("content_type", body_is_utf8_ ? "json_text" : "base64");
+        json.field("stream", stream_);
+        json.field("message_count", static_cast<std::int64_t>(messages_count_));
+        json.field("tool_count", static_cast<std::int64_t>(tools_count_));
+        json.field("request_body_bytes", static_cast<std::int64_t>(body_size_));
+        json.field("request_body_hash", body_hash_.view());
+        json.key("request_json");
+        const std::string_view body =
+                request_body_ ? std::string_view(reinterpret_cast<const char *>(request_body_.readable_data()),
+                                                 request_body_.readable())
+                              : std::string_view{};
+        if (body_is_utf8_) {
+            json.text(body);
+        } else {
+            json.binary_text(body);
+        }
+        json.field("status", response.status_code);
+        json.field("response_body_bytes", static_cast<std::int64_t>(response.body_bytes_sent));
+        json.field("client_aborted", !response.completed);
+        json.field("error_json", error_json(response));
+        json.key("response_json");
+        if (output_.available()) {
+            json.text(output_.content());
+        } else {
+            json.text(std::string_view{});
+        }
+        json.field("finish_reason", output_.finish_reason());
+        json.field("tool_names", output_.tool_names());
+        json.key("usage_json");
+        json.object_open();
+        json.field("promptTokens", add_usage(usage_value(usage_.in_cache), usage_value(usage_.in_nocache)));
+        json.field("completionTokens", usage_value(usage_.out));
+        json.field("total_tokens", usage_value(usage_.total_tokens));
+        json.object_close();
+        json.field("duration_ms", duration_us / 1000);
+        if (attempts_size_ == 0) {
+            json.null_field("upstream_status");
+            json.null_field("upstream_latency_ms");
+        } else {
+            const ProviderAttemptAudit &last = attempts_[attempts_size_ - 1];
+            json.field("upstream_status", last.status);
+            json.field("upstream_latency_ms", last.latency_us / 1000);
+        }
+        json.field("attempts_json", attempts_json);
+        json.field("rate_limit_json", rate_limit_json);
+        json.field("user_agent", exchange_->header("user-agent"));
+        json.field("host", exchange_->header("host"));
+        json.field("real_ip", exchange_->header("x-real-ip"));
+
+        json.field("tool_arguments", output_.tool_arguments());
+        json.field("output_available", output_.available());
+        json.field("output_role", output_.role());
+        json.field("output_complete", output_.complete());
+        json.field("output_canonical_complete", output_.canonical_complete());
+        json.field("output_event_count", static_cast<std::int64_t>(output_.event_count()));
+        json.field("output_observed_json_bytes", static_cast<std::int64_t>(output_.observed_json_bytes()));
+        json.field("output_observed_text_bytes", static_cast<std::int64_t>(output_.observed_text_bytes()));
+        json.field("output_captured_text_bytes", static_cast<std::int64_t>(output_.captured_text_bytes()));
+        json.field("output_parse_errors", static_cast<std::int64_t>(output_.parse_errors()));
+        const std::string_view output_hash = output_.hash();
+        if (output_hash.empty()) {
+            json.null_field("output_sha256");
+        } else {
+            json.field("output_sha256", output_hash);
+        }
         json.field("provider_attempt_count", static_cast<std::int64_t>(attempts_observed_));
         json.field("provider_attempt_skipped_count", static_cast<std::int64_t>(attempts_skipped_));
-
-        json.key("response");
-        json.object_open();
-        json.field("status", response.status_code);
-        json.field("body_bytes", static_cast<std::int64_t>(response.body_bytes_sent));
-        json.field("header_sent", response.header_sent);
-        json.field("completed", response.completed);
-        json.field("terminal_error", common::io_err_name(response.terminal_error));
-        json.object_close();
-
-        json.key("usage");
-        json.object_open();
-        json.field("provider", protocol_name(protocol_));
-        json.optional_field("in_cache", usage_.in_cache);
-        json.optional_field("in_nocache", usage_.in_nocache);
-        json.optional_field("out", usage_.out);
-        json.optional_field("total_tokens", usage_.total_tokens);
-        json.object_close();
-
-        json.field("duration_us", duration_us);
+        json.field("response_header_sent", response.header_sent);
         json.object_close();
         return json.good();
     }
@@ -1219,7 +1253,6 @@ private:
     AiServerCatRequest *cat_request_ = nullptr;
     LlmWireProtocol protocol_ = LlmWireProtocol::OpenAiChatCompletions;
     std::chrono::steady_clock::time_point started_;
-    std::int64_t started_at_ms_ = 0;
     std::array<char, 1024> request_id_storage_{};
     std::string_view request_id_;
     FixedAuditText<kBt1MaxUsernameBytes> user_;
