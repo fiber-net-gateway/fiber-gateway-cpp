@@ -1,0 +1,2512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Fiber Gateway：以 C++23 协程运行时为底座，覆盖 HTTP/1.1、HTTP/2、HTTP/3、QUIC、gRPC 与生产级服务治理的高性能网关框架。">
+    <meta name="theme-color" content="#08110f">
+    <title>Fiber Gateway · 高性能 C++23 网关框架</title>
+    <style>
+        :root {
+            --ink: #f4f7f0;
+            --muted: #9aa8a0;
+            --dim: #6e7e75;
+            --bg: #07100e;
+            --bg-deep: #030806;
+            --panel: rgba(15, 28, 24, 0.78);
+            --panel-solid: #0e1b17;
+            --line: rgba(206, 236, 218, 0.13);
+            --line-strong: rgba(206, 236, 218, 0.24);
+            --acid: #b9f45d;
+            --acid-soft: #d9ff9d;
+            --cyan: #5bd7d0;
+            --orange: #ff9a61;
+            --blue: #78a9ff;
+            --danger: #ff7272;
+            --radius: 24px;
+            --shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+            --ease: cubic-bezier(.2, .7, .2, 1);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+            scroll-padding-top: 92px;
+        }
+
+        body {
+            margin: 0;
+            min-width: 320px;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 12% -8%, rgba(91, 215, 208, 0.12), transparent 30rem),
+                radial-gradient(circle at 86% 10%, rgba(185, 244, 93, 0.08), transparent 34rem),
+                var(--bg);
+            font-family: Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+            line-height: 1.6;
+            text-rendering: optimizeLegibility;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            position: fixed;
+            inset: 0;
+            z-index: -2;
+            content: "";
+            pointer-events: none;
+            opacity: 0.22;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+            background-size: 44px 44px;
+            mask-image: linear-gradient(to bottom, #000 0%, transparent 78%);
+        }
+
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        button,
+        a {
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        button {
+            color: inherit;
+            font: inherit;
+        }
+
+        ::selection {
+            color: #07100e;
+            background: var(--acid);
+        }
+
+        .skip-link {
+            position: fixed;
+            top: 12px;
+            left: 12px;
+            z-index: 100;
+            padding: 10px 16px;
+            color: var(--bg);
+            background: var(--acid);
+            border-radius: 999px;
+            transform: translateY(-150%);
+            transition: transform 180ms ease;
+        }
+
+        .skip-link:focus {
+            transform: translateY(0);
+        }
+
+        .progress {
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 90;
+            width: 100%;
+            height: 2px;
+            transform: scaleX(0);
+            transform-origin: left;
+            background: linear-gradient(90deg, var(--cyan), var(--acid));
+            box-shadow: 0 0 18px rgba(185, 244, 93, 0.5);
+        }
+
+        .container {
+            width: min(1180px, calc(100% - 48px));
+            margin-inline: auto;
+        }
+
+        .nav-wrap {
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            padding-top: 18px;
+        }
+
+        .nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 62px;
+            padding: 0 12px 0 18px;
+            background: rgba(7, 16, 14, 0.74);
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            box-shadow: 0 10px 35px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(18px);
+        }
+
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 11px;
+            font-size: 0.84rem;
+            font-weight: 760;
+            letter-spacing: 0.13em;
+        }
+
+        .brand-mark {
+            display: grid;
+            width: 34px;
+            height: 34px;
+            place-items: center;
+            color: var(--acid);
+            background: rgba(185, 244, 93, 0.08);
+            border: 1px solid rgba(185, 244, 93, 0.24);
+            border-radius: 10px;
+        }
+
+        .brand-mark svg {
+            width: 19px;
+            height: 19px;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 28px;
+            color: var(--muted);
+            font-size: 0.82rem;
+        }
+
+        .nav-links a {
+            transition: color 180ms ease;
+        }
+
+        .nav-links a:hover,
+        .nav-links a:focus-visible {
+            color: var(--ink);
+        }
+
+        .nav-source {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 13px;
+            color: var(--ink) !important;
+            background: rgba(255, 255, 255, 0.055);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+        }
+
+        .nav-source svg {
+            width: 15px;
+        }
+
+        .hero {
+            position: relative;
+            display: grid;
+            grid-template-columns: minmax(0, 1.06fr) minmax(420px, 0.94fr);
+            gap: 66px;
+            align-items: center;
+            min-height: calc(100vh - 80px);
+            padding: 96px 0 108px;
+        }
+
+        .hero::before {
+            position: absolute;
+            top: 8%;
+            right: 0;
+            z-index: -1;
+            width: 520px;
+            height: 520px;
+            content: "";
+            background: radial-gradient(circle, rgba(91, 215, 208, 0.1), transparent 65%);
+            filter: blur(8px);
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 25px;
+            color: var(--acid-soft);
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            font-size: 0.74rem;
+            font-weight: 650;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+        }
+
+        .eyebrow::before {
+            width: 26px;
+            height: 1px;
+            content: "";
+            background: var(--acid);
+            box-shadow: 0 0 12px var(--acid);
+        }
+
+        h1,
+        h2,
+        h3,
+        p {
+            margin-top: 0;
+        }
+
+        h1 {
+            max-width: 780px;
+            margin-bottom: 28px;
+            font-size: clamp(3.45rem, 6vw, 5.7rem);
+            font-weight: 760;
+            line-height: 0.98;
+            letter-spacing: -0.065em;
+        }
+
+        .hero-gradient {
+            display: block;
+            color: transparent;
+            background: linear-gradient(105deg, var(--ink) 8%, var(--acid-soft) 49%, var(--cyan) 95%);
+            background-clip: text;
+            -webkit-background-clip: text;
+        }
+
+        .hero-copy {
+            max-width: 640px;
+            margin-bottom: 36px;
+            color: var(--muted);
+            font-size: clamp(1rem, 1.5vw, 1.16rem);
+            line-height: 1.82;
+        }
+
+        .hero-copy strong {
+            color: var(--ink);
+            font-weight: 600;
+        }
+
+        .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 13px;
+            margin-bottom: 58px;
+        }
+
+        .button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            min-height: 48px;
+            padding: 0 20px;
+            font-size: 0.88rem;
+            font-weight: 680;
+            border: 1px solid transparent;
+            border-radius: 14px;
+            transition:
+                transform 180ms var(--ease),
+                border-color 180ms ease,
+                background 180ms ease;
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+        }
+
+        .button-primary {
+            color: #0b140f;
+            background: var(--acid);
+            box-shadow: 0 12px 35px rgba(185, 244, 93, 0.18);
+        }
+
+        .button-primary:hover {
+            background: #c8ff72;
+        }
+
+        .button-secondary {
+            color: var(--ink);
+            background: rgba(255, 255, 255, 0.035);
+            border-color: var(--line-strong);
+        }
+
+        .button svg {
+            width: 17px;
+            height: 17px;
+        }
+
+        .hero-stats {
+            display: flex;
+            gap: 33px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .hero-stat {
+            position: relative;
+            padding-left: 14px;
+        }
+
+        .hero-stat::before {
+            position: absolute;
+            top: 5px;
+            bottom: 4px;
+            left: 0;
+            width: 2px;
+            content: "";
+            background: var(--line-strong);
+            border-radius: 99px;
+        }
+
+        .hero-stat:first-child::before {
+            background: var(--acid);
+        }
+
+        .hero-stat strong {
+            display: block;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            font-size: 1rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+        }
+
+        .hero-stat span {
+            color: var(--dim);
+            font-size: 0.72rem;
+        }
+
+        .hero-visual {
+            position: relative;
+            min-height: 560px;
+            perspective: 1000px;
+        }
+
+        .system-card {
+            position: absolute;
+            inset: 28px 0 auto;
+            min-height: 505px;
+            padding: 18px;
+            overflow: hidden;
+            background:
+                linear-gradient(145deg, rgba(25, 43, 37, 0.88), rgba(8, 17, 14, 0.91)),
+                var(--panel-solid);
+            border: 1px solid var(--line-strong);
+            border-radius: 28px;
+            box-shadow: var(--shadow);
+            transform: rotateY(-3deg) rotateX(1deg);
+            transform-style: preserve-3d;
+        }
+
+        .system-card::after {
+            position: absolute;
+            inset: 0;
+            content: "";
+            pointer-events: none;
+            background: linear-gradient(115deg, transparent 10%, rgba(255, 255, 255, 0.035) 35%, transparent 57%);
+            transform: translateX(-100%);
+            animation: sheen 8s ease-in-out infinite;
+        }
+
+        .window-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 2px 3px 15px;
+            color: var(--dim);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.64rem;
+            letter-spacing: 0.08em;
+        }
+
+        .window-dots {
+            display: flex;
+            gap: 6px;
+        }
+
+        .window-dot {
+            width: 7px;
+            height: 7px;
+            background: #31413a;
+            border-radius: 50%;
+        }
+
+        .window-dot:first-child {
+            background: var(--orange);
+        }
+
+        .system-stage {
+            position: relative;
+            min-height: 444px;
+            overflow: hidden;
+            background:
+                radial-gradient(circle at 54% 48%, rgba(185, 244, 93, 0.055), transparent 33%),
+                rgba(2, 9, 7, 0.46);
+            border: 1px solid var(--line);
+            border-radius: 20px;
+        }
+
+        .system-stage::before {
+            position: absolute;
+            inset: 0;
+            content: "";
+            opacity: 0.22;
+            background-image: radial-gradient(rgba(201, 240, 220, 0.3) 0.7px, transparent 0.7px);
+            background-size: 18px 18px;
+        }
+
+        .visual-label {
+            position: absolute;
+            z-index: 3;
+            padding: 5px 9px;
+            color: var(--dim);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.58rem;
+            letter-spacing: 0.09em;
+            text-transform: uppercase;
+            background: rgba(7, 16, 14, 0.85);
+            border: 1px solid var(--line);
+            border-radius: 999px;
+        }
+
+        .label-edge {
+            top: 21px;
+            left: 22px;
+        }
+
+        .label-core {
+            top: 21px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .label-services {
+            top: 21px;
+            right: 22px;
+        }
+
+        .node {
+            position: absolute;
+            z-index: 4;
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            min-width: 112px;
+            padding: 10px 12px;
+            color: #dfe9e2;
+            font-size: 0.68rem;
+            font-weight: 650;
+            background: rgba(16, 30, 25, 0.92);
+            border: 1px solid var(--line-strong);
+            border-radius: 12px;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+        }
+
+        .node-dot {
+            flex: 0 0 auto;
+            width: 7px;
+            height: 7px;
+            background: var(--cyan);
+            border-radius: 50%;
+            box-shadow: 0 0 12px currentColor;
+        }
+
+        .node-client {
+            top: 89px;
+            left: 22px;
+        }
+
+        .node-protocol {
+            top: 78px;
+            left: 50%;
+            color: var(--acid-soft);
+            border-color: rgba(185, 244, 93, 0.34);
+            transform: translateX(-50%);
+        }
+
+        .node-protocol .node-dot {
+            background: var(--acid);
+        }
+
+        .node-runtime {
+            top: 176px;
+            left: 50%;
+            color: #e5fbfa;
+            border-color: rgba(91, 215, 208, 0.3);
+            transform: translateX(-50%);
+        }
+
+        .node-runtime .node-dot {
+            background: var(--cyan);
+        }
+
+        .node-transport {
+            top: 274px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .node-transport .node-dot {
+            background: var(--blue);
+        }
+
+        .node-upstream {
+            top: 361px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .node-upstream .node-dot {
+            background: var(--orange);
+        }
+
+        .node-observe {
+            top: 120px;
+            right: 20px;
+        }
+
+        .node-discovery {
+            top: 223px;
+            right: 20px;
+        }
+
+        .node-dns {
+            top: 326px;
+            right: 20px;
+        }
+
+        .node-observe .node-dot {
+            background: var(--orange);
+        }
+
+        .node-discovery .node-dot {
+            background: var(--acid);
+        }
+
+        .node-dns .node-dot {
+            background: var(--blue);
+        }
+
+        .visual-lines {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+            width: 100%;
+            height: 100%;
+            overflow: visible;
+        }
+
+        .visual-lines path {
+            fill: none;
+            stroke: rgba(150, 190, 172, 0.2);
+            stroke-width: 1.25;
+            vector-effect: non-scaling-stroke;
+        }
+
+        .visual-lines .active-line {
+            stroke: url(#lineGradient);
+            stroke-dasharray: 5 9;
+            animation: dash 2.7s linear infinite;
+        }
+
+        .packet {
+            filter: drop-shadow(0 0 5px var(--acid));
+        }
+
+        .protocol-stack {
+            position: absolute;
+            right: -22px;
+            bottom: 0;
+            z-index: 8;
+            display: flex;
+            gap: 8px;
+            padding: 12px;
+            background: rgba(7, 16, 14, 0.86);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            box-shadow: 0 16px 35px rgba(0, 0, 0, 0.24);
+            backdrop-filter: blur(12px);
+        }
+
+        .protocol-pill {
+            padding: 7px 9px;
+            color: var(--muted);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.62rem;
+            background: rgba(255, 255, 255, 0.035);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+        }
+
+        .protocol-pill:last-child {
+            color: var(--acid-soft);
+            border-color: rgba(185, 244, 93, 0.23);
+        }
+
+        .floating-status {
+            position: absolute;
+            bottom: 36px;
+            left: -28px;
+            z-index: 9;
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            padding: 12px 15px;
+            color: var(--muted);
+            font-size: 0.7rem;
+            background: rgba(13, 27, 22, 0.9);
+            border: 1px solid var(--line-strong);
+            border-radius: 14px;
+            box-shadow: 0 14px 30px rgba(0, 0, 0, 0.26);
+            backdrop-filter: blur(12px);
+            animation: float 4.5s ease-in-out infinite;
+        }
+
+        .status-pulse {
+            width: 9px;
+            height: 9px;
+            background: var(--acid);
+            border-radius: 50%;
+            box-shadow: 0 0 0 0 rgba(185, 244, 93, 0.55);
+            animation: pulse 2s ease-out infinite;
+        }
+
+        .floating-status strong {
+            display: block;
+            color: var(--ink);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.69rem;
+            font-weight: 600;
+        }
+
+        .section {
+            position: relative;
+            padding: 118px 0;
+        }
+
+        .section-muted {
+            border-block: 1px solid rgba(206, 236, 218, 0.07);
+            background:
+                linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 28%),
+                rgba(2, 9, 7, 0.34);
+        }
+
+        .section-heading {
+            display: grid;
+            grid-template-columns: 0.8fr 1.2fr;
+            gap: 80px;
+            align-items: end;
+            margin-bottom: 62px;
+        }
+
+        .section-kicker {
+            display: block;
+            margin-bottom: 15px;
+            color: var(--cyan);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.7rem;
+            font-weight: 650;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+        }
+
+        .section-heading h2 {
+            margin-bottom: 0;
+            font-size: clamp(2.25rem, 4.2vw, 4rem);
+            font-weight: 720;
+            line-height: 1.08;
+            letter-spacing: -0.055em;
+        }
+
+        .section-intro {
+            max-width: 570px;
+            margin: 0;
+            color: var(--muted);
+            font-size: 1rem;
+            line-height: 1.85;
+        }
+
+        .advantage-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 16px;
+        }
+
+        .feature-card {
+            position: relative;
+            min-height: 280px;
+            padding: 28px;
+            overflow: hidden;
+            background:
+                radial-gradient(circle at var(--mx, 50%) var(--my, 50%), rgba(185, 244, 93, 0.075), transparent 34%),
+                var(--panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            transition:
+                transform 260ms var(--ease),
+                border-color 260ms ease;
+        }
+
+        .feature-card:hover {
+            border-color: rgba(185, 244, 93, 0.27);
+            transform: translateY(-4px);
+        }
+
+        .feature-card:nth-child(1) {
+            grid-column: span 7;
+        }
+
+        .feature-card:nth-child(2) {
+            grid-column: span 5;
+        }
+
+        .feature-card:nth-child(3) {
+            grid-column: span 5;
+        }
+
+        .feature-card:nth-child(4) {
+            grid-column: span 7;
+        }
+
+        .feature-index {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 37px;
+            height: 26px;
+            margin-bottom: 45px;
+            color: var(--acid-soft);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.64rem;
+            border: 1px solid rgba(185, 244, 93, 0.25);
+            border-radius: 99px;
+        }
+
+        .feature-card h3 {
+            margin-bottom: 12px;
+            font-size: 1.42rem;
+            font-weight: 650;
+            letter-spacing: -0.035em;
+        }
+
+        .feature-card p {
+            max-width: 570px;
+            margin-bottom: 0;
+            color: var(--muted);
+            font-size: 0.9rem;
+            line-height: 1.78;
+        }
+
+        .feature-decor {
+            position: absolute;
+            top: 28px;
+            right: 27px;
+            color: rgba(185, 244, 93, 0.55);
+        }
+
+        .feature-decor svg {
+            width: 86px;
+            height: 54px;
+        }
+
+        .architecture-shell {
+            display: grid;
+            grid-template-columns: 0.95fr 1.05fr;
+            min-height: 680px;
+            overflow: hidden;
+            background: rgba(7, 16, 14, 0.72);
+            border: 1px solid var(--line-strong);
+            border-radius: 30px;
+            box-shadow: var(--shadow);
+        }
+
+        .architecture-copy {
+            padding: 52px 46px;
+            border-right: 1px solid var(--line);
+        }
+
+        .architecture-copy h3 {
+            margin-bottom: 14px;
+            font-size: 2rem;
+            line-height: 1.18;
+            letter-spacing: -0.045em;
+        }
+
+        .architecture-copy > p {
+            margin-bottom: 36px;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .architecture-tabs {
+            display: grid;
+            gap: 10px;
+        }
+
+        .architecture-tab {
+            display: grid;
+            grid-template-columns: 44px 1fr auto;
+            gap: 12px;
+            align-items: center;
+            width: 100%;
+            padding: 15px 16px;
+            text-align: left;
+            cursor: pointer;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 15px;
+            transition:
+                background 180ms ease,
+                border-color 180ms ease;
+        }
+
+        .architecture-tab:hover {
+            background: rgba(255, 255, 255, 0.025);
+        }
+
+        .architecture-tab[aria-selected="true"] {
+            background: rgba(185, 244, 93, 0.065);
+            border-color: rgba(185, 244, 93, 0.2);
+        }
+
+        .architecture-tab .tab-number {
+            color: var(--dim);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.65rem;
+        }
+
+        .architecture-tab .tab-title {
+            font-size: 0.88rem;
+            font-weight: 630;
+        }
+
+        .architecture-tab .tab-arrow {
+            color: var(--dim);
+            transition:
+                color 180ms ease,
+                transform 180ms ease;
+        }
+
+        .architecture-tab[aria-selected="true"] .tab-arrow {
+            color: var(--acid);
+            transform: translateX(3px);
+        }
+
+        .architecture-detail {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            padding: 40px;
+            background:
+                radial-gradient(circle at 50% 42%, rgba(91, 215, 208, 0.07), transparent 40%),
+                rgba(5, 13, 10, 0.68);
+        }
+
+        .architecture-detail-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 44px;
+            margin-bottom: 20px;
+        }
+
+        .architecture-detail-head span {
+            color: var(--dim);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.64rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+
+        .architecture-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 6px 10px;
+            color: var(--acid-soft) !important;
+            background: rgba(185, 244, 93, 0.055);
+            border: 1px solid rgba(185, 244, 93, 0.17);
+            border-radius: 99px;
+        }
+
+        .architecture-badge::before {
+            width: 5px;
+            height: 5px;
+            content: "";
+            background: var(--acid);
+            border-radius: 50%;
+        }
+
+        .layer-map {
+            position: relative;
+            display: grid;
+            align-content: center;
+            gap: 10px;
+            min-height: 550px;
+        }
+
+        .layer {
+            position: relative;
+            display: grid;
+            grid-template-columns: 140px 1fr;
+            gap: 16px;
+            align-items: center;
+            min-height: 76px;
+            padding: 12px 16px;
+            opacity: 0.48;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--line);
+            border-radius: 15px;
+            transition:
+                opacity 260ms ease,
+                border-color 260ms ease,
+                background 260ms ease,
+                transform 260ms var(--ease);
+        }
+
+        .layer::before {
+            position: absolute;
+            top: -11px;
+            left: 42px;
+            width: 1px;
+            height: 10px;
+            content: "";
+            background: var(--line-strong);
+        }
+
+        .layer:first-child::before {
+            display: none;
+        }
+
+        .layer.is-active {
+            opacity: 1;
+            background: linear-gradient(90deg, rgba(185, 244, 93, 0.075), rgba(255, 255, 255, 0.025));
+            border-color: rgba(185, 244, 93, 0.28);
+            transform: translateX(6px);
+        }
+
+        .layer-name {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            font-size: 0.8rem;
+            font-weight: 650;
+        }
+
+        .layer-icon {
+            display: grid;
+            flex: 0 0 auto;
+            width: 27px;
+            height: 27px;
+            place-items: center;
+            color: var(--acid-soft);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.57rem;
+            background: rgba(185, 244, 93, 0.07);
+            border: 1px solid rgba(185, 244, 93, 0.17);
+            border-radius: 8px;
+        }
+
+        .layer-items {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .layer-items span {
+            padding: 5px 8px;
+            color: var(--muted);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.58rem;
+            background: rgba(255, 255, 255, 0.028);
+            border: 1px solid rgba(255, 255, 255, 0.055);
+            border-radius: 7px;
+        }
+
+        .flow-section {
+            overflow: hidden;
+        }
+
+        .flow-track {
+            position: relative;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+        }
+
+        .flow-track::before {
+            position: absolute;
+            top: 44px;
+            right: 8%;
+            left: 8%;
+            height: 1px;
+            content: "";
+            background: linear-gradient(90deg, transparent, rgba(185, 244, 93, 0.4), rgba(91, 215, 208, 0.4), transparent);
+        }
+
+        .flow-step {
+            position: relative;
+            z-index: 1;
+            min-height: 252px;
+            padding: 0 20px 26px;
+            text-align: center;
+        }
+
+        .flow-number {
+            display: grid;
+            width: 88px;
+            height: 88px;
+            margin: 0 auto 26px;
+            place-items: center;
+            color: var(--acid-soft);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.76rem;
+            background: var(--bg);
+            border: 1px solid rgba(185, 244, 93, 0.27);
+            border-radius: 50%;
+            box-shadow:
+                inset 0 0 0 9px rgba(185, 244, 93, 0.025),
+                0 0 0 8px var(--bg);
+        }
+
+        .flow-step:nth-child(2) .flow-number {
+            color: #b5f7f3;
+            border-color: rgba(91, 215, 208, 0.28);
+        }
+
+        .flow-step:nth-child(3) .flow-number {
+            color: #c4d7ff;
+            border-color: rgba(120, 169, 255, 0.3);
+        }
+
+        .flow-step:nth-child(4) .flow-number {
+            color: #ffd0b4;
+            border-color: rgba(255, 154, 97, 0.3);
+        }
+
+        .flow-step h3 {
+            margin-bottom: 10px;
+            font-size: 1.1rem;
+        }
+
+        .flow-step p {
+            margin-bottom: 0;
+            color: var(--muted);
+            font-size: 0.82rem;
+            line-height: 1.72;
+        }
+
+        .performance-layout {
+            display: grid;
+            grid-template-columns: 0.72fr 1.28fr;
+            gap: 17px;
+        }
+
+        .performance-copy,
+        .performance-chart {
+            padding: 34px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+        }
+
+        .performance-copy {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 470px;
+        }
+
+        .performance-copy h3 {
+            max-width: 390px;
+            margin-bottom: 18px;
+            font-size: 2.1rem;
+            line-height: 1.15;
+            letter-spacing: -0.045em;
+        }
+
+        .performance-copy p {
+            color: var(--muted);
+            font-size: 0.88rem;
+        }
+
+        .performance-big {
+            margin-top: 40px;
+        }
+
+        .performance-big strong {
+            display: block;
+            color: var(--acid-soft);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: clamp(3.4rem, 7vw, 5.8rem);
+            font-weight: 600;
+            line-height: 1;
+            letter-spacing: -0.08em;
+        }
+
+        .performance-big span {
+            color: var(--dim);
+            font-size: 0.74rem;
+        }
+
+        .fine-print {
+            padding-top: 24px;
+            color: var(--dim) !important;
+            font-size: 0.69rem !important;
+            border-top: 1px solid var(--line);
+        }
+
+        .performance-chart {
+            min-height: 470px;
+        }
+
+        .chart-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 42px;
+        }
+
+        .chart-head h3 {
+            margin-bottom: 0;
+            font-size: 1rem;
+            font-weight: 630;
+        }
+
+        .chart-legend {
+            display: flex;
+            gap: 14px;
+            color: var(--dim);
+            font-size: 0.64rem;
+        }
+
+        .chart-legend span {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .chart-legend i {
+            width: 8px;
+            height: 8px;
+            background: var(--acid);
+            border-radius: 2px;
+        }
+
+        .chart-legend span:last-child i {
+            background: #33483e;
+        }
+
+        .chart-rows {
+            display: grid;
+            gap: 29px;
+        }
+
+        .chart-row {
+            display: grid;
+            grid-template-columns: 112px 1fr 56px;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .chart-label strong {
+            display: block;
+            font-size: 0.76rem;
+            font-weight: 620;
+        }
+
+        .chart-label span {
+            color: var(--dim);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.58rem;
+        }
+
+        .bars {
+            display: grid;
+            gap: 6px;
+        }
+
+        .bar {
+            position: relative;
+            width: 100%;
+            height: 9px;
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.025);
+            border-radius: 99px;
+        }
+
+        .bar span {
+            display: block;
+            width: 0;
+            height: 100%;
+            background: linear-gradient(90deg, var(--cyan), var(--acid));
+            border-radius: inherit;
+            box-shadow: 0 0 16px rgba(185, 244, 93, 0.25);
+            transition: width 1.1s var(--ease);
+        }
+
+        .bar.baseline span {
+            background: #33483e;
+            box-shadow: none;
+        }
+
+        .bar-w-92 {
+            --bar-width: 92%;
+        }
+
+        .bar-w-82 {
+            --bar-width: 82%;
+        }
+
+        .bar-w-72 {
+            --bar-width: 72%;
+        }
+
+        .bar-w-68 {
+            --bar-width: 68%;
+        }
+
+        .bar-w-43 {
+            --bar-width: 43%;
+        }
+
+        .bar-w-42 {
+            --bar-width: 42%;
+        }
+
+        .bar-w-40 {
+            --bar-width: 40%;
+        }
+
+        .is-visible .bar span {
+            width: var(--bar-width);
+        }
+
+        .chart-ratio {
+            color: var(--acid-soft);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.72rem;
+            text-align: right;
+        }
+
+        .ecosystem-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+        }
+
+        .ecosystem-card {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            min-height: 260px;
+            padding: 28px;
+            overflow: hidden;
+            background: rgba(13, 26, 22, 0.62);
+            border: 1px solid var(--line);
+            border-radius: 20px;
+            transition:
+                border-color 220ms ease,
+                transform 220ms var(--ease);
+        }
+
+        .ecosystem-card:hover {
+            border-color: var(--line-strong);
+            transform: translateY(-4px);
+        }
+
+        .ecosystem-card::after {
+            position: absolute;
+            right: -34px;
+            bottom: -46px;
+            width: 130px;
+            height: 130px;
+            content: "";
+            background: radial-gradient(circle, var(--glow, rgba(185, 244, 93, 0.11)), transparent 66%);
+        }
+
+        .ecosystem-card:nth-child(2) {
+            --glow: rgba(91, 215, 208, 0.12);
+        }
+
+        .ecosystem-card:nth-child(3) {
+            --glow: rgba(120, 169, 255, 0.12);
+        }
+
+        .ecosystem-card:nth-child(4) {
+            --glow: rgba(255, 154, 97, 0.12);
+        }
+
+        .ecosystem-card:nth-child(5) {
+            --glow: rgba(185, 244, 93, 0.12);
+        }
+
+        .ecosystem-card:nth-child(6) {
+            --glow: rgba(91, 215, 208, 0.12);
+        }
+
+        .ecosystem-icon {
+            display: grid;
+            width: 42px;
+            height: 42px;
+            margin-bottom: 31px;
+            place-items: center;
+            color: var(--acid-soft);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.62rem;
+            font-weight: 700;
+            background: rgba(185, 244, 93, 0.055);
+            border: 1px solid rgba(185, 244, 93, 0.18);
+            border-radius: 12px;
+        }
+
+        .ecosystem-card h3 {
+            margin-bottom: 9px;
+            font-size: 1.13rem;
+        }
+
+        .ecosystem-card p {
+            flex: 1;
+            margin-bottom: 20px;
+            color: var(--muted);
+            font-size: 0.8rem;
+            line-height: 1.7;
+        }
+
+        .ecosystem-card a,
+        .ecosystem-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            width: fit-content;
+            color: var(--dim);
+            font-size: 0.68rem;
+            transition: color 180ms ease;
+        }
+
+        .ecosystem-card a:hover {
+            color: var(--acid-soft);
+        }
+
+        .quickstart {
+            position: relative;
+            display: grid;
+            grid-template-columns: 0.8fr 1.2fr;
+            gap: 50px;
+            align-items: center;
+            padding: 55px;
+            overflow: hidden;
+            background:
+                radial-gradient(circle at 9% 30%, rgba(185, 244, 93, 0.09), transparent 28%),
+                linear-gradient(135deg, rgba(20, 38, 31, 0.94), rgba(8, 17, 14, 0.94));
+            border: 1px solid var(--line-strong);
+            border-radius: 30px;
+            box-shadow: var(--shadow);
+        }
+
+        .quickstart::before {
+            position: absolute;
+            top: -90px;
+            right: -50px;
+            width: 300px;
+            height: 300px;
+            content: "";
+            border: 1px solid rgba(185, 244, 93, 0.08);
+            border-radius: 50%;
+            box-shadow:
+                0 0 0 34px rgba(185, 244, 93, 0.025),
+                0 0 0 78px rgba(185, 244, 93, 0.015);
+        }
+
+        .quickstart-copy {
+            position: relative;
+            z-index: 1;
+        }
+
+        .quickstart h2 {
+            margin-bottom: 18px;
+            font-size: clamp(2.35rem, 4.2vw, 4rem);
+            line-height: 1.08;
+            letter-spacing: -0.055em;
+        }
+
+        .quickstart p {
+            margin-bottom: 0;
+            color: var(--muted);
+            font-size: 0.91rem;
+        }
+
+        .terminal {
+            position: relative;
+            z-index: 1;
+            overflow: hidden;
+            background: rgba(2, 8, 6, 0.92);
+            border: 1px solid var(--line-strong);
+            border-radius: 18px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28);
+        }
+
+        .terminal-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 44px;
+            padding: 0 13px 0 17px;
+            color: var(--dim);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.61rem;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .copy-button {
+            padding: 5px 9px;
+            color: var(--muted);
+            cursor: pointer;
+            background: rgba(255, 255, 255, 0.035);
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            transition:
+                color 180ms ease,
+                border-color 180ms ease;
+        }
+
+        .copy-button:hover {
+            color: var(--ink);
+            border-color: var(--line-strong);
+        }
+
+        pre {
+            margin: 0;
+            padding: 26px;
+            overflow-x: auto;
+            color: #dce6df;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            font-size: 0.72rem;
+            line-height: 1.9;
+        }
+
+        .prompt {
+            color: var(--acid);
+        }
+
+        .command-comment {
+            color: #617169;
+        }
+
+        footer {
+            padding: 48px 0 52px;
+            color: var(--dim);
+            font-size: 0.71rem;
+        }
+
+        .footer-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-top: 26px;
+            border-top: 1px solid var(--line);
+        }
+
+        .footer-signature {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+        }
+
+        .footer-signature i {
+            width: 6px;
+            height: 6px;
+            background: var(--acid);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--acid);
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 20px;
+        }
+
+        .footer-links a {
+            transition: color 180ms ease;
+        }
+
+        .footer-links a:hover {
+            color: var(--ink);
+        }
+
+        .reveal {
+            opacity: 0;
+            transform: translateY(24px);
+            transition:
+                opacity 700ms var(--ease),
+                transform 700ms var(--ease);
+        }
+
+        .reveal.is-visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .reveal-delay-1 {
+            transition-delay: 80ms;
+        }
+
+        .reveal-delay-2 {
+            transition-delay: 160ms;
+        }
+
+        .reveal-delay-3 {
+            transition-delay: 240ms;
+        }
+
+        :focus-visible {
+            outline: 2px solid var(--acid);
+            outline-offset: 4px;
+        }
+
+        @keyframes dash {
+            to {
+                stroke-dashoffset: -28;
+            }
+        }
+
+        @keyframes float {
+            0%,
+            100% {
+                transform: translateY(0);
+            }
+            50% {
+                transform: translateY(-8px);
+            }
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(185, 244, 93, 0.48);
+            }
+            70% {
+                box-shadow: 0 0 0 9px rgba(185, 244, 93, 0);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(185, 244, 93, 0);
+            }
+        }
+
+        @keyframes sheen {
+            0%,
+            72% {
+                transform: translateX(-105%);
+            }
+            100% {
+                transform: translateX(105%);
+            }
+        }
+
+        @media (max-width: 1040px) {
+            .hero {
+                grid-template-columns: 1fr;
+                gap: 36px;
+                padding-top: 90px;
+            }
+
+            .hero-copy {
+                max-width: 720px;
+            }
+
+            .hero-visual {
+                width: min(620px, 100%);
+                margin-inline: auto;
+            }
+
+            .section-heading {
+                grid-template-columns: 1fr;
+                gap: 26px;
+            }
+
+            .architecture-shell {
+                grid-template-columns: 1fr;
+            }
+
+            .architecture-copy {
+                border-right: 0;
+                border-bottom: 1px solid var(--line);
+            }
+
+            .architecture-tabs {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .performance-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .performance-copy {
+                min-height: 390px;
+            }
+
+            .ecosystem-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 760px) {
+            .container {
+                width: min(100% - 28px, 620px);
+            }
+
+            .nav-wrap {
+                padding-top: 10px;
+            }
+
+            .nav {
+                min-height: 56px;
+                padding-left: 13px;
+            }
+
+            .brand {
+                font-size: 0.72rem;
+            }
+
+            .brand-mark {
+                width: 31px;
+                height: 31px;
+            }
+
+            .nav-links > a:not(.nav-source) {
+                display: none;
+            }
+
+            .nav-links {
+                flex: 0 0 auto;
+                gap: 0;
+            }
+
+            .nav-source span {
+                display: none;
+            }
+
+            .hero {
+                min-height: auto;
+                padding: 80px 0 88px;
+            }
+
+            h1 {
+                font-size: clamp(2.8rem, 14vw, 5.1rem);
+            }
+
+            .hero-stats {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 20px;
+            }
+
+            .hero-visual {
+                min-height: 505px;
+            }
+
+            .system-card {
+                min-height: 470px;
+                transform: none;
+            }
+
+            .system-stage {
+                min-height: 407px;
+            }
+
+            .node {
+                min-width: auto;
+                padding: 9px;
+                font-size: 0.58rem;
+            }
+
+            .node-client {
+                left: 12px;
+            }
+
+            .node-observe,
+            .node-discovery,
+            .node-dns {
+                right: 10px;
+            }
+
+            .protocol-stack {
+                right: 10px;
+                bottom: -8px;
+            }
+
+            .floating-status {
+                bottom: 19px;
+                left: 8px;
+            }
+
+            .section {
+                padding: 88px 0;
+            }
+
+            .section-heading {
+                margin-bottom: 42px;
+            }
+
+            .feature-card:nth-child(n) {
+                grid-column: span 12;
+            }
+
+            .architecture-copy,
+            .architecture-detail,
+            .performance-copy,
+            .performance-chart {
+                padding: 27px 21px;
+            }
+
+            .architecture-tabs {
+                grid-template-columns: 1fr;
+            }
+
+            .layer {
+                grid-template-columns: 1fr;
+                gap: 8px;
+                min-height: 92px;
+            }
+
+            .layer-map {
+                min-height: 620px;
+            }
+
+            .flow-track {
+                grid-template-columns: 1fr;
+            }
+
+            .flow-track::before {
+                top: 40px;
+                bottom: 40px;
+                left: 43px;
+                width: 1px;
+                height: auto;
+                background: linear-gradient(to bottom, transparent, rgba(185, 244, 93, 0.4), rgba(91, 215, 208, 0.4), transparent);
+            }
+
+            .flow-step {
+                display: grid;
+                grid-template-columns: 86px 1fr;
+                column-gap: 20px;
+                min-height: auto;
+                padding: 0 0 26px;
+                text-align: left;
+            }
+
+            .flow-number {
+                grid-row: span 2;
+                width: 76px;
+                height: 76px;
+                margin: 0;
+            }
+
+            .flow-step h3 {
+                align-self: end;
+                margin-bottom: 5px;
+            }
+
+            .chart-row {
+                grid-template-columns: 88px 1fr 45px;
+                gap: 10px;
+            }
+
+            .chart-legend {
+                display: none;
+            }
+
+            .ecosystem-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .quickstart {
+                grid-template-columns: 1fr;
+                gap: 32px;
+                padding: 35px 21px 22px;
+            }
+
+            .footer-inner {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 18px;
+            }
+        }
+
+        @media (max-width: 450px) {
+            .hero-actions .button {
+                width: 100%;
+            }
+
+            .hero-visual {
+                min-height: 470px;
+            }
+
+            .system-card {
+                inset: 10px 0 auto;
+                min-height: 440px;
+                padding: 10px;
+            }
+
+            .system-stage {
+                min-height: 388px;
+            }
+
+            .visual-label {
+                display: none;
+            }
+
+            .node-client {
+                top: 65px;
+            }
+
+            .node-protocol {
+                top: 58px;
+            }
+
+            .node-runtime {
+                top: 143px;
+            }
+
+            .node-transport {
+                top: 228px;
+            }
+
+            .node-upstream {
+                top: 313px;
+            }
+
+            .node-observe {
+                top: 105px;
+            }
+
+            .node-discovery {
+                top: 194px;
+            }
+
+            .node-dns {
+                top: 284px;
+            }
+
+            .protocol-stack {
+                display: none;
+            }
+
+            .floating-status {
+                bottom: 4px;
+            }
+
+            .chart-row {
+                grid-template-columns: 1fr auto;
+            }
+
+            .bars {
+                grid-column: 1 / -1;
+                grid-row: 2;
+            }
+
+            pre {
+                padding: 20px 16px;
+                font-size: 0.66rem;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                scroll-behavior: auto !important;
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+
+            .reveal {
+                opacity: 1;
+                transform: none;
+            }
+
+            .packet {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <a class="skip-link" href="#main">跳至主要内容</a>
+    <div class="progress" aria-hidden="true"></div>
+
+    <div class="nav-wrap container">
+        <nav class="nav" aria-label="主导航">
+            <a class="brand" href="#top" aria-label="Fiber Gateway 首页">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <path d="M4 6h8.5M4 12h16M4 18h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <circle cx="16.5" cy="6" r="2.5" stroke="currentColor" stroke-width="1.5"/>
+                        <circle cx="18" cy="18" r="2.5" stroke="currentColor" stroke-width="1.5"/>
+                    </svg>
+                </span>
+                <span>FIBER / GATEWAY</span>
+            </a>
+            <div class="nav-links">
+                <a href="#advantages">优势</a>
+                <a href="#architecture">架构</a>
+                <a href="#performance">性能</a>
+                <a href="#ecosystem">生态</a>
+                <a class="nav-source" href="https://github.com/fiber-net-gateway/fiber-gateway-cpp" target="_blank" rel="noreferrer">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M12 3a9 9 0 0 0-2.85 17.54c.45.08.62-.2.62-.44v-1.72c-2.52.55-3.05-1.07-3.05-1.07-.41-1.05-1.01-1.33-1.01-1.33-.82-.57.06-.56.06-.56.91.07 1.39.94 1.39.94.81 1.39 2.12.99 2.64.76.08-.59.32-.99.58-1.22-2.01-.23-4.13-1.01-4.13-4.45 0-.99.35-1.79.93-2.42-.09-.23-.4-1.15.09-2.39 0 0 .76-.24 2.48.93A8.6 8.6 0 0 1 12 8.31a8.6 8.6 0 0 1 2.26.3c1.72-1.17 2.48-.93 2.48-.93.49 1.24.18 2.16.09 2.39.58.63.93 1.43.93 2.42 0 3.45-2.12 4.21-4.14 4.44.33.28.62.83.62 1.68v2.49c0 .24.16.52.62.43A9 9 0 0 0 12 3Z" fill="currentColor"/>
+                    </svg>
+                    <span>Source</span>
+                </a>
+            </div>
+        </nav>
+    </div>
+
+    <header id="top" class="container">
+        <div class="hero">
+            <div class="hero-content">
+                <span class="eyebrow">C++23 · Linux · Performance first</span>
+                <h1>复杂协议栈，<span class="hero-gradient">一个运行时。</span></h1>
+                <p class="hero-copy">
+                    Fiber Gateway 是面向反向代理、API 网关与异步网络服务的高性能框架。
+                    从 <strong>epoll 事件循环</strong>、C++23 协程、TCP / QUIC，到 HTTP 1 / 2 / 3、
+                    gRPC 与生产可观测性——一套代码路径，贯穿请求的完整生命周期。
+                </p>
+                <div class="hero-actions">
+                    <a class="button button-primary" href="#architecture">
+                        探索系统架构
+                        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                            <path d="M4 10h11m-4-4 4 4-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </a>
+                    <a class="button button-secondary" href="../../README.zh-CN.md">
+                        阅读项目文档
+                    </a>
+                </div>
+                <ul class="hero-stats">
+                    <li class="hero-stat">
+                        <strong>C++23</strong>
+                        <span>现代协程运行时</span>
+                    </li>
+                    <li class="hero-stat">
+                        <strong>HTTP 1·2·3</strong>
+                        <span>统一服务端协议栈</span>
+                    </li>
+                    <li class="hero-stat">
+                        <strong>QUIC v1</strong>
+                        <span>自研传输实现</span>
+                    </li>
+                    <li class="hero-stat">
+                        <strong>epoll</strong>
+                        <span>Linux 事件驱动</span>
+                    </li>
+                </ul>
+            </div>
+
+            <div class="hero-visual" role="img" aria-label="Fiber Gateway 请求路径示意图">
+                <div class="system-card">
+                    <div class="window-bar">
+                        <div class="window-dots" aria-hidden="true">
+                            <i class="window-dot"></i><i class="window-dot"></i><i class="window-dot"></i>
+                        </div>
+                        <span>request_topology.live</span>
+                        <span>01:27:42</span>
+                    </div>
+                    <div class="system-stage">
+                        <span class="visual-label label-edge">edge</span>
+                        <span class="visual-label label-core">fiber core</span>
+                        <span class="visual-label label-services">services</span>
+
+                        <svg class="visual-lines" viewBox="0 0 500 444" preserveAspectRatio="none" aria-hidden="true">
+                            <defs>
+                                <linearGradient id="lineGradient" x1="0" y1="0" x2="1" y2="1">
+                                    <stop offset="0" stop-color="#5bd7d0"/>
+                                    <stop offset="0.55" stop-color="#b9f45d"/>
+                                    <stop offset="1" stop-color="#ff9a61"/>
+                                </linearGradient>
+                            </defs>
+                            <path class="active-line" d="M82 104 C142 104 160 95 232 95 L250 95 L250 376"/>
+                            <path d="M250 137 C325 137 333 133 420 133"/>
+                            <path d="M250 220 C330 220 340 237 420 237"/>
+                            <path d="M250 306 C320 306 350 340 420 340"/>
+                            <circle class="packet" r="3.5" fill="#b9f45d">
+                                <animateMotion dur="3.8s" repeatCount="indefinite" path="M82 104 C142 104 160 95 232 95 L250 95 L250 376"/>
+                            </circle>
+                        </svg>
+
+                        <div class="node node-client"><i class="node-dot"></i>Client traffic</div>
+                        <div class="node node-protocol"><i class="node-dot"></i>HTTP Gateway</div>
+                        <div class="node node-runtime"><i class="node-dot"></i>Coroutine runtime</div>
+                        <div class="node node-transport"><i class="node-dot"></i>TCP · QUIC</div>
+                        <div class="node node-upstream"><i class="node-dot"></i>Upstream</div>
+                        <div class="node node-observe"><i class="node-dot"></i>CAT · Metrics</div>
+                        <div class="node node-discovery"><i class="node-dot"></i>Nacos</div>
+                        <div class="node node-dns"><i class="node-dot"></i>DNS cache</div>
+                    </div>
+                </div>
+                <div class="protocol-stack" aria-hidden="true">
+                    <span class="protocol-pill">H1</span>
+                    <span class="protocol-pill">H2</span>
+                    <span class="protocol-pill">H3</span>
+                    <span class="protocol-pill">QUIC</span>
+                </div>
+                <div class="floating-status">
+                    <i class="status-pulse" aria-hidden="true"></i>
+                    <span><strong>event loop / healthy</strong>request path online</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main id="main">
+        <section id="advantages" class="section section-muted">
+            <div class="container">
+                <div class="section-heading reveal">
+                    <div>
+                        <span class="section-kicker">01 / Why Fiber</span>
+                        <h2>为热路径设计，<br>也为工程落地。</h2>
+                    </div>
+                    <p class="section-intro">
+                        性能不是最后添加的选项，而是从所有权、内存模型和调度边界开始的系统选择。
+                        Fiber Gateway 同时保留清晰的协程表达力，让复杂协议与生产生命周期仍然可以被理解和验证。
+                    </p>
+                </div>
+
+                <div class="advantage-grid">
+                    <article class="feature-card reveal spotlight-card">
+                        <span class="feature-index">01</span>
+                        <div class="feature-decor" aria-hidden="true">
+                            <svg viewBox="0 0 90 56" fill="none">
+                                <path d="M3 42 23 22l15 12L59 9l28 25" stroke="currentColor" stroke-width="1.2"/>
+                                <circle cx="23" cy="22" r="3" fill="currentColor"/>
+                                <circle cx="59" cy="9" r="3" fill="currentColor"/>
+                            </svg>
+                        </div>
+                        <h3>全栈协议，统一生命周期</h3>
+                        <p>HTTP/1.1、HTTP/2、HTTP/3、WebSocket、gRPC 与 TLS 共享同一套 EventLoop、Buffer 和取消语义，减少协议之间的适配层与隐式状态。</p>
+                    </article>
+
+                    <article class="feature-card reveal reveal-delay-1 spotlight-card">
+                        <span class="feature-index">02</span>
+                        <div class="feature-decor" aria-hidden="true">
+                            <svg viewBox="0 0 90 56" fill="none">
+                                <rect x="5" y="8" width="18" height="40" rx="4" stroke="currentColor"/>
+                                <rect x="36" y="18" width="18" height="30" rx="4" stroke="currentColor"/>
+                                <rect x="67" y="29" width="18" height="19" rx="4" stroke="currentColor"/>
+                            </svg>
+                        </div>
+                        <h3>少分配，低争用</h3>
+                        <p>复用 IoBuf、池化存储与 intrusive 结构；以 owner EventLoop 本地更新替代热路径锁和原子争用，把动态分配留在真正需要的边界。</p>
+                    </article>
+
+                    <article class="feature-card reveal spotlight-card">
+                        <span class="feature-index">03</span>
+                        <div class="feature-decor" aria-hidden="true">
+                            <svg viewBox="0 0 90 56" fill="none">
+                                <circle cx="45" cy="28" r="20" stroke="currentColor"/>
+                                <path d="M45 8v40M25 28h40M31 15c9 8 19 8 28 0M31 41c9-8 19-8 28 0" stroke="currentColor"/>
+                            </svg>
+                        </div>
+                        <h3>清晰的协程语义</h3>
+                        <p>Task、超时、Watch、WaitGroup 与异步同步原语围绕显式所有权构建，让并发代码保持线性可读，同时具备可靠的取消与关闭路径。</p>
+                    </article>
+
+                    <article class="feature-card reveal reveal-delay-1 spotlight-card">
+                        <span class="feature-index">04</span>
+                        <div class="feature-decor" aria-hidden="true">
+                            <svg viewBox="0 0 90 56" fill="none">
+                                <circle cx="17" cy="28" r="7" stroke="currentColor"/>
+                                <circle cx="45" cy="12" r="7" stroke="currentColor"/>
+                                <circle cx="73" cy="28" r="7" stroke="currentColor"/>
+                                <circle cx="45" cy="44" r="7" stroke="currentColor"/>
+                                <path d="m23 24 16-9m12 0 16 9m0 8-16 9m-12 0-16-9" stroke="currentColor"/>
+                            </svg>
+                        </div>
+                        <h3>生产能力不止于网络层</h3>
+                        <p>Nacos 配置与服务发现、CAT 链路追踪、Prometheus 指标、结构化日志和 DNS 缓存已经进入同一工程体系，应用可以直接复用，而不是从零拼装。</p>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+        <section id="architecture" class="section">
+            <div class="container">
+                <div class="section-heading reveal">
+                    <div>
+                        <span class="section-kicker">02 / Architecture</span>
+                        <h2>从应用到 I/O，<br>每层各司其职。</h2>
+                    </div>
+                    <p class="section-intro">
+                        分层不是为了制造抽象，而是为了稳定边界：应用只组合能力，协议层维护 wire state，
+                        运行时负责调度与所有权，传输层与 Linux 内核高效对话。
+                    </p>
+                </div>
+
+                <div class="architecture-shell reveal">
+                    <div class="architecture-copy">
+                        <h3>一条请求，穿过五层。</h3>
+                        <p>选择左侧层级，查看它在完整请求路径中的职责与相邻边界。</p>
+                        <div class="architecture-tabs" role="tablist" aria-label="架构分层">
+                            <button class="architecture-tab" type="button" role="tab" aria-selected="true" data-layer="0">
+                                <span class="tab-number">01</span>
+                                <span class="tab-title">应用与接入层</span>
+                                <span class="tab-arrow">→</span>
+                            </button>
+                            <button class="architecture-tab" type="button" role="tab" aria-selected="false" data-layer="1">
+                                <span class="tab-number">02</span>
+                                <span class="tab-title">协议与网关层</span>
+                                <span class="tab-arrow">→</span>
+                            </button>
+                            <button class="architecture-tab" type="button" role="tab" aria-selected="false" data-layer="2">
+                                <span class="tab-number">03</span>
+                                <span class="tab-title">协程运行时</span>
+                                <span class="tab-arrow">→</span>
+                            </button>
+                            <button class="architecture-tab" type="button" role="tab" aria-selected="false" data-layer="3">
+                                <span class="tab-number">04</span>
+                                <span class="tab-title">网络与传输层</span>
+                                <span class="tab-arrow">→</span>
+                            </button>
+                            <button class="architecture-tab" type="button" role="tab" aria-selected="false" data-layer="4">
+                                <span class="tab-number">05</span>
+                                <span class="tab-title">基础设施层</span>
+                                <span class="tab-arrow">→</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="architecture-detail">
+                        <div class="architecture-detail-head">
+                            <span>system / layers</span>
+                            <span class="architecture-badge">request path</span>
+                        </div>
+                        <div class="layer-map" aria-live="polite">
+                            <div class="layer is-active" data-map-layer="0">
+                                <div class="layer-name"><i class="layer-icon">APP</i>应用与接入</div>
+                                <div class="layer-items">
+                                    <span>lite-nginx</span><span>ai-server</span><span>examples</span>
+                                </div>
+                            </div>
+                            <div class="layer" data-map-layer="1">
+                                <div class="layer-name"><i class="layer-icon">L7</i>协议与网关</div>
+                                <div class="layer-items">
+                                    <span>HTTP/1.1</span><span>HTTP/2</span><span>HTTP/3</span><span>gRPC</span><span>WebSocket</span>
+                                </div>
+                            </div>
+                            <div class="layer" data-map-layer="2">
+                                <div class="layer-name"><i class="layer-icon">CO</i>协程运行时</div>
+                                <div class="layer-items">
+                                    <span>Task</span><span>EventLoop</span><span>Timer</span><span>Watch</span><span>WaitGroup</span>
+                                </div>
+                            </div>
+                            <div class="layer" data-map-layer="3">
+                                <div class="layer-name"><i class="layer-icon">L4</i>网络与传输</div>
+                                <div class="layer-items">
+                                    <span>TCP</span><span>UDP</span><span>TLS</span><span>QUIC v1</span><span>DNS</span>
+                                </div>
+                            </div>
+                            <div class="layer" data-map-layer="4">
+                                <div class="layer-name"><i class="layer-icon">SYS</i>基础设施</div>
+                                <div class="layer-items">
+                                    <span>epoll</span><span>IoBuf</span><span>memory pool</span><span>JSON</span><span>logging</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section section-muted flow-section">
+            <div class="container">
+                <div class="section-heading reveal">
+                    <div>
+                        <span class="section-kicker">03 / Request Flow</span>
+                        <h2>快，不代表<br>看不清发生了什么。</h2>
+                    </div>
+                    <p class="section-intro">
+                        请求从接入、匹配到流式转发和观测结算，状态沿着明确边界向前推进。
+                        下游背压、超时、连接复用和关闭行为都属于同一生命周期，而不是散落的回调。
+                    </p>
+                </div>
+
+                <div class="flow-track">
+                    <article class="flow-step reveal">
+                        <div class="flow-number">01</div>
+                        <h3>Accept</h3>
+                        <p>监听 TCP 或 QUIC，TLS ALPN 自动进入 HTTP/1.1、HTTP/2 或 HTTP/3 协议状态机。</p>
+                    </article>
+                    <article class="flow-step reveal reveal-delay-1">
+                        <div class="flow-number">02</div>
+                        <h3>Route</h3>
+                        <p>按 Host、路径与配置快照选择处理逻辑、上游集群或嵌入式脚本。</p>
+                    </article>
+                    <article class="flow-step reveal reveal-delay-2">
+                        <div class="flow-number">03</div>
+                        <h3>Stream</h3>
+                        <p>请求与响应按流转发，连接池复用上游连接，背压贯穿读写两端。</p>
+                    </article>
+                    <article class="flow-step reveal reveal-delay-3">
+                        <div class="flow-number">04</div>
+                        <h3>Observe</h3>
+                        <p>指标、日志与 CAT trace 在既定所有权边界内完成记录、聚合与优雅排空。</p>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+        <section id="performance" class="section">
+            <div class="container">
+                <div class="section-heading reveal">
+                    <div>
+                        <span class="section-kicker">04 / Performance</span>
+                        <h2>性能主张，<br>以数据为证。</h2>
+                    </div>
+                    <p class="section-intro">
+                        仓库内置 HTTP benchmark client、backend 与矩阵脚本。以下为同机 Release
+                        反向代理测试中 lite-nginx 相对 OpenResty 的配对 RPS 比值，展示大响应场景的本地结果。
+                    </p>
+                </div>
+
+                <div class="performance-layout reveal">
+                    <article class="performance-copy">
+                        <div>
+                            <span class="section-kicker">Local benchmark snapshot</span>
+                            <h3>HTTP/1.1 · GET 1 MiB</h3>
+                            <p>在零请求错误的正式样本中，lite-nginx 达到 1,659 RPS / 1,659 MiB/s；同批 OpenResty 为 693 RPS。</p>
+                            <div class="performance-big">
+                                <strong>2.307×</strong>
+                                <span>paired RPS ratio · lite / OpenResty</span>
+                            </div>
+                        </div>
+                        <p class="fine-print">
+                            数据来自 4 vCPU VMware 本机回环测试；结果用于描述该环境与版本快照，不应外推为所有硬件和负载下的普遍结论。
+                            <a href="../../feature/all-berchmark.md">查看完整方法与限制 →</a>
+                        </p>
+                    </article>
+
+                    <article class="performance-chart">
+                        <div class="chart-head">
+                            <h3>大载荷场景 · 配对 RPS</h3>
+                            <div class="chart-legend" role="group" aria-label="图例">
+                                <span><i></i>lite-nginx</span>
+                                <span><i></i>OpenResty</span>
+                            </div>
+                        </div>
+                        <div class="chart-rows">
+                            <div class="chart-row">
+                                <div class="chart-label"><strong>GET 1 MiB</strong><span>HTTP/1.1</span></div>
+                                <div class="bars">
+                                    <div class="bar bar-w-92"><span></span></div>
+                                    <div class="bar baseline bar-w-40"><span></span></div>
+                                </div>
+                                <span class="chart-ratio">2.307×</span>
+                            </div>
+                            <div class="chart-row">
+                                <div class="chart-label"><strong>GET 64 KiB</strong><span>HTTP/2</span></div>
+                                <div class="bars">
+                                    <div class="bar bar-w-82"><span></span></div>
+                                    <div class="bar baseline bar-w-43"><span></span></div>
+                                </div>
+                                <span class="chart-ratio">1.887×</span>
+                            </div>
+                            <div class="chart-row">
+                                <div class="chart-label"><strong>POST 1 MiB</strong><span>HTTP/1.1</span></div>
+                                <div class="bars">
+                                    <div class="bar bar-w-72"><span></span></div>
+                                    <div class="bar baseline bar-w-42"><span></span></div>
+                                </div>
+                                <span class="chart-ratio">1.699×</span>
+                            </div>
+                            <div class="chart-row">
+                                <div class="chart-label"><strong>GET 1 MiB</strong><span>HTTP/2</span></div>
+                                <div class="bars">
+                                    <div class="bar bar-w-68"><span></span></div>
+                                    <div class="bar baseline bar-w-43"><span></span></div>
+                                </div>
+                                <span class="chart-ratio">1.579×</span>
+                            </div>
+                        </div>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+        <section id="ecosystem" class="section section-muted">
+            <div class="container">
+                <div class="section-heading reveal">
+                    <div>
+                        <span class="section-kicker">05 / Ecosystem</span>
+                        <h2>框架之外，<br>更有完整生态。</h2>
+                    </div>
+                    <p class="section-intro">
+                        真实应用、服务治理与可观测组件共同验证底层边界。每个模块都建立在同一个
+                        `fiber_lib` 之上，并保留独立的职责与生命周期。
+                    </p>
+                </div>
+
+                <div class="ecosystem-grid">
+                    <article class="ecosystem-card reveal">
+                        <span class="ecosystem-icon">PX</span>
+                        <h3>lite-nginx</h3>
+                        <p>nginx 风格配置的轻量反向代理，支持 HTTP 1 / 2 / 3 接入、TLS、WebSocket tunnel、流式转发与上游连接池。</p>
+                        <a href="../../apps/lite_nginx/README.md">查看模块文档 →</a>
+                    </article>
+                    <article class="ecosystem-card reveal reveal-delay-1">
+                        <span class="ecosystem-icon">AI</span>
+                        <h3>AI Server</h3>
+                        <p>完整 LLM 网关应用，覆盖多协议 API、SSE、动态路由、限流、fallback、审计与有序关闭。</p>
+                        <a href="../../apps/ai-server/README.md">查看模块文档 →</a>
+                    </article>
+                    <article class="ecosystem-card reveal reveal-delay-2">
+                        <span class="ecosystem-icon">NC</span>
+                        <h3>Nacos Client</h3>
+                        <p>Nacos 2.x 配置与服务发现客户端，包含认证、gRPC 长连接、订阅、重连与状态 replay。</p>
+                        <a href="../../apps/nacos/README.md">查看模块文档 →</a>
+                    </article>
+                    <article class="ecosystem-card reveal">
+                        <span class="ecosystem-icon">CAT</span>
+                        <h3>CAT Client</h3>
+                        <p>面向 CAT 3.0 的 Transaction、Event 与 Metric 客户端，支持树形消息、采样聚合和跨服务传播。</p>
+                        <a href="../../apps/cat/README.md">查看模块文档 →</a>
+                    </article>
+                    <article class="ecosystem-card reveal reveal-delay-1">
+                        <span class="ecosystem-icon">PM</span>
+                        <h3>Prometheus</h3>
+                        <p>固定 schema 指标库；EventLoop-owned shard 让记录热路径无需分配、锁、原子 RMW 或字符串查找。</p>
+                        <a href="../../apps/prometheus/README.md">查看模块文档 →</a>
+                    </article>
+                    <article class="ecosystem-card reveal reveal-delay-2">
+                        <span class="ecosystem-icon">{ }</span>
+                        <h3>Script Runtime</h3>
+                        <p>内嵌脚本值模型、GC 与 HTTP 绑定，为动态请求处理提供编译期约束和运行时扩展能力。</p>
+                        <span class="ecosystem-link">src/script · src/http_script</span>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="container">
+                <div class="quickstart reveal">
+                    <div class="quickstart-copy">
+                        <span class="section-kicker">Build the edge</span>
+                        <h2>从源码到运行，<br>只需三步。</h2>
+                        <p>默认构建核心库、示例、测试与应用。需要 Clang 17+ 或 GCC 13+，目标标准为 C++23。</p>
+                    </div>
+                    <div class="terminal">
+                        <div class="terminal-bar">
+                            <span>bash / quickstart</span>
+                            <button class="copy-button" type="button" data-copy-target="quickstart-code">复制</button>
+                        </div>
+                        <pre id="quickstart-code"><code><span class="command-comment"># configure &amp; build</span>
+<span class="prompt">$</span> cmake -S . -B build
+<span class="prompt">$</span> cmake --build build
+
+<span class="command-comment"># verify &amp; launch</span>
+<span class="prompt">$</span> ctest --test-dir build --output-on-failure
+<span class="prompt">$</span> ./build/apps/lite_nginx --check-config
+<span class="prompt">$</span> ./build/apps/lite_nginx</code></pre>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container footer-inner">
+            <div class="footer-signature"><i aria-hidden="true"></i>Fiber Gateway · performance-first C++23 networking</div>
+            <div class="footer-links">
+                <a href="../../README.zh-CN.md">文档</a>
+                <a href="../../example/README.zh-CN.md">示例</a>
+                <a href="https://github.com/fiber-net-gateway/fiber-gateway-cpp" target="_blank" rel="noreferrer">GitHub</a>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        (() => {
+            const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+            const progress = document.querySelector(".progress");
+            const updateProgress = () => {
+                const scrollable = document.documentElement.scrollHeight - window.innerHeight;
+                const value = scrollable > 0 ? window.scrollY / scrollable : 0;
+                progress.style.transform = `scaleX(${Math.min(1, Math.max(0, value))})`;
+            };
+            window.addEventListener("scroll", updateProgress, { passive: true });
+            updateProgress();
+
+            const revealItems = document.querySelectorAll(".reveal");
+            if (reduceMotion || !("IntersectionObserver" in window)) {
+                revealItems.forEach((item) => item.classList.add("is-visible"));
+            } else {
+                const observer = new IntersectionObserver((entries) => {
+                    entries.forEach((entry) => {
+                        if (entry.isIntersecting) {
+                            entry.target.classList.add("is-visible");
+                            observer.unobserve(entry.target);
+                        }
+                    });
+                }, { threshold: 0.13 });
+                revealItems.forEach((item) => observer.observe(item));
+            }
+
+            const tabs = [...document.querySelectorAll(".architecture-tab")];
+            const layers = [...document.querySelectorAll("[data-map-layer]")];
+            const activateLayer = (index) => {
+                tabs.forEach((tab, tabIndex) => {
+                    tab.setAttribute("aria-selected", String(tabIndex === index));
+                });
+                layers.forEach((layer, layerIndex) => {
+                    layer.classList.toggle("is-active", layerIndex === index);
+                });
+            };
+            tabs.forEach((tab, index) => {
+                tab.addEventListener("click", () => activateLayer(index));
+                tab.addEventListener("keydown", (event) => {
+                    if (!["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(event.key)) {
+                        return;
+                    }
+                    event.preventDefault();
+                    const direction = ["ArrowDown", "ArrowRight"].includes(event.key) ? 1 : -1;
+                    const nextIndex = (index + direction + tabs.length) % tabs.length;
+                    tabs[nextIndex].focus();
+                    activateLayer(nextIndex);
+                });
+            });
+
+            document.querySelectorAll(".spotlight-card").forEach((card) => {
+                card.addEventListener("pointermove", (event) => {
+                    const rect = card.getBoundingClientRect();
+                    card.style.setProperty("--mx", `${event.clientX - rect.left}px`);
+                    card.style.setProperty("--my", `${event.clientY - rect.top}px`);
+                });
+            });
+
+            document.querySelectorAll("[data-copy-target]").forEach((button) => {
+                button.addEventListener("click", async () => {
+                    const target = document.getElementById(button.dataset.copyTarget);
+                    if (!target) {
+                        return;
+                    }
+                    const original = button.textContent;
+                    try {
+                        if (navigator.clipboard?.writeText) {
+                            await navigator.clipboard.writeText(target.innerText);
+                        } else {
+                            const fallback = document.createElement("textarea");
+                            fallback.value = target.innerText;
+                            fallback.setAttribute("readonly", "");
+                            fallback.style.position = "fixed";
+                            fallback.style.opacity = "0";
+                            document.body.appendChild(fallback);
+                            fallback.select();
+                            const copied = document.execCommand("copy");
+                            fallback.remove();
+                            if (!copied) {
+                                throw new Error("Copy command was rejected");
+                            }
+                        }
+                        button.textContent = "已复制";
+                    } catch {
+                        button.textContent = "复制失败";
+                    }
+                    window.setTimeout(() => {
+                        button.textContent = original;
+                    }, 1600);
+                });
+            });
+        })();
+    </script>
+</body>
+</html>
