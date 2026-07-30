@@ -834,7 +834,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
             co_return error_exn(*heap, "http.proxyPass: read response body failed");
         }
         const bool last = body_result->complete();
-        auto write_result = co_await exchange.write_body(std::move(*body_result));
+        auto write_result = co_await exchange.write_all(std::move(*body_result));
         if (!write_result) {
             co_return error_exn(*heap, "http.proxyPass: write response body failed");
         }

@@ -78,7 +78,7 @@ fiber::async::Task<void> send_fixed(fiber::http::HttpExchange &exchange, const s
     if (!header_result || body_size == 0) {
         co_return;
     }
-    (void) co_await exchange.write_body(body, body_size, true);
+    (void) co_await exchange.write_all(body, body_size, true);
 }
 
 fiber::async::Task<void> echo_body(fiber::http::HttpExchange &exchange) {
@@ -101,7 +101,7 @@ fiber::async::Task<void> echo_body(fiber::http::HttpExchange &exchange) {
             co_return;
         }
         bool complete = read_result->complete();
-        auto write_result = co_await exchange.write_body(std::move(*read_result));
+        auto write_result = co_await exchange.write_all(std::move(*read_result));
         if (!write_result || complete) {
             co_return;
         }
@@ -157,7 +157,7 @@ fiber::async::Task<void> handle_request(fiber::http::HttpExchange &exchange) {
         auto header_result = co_await send_header(exchange, 200, nullptr,
                                                   fiber::http::HttpBodySpec::ContentLength(kBody64k.size()), false);
         if (header_result) {
-            (void) co_await exchange.write_body(kBody1k.data(), kBody1k.size(), false);
+            (void) co_await exchange.write_all(kBody1k.data(), kBody1k.size(), false);
         }
         exchange.abort(fiber::common::IoErr::Canceled);
         co_return;
@@ -167,8 +167,8 @@ fiber::async::Task<void> handle_request(fiber::http::HttpExchange &exchange) {
     auto header_result = co_await send_header(exchange, 404, nullptr,
                                               fiber::http::HttpBodySpec::ContentLength(kNotFound.size()), false);
     if (header_result) {
-        (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(kNotFound.data()), kNotFound.size(),
-                                            true);
+        (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kNotFound.data()), kNotFound.size(),
+                                           true);
     }
 }
 

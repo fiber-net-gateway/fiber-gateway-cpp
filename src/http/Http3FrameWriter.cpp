@@ -86,17 +86,12 @@ common::IoResult<void> http3_finish_headers_frame(Http3QpackEncoderIoBufWriter &
     return {};
 }
 
-common::IoResult<void> http3_prepare_data_frame(mem::IoBufChain &chunk, mem::IoBufNodePool &target_pool) noexcept {
-    const std::size_t payload_len = chunk.readable_bytes();
+common::IoResult<mem::IoBuf> http3_build_data_frame_header(std::size_t payload_len) noexcept {
     if (static_cast<std::uint64_t>(payload_len) > kMaxHttp3FramePayloadLength) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    auto bound = bind_or_migrate_nodes(chunk, target_pool);
-    if (!bound) {
-        return bound;
-    }
     if (payload_len == 0) {
-        return {};
+        return mem::IoBuf{};
     }
 
     const std::uint64_t frame_type = static_cast<std::uint64_t>(Http3FrameType::Data);
@@ -119,7 +114,23 @@ common::IoResult<void> http3_prepare_data_frame(mem::IoBufChain &chunk, mem::IoB
         return std::unexpected(common::IoErr::Invalid);
     }
     frame_header.commit(frame_header_len);
-    if (!chunk.prepend(std::move(frame_header))) {
+    return frame_header;
+}
+
+common::IoResult<void> http3_prepare_data_frame(mem::IoBufChain &chunk, mem::IoBufNodePool &target_pool) noexcept {
+    const std::size_t payload_len = chunk.readable_bytes();
+    auto bound = bind_or_migrate_nodes(chunk, target_pool);
+    if (!bound) {
+        return bound;
+    }
+    auto frame_header = http3_build_data_frame_header(payload_len);
+    if (!frame_header) {
+        return std::unexpected(frame_header.error());
+    }
+    if (!*frame_header) {
+        return {};
+    }
+    if (!chunk.prepend(std::move(*frame_header))) {
         return std::unexpected(common::IoErr::NoMem);
     }
     return {};

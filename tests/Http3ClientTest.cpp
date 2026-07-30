@@ -108,8 +108,8 @@ fiber::async::Task<void> echo_handler(fiber::http::HttpExchange &exchange,
     if (!sent_head || observation.body.empty()) {
         co_return;
     }
-    auto sent_body = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(observation.body.data()),
-                                                  observation.body.size(), false, 2s);
+    auto sent_body = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(observation.body.data()),
+                                                 observation.body.size(), false, 2s);
     if (!sent_body) {
         co_return;
     }

@@ -43,20 +43,26 @@ public:
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
                                                            const OutgoingHeaderBlockView &header,
                                                            std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, mem::IoBufChain chunk,
-                                                            std::chrono::milliseconds timeout) noexcept override;
-    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const std::uint8_t *buf,
-                                                            std::size_t len, bool end,
-                                                            std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write_all(HttpExchange &exchange, mem::IoBufChain chunk,
+                                                           std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write_all(HttpExchange &exchange, const std::uint8_t *buf,
+                                                           std::size_t len, bool end,
+                                                           std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write(HttpExchange &exchange, mem::IoBufChain &chunk,
+                                                       std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write(HttpExchange &exchange, const std::uint8_t *buf, std::size_t len,
+                                                       bool end, std::chrono::milliseconds timeout) noexcept override;
     common::IoResult<void> abort(HttpExchange &exchange, common::IoErr reason) noexcept override;
 
 private:
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value,
                                                   bool value_stable) noexcept;
     struct SendResponseHeaderOp;
-    struct SendResponseBodyOp;
+    struct SendResponseBodyAllOp;
+    struct SendResponseBodySomeOp;
     using HeaderSendAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseHeaderOp>;
-    using BodySendAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseBodyOp>;
+    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseBodyAllOp>;
+    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseBodySomeOp>;
 
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;

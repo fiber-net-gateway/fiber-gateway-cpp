@@ -20,6 +20,21 @@ enum class RequestHeaderRefKind : std::uint8_t {
     Expect,
 };
 
+bool is_terminal_response_write_error(common::IoErr error) noexcept {
+    switch (error) {
+        case common::IoErr::None:
+        case common::IoErr::Invalid:
+        case common::IoErr::Busy:
+        case common::IoErr::Already:
+        case common::IoErr::NoMem:
+        case common::IoErr::MessageTooLarge:
+        case common::IoErr::NotSupported:
+            return false;
+        default:
+            return true;
+    }
+}
+
 const HeaderMap<RequestHeaderRefKind> &request_header_ref_map() noexcept {
     static HeaderMap<RequestHeaderRefKind> refs = []() {
         HeaderMap<RequestHeaderRefKind> map;
@@ -200,6 +215,17 @@ void HttpExchange::record_io_error(common::IoErr error) noexcept {
     }
 }
 
+void HttpExchange::record_response_write_error(common::IoErr error) noexcept {
+    record_io_error(error);
+    if (response_write_error_ != common::IoErr::None || !is_terminal_response_write_error(error)) {
+        return;
+    }
+    response_write_error_ = error;
+    if (io_ != nullptr) {
+        (void) io_->abort(*this, error);
+    }
+}
+
 void HttpExchange::cache_request_header_field(const HttpHeaders::HeaderField &field) noexcept {
     const auto *kind = request_header_ref_map().get(field.lowcase_view(), field.name_hash);
     if (kind == nullptr) {
@@ -264,9 +290,12 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::send_header(const Outgo
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    if (response_write_error_ != common::IoErr::None) {
+        co_return std::unexpected(response_write_error_);
+    }
     auto result = co_await io_->send_header(*this, header, timeout);
     if (!result) {
-        record_io_error(result.error());
+        record_response_write_error(result.error());
         co_return result;
     }
     if (header.kind == OutgoingHeaderKind::Final) {
@@ -306,16 +335,19 @@ fiber::async::Task<common::IoResult<void>> HttpExchange::send_informational_head
             timeout);
 }
 
-fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(mem::IoBufChain chunk,
-                                                                      std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_all(mem::IoBufChain chunk,
+                                                                     std::chrono::milliseconds timeout) noexcept {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
+    if (response_write_error_ != common::IoErr::None) {
+        co_return std::unexpected(response_write_error_);
+    }
     const std::size_t intended = chunk.readable_bytes();
     const bool end = chunk.complete();
-    auto result = co_await io_->write_body(*this, std::move(chunk), timeout);
+    auto result = co_await io_->write_all(*this, std::move(chunk), timeout);
     if (!result) {
-        record_io_error(result.error());
+        record_response_write_error(result.error());
         co_return result;
     }
     response_stats_.body_bytes_sent =
@@ -328,14 +360,65 @@ fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(mem::IoBuf
     co_return result;
 }
 
-fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_body(const uint8_t *buf, size_t len, bool end,
-                                                                      std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<size_t>> HttpExchange::write_all(const uint8_t *buf, size_t len, bool end,
+                                                                     std::chrono::milliseconds timeout) noexcept {
     if (!io_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    auto result = co_await io_->write_body(*this, buf, len, end, timeout);
+    if (response_write_error_ != common::IoErr::None) {
+        co_return std::unexpected(response_write_error_);
+    }
+    auto result = co_await io_->write_all(*this, buf, len, end, timeout);
     if (!result) {
-        record_io_error(result.error());
+        record_response_write_error(result.error());
+        co_return result;
+    }
+    response_stats_.body_bytes_sent =
+            *result > std::numeric_limits<std::size_t>::max() - response_stats_.body_bytes_sent
+                    ? std::numeric_limits<std::size_t>::max()
+                    : response_stats_.body_bytes_sent + *result;
+    if (end && *result == len) {
+        response_stats_.completed = true;
+    }
+    co_return result;
+}
+
+fiber::async::Task<common::IoResult<size_t>> HttpExchange::write(mem::IoBufChain &chunk,
+                                                                 std::chrono::milliseconds timeout) noexcept {
+    if (!io_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_write_error_ != common::IoErr::None) {
+        co_return std::unexpected(response_write_error_);
+    }
+    const std::size_t intended = chunk.readable_bytes();
+    const bool end = chunk.complete();
+    auto result = co_await io_->write(*this, chunk, timeout);
+    if (!result) {
+        record_response_write_error(result.error());
+        co_return result;
+    }
+    response_stats_.body_bytes_sent =
+            *result > std::numeric_limits<std::size_t>::max() - response_stats_.body_bytes_sent
+                    ? std::numeric_limits<std::size_t>::max()
+                    : response_stats_.body_bytes_sent + *result;
+    if (end && *result == intended && !chunk.complete()) {
+        response_stats_.completed = true;
+    }
+    co_return result;
+}
+
+fiber::async::Task<common::IoResult<size_t>> HttpExchange::write(const uint8_t *buf, size_t len, bool end,
+                                                                 std::chrono::milliseconds timeout) noexcept {
+    if (!io_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_write_error_ != common::IoErr::None) {
+        co_return std::unexpected(response_write_error_);
+    }
+    auto result = co_await io_->write(*this, buf, len, end, timeout);
+    if (!result) {
+        record_response_write_error(result.error());
         co_return result;
     }
     response_stats_.body_bytes_sent =

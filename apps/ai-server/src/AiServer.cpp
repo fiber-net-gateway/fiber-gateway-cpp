@@ -78,7 +78,7 @@ async::Task<void> send_json(http::HttpExchange &exchange, const AiServerCatReque
     }
 
     auto body_result =
-            co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+            co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
     if (!body_result) {
         LOG(LOG_HTTP, DEBUG) << "response body write failed path=" << fiber::log::quoted(exchange.uri().path)
                              << " status=" << status_code << " io_error=" << common::io_err_name(body_result.error());
@@ -299,7 +299,7 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         });
         if (header && size != 0) {
             collected->mark_complete();
-            (void) co_await exchange.write_body(std::move(*collected));
+            (void) co_await exchange.write_all(std::move(*collected));
         }
         co_return;
     }

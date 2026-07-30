@@ -132,11 +132,25 @@ public:
     fiber::async::Task<common::IoResult<void>>
     send_informational_header(int status_code, const HttpHeaders *headers = nullptr,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    // write_all transfers the entire body chunk, including its completion
+    // marker, before succeeding.
     fiber::async::Task<common::IoResult<size_t>>
-    write_body(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    write_all(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::async::Task<common::IoResult<size_t>>
-    write_body(const uint8_t *buf, size_t len, bool end,
-               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    write_all(const uint8_t *buf, size_t len, bool end,
+              std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    // write returns after the send stack accepts at least one body byte, or
+    // after accepting a zero-length completion marker. The chain overload
+    // consumes only that prefix and leaves completion set until the final byte
+    // and protocol terminator are accepted. After a successful partial write,
+    // retry the exact remaining suffix with the same completion/end value.
+    // TimedOut and other terminal transport errors abort this response; no
+    // subsequent header or body write is allowed.
+    fiber::async::Task<common::IoResult<size_t>>
+    write(mem::IoBufChain &chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<size_t>>
+    write(const uint8_t *buf, size_t len, bool end,
+          std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 
@@ -144,6 +158,7 @@ private:
     void set_io(HttpExchangeIo *io) noexcept;
     void cache_request_header_field(const HttpHeaders::HeaderField &field) noexcept;
     void record_io_error(common::IoErr error) noexcept;
+    void record_response_write_error(common::IoErr error) noexcept;
 
     friend class RequestLineParser;
     friend class HeaderLineParser;
@@ -169,6 +184,7 @@ private:
     HttpBodySpec request_body_spec_{HttpBodySpec::None()};
     net::SocketAddress remote_addr_{};
     HttpResponseStats response_stats_{};
+    common::IoErr response_write_error_ = common::IoErr::None;
     bool request_close_ = false;
     bool request_keep_alive_ = false;
     HttpExchangeIo *io_ = nullptr;

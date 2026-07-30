@@ -189,7 +189,7 @@ async::Task<void> send_json(http::HttpExchange &exchange, AiServerCatRequest *ca
     if (!sent || body.empty()) {
         co_return;
     }
-    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+    (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
 }
 
 async::Task<bool> prepare_request(http::HttpExchange &exchange, AiServerCatRequest *cat_request,

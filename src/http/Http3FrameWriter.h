@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "../common/IoError.h"
+#include "../common/mem/IoBuf.h"
 #include "../common/mem/IoBufChain.h"
 
 namespace fiber::http {
@@ -16,6 +17,8 @@ inline constexpr std::uint64_t kMaxHttp3FramePayloadLength = (1ULL << 62U) - 1U;
 
 [[nodiscard]] common::IoResult<void> http3_finish_headers_frame(Http3QpackEncoderIoBufWriter &writer,
                                                                 mem::IoBufChain &frame, bool end_stream) noexcept;
+
+[[nodiscard]] common::IoResult<mem::IoBuf> http3_build_data_frame_header(std::size_t payload_len) noexcept;
 
 [[nodiscard]] common::IoResult<void> http3_prepare_data_frame(mem::IoBufChain &chunk,
                                                               mem::IoBufNodePool &target_pool) noexcept;

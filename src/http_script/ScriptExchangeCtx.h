@@ -35,7 +35,7 @@ struct ScriptConnectionInfo {
 //      in persistent GC root slots (GcHeap::global_value), mirroring Java ReqFunc.Ctx
 //      stored via HttpExchange.Attr.
 //   2. A response state machine: response headers accumulate in pending_headers_ until a
-//      send/write flushes them via HttpExchange::send_header + write_body (header_sent_
+//      send/write flushes them via HttpExchange::send_header + write_all (header_sent_
 //      guards against post-send mutation).
 class ScriptExchangeCtx {
 public:

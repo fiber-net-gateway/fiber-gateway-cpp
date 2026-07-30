@@ -924,8 +924,8 @@ private:
         }
         if (!reply.stream) {
             if (body_size != 0) {
-                (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(reply.body.data()),
-                                                    reply.body.size(), true);
+                (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(reply.body.data()),
+                                                   reply.body.size(), true);
             }
             co_return;
         }
@@ -933,8 +933,8 @@ private:
         for (std::size_t i = 0; i < reply.chunks.size(); ++i) {
             const bool end = i + 1 == reply.chunks.size() && !reply.abort_after_chunks;
             const std::string &chunk = reply.chunks[i];
-            auto written = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(chunk.data()),
-                                                        chunk.size(), end);
+            auto written = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(chunk.data()),
+                                                       chunk.size(), end);
             if (!written) {
                 co_return;
             }
@@ -945,7 +945,7 @@ private:
         if (reply.abort_after_chunks) {
             (void) exchange.abort(fiber::common::IoErr::Canceled);
         } else if (reply.chunks.empty()) {
-            (void) co_await exchange.write_body(nullptr, 0, true);
+            (void) co_await exchange.write_all(nullptr, 0, true);
         }
     }
 

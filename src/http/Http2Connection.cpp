@@ -2208,7 +2208,10 @@ common::IoErr Http2Connection::try_encode_stream_outbound(Http2Stream &stream) n
     }
     stream.outbound_pending_flow_controlled_bytes_ -= result.flow_controlled_bytes;
     if (result.operation_final_batch && stream.outbound_pending_flow_controlled_bytes_ != 0) {
-        return common::IoErr::Invalid;
+        if (!stream.outbound_operation_.ops->allow_partial_final_batch) {
+            return common::IoErr::Invalid;
+        }
+        stream.outbound_pending_flow_controlled_bytes_ = 0;
     }
 
     Http2OutboundHook &hook = stream.outbound_hook_;

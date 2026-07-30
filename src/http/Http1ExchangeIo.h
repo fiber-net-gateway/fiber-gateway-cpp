@@ -36,11 +36,15 @@ public:
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
                                                            const OutgoingHeaderBlockView &header,
                                                            std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, mem::IoBufChain chunk,
-                                                            std::chrono::milliseconds timeout) noexcept override;
-    fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const uint8_t *buf, size_t len,
-                                                            bool end,
-                                                            std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write_all(HttpExchange &exchange, mem::IoBufChain chunk,
+                                                           std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write_all(HttpExchange &exchange, const uint8_t *buf, size_t len,
+                                                           bool end,
+                                                           std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write(HttpExchange &exchange, mem::IoBufChain &chunk,
+                                                       std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> write(HttpExchange &exchange, const uint8_t *buf, size_t len, bool end,
+                                                       std::chrono::milliseconds timeout) noexcept override;
     common::IoResult<void> abort(HttpExchange &exchange, common::IoErr reason) noexcept override;
 
     [[nodiscard]] bool request_body_complete() const noexcept { return body_parser_.done(); }
@@ -61,6 +65,7 @@ private:
                                                                      std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<common::IoResult<void>> write_chunked_trailer_block(const HttpHeaders *headers,
                                                                            std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<void>> write_chunk_suffix(bool end, std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<common::IoResult<void>> write_informational_header(HttpExchange &exchange, int status_code,
                                                                           const HttpHeaders *headers,
                                                                           std::chrono::milliseconds timeout) noexcept;
@@ -101,6 +106,10 @@ private:
     HttpBodySpec response_body_spec_{};
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
     size_t response_content_length_ = 0;
+    size_t chunk_payload_remaining_ = 0;
+    bool chunk_write_active_ = false;
+    bool chunk_write_end_ = false;
+    bool chunk_suffix_pending_ = false;
     bool transport_terminal_callback_registered_ = false;
 };
 

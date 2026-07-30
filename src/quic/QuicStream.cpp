@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <coroutine>
 #include <cstddef>
+#include <cstring>
 #include <expected>
 #include <limits>
 #include <utility>
@@ -350,6 +351,48 @@ common::IoResult<std::size_t> QuicStream::try_write(const mem::IoBuf &buf, bool 
     return appended;
 }
 
+common::IoResult<std::size_t> QuicStream::try_write(const void *buf, std::size_t len, bool fin) noexcept {
+    if (len != 0 && buf == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (len == 0) {
+        return try_write(mem::IoBuf{}, fin);
+    }
+    if (!attached_to_connection_ || !send_queue_.initialized()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const common::IoErr terminal = terminal_write_error();
+    if (terminal != common::IoErr::None) {
+        return std::unexpected(terminal);
+    }
+
+    const std::size_t available = write_available();
+    if (available == 0) {
+        maybe_report_write_flow_blocked();
+        return std::unexpected(common::IoErr::WouldBlock);
+    }
+    const std::size_t append_bytes = std::min(len, available);
+    mem::IoBuf owned = mem::IoBuf::allocate(append_bytes);
+    if (!owned) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    std::memcpy(owned.writable_data(), buf, append_bytes);
+    owned.commit(append_bytes);
+
+    auto appended = send_queue_.try_append(owned, fin && append_bytes == len);
+    if (appended && *appended > 0 && conn_ != nullptr) {
+        const bool reserved = conn_->reserve_peer_data(*appended);
+        FIBER_ASSERT(reserved);
+    }
+    if (appended && conn_ != nullptr && has_send_work()) {
+        (void) conn_->queue_stream_frame(*this);
+    }
+    if (appended && append_bytes < len) {
+        maybe_report_write_flow_blocked();
+    }
+    return appended;
+}
+
 common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noexcept {
     if (!attached_to_connection_ || !send_queue_.initialized()) {
         return std::unexpected(common::IoErr::Invalid);
@@ -395,6 +438,37 @@ common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noex
         maybe_report_write_flow_blocked();
     }
     return appended;
+}
+
+async::Task<common::IoResult<std::size_t>> QuicStream::write(const void *buf, std::size_t len, bool fin,
+                                                             std::chrono::milliseconds timeout) noexcept {
+    if (timeout < std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::zero();
+    }
+
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    bool deadline_set = timeout == std::chrono::milliseconds::max();
+
+    for (;;) {
+        auto written = try_write(buf, len, fin);
+        if (written || written.error() != common::IoErr::WouldBlock) {
+            co_return written;
+        }
+        if (timeout == std::chrono::milliseconds::zero()) {
+            co_return std::unexpected(common::IoErr::TimedOut);
+        }
+        if (!deadline_set) {
+            auto *loop = event::EventLoop::current_or_null();
+            FIBER_ASSERT(loop != nullptr);
+            deadline = loop->now() + timeout;
+            deadline_set = true;
+        }
+
+        common::IoErr wait_result = co_await WriteAwaiter(*this, deadline);
+        if (wait_result != common::IoErr::None) {
+            co_return std::unexpected(wait_result);
+        }
+    }
 }
 
 async::Task<common::IoResult<std::size_t>> QuicStream::write(mem::IoBuf buf, bool fin,

@@ -164,8 +164,8 @@ Task<void> say_hello_stream_handler(fiber::http::HttpExchange &exchange) {
         std::string bytes;
         reply.SerializeToString(&bytes);
         const std::string framed = grpc_frame(bytes);
-        auto write_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(framed.data()),
-                                                         framed.size(), false);
+        auto write_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(framed.data()),
+                                                        framed.size(), false);
         if (!write_result) {
             co_return;
         }
@@ -207,7 +207,7 @@ Task<void> sum_stream_handler(fiber::http::HttpExchange &exchange) {
     std::string bytes;
     reply.SerializeToString(&bytes);
     const std::string framed = grpc_frame(bytes);
-    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(framed.data()), framed.size(), false);
+    (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(framed.data()), framed.size(), false);
 
     fiber::http::HttpHeaders trailers(exchange.pool());
     trailers.set("grpc-status", "0");
@@ -249,8 +249,8 @@ Task<void> chat_handler(fiber::http::HttpExchange &exchange) {
         }
         const std::string payload = body.substr(pos + 5, len);
         const std::string framed = grpc_frame(payload);
-        auto write_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(framed.data()),
-                                                         framed.size(), false);
+        auto write_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(framed.data()),
+                                                        framed.size(), false);
         if (!write_result) {
             co_return;
         }

@@ -215,7 +215,7 @@ fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, co
     std::size_t remaining = total_len;
     while (remaining > 0) {
         std::size_t write_len = remaining < chunk.size() ? remaining : chunk.size();
-        auto write_result = co_await exchange.write_body(chunk.data(), write_len, write_len == remaining);
+        auto write_result = co_await exchange.write_all(chunk.data(), write_len, write_len == remaining);
         if (!write_result) {
             std::cout << "write error: " << fiber::common::io_err_name(write_result.error())
                       << ", remaining=" << remaining << ", write_len=" << write_len << std::endl;
@@ -224,7 +224,7 @@ fiber::async::Task<void> handle_generate(fiber::http::HttpExchange &exchange, co
         remaining -= write_len;
     }
     if (total_len == 0) {
-        co_await exchange.write_body(nullptr, 0, true);
+        co_await exchange.write_all(nullptr, 0, true);
     }
     co_return;
 }
@@ -260,7 +260,7 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange, const 
             co_return;
         }
         bool last = read_result->complete();
-        auto write_result = co_await exchange.write_body(std::move(*read_result));
+        auto write_result = co_await exchange.write_all(std::move(*read_result));
         if (!write_result) {
 
             std::cout << "2222 end....." << std::endl;

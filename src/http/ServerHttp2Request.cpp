@@ -80,10 +80,10 @@ struct ServerHttp2Request::SendResponseHeaderOp {
     bool informational_ = false;
 };
 
-struct ServerHttp2Request::SendResponseBodyOp {
+struct ServerHttp2Request::SendResponseBodyAllOp {
     using SuccessType = std::size_t;
 
-    explicit SendResponseBodyOp(mem::IoBufChain &&chunk) noexcept :
+    explicit SendResponseBodyAllOp(mem::IoBufChain &&chunk) noexcept :
         chunk_(std::move(chunk)), total_bytes_(chunk_.readable_bytes()) {}
 
     [[nodiscard]] bool should_complete_without_submit() const noexcept {
@@ -105,6 +105,38 @@ struct ServerHttp2Request::SendResponseBodyOp {
 
     mem::IoBufChain chunk_;
     std::size_t total_bytes_ = 0;
+};
+
+struct ServerHttp2Request::SendResponseBodySomeOp {
+    using SuccessType = std::size_t;
+    inline static constexpr bool kAllowsPartialFinalBatch = true;
+
+    explicit SendResponseBodySomeOp(mem::IoBufChain &chunk) noexcept :
+        chunk_(&chunk), total_bytes_(chunk.readable_bytes()), end_(chunk.complete()) {}
+
+    SendResponseBodySomeOp(const std::uint8_t *buf, std::size_t len, bool end) noexcept :
+        buf_(buf), total_bytes_(len), end_(end) {}
+
+    [[nodiscard]] bool should_complete_without_submit() const noexcept { return total_bytes_ == 0 && !end_; }
+
+    [[nodiscard]] common::IoErr submit(ServerHttp2Request &request) noexcept {
+        return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Data);
+    }
+
+    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return total_bytes_; }
+    void on_send_done(ServerHttp2Request &request, std::uint32_t flow_controlled_bytes,
+                      bool operation_final_batch) noexcept;
+
+    common::IoErr on_encode(ServerHttp2Request &request, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
+                            Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept;
+
+    [[nodiscard]] std::size_t success_result() const noexcept { return accepted_bytes_; }
+
+    mem::IoBufChain *chunk_ = nullptr;
+    const std::uint8_t *buf_ = nullptr;
+    std::size_t total_bytes_ = 0;
+    std::size_t accepted_bytes_ = 0;
+    bool end_ = false;
 };
 
 const Http2Stream::Ops &ServerHttp2Request::stream_ops() noexcept {
@@ -323,10 +355,10 @@ void ServerHttp2Request::SendResponseHeaderOp::on_send_done(ServerHttp2Request &
     }
 }
 
-common::IoErr ServerHttp2Request::SendResponseBodyOp::on_encode(ServerHttp2Request &request, Http2Stream &stream,
-                                                                const Http2OutboundEncodeRequest &req,
-                                                                Http2OutboundEncodeTarget &target,
-                                                                Http2OutboundEncodeResult &result) noexcept {
+common::IoErr ServerHttp2Request::SendResponseBodyAllOp::on_encode(ServerHttp2Request &request, Http2Stream &stream,
+                                                                   const Http2OutboundEncodeRequest &req,
+                                                                   Http2OutboundEncodeTarget &target,
+                                                                   Http2OutboundEncodeResult &result) noexcept {
     if (request.abort_reason_ != common::IoErr::None || request.stream_.local_rst() || request.stream_.remote_rst()) {
         return request.abort_reason_ != common::IoErr::None ? request.abort_reason_ : common::IoErr::Canceled;
     }
@@ -367,14 +399,105 @@ common::IoErr ServerHttp2Request::SendResponseBodyOp::on_encode(ServerHttp2Reque
     return common::IoErr::None;
 }
 
-void ServerHttp2Request::SendResponseBodyOp::on_send_done(ServerHttp2Request &request,
-                                                          std::uint32_t flow_controlled_bytes,
-                                                          bool operation_final_batch) noexcept {
+void ServerHttp2Request::SendResponseBodyAllOp::on_send_done(ServerHttp2Request &request,
+                                                             std::uint32_t flow_controlled_bytes,
+                                                             bool operation_final_batch) noexcept {
     request.response_body_sent_ += flow_controlled_bytes;
     if (!operation_final_batch) {
         return;
     }
     if (chunk_.complete()) {
+        request.stream_.local_end_stream_ = true;
+        request.response_finished_ = true;
+    }
+}
+
+common::IoErr ServerHttp2Request::SendResponseBodySomeOp::on_encode(ServerHttp2Request &request, Http2Stream &stream,
+                                                                    const Http2OutboundEncodeRequest &req,
+                                                                    Http2OutboundEncodeTarget &target,
+                                                                    Http2OutboundEncodeResult &result) noexcept {
+    if (request.abort_reason_ != common::IoErr::None || request.stream_.local_rst() || request.stream_.remote_rst()) {
+        return request.abort_reason_ != common::IoErr::None ? request.abort_reason_ : common::IoErr::Canceled;
+    }
+
+    if (total_bytes_ == 0) {
+        FIBER_ASSERT(end_);
+        mem::IoBufChain empty(request.conn_->transport().loop().io_buf_node_pool());
+        Http2DataFrameEncoder frame_encoder({
+                .stream_id = stream.stream_id(),
+                .max_frame_size = req.max_frame_size,
+                .end_stream = true,
+        });
+        common::IoErr err = frame_encoder.encode(target, empty, 0);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        result.flow_controlled_bytes = 0;
+        result.operation_final_batch = true;
+        return common::IoErr::None;
+    }
+
+    FIBER_ASSERT(req.payload_budget != 0);
+    const std::size_t payload_bytes = std::min(total_bytes_, static_cast<std::size_t>(req.payload_budget));
+    mem::IoBufChain staged;
+    mem::IoBufChain *payload = chunk_;
+    bool consume_borrowed_chain = false;
+
+    if (chunk_ == nullptr) {
+        staged.bind_node_pool(request.conn_->transport().loop().io_buf_node_pool());
+        mem::IoBuf owned = mem::IoBuf::allocate(payload_bytes);
+        if (!owned) {
+            return common::IoErr::NoMem;
+        }
+        std::memcpy(owned.writable_data(), buf_, payload_bytes);
+        owned.commit(payload_bytes);
+        if (!staged.append(std::move(owned))) {
+            return common::IoErr::NoMem;
+        }
+        if (end_ && payload_bytes == total_bytes_) {
+            staged.mark_complete();
+        }
+        payload = &staged;
+    } else if (&chunk_->node_pool() != &request.conn_->transport().loop().io_buf_node_pool()) {
+        staged.bind_node_pool(request.conn_->transport().loop().io_buf_node_pool());
+        if (!chunk_->retain_prefix(payload_bytes, staged)) {
+            return common::IoErr::NoMem;
+        }
+        payload = &staged;
+        consume_borrowed_chain = true;
+    }
+
+    Http2DataFrameEncoder frame_encoder({
+            .stream_id = stream.stream_id(),
+            .max_frame_size = req.max_frame_size,
+            .end_stream = end_ && payload_bytes == total_bytes_,
+    });
+    common::IoErr err = frame_encoder.encode(target, *payload, payload_bytes);
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    if (consume_borrowed_chain) {
+        chunk_->consume_and_compact(payload_bytes);
+        if (payload_bytes == total_bytes_ && end_) {
+            chunk_->clear_complete();
+        }
+    } else if (chunk_ != nullptr && payload_bytes == total_bytes_ && end_) {
+        chunk_->clear_complete();
+    }
+
+    accepted_bytes_ = payload_bytes;
+    result.flow_controlled_bytes = static_cast<std::uint32_t>(payload_bytes);
+    result.operation_final_batch = true;
+    return common::IoErr::None;
+}
+
+void ServerHttp2Request::SendResponseBodySomeOp::on_send_done(ServerHttp2Request &request,
+                                                              std::uint32_t flow_controlled_bytes,
+                                                              bool operation_final_batch) noexcept {
+    FIBER_ASSERT(operation_final_batch);
+    FIBER_ASSERT(flow_controlled_bytes == accepted_bytes_);
+    request.response_body_sent_ += flow_controlled_bytes;
+    if (end_ && accepted_bytes_ == total_bytes_) {
         request.stream_.local_end_stream_ = true;
         request.response_finished_ = true;
     }
@@ -483,9 +606,9 @@ fiber::async::Task<common::IoResult<void>> ServerHttp2Request::send_header(HttpE
     co_return co_await HeaderSendAwaiter(*this, timeout, header);
 }
 
-fiber::async::Task<common::IoResult<size_t>>
-ServerHttp2Request::write_body(HttpExchange &exchange, mem::IoBufChain chunk,
-                               std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_all(HttpExchange &exchange,
+                                                                           mem::IoBufChain chunk,
+                                                                           std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr || &exchange != &exchange_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -499,12 +622,13 @@ ServerHttp2Request::write_body(HttpExchange &exchange, mem::IoBufChain chunk,
         co_return std::unexpected(common::IoErr::Canceled);
     }
 
-    co_return co_await BodySendAwaiter(*this, timeout, std::move(chunk));
+    co_return co_await BodyWriteAllAwaiter(*this, timeout, std::move(chunk));
 }
 
-fiber::async::Task<common::IoResult<size_t>>
-ServerHttp2Request::write_body(HttpExchange &exchange, const std::uint8_t *buf, std::size_t len, bool end,
-                               std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_all(HttpExchange &exchange,
+                                                                           const std::uint8_t *buf, std::size_t len,
+                                                                           bool end,
+                                                                           std::chrono::milliseconds timeout) noexcept {
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -525,7 +649,47 @@ ServerHttp2Request::write_body(HttpExchange &exchange, const std::uint8_t *buf, 
         }
     }
 
-    co_return co_await write_body(exchange, std::move(chunk), timeout);
+    co_return co_await write_all(exchange, std::move(chunk), timeout);
+}
+
+fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write(HttpExchange &exchange, mem::IoBufChain &chunk,
+                                                                       std::chrono::milliseconds timeout) noexcept {
+    if (conn_ == nullptr || &exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (stream_.local_end_stream()) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    if (abort_reason_ != common::IoErr::None) {
+        co_return std::unexpected(abort_reason_);
+    }
+    if (stream_.local_rst() || stream_.remote_rst()) {
+        co_return std::unexpected(common::IoErr::Canceled);
+    }
+
+    co_return co_await BodyWriteSomeAwaiter(*this, timeout, chunk);
+}
+
+fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write(HttpExchange &exchange, const std::uint8_t *buf,
+                                                                       std::size_t len, bool end,
+                                                                       std::chrono::milliseconds timeout) noexcept {
+    if (len != 0 && buf == nullptr) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (conn_ == nullptr || &exchange != &exchange_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (stream_.local_end_stream()) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    if (abort_reason_ != common::IoErr::None) {
+        co_return std::unexpected(abort_reason_);
+    }
+    if (stream_.local_rst() || stream_.remote_rst()) {
+        co_return std::unexpected(common::IoErr::Canceled);
+    }
+
+    co_return co_await BodyWriteSomeAwaiter(*this, timeout, buf, len, end);
 }
 
 common::IoResult<void> ServerHttp2Request::abort(HttpExchange &exchange, common::IoErr reason) noexcept {

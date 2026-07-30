@@ -139,8 +139,12 @@ public:
     [[nodiscard]] async::Task<common::IoResult<std::size_t>>
     read(std::size_t max_bytes, mem::IoBufChain &out,
          std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    [[nodiscard]] common::IoResult<std::size_t> try_write(const void *buf, std::size_t len, bool fin = false) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> try_write(const mem::IoBuf &buf, bool fin = false) noexcept;
     [[nodiscard]] common::IoResult<std::size_t> try_write(mem::IoBufChain &chain) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<std::size_t>>
+    write(const void *buf, std::size_t len, bool fin = false,
+          std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] async::Task<common::IoResult<std::size_t>>
     write(mem::IoBuf buf, bool fin = false,
           std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;

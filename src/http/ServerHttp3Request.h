@@ -50,11 +50,16 @@ public:
     fiber::async::Task<common::IoResult<void>> send_header(HttpExchange &exchange,
                                                            const OutgoingHeaderBlockView &header,
                                                            std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(HttpExchange &exchange, mem::IoBufChain chunk,
-                                                                 std::chrono::milliseconds timeout) noexcept override;
-    fiber::async::Task<common::IoResult<std::size_t>> write_body(HttpExchange &exchange, const std::uint8_t *buf,
-                                                                 std::size_t len, bool end,
-                                                                 std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<std::size_t>> write_all(HttpExchange &exchange, mem::IoBufChain chunk,
+                                                                std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<std::size_t>> write_all(HttpExchange &exchange, const std::uint8_t *buf,
+                                                                std::size_t len, bool end,
+                                                                std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<std::size_t>> write(HttpExchange &exchange, mem::IoBufChain &chunk,
+                                                            std::chrono::milliseconds timeout) noexcept override;
+    fiber::async::Task<common::IoResult<std::size_t>> write(HttpExchange &exchange, const std::uint8_t *buf,
+                                                            std::size_t len, bool end,
+                                                            std::chrono::milliseconds timeout) noexcept override;
     common::IoResult<void> abort(HttpExchange &exchange, common::IoErr reason) noexcept override;
 
 private:
@@ -81,6 +86,8 @@ private:
     [[nodiscard]] common::IoResult<mem::IoBufChain>
     fail_read_body(Http3ErrorCode error, common::IoErr reason = common::IoErr::Invalid) noexcept;
     [[nodiscard]] common::IoResult<void> take_body_payload(mem::IoBufChain &out, std::size_t bytes) noexcept;
+    async::Task<common::IoResult<void>> write_data_frame_header(std::size_t payload_len,
+                                                                std::chrono::milliseconds timeout) noexcept;
 
     quic::QuicConnection::Lease quic_lease_{};
     quic::QuicStream stream_;
@@ -97,6 +104,7 @@ private:
     HttpBodySpec response_body_spec_{HttpBodySpec::Auto()};
     std::size_t response_content_length_ = 0;
     std::size_t response_body_sent_ = 0;
+    std::size_t response_data_frame_remaining_ = 0;
     bool read_loop_started_ = false;
     bool request_head_received_ = false;
     bool handler_started_ = false;
@@ -104,6 +112,8 @@ private:
     bool frame_header_in_progress_ = false;
     bool response_headers_sent_ = false;
     bool response_finished_ = false;
+    bool response_data_frame_active_ = false;
+    bool response_data_frame_end_ = false;
     bool extended_connect_enabled_ = false;
 };
 

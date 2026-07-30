@@ -90,9 +90,22 @@ struct Http3BodyWriteOutcome {
     fiber::common::IoErr header_error = fiber::common::IoErr::None;
     fiber::common::IoErr body_error = fiber::common::IoErr::None;
     std::size_t written = 0;
+    std::size_t remaining = 0;
     std::size_t foreign_pool_cached_after_write = 0;
     bool header_ok = false;
     bool body_ok = false;
+    bool complete = false;
+};
+
+struct Http3WriteTimeoutOutcome {
+    fiber::common::IoErr header_error = fiber::common::IoErr::None;
+    fiber::common::IoErr first_error = fiber::common::IoErr::None;
+    fiber::common::IoErr retry_error = fiber::common::IoErr::None;
+    fiber::common::IoErr terminal_error = fiber::common::IoErr::None;
+    std::size_t remaining = 0;
+    bool header_ok = false;
+    bool complete = false;
+    bool response_channel_closed = false;
 };
 
 struct ClientRequestNotification {
@@ -190,14 +203,15 @@ fiber::quic::QuicStream::Lease create_server_request(void *owner, std::uint64_t 
     return fiber::http::ServerHttp3Request::create(stream_id, conn, ctx->options, ctx->handler);
 }
 
-fiber::quic::QuicTransportParams valid_peer_transport_params(const fiber::quic::QuicConnection::Options &options) {
+fiber::quic::QuicTransportParams valid_peer_transport_params(const fiber::quic::QuicConnection::Options &options,
+                                                             std::uint64_t initial_max_stream_data_bidi_local = 1024) {
     fiber::quic::QuicTransportParams params{};
     params.has_initial_source_connection_id = true;
     params.initial_source_connection_id = options.remote_connection_id;
     params.max_udp_payload_size = fiber::quic::kMinInitialDatagramSize;
     params.active_connection_id_limit = 2;
     params.initial_max_data = 4096;
-    params.initial_max_stream_data_bidi_local = 1024;
+    params.initial_max_stream_data_bidi_local = initial_max_stream_data_bidi_local;
     params.initial_max_stream_data_bidi_remote = 1024;
     params.initial_max_stream_data_uni = 1024;
     params.initial_max_streams_uni = 8;
@@ -211,8 +225,9 @@ fiber::async::DetachedTask start_h3(fiber::http::Http3Connection *h3, std::promi
 }
 
 StartResult start_h3_on_loop(fiber::event::EventLoop &loop, fiber::quic::QuicConnection &quic,
-                             const fiber::quic::QuicConnection::Options &options, fiber::http::Http3Connection &h3) {
-    auto params = valid_peer_transport_params(options);
+                             const fiber::quic::QuicConnection::Options &options, fiber::http::Http3Connection &h3,
+                             std::uint64_t initial_max_stream_data_bidi_local = 1024) {
+    auto params = valid_peer_transport_params(options, initial_max_stream_data_bidi_local);
     if (options.role == fiber::quic::QuicConnectionRole::Client) {
         auto adopted = quic.adopt_server_initial_source_connection_id(options.remote_connection_id);
         if (!adopted) {
@@ -743,7 +758,7 @@ TEST(Http3ConnectionTest, ServerCanWriteFinalResponseBody) {
         }
         outcome.header_ok = true;
 
-        auto body = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        auto body = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
         if (!body) {
             outcome.body_error = body.error();
             outcome_promise->set_value(outcome);
@@ -831,7 +846,7 @@ TEST(Http3ConnectionTest, ServerCanWriteFinalResponseBodyFromForeignNodePool) {
         }
         chunk.mark_complete();
 
-        auto body = co_await exchange.write_body(std::move(chunk));
+        auto body = co_await exchange.write_all(std::move(chunk));
         if (!body) {
             outcome.body_error = body.error();
             outcome_promise->set_value(outcome);
@@ -873,6 +888,197 @@ TEST(Http3ConnectionTest, ServerCanWriteFinalResponseBodyFromForeignNodePool) {
     EXPECT_TRUE(outcome.body_ok) << static_cast<int>(outcome.body_error);
     EXPECT_EQ(outcome.written, 5U);
     EXPECT_EQ(outcome.foreign_pool_cached_after_write, 0U);
+
+    h3.close();
+    group.stop();
+    group.join();
+}
+
+TEST(Http3ConnectionTest, ServerWriteReturnsWithUnsentPayloadTailAtStreamFlowLimit) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    constexpr std::size_t kBodySize = 2048;
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto outcome_promise = std::make_shared<std::promise<Http3BodyWriteOutcome>>();
+    auto outcome_future = outcome_promise->get_future();
+    ctx.handler = [outcome_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        Http3BodyWriteOutcome outcome;
+        auto header = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .body = fiber::http::HttpBodySpec::ContentLength(kBodySize),
+                .end_stream = false,
+        });
+        if (!header) {
+            outcome.header_error = header.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        outcome.header_ok = true;
+
+        fiber::mem::IoBufNodePool &pool = fiber::event::EventLoop::current().io_buf_node_pool();
+        fiber::mem::IoBufChain chunk(pool);
+        fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(kBodySize);
+        if (!body) {
+            outcome.body_error = fiber::common::IoErr::NoMem;
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        std::memset(body.writable_data(), 'x', kBodySize);
+        body.commit(kBodySize);
+        if (!chunk.append(std::move(body))) {
+            outcome.body_error = fiber::common::IoErr::NoMem;
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        chunk.mark_complete();
+
+        auto written = co_await exchange.write(chunk);
+        if (!written) {
+            outcome.body_error = written.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        outcome.body_ok = true;
+        outcome.written = *written;
+        outcome.remaining = chunk.readable_bytes();
+        outcome.complete = chunk.complete();
+        outcome_promise->set_value(outcome);
+        co_return;
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/partial"},
+    };
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_request_stream_then_wait(&quic, &request, &feed_done);
+    });
+
+    ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(outcome_future.wait_for(2s), std::future_status::ready);
+    auto outcome = outcome_future.get();
+    EXPECT_TRUE(outcome.header_ok) << static_cast<int>(outcome.header_error);
+    EXPECT_TRUE(outcome.body_ok) << static_cast<int>(outcome.body_error);
+    EXPECT_GT(outcome.written, 0U);
+    EXPECT_LT(outcome.written, kBodySize);
+    EXPECT_EQ(outcome.remaining, kBodySize - outcome.written);
+    EXPECT_TRUE(outcome.complete);
+
+    h3.close();
+    group.stop();
+    group.join();
+}
+
+TEST(Http3ConnectionTest, ServerWriteTimeoutDuringDataHeaderAbortsStreamAndRejectsRetry) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto outcome_promise = std::make_shared<std::promise<Http3WriteTimeoutOutcome>>();
+    auto outcome_future = outcome_promise->get_future();
+    ctx.handler = [outcome_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        Http3WriteTimeoutOutcome outcome;
+        auto header = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .body = fiber::http::HttpBodySpec::ContentLength(5),
+                .end_stream = false,
+        });
+        if (!header) {
+            outcome.header_error = header.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        outcome.header_ok = true;
+
+        fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+        fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(5);
+        if (!body) {
+            outcome.first_error = fiber::common::IoErr::NoMem;
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        std::memcpy(body.writable_data(), "hello", 5);
+        body.commit(5);
+        if (!chunk.append(std::move(body))) {
+            outcome.first_error = fiber::common::IoErr::NoMem;
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        chunk.mark_complete();
+
+        auto first = co_await exchange.write(chunk, 0ms);
+        if (!first) {
+            outcome.first_error = first.error();
+        }
+        outcome.remaining = chunk.readable_bytes();
+        outcome.complete = chunk.complete();
+
+        auto retry = co_await exchange.write(chunk, 0ms);
+        if (!retry) {
+            outcome.retry_error = retry.error();
+        }
+        outcome.terminal_error = exchange.response_stats().terminal_error;
+        outcome.response_channel_closed = exchange.response_channel_closed();
+        outcome_promise->set_value(outcome);
+        co_return;
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    // A minimal 200 response HEADERS frame consumes five bytes. One byte of
+    // stream credit remains, so the two-byte DATA header is only partly queued
+    // before the zero-timeout write fails.
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3, 6);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    HeaderList headers{
+            {":method", "GET"},
+            {":scheme", "https"},
+            {":authority", "example.com"},
+            {":path", "/write-timeout"},
+    };
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_request_stream_then_wait(&quic, &request, &feed_done);
+    });
+
+    ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(outcome_future.wait_for(2s), std::future_status::ready);
+    Http3WriteTimeoutOutcome outcome = outcome_future.get();
+    EXPECT_TRUE(outcome.header_ok) << static_cast<int>(outcome.header_error);
+    EXPECT_EQ(outcome.first_error, fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(outcome.retry_error, fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(outcome.terminal_error, fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(outcome.remaining, 5U);
+    EXPECT_TRUE(outcome.complete);
+    EXPECT_TRUE(outcome.response_channel_closed);
 
     h3.close();
     group.stop();

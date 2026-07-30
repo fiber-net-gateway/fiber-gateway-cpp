@@ -164,8 +164,8 @@ void encode_header_fields(char *&dst, const HttpHeaders *headers) noexcept {
     }
 }
 
-fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, const void *buf, size_t len,
-                                                     std::chrono::milliseconds timeout) {
+fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *transport, const void *buf, size_t len,
+                                                               std::chrono::milliseconds timeout) {
     const auto *ptr = static_cast<const std::uint8_t *>(buf);
     size_t remaining = len;
     while (remaining > 0) {
@@ -182,8 +182,8 @@ fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, c
     co_return common::IoResult<void>{};
 }
 
-fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, mem::IoBufChain &buf,
-                                                     std::chrono::milliseconds timeout) {
+fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *transport, mem::IoBufChain &buf,
+                                                               std::chrono::milliseconds timeout) {
     while (buf.readable_bytes() > 0) {
         auto result = co_await transport->writev(buf, timeout);
         if (!result) {
@@ -975,8 +975,8 @@ Http1ExchangeIo::write_response_header(HttpExchange &exchange, bool body_end, st
         co_return std::unexpected(header_result.error());
     }
 
-    auto result = co_await write_all(&connection_->transport(), header_result->readable_data(),
-                                     header_result->readable(), timeout);
+    auto result = co_await transport_write_all(&connection_->transport(), header_result->readable_data(),
+                                               header_result->readable(), timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -1008,8 +1008,8 @@ Http1ExchangeIo::write_informational_header(HttpExchange &exchange, int status_c
         co_return std::unexpected(header_result.error());
     }
 
-    auto result = co_await write_all(&connection_->transport(), header_result->readable_data(),
-                                     header_result->readable(), timeout);
+    auto result = co_await transport_write_all(&connection_->transport(), header_result->readable_data(),
+                                               header_result->readable(), timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
@@ -1057,16 +1057,22 @@ Http1ExchangeIo::write_chunked_trailer_block(const HttpHeaders *headers, std::ch
         co_return std::unexpected(block_result.error());
     }
 
-    auto result = co_await write_all(&connection_->transport(), block_result->readable_data(), block_result->readable(),
-                                     timeout);
+    auto result = co_await transport_write_all(&connection_->transport(), block_result->readable_data(),
+                                               block_result->readable(), timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
     co_return common::IoResult<void>{};
 }
 
-fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExchange &exchange, mem::IoBufChain chunk,
-                                                                         std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<void>>
+Http1ExchangeIo::write_chunk_suffix(bool end, std::chrono::milliseconds timeout) noexcept {
+    const std::string_view suffix = end ? std::string_view("\r\n0\r\n\r\n", 7) : std::string_view("\r\n", 2);
+    co_return co_await transport_write_all(&connection_->transport(), suffix.data(), suffix.size(), timeout);
+}
+
+fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_all(HttpExchange &exchange, mem::IoBufChain chunk,
+                                                                        std::chrono::milliseconds timeout) noexcept {
     if (!connection_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1075,13 +1081,28 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
     }
 
     size_t len = chunk.readable_bytes();
+    if (chunk_write_active_) {
+        const bool end = chunk.complete();
+        if (len != chunk_payload_remaining_ || end != chunk_write_end_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        std::size_t total = 0;
+        while (chunk_write_active_ || chunk.readable_bytes() != 0 || chunk.complete()) {
+            auto written = co_await write(exchange, chunk, timeout);
+            if (!written) {
+                co_return std::unexpected(written.error());
+            }
+            total += *written;
+        }
+        co_return total;
+    }
     if (response_phase_ == ResponsePhase::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
     if (response_body_spec_.is_stream()) {
         if (len > 0) {
-            auto res = co_await write_all(&connection_->transport(), chunk, timeout);
+            auto res = co_await transport_write_all(&connection_->transport(), chunk, timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
@@ -1130,7 +1151,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
                 co_return std::unexpected(common::IoErr::NoMem);
             }
 
-            auto res = co_await write_all(&connection_->transport(), chunk, timeout);
+            auto res = co_await transport_write_all(&connection_->transport(), chunk, timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
@@ -1143,7 +1164,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
             }
         } else if (chunk.complete()) {
             // Empty final chunk: just the terminator.
-            auto zero_result = co_await write_all(&connection_->transport(), "0\r\n\r\n", 5, timeout);
+            auto zero_result = co_await transport_write_all(&connection_->transport(), "0\r\n\r\n", 5, timeout);
             if (!zero_result) {
                 co_return std::unexpected(zero_result.error());
             }
@@ -1166,7 +1187,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         }
     }
     if (len > 0) {
-        auto res = co_await write_all(&connection_->transport(), chunk, timeout);
+        auto res = co_await transport_write_all(&connection_->transport(), chunk, timeout);
         if (!res) {
             co_return std::unexpected(res.error());
         }
@@ -1184,9 +1205,9 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
     co_return len;
 }
 
-fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExchange &exchange, const uint8_t *buf,
-                                                                         size_t len, bool end,
-                                                                         std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_all(HttpExchange &exchange, const uint8_t *buf,
+                                                                        size_t len, bool end,
+                                                                        std::chrono::milliseconds timeout) noexcept {
     if (len > 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1197,13 +1218,33 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         co_return std::unexpected(common::IoErr::Already);
     }
 
+    if (chunk_write_active_) {
+        if (len != chunk_payload_remaining_ || end != chunk_write_end_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        const std::uint8_t *current = buf;
+        std::size_t remaining = len;
+        while (chunk_write_active_ || remaining != 0 || end) {
+            auto written = co_await write(exchange, current, remaining, end, timeout);
+            if (!written) {
+                co_return std::unexpected(written.error());
+            }
+            current += *written;
+            remaining -= *written;
+            if (remaining == 0) {
+                break;
+            }
+        }
+        co_return len;
+    }
+
     if (response_phase_ == ResponsePhase::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
     if (response_body_spec_.is_stream()) {
         if (len > 0) {
-            auto res = co_await write_all(&connection_->transport(), buf, len, timeout);
+            auto res = co_await transport_write_all(&connection_->transport(), buf, len, timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
@@ -1226,19 +1267,20 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
                 co_return std::unexpected(common::IoErr::Invalid);
             }
             std::string_view size_view(size_buf.data(), static_cast<size_t>(ptr - size_buf.data()));
-            auto res = co_await write_all(&connection_->transport(), size_view.data(), size_view.size(), timeout);
+            auto res = co_await transport_write_all(&connection_->transport(), size_view.data(), size_view.size(),
+                                                    timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
-            res = co_await write_all(&connection_->transport(), "\r\n", 2, timeout);
+            res = co_await transport_write_all(&connection_->transport(), "\r\n", 2, timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
-            res = co_await write_all(&connection_->transport(), buf, len, timeout);
+            res = co_await transport_write_all(&connection_->transport(), buf, len, timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
-            res = co_await write_all(&connection_->transport(), "\r\n", 2, timeout);
+            res = co_await transport_write_all(&connection_->transport(), "\r\n", 2, timeout);
             if (!res) {
                 co_return std::unexpected(res.error());
             }
@@ -1248,7 +1290,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
             response_phase_ = ResponsePhase::BodyStreaming;
         }
         if (end) {
-            auto zero_result = co_await write_all(&connection_->transport(), "0\r\n\r\n", 5, timeout);
+            auto zero_result = co_await transport_write_all(&connection_->transport(), "0\r\n\r\n", 5, timeout);
             if (!zero_result) {
                 co_return std::unexpected(zero_result.error());
             }
@@ -1271,7 +1313,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         }
     }
     if (len > 0) {
-        auto res = co_await write_all(&connection_->transport(), buf, len, timeout);
+        auto res = co_await transport_write_all(&connection_->transport(), buf, len, timeout);
         if (!res) {
             co_return std::unexpected(res.error());
         }
@@ -1287,6 +1329,300 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write_body(HttpExc
         response_phase_ = ResponsePhase::Finished;
     }
     co_return len;
+}
+
+fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange &exchange, mem::IoBufChain &chunk,
+                                                                    std::chrono::milliseconds timeout) noexcept {
+    if (!connection_ || exchange.io_ != this || response_phase_ == ResponsePhase::Init) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_phase_ == ResponsePhase::Finished) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+
+    const std::size_t len = chunk.readable_bytes();
+    const bool end = chunk.complete();
+
+    if (response_body_spec_.is_none()) {
+        if (len != 0 || end) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        co_return 0;
+    }
+
+    if (response_body_spec_.is_content_length()) {
+        if (response_body_sent_ > response_content_length_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        const std::size_t remaining = response_content_length_ - response_body_sent_;
+        if (len > remaining || (end && len != remaining)) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
+    if (!response_body_spec_.is_chunked()) {
+        if (len == 0) {
+            if (end) {
+                chunk.clear_complete();
+                response_phase_ = ResponsePhase::Finished;
+            }
+            co_return 0;
+        }
+        auto written = co_await connection_->transport().writev(chunk, timeout);
+        if (!written) {
+            co_return std::unexpected(written.error());
+        }
+        if (*written == 0) {
+            co_return std::unexpected(common::IoErr::ConnReset);
+        }
+        response_body_sent_ += *written;
+        response_phase_ = ResponsePhase::BodyStreaming;
+        if (*written == len && end) {
+            chunk.clear_complete();
+            response_phase_ = ResponsePhase::Finished;
+        }
+        co_return *written;
+    }
+
+    if (chunk_write_active_) {
+        if (len != chunk_payload_remaining_ || end != chunk_write_end_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        if (chunk_suffix_pending_) {
+            auto suffix = co_await write_chunk_suffix(end, timeout);
+            if (!suffix) {
+                co_return std::unexpected(suffix.error());
+            }
+            chunk_write_active_ = false;
+            chunk_write_end_ = false;
+            chunk_suffix_pending_ = false;
+            if (end) {
+                chunk.clear_complete();
+                response_phase_ = ResponsePhase::Finished;
+            }
+            co_return 0;
+        }
+    } else {
+        if (len == 0) {
+            if (!end) {
+                co_return 0;
+            }
+            auto finished = co_await transport_write_all(&connection_->transport(), "0\r\n\r\n", 5, timeout);
+            if (!finished) {
+                co_return std::unexpected(finished.error());
+            }
+            chunk.clear_complete();
+            response_phase_ = ResponsePhase::Finished;
+            co_return 0;
+        }
+
+        std::array<char, kMaxChunkSizeHexDigits + 2> prefix_buf{};
+        char *prefix_ptr = prefix_buf.data();
+        prefix_ptr += append_hex(prefix_ptr, len);
+        *prefix_ptr++ = '\r';
+        *prefix_ptr++ = '\n';
+        const std::size_t prefix_len = static_cast<std::size_t>(prefix_ptr - prefix_buf.data());
+        mem::IoBuf prefix = mem::IoBuf::allocate(prefix_len);
+        if (!prefix) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+        std::memcpy(prefix.writable_data(), prefix_buf.data(), prefix_len);
+        prefix.commit(prefix_len);
+        if (!chunk.prepend(std::move(prefix))) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+
+        chunk_write_active_ = true;
+        chunk_payload_remaining_ = len;
+        chunk_write_end_ = end;
+
+        std::size_t prefix_remaining = prefix_len;
+        while (prefix_remaining != 0) {
+            auto written = co_await connection_->transport().writev(chunk, timeout);
+            if (!written) {
+                co_return std::unexpected(written.error());
+            }
+            if (*written == 0) {
+                co_return std::unexpected(common::IoErr::ConnReset);
+            }
+            if (*written >= prefix_remaining) {
+                const std::size_t payload_written = *written - prefix_remaining;
+                prefix_remaining = 0;
+                if (payload_written != 0) {
+                    chunk_payload_remaining_ -= payload_written;
+                    response_body_sent_ += payload_written;
+                    response_phase_ = ResponsePhase::BodyStreaming;
+                    if (chunk_payload_remaining_ != 0) {
+                        co_return payload_written;
+                    }
+                    chunk_suffix_pending_ = true;
+                    auto suffix = co_await write_chunk_suffix(end, timeout);
+                    if (!suffix) {
+                        co_return std::unexpected(suffix.error());
+                    }
+                    chunk_write_active_ = false;
+                    chunk_write_end_ = false;
+                    chunk_suffix_pending_ = false;
+                    if (end) {
+                        chunk.clear_complete();
+                        response_phase_ = ResponsePhase::Finished;
+                    }
+                    co_return payload_written;
+                }
+            } else {
+                prefix_remaining -= *written;
+            }
+        }
+    }
+
+    auto written = co_await connection_->transport().writev(chunk, timeout);
+    if (!written) {
+        co_return std::unexpected(written.error());
+    }
+    if (*written == 0) {
+        co_return std::unexpected(common::IoErr::ConnReset);
+    }
+    chunk_payload_remaining_ -= *written;
+    response_body_sent_ += *written;
+    response_phase_ = ResponsePhase::BodyStreaming;
+    if (chunk_payload_remaining_ != 0) {
+        co_return *written;
+    }
+    chunk_suffix_pending_ = true;
+    auto suffix = co_await write_chunk_suffix(end, timeout);
+    if (!suffix) {
+        co_return std::unexpected(suffix.error());
+    }
+    chunk_write_active_ = false;
+    chunk_write_end_ = false;
+    chunk_suffix_pending_ = false;
+    if (end) {
+        chunk.clear_complete();
+        response_phase_ = ResponsePhase::Finished;
+    }
+    co_return *written;
+}
+
+fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange &exchange, const uint8_t *buf,
+                                                                    size_t len, bool end,
+                                                                    std::chrono::milliseconds timeout) noexcept {
+    if ((len != 0 && buf == nullptr) || !connection_ || exchange.io_ != this ||
+        response_phase_ == ResponsePhase::Init) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_phase_ == ResponsePhase::Finished) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+
+    if (response_body_spec_.is_none()) {
+        if (len != 0 || end) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        co_return 0;
+    }
+
+    if (response_body_spec_.is_content_length()) {
+        if (response_body_sent_ > response_content_length_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        const std::size_t remaining = response_content_length_ - response_body_sent_;
+        if (len > remaining || (end && len != remaining)) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
+    if (!response_body_spec_.is_chunked()) {
+        if (len == 0) {
+            if (end) {
+                response_phase_ = ResponsePhase::Finished;
+            }
+            co_return 0;
+        }
+        auto written = co_await connection_->transport().write(buf, len, timeout);
+        if (!written) {
+            co_return std::unexpected(written.error());
+        }
+        if (*written == 0) {
+            co_return std::unexpected(common::IoErr::ConnReset);
+        }
+        response_body_sent_ += *written;
+        response_phase_ = ResponsePhase::BodyStreaming;
+        if (*written == len && end) {
+            response_phase_ = ResponsePhase::Finished;
+        }
+        co_return *written;
+    }
+
+    if (chunk_write_active_) {
+        if (len != chunk_payload_remaining_ || end != chunk_write_end_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        if (chunk_suffix_pending_) {
+            auto suffix = co_await write_chunk_suffix(end, timeout);
+            if (!suffix) {
+                co_return std::unexpected(suffix.error());
+            }
+            chunk_write_active_ = false;
+            chunk_write_end_ = false;
+            chunk_suffix_pending_ = false;
+            if (end) {
+                response_phase_ = ResponsePhase::Finished;
+            }
+            co_return 0;
+        }
+    } else {
+        if (len == 0) {
+            if (!end) {
+                co_return 0;
+            }
+            auto finished = co_await transport_write_all(&connection_->transport(), "0\r\n\r\n", 5, timeout);
+            if (!finished) {
+                co_return std::unexpected(finished.error());
+            }
+            response_phase_ = ResponsePhase::Finished;
+            co_return 0;
+        }
+
+        std::array<char, kMaxChunkSizeHexDigits + 2> prefix_buf{};
+        char *prefix_ptr = prefix_buf.data();
+        prefix_ptr += append_hex(prefix_ptr, len);
+        *prefix_ptr++ = '\r';
+        *prefix_ptr++ = '\n';
+        const std::size_t prefix_len = static_cast<std::size_t>(prefix_ptr - prefix_buf.data());
+        auto prefix = co_await transport_write_all(&connection_->transport(), prefix_buf.data(), prefix_len, timeout);
+        if (!prefix) {
+            co_return std::unexpected(prefix.error());
+        }
+        chunk_write_active_ = true;
+        chunk_payload_remaining_ = len;
+        chunk_write_end_ = end;
+    }
+
+    auto written = co_await connection_->transport().write(buf, len, timeout);
+    if (!written) {
+        co_return std::unexpected(written.error());
+    }
+    if (*written == 0) {
+        co_return std::unexpected(common::IoErr::ConnReset);
+    }
+    chunk_payload_remaining_ -= *written;
+    response_body_sent_ += *written;
+    response_phase_ = ResponsePhase::BodyStreaming;
+    if (chunk_payload_remaining_ != 0) {
+        co_return *written;
+    }
+    chunk_suffix_pending_ = true;
+    auto suffix = co_await write_chunk_suffix(end, timeout);
+    if (!suffix) {
+        co_return std::unexpected(suffix.error());
+    }
+    chunk_write_active_ = false;
+    chunk_write_end_ = false;
+    chunk_suffix_pending_ = false;
+    if (end) {
+        response_phase_ = ResponsePhase::Finished;
+    }
+    co_return *written;
 }
 
 bool Http1ExchangeIo::should_keep_alive(const HttpExchange &) const noexcept {
