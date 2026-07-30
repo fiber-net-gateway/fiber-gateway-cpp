@@ -1487,7 +1487,7 @@ async::Task<void> send_body(http::HttpExchange &exchange, AiServerCatRequest *ca
     if (!sent_header || size == 0) {
         co_return;
     }
-    (void) co_await exchange.write_body(body.readable_data(), size, true);
+    (void) co_await exchange.write_all(body.readable_data(), size, true);
 }
 
 void record_cat_response_error(AiServerCatRequest *cat_request, const LlmError &error) noexcept {
@@ -1562,7 +1562,7 @@ async::Task<void> send_error(http::HttpExchange &exchange, AiServerCatRequest *c
             .end_stream = encoded->readable() == 0,
     });
     if (sent_header && encoded->readable() > 0) {
-        (void) co_await exchange.write_body(encoded->readable_data(), encoded->readable(), true);
+        (void) co_await exchange.write_all(encoded->readable_data(), encoded->readable(), true);
     }
 }
 
@@ -2019,7 +2019,7 @@ async::Task<SseRelayResult> relay_sse(http::HttpExchange &exchange, ProviderHttp
         if (expected_bytes == 0 && !complete) {
             continue;
         }
-        auto written = co_await exchange.write_body(std::move(relay_chunk));
+        auto written = co_await exchange.write_all(std::move(relay_chunk));
         if (!written || *written != expected_bytes) {
             (void) exchange.abort(written ? common::IoErr::Invalid : written.error());
             downstream_delivery_open = false;

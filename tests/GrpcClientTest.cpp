@@ -154,7 +154,7 @@ fiber::async::Task<void> say_hello_handler(fiber::http::HttpExchange &exchange) 
     }
 
     auto write_result =
-            co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(framed.data()), framed.size(), false);
+            co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(framed.data()), framed.size(), false);
     if (!write_result) {
         co_return;
     }

@@ -259,7 +259,7 @@ TEST(Http1ServerTest, BasicGet) {
             if (!header_result) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>("ok"), 2, true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>("ok"), 2, true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -323,7 +323,7 @@ TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
             if (!header_result) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -442,11 +442,11 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesChunkedForStreaming)
             if (!header_result) {
                 co_return;
             }
-            auto first = co_await exchange.write_body(reinterpret_cast<const uint8_t *>("he"), 2, false);
+            auto first = co_await exchange.write_all(reinterpret_cast<const uint8_t *>("he"), 2, false);
             if (!first) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>("llo"), 3, true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>("llo"), 3, true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -492,7 +492,7 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesContentLengthForLarg
                 co_return;
             }
             auto write_result =
-                    co_await exchange.write_body(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
+                    co_await exchange.write_all(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
             if (!write_result) {
                 co_return;
             }
@@ -559,8 +559,8 @@ TEST(Http1ServerTest, StreamResponseSwitchesToRawBidirectionalIo) {
                 co_return;
             }
             response.append(chain_to_string(std::move(*eof_result)));
-            (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(response.data()),
-                                                response.size(), true);
+            (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(response.data()), response.size(),
+                                               true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -637,9 +637,9 @@ TEST(Http1ServerTest, ChunkedPost) {
                 co_return;
             }
             if (!body.empty()) {
-                co_await exchange.write_body(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
+                co_await exchange.write_all(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
             } else {
-                co_await exchange.write_body(nullptr, 0, true);
+                co_await exchange.write_all(nullptr, 0, true);
             }
             co_return;
         };
@@ -719,7 +719,7 @@ TEST(Http1ServerTest, WriteBodyAcceptsIoBufChain) {
             }
 
             for (auto &chunk: chunks) {
-                auto write_result = co_await exchange.write_body(std::move(chunk));
+                auto write_result = co_await exchange.write_all(std::move(chunk));
                 if (!write_result) {
                     co_return;
                 }
@@ -794,7 +794,7 @@ TEST(Http1ServerTest, ChunkedPostTrailersAreAvailableAfterBody) {
             if (!header_result) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>(response.data()), response.size(), true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(response.data()), response.size(), true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -868,7 +868,7 @@ TEST(Http1ServerTest, ChunkedPostWaitsForCompleteTrailersBeforeLastChunk) {
             if (!header_result) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>(response.data()), response.size(), true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(response.data()), response.size(), true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -934,7 +934,7 @@ TEST(Http1ServerTest, InvalidChunkedPostReturnsBadRequest) {
                 }
             }
             co_await send_final_header(exchange, 204, nullptr, fiber::http::ResponseBodySpec::None(), {}, true);
-            co_await exchange.write_body(nullptr, 0, true);
+            co_await exchange.write_all(nullptr, 0, true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -986,7 +986,7 @@ TEST(Http1ServerTest, ChunkedResponseCanSendTrailers) {
                 co_return;
             }
 
-            auto body_result = co_await exchange.write_body(reinterpret_cast<const uint8_t *>("hello"), 5, false);
+            auto body_result = co_await exchange.write_all(reinterpret_cast<const uint8_t *>("hello"), 5, false);
             if (!body_result) {
                 co_return;
             }
@@ -1047,7 +1047,7 @@ TEST(Http1ServerTest, KeepAliveReuse) {
             if (!header_result) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -1124,7 +1124,7 @@ TEST(Http1ServerTest, ChunkedKeepAlivePipelinedNextRequest) {
             if (!header_result) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>(response.data()), response.size(), true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(response.data()), response.size(), true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
@@ -1188,7 +1188,7 @@ TEST(Http1ServerTest, EventLoopGroupDispatch) {
             if (!header_result) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>("ok"), 2, true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>("ok"), 2, true);
             co_return;
         };
         auto *server = new fiber::http::Http1Server(group.at(0), handler, {}, &group);
@@ -1261,7 +1261,7 @@ TEST(Http1ServerTest, ShutdownAndWait) {
             if (!header_result) {
                 co_return;
             }
-            co_await exchange.write_body(reinterpret_cast<const uint8_t *>("ok"), 2, true);
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>("ok"), 2, true);
             co_return;
         };
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);

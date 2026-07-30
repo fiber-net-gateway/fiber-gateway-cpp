@@ -24,7 +24,7 @@ namespace {
 constexpr std::uint64_t kCookieHash = fiber::http::http_header_name_hash("cookie");
 
 // Writes generated JSON into a std::string buffer. Used by write_json to materialize a
-// JsValue as bytes before handing them to HttpExchange::write_body.
+// JsValue as bytes before handing them to HttpExchange::write_all.
 class StringSink final : public fiber::json::OutputSink {
 public:
     explicit StringSink(std::string &out) noexcept : out_(out) {}
@@ -330,7 +330,7 @@ ScriptExchangeCtx::send_final_with_body(int status, std::size_t content_length, 
     }
     header_sent_ = true;
 
-    auto body_result = co_await exchange_.write_body(data, content_length, true);
+    auto body_result = co_await exchange_.write_all(data, content_length, true);
     if (!body_result) {
         co_return std::unexpected(body_result.error());
     }

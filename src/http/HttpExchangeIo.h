@@ -57,11 +57,16 @@ public:
     read_body(HttpExchange &exchange, size_t max_bytes, std::chrono::milliseconds timeout) noexcept = 0;
     virtual fiber::async::Task<common::IoResult<void>>
     send_header(HttpExchange &exchange, const OutgoingHeaderBlockView &header, std::chrono::milliseconds timeout) = 0;
-    virtual fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, mem::IoBufChain chunk,
-                                                                    std::chrono::milliseconds timeout) noexcept = 0;
-    virtual fiber::async::Task<common::IoResult<size_t>> write_body(HttpExchange &exchange, const uint8_t *buf,
-                                                                    size_t len, bool end,
-                                                                    std::chrono::milliseconds timeout) noexcept = 0;
+    virtual fiber::async::Task<common::IoResult<size_t>> write_all(HttpExchange &exchange, mem::IoBufChain chunk,
+                                                                   std::chrono::milliseconds timeout) noexcept = 0;
+    virtual fiber::async::Task<common::IoResult<size_t>> write_all(HttpExchange &exchange, const uint8_t *buf,
+                                                                   size_t len, bool end,
+                                                                   std::chrono::milliseconds timeout) noexcept = 0;
+    virtual fiber::async::Task<common::IoResult<size_t>> write(HttpExchange &exchange, mem::IoBufChain &chunk,
+                                                               std::chrono::milliseconds timeout) noexcept = 0;
+    virtual fiber::async::Task<common::IoResult<size_t>> write(HttpExchange &exchange, const uint8_t *buf, size_t len,
+                                                               bool end,
+                                                               std::chrono::milliseconds timeout) noexcept = 0;
     virtual common::IoResult<void> abort(HttpExchange &exchange,
                                          common::IoErr reason = common::IoErr::Canceled) noexcept = 0;
 };

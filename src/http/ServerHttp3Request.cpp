@@ -1289,8 +1289,8 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
     co_return common::IoResult<void>{};
 }
 
-async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpExchange &exchange, mem::IoBufChain chunk,
-                                                                          std::chrono::milliseconds timeout) noexcept {
+async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_all(HttpExchange &exchange, mem::IoBufChain chunk,
+                                                                         std::chrono::milliseconds timeout) noexcept {
     if (&exchange != &exchange_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1327,6 +1327,21 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
         }
     }
 
+    if (response_data_frame_active_) {
+        if (body_len != response_data_frame_remaining_ || end_stream != response_data_frame_end_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        std::size_t total = 0;
+        while (chunk.readable_bytes() != 0 || chunk.complete()) {
+            auto written = co_await write(exchange, chunk, timeout);
+            if (!written) {
+                co_return std::unexpected(written.error());
+            }
+            total += *written;
+        }
+        co_return total;
+    }
+
     if (body_len == 0 && !end_stream) {
         co_return body_len;
     }
@@ -1353,10 +1368,10 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
     co_return body_len;
 }
 
-async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpExchange &exchange,
-                                                                          const std::uint8_t *buf, std::size_t len,
-                                                                          bool end,
-                                                                          std::chrono::milliseconds timeout) noexcept {
+async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_all(HttpExchange &exchange,
+                                                                         const std::uint8_t *buf, std::size_t len,
+                                                                         bool end,
+                                                                         std::chrono::milliseconds timeout) noexcept {
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1377,7 +1392,200 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_body(HttpEx
         }
     }
 
-    co_return co_await write_body(exchange, std::move(chunk), timeout);
+    co_return co_await write_all(exchange, std::move(chunk), timeout);
+}
+
+async::Task<common::IoResult<void>>
+ServerHttp3Request::write_data_frame_header(std::size_t payload_len, std::chrono::milliseconds timeout) noexcept {
+    auto header = http3_build_data_frame_header(payload_len);
+    if (!header) {
+        co_return std::unexpected(header.error());
+    }
+    if (!*header) {
+        co_return common::IoResult<void>{};
+    }
+
+    mem::IoBufChain chain(inbound_buf_.node_pool());
+    if (!chain.append(std::move(*header))) {
+        co_return std::unexpected(common::IoErr::NoMem);
+    }
+    while (!chain.empty()) {
+        auto written = co_await stream_.write(chain, timeout);
+        if (!written) {
+            co_return std::unexpected(written.error());
+        }
+        if (*written == 0) {
+            co_return std::unexpected(common::IoErr::WouldBlock);
+        }
+    }
+    co_return common::IoResult<void>{};
+}
+
+async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write(HttpExchange &exchange, mem::IoBufChain &chunk,
+                                                                     std::chrono::milliseconds timeout) noexcept {
+    if (&exchange != &exchange_ || !handler_started_ || !response_headers_sent_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_finished_) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+
+    const std::size_t body_len = chunk.readable_bytes();
+    const bool end_stream = chunk.complete();
+    if (static_cast<std::uint64_t>(body_len) > kMaxHttp3FramePayloadLength) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_body_spec_.is_none()) {
+        if (body_len != 0 || end_stream) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        co_return 0;
+    }
+    if (response_body_spec_.is_content_length()) {
+        if (response_body_sent_ > response_content_length_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        const std::size_t remaining = response_content_length_ - response_body_sent_;
+        if (body_len > remaining || (end_stream && body_len != remaining)) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
+    if (response_data_frame_active_) {
+        if (body_len != response_data_frame_remaining_ || end_stream != response_data_frame_end_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+    } else {
+        if (body_len == 0) {
+            if (!end_stream) {
+                co_return 0;
+            }
+            auto written = co_await stream_.write(nullptr, 0, true, timeout);
+            if (!written) {
+                co_return std::unexpected(written.error());
+            }
+            chunk.clear_complete();
+            response_finished_ = true;
+            co_return 0;
+        }
+        auto header = co_await write_data_frame_header(body_len, timeout);
+        if (!header) {
+            co_return std::unexpected(header.error());
+        }
+        response_data_frame_active_ = true;
+        response_data_frame_remaining_ = body_len;
+        response_data_frame_end_ = end_stream;
+    }
+
+    std::size_t accepted = 0;
+    if (chunk.bound() && &chunk.node_pool() == &inbound_buf_.node_pool()) {
+        auto written = co_await stream_.write(chunk, timeout);
+        if (!written) {
+            co_return std::unexpected(written.error());
+        }
+        accepted = *written;
+    } else {
+        mem::IoBufChain staged(inbound_buf_.node_pool());
+        if (!chunk.retain_prefix(body_len, staged)) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+        auto written = co_await stream_.write(staged, timeout);
+        if (!written) {
+            co_return std::unexpected(written.error());
+        }
+        accepted = *written;
+        chunk.consume_and_compact(accepted);
+        if (accepted == body_len && end_stream) {
+            chunk.clear_complete();
+        }
+    }
+    if (accepted == 0) {
+        co_return std::unexpected(common::IoErr::WouldBlock);
+    }
+
+    response_data_frame_remaining_ -= accepted;
+    response_body_sent_ += accepted;
+    if (response_data_frame_remaining_ == 0) {
+        response_data_frame_active_ = false;
+        response_data_frame_end_ = false;
+        if (end_stream) {
+            chunk.clear_complete();
+            response_finished_ = true;
+        }
+    }
+    co_return accepted;
+}
+
+async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write(HttpExchange &exchange, const std::uint8_t *buf,
+                                                                     std::size_t len, bool end,
+                                                                     std::chrono::milliseconds timeout) noexcept {
+    if ((len != 0 && buf == nullptr) || &exchange != &exchange_ || !handler_started_ || !response_headers_sent_) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_finished_) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    if (static_cast<std::uint64_t>(len) > kMaxHttp3FramePayloadLength) {
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (response_body_spec_.is_none()) {
+        if (len != 0 || end) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        co_return 0;
+    }
+    if (response_body_spec_.is_content_length()) {
+        if (response_body_sent_ > response_content_length_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+        const std::size_t remaining = response_content_length_ - response_body_sent_;
+        if (len > remaining || (end && len != remaining)) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
+    if (response_data_frame_active_) {
+        if (len != response_data_frame_remaining_ || end != response_data_frame_end_) {
+            co_return std::unexpected(common::IoErr::Invalid);
+        }
+    } else {
+        if (len == 0) {
+            if (!end) {
+                co_return 0;
+            }
+            auto written = co_await stream_.write(nullptr, 0, true, timeout);
+            if (!written) {
+                co_return std::unexpected(written.error());
+            }
+            response_finished_ = true;
+            co_return 0;
+        }
+        auto header = co_await write_data_frame_header(len, timeout);
+        if (!header) {
+            co_return std::unexpected(header.error());
+        }
+        response_data_frame_active_ = true;
+        response_data_frame_remaining_ = len;
+        response_data_frame_end_ = end;
+    }
+
+    auto written = co_await stream_.write(buf, len, end, timeout);
+    if (!written) {
+        co_return std::unexpected(written.error());
+    }
+    if (*written == 0) {
+        co_return std::unexpected(common::IoErr::WouldBlock);
+    }
+    response_data_frame_remaining_ -= *written;
+    response_body_sent_ += *written;
+    if (response_data_frame_remaining_ == 0) {
+        response_data_frame_active_ = false;
+        response_data_frame_end_ = false;
+        if (end) {
+            response_finished_ = true;
+        }
+    }
+    co_return *written;
 }
 
 common::IoResult<void> ServerHttp3Request::abort(HttpExchange &exchange, common::IoErr) noexcept {

@@ -4778,7 +4778,7 @@ TEST(Http2ConnectionTest, ServerHandlerCanSendResponseBodyDataFrames) {
         if (!*header_result) {
             co_return;
         }
-        *body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        *body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
         co_return;
     };
 
@@ -4842,7 +4842,7 @@ TEST(Http2ConnectionTest, ServerHandlerResumesBodySendAfterStreamWindowUpdate) {
         if (!*header_result) {
             co_return;
         }
-        *body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        *body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
         co_return;
     };
 
@@ -4875,6 +4875,118 @@ TEST(Http2ConnectionTest, ServerHandlerResumesBodySendAfterStreamWindowUpdate) {
     EXPECT_TRUE(saw_data) << describe_frames(frames);
 }
 
+TEST(Http2ConnectionTest, ServerWriteReturnsAfterFirstFlowControlledDataBatch) {
+    fiber::http::Http2Connection::Options options;
+    options.initial_stream_send_window = 2;
+
+    std::string first = std::string(kClientConnectionPreface);
+    first += make_frame(0, 0x4, 0x0, 0, {});
+    first += build_headers_frame_bytes(1,
+                                       {
+                                               {":method", "GET"},
+                                               {":scheme", "https"},
+                                               {":path", "/partial-body"},
+                                               {":authority", "example.com"},
+                                       },
+                                       true);
+    auto first_result = std::make_shared<fiber::common::IoResult<std::size_t>>();
+    fiber::http::HttpHandler handler = [first_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        auto header = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .body = fiber::http::HttpBodySpec::ContentLength(5),
+                .end_stream = false,
+        });
+        if (!header) {
+            co_return;
+        }
+        constexpr std::string_view kBody = "hello";
+        *first_result =
+                co_await exchange.write(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome =
+            execute_server_request({std::move(first)}, std::move(handler), fiber::http::HttpServerOptions{}, options);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(first_result->has_value());
+    EXPECT_EQ(**first_result, 2U);
+
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    std::vector<std::string> payloads;
+    std::vector<std::uint8_t> flags;
+    for (const auto &frame: frames) {
+        if (frame.type == 0x0 && frame.stream_id == 1U) {
+            payloads.push_back(frame.payload);
+            flags.push_back(frame.flags);
+        }
+    }
+    ASSERT_EQ(payloads.size(), 1U) << describe_frames(frames);
+    EXPECT_EQ(payloads[0], "he");
+    EXPECT_EQ(flags[0] & 0x1U, 0U);
+}
+
+TEST(Http2ConnectionTest, ServerWriteTimeoutResetsStreamAndRejectsRetry) {
+    fiber::http::Http2Connection::Options options;
+    options.initial_stream_send_window = 0;
+
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/write-timeout"},
+                                                 {":authority", "example.com"},
+                                         },
+                                         true);
+
+    auto first_result =
+            std::make_shared<fiber::common::IoResult<std::size_t>>(std::unexpected(fiber::common::IoErr::Invalid));
+    auto retry_result =
+            std::make_shared<fiber::common::IoResult<std::size_t>>(std::unexpected(fiber::common::IoErr::Invalid));
+    auto terminal_error = std::make_shared<fiber::common::IoErr>(fiber::common::IoErr::None);
+    fiber::http::HttpHandler handler = [first_result, retry_result, terminal_error](
+                                               fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        auto header = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .body = fiber::http::HttpBodySpec::ContentLength(5),
+                .end_stream = false,
+        });
+        if (!header) {
+            co_return;
+        }
+
+        constexpr std::string_view kBody = "hello";
+        *first_result = co_await exchange.write(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(),
+                                                true, std::chrono::milliseconds::zero());
+        *retry_result = co_await exchange.write(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(),
+                                                true, std::chrono::milliseconds::zero());
+        *terminal_error = exchange.response_stats().terminal_error;
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome =
+            execute_server_request({std::move(request)}, std::move(handler), fiber::http::HttpServerOptions{}, options);
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_FALSE(first_result->has_value());
+    EXPECT_EQ(first_result->error(), fiber::common::IoErr::TimedOut);
+    ASSERT_FALSE(retry_result->has_value());
+    EXPECT_EQ(retry_result->error(), fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(*terminal_error, fiber::common::IoErr::TimedOut);
+
+    std::size_t reset_count = 0;
+    for (const auto &frame: parse_frames(outcome.written)) {
+        if (frame.type == 0x3 && frame.stream_id == 1U) {
+            ++reset_count;
+        }
+    }
+    EXPECT_EQ(reset_count, 1U);
+}
+
 TEST(Http2ConnectionTest, ServerHandlerCanSendResponseTrailers) {
     std::string request = std::string(kClientConnectionPreface);
     request += make_frame(0, 0x4, 0x0, 0, {});
@@ -4904,7 +5016,7 @@ TEST(Http2ConnectionTest, ServerHandlerCanSendResponseTrailers) {
             co_return;
         }
 
-        *body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
+        *body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
         if (!*body_result) {
             co_return;
         }

@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -41,13 +43,18 @@ struct TransportMetrics {
     std::vector<std::chrono::milliseconds> read_timeouts;
     std::size_t handler_calls = 0;
     std::size_t write_calls = 0;
+    std::size_t body_remaining = 0;
+    std::vector<std::size_t> partial_write_results;
+    std::string written;
+    bool body_complete = false;
     bool responses_ok = true;
 };
 
 class RecordingHttp1Transport final : public fiber::test::HttpTransportStub {
 public:
-    RecordingHttp1Transport(fiber::event::EventLoop &loop, TransportMetrics &metrics, std::string input) :
-        loop_(loop), metrics_(metrics), input_(std::move(input)) {}
+    RecordingHttp1Transport(fiber::event::EventLoop &loop, TransportMetrics &metrics, std::string input,
+                            std::size_t write_limit = std::numeric_limits<std::size_t>::max()) :
+        loop_(loop), metrics_(metrics), input_(std::move(input)), write_limit_(write_limit) {}
 
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -90,15 +97,18 @@ public:
         co_return std::unexpected(fiber::common::IoErr::NotSupported);
     }
 
-    fiber::async::Task<fiber::common::IoResult<std::size_t>> write(const void *, std::size_t len,
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> write(const void *buf, std::size_t len,
                                                                    std::chrono::milliseconds) override {
+        const std::size_t written = std::min(len, write_limit_);
+        metrics_.written.append(static_cast<const char *>(buf), written);
         record_write();
-        co_return len;
+        co_return written;
     }
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> write(fiber::mem::IoBuf &buf,
                                                                    std::chrono::milliseconds) override {
-        std::size_t len = buf.readable();
+        const std::size_t len = std::min(buf.readable(), write_limit_);
+        metrics_.written.append(reinterpret_cast<const char *>(buf.readable_data()), len);
         buf.consume(len);
         record_write();
         co_return len;
@@ -106,7 +116,22 @@ public:
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> writev(fiber::mem::IoBufChain &buf,
                                                                     std::chrono::milliseconds) override {
-        std::size_t len = buf.readable_bytes();
+        if (writev_error_ != fiber::common::IoErr::None) {
+            if (writev_successes_before_error_ == 0) {
+                record_write();
+                co_return std::unexpected(writev_error_);
+            }
+            --writev_successes_before_error_;
+        }
+        const std::size_t len = std::min(buf.readable_bytes(), write_limit_);
+        std::array<iovec, 16> iov{};
+        const int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+        std::size_t remaining = len;
+        for (int i = 0; i < count && remaining != 0; ++i) {
+            const std::size_t take = std::min(remaining, iov[static_cast<std::size_t>(i)].iov_len);
+            metrics_.written.append(static_cast<const char *>(iov[static_cast<std::size_t>(i)].iov_base), take);
+            remaining -= take;
+        }
         buf.consume_and_compact(len);
         record_write();
         co_return len;
@@ -130,6 +155,10 @@ public:
         notify_terminal(err);
     }
     [[nodiscard]] bool response_wait_registered() const noexcept { return terminal_callback_registered(); }
+    void fail_writev_after(std::size_t successful_writes, fiber::common::IoErr error) noexcept {
+        writev_successes_before_error_ = successful_writes;
+        writev_error_ = error;
+    }
 
 private:
     void record_write() {
@@ -141,6 +170,9 @@ private:
     TransportMetrics &metrics_;
     std::string input_;
     fiber::net::SocketAddress remote_addr_{};
+    std::size_t write_limit_ = std::numeric_limits<std::size_t>::max();
+    std::size_t writev_successes_before_error_ = 0;
+    fiber::common::IoErr writev_error_ = fiber::common::IoErr::None;
     bool input_consumed_ = false;
     bool closed_ = false;
 };
@@ -246,6 +278,147 @@ TEST(Http1ConnectionTest, ResponseChannelWaitUsesTransportTerminalCallback) {
     EXPECT_FALSE(*initial_closed);
     EXPECT_TRUE(wait_result->has_value());
     EXPECT_TRUE(*final_closed);
+}
+
+TEST(Http1ConnectionTest, ChunkedWriteReturnsAfterPayloadProgressAndPreservesCallerTail) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    TransportMetrics metrics;
+    std::promise<void> done_promise;
+    auto done_future = done_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        auto transport = std::make_unique<RecordingHttp1Transport>(
+                group.at(0), metrics, "GET /partial HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n", 2);
+
+        fiber::http::HttpHandler handler = [&metrics](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto header = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .body = fiber::http::HttpBodySpec::Chunked(),
+                    .end_stream = false,
+            });
+            if (!header) {
+                metrics.responses_ok = false;
+                co_return;
+            }
+
+            fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+            fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(5);
+            if (!body) {
+                metrics.responses_ok = false;
+                co_return;
+            }
+            std::memcpy(body.writable_data(), "hello", 5);
+            body.commit(5);
+            if (!chunk.append(std::move(body))) {
+                metrics.responses_ok = false;
+                co_return;
+            }
+            chunk.mark_complete();
+
+            while (chunk.readable_bytes() != 0 || chunk.complete()) {
+                auto written = co_await exchange.write(chunk);
+                if (!written) {
+                    metrics.responses_ok = false;
+                    co_return;
+                }
+                metrics.partial_write_results.push_back(*written);
+            }
+            metrics.body_remaining = chunk.readable_bytes();
+            metrics.body_complete = chunk.complete();
+            co_return;
+        };
+
+        fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+        co_await connection.run();
+        done_promise.set_value();
+        co_return;
+    });
+
+    ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+
+    EXPECT_TRUE(metrics.responses_ok);
+    EXPECT_EQ(metrics.partial_write_results, (std::vector<std::size_t>{1, 2, 2}));
+    EXPECT_EQ(metrics.body_remaining, 0U);
+    EXPECT_FALSE(metrics.body_complete);
+    EXPECT_TRUE(metrics.written.ends_with("5\r\nhello\r\n0\r\n\r\n"));
+}
+
+TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    TransportMetrics metrics;
+    auto first_result =
+            std::make_shared<fiber::common::IoResult<std::size_t>>(std::unexpected(fiber::common::IoErr::Invalid));
+    auto retry_result =
+            std::make_shared<fiber::common::IoResult<std::size_t>>(std::unexpected(fiber::common::IoErr::Invalid));
+    std::size_t writes_after_header = 0;
+    std::size_t writes_after_timeout = 0;
+    std::size_t writes_after_retry = 0;
+    fiber::common::IoErr terminal_error = fiber::common::IoErr::None;
+    std::promise<void> done_promise;
+    auto done_future = done_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        auto transport = std::make_unique<RecordingHttp1Transport>(
+                group.at(0), metrics, "GET /timeout HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n", 1);
+        RecordingHttp1Transport *transport_ptr = transport.get();
+
+        fiber::http::HttpHandler handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto header = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .body = fiber::http::HttpBodySpec::Chunked(),
+                    .end_stream = false,
+            });
+            if (!header) {
+                co_return;
+            }
+            writes_after_header = metrics.write_calls;
+            transport_ptr->fail_writev_after(1, fiber::common::IoErr::TimedOut);
+
+            fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+            fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(5);
+            if (!body) {
+                co_return;
+            }
+            std::memcpy(body.writable_data(), "hello", 5);
+            body.commit(5);
+            if (!chunk.append(std::move(body))) {
+                co_return;
+            }
+            chunk.mark_complete();
+
+            *first_result = co_await exchange.write(chunk, 1ms);
+            writes_after_timeout = metrics.write_calls;
+            *retry_result = co_await exchange.write(chunk, 1ms);
+            writes_after_retry = metrics.write_calls;
+            terminal_error = exchange.response_stats().terminal_error;
+            co_return;
+        };
+
+        fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+        co_await connection.run();
+        done_promise.set_value();
+        co_return;
+    });
+
+    ASSERT_EQ(done_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+
+    ASSERT_FALSE(first_result->has_value());
+    EXPECT_EQ(first_result->error(), fiber::common::IoErr::TimedOut);
+    ASSERT_FALSE(retry_result->has_value());
+    EXPECT_EQ(retry_result->error(), fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(writes_after_timeout, writes_after_header + 2);
+    EXPECT_EQ(writes_after_retry, writes_after_timeout);
+    EXPECT_EQ(terminal_error, fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(std::count(metrics.events.begin(), metrics.events.end(), TransportEvent::Close), 1);
 }
 
 } // namespace

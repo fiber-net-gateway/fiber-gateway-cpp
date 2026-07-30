@@ -87,9 +87,9 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange) {
         co_return;
     }
     if (!body.empty()) {
-        co_await exchange.write_body(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
+        co_await exchange.write_all(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
     } else {
-        co_await exchange.write_body(nullptr, 0, true);
+        co_await exchange.write_all(nullptr, 0, true);
     }
     co_return;
 }

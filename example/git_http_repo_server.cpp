@@ -869,8 +869,8 @@ fiber::async::Task<IoResult<void>> send_error_response(fiber::http::HttpExchange
         co_return std::unexpected(header_result.error());
     }
     if (!message.empty()) {
-        auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(message.data()),
-                                                        message.size(), true);
+        auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(message.data()),
+                                                       message.size(), true);
         if (!body_result) {
             co_return std::unexpected(body_result.error());
         }
@@ -918,7 +918,7 @@ fiber::async::Task<IoResult<void>> forward_backend_response(fiber::http::HttpExc
         }
         if (prefix_size > 0) {
             remaining -= prefix_size;
-            auto write_result = co_await exchange.write_body(response.body_prefix.data(), prefix_size, remaining == 0);
+            auto write_result = co_await exchange.write_all(response.body_prefix.data(), prefix_size, remaining == 0);
             if (!write_result) {
                 co_return std::unexpected(write_result.error());
             }
@@ -932,7 +932,7 @@ fiber::async::Task<IoResult<void>> forward_backend_response(fiber::http::HttpExc
                 co_return std::unexpected(IoErr::BrokenPipe);
             }
             remaining -= *read_result;
-            auto write_result = co_await exchange.write_body(chunk.data(), *read_result, remaining == 0);
+            auto write_result = co_await exchange.write_all(chunk.data(), *read_result, remaining == 0);
             if (!write_result) {
                 co_return std::unexpected(write_result.error());
             }
@@ -942,7 +942,7 @@ fiber::async::Task<IoResult<void>> forward_backend_response(fiber::http::HttpExc
 
     if (!response.body_prefix.empty()) {
         auto write_result =
-                co_await exchange.write_body(response.body_prefix.data(), response.body_prefix.size(), false);
+                co_await exchange.write_all(response.body_prefix.data(), response.body_prefix.size(), false);
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
@@ -956,13 +956,13 @@ fiber::async::Task<IoResult<void>> forward_backend_response(fiber::http::HttpExc
         if (*read_result == 0) {
             break;
         }
-        auto write_result = co_await exchange.write_body(chunk.data(), *read_result, false);
+        auto write_result = co_await exchange.write_all(chunk.data(), *read_result, false);
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
     }
 
-    auto final_result = co_await exchange.write_body(nullptr, 0, true);
+    auto final_result = co_await exchange.write_all(nullptr, 0, true);
     if (!final_result) {
         co_return std::unexpected(final_result.error());
     }

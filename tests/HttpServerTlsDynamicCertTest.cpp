@@ -449,7 +449,7 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
     co_return;
 }
 
-// End-to-end over TLS: server sends a chunked response via write_body(IoBufChain),
+// End-to-end over TLS: server sends a chunked response via write_all(IoBufChain),
 // which builds [prefix][body][suffix] and feeds TlsTransport::writev (the coalesce
 // path). The client verifies the exact chunked wire framing survives, proving the
 // two parts compose correctly on the real HTTPS path.
@@ -482,7 +482,7 @@ TEST(HttpServerTlsDynamicCertTest, ChunkedResponseEchoedOverTls) {
         if (!header_result) {
             co_return;
         }
-        co_await exchange.write_body(std::move(*read_result));
+        co_await exchange.write_all(std::move(*read_result));
         co_return;
     };
 

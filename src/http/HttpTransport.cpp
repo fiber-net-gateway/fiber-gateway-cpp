@@ -721,35 +721,24 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
 
     auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
                                                                   : stream_.loop().now() + timeout;
-    std::size_t total_written = 0;
 
     for (;;) {
         if (buf.readable_bytes() == 0) {
-            co_return total_written;
+            co_return static_cast<std::size_t>(0);
         }
 
         std::size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
         common::IoErr err = poll_writev(buf, out, wait_event);
         if (err == common::IoErr::None) {
-            if (out == 0) {
-                co_return total_written;
-            }
-            total_written += out;
-            continue;
+            co_return out;
         }
         if (err != common::IoErr::WouldBlock) {
-            if (total_written != 0) {
-                co_return total_written;
-            }
             co_return std::unexpected(err);
         }
 
         auto wait_result = co_await wait_tls_event(stream_, wait_event, deadline);
         if (!wait_result) {
-            if (total_written != 0) {
-                co_return total_written;
-            }
             co_return std::unexpected(wait_result.error());
         }
     }

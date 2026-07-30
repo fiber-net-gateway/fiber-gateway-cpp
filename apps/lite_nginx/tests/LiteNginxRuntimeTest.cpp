@@ -801,8 +801,8 @@ public:
                         .end_stream = false,
                 });
                 if (header_result) {
-                    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(kBody.data()),
-                                                        kBody.size(), true, 3s);
+                    (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kBody.data()),
+                                                       kBody.size(), true, 3s);
                 }
             };
 

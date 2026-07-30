@@ -451,15 +451,23 @@ DetachedTask run_transport_client(fiber::http::TlsTransport *transport, fiber::m
         co_return;
     }
 
-    auto write_result = co_await transport->writev(chain, 5s);
-    if (!write_result) {
-        done->set_value(std::unexpected(write_result.error()));
-        co_return;
+    std::size_t total_written = 0;
+    while (chain.readable_bytes() != 0) {
+        auto write_result = co_await transport->writev(chain, 5s);
+        if (!write_result) {
+            done->set_value(std::unexpected(write_result.error()));
+            co_return;
+        }
+        if (*write_result == 0) {
+            done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
+            co_return;
+        }
+        total_written += *write_result;
     }
 
     // Close-notify so the server sees EOF after the payload.
     (void) co_await transport->shutdown(5s);
-    done->set_value(*write_result);
+    done->set_value(total_written);
     co_return;
 }
 

@@ -112,8 +112,8 @@ fiber::async::Task<fiber::common::IoResult<void>> send_response_header(fiber::ht
 fiber::async::Task<fiber::common::IoResult<void>> send_payload(fiber::http::HttpExchange &exchange,
                                                                const proto::Payload &payload) {
     const std::string framed = grpc_frame(payload);
-    auto result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(framed.data()), framed.size(),
-                                               false, 2s);
+    auto result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(framed.data()), framed.size(),
+                                              false, 2s);
     if (!result) {
         co_return std::unexpected(result.error());
     }

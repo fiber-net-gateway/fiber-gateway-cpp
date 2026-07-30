@@ -245,7 +245,7 @@ fiber::async::Task<void> handle_body_request(fiber::http::HttpExchange &exchange
     if (!header_result) {
         co_return;
     }
-    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+    (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
 }
 
 DetachedTask start_http_server(fiber::event::EventLoop *loop, fiber::http::HttpHandler handler,

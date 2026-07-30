@@ -205,7 +205,7 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
         co_return;
     }
 
-    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+    (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
 }
 
 bool build_upstream_request_headers(const runtime::LocationRuntime &location, const fiber::http::HttpExchange &exchange,
@@ -423,7 +423,7 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, const runtime::Locati
             co_return;
         }
         const bool last = body_result->complete();
-        auto write_result = co_await exchange.write_body(std::move(*body_result));
+        auto write_result = co_await exchange.write_all(std::move(*body_result));
         if (!write_result) {
             (void) upstream_exchange.abort(write_result.error());
             co_return;

@@ -204,6 +204,14 @@ private:
     inline static constexpr Http2OutboundOperation::Ops kOutboundOps{
             .on_encode = &Http2SendAwaiter::on_encode,
             .on_send_done = &Http2SendAwaiter::on_send_done,
+            .allow_partial_final_batch =
+                    []() constexpr {
+                        if constexpr (requires { Op::kAllowsPartialFinalBatch; }) {
+                            return Op::kAllowsPartialFinalBatch;
+                        } else {
+                            return false;
+                        }
+                    }(),
     };
 
     Owner *owner_ = nullptr;

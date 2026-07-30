@@ -68,7 +68,7 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
         co_return;
     }
 
-    (void) co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+    (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
 }
 
 // Runs a compiled script against the request, wiring the HttpExchange via a
