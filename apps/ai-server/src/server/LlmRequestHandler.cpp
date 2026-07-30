@@ -55,6 +55,7 @@ constexpr std::size_t kMaxProviderErrorBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaxProviderResponseBytes = 32 * 1024 * 1024;
 constexpr std::size_t kBodyChunkBytes = 64 * 1024;
 constexpr std::size_t kAuditRecordMetadataReserveBytes = 1024 * 1024;
+constexpr std::size_t kMaxCatResponseErrorMessageBytes = 1024;
 constexpr std::chrono::seconds kProviderTimeout{300};
 
 std::int64_t wall_now_millis() noexcept;
@@ -1489,6 +1490,33 @@ async::Task<void> send_body(http::HttpExchange &exchange, AiServerCatRequest *ca
     (void) co_await exchange.write_body(body.readable_data(), size, true);
 }
 
+void record_cat_response_error(AiServerCatRequest *cat_request, const LlmError &error) noexcept {
+    if (!cat_request) {
+        return;
+    }
+    auto event = cat_request->start_event("LLM.ResponseError", error.code);
+    if (!event) {
+        return;
+    }
+    std::array<char, std::numeric_limits<int>::digits10 + 3> status{};
+    const auto converted = std::to_chars(status.data(), status.data() + status.size(), error.status_code);
+    if (converted.ec == std::errc{}) {
+        (void) event->add_data(
+                "status", std::string_view(status.data(), static_cast<std::size_t>(converted.ptr - status.data())));
+    }
+    if (!error.type.empty()) {
+        (void) event->add_data("type", error.type);
+    }
+    if (!error.message.empty()) {
+        const bool truncated = error.message.size() > kMaxCatResponseErrorMessageBytes;
+        (void) event->add_data("message", error.message.substr(0, kMaxCatResponseErrorMessageBytes));
+        if (truncated) {
+            (void) event->add_data("message_truncated", "true");
+        }
+    }
+    (void) event->complete(cat::status::Error);
+}
+
 async::Task<void> send_error(http::HttpExchange &exchange, AiServerCatRequest *cat_request, LlmWireProtocol protocol,
                              const LlmError &error, bool allow_post = false) noexcept {
     auto encoded = encode_llm_error(protocol, error);
@@ -1497,6 +1525,14 @@ async::Task<void> send_error(http::HttpExchange &exchange, AiServerCatRequest *c
                 R"({"error":{"message":"internal server error","type":"server_error","param":null,"code":"internal_error"}})";
         constexpr std::string_view kAnthropicFallback =
                 R"({"type":"error","error":{"type":"api_error","message":"internal server error"},"request_id":null})";
+        const LlmError fallback_error{
+                .status_code = 500,
+                .code = "internal_error",
+                .type = protocol == LlmWireProtocol::OpenAiChatCompletions ? std::string_view("server_error")
+                                                                           : std::string_view("api_error"),
+                .message = "internal server error",
+        };
+        record_cat_response_error(cat_request, fallback_error);
         const std::string_view fallback =
                 protocol == LlmWireProtocol::OpenAiChatCompletions ? kOpenAiFallback : kAnthropicFallback;
         mem::IoBuf body = mem::IoBuf::allocate(fallback.size());
@@ -1508,6 +1544,7 @@ async::Task<void> send_error(http::HttpExchange &exchange, AiServerCatRequest *c
         co_return;
     }
 
+    record_cat_response_error(cat_request, error);
     http::HttpHeaders headers(exchange.pool());
     headers.set_view("Content-Type", "application/json");
     if (allow_post) {

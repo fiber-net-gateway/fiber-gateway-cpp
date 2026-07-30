@@ -362,6 +362,11 @@ attempt 保持父 Transaction 的失败状态，并增加 `LLM.UpstreamError` �
 Event name 本身承载 failure phase；Event data 按实际存在的值记录 I/O error、
 failure source、上游状态、retry target、是否执行重试、跳过的 attempt 数和响应是否
 已经开始，默认的 `none`、`false`、`0` 不输出。成功 attempt 不生成错误 Event。
+ai-server 通过 `send_error` 生成最终错误响应时，另在 root 下生成
+`LLM.ResponseError` Event：name 使用响应 code，data 记录 status、type 和最多
+1024 字节的 message，截断时增加 `message_truncated=true`；编码失败则记录实际回退的
+`internal_error`/500。它描述网关准备发送的最终错误，`LLM.UpstreamError` 仍描述上游
+原因；通过 `send_body` 原样透传的上游非 2xx 响应不在此范围。
 
 listener 只在完整首个配置安装到所有 worker 后绑定；服务注册使用启动配置
 `<AI_SERVER_ZONE>-<AI_SERVER_CLUSTER>` 作为 Nacos cluster，注册和初始本机限流节点

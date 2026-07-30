@@ -1679,6 +1679,33 @@ TEST(LlmProxyIntegrationTest, CatProviderTransactionOmitsFirstTokenAndBodyTransf
     EXPECT_FALSE(fixture.cat_frame_contains("LLM.Provider", "body_transfer_us="));
 }
 
+TEST(LlmProxyIntegrationTest, CatRecordsGeneratedResponseErrorAlongsideInvalidProviderResponse) {
+    FixtureHarness fixture(
+            {
+                    MockReply{
+                            .status = 200,
+                            .content_type = "application/json",
+                            .body = R"({"error":"streaming unavailable"})",
+                    },
+            },
+            false, false, fiber::ai_server::kDefaultLlmAuditMaxRecordBytes, true);
+    ASSERT_TRUE(fixture.valid());
+    const std::string token = issue_token();
+    ASSERT_FALSE(token.empty());
+
+    const RawHttpResponse response =
+            post_json(fixture.entry_port(), token, R"({"model":"logical","stream":true,"messages":[]})");
+
+    EXPECT_EQ(response.system_error, 0);
+    EXPECT_EQ(response.status, 502);
+    EXPECT_TRUE(response.complete);
+    EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_and_name("LLM.UpstreamError", "invalid_response"),
+                                           "io_error=invalid&failure_source=io&status=200"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame(
+            cat_nt1_type_name_and_status("LLM.ResponseError", "upstream_invalid_response", fiber::cat::status::Error),
+            "status=502&type=api_error&message=provider did not return an event stream"));
+}
+
 TEST(LlmProxyIntegrationTest, RelaysSseBytesUnchangedAndNeverRetriesAfterResponseStart) {
     constexpr std::string_view expected =
             ": ping\r\nid: 7\r\ndata:{\"choices\":[],\"usage\":{\"prompt_tokens\":2"
