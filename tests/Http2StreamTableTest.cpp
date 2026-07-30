@@ -36,6 +36,9 @@ fiber::http::Http2Stream::Lease make_stream(std::uint32_t stream_id) {
     fiber::http::Http2Stream::Lease stream = TestHttp2StreamOwner::create();
     if (stream) {
         stream->stream_id_ = stream_id;
+        // These tests exercise table ownership only. Mark the unattached stream
+        // terminal so releasing its final lease can destroy the test owner.
+        stream->close();
     }
     return stream;
 }
