@@ -272,27 +272,30 @@ no-follow、普通文件限定、权限强制和不完整尾部恢复。
 Provider token、BT1 token 或配置 secret 写入响应。
 
 请求审计由请求级 RAII owner 聚合。请求结束时，当前 HTTP worker 把
-`schema_version=4` 对象直接编码到一条 `ai_server.audit` 日志记录中，消息格式为
+`schema_version=5` 扁平对象直接编码到一条 `ai_server.audit` 日志记录中，消息格式为
 `audit_json=<json>`。记录随后提交给进程共享的 log EventLoop，该线程是 stderr 和
 审计文件的唯一正常 writer；审计 logger 关闭 additive，不会复制到 stderr。
 同一对象包含：
 
-- audit ID、采集是否完整及稳定的采集错误；
-- 来源、方法、路径、协议，以及唯一一份完整 request body、body encoding/size/hash；
-- 从 body 单独物化的 `request_model_name`、有效 `stream`、message/tool 数量；
+- request ID、采集是否完整及稳定的采集错误；
+- 来源、方法、路径、协议、User-Agent、Host、X-Real-Ip，以及唯一一份完整
+  `request_json`、content type/size/hash；
+- 从 body 单独物化的 `requested_model`、有效 `stream`、message/tool 数量；
 - username、kid、resolved model、授权和限流结果；
-- `llm.output` 中从同步响应或 SSE delta 聚合出的 role/content/tool/finish reason；
-- `provider_attempts` 中每次尝试的 Provider/token 名、协议、上游模型、路径、配置
+- 从同步响应或 SSE delta 聚合出的 output role、`response_json`、tool/finish reason；
+- `attempts_json` JSON 字符串中每次尝试的 Provider/token 名、协议、上游模型、路径、配置
   版本、fallback、状态和延迟，以及失败阶段、I/O 错误、失败来源、重试目标、是否
   真正重试和跳过的计划项数；
 - 请求级 `provider_attempt_skipped_count`；
-- 最终状态、响应字节、客户端中断、usage 和总耗时。
+- 最终状态、响应字节、客户端中断、`error_json`、usage 和毫秒总耗时。
 
-`llm.output.capture_scope=provider_observed`：它说明 Provider 已生成并被网关观察到的
-内容，是否完整交付客户端仍以 `response.completed` 和 `terminal_error` 为准。
+模型输出仍是 Provider 已生成并被网关观察到的内容，是否完整交付客户端以
+`client_aborted` 和 `error_json` 为准。
 Provider 非 2xx 错误正文不会被当成模型输出。
 
-usage 统一输出 `in_cache`、`in_nocache`、`out` 和派生的 `total_tokens`：
+`usage_json` 统一输出 `promptTokens`、`completionTokens` 和 `total_tokens`：
+`promptTokens` 是 `in_cache + in_nocache`，`completionTokens` 来自 `out`，缺失值
+按零处理。内部 token 提取规则为：
 OpenAI 用 `prompt_tokens_details.cached_tokens` 作为缓存输入并从
 `prompt_tokens` 中扣除；Anthropic 只把 `cache_read_input_tokens` 计入缓存命中，
 `input_tokens + cache_creation_input_tokens` 计入非缓存输入。有效 usage 同时写入

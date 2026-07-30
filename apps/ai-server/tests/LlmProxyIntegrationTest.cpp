@@ -122,6 +122,7 @@ struct ClientCatHeaders {
     std::string span_id;
     std::string trace_state;
     std::string user_agent;
+    std::string real_ip;
 };
 
 struct RawHttpResponse {
@@ -339,6 +340,9 @@ RawHttpResponse post_json(std::uint16_t port, std::string_view token, std::strin
                 }
                 if (!cat_headers.user_agent.empty()) {
                     headers.set("User-Agent", cat_headers.user_agent);
+                }
+                if (!cat_headers.real_ip.empty()) {
+                    headers.set("X-Real-Ip", cat_headers.real_ip);
                 }
                 fiber::http::ClientHttp1Exchange exchange(connection, pool);
                 auto sent_header = co_await exchange.send_header(
@@ -1344,13 +1348,13 @@ TEST(LlmProxyIntegrationTest, DnsTimeoutSkipsRemainingTokensAndBacksOffRepeatedL
 
     ASSERT_TRUE(fixture.wait_for_audit_records(2));
     const std::string audit = fixture.audit_contents();
-    EXPECT_NE(audit.find(R"("schema_version":4)"), std::string::npos);
-    EXPECT_NE(audit.find(R"("failure_phase":"dns")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("io_error":"timed_out")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("failure_source":"io")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("failure_source":"dns_backoff")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("retry_target":"next_provider")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("retry_performed":true,"skipped_attempts":2)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("schema_version":5)"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"failure_phase\":\"dns\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"io_error\":\"timed_out\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"failure_source\":\"io\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"failure_source\":\"dns_backoff\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"retry_target\":\"next_provider\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"retry_performed\":true,\"skipped_attempts\":2)"), std::string::npos);
     EXPECT_NE(audit.find(R"("provider_attempt_count":2,"provider_attempt_skipped_count":2)"), std::string::npos);
     EXPECT_TRUE(fixture.wait_for_cat_frame("io_error=timed_out", "failure_source=io"));
     EXPECT_TRUE(fixture.wait_for_cat_frame("failure_source=dns_backoff", "retry_target=next_provider"));
@@ -1397,10 +1401,13 @@ TEST(LlmProxyIntegrationTest, DnsTimeoutWithoutFallbackReturnsCurrentTransportEr
 
     ASSERT_TRUE(fixture.wait_for_audit_records(1));
     const std::string audit = fixture.audit_contents();
-    EXPECT_NE(audit.find(R"("failure_phase":"dns")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("retry_target":"next_provider","retryable":true,"retry_performed":false)"),
+    EXPECT_NE(audit.find(R"(\"failure_phase\":\"dns\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"retry_target\":\"next_provider\",\"retryable\":true,\"retry_performed\":false)"),
               std::string::npos);
     EXPECT_NE(audit.find(R"("provider_attempt_count":1,"provider_attempt_skipped_count":2)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("error_json":"transport_error")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("usage_json":{"promptTokens":0,"completionTokens":0,"total_tokens":0})"),
+              std::string::npos);
     (void) ::close(dns_fd);
 }
 
@@ -1798,11 +1805,10 @@ TEST(LlmProxyIntegrationTest, DrainsSseUsageAfterClientDisconnectAndDoesNotRetry
 
     const std::string audit = fixture.audit_contents();
     EXPECT_NE(audit.find(R"("provider_attempt_count":1)"), std::string::npos);
-    EXPECT_NE(audit.find(R"("response_started":true,"outcome":"success")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("complete":true,"canonical_complete":true)"), std::string::npos);
-    EXPECT_NE(audit.find(R"("completed":false)"), std::string::npos);
-    EXPECT_EQ(audit.find(R"("terminal_error":"none")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("usage":{"provider":"openai","in_cache":0,"in_nocache":2,"out":3,"total_tokens":5})"),
+    EXPECT_NE(audit.find(R"(\"response_started\":true,\"outcome\":\"success\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("output_complete":true,"output_canonical_complete":true)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("client_aborted":true,"error_json":"conn_reset")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("usage_json":{"promptTokens":2,"completionTokens":3,"total_tokens":5})"),
               std::string::npos);
 }
 
@@ -1871,9 +1877,9 @@ TEST(LlmProxyIntegrationTest, DoesNotRetryWhenUpstreamFailsWhileDrainingAfterCli
 
     const std::string audit = fixture.audit_contents();
     EXPECT_NE(audit.find(R"("provider_attempt_count":1)"), std::string::npos);
-    EXPECT_NE(audit.find(R"("response_started":true,"outcome":"stream_error")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("complete":false,"canonical_complete":false)"), std::string::npos);
-    EXPECT_NE(audit.find(R"("completed":false)"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"response_started\":true,\"outcome\":\"stream_error\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("output_complete":false,"output_canonical_complete":false)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("client_aborted":true,"error_json":"conn_reset")"), std::string::npos) << audit;
     EXPECT_TRUE(fixture.wait_for_cat_frame("upstream_model=upstream-primary", "time_to_first_token_us="));
     EXPECT_FALSE(fixture.cat_frame_contains("upstream_model=upstream-primary", "body_transfer_us="));
     EXPECT_TRUE(fixture.wait_for_cat_frame(cat_nt1_type_and_name("LLM.UpstreamError", "read_body"),
@@ -1935,9 +1941,11 @@ TEST(LlmProxyIntegrationTest, DrainsSseWhenClientDisconnectsBeforeResponseHeader
 
     const std::string audit = fixture.audit_contents();
     EXPECT_NE(audit.find(R"("provider_attempt_count":1)"), std::string::npos);
-    EXPECT_NE(audit.find(R"("response_started":false,"outcome":"success")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("header_sent":false,"completed":false)"), std::string::npos);
-    EXPECT_NE(audit.find(R"("total_tokens":10)"), std::string::npos);
+    EXPECT_NE(audit.find(R"(\"response_started\":false,\"outcome\":\"success\")"), std::string::npos);
+    EXPECT_NE(audit.find(R"("client_aborted":true,"error_json":"conn_reset")"), std::string::npos) << audit;
+    EXPECT_NE(audit.find(R"("usage_json":{"promptTokens":4,"completionTokens":6,"total_tokens":10})"),
+              std::string::npos);
+    EXPECT_NE(audit.find(R"("response_header_sent":false)"), std::string::npos);
 }
 
 TEST(LlmProxyIntegrationTest, SettlementFailureDoesNotChangeProviderResponse) {
@@ -2005,7 +2013,9 @@ TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
     constexpr std::string_view request =
             R"({"model":"logical","stream":false,"messages":[{"role":"system","content":"answer briefly"},{"role":"user","content":[{"type":"text","text":"weather in Paris"},{"type":"image_url","image_url":{"url":"https://example.test/image?signature=SECRET_URL"}},{"type":"input_audio","input_audio":{"data":"SECRET_BASE64"}}]}],"tools":[{"type":"function","function":{"name":"weather","description":"look up weather","parameters":{"type":"object"}}}]})";
 
-    const RawHttpResponse response = post_json(fixture.entry_port(), token, request);
+    const RawHttpResponse response =
+            post_json(fixture.entry_port(), token, request,
+                      ClientCatHeaders{.user_agent = "audit-client/1.0", .real_ip = "203.0.113.9"});
 
     ASSERT_EQ(response.system_error, 0);
     ASSERT_EQ(response.status, 200);
@@ -2038,20 +2048,50 @@ TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
                                           }),
               fiber::json::ParseStatus::Done);
     ASSERT_TRUE(root.is_object());
+    const auto *attempts_json_field = root.as_object().find("attempts_json");
+    ASSERT_NE(attempts_json_field, nullptr);
+    ASSERT_TRUE(attempts_json_field->value.is_text());
+    const auto *rate_limit_json_field = root.as_object().find("rate_limit_json");
+    ASSERT_NE(rate_limit_json_field, nullptr);
+    EXPECT_TRUE(rate_limit_json_field->value.is_text());
+    const auto *usage_json_field = root.as_object().find("usage_json");
+    ASSERT_NE(usage_json_field, nullptr);
+    EXPECT_TRUE(usage_json_field->value.is_object());
+    EXPECT_EQ(root.as_object().find("request"), nullptr);
+    EXPECT_EQ(root.as_object().find("provider_attempts"), nullptr);
+
+    fiber::mem::BufPool attempts_pool;
+    fiber::json::JsonParser attempts_parser;
+    const std::string_view attempts_text = attempts_json_field->value.as_text();
+    ASSERT_TRUE(attempts_parser.feed(attempts_text.data(), attempts_text.size()));
+    attempts_parser.finish();
+    fiber::json::JsonAny parsed_attempts;
+    ASSERT_EQ(fiber::json::parse_document(attempts_parser, attempts_pool, parsed_attempts,
+                                          [](fiber::json::JsonParser &value_parser, fiber::mem::BufPool &value_pool,
+                                             fiber::json::JsonAny &value) noexcept {
+                                              return fiber::json::parse_any(value_parser, value_pool, value);
+                                          }),
+              fiber::json::ParseStatus::Done);
+    ASSERT_TRUE(parsed_attempts.is_array());
+    ASSERT_EQ(parsed_attempts.as_array().size(), 1u);
 
     EXPECT_NE(audit_json.find("answer briefly"), std::string_view::npos);
     EXPECT_NE(audit_json.find("weather in Paris"), std::string_view::npos);
     EXPECT_NE(audit_json.find("look up weather"), std::string_view::npos);
     EXPECT_NE(audit_json.find("weather is sunny"), std::string_view::npos);
     EXPECT_NE(audit_json.find(R"(\"city\":\"Paris\")"), std::string_view::npos);
-    EXPECT_NE(audit_json.find(R"("provider_attempts":[{)"), std::string_view::npos);
-    EXPECT_NE(audit_json.find(R"("schema_version":4)"), std::string_view::npos);
-    EXPECT_NE(audit_json.find(R"("request_model_name":"logical","stream":false,"messages_count":2,"tools_count":1)"),
+    EXPECT_NE(audit_json.find(R"("attempts_json":"[{\")"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("schema_version":5)"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("requested_model":"logical","client_protocol":"openai")"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("content_type":"json_text","stream":false,"message_count":2,"tool_count":1)"),
               std::string_view::npos);
-    EXPECT_NE(audit_json.find(R"("body_encoding":"json_text","body":"{)"), std::string_view::npos);
-    EXPECT_NE(audit_json.find(R"("content":"weather is sunny")"), std::string_view::npos);
-    EXPECT_NE(audit_json.find(R"("usage":{"provider":"openai","in_cache":3,"in_nocache":5,"out":6,"total_tokens":14})"),
+    EXPECT_NE(audit_json.find(R"("request_json":"{)"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("response_json":"weather is sunny")"), std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("usage_json":{"promptTokens":8,"completionTokens":6,"total_tokens":14})"),
               std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("user_agent":"audit-client/1.0","host":"127.0.0.1","real_ip":"203.0.113.9")"),
+              std::string_view::npos);
+    EXPECT_NE(audit_json.find(R"("error_json":"")"), std::string_view::npos);
     const std::size_t secret_url = audit_json.find("SECRET_URL");
     ASSERT_NE(secret_url, std::string_view::npos);
     EXPECT_EQ(audit_json.find("SECRET_URL", secret_url + 1), std::string_view::npos);
@@ -2092,11 +2132,13 @@ TEST(LlmProxyIntegrationTest, AggregatesStreamedContentIntoTheSameOutputField) {
     const std::string audit = fixture.audit_contents();
     ASSERT_FALSE(audit.empty());
     EXPECT_EQ(audit.find('\n'), audit.size() - 1);
-    EXPECT_NE(audit.find(R"("request_model_name":"logical","stream":true,"messages_count":1,"tools_count":0)"),
+    EXPECT_NE(audit.find(R"("content_type":"json_text","stream":true,"message_count":1,"tool_count":0)"),
               std::string::npos);
-    EXPECT_NE(audit.find(R"("role":"assistant","content":"hello stream")"), std::string::npos);
-    EXPECT_NE(audit.find(R"("finish_reason":"stop","complete":true,"canonical_complete":true,"events":2)"),
-              std::string::npos);
+    EXPECT_NE(audit.find(R"("response_json":"hello stream","finish_reason":"stop")"), std::string::npos);
+    EXPECT_NE(
+            audit.find(
+                    R"("output_role":"assistant","output_complete":true,"output_canonical_complete":true,"output_event_count":2)"),
+            std::string::npos);
 }
 
 TEST(LlmProxyIntegrationTest, PreservesLargeUtf8OutputWithoutTruncation) {
@@ -2127,7 +2169,7 @@ TEST(LlmProxyIntegrationTest, PreservesLargeUtf8OutputWithoutTruncation) {
     ASSERT_TRUE(fixture.wait_for_audit_records(1));
     const std::string audit = fixture.audit_contents();
     EXPECT_NE(audit.find(content), std::string::npos);
-    EXPECT_NE(audit.find(R"("canonical_complete":true)"), std::string::npos);
+    EXPECT_NE(audit.find(R"("output_canonical_complete":true)"), std::string::npos);
     EXPECT_EQ(audit.find("\"truncated\""), std::string::npos);
 }
 
