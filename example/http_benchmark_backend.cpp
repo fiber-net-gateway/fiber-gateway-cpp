@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <string_view>
 #include <sys/socket.h>
+#include <vector>
 
 #include "async/Sleep.h"
 #include "async/Spawn.h"
@@ -187,7 +188,7 @@ int main(int argc, char **argv) {
     (void) ::signal(SIGPIPE, SIG_IGN);
 
     fiber::event::EventLoop accept_loop;
-    fiber::event::EventLoopGroup worker_group(2);
+    fiber::event::EventLoopGroup worker_group(4);
     worker_group.start();
 
     fiber::http::HttpServerOptions server_options{};
