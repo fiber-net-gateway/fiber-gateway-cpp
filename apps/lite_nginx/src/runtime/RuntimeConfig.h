@@ -14,6 +14,7 @@
 #include "common/util/RoutePathMatcher.h"
 #include "http/HeaderMap.h"
 #include "http/Http1ConnectionGroupKey.h"
+#include "http/HttpBodyPipe.h"
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
 #include "script/Script.h"
@@ -98,8 +99,16 @@ struct UpstreamRuntime {
     std::string name;
     std::vector<UpstreamPeerRuntime> peers;
     std::chrono::milliseconds connect_timeout{10000};
-    std::chrono::milliseconds read_timeout{30000};
-    std::chrono::milliseconds send_timeout{30000};
+    std::chrono::milliseconds read_timeout{60000};
+    std::chrono::milliseconds send_timeout{60000};
+};
+
+struct ProxyBufferingRuntime {
+    std::size_t buffer_size = fiber::http::kDefaultBodyPipeBufferSize;
+    // Zero selects the existing unbuffered forwarding path.
+    std::size_t low_water = 0;
+
+    [[nodiscard]] bool enabled() const noexcept { return low_water != 0; }
 };
 
 struct LocationRuntime {
@@ -113,11 +122,11 @@ struct LocationRuntime {
     fiber::http::HeaderMap<std::uint8_t> skip_headers;
     std::vector<ProxyHeaderRuntime> set_headers;
     std::chrono::milliseconds connect_timeout{10000};
-    std::chrono::milliseconds read_timeout{30000};
-    std::chrono::milliseconds send_timeout{30000};
+    std::chrono::milliseconds read_timeout{60000};
+    std::chrono::milliseconds send_timeout{60000};
+    ProxyBufferingRuntime buffering;
     std::uint32_t upstream_index = 0;
     AccessLogId access_log = kDisabledAccessLog;
-    bool proxy_buffering = false;
     bool host_header_overridden = false;
     bool reuse_connection = true;
     bool close_on_client_abort = false;

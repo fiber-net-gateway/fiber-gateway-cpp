@@ -173,6 +173,8 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     EXPECT_EQ(ready.proxy_pass.kind, ProxyPassKind::Direct);
     EXPECT_EQ(ready.proxy_pass.host, "127.0.0.1");
     EXPECT_EQ(ready.proxy_pass.port, 9009);
+    EXPECT_FALSE(ready.proxy.buffering.enabled());
+    EXPECT_EQ(ready.proxy.buffering.low_water, 0u);
 
     const auto &api = server.locations[1];
     EXPECT_EQ(api.proxy_pass.kind, ProxyPassKind::NamedUpstream);
@@ -180,6 +182,80 @@ TEST(LiteNginxConfigTest, ParsesStructuredConfig) {
     ASSERT_EQ(api.proxy.set_headers.size(), 2u);
     EXPECT_EQ(api.proxy.set_headers[0].name, "Host");
     EXPECT_EQ(api.proxy.set_headers[1].name, "X-Forwarded-Proto");
+    EXPECT_FALSE(api.proxy.buffering.enabled());
+}
+
+TEST(LiteNginxConfigTest, ParsesAndInheritsProxyBufferingSettings) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+
+            server {
+                server_name localhost;
+
+                location /inherited {
+                    proxy_pass http://127.0.0.1:9001;
+                }
+
+                location /disabled {
+                    proxy_pass http://127.0.0.1:9001;
+                    proxy_buffering off;
+                }
+
+                location /defaults {
+                    proxy_pass http://127.0.0.1:9001;
+                    proxy_buffering on;
+                }
+
+                proxy_buffering 128k 32k;
+            }
+        }
+    )",
+                                                        "proxy_buffering.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    const auto &locations = config_result->http.servers[0].locations;
+    ASSERT_EQ(locations.size(), 3u);
+
+    EXPECT_TRUE(locations[0].proxy.buffering.enabled());
+    EXPECT_EQ(locations[0].proxy.buffering.buffer_size, 128u * 1024u);
+    EXPECT_EQ(locations[0].proxy.buffering.low_water, 32u * 1024u);
+
+    EXPECT_FALSE(locations[1].proxy.buffering.enabled());
+    EXPECT_EQ(locations[1].proxy.buffering.low_water, 0u);
+
+    EXPECT_TRUE(locations[2].proxy.buffering.enabled());
+    EXPECT_EQ(locations[2].proxy.buffering.buffer_size, 64u * 1024u);
+    EXPECT_EQ(locations[2].proxy.buffering.low_water, 48u * 1024u);
+}
+
+TEST(LiteNginxConfigTest, RejectsInvalidProxyBufferingSettings) {
+    static constexpr std::string_view kDirectives[] = {
+            "proxy_buffering;",         "proxy_buffering maybe;",
+            "proxy_buffering 0 1k;",    "proxy_buffering 64k 0;",
+            "proxy_buffering 32k 48k;", "proxy_buffering 64k;",
+            "proxy_buffering 64x 48k;", "proxy_buffering on; proxy_buffering off;",
+    };
+
+    for (std::string_view directive: kDirectives) {
+        std::string config_text = R"(
+            http {
+                listen 8080;
+                server {
+                    server_name localhost;
+                    location / {
+                        proxy_pass http://127.0.0.1:9001;
+                        PROXY_BUFFERING_DIRECTIVE
+                    }
+                }
+            }
+        )";
+        config_text.replace(config_text.find("PROXY_BUFFERING_DIRECTIVE"), sizeof("PROXY_BUFFERING_DIRECTIVE") - 1,
+                            directive);
+
+        auto config_result = ConfigLoader::load_from_string(config_text, "bad_proxy_buffering.conf");
+        EXPECT_FALSE(config_result.has_value()) << directive;
+    }
 }
 
 TEST(LiteNginxConfigTest, ParsesProxyTargetRewriteAndConnectionPolicies) {

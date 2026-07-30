@@ -1077,6 +1077,46 @@ http {
     EXPECT_EQ(runtime->listeners[0].http3_alt_svc, "h3=\":8443\"; ma=86400");
 }
 
+TEST(LiteNginxRuntimeTest, BuildsProxyBufferingRuntimeAndSixtySecondDefaults) {
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
+http {
+    listen 127.0.0.1:8080;
+
+    server {
+        server_name localhost;
+        proxy_buffering 128k 32k;
+
+        location /buffered {
+            proxy_pass http://127.0.0.1:9001;
+        }
+
+        location /stream {
+            proxy_pass http://127.0.0.1:9001;
+            proxy_buffering off;
+        }
+    }
+}
+)",
+                                                                            "buffering_runtime.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    ASSERT_EQ(runtime->servers.size(), 1u);
+    ASSERT_EQ(runtime->servers[0].locations.size(), 2u);
+
+    const auto &buffered = runtime->servers[0].locations[0];
+    EXPECT_TRUE(buffered.buffering.enabled());
+    EXPECT_EQ(buffered.buffering.buffer_size, 128u * 1024u);
+    EXPECT_EQ(buffered.buffering.low_water, 32u * 1024u);
+    EXPECT_EQ(buffered.read_timeout, std::chrono::seconds(60));
+    EXPECT_EQ(buffered.send_timeout, std::chrono::seconds(60));
+
+    const auto &stream = runtime->servers[0].locations[1];
+    EXPECT_FALSE(stream.buffering.enabled());
+    EXPECT_EQ(stream.buffering.low_water, 0u);
+}
+
 TEST(LiteNginxRuntimeTest, CompilesAccessLogInheritance) {
     auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
 http {
@@ -1148,6 +1188,7 @@ http {
         location /api/:id {
             proxy_pass http://127.0.0.1:UPSTREAM_PORT;
             proxy_set_header Host backend.internal;
+            proxy_buffering 64k 48k;
         }
     }
 }

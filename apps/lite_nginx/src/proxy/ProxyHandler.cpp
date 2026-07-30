@@ -11,6 +11,7 @@
 #include "event/EventLoop.h"
 #include "http/ClientHttp1Exchange.h"
 #include "http/Http1ClientConnection.h"
+#include "http/HttpBodyPipe.h"
 #include "http/HttpCommon.h"
 #include "http/HttpExchange.h"
 #include "http/HttpExchangeIo.h"
@@ -414,23 +415,48 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, const runtime::Locati
         }
         co_return;
     }
+    if (has_content_length && response_content_length == 0) {
+        co_return;
+    }
 
-    while (true) {
-        auto body_result = co_await upstream_exchange.read_body(kBodyChunkSize, location.read_timeout);
-        if (!body_result) {
-            record_upstream_error(log_context, body_result.error(), "read_body");
-            (void) exchange.abort(body_result.error());
-            co_return;
+    if (!location.buffering.enabled()) {
+        while (true) {
+            auto body_result = co_await upstream_exchange.read_body(kBodyChunkSize, location.read_timeout);
+            if (!body_result) {
+                record_upstream_error(log_context, body_result.error(), "read_body");
+                (void) exchange.abort(body_result.error());
+                co_return;
+            }
+            const bool last = body_result->complete();
+            auto write_result = co_await exchange.write_all(std::move(*body_result), location.send_timeout);
+            if (!write_result) {
+                (void) upstream_exchange.abort(write_result.error());
+                co_return;
+            }
+            if (last) {
+                break;
+            }
         }
-        const bool last = body_result->complete();
-        auto write_result = co_await exchange.write_all(std::move(*body_result));
-        if (!write_result) {
-            (void) upstream_exchange.abort(write_result.error());
-            co_return;
+        co_return;
+    }
+
+    const fiber::http::HttpBodyPipeOptions pipe_options{
+            .buffer_size = location.buffering.buffer_size,
+            .low_water = location.buffering.low_water,
+            .read_timeout = location.read_timeout,
+            .write_timeout = location.send_timeout,
+    };
+    auto pipe_result =
+            co_await fiber::http::pipe_http_body(fiber::http::make_http_body_pipe_reader(upstream_exchange),
+                                                 fiber::http::make_http_body_pipe_writer(exchange),
+                                                 fiber::event::EventLoop::current().io_buf_node_pool(), pipe_options);
+    if (!pipe_result) {
+        if (pipe_result.error().phase == fiber::http::HttpBodyPipePhase::Read) {
+            record_upstream_error(log_context, pipe_result.error().code, "read_body");
+        } else if (pipe_result.error().phase == fiber::http::HttpBodyPipePhase::Validate) {
+            record_upstream_error(log_context, pipe_result.error().code, "body_pipe");
         }
-        if (last) {
-            break;
-        }
+        co_return;
     }
 }
 
