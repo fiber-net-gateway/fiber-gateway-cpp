@@ -570,6 +570,43 @@ TEST(LogSystemTest, RawAppendPreservesBytesAndDiscardCancelsTheRecord) {
     EXPECT_EQ(std::count(content.begin(), content.end(), '\n'), 1);
 }
 
+TEST(LogSystemTest, MessageOnlyFileAppenderOmitsFormattedPrefix) {
+    LoggingScope scope;
+    TempLogFile formatted_output;
+    TempLogFile message_output;
+    ASSERT_TRUE(formatted_output.valid());
+    ASSERT_TRUE(message_output.valid());
+
+    fiber::log::LogConfigBuilder builder;
+    auto formatted_id = builder.add_file_appender({.name = "formatted_output", .path = formatted_output.path()});
+    auto message_id = builder.add_file_appender({
+            .name = "message_output",
+            .path = message_output.path(),
+            .buffer_size = 4096,
+            .flush_interval = 1h,
+            .layout = fiber::log::FileAppenderLayout::MessageOnly,
+    });
+    ASSERT_TRUE(formatted_id);
+    ASSERT_TRUE(message_id);
+    ASSERT_TRUE(builder.set_root_logger({.level = fiber::log::LogLevel::Info}, {*formatted_id, *message_id}));
+    auto config = builder.finish();
+    ASSERT_TRUE(config);
+    auto &manager = fiber::log::LoggerManager::global();
+    ASSERT_TRUE(manager.initialize(std::move(*config)));
+
+    constexpr std::string_view message = R"({"audit":true})";
+    ASSERT_TRUE(fiber::log::log_complete_message(LOG_TEST_OTHER.get(), fiber::log::LogLevel::Info, __FILE__, __LINE__,
+                                                 __func__, message));
+    manager.shutdown();
+
+    const std::string formatted = read_file(formatted_output.path());
+    const std::string message_only = read_file(message_output.path());
+    EXPECT_NE(formatted, std::string(message) + "\n");
+    EXPECT_TRUE(formatted.ends_with(std::string(message) + "\n"));
+    EXPECT_EQ(message_only, std::string(message) + "\n");
+    EXPECT_EQ(message_only.find("test.other"), std::string::npos);
+}
+
 TEST(LogSystemTest, SecureFileAppenderRecoversTailAndEnforcesMode) {
     LoggingScope scope;
     TempLogFile output;

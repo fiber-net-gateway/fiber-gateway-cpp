@@ -6,6 +6,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <cerrno>
 #include <sys/stat.h>
@@ -70,15 +71,15 @@ public:
         if (path_.empty()) {
             return;
         }
-        (void) ::unlink(target_path().c_str());
-        (void) ::unlink(audit_path().c_str());
-        (void) ::rmdir(path_.c_str());
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
     }
 
     TempDirectory(const TempDirectory &) = delete;
     TempDirectory &operator=(const TempDirectory &) = delete;
 
     [[nodiscard]] bool valid() const noexcept { return !path_.empty(); }
+    [[nodiscard]] const std::string &path() const noexcept { return path_; }
     [[nodiscard]] std::string target_path() const { return path_ + "/target.ndjson"; }
     [[nodiscard]] std::string audit_path() const { return path_ + "/audit.ndjson"; }
 
@@ -334,15 +335,61 @@ TEST(AiServerLoggingTest, AppliesCategoryOverridesAndKeepsAuditIsolated) {
     EXPECT_EQ(operational_content.find("suppressed-operational-record"), std::string::npos);
     EXPECT_EQ(operational_content.find(R"({"audit":true})"), std::string::npos);
     const std::string audit_content = read_file(audit.path());
-    EXPECT_TRUE(audit_content.starts_with("complete\n"));
-    EXPECT_NE(audit_content.find(" ai_server.audit "), std::string::npos);
-    EXPECT_TRUE(audit_content.ends_with("{\"audit\":true}\n"));
+    EXPECT_EQ(audit_content, "complete\n{\"audit\":true}\n");
+    EXPECT_EQ(audit_content.find(" ai_server.audit "), std::string::npos);
     EXPECT_EQ(audit_content.find("visible-operational-record"), std::string::npos);
     EXPECT_EQ(std::count(audit_content.begin(), audit_content.end(), '\n'), 2);
 
     struct stat status{};
     ASSERT_EQ(::stat(audit.path().c_str(), &status), 0);
     EXPECT_EQ(status.st_mode & 0777, 0600);
+}
+
+TEST(AiServerLoggingTest, AuditArchivesIncludeUtcTimestampAndSequence) {
+    TempDirectory directory;
+    ASSERT_TRUE(directory.valid());
+    LoggingScope logging;
+
+    std::string source = console_config(directory.audit_path());
+    ASSERT_TRUE(replace_once(source, R"("rotate_bytes": 0)", R"("rotate_bytes": 64)"));
+    auto config = fiber::ai_server::parse_ai_server_log_config(source, "/tmp/ai-server.logging.json");
+    ASSERT_TRUE(config) << config.error().detail;
+    auto initialized = fiber::log::LoggerManager::global().initialize(std::move(config->config));
+    ASSERT_TRUE(initialized) << initialized.error().message;
+
+    const std::string record = R"({"payload":")" + std::string(96, 'x') + R"("})";
+    ASSERT_TRUE(fiber::log::log_complete_message(LOG_TEST_AUDIT.get(), fiber::log::LogLevel::Info, __FILE__, __LINE__,
+                                                 __func__, record));
+    ASSERT_TRUE(fiber::log::log_complete_message(LOG_TEST_AUDIT.get(), fiber::log::LogLevel::Info, __FILE__, __LINE__,
+                                                 __func__, record));
+    fiber::log::LoggerManager::global().shutdown();
+
+    std::vector<std::filesystem::path> archives;
+    for (const auto &entry: std::filesystem::directory_iterator(directory.path())) {
+        const std::string name = entry.path().filename().string();
+        if (name.starts_with("audit.ndjson.")) {
+            archives.push_back(entry.path());
+        }
+    }
+    ASSERT_EQ(archives.size(), 1u);
+
+    constexpr std::string_view prefix = "audit.ndjson.";
+    constexpr std::string_view suffix = ".000001";
+    const std::string name = archives.front().filename().string();
+    ASSERT_EQ(name.size(), prefix.size() + 16 + suffix.size());
+    EXPECT_TRUE(name.starts_with(prefix));
+    EXPECT_TRUE(name.ends_with(suffix));
+    const std::string_view stamp(name.data() + prefix.size(), 16);
+    EXPECT_EQ(stamp[8], 'T');
+    EXPECT_EQ(stamp[15], 'Z');
+    for (std::size_t index = 0; index < stamp.size(); ++index) {
+        if (index != 8 && index != 15) {
+            EXPECT_GE(stamp[index], '0');
+            EXPECT_LE(stamp[index], '9');
+        }
+    }
+    EXPECT_EQ(read_file(archives.front().string()), record + "\n");
+    EXPECT_EQ(read_file(directory.audit_path()), record + "\n");
 }
 
 TEST(AiServerLoggingTest, AuditAppenderRejectsSymbolicLinks) {

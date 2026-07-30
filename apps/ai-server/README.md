@@ -199,7 +199,9 @@ Event：name 使用稳定的响应 `code`，data 记录 `status`、`type` 和最
 `audit` 必须提供 `path`、正整数 `max_record_bytes`、非负整数 `rotate_bytes` 和正整数
 `max_archives`；`rotate_bytes: 0` 禁用轮转。审计 appender 始终为 unbuffered、
 `0600`、no-follow、普通文件限定、启动尾部恢复，logger 始终为精确
-`ai_server.audit`、INFO、`additive=false`。这些安全和隔离约束不开放配置。
+`ai_server.audit`、INFO、`additive=false`，并以 message-only 模式让每个物理行都是
+一个完整 JSON。滚动归档名固定为 `{base}.{utc}.{seq}`。这些安全、格式和隔离约束
+不开放配置。
 
 进程仍会在 listener 成功后向 stdout 输出一行服务发现信息。这不是运行日志，不受
 日志 JSON 控制，便于本地启动脚本发现实际绑定端口。
@@ -281,9 +283,9 @@ ai-server 在静态初始化边界编译 OpenAI/Anthropic 路径。请求只解�
 `ai_server.http`、`ai_server.llm`、`ai_server.discovery` 和
 `ai_server.rate_limit`。
 LLM 对话审计使用独立的 `ai_server.audit` logger，不向 stderr 传播。请求 worker
-直接生成 JSON 并构造一条 `audit_json=<json>` 日志记录，随后投递给进程共享的异步
-日志线程；文件中的每行因此是常规日志前缀加稳定标记 `audit_json=` 和一个完整 JSON，
-采集端应从该标记后解析 JSON。
+直接生成 JSON 日志记录，随后投递给进程共享的异步日志线程。专用审计 FileAppender
+只写 message 和行末换行，不写常规日志前缀；文件因此是 NDJSON，每个物理行都可以
+直接作为一个完整 JSON 解析。
 
 当前审计 schema 为 `schema_version=5`，按采集端旧列名输出扁平字段。`request_json`
 是入站 body 的唯一完整副本：合法 UTF-8 以 `content_type=json_text` 保存，非法 UTF-8
@@ -309,7 +311,8 @@ usage 等信息位于同一顶层对象。每个 Provider attempt 还记录
 配置为 `DropNewest`，请求线程不等待日志容量，也不读取投递结果。
 
 审计 FileAppender 只在记录边界轮转，绝不拆分一条日志；启动和 reopen 时会删除活动
-文件末尾由崩溃留下的不完整行。文件拒绝符号链接和非普通文件，并强制为 `0600`。
+文件末尾由崩溃留下的不完整行。归档文件名包含 UTC 时间戳和单调序号，例如
+`ai-server-audit.ndjson.20260730T083012Z.000001`。文件拒绝符号链接和非普通文件，并强制为 `0600`。
 优雅停机先排空 HTTP 请求和业务 EventLoop，再由日志系统 drain 全部已提交记录。
 Authorization、Provider token 值、BT1 secret 和 Nacos 凭据不会作为独立字段写入，
 但完整 request body 和模型输出本身可能包含任意业务秘密，生产环境必须严格限制文件

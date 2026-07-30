@@ -225,8 +225,7 @@ std::size_t write_contiguous_bytes(int fd, const char *data, std::size_t size) n
     return offset;
 }
 
-std::size_t write_record_bytes(int fd, const FormattedLogRecord &record) noexcept {
-    FormattedLogRecord::Cursor position = record.cursor();
+std::size_t write_record_bytes(int fd, FormattedLogRecord::Cursor position) noexcept {
     std::size_t total_written = 0;
     while (!position.done()) {
         iovec vectors[kWriteVectorCount];
@@ -324,7 +323,7 @@ ConsoleAppender::ConsoleAppender(AppenderId id, ConsoleAppenderOptions options) 
     fd_(options.stream == ConsoleStream::Stdout ? STDOUT_FILENO : STDERR_FILENO) {}
 
 void ConsoleAppender::append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point) noexcept {
-    const std::size_t written = write_record_bytes(fd_, record);
+    const std::size_t written = write_record_bytes(fd_, record.cursor());
     if (written != record.size()) {
         if (written > 0) {
             record_write(written, 0);
@@ -342,7 +341,7 @@ bool ConsoleAppender::reopen() noexcept { return true; }
 FileAppender::FileAppender(AppenderId id, FileAppenderOptions options) noexcept :
     Appender(id, std::move(options.name), options.min_level, options.max_level), path_(std::move(options.path)),
     file_mode_(options.file_mode), buffer_size_(options.buffer_size), flush_interval_(options.flush_interval),
-    rotation_(std::move(options.rotation)), no_follow_(options.no_follow),
+    rotation_(std::move(options.rotation)), layout_(options.layout), no_follow_(options.no_follow),
     regular_file_only_(options.regular_file_only), enforce_file_mode_(options.enforce_file_mode),
     truncate_incomplete_tail_(options.truncate_incomplete_tail) {}
 
@@ -605,6 +604,20 @@ bool FileAppender::rotate() noexcept {
     return false;
 }
 
+std::size_t FileAppender::record_size(const FormattedLogRecord &record) const noexcept {
+    return layout_ == FileAppenderLayout::MessageOnly ? record.message_line_size() : record.size();
+}
+
+FormattedLogRecord::Cursor FileAppender::record_cursor(const FormattedLogRecord &record) const noexcept {
+    return layout_ == FileAppenderLayout::MessageOnly ? record.message_cursor() : record.cursor();
+}
+
+bool FileAppender::copy_record_to(const FormattedLogRecord &record, char *destination,
+                                  std::size_t capacity) const noexcept {
+    return layout_ == FileAppenderLayout::MessageOnly ? record.copy_message_to(destination, capacity)
+                                                      : record.copy_to(destination, capacity);
+}
+
 void FileAppender::cleanup_archives(std::chrono::steady_clock::time_point now) noexcept {
     if (!rotation_ || archives_.size() <= rotation_->max_archives || now < cleanup_retry_after_) {
         return;
@@ -664,16 +677,16 @@ void FileAppender::write_contiguous(const char *data, std::size_t size, std::uin
     record_write(size, records);
 }
 
-void FileAppender::write_record(const FormattedLogRecord &record) noexcept {
+void FileAppender::write_record(const FormattedLogRecord &record, std::size_t size) noexcept {
     const std::uint64_t record_start = active_bytes_;
-    const std::size_t written = write_record_bytes(fd_, record);
+    const std::size_t written = write_record_bytes(fd_, record_cursor(record));
     if (written > std::numeric_limits<std::uint64_t>::max() - active_bytes_) {
         active_bytes_ = std::numeric_limits<std::uint64_t>::max();
     } else {
         active_bytes_ += written;
     }
     set_active_file_bytes(active_bytes_);
-    if (written != record.size()) {
+    if (written != size) {
         bool rolled_back = false;
         if (truncate_incomplete_tail_ &&
             record_start <= static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) &&
@@ -688,7 +701,7 @@ void FileAppender::write_record(const FormattedLogRecord &record) noexcept {
         record_write_error(1);
         return;
     }
-    record_write(record.size(), 1);
+    record_write(size, 1);
 }
 
 void FileAppender::flush_buffer() noexcept {
@@ -702,29 +715,30 @@ void FileAppender::flush_buffer() noexcept {
 }
 
 void FileAppender::append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point now) noexcept {
+    const std::size_t size = record_size(record);
     if (buffer_used_ > 0 && now >= flush_at_) {
         flush_buffer();
     }
-    prepare_record(record.size(), now);
+    prepare_record(size, now);
 
-    if (!buffered() || record.size() > buffer_size_) {
+    if (!buffered() || size > buffer_size_) {
         if (buffer_used_ > 0) {
             flush_buffer();
         }
-        write_record(record);
+        write_record(record, size);
         return;
     }
-    if (record.size() > buffer_size_ - buffer_used_) {
+    if (size > buffer_size_ - buffer_used_) {
         flush_buffer();
     }
     if (buffer_used_ == 0) {
         flush_at_ = now + flush_interval_;
     }
-    if (!record.copy_to(buffer_ + buffer_used_, buffer_size_ - buffer_used_)) {
+    if (!copy_record_to(record, buffer_ + buffer_used_, buffer_size_ - buffer_used_)) {
         record_drop();
         return;
     }
-    buffer_used_ += record.size();
+    buffer_used_ += size;
     ++buffered_records_;
     if (buffer_used_ == buffer_size_) {
         flush_buffer();

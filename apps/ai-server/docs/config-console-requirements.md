@@ -751,8 +751,9 @@ dotenv 中只保留一个必填日志参数：
 运行时审计使用共享异步日志线程和固定 `DropNewest` 策略。审计 appender 的
 unbuffered、`0600`、no-follow、普通文件限定、权限强制、尾部恢复，以及 logger 的
 INFO/`additive=false` 都是代码不变量，不提供控件。请求线程只生成并投递
-`audit_json=<json>`，不等待容量或写入结果；队列满、生成失败和 I/O 失败均通过指标
-暴露，不参与请求成功判定或 `/ready`。界面可以用当前示例值 `67108864`（queue）、
+一个 JSON 对象；审计文件以 message-only 模式输出 NDJSON，每个物理行都是完整 JSON。
+滚动归档名固定为 `{base}.{utc}.{seq}`。请求线程不等待容量或写入结果；队列满、
+生成失败和 I/O 失败均通过指标暴露，不参与请求成功判定或 `/ready`。界面可以用当前示例值 `67108864`（queue）、
 `ai-server-audit.ndjson`、`134217728`、`1073741824`、`30` 初始化模板，但 JSON
 中的这些字段仍全部显式必填。
 

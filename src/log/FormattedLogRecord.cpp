@@ -11,8 +11,9 @@ constexpr char kLogNewline = '\n';
 
 } // namespace
 
-FormattedLogRecord::Cursor::Cursor(const FormattedLogRecord &record) noexcept :
-    record_(&record), chunk_(record.record_->first_chunk()), stage_(Stage::Prefix) {
+FormattedLogRecord::Cursor::Cursor(const FormattedLogRecord &record, bool include_prefix) noexcept :
+    record_(&record), chunk_(record.record_->first_chunk()),
+    stage_(include_prefix ? Stage::Prefix : Stage::InlineMessage) {
     normalize();
 }
 
@@ -101,7 +102,7 @@ bool FormattedLogRecord::copy_to(char *destination, std::size_t capacity) const 
     if (!destination || capacity < total_size_) {
         return false;
     }
-    Cursor position(*this);
+    Cursor position = cursor();
     std::size_t offset = 0;
     while (!position.done()) {
         const LogSegment segment = position.current();
@@ -110,6 +111,22 @@ bool FormattedLogRecord::copy_to(char *destination, std::size_t capacity) const 
         position.advance(segment.size);
     }
     return offset == total_size_;
+}
+
+bool FormattedLogRecord::copy_message_to(char *destination, std::size_t capacity) const noexcept {
+    const std::size_t required = message_line_size();
+    if (!destination || capacity < required) {
+        return false;
+    }
+    Cursor position = message_cursor();
+    std::size_t offset = 0;
+    while (!position.done()) {
+        const LogSegment segment = position.current();
+        std::memcpy(destination + offset, segment.data, segment.size);
+        offset += segment.size;
+        position.advance(segment.size);
+    }
+    return offset == required;
 }
 
 } // namespace fiber::log
