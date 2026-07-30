@@ -76,6 +76,16 @@ struct ContentLengthWriteOutcome {
     bool request_complete = false;
 };
 
+struct PartialChunkedWriteOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::Unknown;
+    std::size_t first_written = 0;
+    std::size_t total_written = 0;
+    std::size_t remaining_after_first = 0;
+    std::size_t write_calls = 0;
+    bool request_complete = false;
+    bool input_complete = false;
+};
+
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
     socklen_t len = sizeof(bound);
@@ -533,7 +543,7 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
         if (!header_result) {
             outcome.body_error = header_result.error();
         } else {
-            auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
+            auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
             if (!body_result) {
                 outcome.body_error = body_result.error();
             } else {
@@ -541,7 +551,7 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
                 outcome.body_written = *body_result;
                 outcome.request_complete = exchange.request_complete();
 
-                auto redundant_pointer = co_await exchange.write_body(nullptr, 0, true);
+                auto redundant_pointer = co_await exchange.write_all(nullptr, 0, true);
                 outcome.redundant_pointer_error =
                         redundant_pointer ? fiber::common::IoErr::None : redundant_pointer.error();
                 outcome.redundant_pointer_written = redundant_pointer ? *redundant_pointer : 0;
@@ -549,23 +559,23 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
                 fiber::mem::IoBufNodePool node_pool;
                 fiber::mem::IoBufChain redundant_chain(node_pool);
                 redundant_chain.mark_complete();
-                auto redundant_chain_result = co_await exchange.write_body(std::move(redundant_chain));
+                auto redundant_chain_result = co_await exchange.write_all(std::move(redundant_chain));
                 outcome.redundant_chain_error =
                         redundant_chain_result ? fiber::common::IoErr::None : redundant_chain_result.error();
                 outcome.redundant_chain_written = redundant_chain_result ? *redundant_chain_result : 0;
 
-                auto repeated_completion = co_await exchange.write_body(nullptr, 0, true);
+                auto repeated_completion = co_await exchange.write_all(nullptr, 0, true);
                 outcome.repeated_completion_error =
                         repeated_completion ? fiber::common::IoErr::None : repeated_completion.error();
                 outcome.repeated_completion_written = repeated_completion ? *repeated_completion : 0;
 
                 fiber::mem::IoBufChain incomplete_empty(node_pool);
-                auto incomplete_empty_result = co_await exchange.write_body(std::move(incomplete_empty));
+                auto incomplete_empty_result = co_await exchange.write_all(std::move(incomplete_empty));
                 outcome.incomplete_empty_error =
                         incomplete_empty_result ? fiber::common::IoErr::None : incomplete_empty_result.error();
 
                 auto nonempty_after_done =
-                        co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("x"), 1, true);
+                        co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("x"), 1, true);
                 outcome.nonempty_after_done_error =
                         nonempty_after_done ? fiber::common::IoErr::None : nonempty_after_done.error();
             }
@@ -611,7 +621,7 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t por
         if (!header_result) {
             result = header_result.error();
         } else {
-            auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
+            auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
             if (!body_result) {
                 result = body_result.error();
             } else {
@@ -631,7 +641,7 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t por
     request_done_promise->set_value(request_done);
 }
 
-// Exercises the explicit Chunked write_body(IoBufChain) path.
+// Exercises the explicit Chunked write_all(IoBufChain) path.
 // (ClientHttp1Exchange merges [prefix][body][suffix] into a single writev).
 DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::uint16_t port,
                                            std::promise<fiber::common::IoErr> *result_promise,
@@ -676,7 +686,7 @@ DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::u
             body_chain.append(std::move(body_buf));
             // chain.complete() == false -> trailing CRLF only, no terminator (trailer follows).
 
-            auto body_result = co_await exchange.write_body(std::move(body_chain));
+            auto body_result = co_await exchange.write_all(std::move(body_chain));
             if (!body_result) {
                 result = body_result.error();
             } else {
@@ -694,6 +704,85 @@ DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::u
     connection.close();
     result_promise->set_value(result);
     request_done_promise->set_value(request_done);
+}
+
+DetachedTask run_partial_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
+                                        std::promise<PartialChunkedWriteOutcome> *result_promise) {
+    PartialChunkedWriteOutcome outcome;
+    fiber::http::Http1ClientConnectionOptions conn_options;
+    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+
+    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
+    auto connect_result = co_await connection.connect(5s);
+    if (!connect_result) {
+        outcome.error = connect_result.error();
+        result_promise->set_value(outcome);
+        co_return;
+    }
+
+    {
+        fiber::mem::BufPool pool;
+        fiber::http::HttpHeaders headers(pool);
+        headers.add_view("host", "example.com");
+
+        fiber::http::ClientHttp1Exchange exchange(connection, pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Post;
+        head.target = "/partial";
+        head.headers = &headers;
+        head.body = fiber::http::HttpBodySpec::Chunked();
+
+        auto header_result = co_await exchange.send_header(head, false);
+        if (!header_result) {
+            outcome.error = header_result.error();
+        } else {
+            constexpr std::string_view kBody = "abcdefghijklmnopqrst";
+            fiber::mem::IoBufNodePool node_pool;
+            fiber::mem::IoBufChain chunk(node_pool);
+            for (char ch: kBody) {
+                fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(1);
+                if (!node) {
+                    outcome.error = fiber::common::IoErr::NoMem;
+                    break;
+                }
+                *node.writable_data() = static_cast<std::uint8_t>(ch);
+                node.commit(1);
+                if (!chunk.append(std::move(node))) {
+                    outcome.error = fiber::common::IoErr::NoMem;
+                    break;
+                }
+            }
+            if (outcome.error == fiber::common::IoErr::Unknown) {
+                chunk.mark_complete();
+                auto first = co_await exchange.write(chunk, 2s);
+                ++outcome.write_calls;
+                if (!first) {
+                    outcome.error = first.error();
+                } else {
+                    outcome.first_written = *first;
+                    outcome.total_written = *first;
+                    outcome.remaining_after_first = chunk.readable_bytes();
+                    while (chunk.readable_bytes() != 0 || chunk.complete()) {
+                        auto written = co_await exchange.write(chunk, 2s);
+                        ++outcome.write_calls;
+                        if (!written) {
+                            outcome.error = written.error();
+                            break;
+                        }
+                        outcome.total_written += *written;
+                    }
+                    if (outcome.error == fiber::common::IoErr::Unknown) {
+                        outcome.error = fiber::common::IoErr::None;
+                    }
+                }
+                outcome.request_complete = exchange.request_complete();
+                outcome.input_complete = chunk.complete();
+            }
+        }
+    }
+
+    connection.close();
+    result_promise->set_value(outcome);
 }
 
 DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
@@ -734,7 +823,7 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
         } else {
             result = fiber::common::IoErr::None;
             request_done = exchange.request_complete();
-            auto duplicate_result = co_await exchange.write_body(nullptr, 0, true);
+            auto duplicate_result = co_await exchange.write_all(nullptr, 0, true);
             duplicate_completion = duplicate_result ? fiber::common::IoErr::None : duplicate_result.error();
         }
     }
@@ -868,7 +957,7 @@ DetachedTask run_expect_continue_client(fiber::event::EventLoop *loop, std::uint
         }
         outcome.first_status = (*informational_result)->status_code;
 
-        auto body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
         if (!body_result) {
             outcome.err = body_result.error();
             result_promise->set_value(std::move(outcome));
@@ -1266,8 +1355,8 @@ DetachedTask run_raw_stream_client(fiber::event::EventLoop *loop, std::uint16_t 
         outcome.first_body_complete = first_body_result->complete();
         outcome.first_body = flatten_body_chunk(*first_body_result);
 
-        auto write_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("client-frame"),
-                                                         std::string_view("client-frame").size(), true);
+        auto write_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("client-frame"),
+                                                        std::string_view("client-frame").size(), true);
         if (!write_result) {
             outcome.err = write_result.error();
             result_promise->set_value(std::move(outcome));
@@ -1383,7 +1472,7 @@ TEST(ClientHttp1ExchangeTest, SendChunkedBodyAndTrailerAsChunkedHttp1Request) {
 
 TEST(ClientHttp1ExchangeTest, SendChunkedBodyIoBufChainWriteRawHttp1Request) {
     // Same wire output as SendChunkedBodyAndTrailerWriteRawHttp1Request, but the
-    // body is sent via write_body(IoBufChain) -> single coalesced writev.
+    // body is sent via write_all(IoBufChain) -> single coalesced writev.
     const std::string expected = "POST /upload HTTP/1.1\r\n"
                                  "Transfer-Encoding: chunked\r\n"
                                  "host: example.com\r\n"
@@ -1419,6 +1508,52 @@ TEST(ClientHttp1ExchangeTest, SendChunkedBodyIoBufChainWriteRawHttp1Request) {
 
     EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
     EXPECT_TRUE(request_done_future.get());
+
+    CaptureOutcome capture = capture_future.get();
+    EXPECT_EQ(capture.err, fiber::common::IoErr::None);
+    EXPECT_EQ(capture.bytes, expected);
+
+    group.stop();
+    group.join();
+}
+
+TEST(ClientHttp1ExchangeTest, PartialChunkedWriteContinuesPayloadWithoutRepeatingPrefix) {
+    const std::string expected = "POST /partial HTTP/1.1\r\n"
+                                 "Transfer-Encoding: chunked\r\n"
+                                 "host: example.com\r\n"
+                                 "\r\n"
+                                 "14\r\n"
+                                 "abcdefghijklmnopqrst\r\n"
+                                 "0\r\n"
+                                 "\r\n";
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<CaptureOutcome> capture_promise;
+    auto capture_future = capture_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_capture_server(&group.at(0), &port_promise, expected.size(), &capture_promise);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<PartialChunkedWriteOutcome> result_promise;
+    auto result_future = result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return run_partial_chunked_client(&group.at(0), port, &result_promise); });
+
+    PartialChunkedWriteOutcome outcome = result_future.get();
+    EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
+    EXPECT_GT(outcome.first_written, 0U);
+    EXPECT_LT(outcome.first_written, 20U);
+    EXPECT_EQ(outcome.remaining_after_first, 20U - outcome.first_written);
+    EXPECT_EQ(outcome.total_written, 20U);
+    EXPECT_GT(outcome.write_calls, 1U);
+    EXPECT_TRUE(outcome.request_complete);
+    EXPECT_FALSE(outcome.input_complete);
 
     CaptureOutcome capture = capture_future.get();
     EXPECT_EQ(capture.err, fiber::common::IoErr::None);

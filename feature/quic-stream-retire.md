@@ -45,7 +45,7 @@ return close_reason_ != None || remote_rst_ || local_rst_ ||
 ## 非目标
 
 - 不重构 `Lease::adopt` / table 持有 ref 的显式化（现状已平衡，仅清理 flag）。
-- 不实现 H3 写响应路径（`ServerHttp3Request::write_body` 仍为 stub）；但本方案为
+- 不实现 H3 写响应路径（`ServerHttp3Request::write_all` 仍为 stub）；但本方案为
   其落地铺好退役语义前提。
 
 ## 方向语义（覆盖单向流）
@@ -160,7 +160,7 @@ bool QuicStream::ready_for_connection_release() const noexcept {
   `run_read_loop` 改为仅持 `Lease` 保证对象存活，退役交给连接在 recv 完结 + send
   完结时统一判定。
 
-  时序：读循环退出仅代表 recv 侧结束；bidi 流要等 app 写完响应（`write_body` 发 FIN
+  时序：读循环退出仅代表 recv 侧结束；bidi 流要等 app 写完响应（`write_all` 发 FIN
   → `fin_appended_=true`）且全部 ack 后，连接的 `on_stream_send_acked` →
   `try_release_stream` 才真正 retire。
 
@@ -215,7 +215,7 @@ stream_data_blocked_reported_=false`。补充兜底：detach 时显式 `send_que
    `app_released_` 在 H3 写路径落地时的隐患。
 2. **可接受的泄漏语义**：app 读完请求但从不发响应+FIN 的 bidi 流，会留存到连接关闭
    （`close_all_streams` → `closed_` 逃生）。与 H2 一致；不发响应的 server 本就是 bug。
-3. **H3 写响应路径前置依赖**：`ServerHttp3Request::write_body`（当前 stub）落地时，
+3. **H3 写响应路径前置依赖**：`ServerHttp3Request::write_all`（当前 stub）落地时，
    必须在发出 FIN/RESET 后由连接侧 `on_stream_send_acked` 触发退役。写路径实现须遵守。
 4. **uni 流无回归**：peer uni 流（control/QPACK）当前 `app_released_` 默认 true 即按
    recv 完结退役，新模型 `recv_done` 等价；local uni 流当前实际只能靠 `closed_` 退役

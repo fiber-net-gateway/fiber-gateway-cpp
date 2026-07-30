@@ -34,11 +34,20 @@ public:
     async::Task<common::IoResult<void>>
     send_request_header(const Http3RequestHead &head, bool end_stream,
                         std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    // write_all accepts the complete payload before returning. write returns
+    // after the first QUIC payload batch and consumes an IoBufChain in place;
+    // retry the exact remaining suffix with the same end_stream value. A
+    // timeout or terminal stream error aborts the request and rejects retries.
     async::Task<common::IoResult<std::size_t>>
-    write_body(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    write_all(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     async::Task<common::IoResult<std::size_t>>
-    write_body(const std::uint8_t *buf, std::size_t len, bool end_stream,
-               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    write_all(const std::uint8_t *buf, std::size_t len, bool end_stream,
+              std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    async::Task<common::IoResult<std::size_t>>
+    write(mem::IoBufChain &chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    async::Task<common::IoResult<std::size_t>>
+    write(const std::uint8_t *buf, std::size_t len, bool end_stream,
+          std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     async::Task<common::IoResult<void>>
     write_trailer(const HttpHeaders &headers,
                   std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;

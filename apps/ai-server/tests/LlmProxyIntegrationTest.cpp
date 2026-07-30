@@ -360,8 +360,8 @@ RawHttpResponse post_json(std::uint16_t port, std::string_view token, std::strin
                     co_return;
                 }
                 if (!body.empty()) {
-                    auto written = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(body.data()),
-                                                                body.size(), true, 5s);
+                    auto written = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()),
+                                                               body.size(), true, 5s);
                     if (!written) {
                         response.system_error = static_cast<int>(written.error());
                         promise.set_value(std::move(response));

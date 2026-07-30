@@ -195,8 +195,8 @@ DetachedTask run_http1_client(fiber::event::EventLoop *loop, std::uint16_t port,
         co_return;
     }
     if (req.body) {
-        auto write_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>(req.body->data()),
-                                                         req.body->size(), true);
+        auto write_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(req.body->data()),
+                                                        req.body->size(), true);
         if (!write_result) {
             result.err = write_result.error();
             promise->set_value(std::move(result));

@@ -37,11 +37,20 @@ public:
     fiber::async::Task<common::IoResult<void>>
     send_header(const Http1RequestHead &head, bool end_stream,
                 std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    // write_all accepts the complete payload before returning. write returns
+    // after the first payload batch and consumes an IoBufChain in place; retry
+    // the exact remaining suffix with the same end_stream value. A timeout or
+    // terminal transport error makes this request permanently non-writable.
     fiber::async::Task<common::IoResult<std::size_t>>
-    write_body(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    write_all(mem::IoBufChain chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::async::Task<common::IoResult<std::size_t>>
-    write_body(const std::uint8_t *buf, std::size_t len, bool end_stream,
-               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    write_all(const std::uint8_t *buf, std::size_t len, bool end_stream,
+              std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>>
+    write(mem::IoBufChain &chunk, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>>
+    write(const std::uint8_t *buf, std::size_t len, bool end_stream,
+          std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::async::Task<common::IoResult<void>>
     send_trailer(const HttpHeaders &trailers,
                  std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -91,14 +100,18 @@ private:
 
     void clear_response_header_nodes() noexcept;
     void fail_active_exchange() noexcept;
+    void record_request_write_error(common::IoErr error) noexcept;
     void cancel_active_io(common::IoErr reason) noexcept;
     void on_io_awaiter_destroyed() noexcept;
     NotifyAwaiter wait_transport_read(fiber::async::Task<common::IoResult<std::size_t>> task) noexcept;
     NotifyAwaiter wait_transport_write(fiber::async::Task<common::IoResult<std::size_t>> task) noexcept;
-    fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, const void *buf, std::size_t len,
-                                                         std::chrono::milliseconds timeout) noexcept;
-    fiber::async::Task<common::IoResult<void>> write_all(HttpTransport *transport, mem::IoBufChain &chain,
-                                                         std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *transport, const void *buf,
+                                                                   std::size_t len,
+                                                                   std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *transport, mem::IoBufChain &chain,
+                                                                   std::chrono::milliseconds timeout) noexcept;
+    fiber::async::Task<common::IoResult<void>> write_chunk_suffix(HttpTransport *transport, bool end_stream,
+                                                                  std::chrono::milliseconds timeout) noexcept;
     [[nodiscard]] bool is_idempotent_content_length_completion(std::size_t body_bytes, bool end_stream) const noexcept;
     common::IoResult<void> ensure_body_read_buf_writable(mem::IoBuf &read_buf, std::size_t min_writable) noexcept;
     common::IoResult<void> take_prefix(mem::IoBuf &read_buf, mem::IoBufChain &out, std::size_t len) noexcept;
@@ -131,11 +144,15 @@ private:
     bool response_eof_delimited_ = false;
     bool raw_stream_active_ = false;
     bool raw_stream_write_complete_ = false;
+    bool chunk_write_active_ = false;
+    bool chunk_write_end_ = false;
     RequestState request_state_ = RequestState::Init;
     HttpMethod request_method_ = HttpMethod::Unknown;
     HttpBodySpec body_spec_ = HttpBodySpec::None();
+    common::IoErr request_write_error_ = common::IoErr::None;
     std::size_t content_length_ = 0;
     std::size_t body_sent_ = 0;
+    std::size_t chunk_payload_remaining_ = 0;
 };
 
 } // namespace fiber::http

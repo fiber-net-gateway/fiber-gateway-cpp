@@ -198,7 +198,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::write(const google::proto
         co_return std::unexpected(framed.error());
     }
 
-    auto write_result = co_await exchange_.write_body(std::move(*framed), remaining_timeout());
+    auto write_result = co_await exchange_.write_all(std::move(*framed), remaining_timeout());
     if (!write_result) {
         // Any write failure (including TimedOut) fails the call: a timed-out
         // partial flush may have left a truncated frame on the wire.
@@ -225,7 +225,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::writes_done() noexcept {
     // Empty chain marked complete -> an empty DATA frame with END_STREAM.
     mem::IoBufChain empty(conn_->loop().io_buf_node_pool());
     empty.mark_complete();
-    auto write_result = co_await exchange_.write_body(std::move(empty), remaining_timeout());
+    auto write_result = co_await exchange_.write_all(std::move(empty), remaining_timeout());
     if (!write_result) {
         fail(write_result.error());
         co_return std::unexpected(write_result.error());

@@ -594,6 +594,13 @@ struct ClientBodyCancelRunOutcome {
     std::string written;
 };
 
+struct ClientPartialBodyRunOutcome {
+    fiber::common::IoResult<void> header_result;
+    fiber::common::IoResult<std::size_t> first_body_result;
+    fiber::common::IoResult<std::size_t> second_body_result;
+    std::string written;
+};
+
 struct ClientConnWindowWaitRunOutcome {
     fiber::common::IoResult<void> header_result;
     fiber::common::IoResult<std::size_t> body_result;
@@ -1512,7 +1519,7 @@ DetachedTask run_client_request_body_send(std::shared_ptr<std::promise<ClientReq
             },
             false);
     if (outcome.header_result) {
-        outcome.body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        outcome.body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
     }
     outcome.stream_id = exchange.stream_id();
     outcome.conn_send_window = connection.current_connection_send_window();
@@ -1545,12 +1552,58 @@ DetachedTask run_client_body_cancel_before_write(std::shared_ptr<std::promise<Cl
             },
             false);
     if (outcome.header_result) {
-        outcome.canceled_body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("drop"), 4,
-                                                                    false, std::chrono::milliseconds::zero());
+        outcome.canceled_body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("drop"), 4,
+                                                                   false, std::chrono::milliseconds::zero());
         outcome.conn_window_after_cancel = connection.current_connection_send_window();
         outcome.stream_window_after_cancel = exchange.stream()->send_window();
         outcome.retried_body_result =
-                co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("keep"), 4, true);
+                co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("keep"), 4, true);
+        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+    }
+
+    connection.request_stop();
+    co_await connection.stop_and_join();
+    outcome.written = fake_transport_ptr->written();
+    promise->set_value(std::move(outcome));
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+DetachedTask run_client_partial_request_body_send(std::shared_ptr<std::promise<ClientPartialBodyRunOutcome>> promise) {
+    ClientPartialBodyRunOutcome outcome;
+    auto fake_transport =
+            std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, false, true);
+    auto *fake_transport_ptr = fake_transport.get();
+
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    options.initial_connection_send_window = 2;
+    SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
+    fiber::mem::BufPool pool;
+    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    outcome.header_result = co_await exchange.send_request_header(
+            {
+                    .method = fiber::http::HttpMethod::Post,
+                    .scheme = "https",
+                    .authority = "example.com",
+                    .path = "/partial-body",
+            },
+            false);
+    if (outcome.header_result) {
+        constexpr std::string_view kBody = "hello";
+        outcome.first_body_result =
+                co_await exchange.write(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
+        if (outcome.first_body_result) {
+            fiber::async::spawn([fake_transport_ptr]() -> fiber::async::DetachedTask {
+                co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                std::string update_payload(4, '\0');
+                update_payload[3] = 3;
+                fake_transport_ptr->append_read_chunk(make_frame(4, 0x8, 0x0, 0, update_payload));
+                co_return;
+            });
+            outcome.second_body_result =
+                    co_await exchange.write(reinterpret_cast<const std::uint8_t *>(kBody.data() + 2), 3, true);
+        }
     }
 
     connection.request_stop();
@@ -1591,7 +1644,7 @@ run_client_body_waiting_for_connection_window(std::shared_ptr<std::promise<Clien
             fake_transport_ptr->append_read_chunk(make_frame(4, 0x8, 0x0, 0, update_payload));
             co_return;
         });
-        outcome.body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+        outcome.body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
         outcome.conn_send_window = connection.current_connection_send_window();
         outcome.stream_send_window = exchange.stream()->send_window();
     }
@@ -1625,7 +1678,7 @@ DetachedTask run_client_request_trailer_send(std::shared_ptr<std::promise<Client
             },
             false);
     if (outcome.header_result) {
-        outcome.body_result = co_await exchange.write_body(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
+        outcome.body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, false);
     }
     if (outcome.body_result) {
         fiber::mem::BufPool pool;
@@ -4313,7 +4366,7 @@ TEST(Http2ConnectionTest, ClientExchangeWriteBodyEncodesDataFrames) {
     EXPECT_EQ(data_frame_count, 1U) << describe_frames(frames);
 }
 
-TEST(Http2ConnectionTest, CancelQueuedBodyRestoresBothSendWindowsBeforeRetry) {
+TEST(Http2ConnectionTest, TimedOutQueuedClientBodyResetsStreamAndRejectsRetry) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<ClientBodyCancelRunOutcome>>();
     auto future = promise->get_future();
@@ -4331,20 +4384,56 @@ TEST(Http2ConnectionTest, CancelQueuedBodyRestoresBothSendWindowsBeforeRetry) {
     EXPECT_EQ(outcome.canceled_body_result.error(), fiber::common::IoErr::TimedOut);
     EXPECT_EQ(outcome.conn_window_after_cancel, 65535);
     EXPECT_EQ(outcome.stream_window_after_cancel, 65535);
-    ASSERT_TRUE(outcome.retried_body_result.has_value());
-    EXPECT_EQ(outcome.retried_body_result.value(), 4U);
+    ASSERT_FALSE(outcome.retried_body_result.has_value());
+    EXPECT_EQ(outcome.retried_body_result.error(), fiber::common::IoErr::TimedOut);
 
     const std::vector<EncodedFrame> frames = parse_frames(strip_client_initial_flight(outcome.written));
     std::size_t data_frame_count = 0;
+    std::size_t rst_stream_count = 0;
     for (const EncodedFrame &frame: frames) {
-        if (frame.type != 0x0 || frame.stream_id != 1U) {
-            continue;
+        if (frame.type == 0x0 && frame.stream_id == 1U) {
+            ++data_frame_count;
+        } else if (frame.type == 0x3 && frame.stream_id == 1U) {
+            ++rst_stream_count;
         }
-        ++data_frame_count;
-        EXPECT_EQ(frame.payload, "keep");
-        EXPECT_EQ(frame.flags & 0x1U, 0x1U);
     }
-    EXPECT_EQ(data_frame_count, 1U) << describe_frames(frames);
+    EXPECT_EQ(data_frame_count, 0U) << describe_frames(frames);
+    EXPECT_EQ(rst_stream_count, 1U) << describe_frames(frames);
+}
+
+TEST(Http2ConnectionTest, ClientWriteReturnsAfterFirstFlowControlledDataBatch) {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<ClientPartialBodyRunOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0),
+                        [promise]() mutable { return run_client_partial_request_body_send(std::move(promise)); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ClientPartialBodyRunOutcome outcome = future.get();
+    group.join();
+
+    ASSERT_TRUE(outcome.header_result.has_value());
+    ASSERT_TRUE(outcome.first_body_result.has_value());
+    EXPECT_EQ(*outcome.first_body_result, 2U);
+    ASSERT_TRUE(outcome.second_body_result.has_value());
+    EXPECT_EQ(*outcome.second_body_result, 3U);
+
+    const std::vector<EncodedFrame> frames = parse_frames(strip_client_initial_flight(outcome.written));
+    std::vector<std::string> payloads;
+    std::vector<std::uint8_t> flags;
+    for (const EncodedFrame &frame: frames) {
+        if (frame.type == 0x0 && frame.stream_id == 1U) {
+            payloads.push_back(frame.payload);
+            flags.push_back(frame.flags);
+        }
+    }
+    ASSERT_EQ(payloads.size(), 2U) << describe_frames(frames);
+    EXPECT_EQ(payloads[0], "he");
+    EXPECT_EQ(flags[0] & 0x1U, 0U);
+    EXPECT_EQ(payloads[1], "llo");
+    EXPECT_EQ(flags[1] & 0x1U, 0x1U);
 }
 
 TEST(Http2ConnectionTest, ConnectionWindowUpdateWakesQueuedBodySend) {

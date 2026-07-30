@@ -315,7 +315,7 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, const runtime::Locati
             }
             if (forward_state.should_write(body_bytes)) {
                 auto write_result =
-                        co_await upstream_exchange.write_body(std::move(*body_result), location.send_timeout);
+                        co_await upstream_exchange.write_all(std::move(*body_result), location.send_timeout);
                 if (!write_result) {
                     record_upstream_error(log_context, write_result.error(), "send_body");
                     co_await send_plain_response(exchange, map_upstream_error_status(write_result.error()),

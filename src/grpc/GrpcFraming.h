@@ -16,7 +16,7 @@ namespace fiber::grpc {
 
 // Prepend a 5-byte frame header to `payload` (in place). `payload` must be a
 // bound IoBufChain (e.g. from ProtoCodec::encode). Returns the framed chain
-// (header node + payload nodes) ready for ClientHttp2Exchange::write_body.
+// (header node + payload nodes) ready for ClientHttp2Exchange::write_all.
 common::IoResult<mem::IoBufChain> frame(mem::IoBufChain payload) noexcept;
 
 // Streaming deframer for the receive side: feed body chunks from
