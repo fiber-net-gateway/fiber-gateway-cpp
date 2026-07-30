@@ -139,6 +139,39 @@ bool IoBufChain::append(IoBuf &&buf) noexcept {
     return append_node(node);
 }
 
+bool IoBufChain::append_chain(IoBufChain &&other) noexcept {
+    if (this == &other || complete_) {
+        return false;
+    }
+    if (node_pool_ == nullptr && other.node_pool_ != nullptr) {
+        node_pool_ = other.node_pool_;
+    }
+    if (other.node_pool_ != nullptr && node_pool_ != other.node_pool_) {
+        return false;
+    }
+
+    if (other.head_ != nullptr) {
+        if (tail_ != nullptr) {
+            tail_->next = other.head_;
+        } else {
+            head_ = other.head_;
+        }
+        tail_ = other.tail_;
+        size_ += other.size_;
+        readable_bytes_ += other.readable_bytes_;
+        writable_bytes_ += other.writable_bytes_;
+    }
+    complete_ = other.complete_;
+
+    other.head_ = nullptr;
+    other.tail_ = nullptr;
+    other.size_ = 0;
+    other.readable_bytes_ = 0;
+    other.writable_bytes_ = 0;
+    other.complete_ = false;
+    return true;
+}
+
 bool IoBufChain::prepend(IoBuf &&buf) noexcept {
     if (!buf) {
         return true;

@@ -110,6 +110,100 @@ TEST(IoBufChainTest, ChainAppendNodeTakesOwnershipAndResetsOwnerFields) {
     EXPECT_EQ(readable_string(chain), "abc");
 }
 
+TEST(IoBufChainTest, AppendChainMovesNodesAndCompletionWithoutChangingSourceBinding) {
+    IoBufNodePool pool;
+    IoBuf first = IoBuf::allocate(4);
+    IoBuf second = IoBuf::allocate(5);
+    IoBuf prefix = IoBuf::allocate(4);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    ASSERT_TRUE(prefix);
+
+    std::memcpy(prefix.writable_data(), "xy", 2);
+    prefix.commit(2);
+    std::memcpy(first.writable_data(), "ab", 2);
+    first.commit(2);
+    std::memcpy(second.writable_data(), "cde", 3);
+    second.commit(3);
+
+    IoBufChain src(pool);
+    IoBufChain dst(pool);
+    ASSERT_TRUE(src.append(std::move(first)));
+    ASSERT_TRUE(src.append(std::move(second)));
+    ASSERT_TRUE(dst.append(std::move(prefix)));
+    src.mark_complete();
+
+    ASSERT_TRUE(dst.append_chain(std::move(src)));
+
+    EXPECT_EQ(readable_string(dst), "xyabcde");
+    EXPECT_EQ(dst.size(), 3u);
+    EXPECT_EQ(dst.readable_bytes(), 7u);
+    EXPECT_TRUE(dst.complete());
+    EXPECT_TRUE(src.empty());
+    EXPECT_EQ(src.readable_bytes(), 0u);
+    EXPECT_FALSE(src.complete());
+    EXPECT_TRUE(src.bound());
+    EXPECT_EQ(&src.node_pool(), &pool);
+}
+
+TEST(IoBufChainTest, AppendChainTransfersEmptyCompletionMarker) {
+    IoBufNodePool pool;
+    IoBufChain src(pool);
+    IoBufChain dst(pool);
+    src.mark_complete();
+
+    ASSERT_TRUE(dst.append_chain(std::move(src)));
+
+    EXPECT_TRUE(dst.empty());
+    EXPECT_TRUE(dst.complete());
+    EXPECT_FALSE(src.complete());
+}
+
+TEST(IoBufChainTest, AppendChainBindsUnboundDestination) {
+    IoBufNodePool pool;
+    IoBuf buf = IoBuf::allocate(4);
+    ASSERT_TRUE(buf);
+    std::memcpy(buf.writable_data(), "abc", 3);
+    buf.commit(3);
+
+    IoBufChain src(pool);
+    IoBufChain dst;
+    ASSERT_TRUE(src.append(std::move(buf)));
+
+    ASSERT_TRUE(dst.append_chain(std::move(src)));
+
+    EXPECT_TRUE(dst.bound());
+    EXPECT_EQ(&dst.node_pool(), &pool);
+    EXPECT_EQ(readable_string(dst), "abc");
+}
+
+TEST(IoBufChainTest, AppendChainRejectsPoolMismatchAndCompletedDestination) {
+    IoBufNodePool first_pool;
+    IoBufNodePool second_pool;
+    IoBuf first = IoBuf::allocate(4);
+    IoBuf second = IoBuf::allocate(4);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    std::memcpy(first.writable_data(), "ab", 2);
+    first.commit(2);
+    std::memcpy(second.writable_data(), "cd", 2);
+    second.commit(2);
+
+    IoBufChain src(first_pool);
+    IoBufChain foreign(second_pool);
+    ASSERT_TRUE(src.append(std::move(first)));
+    ASSERT_TRUE(foreign.append(std::move(second)));
+
+    EXPECT_FALSE(foreign.append_chain(std::move(src)));
+    EXPECT_EQ(readable_string(src), "ab");
+    EXPECT_EQ(readable_string(foreign), "cd");
+
+    IoBufChain completed(first_pool);
+    completed.mark_complete();
+    EXPECT_FALSE(completed.append_chain(std::move(src)));
+    EXPECT_EQ(readable_string(src), "ab");
+}
+
 TEST(IoBufChainTest, DropEmptyFrontRemovesOnlyDrainedPrefix) {
     IoBufNodePool pool;
     IoBuf a = IoBuf::allocate(4);

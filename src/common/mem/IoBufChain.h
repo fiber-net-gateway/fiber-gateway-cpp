@@ -63,6 +63,7 @@ public:
     void bind_node_pool(IoBufNodePool &node_pool) noexcept;
 
     bool append(IoBuf &&buf) noexcept;
+    bool append_chain(IoBufChain &&other) noexcept;
     bool prepend(IoBuf &&buf) noexcept;
     bool append_node(IoBufNode *node) noexcept;
     bool prepend_node(IoBufNode *node) noexcept;

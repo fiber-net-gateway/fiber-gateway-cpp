@@ -22,8 +22,8 @@ namespace fiber::lite_nginx::runtime {
 namespace {
 
 constexpr std::chrono::milliseconds kDefaultConnectTimeout{10000};
-constexpr std::chrono::milliseconds kDefaultReadTimeout{30000};
-constexpr std::chrono::milliseconds kDefaultSendTimeout{30000};
+constexpr std::chrono::milliseconds kDefaultReadTimeout{60000};
+constexpr std::chrono::milliseconds kDefaultSendTimeout{60000};
 constexpr std::uint8_t kSkipHeaderValue = 1;
 
 enum class ScriptCompileScope : std::uint8_t {
@@ -404,8 +404,9 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                     resolve_timeout(location.proxy.read_timeout, inherited_read, kDefaultReadTimeout);
             runtime_location.send_timeout =
                     resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
+            runtime_location.buffering.buffer_size = location.proxy.buffering.buffer_size;
+            runtime_location.buffering.low_water = location.proxy.buffering.low_water;
             runtime_location.upstream_index = upstream_index;
-            runtime_location.proxy_buffering = location.proxy.proxy_buffering;
             runtime_location.reuse_connection = location.reuse_connection;
             runtime_location.close_on_client_abort = location.proxy.close_on_client_abort;
             runtime_location.skip_headers = make_default_skip_headers();

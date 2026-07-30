@@ -2,12 +2,14 @@
 #define FIBER_LITE_NGINX_CONFIG_CONFIG_H
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "Ast.h"
+#include "http/HttpBodyPipe.h"
 
 namespace fiber::lite_nginx::config {
 
@@ -104,12 +106,20 @@ struct HeaderOverride {
     bool is_template = false;
 };
 
+struct ProxyBufferingSettings {
+    std::size_t buffer_size = fiber::http::kDefaultBodyPipeBufferSize;
+    // Zero is the post-inheritance representation of `proxy_buffering off`.
+    std::size_t low_water = 0;
+
+    [[nodiscard]] bool enabled() const noexcept { return low_water != 0; }
+};
+
 struct ProxySettings {
     std::optional<std::chrono::milliseconds> connect_timeout;
     std::optional<std::chrono::milliseconds> read_timeout;
     std::optional<std::chrono::milliseconds> send_timeout;
     std::vector<HeaderOverride> set_headers;
-    bool proxy_buffering = false;
+    ProxyBufferingSettings buffering;
     bool close_on_client_abort = false;
 };
 

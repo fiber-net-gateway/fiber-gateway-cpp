@@ -5,6 +5,7 @@
 #include <limits>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 #include "PathResolve.h"
 #include "http/HttpProxyCore.h"
@@ -57,9 +58,9 @@ struct ProxySettingsBuilder {
     std::optional<std::chrono::milliseconds> connect_timeout;
     std::optional<std::chrono::milliseconds> read_timeout;
     std::optional<std::chrono::milliseconds> send_timeout;
+    std::optional<ProxyBufferingSettings> buffering;
     std::optional<bool> close_on_client_abort;
     std::vector<HeaderOverride> set_headers;
-    bool proxy_buffering = false;
 };
 
 ConfigError make_error(const DirectiveNode &directive, std::string message) {
@@ -177,6 +178,56 @@ std::expected<std::size_t, ConfigError> parse_size(const DirectiveNode &directiv
         return std::unexpected(make_error(directive, std::string(field_name) + " has invalid size"));
     }
     return parsed * multiplier;
+}
+
+std::expected<ProxyBufferingSettings, ConfigError> parse_proxy_buffering(const DirectiveNode &directive) {
+    if (directive.has_block) {
+        return std::unexpected(make_error(directive, "proxy_buffering must not be a block"));
+    }
+    if (directive.args.size() == 1) {
+        if (directive.args[0] == "off") {
+            return ProxyBufferingSettings{};
+        }
+        if (directive.args[0] == "on") {
+            return ProxyBufferingSettings{
+                    .buffer_size = fiber::http::kDefaultBodyPipeBufferSize,
+                    .low_water = fiber::http::kDefaultBodyPipeLowWater,
+            };
+        }
+        return std::unexpected(
+                make_error(directive, "proxy_buffering expects 'on', 'off', or '<buffer_size> <low_water>'"));
+    }
+    if (directive.args.size() != 2) {
+        return std::unexpected(
+                make_error(directive, "proxy_buffering expects 'on', 'off', or '<buffer_size> <low_water>'"));
+    }
+    if (contains_variable(directive.args[0]) || contains_variable(directive.args[1])) {
+        return std::unexpected(make_error(directive, "proxy_buffering does not support variables"));
+    }
+
+    auto buffer_size = parse_size(directive, directive.args[0], "proxy_buffering buffer_size");
+    if (!buffer_size) {
+        return std::unexpected(buffer_size.error());
+    }
+    auto low_water = parse_size(directive, directive.args[1], "proxy_buffering low_water");
+    if (!low_water) {
+        return std::unexpected(low_water.error());
+    }
+    if (*buffer_size == 0) {
+        return std::unexpected(make_error(directive, "proxy_buffering buffer_size must be greater than zero"));
+    }
+    if (*low_water == 0) {
+        return std::unexpected(
+                make_error(directive, "proxy_buffering low_water must be greater than zero; use 'off' to disable"));
+    }
+    if (*low_water > *buffer_size) {
+        return std::unexpected(make_error(directive, "proxy_buffering low_water must not exceed buffer_size"));
+    }
+
+    return ProxyBufferingSettings{
+            .buffer_size = *buffer_size,
+            .low_water = *low_water,
+    };
 }
 
 std::expected<unsigned, ConfigError> parse_non_negative_unsigned(const DirectiveNode &directive, std::string_view value,
@@ -433,7 +484,7 @@ ProxySettings finalize_proxy_settings(const ProxySettingsBuilder &builder) {
     settings.read_timeout = builder.read_timeout;
     settings.send_timeout = builder.send_timeout;
     settings.set_headers = builder.set_headers;
-    settings.proxy_buffering = builder.proxy_buffering;
+    settings.buffering = builder.buffering.value_or(ProxyBufferingSettings{});
     settings.close_on_client_abort = builder.close_on_client_abort.value_or(false);
     return settings;
 }
@@ -443,7 +494,7 @@ ProxySettings merge_proxy_settings(const ProxySettingsBuilder &base, const Proxy
     settings.connect_timeout = overrides.connect_timeout ? overrides.connect_timeout : base.connect_timeout;
     settings.read_timeout = overrides.read_timeout ? overrides.read_timeout : base.read_timeout;
     settings.send_timeout = overrides.send_timeout ? overrides.send_timeout : base.send_timeout;
-    settings.proxy_buffering = overrides.proxy_buffering;
+    settings.buffering = overrides.buffering.value_or(base.buffering.value_or(ProxyBufferingSettings{}));
     settings.close_on_client_abort =
             overrides.close_on_client_abort.value_or(base.close_on_client_abort.value_or(false));
 
@@ -1155,10 +1206,14 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
             continue;
         }
         if (child.name == "proxy_buffering") {
-            if (child.args.size() != 1 || child.args[0] != "off") {
-                return std::unexpected(make_error(child, "proxy_buffering only supports 'off' in V1"));
+            if (location_proxy_defaults.buffering.has_value()) {
+                return std::unexpected(make_error(child, "proxy_buffering must not be repeated in location"));
             }
-            location_proxy_defaults.proxy_buffering = false;
+            auto buffering = parse_proxy_buffering(child);
+            if (!buffering) {
+                return std::unexpected(buffering.error());
+            }
+            location_proxy_defaults.buffering = *buffering;
             continue;
         }
         if (child.name == "access_log") {
@@ -1204,6 +1259,7 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
     ServerConfig server;
     server.location = directive.location;
     ProxySettingsBuilder proxy_defaults;
+    std::vector<const DirectiveNode *> location_directives;
     bool seen_certificate = false;
     bool seen_certificate_key = false;
     bool seen_access_log = false;
@@ -1280,6 +1336,18 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
             continue;
         }
 
+        if (child.name == "proxy_buffering") {
+            if (proxy_defaults.buffering.has_value()) {
+                return std::unexpected(make_error(child, "proxy_buffering must not be repeated in server"));
+            }
+            auto buffering = parse_proxy_buffering(child);
+            if (!buffering) {
+                return std::unexpected(buffering.error());
+            }
+            proxy_defaults.buffering = *buffering;
+            continue;
+        }
+
         if (child.name == "access_log") {
             if (seen_access_log) {
                 return std::unexpected(make_error(child, "access_log must not be repeated in server"));
@@ -1294,15 +1362,19 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
         }
 
         if (child.name == "location") {
-            auto location = parse_location(child, proxy_defaults);
-            if (!location) {
-                return std::unexpected(location.error());
-            }
-            server.locations.push_back(std::move(*location));
+            location_directives.push_back(&child);
             continue;
         }
 
         return std::unexpected(make_error(child, "unsupported directive in server block: " + child.name));
+    }
+
+    for (const DirectiveNode *location_directive: location_directives) {
+        auto location = parse_location(*location_directive, proxy_defaults);
+        if (!location) {
+            return std::unexpected(location.error());
+        }
+        server.locations.push_back(std::move(*location));
     }
 
     if (server.server_names.empty()) {

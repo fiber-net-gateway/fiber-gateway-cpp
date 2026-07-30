@@ -182,6 +182,8 @@ Top level:
 - `proxy_send_timeout <duration>;`
 - `proxy_set_header <name> <literal>;`
 - `proxy_close_on_client_abort on|off;` - inherited by proxy locations; default `off`.
+- `proxy_buffering on|off;` or `proxy_buffering <buffer-size> <low-water>;` - inherited by
+  proxy locations; default `off`.
 
 `location` block:
 
@@ -197,9 +199,22 @@ Top level:
 - `proxy_send_timeout <duration>;`
 - `proxy_set_header <name> <literal>;`
 - `proxy_close_on_client_abort on|off;`
-- `proxy_buffering off;`
+- `proxy_buffering on|off;`
+- `proxy_buffering <buffer-size> <low-water>;`
 - `script_file <path>;` - handle the request with a compiled script instead of proxying
   (mutually exclusive with `proxy_pass`).
+
+`proxy_buffering on` uses a 64 KiB response-body buffer with a 48 KiB low-water mark. The
+two-size form is a lite-nginx extension and enables buffering with explicit values, for example
+`proxy_buffering 64k 48k;`. The proxy reads while fewer than `low-water` bytes are buffered, writes
+while at least `low-water` bytes remain, and resumes reading after a partial write drops below the
+mark. At upstream EOF it writes the remaining payload and completion marker regardless of the
+water level. Data below the low-water mark may wait for more upstream data or EOF, so streaming and
+SSE locations should use `proxy_buffering off`. Buffering is memory-only and does not spill to a
+temporary file.
+
+Proxy read/send timeouts default to 60 seconds. In lite-nginx, `proxy_send_timeout` is also the
+timeout for writing a proxied response body to the downstream client.
 
 ## Logging
 
@@ -351,7 +366,8 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
   exactly; `:name`/`*` are matched as written), not nginx `location` precedence rules.
 - Direct `proxy_pass` and upstream peers accept hostnames (resolved via DNS) or IP
   literals. The script `url` call option is the request path plus optional query, not a host.
-- `proxy_buffering` only accepts `off`.
+- `proxy_buffering` accepts the nginx-compatible `on`/`off` forms and the lite-nginx
+  `<buffer-size> <low-water>` extension. The default is `off`, unlike nginx.
 - A single global keepalive pool is shared across all upstreams and script targets; per-upstream
   `keepalive` sizing is not available (use `connection_pool { keepalive_size ...; }`).
 
