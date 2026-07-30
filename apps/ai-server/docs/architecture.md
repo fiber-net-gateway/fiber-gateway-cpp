@@ -265,16 +265,18 @@ main 向 stdout 输出的单行地址是服务发现通道，不经过 LoggerMan
 进程固定异步队列策略为 `DropNewest`。`ai_server.audit` 及
 `ai_server_audit_file` 为代码保留名：外部配置只能给出 audit 路径、单条记录上限、
 轮转阈值和归档数，不能改变 INFO、`additive=false`、`0600`、unbuffered、
-no-follow、普通文件限定、权限强制和不完整尾部恢复。
+no-follow、普通文件限定、权限强制、不完整尾部恢复和 message-only NDJSON 输出格式。
+滚动归档名固定为 `{base}.{utc}.{seq}`，同时包含 UTC 时间戳和防重序号。
 
 错误层维护一个内部 `LlmError`，包含 HTTP status、稳定 code、公开 message、field
 和是否可重试。序列化器按入站协议生成 OpenAI 或 Anthropic 外观，绝不把 C++ 错误、
 Provider token、BT1 token 或配置 secret 写入响应。
 
 请求审计由请求级 RAII owner 聚合。请求结束时，当前 HTTP worker 把
-`schema_version=5` 扁平对象直接编码到一条 `ai_server.audit` 日志记录中，消息格式为
-`audit_json=<json>`。记录随后提交给进程共享的 log EventLoop，该线程是 stderr 和
-审计文件的唯一正常 writer；审计 logger 关闭 additive，不会复制到 stderr。
+`schema_version=5` 扁平对象直接编码到一条 `ai_server.audit` 日志记录中。记录随后
+提交给进程共享的 log EventLoop，该线程是 stderr 和审计文件的唯一正常 writer；
+审计 logger 关闭 additive，不会复制到 stderr；专用 FileAppender 只写 message 和
+换行，因此文件中每个物理行都是可直接解析的完整 JSON。
 同一对象包含：
 
 - request ID、采集是否完整及稳定的采集错误；
@@ -315,8 +317,8 @@ writer 失败时只丢弃对应审计并增加指标，不改变认证、路由�
 
 专用文件以 `0600` 和 append 模式打开，拒绝符号链接和非普通文件；FileAppender
 仅在记录之间轮转，进程启动和 reopen 时截掉活动文件末尾的不完整行，停机时在业务
-EventLoop 全部结束后 drain 已提交记录。文件中的每行带常规日志前缀，采集端从稳定的
-`audit_json=` 标记后解析 JSON。
+EventLoop 全部结束后 drain 已提交记录。滚动归档文件名包含 UTC 时间戳和单调序号，
+例如 `ai-server-audit.ndjson.20260730T083012Z.000001`；活动文件名保持配置的固定路径。
 Authorization、Provider token 值、BT1 token 和配置 secret 不作为独立字段输出，
 但 body/prompt/模型输出本身可能携带任意业务敏感信息，部署必须设置严格的读取、
 采集、传输和保留策略。

@@ -712,6 +712,7 @@ std::expected<AiServerLogConfig, AiServerLoggingError> build_config(const JsonOb
             .file_mode = 0600,
             .min_level = log::LogLevel::Info,
             .max_level = log::LogLevel::Info,
+            .layout = log::FileAppenderLayout::MessageOnly,
             .no_follow = true,
             .regular_file_only = true,
             .enforce_file_mode = true,
@@ -720,7 +721,7 @@ std::expected<AiServerLogConfig, AiServerLoggingError> build_config(const JsonOb
     if (audit->rotate_bytes != 0) {
         audit_file.rotation = log::FileRotationOptions{
                 .max_file_size = audit->rotate_bytes,
-                .archive_name = "{base}.{seq}",
+                .archive_name = "{base}.{utc}.{seq}",
                 .max_archives = audit->max_archives,
         };
     }

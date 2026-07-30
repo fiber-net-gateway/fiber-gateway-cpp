@@ -123,10 +123,14 @@ private:
                                                int &system_error) const noexcept;
     [[nodiscard]] bool should_rotate(std::size_t incoming_size) const noexcept;
     [[nodiscard]] bool rotate() noexcept;
+    [[nodiscard]] std::size_t record_size(const FormattedLogRecord &record) const noexcept;
+    [[nodiscard]] FormattedLogRecord::Cursor record_cursor(const FormattedLogRecord &record) const noexcept;
+    [[nodiscard]] bool copy_record_to(const FormattedLogRecord &record, char *destination,
+                                      std::size_t capacity) const noexcept;
     void cleanup_archives(std::chrono::steady_clock::time_point now) noexcept;
     void prepare_record(std::size_t record_size, std::chrono::steady_clock::time_point now) noexcept;
     void write_contiguous(const char *data, std::size_t size, std::uint64_t records) noexcept;
-    void write_record(const FormattedLogRecord &record) noexcept;
+    void write_record(const FormattedLogRecord &record, std::size_t size) noexcept;
     void flush_buffer() noexcept;
 
     std::string path_;
@@ -136,6 +140,7 @@ private:
     std::size_t buffer_size_ = 0;
     std::chrono::milliseconds flush_interval_{0};
     std::optional<FileRotationOptions> rotation_;
+    FileAppenderLayout layout_ = FileAppenderLayout::Formatted;
     bool no_follow_ = false;
     bool regular_file_only_ = false;
     bool enforce_file_mode_ = false;

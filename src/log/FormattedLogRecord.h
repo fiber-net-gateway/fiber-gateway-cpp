@@ -17,7 +17,7 @@ public:
     class Cursor {
     public:
         Cursor() noexcept = default;
-        explicit Cursor(const FormattedLogRecord &record) noexcept;
+        Cursor(const FormattedLogRecord &record, bool include_prefix) noexcept;
 
         [[nodiscard]] bool done() const noexcept { return stage_ == Stage::Done; }
         [[nodiscard]] LogSegment current() const noexcept;
@@ -42,10 +42,13 @@ public:
 
     FormattedLogRecord() noexcept = default;
 
-    [[nodiscard]] Cursor cursor() const noexcept { return Cursor(*this); }
+    [[nodiscard]] Cursor cursor() const noexcept { return Cursor(*this, true); }
+    [[nodiscard]] Cursor message_cursor() const noexcept { return Cursor(*this, false); }
     [[nodiscard]] std::size_t size() const noexcept { return total_size_; }
+    [[nodiscard]] std::size_t message_line_size() const noexcept { return record_->message_size() + 1; }
     [[nodiscard]] const OwnedLogRecord &record() const noexcept { return *record_; }
     [[nodiscard]] bool copy_to(char *destination, std::size_t capacity) const noexcept;
+    [[nodiscard]] bool copy_message_to(char *destination, std::size_t capacity) const noexcept;
 
 private:
     friend class LogFormatter;

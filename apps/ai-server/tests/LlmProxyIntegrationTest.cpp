@@ -2056,11 +2056,7 @@ TEST(LlmProxyIntegrationTest, EmitsOneJsonAuditLineWithInputAndOutput) {
     ASSERT_FALSE(logs.empty());
     ASSERT_EQ(logs.back(), '\n');
     EXPECT_EQ(logs.find('\n'), logs.size() - 1);
-    constexpr std::string_view audit_prefix = "audit_json=";
-    const std::size_t audit_prefix_pos = logs.find(audit_prefix);
-    ASSERT_NE(audit_prefix_pos, std::string::npos) << logs;
-    const std::size_t audit_json_begin = audit_prefix_pos + audit_prefix.size();
-    const std::string_view audit_json(logs.data() + audit_json_begin, logs.size() - audit_json_begin - 1);
+    const std::string_view audit_json(logs.data(), logs.size() - 1);
     EXPECT_EQ(audit_json.find('\n'), std::string_view::npos);
 
     fiber::mem::BufPool pool;

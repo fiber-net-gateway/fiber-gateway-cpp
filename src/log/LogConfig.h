@@ -32,6 +32,11 @@ enum class LogQueueFullPolicy : std::uint8_t {
     DropNewest,
 };
 
+enum class FileAppenderLayout : std::uint8_t {
+    Formatted,
+    MessageOnly,
+};
+
 enum class LogConfigErrorCode : std::uint8_t {
     None = 0,
     InvalidName,
@@ -79,6 +84,7 @@ struct FileAppenderOptions {
     LogLevel min_level = LogLevel::Trace;
     LogLevel max_level = LogLevel::Fatal;
     std::optional<FileRotationOptions> rotation;
+    FileAppenderLayout layout = FileAppenderLayout::Formatted;
     bool no_follow = false;
     bool regular_file_only = false;
     bool enforce_file_mode = false;

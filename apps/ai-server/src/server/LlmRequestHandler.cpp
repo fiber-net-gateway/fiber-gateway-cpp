@@ -1232,11 +1232,6 @@ private:
         const auto duration =
                 std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started_);
         log::LogLine line(LOG_LLM_AUDIT.get(), log::LogLevel::Info, __FILE__, __LINE__, __func__);
-        if (!line.append_raw("audit_json=")) {
-            line.discard();
-            metrics_->audit_generation_failed();
-            return;
-        }
         AuditLogSink sink(line, max_record_bytes_);
         AuditJsonWriter json(sink);
         if (!encode(json, response, std::max<std::int64_t>(duration.count(), 0)) || !line.good()) {
