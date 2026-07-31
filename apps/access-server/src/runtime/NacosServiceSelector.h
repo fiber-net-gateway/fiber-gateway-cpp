@@ -66,6 +66,8 @@ private:
     void apply(Entry &entry, const nacos::ServiceInfo &info);
     void publish_directory();
     void request_stop(Entry &entry) noexcept;
+    [[nodiscard]] std::shared_ptr<const Directory> load_directory() const noexcept;
+    void store_directory(std::shared_ptr<const Directory> directory, std::memory_order order) noexcept;
 
     event::EventLoop *loop_ = nullptr;
     nacos::NamingService *naming_service_ = nullptr;
@@ -73,7 +75,11 @@ private:
     NacosServiceSelectorOptions options_;
     async::WaitGroup tasks_;
     std::map<std::string, std::shared_ptr<Entry>, std::less<>> entries_;
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const Directory>> directory_;
+#else
+    std::shared_ptr<const Directory> directory_;
+#endif
     std::uint64_t naming_updates_ = 0;
     std::uint64_t reconcile_failures_ = 0;
     bool stopping_ = false;

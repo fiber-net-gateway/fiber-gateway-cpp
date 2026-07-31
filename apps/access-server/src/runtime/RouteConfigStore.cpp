@@ -6,7 +6,11 @@
 namespace fiber::access_server {
 
 RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler) : script_compiler_(script_compiler) {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     published_.store(std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);
+#else
+    std::atomic_store_explicit(&published_, std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);
+#endif
 }
 
 ConfigUpdateOutcome RouteConfigStore::apply(std::string_view project, const std::optional<ProjectConfig> &config) {
@@ -119,7 +123,11 @@ RouteConfigStore::publish_candidate(std::vector<std::shared_ptr<const ProjectRou
 
     auto published = std::make_shared<const AccessRouteSnapshot>(std::move(*snapshot));
     projects_ = std::move(candidate);
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     published_.store(published, std::memory_order_release);
+#else
+    std::atomic_store_explicit(&published_, published, std::memory_order_release);
+#endif
     return ConfigUpdateResult{
             .status = status,
             .snapshot = std::move(published),

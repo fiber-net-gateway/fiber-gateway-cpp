@@ -48,8 +48,13 @@ private:
 
     [[nodiscard]] static bool recognized_entry(std::string_view entry) noexcept;
     [[nodiscard]] std::uint32_t next_sample() const noexcept;
+    [[nodiscard]] std::shared_ptr<const Snapshot> pin() const noexcept;
 
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const Snapshot>> published_;
+#else
+    std::shared_ptr<const Snapshot> published_;
+#endif
     mutable std::atomic<std::uint64_t> random_sequence_{0};
 };
 

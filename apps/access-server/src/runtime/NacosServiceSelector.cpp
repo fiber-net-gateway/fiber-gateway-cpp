@@ -68,9 +68,25 @@ struct NacosServiceSelector::ServiceState final : public common::NonCopyable, pu
         std::size_t index = 0;
     };
 
+    [[nodiscard]] std::shared_ptr<const ServiceSnapshot> load_snapshot() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+        return snapshot.load(std::memory_order_acquire);
+#else
+        return std::atomic_load_explicit(&snapshot, std::memory_order_acquire);
+#endif
+    }
+
+    void store_snapshot(std::shared_ptr<const ServiceSnapshot> update) noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+        snapshot.store(std::move(update), std::memory_order_release);
+#else
+        std::atomic_store_explicit(&snapshot, std::move(update), std::memory_order_release);
+#endif
+    }
+
     [[nodiscard]] std::expected<SelectedPeer, ProxyRequestError> select(std::string_view cluster) noexcept {
         std::lock_guard guard(mutex);
-        std::shared_ptr<const ServiceSnapshot> current = snapshot.load(std::memory_order_acquire);
+        std::shared_ptr<const ServiceSnapshot> current = load_snapshot();
         if (!current) {
             return std::unexpected(
                     select_error("service discovery has not received an initial value", common::IoErr::NotFound));
@@ -125,7 +141,11 @@ struct NacosServiceSelector::ServiceState final : public common::NonCopyable, pu
         avoid_once = selection_token;
     }
 
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const ServiceSnapshot>> snapshot;
+#else
+    std::shared_ptr<const ServiceSnapshot> snapshot;
+#endif
     std::mutex mutex;
     std::shared_ptr<const ServiceSnapshot> runtime_snapshot;
     std::vector<std::int64_t> current_weights;
@@ -174,7 +194,7 @@ struct NacosServiceSelector::Directory {
 NacosServiceSelector::NacosServiceSelector(event::EventLoop &loop, nacos::NamingService &naming_service,
                                            NacosServiceSelectorOptions options, const GrayMatchStore *gray_match) :
     loop_(&loop), naming_service_(&naming_service), gray_match_(gray_match), options_(std::move(options)) {
-    directory_.store(std::make_shared<const Directory>(), std::memory_order_relaxed);
+    store_directory(std::make_shared<const Directory>(), std::memory_order_relaxed);
 }
 
 NacosServiceSelector::~NacosServiceSelector() {
@@ -252,7 +272,7 @@ async::Task<void> NacosServiceSelector::shutdown() noexcept {
             (void) service;
             request_stop(*entry);
         }
-        directory_.store(std::make_shared<const Directory>(), std::memory_order_release);
+        store_directory(std::make_shared<const Directory>(), std::memory_order_release);
     }
     co_await tasks_.join();
     entries_.clear();
@@ -275,7 +295,7 @@ RouteSnapshotObserver NacosServiceSelector::route_observer() noexcept {
 
 std::expected<ProxyUpstreamEndpoint, ProxyRequestError>
 NacosServiceSelector::select_endpoint(std::string_view service, std::optional<std::string_view> cluster) noexcept {
-    std::shared_ptr<const Directory> directory = directory_.load(std::memory_order_acquire);
+    std::shared_ptr<const Directory> directory = load_directory();
     std::shared_ptr<ServiceState> state = directory->find(service);
     if (!state) {
         return std::unexpected(
@@ -352,7 +372,7 @@ void NacosServiceSelector::report(void *context, const ProxyUpstreamEndpoint &en
     if (!success && endpoint.owner && endpoint.selection_token != 0) {
         auto &self = *static_cast<NacosServiceSelector *>(context);
         auto snapshot = std::static_pointer_cast<const ServiceSnapshot>(endpoint.owner);
-        std::shared_ptr<const Directory> directory = self.directory_.load(std::memory_order_acquire);
+        std::shared_ptr<const Directory> directory = self.load_directory();
         std::shared_ptr<ServiceState> state = directory->find(snapshot->service);
         if (state) {
             state->report_failure(endpoint.selection_token);
@@ -399,7 +419,7 @@ void NacosServiceSelector::apply(Entry &entry, const nacos::ServiceInfo &info) {
         }
         update->peers.push_back(std::move(peer));
     }
-    entry.state->snapshot.store(std::move(update), std::memory_order_release);
+    entry.state->store_snapshot(std::move(update));
     ++naming_updates_;
 }
 
@@ -412,7 +432,24 @@ void NacosServiceSelector::publish_directory() {
                 .state = entry->state,
         });
     }
-    directory_.store(std::move(directory), std::memory_order_release);
+    store_directory(std::move(directory), std::memory_order_release);
+}
+
+std::shared_ptr<const NacosServiceSelector::Directory> NacosServiceSelector::load_directory() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    return directory_.load(std::memory_order_acquire);
+#else
+    return std::atomic_load_explicit(&directory_, std::memory_order_acquire);
+#endif
+}
+
+void NacosServiceSelector::store_directory(std::shared_ptr<const Directory> directory,
+                                           std::memory_order order) noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    directory_.store(std::move(directory), order);
+#else
+    std::atomic_store_explicit(&directory_, std::move(directory), order);
+#endif
 }
 
 void NacosServiceSelector::request_stop(Entry &entry) noexcept {

@@ -39,7 +39,11 @@ public:
     [[nodiscard]] ConfigUpdateOutcome remove_project(std::string_view project);
 
     [[nodiscard]] std::shared_ptr<const AccessRouteSnapshot> pin() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
         return published_.load(std::memory_order_acquire);
+#else
+        return std::atomic_load_explicit(&published_, std::memory_order_acquire);
+#endif
     }
 
 private:
@@ -57,7 +61,11 @@ private:
     std::vector<std::shared_ptr<const ProjectRouteSnapshot>> projects_;
     std::vector<PublishedVersion> published_versions_;
     ScriptCompilerAdapter script_compiler_;
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const AccessRouteSnapshot>> published_;
+#else
+    std::shared_ptr<const AccessRouteSnapshot> published_;
+#endif
 };
 
 } // namespace fiber::access_server
