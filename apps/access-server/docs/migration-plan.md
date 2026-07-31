@@ -406,6 +406,10 @@ corpus 差分。
 
 工作：
 
+- [x] 提供按项目列表精确导出 project/route/gray 配置、禁用代理、发布到 rnacos 并
+  逐项回读 SHA-256 的同步工具；
+- [x] 使用测试环境完整配置图启动 C++ access-server，并验证实际 RESPONSE 路由和
+  Prometheus 请求结果；
 - Java 和 C++ 加载相同配置，使用同一套 request corpus；
 - 可控 Nacos、HTTP/HTTPS echo upstream 和 WebSocket upstream；
 - 配置热更、慢 body、连接断开、超时与 shutdown；

@@ -127,6 +127,27 @@ CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、ho
 至少一个 router 或 bootstrap collector。CAT 不可用会在启动阶段 fail closed，不会
 静默退化为无 trace 的生产实例。
 
+### 同步测试环境 Nacos 配置
+
+`scripts/sync_test_nacos.py` 按 access-server 的实际订阅图导出项目列表、列表引用的
+全部 route，以及 gray-match 配置，并可直接发布到测试 rnacos。工具在进程内禁用
+HTTP/HTTPS 代理。源地址和凭据由环境变量或参数注入，不在仓库中提供默认值，且源地址、
+token 和密码都不会写入 dump 或 manifest。输出目录必须为空，建议放在已忽略的
+`temp/` 下：
+
+```bash
+ACCESS_SERVER_SOURCE_NACOS_URL='...' \
+ACCESS_SERVER_SOURCE_NACOS_USERNAME='...' \
+ACCESS_SERVER_SOURCE_NACOS_PASSWORD='...' \
+python3 apps/access-server/scripts/sync_test_nacos.py \
+  --destination-url http://127.0.0.1:18848/nacos \
+  --output-dir temp/access-server-nacos-dump
+```
+
+同步完成后工具会逐项回读 rnacos 并比较原始内容；`manifest.json` 记录 dataId、group、
+字节数和 SHA-256，但不记录 token 或密码。若项目列表引用了不存在的 route，该 dataId
+保持 rnacos `NotFound` 状态，并记录在 `missingRoutes` 中。
+
 listener 只在 Nacos client/config/naming、两类 watcher 和项目列表首值就绪后开放；
 若项目列表不存在，服务会等待到
 `ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS` 后失败退出。某个项目的 route 配置尚未
@@ -145,6 +166,7 @@ listener 只在 Nacos client/config/naming、两类 watcher 和项目列表首�
 - `src/runtime/`：本地脚本 runtime、候选快照编译/原子发布、Nacos 配置 watcher、
   production gray、NamingService selector、per-worker DNS/pool、HTTP server 和进程
   runtime；
+- `scripts/`：测试环境 Nacos 配置图的无代理导出、rnacos 发布和回读校验工具；
 - `tests/`：access-server 聚焦测试和 Java golden fixtures；
 - `docs/migration-plan.md`：范围边界、C++ 模块划分、工作包和阶段门槛；
 - `docs/compatibility-contract.md`：配置字段、热更新和 HTTP 请求执行的 Java 契约。

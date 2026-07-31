@@ -4,7 +4,13 @@
 
 namespace fiber::access_server {
 
-GrayMatchStore::GrayMatchStore() { published_.store(std::make_shared<const Snapshot>(), std::memory_order_relaxed); }
+GrayMatchStore::GrayMatchStore() {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    published_.store(std::make_shared<const Snapshot>(), std::memory_order_relaxed);
+#else
+    std::atomic_store_explicit(&published_, std::make_shared<const Snapshot>(), std::memory_order_relaxed);
+#endif
+}
 
 std::expected<GrayMatchUpdateStatus, AccessConfigError>
 GrayMatchStore::apply(const std::optional<GrayMatchConfig> &config) {
@@ -35,7 +41,12 @@ GrayMatchStore::apply(const std::optional<GrayMatchConfig> &config) {
         }
         candidate->rules.push_back(std::move(rule));
     }
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     published_.store(std::move(candidate), std::memory_order_release);
+#else
+    std::shared_ptr<const Snapshot> published = std::move(candidate);
+    std::atomic_store_explicit(&published_, std::move(published), std::memory_order_release);
+#endif
     return GrayMatchUpdateStatus::Published;
 }
 
@@ -45,7 +56,7 @@ bool GrayMatchStore::matches(const http::HttpExchange &exchange) const noexcept 
 
 bool GrayMatchStore::matches(std::string_view entry, std::string_view real_ip,
                              std::uint32_t random_sample) const noexcept {
-    std::shared_ptr<const Snapshot> snapshot = published_.load(std::memory_order_acquire);
+    std::shared_ptr<const Snapshot> snapshot = pin();
     const Rule *matched = nullptr;
     for (const Rule &rule: snapshot->rules) {
         if (rule.entry == entry) {
@@ -77,8 +88,14 @@ bool GrayMatchStore::matches(std::string_view entry, std::string_view real_ip,
     return random_sample % 10000U < static_cast<std::uint32_t>(matched->ratio);
 }
 
-std::size_t GrayMatchStore::rule_count() const noexcept {
-    return published_.load(std::memory_order_acquire)->rules.size();
+std::size_t GrayMatchStore::rule_count() const noexcept { return pin()->rules.size(); }
+
+std::shared_ptr<const GrayMatchStore::Snapshot> GrayMatchStore::pin() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    return published_.load(std::memory_order_acquire);
+#else
+    return std::atomic_load_explicit(&published_, std::memory_order_acquire);
+#endif
 }
 
 bool GrayMatchStore::recognized_entry(std::string_view entry) noexcept {
