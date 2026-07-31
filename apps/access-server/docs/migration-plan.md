@@ -389,7 +389,8 @@ corpus 差分。
 - [x] X-Entry net mask、HTTPS redirect、HSTS；
 - [x] X-Real-IP CIDR allow/deny；
 - [x] 本地脚本 engine adapter：配置发布前预编译、请求同步执行、编译失败保旧；
-- [ ] 现网 condition/template/rewrite 配置样例差分；
+- [x] 现网 condition/template/rewrite 配置样例差分，详见
+  [script-corpus-differential.md](script-corpus-differential.md)；
 - [x] 将 project、route、cluster、upstream、错误和最终响应映射到统一请求观测上下文；
 - [x] CAT 使用 `URL/<project><route>`、继续/生成三段 message ID、响应回传 trace ID；
 - [x] Prometheus 使用独立 `main-port + 1` listener 和固定 result schema，避免动态

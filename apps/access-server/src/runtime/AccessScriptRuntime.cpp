@@ -31,10 +31,31 @@ bool lookup_path_variable(void *context, std::string_view name, std::string_view
     return false;
 }
 
+bool is_context_cluster_key(std::string_view name) noexcept {
+    if (name == "cluster") {
+        return true;
+    }
+    constexpr std::string_view kNormalizedKey = "hi_trace_cluster";
+    if (name.size() != kNormalizedKey.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        unsigned char ch = static_cast<unsigned char>(name[i]);
+        if (ch == '-') {
+            ch = '_';
+        } else if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<unsigned char>(ch - 'A' + 'a');
+        }
+        if (ch != static_cast<unsigned char>(kNormalizedKey[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool lookup_context_variable(void *context, std::string_view name, std::string_view &value) noexcept {
     const auto &variables = *static_cast<const InvocationVariables *>(context);
-    if ((name != "cluster" && name != "HI_TRACE_CLUSTER" && name != "HI-TRACE-CLUSTER") ||
-        variables.context_cluster.empty()) {
+    if (!is_context_cluster_key(name) || variables.context_cluster.empty()) {
         return false;
     }
     value = variables.context_cluster;
