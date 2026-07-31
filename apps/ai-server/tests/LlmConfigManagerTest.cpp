@@ -471,7 +471,10 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBala
         EXPECT_TRUE(selected_a);
         if (selected_a) {
             EXPECT_EQ(selected_a->service_name(), "backend-a");
-            EXPECT_EQ(selected_a->address().ip().to_string(), "10.0.0.1");
+            EXPECT_TRUE(selected_a->ip_address());
+            if (selected_a->ip_address()) {
+                EXPECT_EQ(selected_a->ip_address()->to_string(), "10.0.0.1");
+            }
             first_provider->service->report(std::move(*selected_a), fiber::ai_server::InstanceReportOutcome::Neutral);
         }
 
@@ -526,7 +529,10 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBala
         EXPECT_TRUE(selected_b);
         if (selected_b) {
             EXPECT_EQ(selected_b->service_name(), "backend-b");
-            EXPECT_EQ(selected_b->address().ip().to_string(), "10.0.0.2");
+            EXPECT_TRUE(selected_b->ip_address());
+            if (selected_b->ip_address()) {
+                EXPECT_EQ(selected_b->ip_address()->to_string(), "10.0.0.2");
+            }
             second_provider->service->report(std::move(*selected_b), fiber::ai_server::InstanceReportOutcome::Neutral);
         }
         EXPECT_EQ(manager.service_subscription_count(), 1u);

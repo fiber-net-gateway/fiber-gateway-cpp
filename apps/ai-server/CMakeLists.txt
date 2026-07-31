@@ -9,8 +9,6 @@ add_library(ai_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/config/LlmConfigCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/LlmConfigManager.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/LlmConfigSnapshot.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/discovery/LoadBalancer.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/discovery/ServiceDiscovery.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/RateLimitHash.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/RateLimitHttpCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/RateLimitClusterMembership.cpp"
@@ -43,6 +41,7 @@ target_link_libraries(ai_server_core
     PUBLIC
         fiber_lib
         fiber::nacos
+        fiber::nacos_discovery
         fiber::cat
         fiber::prometheus)
 set_target_properties(ai_server_core PROPERTIES FOLDER "apps/ai-server")
@@ -70,7 +69,6 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmBodyTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmConfigCodecTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmConfigManagerTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/LoadBalancerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmProtocolTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmProxyIntegrationTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmRateLimitTest.cpp"

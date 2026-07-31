@@ -8,6 +8,8 @@
 #include "../../../../src/net/IpAddress.h"
 #include "ProxyRequestPlan.h"
 
+#include <fiber/nacos/discovery/ServiceLoadBalancer.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -44,23 +46,23 @@ struct ProxyRequestError {
 
 [[nodiscard]] std::string_view proxy_request_error_code_name(ProxyRequestErrorCode code) noexcept;
 
-// Service discovery implementations keep owner alive for as long as host,
-// host_header, and selection_token are consumed by the request.
+// service_instance pins the discovery generation for as long as host and
+// host_header are consumed by the request.
 struct ProxyUpstreamEndpoint {
     ProxyUpstreamScheme scheme = ProxyUpstreamScheme::Http;
     std::string_view host;
     std::uint16_t port = 80;
     std::string_view host_header;
     std::optional<net::IpAddress> ip_address;
-    std::shared_ptr<const void> owner;
+    nacos::LoadBalancer::Instance service_instance;
     std::uint64_t selection_token = 0;
 };
 
 struct ProxyServiceSelector {
     using SelectFunction = std::expected<ProxyUpstreamEndpoint, ProxyRequestError> (*)(
             void *context, http::HttpExchange &exchange, std::string_view service,
-            std::optional<std::string_view> cluster) noexcept;
-    using ReportFunction = void (*)(void *context, const ProxyUpstreamEndpoint &endpoint, bool success) noexcept;
+            std::optional<std::string_view> cluster, std::span<const std::uint64_t> excluded_selection_tokens) noexcept;
+    using ReportFunction = void (*)(void *context, ProxyUpstreamEndpoint &endpoint, bool success) noexcept;
 
     void *context = nullptr;
     SelectFunction select = nullptr;
@@ -140,7 +142,7 @@ private:
                                                                std::size_t index) const noexcept;
     [[nodiscard]] async::Task<std::expected<ConnectedEndpoint, ProxyRequestError>>
     connect(const ProxyUpstreamEndpoint &endpoint) noexcept;
-    void report(const ProxyUpstreamEndpoint &endpoint, bool success) const noexcept;
+    void report(ProxyUpstreamEndpoint &endpoint, bool success) const noexcept;
 
     http::LocalHttp1ConnectionPoolSet *pool_ = nullptr;
     ProxyServiceSelector service_selector_{};

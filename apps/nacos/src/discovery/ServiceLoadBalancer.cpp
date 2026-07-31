@@ -1,4 +1,4 @@
-#include "LoadBalancer.h"
+#include <fiber/nacos/discovery/ServiceLoadBalancer.h>
 
 #include <algorithm>
 #include <array>
@@ -12,7 +12,7 @@
 #include <common/Assert.h>
 #include <event/EventLoop.h>
 
-namespace fiber::ai_server {
+namespace fiber::nacos {
 
 struct LoadBalancer::Core {
     explicit Core(Options value) noexcept : options(std::move(value)) {}
@@ -67,6 +67,59 @@ using PeerEntry = detail::PeerEntry;
 using PeerRuntime = detail::PeerRuntime;
 using RoundRobin = detail::RoundRobin;
 
+constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+
+constexpr unsigned char ascii_to_lower(unsigned char ch) noexcept {
+    return ch >= 'A' && ch <= 'Z' ? static_cast<unsigned char>(ch - 'A' + 'a') : ch;
+}
+
+void hash_byte(std::uint64_t &hash, std::uint8_t byte) noexcept {
+    hash ^= static_cast<std::uint64_t>(byte);
+    hash *= kFnvPrime;
+}
+
+void hash_be16(std::uint64_t &hash, std::uint16_t value) noexcept {
+    hash_byte(hash, static_cast<std::uint8_t>(value >> 8U));
+    hash_byte(hash, static_cast<std::uint8_t>(value & 0xffU));
+}
+
+void hash_be32(std::uint64_t &hash, std::uint32_t value) noexcept {
+    hash_byte(hash, static_cast<std::uint8_t>((value >> 24U) & 0xffU));
+    hash_byte(hash, static_cast<std::uint8_t>((value >> 16U) & 0xffU));
+    hash_byte(hash, static_cast<std::uint8_t>((value >> 8U) & 0xffU));
+    hash_byte(hash, static_cast<std::uint8_t>(value & 0xffU));
+}
+
+std::uint64_t endpoint_hash(const DiscoveredInstance &instance) noexcept {
+    std::uint64_t hash = kFnvOffsetBasis;
+    // Preserve the legacy HTTP endpoint hash so existing weighted-rendezvous
+    // mappings remain stable while the discovery layer stays HTTP-agnostic.
+    hash_byte(hash, instance.ip_address ? 1U : 0U);
+    hash_byte(hash, 0U);
+    hash_be16(hash, instance.port);
+    if (!instance.ip_address) {
+        for (char ch: instance.host) {
+            hash_byte(hash, ascii_to_lower(static_cast<unsigned char>(ch)));
+        }
+        return hash;
+    }
+
+    const net::IpAddress &ip = *instance.ip_address;
+    hash_byte(hash, static_cast<std::uint8_t>(ip.family()));
+    if (ip.is_v4()) {
+        for (std::uint8_t byte: ip.v4_bytes()) {
+            hash_byte(hash, byte);
+        }
+        return hash;
+    }
+    for (std::uint8_t byte: ip.v6_bytes()) {
+        hash_byte(hash, byte);
+    }
+    hash_be32(hash, ip.scope_id());
+    return hash;
+}
+
 std::uint64_t mix_rendezvous_hash(std::uint64_t key, std::uint64_t peer_hash) noexcept {
     std::uint64_t value = key ^ (peer_hash + 0x9e3779b97f4a7c15ULL);
     value ^= value >> 30U;
@@ -110,46 +163,86 @@ bool excluded_peer(std::span<const std::uint64_t> excluded_peer_ids, std::uint64
     return std::find(excluded_peer_ids.begin(), excluded_peer_ids.end(), peer_id) != excluded_peer_ids.end();
 }
 
-int compare_address(const net::SocketAddress &left, const net::SocketAddress &right) noexcept {
+int compare_ip(const net::IpAddress &left, const net::IpAddress &right) noexcept {
     if (left.family() != right.family()) {
         return left.family() < right.family() ? -1 : 1;
     }
-    if (left.ip().is_v4()) {
-        const auto left_bytes = left.ip().v4_bytes();
-        const auto right_bytes = right.ip().v4_bytes();
+    if (left.is_v4()) {
+        const auto left_bytes = left.v4_bytes();
+        const auto right_bytes = right.v4_bytes();
         if (left_bytes != right_bytes) {
             return left_bytes < right_bytes ? -1 : 1;
         }
     } else {
-        if (left.ip().v6_bytes() != right.ip().v6_bytes()) {
-            return left.ip().v6_bytes() < right.ip().v6_bytes() ? -1 : 1;
+        if (left.v6_bytes() != right.v6_bytes()) {
+            return left.v6_bytes() < right.v6_bytes() ? -1 : 1;
         }
-        if (left.ip().scope_id() != right.ip().scope_id()) {
-            return left.ip().scope_id() < right.ip().scope_id() ? -1 : 1;
+        if (left.scope_id() != right.scope_id()) {
+            return left.scope_id() < right.scope_id() ? -1 : 1;
         }
-    }
-    if (left.port() != right.port()) {
-        return left.port() < right.port() ? -1 : 1;
     }
     return 0;
 }
 
 int compare_entry(const PeerEntry &left, const PeerEntry &right) noexcept {
-    const auto left_scheme = left.instance.connection_key.scheme();
-    const auto right_scheme = right.instance.connection_key.scheme();
-    if (left_scheme != right_scheme) {
-        return left_scheme < right_scheme ? -1 : 1;
+    if (left.instance.ip_address.has_value() != right.instance.ip_address.has_value()) {
+        return left.instance.ip_address ? 1 : -1;
     }
-    return compare_address(left.instance.address, right.instance.address);
+    if (left.instance.ip_address) {
+        const int ip = compare_ip(*left.instance.ip_address, *right.instance.ip_address);
+        if (ip != 0) {
+            return ip;
+        }
+    } else if (left.instance.host != right.instance.host) {
+        return left.instance.host < right.instance.host ? -1 : 1;
+    }
+    if (left.instance.port != right.instance.port) {
+        return left.instance.port < right.instance.port ? -1 : 1;
+    }
+    if (left.instance.cluster_name != right.instance.cluster_name) {
+        return left.instance.cluster_name < right.instance.cluster_name ? -1 : 1;
+    }
+    return 0;
 }
 
 bool same_endpoint(const PeerEntry &left, const PeerEntry &right) noexcept { return compare_entry(left, right) == 0; }
 
 bool same_instance_definition(const PeerEntry &left, const PeerEntry &right) noexcept {
     return same_endpoint(left, right) && left.instance.instance_id == right.instance.instance_id &&
-           left.instance.host_header == right.instance.host_header &&
+           left.instance.host == right.instance.host && left.instance.authority == right.instance.authority &&
            left.instance.cluster_name == right.instance.cluster_name && left.instance.weight == right.instance.weight &&
+           left.instance.selection_hash == right.instance.selection_hash &&
            left.normalized_weight == right.normalized_weight;
+}
+
+struct ClusterMatch {
+    bool matches = false;
+    bool preferred = false;
+};
+
+ClusterMatch cluster_match(std::string_view raw_cluster, const ServiceInstanceSelection &selection) noexcept {
+    if (selection.cluster.empty()) {
+        return {.matches = true, .preferred = true};
+    }
+
+    const std::size_t separator = raw_cluster.find('-');
+    const std::string_view logical_cluster =
+            separator == std::string_view::npos ? raw_cluster : raw_cluster.substr(separator + 1);
+    if (logical_cluster != selection.cluster) {
+        return {};
+    }
+    if (selection.preferred_zone.empty() || separator == std::string_view::npos) {
+        return {.matches = true, .preferred = true};
+    }
+    return {
+            .matches = true,
+            .preferred = raw_cluster.substr(0, separator) == selection.preferred_zone,
+    };
+}
+
+bool circuit_available(const PeerRuntime &runtime, const LoadBalancer::Options &options,
+                       LoadBalancer::TimePoint now) noexcept {
+    return options.max_fails == 0 || runtime.fails < options.max_fails || now - runtime.checked > options.fail_timeout;
 }
 
 std::int64_t quantize_weight(double weight, const LoadBalancer::Options &options) noexcept {
@@ -241,23 +334,27 @@ LoadBalancer::Instance &LoadBalancer::Instance::operator=(Instance &&other) noex
 }
 
 bool LoadBalancer::Instance::valid() const noexcept {
-    return pending_ && owner_ && index_ < owner_->peers.size() &&
-           owner_->peers[index_].runtime->peer_epoch == peer_epoch_;
+    return owner_ && index_ < owner_->peers.size() && owner_->peers[index_].runtime->peer_epoch == peer_epoch_;
 }
 
-const net::SocketAddress &LoadBalancer::Instance::address() const noexcept {
+std::string_view LoadBalancer::Instance::host() const noexcept {
     FIBER_ASSERT(valid());
-    return owner_->peers[index_].instance.address;
+    return owner_->peers[index_].instance.host;
 }
 
-const http::Http1ConnectionGroupKey &LoadBalancer::Instance::connection_key() const noexcept {
+const std::optional<net::IpAddress> &LoadBalancer::Instance::ip_address() const noexcept {
     FIBER_ASSERT(valid());
-    return owner_->peers[index_].instance.connection_key;
+    return owner_->peers[index_].instance.ip_address;
 }
 
-std::string_view LoadBalancer::Instance::host_header() const noexcept {
+std::uint16_t LoadBalancer::Instance::port() const noexcept {
     FIBER_ASSERT(valid());
-    return owner_->peers[index_].instance.host_header;
+    return owner_->peers[index_].instance.port;
+}
+
+std::string_view LoadBalancer::Instance::authority() const noexcept {
+    FIBER_ASSERT(valid());
+    return owner_->peers[index_].instance.authority;
 }
 
 std::string_view LoadBalancer::Instance::instance_id() const noexcept {
@@ -293,6 +390,14 @@ std::uint64_t LoadBalancer::Instance::generation() const noexcept {
 std::uint64_t LoadBalancer::Instance::peer_id() const noexcept {
     FIBER_ASSERT(valid());
     return peer_epoch_;
+}
+
+void LoadBalancer::Instance::report(InstanceReportOutcome outcome) noexcept {
+    report(outcome, event::EventLoop::current().now());
+}
+
+void LoadBalancer::Instance::report(InstanceReportOutcome outcome, TimePoint now) noexcept {
+    LoadBalancer::complete_instance(*this, outcome, now);
 }
 
 void LoadBalancer::Instance::release_neutral() noexcept {
@@ -332,60 +437,12 @@ std::expected<LoadBalancer::Instance, LoadBalanceError> LoadBalancer::load_balan
 }
 
 std::expected<LoadBalancer::Instance, LoadBalanceError> LoadBalancer::load_balance(TimePoint now) noexcept {
-    std::lock_guard guard(core_->mutex);
-    if (core_->shutdown) {
-        return std::unexpected(LoadBalanceError::Shutdown);
-    }
-    std::shared_ptr<RoundRobin> current = load_current();
-    if (!current) {
-        return std::unexpected(LoadBalanceError::Uninitialized);
-    }
-    if (current->peers.empty()) {
-        core_->unavailable.fetch_add(1, std::memory_order_relaxed);
-        return std::unexpected(LoadBalanceError::NoAvailableInstance);
-    }
+    return load_balance(ServiceInstanceSelection{}, now);
+}
 
-    PeerRuntime *best = nullptr;
-    std::size_t best_index = 0;
-    std::int64_t total = 0;
-    for (std::size_t i = 0; i < current->peers.size(); ++i) {
-        PeerRuntime &runtime = *current->peers[i].runtime;
-        if (runtime.retired) {
-            continue;
-        }
-        if (core_->options.max_fails != 0 && runtime.fails >= core_->options.max_fails &&
-            now - runtime.checked <= core_->options.fail_timeout) {
-            continue;
-        }
-        runtime.current_weight += runtime.effective_weight;
-        total += runtime.effective_weight;
-        if (runtime.effective_weight < runtime.base_weight) {
-            ++runtime.effective_weight;
-        }
-        if (!best || runtime.current_weight > best->current_weight) {
-            best = &runtime;
-            best_index = i;
-        }
-    }
-
-    if (!best) {
-        if (core_->options.fail_open_when_single && current->peers.size() == 1) {
-            best = current->peers[0].runtime.get();
-            best_index = 0;
-        } else {
-            core_->unavailable.fetch_add(1, std::memory_order_relaxed);
-            return std::unexpected(LoadBalanceError::NoAvailableInstance);
-        }
-    }
-
-    best->current_weight -= total;
-    if (now - best->checked > core_->options.fail_timeout) {
-        best->checked = now;
-    }
-    FIBER_ASSERT(best->in_flight != std::numeric_limits<std::size_t>::max());
-    ++best->in_flight;
-    core_->selections.fetch_add(1, std::memory_order_relaxed);
-    return Instance(std::move(current), best_index, best->peer_epoch);
+std::expected<LoadBalancer::Instance, LoadBalanceError>
+LoadBalancer::load_balance(const ServiceInstanceSelection &selection) noexcept {
+    return load_balance(selection, event::EventLoop::current().now());
 }
 
 std::expected<LoadBalancer::Instance, LoadBalanceError>
@@ -396,6 +453,17 @@ LoadBalancer::load_balance(std::uint64_t key, std::span<const std::uint64_t> exc
 std::expected<LoadBalancer::Instance, LoadBalanceError>
 LoadBalancer::load_balance(std::uint64_t key, std::span<const std::uint64_t> excluded_peer_ids,
                            TimePoint now) noexcept {
+    return load_balance(
+            ServiceInstanceSelection{
+                    .policy = ServiceInstancePolicy::WeightedRendezvous,
+                    .rendezvous_key = key,
+                    .excluded_peer_ids = excluded_peer_ids,
+            },
+            now);
+}
+
+std::expected<LoadBalancer::Instance, LoadBalanceError>
+LoadBalancer::load_balance(const ServiceInstanceSelection &selection, TimePoint now) noexcept {
     std::lock_guard guard(core_->mutex);
     if (core_->shutdown) {
         return std::unexpected(LoadBalanceError::Shutdown);
@@ -409,46 +477,88 @@ LoadBalancer::load_balance(std::uint64_t key, std::span<const std::uint64_t> exc
         return std::unexpected(LoadBalanceError::NoAvailableInstance);
     }
 
+    bool has_preferred = false;
+    for (const PeerEntry &peer: current->peers) {
+        const PeerRuntime &runtime = *peer.runtime;
+        const ClusterMatch match = cluster_match(peer.instance.cluster_name, selection);
+        if (match.matches && match.preferred && !runtime.retired &&
+            !excluded_peer(selection.excluded_peer_ids, runtime.peer_epoch) &&
+            circuit_available(runtime, core_->options, now)) {
+            has_preferred = true;
+            break;
+        }
+    }
+    const auto eligible = [&](const PeerEntry &peer, bool check_circuit) noexcept {
+        const PeerRuntime &runtime = *peer.runtime;
+        const ClusterMatch match = cluster_match(peer.instance.cluster_name, selection);
+        return match.matches && (!has_preferred || match.preferred) && !runtime.retired &&
+               !excluded_peer(selection.excluded_peer_ids, runtime.peer_epoch) &&
+               (!check_circuit || circuit_available(runtime, core_->options, now));
+    };
+
     PeerRuntime *best = nullptr;
     std::size_t best_index = 0;
-    double best_cost = 0;
-    for (std::size_t i = 0; i < current->peers.size(); ++i) {
-        PeerEntry &peer = current->peers[i];
-        PeerRuntime &runtime = *peer.runtime;
-        if (runtime.retired) {
-            continue;
+    std::int64_t total = 0;
+    if (selection.policy == ServiceInstancePolicy::SmoothWeightedRoundRobin) {
+        for (std::size_t i = 0; i < current->peers.size(); ++i) {
+            PeerEntry &peer = current->peers[i];
+            if (!eligible(peer, true)) {
+                continue;
+            }
+            PeerRuntime &runtime = *peer.runtime;
+            runtime.current_weight += runtime.effective_weight;
+            total += runtime.effective_weight;
+            if (runtime.effective_weight < runtime.base_weight) {
+                ++runtime.effective_weight;
+            }
+            if (!best || runtime.current_weight > best->current_weight) {
+                best = &runtime;
+                best_index = i;
+            }
         }
-        if (core_->options.max_fails != 0 && runtime.fails >= core_->options.max_fails &&
-            now - runtime.checked <= core_->options.fail_timeout) {
-            continue;
-        }
-        if (runtime.effective_weight < runtime.base_weight) {
-            ++runtime.effective_weight;
-        }
-        if (excluded_peer(excluded_peer_ids, runtime.peer_epoch)) {
-            continue;
-        }
-
-        const double cost = weighted_rendezvous_cost(mix_rendezvous_hash(key, peer.instance.connection_key.hash()),
-                                                     peer.normalized_weight);
-        if (!best || cost < best_cost || (cost == best_cost && compare_entry(peer, current->peers[best_index]) < 0)) {
-            best = &runtime;
-            best_index = i;
-            best_cost = cost;
+    } else {
+        double best_cost = 0;
+        for (std::size_t i = 0; i < current->peers.size(); ++i) {
+            PeerEntry &peer = current->peers[i];
+            if (!eligible(peer, true)) {
+                continue;
+            }
+            PeerRuntime &runtime = *peer.runtime;
+            if (runtime.effective_weight < runtime.base_weight) {
+                ++runtime.effective_weight;
+            }
+            const double cost = weighted_rendezvous_cost(
+                    mix_rendezvous_hash(selection.rendezvous_key, peer.instance.selection_hash),
+                    peer.normalized_weight);
+            if (!best || cost < best_cost ||
+                (cost == best_cost && compare_entry(peer, current->peers[best_index]) < 0)) {
+                best = &runtime;
+                best_index = i;
+                best_cost = cost;
+            }
         }
     }
 
     if (!best) {
-        if (core_->options.fail_open_when_single && current->peers.size() == 1 && !current->peers[0].runtime->retired &&
-            !excluded_peer(excluded_peer_ids, current->peers[0].runtime->peer_epoch)) {
-            best = current->peers[0].runtime.get();
-            best_index = 0;
-        } else {
+        std::size_t fallback_count = 0;
+        if (core_->options.fail_open_when_single) {
+            for (std::size_t i = 0; i < current->peers.size(); ++i) {
+                if (eligible(current->peers[i], false)) {
+                    ++fallback_count;
+                    best = current->peers[i].runtime.get();
+                    best_index = i;
+                }
+            }
+        }
+        if (fallback_count != 1) {
             core_->unavailable.fetch_add(1, std::memory_order_relaxed);
             return std::unexpected(LoadBalanceError::NoAvailableInstance);
         }
     }
 
+    if (selection.policy == ServiceInstancePolicy::SmoothWeightedRoundRobin) {
+        best->current_weight -= total;
+    }
     if (now - best->checked > core_->options.fail_timeout) {
         best->checked = now;
     }
@@ -491,7 +601,6 @@ void LoadBalancer::complete_instance(Instance &instance, InstanceReportOutcome o
     std::lock_guard guard(core->mutex);
     if (instance.index_ >= owner->peers.size()) {
         instance.pending_ = false;
-        instance.owner_.reset();
         return;
     }
 
@@ -499,7 +608,6 @@ void LoadBalancer::complete_instance(Instance &instance, InstanceReportOutcome o
     PeerRuntime &runtime = *entry.runtime;
     if (runtime.peer_epoch != instance.peer_epoch_) {
         instance.pending_ = false;
-        instance.owner_.reset();
         return;
     }
     FIBER_ASSERT(runtime.in_flight > 0);
@@ -541,7 +649,6 @@ void LoadBalancer::complete_instance(Instance &instance, InstanceReportOutcome o
     }
 
     instance.pending_ = false;
-    instance.owner_.reset();
 }
 
 LoadBalancerUpdateResult LoadBalancer::update_instances(DiscoveredService update) {
@@ -553,8 +660,11 @@ LoadBalancerUpdateResult LoadBalancer::update_instances(DiscoveredService update
     next->last_ref_time = update.last_ref_time;
     next->peers.reserve(update.instances.size());
     for (DiscoveredInstance &instance: update.instances) {
-        if (!std::isfinite(instance.weight) || instance.weight <= 0.0 || instance.address.port() == 0) {
+        if (!std::isfinite(instance.weight) || instance.weight <= 0.0 || instance.host.empty() || instance.port == 0) {
             continue;
+        }
+        if (instance.selection_hash == 0) {
+            instance.selection_hash = endpoint_hash(instance);
         }
         auto runtime = std::make_shared<PeerRuntime>();
         next->peers.push_back(PeerEntry{
@@ -570,11 +680,11 @@ LoadBalancerUpdateResult LoadBalancer::update_instances(DiscoveredService update
         if (left.instance.instance_id != right.instance.instance_id) {
             return left.instance.instance_id < right.instance.instance_id;
         }
-        if (left.instance.cluster_name != right.instance.cluster_name) {
-            return left.instance.cluster_name < right.instance.cluster_name;
+        if (left.instance.host != right.instance.host) {
+            return left.instance.host < right.instance.host;
         }
-        if (left.instance.host_header != right.instance.host_header) {
-            return left.instance.host_header < right.instance.host_header;
+        if (left.instance.authority != right.instance.authority) {
+            return left.instance.authority < right.instance.authority;
         }
         return left.instance.weight < right.instance.weight;
     });
@@ -676,4 +786,4 @@ LoadBalancerStats LoadBalancer::stats() const noexcept {
     };
 }
 
-} // namespace fiber::ai_server
+} // namespace fiber::nacos

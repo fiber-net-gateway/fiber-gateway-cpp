@@ -170,14 +170,17 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
             co_return std::unexpected(error(ProviderConnectionErrorCode::NoServiceEndpoint,
                                             "provider service has no usable endpoint", common::IoErr::NotFound));
         }
+        FIBER_ASSERT(selected->ip_address().has_value());
+        const net::IpAddress &selected_ip = *selected->ip_address();
         dial.endpoint.scheme = ProviderEndpointScheme::Http;
-        dial.endpoint.ip = selected->address().ip();
+        dial.endpoint.ip = selected_ip;
         dial.endpoint.host_is_ip = true;
-        dial.endpoint.port = selected->address().port();
-        dial.addresses.addresses[0] = selected->address().ip();
+        dial.endpoint.port = selected->port();
+        dial.addresses.addresses[0] = selected_ip;
         dial.addresses.size = 1;
-        dial.host_header = std::string(selected->host_header());
-        dial.key = selected->connection_key();
+        dial.host_header = std::string(selected->authority());
+        dial.key = http::Http1ConnectionGroupKey::from_ip(selected_ip, selected->port(),
+                                                          http::Http1ConnectionGroupKey::Scheme::Http);
         dial.load_balance = ProviderLoadBalanceLease{
                 .load_balancer = attempt.provider->service,
                 .instance = std::move(*selected),

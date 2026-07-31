@@ -172,7 +172,8 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
             EXPECT_TRUE(stable->ip_address);
             auto adapter = selector.adapter();
             adapter.report(adapter.context, *stable, false);
-            auto retry = selector.select_endpoint("orders");
+            const std::uint64_t excluded = stable->selection_token;
+            auto retry = selector.select_endpoint("orders", std::nullopt, std::span(&excluded, 1));
             EXPECT_TRUE(retry);
             if (retry) {
                 EXPECT_EQ(retry->host, "10.0.0.5");

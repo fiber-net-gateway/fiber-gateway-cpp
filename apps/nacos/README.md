@@ -4,7 +4,8 @@
 `apps/`. Consumers should link the `fiber::nacos` target.
 
 The current implementation covers authentication, the reusable Nacos gRPC
-transport layer, ConfigService, and NamingService:
+transport layer, ConfigService, NamingService, and an optional client-side
+service-discovery layer:
 
 - Immutable, validated client configuration with multiple server IPs.
 - Nacos 2.x authentication flow through its fixed
@@ -41,15 +42,30 @@ transport layer, ConfigService, and NamingService:
   server-push semantics and `lastRefTime` deduplication.
 - Latest-value instance registration, explicit status observation,
   best-effort deregistration, and reconnect replay.
+- Reference-counted `(serviceName, group)` discovery handles over
+  NamingService subscriptions.
+- Atomically published immutable instance generations that request workers can
+  pin without touching the NamingService EventLoop.
+- Smooth weighted round-robin and weighted rendezvous selection, request-level
+  peer exclusion, cluster/local-zone preference, failure feedback, and bounded
+  circuit state.
+- IP and hostname instances with application-owned HTTP/DNS adaptation.
 
 ## Targets
 
 - `fiber_nacos`: concrete static library.
 - `fiber::nacos`: stable alias for consuming applications.
+- `fiber_nacos_discovery`: optional client-side discovery and load-balancing
+  library.
+- `fiber::nacos_discovery`: stable alias for discovery consumers.
 - `fiber_nacos_tests`: unit and local integration tests when tests are enabled.
 
 The library links `fiber_lib` publicly, so consumers receive the core Fiber
 include paths and dependencies through `fiber::nacos`.
+
+`fiber::nacos_discovery` links `fiber::nacos` publicly. It is intentionally a
+separate target: `NamingService` retains Java-compatible subscribe/get/registry
+semantics, while applications opt into discovery pooling and selection policy.
 
 ## NacosRpc Transport and Reconnection
 
@@ -92,6 +108,13 @@ The main headers are:
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NamingService.h>
+```
+
+Discovery consumers additionally include:
+
+```cpp
+#include <fiber/nacos/discovery/ServiceDiscovery.h>
+#include <fiber/nacos/discovery/ServiceLoadBalancer.h>
 ```
 
 Configuration is created through a validation boundary:

@@ -28,7 +28,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/NacosServiceSelector.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RouteConfigStore.cpp")
 target_include_directories(access_server_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
-target_link_libraries(access_server_core PUBLIC fiber_lib fiber::nacos fiber::cat fiber::prometheus)
+target_link_libraries(access_server_core PUBLIC fiber_lib fiber::nacos fiber::nacos_discovery fiber::cat fiber::prometheus)
 set_target_properties(access_server_core PROPERTIES FOLDER "apps/access-server")
 
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)

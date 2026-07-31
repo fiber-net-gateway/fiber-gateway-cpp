@@ -1,5 +1,4 @@
-#include "ServiceDiscovery.h"
-#include "../observability/AiServerLogCategories.h"
+#include <fiber/nacos/discovery/ServiceDiscovery.h>
 
 #include <array>
 #include <charconv>
@@ -11,25 +10,21 @@
 #include <async/Spawn.h>
 #include <async/WhenAny.h>
 #include <common/Assert.h>
-#include <log/Log.h>
 
-namespace fiber::ai_server {
+namespace fiber::nacos {
 namespace {
 
-DEFINE_LOGGER(LOG_DISCOVERY, kAiServerDiscoveryLogger);
-
-std::string make_host_header(const net::IpAddress &ip, std::uint16_t port) {
-    const std::string address = ip.to_string();
+std::string make_authority(std::string_view host, std::uint16_t port, const std::optional<net::IpAddress> &ip) {
     std::array<char, 5> port_text{};
     const auto converted = std::to_chars(port_text.data(), port_text.data() + port_text.size(), port);
     std::string result;
-    result.reserve(address.size() + 8);
-    if (ip.is_v6()) {
+    result.reserve(host.size() + 8);
+    if (ip && ip->is_v6()) {
         result.push_back('[');
-        result.append(address);
+        result.append(host);
         result.push_back(']');
     } else {
-        result.append(address);
+        result.append(host);
     }
     result.push_back(':');
     result.append(port_text.data(), converted.ptr);
@@ -39,9 +34,10 @@ std::string make_host_header(const net::IpAddress &ip, std::uint16_t port) {
 } // namespace
 
 struct ServiceDiscovery::Entry final : public common::NonCopyable, public common::NonMovable {
-    Entry(ServiceDiscovery &value_owner, Key value_key, nacos::Subscription<nacos::ServiceInfo> value_subscription) :
+    Entry(ServiceDiscovery &value_owner, Key value_key, Subscription<ServiceInfo> value_subscription,
+          LoadBalancer::Options options) :
         owner(&value_owner), key(std::move(value_key)), subscription(std::move(value_subscription)),
-        load_balancer(std::make_shared<LoadBalancer>()) {
+        load_balancer(std::make_shared<LoadBalancer>(std::move(options))) {
         stop_publisher = stop.acquire_publisher();
         FIBER_ASSERT(stop_publisher.has_value());
     }
@@ -55,7 +51,7 @@ struct ServiceDiscovery::Entry final : public common::NonCopyable, public common
 
     ServiceDiscovery *owner = nullptr;
     Key key;
-    nacos::Subscription<nacos::ServiceInfo> subscription;
+    Subscription<ServiceInfo> subscription;
     std::shared_ptr<LoadBalancer> load_balancer;
     async::Watch<bool> stop{false};
     std::optional<async::Watch<bool>::Publisher> stop_publisher;
@@ -112,21 +108,21 @@ void ServiceDiscovery::Handle::reset() noexcept {
     owner->release(entry);
 }
 
-ServiceDiscovery::ServiceDiscovery(event::EventLoop &loop, nacos::NamingService &naming_service,
-                                   ServiceDiscoveryObserver observer) noexcept :
-    loop_(&loop), naming_service_(&naming_service), observer_(observer) {}
+ServiceDiscovery::ServiceDiscovery(event::EventLoop &loop, NamingService &naming_service,
+                                   ServiceDiscoveryOptions options, ServiceDiscoveryObserver observer) noexcept :
+    loop_(&loop), naming_service_(&naming_service), options_(std::move(options)), observer_(observer) {}
 
 ServiceDiscovery::~ServiceDiscovery() {
     FIBER_ASSERT(entries_.empty());
     FIBER_ASSERT(tasks_.empty());
 }
 
-std::expected<ServiceDiscovery::Handle, nacos::NamingServiceError> ServiceDiscovery::acquire(std::string service_name,
-                                                                                             std::string group) {
+std::expected<ServiceDiscovery::Handle, NamingServiceError> ServiceDiscovery::acquire(std::string service_name,
+                                                                                      std::string group) {
     FIBER_ASSERT(loop_->in_loop());
     if (stopping_) {
-        return std::unexpected(nacos::NamingServiceError{
-                .code = nacos::NamingServiceErrorCode::Shutdown,
+        return std::unexpected(NamingServiceError{
+                .code = NamingServiceErrorCode::Shutdown,
                 .io_error = common::IoErr::Canceled,
                 .message = "service discovery is stopping",
         });
@@ -144,7 +140,7 @@ std::expected<ServiceDiscovery::Handle, nacos::NamingServiceError> ServiceDiscov
     if (!subscription) {
         return std::unexpected(std::move(subscription.error()));
     }
-    auto entry = std::make_shared<Entry>(*this, std::move(key), std::move(*subscription));
+    auto entry = std::make_shared<Entry>(*this, std::move(key), std::move(*subscription), options_.load_balancer);
     auto [it, inserted] = entries_.emplace(entry->key, std::pair(entry, 1));
     FIBER_ASSERT(inserted);
     (void) it;
@@ -175,11 +171,10 @@ async::DetachedTask ServiceDiscovery::run(std::shared_ptr<Entry> entry) noexcept
             break;
         }
         if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                if (!entry->stopping) {
-                    LOG(LOG_DISCOVERY, WARN)
-                            << "NamingService subscription closed service=" << log::quoted(entry->key.service_name)
-                            << " group=" << log::quoted(entry->key.group);
+            if (snapshot.value->kind == ResultKind::Closed) {
+                if (!entry->stopping && entry->owner->observer_.on_closed) {
+                    entry->owner->observer_.on_closed(entry->owner->observer_.context, entry->key.service_name,
+                                                      entry->key.group);
                 }
                 break;
             }
@@ -201,7 +196,7 @@ async::DetachedTask ServiceDiscovery::run(std::shared_ptr<Entry> entry) noexcept
     entry->owner->tasks_.done();
 }
 
-void ServiceDiscovery::apply(Entry &entry, const nacos::ServiceInfo &info) {
+void ServiceDiscovery::apply(Entry &entry, const ServiceInfo &info) {
     FIBER_ASSERT(loop_->in_loop());
     if (!contains(entry)) {
         return;
@@ -213,36 +208,33 @@ void ServiceDiscovery::apply(Entry &entry, const nacos::ServiceInfo &info) {
     update.checksum = info.checksum;
     update.last_ref_time = info.last_ref_time;
     update.instances.reserve(info.hosts.size());
-    for (const nacos::Instance &host: info.hosts) {
-        if (!host.enabled || !host.healthy || !std::isfinite(host.weight) || host.weight <= 0.0 || host.ip.empty() ||
-            host.port == 0) {
+    for (const Instance &instance: info.hosts) {
+        if (!instance.enabled || !instance.healthy || !std::isfinite(instance.weight) || instance.weight <= 0.0 ||
+            instance.ip.empty() || instance.port == 0) {
             continue;
         }
         net::IpAddress ip;
-        if (!net::IpAddress::parse(host.ip, ip)) {
+        const bool parsed_ip = net::IpAddress::parse(instance.ip, ip);
+        if (options_.require_ip && !parsed_ip) {
             continue;
         }
         update.instances.push_back(DiscoveredInstance{
-                .instance_id = host.instance_id,
-                .address = net::SocketAddress(ip, host.port),
-                .connection_key = http::Http1ConnectionGroupKey::from_ip(ip, host.port,
-                                                                         http::Http1ConnectionGroupKey::Scheme::Http),
-                .host_header = make_host_header(ip, host.port),
-                .weight = host.weight,
-                .cluster_name = host.cluster_name,
+                .instance_id = instance.instance_id,
+                .host = instance.ip,
+                .ip_address = parsed_ip ? std::optional(ip) : std::nullopt,
+                .port = instance.port,
+                .authority = make_authority(instance.ip, instance.port, parsed_ip ? std::optional(ip) : std::nullopt),
+                .weight = instance.weight,
+                .cluster_name = instance.cluster_name,
         });
     }
 
     const LoadBalancerUpdateResult result = entry.load_balancer->update_instances(std::move(update));
     const bool first_update = !entry.initialized;
     entry.initialized = true;
-    LOG(LOG_DISCOVERY, DEBUG) << "NamingService instances updated service=" << log::quoted(entry.key.service_name)
-                              << " group=" << log::quoted(entry.key.group)
-                              << " generation=" << entry.load_balancer->generation()
-                              << " instances=" << entry.load_balancer->configured_instance_count()
-                              << " changed=" << (result == LoadBalancerUpdateResult::Applied);
     if (observer_.on_update) {
-        observer_.on_update(observer_.context, *entry.load_balancer, first_update);
+        observer_.on_update(observer_.context, *entry.load_balancer, entry.key.service_name, entry.key.group,
+                            first_update, result);
     }
 }
 
@@ -266,4 +258,4 @@ bool ServiceDiscovery::contains(const Entry &entry) const noexcept {
     return it != entries_.end() && it->second.first.get() == &entry;
 }
 
-} // namespace fiber::ai_server
+} // namespace fiber::nacos

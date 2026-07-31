@@ -461,7 +461,8 @@ fiber::access_server::ProjectConfig service_project_config() {
 
 std::expected<fiber::access_server::ProxyUpstreamEndpoint, fiber::access_server::ProxyRequestError>
 select_service(void *context, fiber::http::HttpExchange &, std::string_view service,
-               std::optional<std::string_view> cluster) noexcept {
+               std::optional<std::string_view> cluster,
+               std::span<const std::uint64_t> excluded_selection_tokens) noexcept {
     auto &state = *static_cast<ServiceSelectorState *>(context);
     if (service != "inventory" || cluster != std::optional<std::string_view>("stable")) {
         return std::unexpected(fiber::access_server::ProxyRequestError{
@@ -471,6 +472,21 @@ select_service(void *context, fiber::http::HttpExchange &, std::string_view serv
         });
     }
     const bool first = state.select_count++ == 0;
+    if (first) {
+        if (!excluded_selection_tokens.empty()) {
+            return std::unexpected(fiber::access_server::ProxyRequestError{
+                    .code = fiber::access_server::ProxyRequestErrorCode::SelectUpstream,
+                    .io_error = fiber::common::IoErr::Invalid,
+                    .message = "first selection unexpectedly excluded an instance",
+            });
+        }
+    } else if (excluded_selection_tokens.size() != 1 || excluded_selection_tokens.front() != 1U) {
+        return std::unexpected(fiber::access_server::ProxyRequestError{
+                .code = fiber::access_server::ProxyRequestErrorCode::SelectUpstream,
+                .io_error = fiber::common::IoErr::Invalid,
+                .message = "retry did not exclude the failed instance",
+        });
+    }
     return fiber::access_server::ProxyUpstreamEndpoint{
             .host = first ? std::string_view("127.0.0.2") : std::string_view("127.0.0.1"),
             .port = state.port,
@@ -480,7 +496,7 @@ select_service(void *context, fiber::http::HttpExchange &, std::string_view serv
     };
 }
 
-void report_service(void *context, const fiber::access_server::ProxyUpstreamEndpoint &endpoint, bool success) noexcept {
+void report_service(void *context, fiber::access_server::ProxyUpstreamEndpoint &endpoint, bool success) noexcept {
     auto &state = *static_cast<ServiceSelectorState *>(context);
     state.reports.emplace_back(endpoint.selection_token, success);
 }

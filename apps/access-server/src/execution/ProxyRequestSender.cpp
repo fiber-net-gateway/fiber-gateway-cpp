@@ -281,7 +281,7 @@ ProxyRequestSender::connect(const ProxyUpstreamEndpoint &endpoint) noexcept {
     co_return std::unexpected(error(ProxyRequestErrorCode::Connect, "upstream connection failed", last_error));
 }
 
-void ProxyRequestSender::report(const ProxyUpstreamEndpoint &endpoint, bool success) const noexcept {
+void ProxyRequestSender::report(ProxyUpstreamEndpoint &endpoint, bool success) const noexcept {
     if (service_selector_.report) {
         service_selector_.report(service_selector_.context, endpoint, success);
     }
@@ -312,13 +312,17 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                                          : kMaxJavaAttempts;
     std::optional<ProxyUpstreamEndpoint> previous_endpoint;
     std::optional<ProxyRequestError> previous_error;
-    const auto report_selection = [&](const ProxyUpstreamEndpoint &endpoint, bool success) noexcept {
+    const auto report_selection = [&](ProxyUpstreamEndpoint &endpoint, bool success) noexcept {
         if (request.upstream_kind == ProxyUpstreamKind::Service) {
             report(endpoint, success);
         }
     };
 
     for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
+        const std::uint64_t previous_selection_token = previous_endpoint ? previous_endpoint->selection_token : 0;
+        const std::span<const std::uint64_t> excluded_selection_tokens =
+                previous_selection_token == 0 ? std::span<const std::uint64_t>{}
+                                              : std::span<const std::uint64_t>(&previous_selection_token, 1);
         std::expected<ProxyUpstreamEndpoint, ProxyRequestError> selected =
                 request.upstream_kind == ProxyUpstreamKind::Addresses
                         ? std::expected<ProxyUpstreamEndpoint, ProxyRequestError>(
@@ -326,7 +330,8 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                         : service_selector_.select(service_selector_.context, downstream, request.service,
                                                    request.context_cluster
                                                            ? std::optional<std::string_view>(*request.context_cluster)
-                                                           : request.cluster);
+                                                           : request.cluster,
+                                                   excluded_selection_tokens);
         if (!selected) {
             co_return std::unexpected(previous_error ? *previous_error : selected.error());
         }

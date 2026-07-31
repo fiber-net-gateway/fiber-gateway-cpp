@@ -23,8 +23,20 @@ target_include_directories(fiber_nacos
 target_link_libraries(fiber_nacos PUBLIC fiber_lib fiber_proto_nacos_payload)
 set_target_properties(fiber_nacos PROPERTIES FOLDER "apps/nacos")
 
+add_library(fiber_nacos_discovery STATIC
+    "${CMAKE_CURRENT_LIST_DIR}/src/discovery/ServiceDiscovery.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/discovery/ServiceLoadBalancer.cpp")
+add_library(fiber::nacos_discovery ALIAS fiber_nacos_discovery)
+
+target_include_directories(fiber_nacos_discovery
+    PUBLIC
+        "${CMAKE_CURRENT_LIST_DIR}/include")
+target_link_libraries(fiber_nacos_discovery PUBLIC fiber::nacos)
+set_target_properties(fiber_nacos_discovery PROPERTIES FOLDER "apps/nacos")
+
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
     set_property(TARGET fiber_nacos PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_property(TARGET fiber_nacos_discovery PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
@@ -38,8 +50,10 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/NamingServiceTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/NacosRpcTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/PayloadTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/RpcDtoJsonTest.cpp")
-    target_link_libraries(fiber_nacos_tests PRIVATE fiber::nacos GTest::gtest_main)
+        "${CMAKE_CURRENT_LIST_DIR}/tests/RpcDtoJsonTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/ServiceDiscoveryTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/ServiceLoadBalancerTest.cpp")
+    target_link_libraries(fiber_nacos_tests PRIVATE fiber::nacos_discovery GTest::gtest_main)
     set_target_properties(fiber_nacos_tests PROPERTIES FOLDER "apps/nacos")
     fiber_link_runtime_allocator(fiber_nacos_tests)
 
