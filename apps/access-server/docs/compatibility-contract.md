@@ -50,6 +50,10 @@ Java 先 `trim()` 整体字符串，再按 `;` 分割。空内容产生空项目
 3. 保留未变化项目的当前快照；
 4. listener 增删和全局快照发布必须在明确的 runtime/EventLoop 所有者上串行化。
 
+当前 C++ `AccessConfigWatcher` 已按该拓扑实现 owner-loop 订阅图。每个 listener
+使用独立停止信号，关闭时先停止项目列表和全部逐项目任务，再等待 barrier 后销毁
+subscription；已发布请求快照保持不可变，可由 worker 继续 pin。
+
 ## 3. 项目配置 wire model
 
 ### 3.1 ProjectConf
@@ -97,7 +101,8 @@ Java 使用的 Jackson 配置会产生以下行为，C++ 的 wire codec 必须�
 - 缺失或 null 的 primitive int/bool 使用 Java primitive 默认值；
 - 部分数字字符串可转数字，数字可转字符串，字符串可转 bool；
 - `Map<String, String>` 的数值 value 会转成字符串；
-- JSON 语法错误、数值溢出或 custom codec 不接受的格式仍应拒绝。
+- JSON 语法错误、目标 primitive 范围溢出或 custom codec 不接受的格式通常拒绝；
+  custom codec 内部的 Java 整数运算溢出按下节遗留行为处理。
 
 这不是要求本地 JSON 库模拟 Jackson。实现应在 access-server 的 wire DTO/codec
 边界显式完成必要转型，随后转换为类型严格的 compiled model。
@@ -127,7 +132,9 @@ Java 使用的 Jackson 配置会产生以下行为，C++ 的 wire codec 必须�
 - 无后缀或 `ms`：毫秒；
 - `s`：秒；
 - 纯空白 string：null；
-- 负数字符串、带小数、其他单位和溢出：拒绝。
+- 负数字符串、带小数、其他单位，以及数字部分超过 Java int：拒绝；
+- `s` 会在 Java int 上先乘 1000 再传给 `Duration.ofMillis`，所以乘法按 32 位
+  two's-complement wrap；例如 `"2147484s"` 得到 `-2147483296` ms。
 
 示例：
 
@@ -145,7 +152,8 @@ Java 使用的 Jackson 配置会产生以下行为，C++ 的 wire codec 必须�
 - string：大小写不敏感地匹配 `(\d+)([kmg])?`；
 - K/M/G 按二进制 `<< 10/20/30`；
 - string 解析后的值必须大于 0；
-- 溢出或不匹配格式：拒绝。
+- 数字部分超过 Java long 或格式不匹配：拒绝；
+- K/M/G 左移使用 Java long wrap，最终结果大于 0 才接受。
 
 因此 JSON number `0` 可解码，而 JSON string `"0"` 会被拒绝。语义层是否接受非正值
 由具体字段的 Java 使用方式决定，不能提前用统一规则改写。
@@ -179,6 +187,10 @@ body: empty
 `Strict-Transport-Security: max-age=31536000`，并不只对 HTTPS redirect 添加。这个
 header 属于 access-owned 响应契约。
 
+该 header 在 Host 匹配成功后、X-Entry/HTTPS/Path/CIDR 检查前加入，因此这些错误响应
+也携带 HSTS；Host 未匹配的 `ROUTER_NOT_FOUND` 不携带。路由配置中的同名
+`response_headers` 随后使用 set 语义，可以覆盖该值。
+
 `net` 是逗号分隔 enum 名称，Java 映射：
 
 | enum | X-Entry name |
@@ -210,8 +222,12 @@ X-Entry 与 HostStrategy net mask 不匹配时返回 403 `ENTRY_ERROR`。
 
 bad routing 特殊入口返回 400、`BAD_REQUEST`、`error find router`。
 
-测试环境使用 Host 扩展提取 cluster；production 使用内部 IP 灰度拦截器。两者不可
-同时按普通 Host pattern 处理。
+测试环境使用 Host 扩展提取 cluster：对原 Host 查找第一个 `_`，再查找其后的第一个
+`.`；两者都存在且 `_` 不在首位时，删除 `_<cluster>` 后再做项目 Host 匹配。例如
+`api_gray.example.com` 按 `api.example.com` 匹配，`gray` 写入请求 cluster，并向上游
+增加 `ploto-origin-host: api_gray.example.com`。未提取到 Host cluster 时，
+`HI-TRACE-CLUSTER` 请求头作为 cluster。production 使用内部 IP 灰度规则，两种模式由
+`ACCESS_SERVER_TEST_MODE` 显式区分。
 
 ## 6. RouteItem
 
@@ -278,6 +294,16 @@ body size 的 Java 执行边界：
 - `max_proxy_body_size` 缺失或数值 `0`：不覆盖 client 默认 response body limit；
 - `max_proxy_body_size` 为非零负值：clamp 为 `0` 后设置 upstream response limit。
 
+Java server 默认 request body limit 为 4 MiB。命中限制返回 413：
+
+```json
+{"name":"REQ_BODY_TOO_LARGE","message":"request body is too large","meta":null}
+```
+
+C++ handler 将默认值作为启动选项，并允许部署时覆盖；已知 Content-Length 在 CIDR
+检查前拒绝，chunked/stream body 在读取时累计检查。显式负值按 Java 的 clamp-to-zero
+路径解释为 unlimited。
+
 `allows` 中的每个值必须非空；Java build 会直接检查首字符，空字符串会导致配置构建
 失败。
 
@@ -287,13 +313,17 @@ body size 的 Java 执行边界：
 - 同一个 path 可安装多条有 condition 的 route；
 - condition 必须是同步表达式；异步表达式配置拒绝；
 - 依次判断条件，首个满足者执行；
-- 节点已有无条件 route 后，再加入同节点 route 属于 dead-route conflict；
-- condition route key 是 `path + "@" + CRC32(condition) 的十六进制形式`；
+- 节点已有无条件 route 后，再加入同节点 route 属于 dead-route conflict；placeholder
+  名称不同会形成不同节点，Java 不把这种 sibling 遮蔽判为该冲突；
+- condition route key 是 `path + "@" + CRC32C(condition)`，CRC 的 8 个十六进制
+  nibble 按低位到高位依次输出；
 - 未找到 Path 返回 404、`URL_NOT_MATCHED`，message：
   `url not matched is project:<project>`。
 
-本仓库已有 `RoutePathMatcher`，但必须通过 Java/C++ fixture 验证静态段、参数段、
-wildcard、尾 slash、冲突和 condition 顺序后才能直接使用。
+本仓库 `RoutePathMatcher` 已通过聚焦用例验证静态段、参数段、wildcard、冲突和
+condition 顺序，并用于 compiled snapshot。条件表达式在候选快照发布前由本地脚本
+adapter 编译为同步程序，请求热路径只执行已编译程序；通用脚本语法兼容仍不属于本次
+迁移门槛。
 
 ## 8. 请求前置策略
 
@@ -344,7 +374,24 @@ wildcard、尾 slash、冲突和 condition 顺序后才能直接使用。
 2. 先计算全部 response header 模板；
 3. 任一 header 模板失败时，不提交任何配置 header，进入错误处理；
 4. 设置 header；
-5. 发送配置 status 和 body。
+5. 计算/发送配置 status 和 body；
+6. body 模板失败发生在 header 提交之后，因此错误响应保留已经提交的完整配置 header
+   集；错误处理随后覆盖 `Content-Type`。
+
+`setResponseHeader` 会忽略以下大小写不敏感的名称，`Host` 不在忽略集合：
+
+```text
+Connection
+Content-Length
+Proxy-Connection
+Keep-Alive
+Proxy-Authenticate
+Proxy-Authorization
+TE
+Trailer
+Transfer-Encoding
+Upgrade
+```
 
 模板 body 的 Java value 转换：
 
@@ -352,7 +399,15 @@ wildcard、尾 slash、冲突和 condition 顺序后才能直接使用。
 - scalar -> `asText()`；
 - object/array -> 空。
 
-这里仅记录 access 执行顺序和 value-to-body 规则，不承诺通用脚本语法兼容。
+模板字面量支持 `\\`、`\$`、`\{`、`\}` 转义，`${expression}` 交给脚本引擎。
+C++ compiled plan 保留该分段/提交语义，并在候选配置发布前将每个 expression 预编译
+为不可变本地程序；condition 使用同一编译边界。编译失败不会替换当前快照，请求阶段
+只做同步执行；这里不承诺通用脚本语法兼容。
+
+Java 的 `discardReqBody()` 只触发忽略后续请求 body；本仓库现有
+`HttpExchange::discard_body()` 会异步读完 body 后再继续 RESPONSE 执行。两者最终
+HTTP 结果相同，但慢请求 body 的响应开始时点可能不同；毫秒级内部完成时序不属于本
+契约，阶段 8 仍需覆盖慢 body 和下游断开生命周期。
 
 ## 10. PROXY 请求
 
@@ -369,16 +424,40 @@ wildcard、尾 slash、冲突和 condition 顺序后才能直接使用。
 命名服务选择的具体健康实例、pool slot 和连接复用时机不是契约；选择输入
 service/cluster/addresses 是契约。
 
+静态 address 在配置编译期按 Java `HttpHost.create` 归一化：
+
+- 未写 scheme 时，显式端口 443 选择 HTTPS，其他情况选择 HTTP；
+- 写了 scheme 时，仅大小写不敏感的 `https` 选择 HTTPS，其他 scheme 按 HTTP；
+- 端口缺失或小于等于 0 时使用 scheme 默认端口；
+- Host header 省略默认端口，保留非默认端口；
+- 数字 IP 在编译期保存，hostname 通过 runtime DNS adapter 解析；
+- 无法解析为 Java int 或最终端口超过 65535 时配置 build 失败。
+
 ### 10.2 Method、URI 和 body
 
 - 保留原 method；
-- 无 rewrite 时保留原 URI；
+- 无 rewrite 时保留 raw URI，包括原始 percent-encoding；
 - rewrite 结果为空时 path 变为 `/`；
-- rewrite path 做 Java 等价 escape；
-- 无论是否 rewrite，都保留原 query；
+- rewrite path 使用 `fiber-net-gateway` `UriCodec.escapeUri` 的 Nginx byte mask：`/`
+  保留，空格、`#`、`%`、`?` 以及对应控制/非 ASCII UTF-8 byte 使用大写 `%XX`；
+- rewrite 后拼回原 query，不对 query 做二次 escape；
+- 普通请求存在 Content-Length 时保留其 framing；缺失时 Java 因始终安装 streaming
+  body function，由 client 自动使用 chunked framing；
 - downstream request body 流式转给 upstream；
 - `flush` 传入 body 写入逻辑；
-- WebSocket 仅在 timeout 大于 0 且 Upgrade/Connection 满足条件时启用。
+- WebSocket 仅在 timeout 大于 0，且 `Upgrade` 大小写不敏感等于 `websocket`、
+  `Connection` 大小写不敏感精确等于 `upgrade` 时启用；逗号 token 列表不命中这一
+  Java 遗留判断。
+
+Java `requestTimeout` 在请求 body 全部发送后启动，到收到 response header 为止；连接
+建立使用 Java client 默认的 3000 ms connect timeout。C++ sender 保留这个边界：
+connect 不占 route timeout，请求 body 写完后才把 route timeout 用于 response header
+读取；负的遗留 int32 timeout 表示不启动该 timer。
+
+连接/解析在 request header 尚未发送时失败，可以重新选择 service 实例，最多包含首选
+实例在内尝试 4 次；选回同一失败实例时停止。request header 已开始发送后不重试，避免
+重复提交非幂等请求。实例收到 `<500` response header report 成功，`>=500` 或 I/O
+失败 report 失败。
 
 ### 10.3 Request header
 
@@ -400,9 +479,16 @@ Host
 
 - custom `proxy_headers` 覆盖的同名 inbound header 也先过滤；
 - custom 模板结果为空时不写该 header；
+- custom header 通过 Java client 的安全 setter：上面除 Host 外的固定 hop-by-hop
+  名称即使显式配置也不会写入；Host 可以显式覆盖 upstream 默认 Host；
+- header 被配置后，无论模板最终为空或该名称被安全 setter 忽略，同名 inbound
+  header 都不会再复制；
 - 普通 HTTP 的 Content-Length 走专用路径复制；
 - WebSocket 专门转发 Upgrade/Connection；
-- Host 由 upstream 请求构造逻辑决定，不透传 inbound Host。
+- Host 由 upstream 请求构造逻辑决定，不透传 inbound Host；
+- 只过滤上述固定集合，不额外解析 `Connection` 的动态 token；
+- `x-ploto-source-app` 在最后强制 set 为 `<project>.unifiedAccess`，覆盖配置值和
+  inbound 值。
 
 ### 10.4 Context
 
@@ -410,8 +496,45 @@ context 模板先计算后更新 trace user data：
 
 - 空值移除 key；
 - `cluster` 和 trace cluster key 归一到 cluster key；
+- 非空 cluster context 覆盖 route/service 中的默认 cluster；空值移除覆盖；
 - 该步骤的业务 key/value 结果属于排障契约；
 - CAT 的底层 message 编码和线程行为不属于兼容范围。
+
+当前 C++ 已将上述结果固化为 `PreparedProxyRequest` 并接入 live handler。
+`ProxyRequestSender` 使用 `LocalHttp1ConnectionPoolSet`，可通过同步 service selector
+和异步 DNS adapter 获取实际 peer；它拥有 pool lease 和 `ClientHttp1Exchange`，直到
+调用者消费或放弃 upstream response。真实 loopback upstream 已覆盖 chunked、
+Content-Length、默认 Host、source header、body 字节、service 连接失败重选和连接复用。
+
+service/cluster/address 视图只在当前 pinned snapshot 生命周期内有效。C++ 已实现
+NamingService route 依赖协调和原子服务目录：仅接受 enabled、healthy、正 weight
+实例，按 Java cluster 名的 `zone-cluster` 结构选择本 zone，并让请求 owner pin 选中
+的 discovery generation；hostname 实例交给本地 DNS adapter。该选择/pool 算法本身
+不属于兼容边界。
+
+production gray 原子快照在 selector 前覆盖 cluster，非空 context cluster 次之，
+最后才使用 route 默认 cluster。最终 PROXY adapter 已统一监视 downstream response
+channel；在等待 response header/body 或 tunnel 时关闭 downstream，会销毁未完成
+sender 并使 active upstream exchange 退出 pool 复用。上述组件已在
+`AccessServerRuntime` 完成进程级装配：每个 request worker 使用自己的 DNS resolver
+和 local pool shard，项目列表首值到达前不绑定 listener，关闭时先停止 listener 和
+active exchange，再关闭 pool/DNS 和 Nacos 控制面。本地脚本 adapter 和测试环境
+Host cluster 已装配。
+
+请求观测使用一个贯穿 handler、RESPONSE 和 PROXY 的上下文：
+
+- CAT 根事务类型为 `URL`，命中后名称为 `<project><route-pattern>`；
+- 入站三段 CAT ID 被继续，无有效上下文时生成新 tree；响应写回 `Hi-Trace-Id`，
+  upstream 写入新的 `HI-TRACE-ID`、`HI-SPAN-ID-PARENT`、`HI-SPAN-ID`；
+- project、route、context cluster、实际 upstream、稳定 `AccessError.name` 和最终
+  response completion 同时进入 CAT 与 `access_server.access`；
+- Prometheus 在独立 listener 输出固定 `result` 标签的请求总数、inflight 和 duration。
+  project/route/cluster 属于动态控制面或请求输入，不建立无限增长的 label series；
+- CAT、指标或日志记录失败均为 best effort，不得改写 Java 兼容 HTTP 结果。
+
+上述接入只约束 access-server 可见的 trace/header、维度和值，不比较 CAT 编码、
+Prometheus 内部快照时点或日志行顺序。现网脚本 corpus 与阶段 8 全量差分仍未完成，
+因此当前阶段仍不进入生产切流。
 
 ## 11. PROXY 响应
 
@@ -441,6 +564,14 @@ context 模板先计算后更新 trace user data：
 Location/Refresh 的 host 比较、端口和大小写要使用 Java 原实现的 golden fixtures；
 不能直接替换成 RFC 意义上的规范化 URL equality，因为 Java 当前是字符串区段比较。
 
+当前 C++ 普通响应 bridge 遵循上述顺序，只过滤 Java 固定 hop-by-hop 集合，不解析
+`Connection` 的动态 token。已知 Content-Length 超限会在提交 upstream status 前返回
+500 `READ_RESP_BODY`；chunked/动态响应在提交后超限或 upstream 提前结束时，只中止
+当前 response channel，不再写第二份错误响应。基本 WebSocket 101 已复用本仓库 raw
+tunnel，保留 upstream `Sec-WebSocket-Accept` 和非 hop-by-hop header，并在握手响应中
+重新建立 `Connection: Upgrade`/`Upgrade`。`websocket_timeout` 已接到 raw tunnel
+读写超时，并由真实 loopback 空闲 tunnel 回归覆盖。
+
 ## 12. 错误响应
 
 错误处理先 discard request body。若 response 已经提交，则不再二次写入。
@@ -453,16 +584,13 @@ Location/Refresh 的 host 比较、端口和大小写要使用 Java 原实现的
 JSON 格式：
 
 ```json
-{
-  "name": "ENTRY_ERROR",
-  "message": "entry error",
-  "meta": null
-}
+{"name":"ENTRY_ERROR","message":"entry error","meta":null}
 ```
 
 status 不在 JSON body 中。已知业务错误使用其 code；未知错误使用 500。Java 未知错误
-name 包含 Java class name，C++ 不应伪造 Java 类型名；迁移实现前为本模块定义稳定的
-C++ unknown error name，并把它登记为有意差异。
+name 包含 Java class name，C++ 不伪造 Java 类型名，固定使用
+`ACCESS_UNKNOWN_ERROR`；这是已登记的有意差异。JSON Content-Type 固定为
+`application/json; charset=utf-8`。
 
 稳定业务错误矩阵：
 
@@ -473,10 +601,12 @@ C++ unknown error name，并把它登记为有意差异。
 | Path 未匹配 | 404 | `URL_NOT_MATCHED` | `url not matched is project:<project>` |
 | X-Entry 不允许 | 403 | `ENTRY_ERROR` | `entry error` |
 | source IP 不允许 | 403 | `NOT_ALLOW_IP` | `source ip is not allowed` |
+| request body 超限 | 413 | `REQ_BODY_TOO_LARGE` | `request body is too large` |
 
-HTML 页的 status、name、message、trace ID、meta 和 Content-Type 要建立 golden fixture。
-Java 页面当前对部分字段没有 HTML escaping；这是安全和兼容冲突点，必须单独形成差异
-决定，不能在实现中静默改变。
+HTML Content-Type 为 `text/html`。当前实现按 Java 页面精确拼接 status、name、
+message、trace ID 和 null meta；Java 对 message 没有 HTML escaping，C++ 为保持当前
+请求结果兼容也保留这一行为，并以 golden test 锁定。后续若要修复，必须作为显式的
+安全/兼容变更处理。
 
 ## 13. 差分用例清单
 

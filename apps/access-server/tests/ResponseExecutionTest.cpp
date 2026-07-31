@@ -1,0 +1,348 @@
+#include <gtest/gtest.h>
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "execution/AccessError.h"
+#include "execution/ErrorResponder.h"
+#include "execution/ProxyResponsePlan.h"
+#include "execution/ResponsePlan.h"
+#include "execution/TemplateEvaluator.h"
+
+namespace {
+
+using fiber::access_server::AccessError;
+using fiber::access_server::CompiledResponseRoute;
+using fiber::access_server::CompiledTemplateEntry;
+using fiber::access_server::ErrorResponder;
+using fiber::access_server::evaluate_template;
+using fiber::access_server::is_java_filtered_response_header;
+using fiber::access_server::prepare_proxy_response_headers;
+using fiber::access_server::prepare_response;
+using fiber::access_server::proxy_response_header_is_configured;
+using fiber::access_server::ResponseBodyKind;
+using fiber::access_server::rewrite_java_proxy_location;
+using fiber::access_server::rewrite_java_proxy_refresh;
+using fiber::access_server::TemplateEvaluator;
+
+struct EvaluatorState {
+    std::vector<std::string> expressions;
+    std::optional<std::string> failing_expression;
+};
+
+bool evaluate_expression(void *context, const void *, std::string_view expression, std::string &output,
+                         AccessError &error) noexcept {
+    auto &state = *static_cast<EvaluatorState *>(context);
+    state.expressions.emplace_back(expression);
+    if (state.failing_expression && expression == *state.failing_expression) {
+        error = AccessError::template_script("fixture failure");
+        return false;
+    }
+    if (expression == "$path.id") {
+        output = "42";
+    } else if (expression == "$request.method") {
+        output = "POST";
+    } else {
+        output.clear();
+    }
+    return true;
+}
+
+TemplateEvaluator evaluator(EvaluatorState &state) {
+    return TemplateEvaluator{
+            .context = &state,
+            .evaluate = evaluate_expression,
+    };
+}
+
+TEST(AccessErrorTest, UsesJavaCompatibleStableErrors) {
+    const AccessError router = AccessError::router_not_found();
+    EXPECT_EQ(router.status, 404);
+    EXPECT_EQ(router.name, "ROUTER_NOT_FOUND");
+    EXPECT_EQ(router.message, "error find router");
+
+    const AccessError bad_request = AccessError::bad_request();
+    EXPECT_EQ(bad_request.status, 400);
+    EXPECT_EQ(bad_request.name, "BAD_REQUEST");
+    EXPECT_EQ(bad_request.message, "error find router");
+
+    const AccessError path = AccessError::url_not_matched("orders");
+    EXPECT_EQ(path.status, 404);
+    EXPECT_EQ(path.name, "URL_NOT_MATCHED");
+    EXPECT_EQ(path.message, "url not matched is project:orders");
+
+    const AccessError entry = AccessError::entry_error();
+    EXPECT_EQ(entry.status, 403);
+    EXPECT_EQ(entry.name, "ENTRY_ERROR");
+    EXPECT_EQ(entry.message, "entry error");
+
+    const AccessError ip = AccessError::source_ip_not_allowed();
+    EXPECT_EQ(ip.status, 403);
+    EXPECT_EQ(ip.name, "NOT_ALLOW_IP");
+    EXPECT_EQ(ip.message, "source ip is not allowed");
+
+    const AccessError body = AccessError::request_body_too_large();
+    EXPECT_EQ(body.status, 413);
+    EXPECT_EQ(body.name, "REQ_BODY_TOO_LARGE");
+    EXPECT_EQ(body.message, "request body is too large");
+}
+
+TEST(TemplateEvaluatorTest, EvaluatesSegmentsAndJavaEscapes) {
+    EvaluatorState state;
+    auto result = evaluate_template(R"(id=${$path.id};method=${$request.method};literal=\$\{\}\\)", evaluator(state));
+
+    ASSERT_TRUE(result);
+    EXPECT_EQ(*result, "id=42;method=POST;literal=${}\\");
+    EXPECT_EQ(state.expressions, (std::vector<std::string>{"$path.id", "$request.method"}));
+}
+
+TEST(TemplateEvaluatorTest, FailsClosedWithoutAdapter) {
+    auto result = evaluate_template("${$path.id}", {});
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().status, 500);
+    EXPECT_EQ(result.error().name, "TEMPLATE_SCRIPT");
+    EXPECT_EQ(result.error().message, "error exec for template expression: template evaluator is not configured");
+}
+
+TEST(ResponsePlanTest, EvaluatesEveryHeaderBeforeApplyingJavaHopHeaderFilter) {
+    CompiledResponseRoute response{
+            .status = 201,
+            .body_kind = ResponseBodyKind::Text,
+            .body = "created",
+            .response_headers =
+                    {
+                            {.name = "X-Request", .source = "${$request.method}"},
+                            {.name = "Content-Length", .source = "${$path.id}"},
+                            {.name = "Host", .source = "public.example.com"},
+                    },
+    };
+    EvaluatorState state;
+
+    auto result = prepare_response(response, evaluator(state));
+
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 201);
+    EXPECT_EQ(result->body, "created");
+    ASSERT_EQ(result->headers.size(), 2U);
+    EXPECT_EQ(result->headers[0].name, "X-Request");
+    EXPECT_EQ(result->headers[0].value, "POST");
+    EXPECT_EQ(result->headers[1].name, "Host");
+    EXPECT_EQ(result->headers[1].value, "public.example.com");
+    EXPECT_EQ(state.expressions, (std::vector<std::string>{"$request.method", "$path.id"}));
+}
+
+TEST(ResponsePlanTest, PreservesEmptyAndPrecompiledStaticBodyBytes) {
+    for (const auto &[kind, body]: {
+                 std::pair{ResponseBodyKind::Empty, std::string("")},
+                 std::pair{ResponseBodyKind::Text, std::string("plain")},
+                 std::pair{ResponseBodyKind::Base64, std::string("binary\0body", 11)},
+         }) {
+        const CompiledResponseRoute response{
+                .status = 206,
+                .body_kind = kind,
+                .body = body,
+        };
+
+        auto result = prepare_response(response, {});
+
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->status, 206);
+        EXPECT_EQ(result->body, body);
+    }
+}
+
+TEST(ResponsePlanTest, EvaluatesTemplateBodyAfterHeaders) {
+    const CompiledResponseRoute response{
+            .status = 200,
+            .body_kind = ResponseBodyKind::Template,
+            .body = "item-${$path.id}",
+            .response_headers =
+                    {
+                            {.name = "X-Method", .source = "${$request.method}"},
+                    },
+    };
+    EvaluatorState state;
+
+    auto result = prepare_response(response, evaluator(state));
+
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->body, "item-42");
+    EXPECT_EQ(state.expressions, (std::vector<std::string>{"$request.method", "$path.id"}));
+}
+
+TEST(ResponsePlanTest, DiscardsAllConfiguredHeadersWhenAHeaderTemplateFails) {
+    CompiledResponseRoute response{
+            .status = 200,
+            .body_kind = ResponseBodyKind::Text,
+            .body = "unreached",
+            .response_headers =
+                    {
+                            {.name = "X-First", .source = "${$path.id}"},
+                            {.name = "X-Fail", .source = "${broken}"},
+                    },
+    };
+    EvaluatorState state{.failing_expression = "broken"};
+
+    auto result = prepare_response(response, evaluator(state));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().error.name, "TEMPLATE_SCRIPT");
+    EXPECT_TRUE(result.error().inherited_headers.empty());
+}
+
+TEST(ResponsePlanTest, RetainsAllConfiguredHeadersWhenBodyTemplateFails) {
+    CompiledResponseRoute response{
+            .status = 200,
+            .body_kind = ResponseBodyKind::Template,
+            .body = "${broken}",
+            .response_headers =
+                    {
+                            {.name = "X-First", .source = "${$path.id}"},
+                            {.name = "Content-Type", .source = "application/custom"},
+                    },
+    };
+    EvaluatorState state{.failing_expression = "broken"};
+
+    auto result = prepare_response(response, evaluator(state));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().error.name, "TEMPLATE_SCRIPT");
+    ASSERT_EQ(result.error().inherited_headers.size(), 2U);
+    EXPECT_EQ(result.error().inherited_headers[0].name, "X-First");
+    EXPECT_EQ(result.error().inherited_headers[0].value, "42");
+    EXPECT_EQ(result.error().inherited_headers[1].name, "Content-Type");
+    EXPECT_EQ(result.error().inherited_headers[1].value, "application/custom");
+}
+
+TEST(ResponsePlanTest, RetainsOnlyHeadersCommittedBeforeAnInvalidHeader) {
+    CompiledResponseRoute response{
+            .status = 200,
+            .body_kind = ResponseBodyKind::Text,
+            .body = "unreached",
+            .response_headers =
+                    {
+                            {.name = "X-First", .source = "one"},
+                            {.name = "Bad Header", .source = "two"},
+                            {.name = "X-Last", .source = "three"},
+                    },
+    };
+
+    auto result = prepare_response(response, {});
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().error.status, 500);
+    EXPECT_EQ(result.error().error.name, "ACCESS_UNKNOWN_ERROR");
+    ASSERT_EQ(result.error().inherited_headers.size(), 1U);
+    EXPECT_EQ(result.error().inherited_headers[0].name, "X-First");
+}
+
+TEST(ResponsePlanTest, FiltersTheSameProtectedResponseHeadersAsJava) {
+    for (const std::string_view header: {
+                 "Connection",
+                 "content-length",
+                 "Proxy-Connection",
+                 "Keep-Alive",
+                 "Proxy-Authenticate",
+                 "Proxy-Authorization",
+                 "TE",
+                 "Trailer",
+                 "Transfer-Encoding",
+                 "Upgrade",
+         }) {
+        EXPECT_TRUE(is_java_filtered_response_header(header)) << header;
+    }
+    EXPECT_FALSE(is_java_filtered_response_header("Host"));
+    EXPECT_FALSE(is_java_filtered_response_header("Content-Type"));
+}
+
+TEST(ProxyResponsePlanTest, EvaluatesAllHeadersBeforeFilteringEmptyAndProtectedValues) {
+    const std::vector<CompiledTemplateEntry> headers{
+            {.name = "X-First", .source = "${$path.id}"},
+            {.name = "Content-Length", .source = "${$request.method}"},
+            {.name = "X-Empty", .source = "${empty}"},
+            {.name = "X-Last", .source = "static"},
+    };
+    EvaluatorState state;
+
+    auto result = prepare_proxy_response_headers(headers, evaluator(state));
+
+    ASSERT_TRUE(result);
+    ASSERT_EQ(result->size(), 2U);
+    EXPECT_EQ((*result)[0].name, "X-First");
+    EXPECT_EQ((*result)[0].value, "42");
+    EXPECT_EQ((*result)[1].name, "X-Last");
+    EXPECT_EQ((*result)[1].value, "static");
+    EXPECT_EQ(state.expressions, (std::vector<std::string>{"$path.id", "$request.method", "empty"}));
+    EXPECT_TRUE(proxy_response_header_is_configured(headers, "content-length"));
+    EXPECT_TRUE(proxy_response_header_is_configured(headers, "x-empty"));
+    EXPECT_FALSE(proxy_response_header_is_configured(headers, "Location"));
+}
+
+TEST(ProxyResponsePlanTest, RewritesLocationWithJavaAuthorityPrefixSemantics) {
+    auto rewritten = rewrite_java_proxy_location("http://backend/next?q=1", "backend:8080", "https", "api.example.com");
+
+    ASSERT_TRUE(rewritten);
+    EXPECT_EQ(*rewritten, "https://api.example.com/next?q=1");
+    EXPECT_FALSE(rewrite_java_proxy_location("http://other/next", "backend:8080", "https", "api.example.com"));
+
+    auto default_scheme = rewrite_java_proxy_location("custom://backend", "backend:8080", "", "api.example.com");
+    ASSERT_TRUE(default_scheme);
+    EXPECT_EQ(*default_scheme, "http://api.example.com");
+}
+
+TEST(ProxyResponsePlanTest, RewritesOnlyJavaStyleRefreshUrlsAfterAPrefix) {
+    auto rewritten =
+            rewrite_java_proxy_refresh("5;url=http://backend/next", "backend:8080", "https", "api.example.com");
+
+    ASSERT_TRUE(rewritten);
+    EXPECT_EQ(*rewritten, "5;url=https://api.example.com/next");
+    EXPECT_FALSE(rewrite_java_proxy_refresh("url=http://backend/next", "backend:8080", "https", "api.example.com"));
+    EXPECT_FALSE(rewrite_java_proxy_refresh("5;URL=http://backend/next", "backend:8080", "https", "api.example.com"));
+}
+
+TEST(ErrorResponderTest, NegotiatesHtmlOnlyFromTheAcceptPrefix) {
+    EXPECT_TRUE(ErrorResponder::wants_html("text/html"));
+    EXPECT_TRUE(ErrorResponder::wants_html("TEXT/HTML;q=0.8"));
+
+    EXPECT_FALSE(ErrorResponder::wants_html(""));
+    EXPECT_FALSE(ErrorResponder::wants_html("application/json, text/html"));
+    EXPECT_FALSE(ErrorResponder::wants_html(" text/html"));
+    EXPECT_FALSE(ErrorResponder::wants_html("application/xhtml+xml"));
+}
+
+TEST(ErrorResponderTest, RendersExactJavaJsonErrorShape) {
+    const auto rendered = ErrorResponder::render(AccessError::entry_error(), "", "trace-1");
+
+    EXPECT_EQ(rendered.status, 403);
+    EXPECT_EQ(rendered.content_type, "application/json; charset=utf-8");
+    EXPECT_EQ(rendered.body, R"({"name":"ENTRY_ERROR","message":"entry error","meta":null})");
+}
+
+TEST(ErrorResponderTest, RendersExactJavaHtmlErrorPage) {
+    const auto rendered =
+            ErrorResponder::render(AccessError::source_ip_not_allowed(), "text/html,application/json", "trace-1");
+
+    EXPECT_EQ(rendered.status, 403);
+    EXPECT_EQ(rendered.content_type, "text/html");
+    EXPECT_EQ(rendered.body, "<!DOCTYPE html>\n"
+                             "<html lang=\"en\">\n"
+                             "<head>\n"
+                             "    <meta charset=\"UTF-8\">\n"
+                             "    <title>Ploto-Access-Server</title>\n"
+                             "</head>\n"
+                             "<body>\n"
+                             "<div style=\"text-align: center\">\n"
+                             "    <h3>NOT_ALLOW_IP:&nbsp; <span style=\"color: #ff5544\">403</span></h3>\n"
+                             "    <p>source ip is not allowed</p>\n"
+                             "    <h5>traceID: trace-1</h5>\n"
+                             "    <pre></pre>\n"
+                             "</div>\n"
+                             "</body>\n"
+                             "</html>");
+}
+
+} // namespace

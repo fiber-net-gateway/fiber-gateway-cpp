@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -45,11 +46,11 @@ public:
 
     // RuntimeBuilder calls these before each serial compile. Route information is used only for
     // compile-time validation; cached HostCallables never point at this mutable route state.
-    void set_compile_path_vars(const std::vector<std::string> &path_var_names);
+    void set_compile_path_vars(std::span<const std::string> path_var_names);
     void set_http_directives_enabled(bool enabled) noexcept { allow_http_directives_ = enabled; }
 
 private:
-    enum class VarKind : std::uint8_t { Path, Query, Header, Cookie, ReqField, ConnField };
+    enum class VarKind : std::uint8_t { Path, Query, Header, Cookie, Context, ReqField, ConnField };
 
     struct VarRef {
         VarKind kind;
@@ -62,6 +63,7 @@ private:
     static fiber::script::AbiResult query_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
     static fiber::script::AbiResult header_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
     static fiber::script::AbiResult cookie_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
+    static fiber::script::AbiResult context_var_fn(void *userdata, const HostCallFrame &frame) noexcept;
     static fiber::script::AbiResult req_field_fn(void *userdata, const HostCallFrame &frame) noexcept;
     static fiber::script::AbiResult conn_field_fn(void *userdata, const HostCallFrame &frame) noexcept;
 

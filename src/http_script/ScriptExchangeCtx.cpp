@@ -185,12 +185,30 @@ fiber::script::AbiResult ScriptExchangeCtx::lookup_property(fiber::script::GcHea
 
 fiber::script::AbiResult ScriptExchangeCtx::path_var(fiber::script::GcHeap &heap,
                                                      std::string_view name) const noexcept {
+    if (path_var_lookup_) {
+        std::string_view value;
+        if (path_var_lookup_(path_var_lookup_context_, name, value)) {
+            return make_string_value(heap, value);
+        }
+        return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
+    }
     for (const auto &pv: path_vars_) {
         if (pv.first == name) {
             return make_string_value(heap, pv.second);
         }
     }
     // Absent -> null (mirrors Java NullNode; undefined is not JSON-encodable here).
+    return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
+}
+
+fiber::script::AbiResult ScriptExchangeCtx::context_var(fiber::script::GcHeap &heap,
+                                                        std::string_view name) const noexcept {
+    if (context_var_lookup_) {
+        std::string_view value;
+        if (context_var_lookup_(context_var_lookup_context_, name, value)) {
+            return make_string_value(heap, value);
+        }
+    }
     return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
 }
 
