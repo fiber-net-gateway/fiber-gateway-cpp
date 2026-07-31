@@ -14,13 +14,11 @@
 #include <string>
 #include <string_view>
 
-#include <async/Spawn.h>
 #include <async/Task.h>
-#include <async/WaitGroup.h>
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <event/EventLoop.h>
-#include <fiber/nacos/NamingService.h>
+#include <fiber/nacos/discovery/ServiceDiscovery.h>
 
 namespace fiber::access_server {
 
@@ -45,36 +43,31 @@ public:
     [[nodiscard]] ProxyServiceSelector adapter() noexcept;
     [[nodiscard]] RouteSnapshotObserver route_observer() noexcept;
     [[nodiscard]] std::expected<ProxyUpstreamEndpoint, ProxyRequestError>
-    select_endpoint(std::string_view service, std::optional<std::string_view> cluster = std::nullopt) noexcept;
+    select_endpoint(std::string_view service, std::optional<std::string_view> cluster = std::nullopt,
+                    std::span<const std::uint64_t> excluded_selection_tokens = {}) noexcept;
     [[nodiscard]] std::size_t service_count() const noexcept { return entries_.size(); }
     [[nodiscard]] std::uint64_t naming_updates() const noexcept { return naming_updates_; }
     [[nodiscard]] std::uint64_t reconcile_failures() const noexcept { return reconcile_failures_; }
 
 private:
-    struct ServiceSnapshot;
-    struct ServiceState;
-    struct Entry;
     struct Directory;
 
-    [[nodiscard]] static async::DetachedTask run(std::shared_ptr<Entry> entry) noexcept;
     static void route_snapshot_updated(void *context, std::shared_ptr<const AccessRouteSnapshot> snapshot) noexcept;
     [[nodiscard]] static std::expected<ProxyUpstreamEndpoint, ProxyRequestError>
     select(void *context, http::HttpExchange &exchange, std::string_view service,
-           std::optional<std::string_view> cluster) noexcept;
-    static void report(void *context, const ProxyUpstreamEndpoint &endpoint, bool success) noexcept;
-
-    void apply(Entry &entry, const nacos::ServiceInfo &info);
+           std::optional<std::string_view> cluster, std::span<const std::uint64_t> excluded_selection_tokens) noexcept;
+    static void report(void *context, ProxyUpstreamEndpoint &endpoint, bool success) noexcept;
+    static void service_updated(void *context, nacos::LoadBalancer &load_balancer, std::string_view service_name,
+                                std::string_view group, bool first_update, nacos::LoadBalancerUpdateResult result);
     void publish_directory();
-    void request_stop(Entry &entry) noexcept;
     [[nodiscard]] std::shared_ptr<const Directory> load_directory() const noexcept;
     void store_directory(std::shared_ptr<const Directory> directory, std::memory_order order) noexcept;
 
     event::EventLoop *loop_ = nullptr;
-    nacos::NamingService *naming_service_ = nullptr;
     const GrayMatchStore *gray_match_ = nullptr;
     NacosServiceSelectorOptions options_;
-    async::WaitGroup tasks_;
-    std::map<std::string, std::shared_ptr<Entry>, std::less<>> entries_;
+    nacos::ServiceDiscovery discovery_;
+    std::map<std::string, nacos::ServiceDiscovery::Handle, std::less<>> entries_;
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const Directory>> directory_;
 #else

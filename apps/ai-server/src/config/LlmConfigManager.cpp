@@ -24,6 +24,7 @@ namespace fiber::ai_server {
 namespace {
 
 DEFINE_LOGGER(LOG_CONFIG, kAiServerConfigLogger);
+DEFINE_LOGGER(LOG_DISCOVERY, kAiServerDiscoveryLogger);
 
 void log_config_rejection(bool serving_ready, std::string_view data_id, std::string_view md5,
                           const LlmConfigError &error) noexcept {
@@ -180,8 +181,12 @@ class ConfigGraph final : public common::NonCopyable, public common::NonMovable 
 public:
     ConfigGraph(event::EventLoop &loop, nacos::ConfigService &config_service, nacos::NamingService &naming_service) :
         loop_(&loop), config_service_(&config_service),
-        services_(loop, naming_service,
-                  ServiceDiscoveryObserver{.context = this, .on_update = &ConfigGraph::service_updated}),
+        services_(loop, naming_service, ServiceDiscoveryOptions{.require_ip = true},
+                  ServiceDiscoveryObserver{
+                          .context = this,
+                          .on_update = &ConfigGraph::service_updated,
+                          .on_closed = &ConfigGraph::service_closed,
+                  }),
         providers_(this, &ConfigGraph::create_provider_node), groups_(this, &ConfigGraph::create_group_node) {
         snapshot_publisher_ = snapshots_.acquire_publisher();
         FIBER_ASSERT(snapshot_publisher_.has_value());
@@ -233,7 +238,9 @@ public:
     void report_not_found(std::string_view data_id);
 
 private:
-    static void service_updated(void *context, LoadBalancer &service, bool first_update);
+    static void service_updated(void *context, LoadBalancer &service, std::string_view service_name,
+                                std::string_view group, bool first_update, LoadBalancerUpdateResult result);
+    static void service_closed(void *context, std::string_view service_name, std::string_view group);
     [[nodiscard]] static std::expected<std::shared_ptr<ProviderNode>, nacos::ConfigServiceError>
     create_provider_node(void *context, std::string key);
     [[nodiscard]] static std::expected<std::shared_ptr<GroupNode>, nacos::ConfigServiceError>
@@ -924,12 +931,22 @@ void ConfigGraph::on_group_changed(GroupNode &group) {
     }
 }
 
-void ConfigGraph::service_updated(void *context, LoadBalancer &service, bool first_update) {
+void ConfigGraph::service_updated(void *context, LoadBalancer &service, std::string_view service_name,
+                                  std::string_view group, bool first_update, LoadBalancerUpdateResult result) {
     auto &graph = *static_cast<ConfigGraph *>(context);
+    LOG(LOG_DISCOVERY, DEBUG) << "NamingService instances updated service=" << log::quoted(service_name)
+                              << " group=" << log::quoted(group) << " generation=" << service.generation()
+                              << " instances=" << service.configured_instance_count()
+                              << " changed=" << (result == LoadBalancerUpdateResult::Applied);
     graph.accepted_update();
     if (first_update) {
         graph.on_service_initialized(service);
     }
+}
+
+void ConfigGraph::service_closed(void *, std::string_view service_name, std::string_view group) {
+    LOG(LOG_DISCOVERY, WARN) << "NamingService subscription closed service=" << log::quoted(service_name)
+                             << " group=" << log::quoted(group);
 }
 
 void ConfigGraph::on_service_initialized(LoadBalancer &service) {

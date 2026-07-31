@@ -741,10 +741,10 @@ private:
         const fiber::net::IpAddress ip = fiber::net::IpAddress::loopback_v4();
         return DiscoveredInstance{
                 .instance_id = std::move(id),
-                .address = fiber::net::SocketAddress(ip, port),
-                .connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-                        ip, port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
-                .host_header = "127.0.0.1:" + std::to_string(port),
+                .host = "127.0.0.1",
+                .ip_address = ip,
+                .port = port,
+                .authority = "127.0.0.1:" + std::to_string(port),
                 .weight = 1.0,
                 .cluster_name = "primary",
         };
@@ -821,7 +821,7 @@ private:
                 const std::uint64_t key = fiber::ai_server::rendezvous_score(candidate, primary->name);
                 auto selected = primary->service->load_balance(key, {}, LoadBalancer::TimePoint{});
                 FIBER_ASSERT(selected.has_value());
-                const bool selects_failing = selected->address().port() == failing_provider_port;
+                const bool selects_failing = selected->port() == failing_provider_port;
                 primary->service->report(std::move(*selected), InstanceReportOutcome::Neutral,
                                          LoadBalancer::TimePoint{});
                 if (selects_failing) {

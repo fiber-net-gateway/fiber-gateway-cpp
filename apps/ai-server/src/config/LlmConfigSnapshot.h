@@ -1,6 +1,8 @@
 #ifndef FIBER_AI_SERVER_LLM_CONFIG_SNAPSHOT_H
 #define FIBER_AI_SERVER_LLM_CONFIG_SNAPSHOT_H
 
+#include "../discovery/LoadBalancer.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -11,8 +13,6 @@
 #include <vector>
 
 namespace fiber::ai_server {
-
-class LoadBalancer;
 
 inline constexpr std::string_view kLlmConfigGroup = "LLM-SERVER";
 inline constexpr std::string_view kBt1KeysDataId = "ploto.ai-llm.auth.bt1.keys";

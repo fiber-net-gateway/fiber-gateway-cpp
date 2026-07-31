@@ -15,27 +15,28 @@
 
 #include <common/Assert.h>
 
-#include "discovery/LoadBalancer.h"
+#include <fiber/nacos/discovery/ServiceLoadBalancer.h>
 
 namespace {
 
 using namespace std::chrono_literals;
-using fiber::ai_server::DiscoveredInstance;
-using fiber::ai_server::DiscoveredService;
-using fiber::ai_server::InstanceReportOutcome;
-using fiber::ai_server::LoadBalanceError;
-using fiber::ai_server::LoadBalancer;
-using fiber::ai_server::LoadBalancerUpdateResult;
+using fiber::nacos::DiscoveredInstance;
+using fiber::nacos::DiscoveredService;
+using fiber::nacos::InstanceReportOutcome;
+using fiber::nacos::LoadBalanceError;
+using fiber::nacos::LoadBalancer;
+using fiber::nacos::LoadBalancerUpdateResult;
+using fiber::nacos::ServiceInstanceSelection;
 
 DiscoveredInstance make_instance(std::string id, std::string_view address, std::uint16_t port, double weight) {
     fiber::net::IpAddress ip;
     FIBER_ASSERT(fiber::net::IpAddress::parse(address, ip));
     return DiscoveredInstance{
             .instance_id = std::move(id),
-            .address = fiber::net::SocketAddress(ip, port),
-            .connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-                    ip, port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
-            .host_header = std::string(address) + ":" + std::to_string(port),
+            .host = std::string(address),
+            .ip_address = ip,
+            .port = port,
+            .authority = std::string(address) + ":" + std::to_string(port),
             .weight = weight,
             .cluster_name = "primary",
     };
@@ -239,7 +240,8 @@ TEST(LoadBalancerTest, AtomicGenerationReplacementKeepsSelectedInstanceMemoryAli
     EXPECT_EQ(load_balancer.update_instances(make_service("v2", {make_instance("c", "10.0.0.3", 9090, 1.0)})),
               LoadBalancerUpdateResult::Applied);
     EXPECT_EQ(load_balancer.generation(), 2u);
-    EXPECT_EQ(old->address().ip().to_string(), "10.0.0.1");
+    ASSERT_TRUE(old->ip_address());
+    EXPECT_EQ(old->ip_address()->to_string(), "10.0.0.1");
     EXPECT_EQ(old->generation(), 1u);
 
     auto current = load_balancer.load_balance(now);
@@ -248,6 +250,66 @@ TEST(LoadBalancerTest, AtomicGenerationReplacementKeepsSelectedInstanceMemoryAli
     EXPECT_EQ(current->generation(), 2u);
     load_balancer.report(std::move(*old), InstanceReportOutcome::Failure, now);
     load_balancer.report(std::move(*current), InstanceReportOutcome::Success, now);
+}
+
+TEST(LoadBalancerTest, CompletedInstanceKeepsItsGenerationViewsAlive) {
+    LoadBalancer load_balancer;
+    const auto now = LoadBalancer::TimePoint{};
+    EXPECT_EQ(load_balancer.update_instances(make_service("v1", {make_instance("old", "10.0.0.1", 8080, 1.0)})),
+              LoadBalancerUpdateResult::Applied);
+    auto selected = load_balancer.load_balance(now);
+    ASSERT_TRUE(selected);
+    selected->report(InstanceReportOutcome::Success, now);
+    EXPECT_FALSE(selected->pending());
+
+    EXPECT_EQ(load_balancer.update_instances(make_service("v2", {make_instance("new", "10.0.0.2", 9090, 1.0)})),
+              LoadBalancerUpdateResult::Applied);
+    EXPECT_EQ(selected->instance_id(), "old");
+    EXPECT_EQ(selected->authority(), "10.0.0.1:8080");
+    ASSERT_TRUE(selected->ip_address());
+    EXPECT_EQ(selected->ip_address()->to_string(), "10.0.0.1");
+}
+
+TEST(LoadBalancerTest, ClusterSelectionPrefersLocalZoneAndFallsBackAfterCircuitOpens) {
+    LoadBalancer load_balancer(LoadBalancer::Options{
+            .max_fails = 1,
+            .fail_timeout = 10s,
+    });
+    const auto now = LoadBalancer::TimePoint{};
+    DiscoveredInstance local = make_instance("local", "10.0.0.1", 8080, 1.0);
+    local.cluster_name = "sh-default";
+    DiscoveredInstance remote = make_instance("remote", "10.0.0.2", 8080, 1.0);
+    remote.cluster_name = "bj-default";
+    DiscoveredInstance gray = make_instance("gray", "10.0.0.1", 8080, 1.0);
+    gray.cluster_name = "sh-gray";
+    EXPECT_EQ(
+            load_balancer.update_instances(make_service("v1", {std::move(local), std::move(remote), std::move(gray)})),
+            LoadBalancerUpdateResult::Applied);
+    EXPECT_EQ(load_balancer.configured_instance_count(), 3U);
+
+    const ServiceInstanceSelection stable{
+            .cluster = "default",
+            .preferred_zone = "sh",
+    };
+    auto first = load_balancer.load_balance(stable, now);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->instance_id(), "local");
+    first->report(InstanceReportOutcome::Failure, now);
+
+    auto fallback = load_balancer.load_balance(stable, now + 1ms);
+    ASSERT_TRUE(fallback);
+    EXPECT_EQ(fallback->instance_id(), "remote");
+    fallback->report(InstanceReportOutcome::Neutral, now + 1ms);
+
+    auto selected_gray = load_balancer.load_balance(
+            ServiceInstanceSelection{
+                    .cluster = "gray",
+                    .preferred_zone = "sh",
+            },
+            now + 1ms);
+    ASSERT_TRUE(selected_gray);
+    EXPECT_EQ(selected_gray->instance_id(), "gray");
+    selected_gray->report(InstanceReportOutcome::Neutral, now + 1ms);
 }
 
 TEST(LoadBalancerTest, PeerCircuitStateSurvivesInstanceWeightUpdates) {
