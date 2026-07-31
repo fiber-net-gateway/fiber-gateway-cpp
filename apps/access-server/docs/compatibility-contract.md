@@ -322,8 +322,9 @@ C++ handler 将默认值作为启动选项，并允许部署时覆盖；已知 C
 
 本仓库 `RoutePathMatcher` 已通过聚焦用例验证静态段、参数段、wildcard、冲突和
 condition 顺序，并用于 compiled snapshot。条件表达式在候选快照发布前由本地脚本
-adapter 编译为同步程序，请求热路径只执行已编译程序；通用脚本语法兼容仍不属于本次
-迁移门槛。
+adapter 编译为同步程序，请求热路径只执行已编译程序。通用脚本语法兼容仍不属于本次
+迁移门槛，但现网已观察到的有限语法集合必须通过
+[script-corpus-differential.md](script-corpus-differential.md) 的 corpus 差分。
 
 ## 8. 请求前置策略
 
@@ -402,7 +403,9 @@ Upgrade
 模板字面量支持 `\\`、`\$`、`\{`、`\}` 转义，`${expression}` 交给脚本引擎。
 C++ compiled plan 保留该分段/提交语义，并在候选配置发布前将每个 expression 预编译
 为不可变本地程序；condition 使用同一编译边界。编译失败不会替换当前快照，请求阶段
-只做同步执行；这里不承诺通用脚本语法兼容。
+只做同步执行；这里不承诺通用脚本语法兼容。现网使用的 `$context.hi_trace_cluster`
+按 Java 规则执行 ASCII 大小写折叠和 `-/_` 归一化，可读取运行时
+`HI-TRACE-CLUSTER`。
 
 Java 的 `discardReqBody()` 只触发忽略后续请求 body；本仓库现有
 `HttpExchange::discard_body()` 会异步读完 body 后再继续 RESPONSE 执行。两者最终
@@ -646,15 +649,15 @@ message、trace ID 和 null meta；Java 对 message 没有 HTML escaping，C++ �
 - HTML Accept 前缀和遗留 escaping；
 - Jackson 罕见 scalar coercion。
 
-## 14. 待从现网确认
+## 14. 现网确认状态
 
-实现阶段开始前应收集并脱敏：
+condition/template/rewrite 已完成脱敏统计、Java golden 和 C++ 请求级差分，结果见
+[script-corpus-differential.md](script-corpus-differential.md)。其余仍需收集并脱敏：
 
 - 当前项目列表 data ID 是否被覆盖；
 - production 是否覆盖 `ploto.nacos.group`；
 - 所有 Host pattern 和 HostStrategy 组合；
 - RouteItem 字段使用频率及真实 Duration/DataSize 写法；
-- 实际 condition/template/rewrite 脚本 corpus；
 - static address 的 scheme/IPv6/权重格式；
 - `allows` 中 IPv6、deny-only、空列表的使用情况；
 - HTML 错误页是否有调用方依赖；

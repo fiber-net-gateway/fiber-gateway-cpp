@@ -53,6 +53,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServerConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/GrayConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/NacosServiceSelectorTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/ProductionScriptCorpusTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProjectRouteSnapshotTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProxyRequestSenderTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ResponseExecutionTest.cpp"

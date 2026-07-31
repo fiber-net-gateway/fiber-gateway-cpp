@@ -469,6 +469,48 @@ TEST(AccessRequestHandlerTest, ExecutesPrecompiledLocalConditionAndTemplates) {
     EXPECT_EQ(response_body(fallback_response), "fallback");
 }
 
+TEST(AccessRequestHandlerTest, MatchesProductionConditionAndTemplateCorpus) {
+    AccessScriptRuntime scripts;
+    RouteConfig conditional =
+            response_route("/corpus/*tail",
+                           "tail=${$path.tail};host=${$header.host};host_case=${$header.Host};"
+                           "header_default=${$header.hi_trace_cluster || 'stable'};"
+                           "context=${$context.hi_trace_cluster || 'stable'};"
+                           "cookie=${$cookie.cluster || 'stable'};query=${$query.redirect};"
+                           "request_path=${$req.path};request_query=${$req.query};request_method=${$req.method};"
+                           "origin=${$header.origin};forwarded_for=${$header.proxy_add_x_forwarded_for};"
+                           "remote_addr=${$header.remote_addr}",
+                           203);
+    conditional.condition = "$header.hi_trace_cluster == 'header-blue' && $header.connection == 'close' && "
+                            "$header.x_entry != 'internet' && $req.method == 'GET' && "
+                            "strings.hasPrefix($path.tail, 'segment') && rand.random(1) <= 0";
+    RouteConfig fallback = response_route("/corpus/*tail", "fallback");
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(conditional), std::move(fallback)}));
+
+    AccessRequestHandlerOptions options;
+    options.test_mode = true;
+    const std::string response = run_request(store,
+                                             "GET /corpus/segment/rest?redirect=%2Fnext HTTP/1.1\r\n"
+                                             "Host: api_context-blue.example.com\r\n"
+                                             "HI-TRACE-CLUSTER: header-blue\r\n"
+                                             "X-Entry: desktop\r\n"
+                                             "Origin: https://origin.example.test\r\n"
+                                             "Proxy-Add-X-Forwarded-For: 192.0.2.20\r\n"
+                                             "Remote-Addr: 192.0.2.10\r\n"
+                                             "Cookie: cluster=cookie-blue\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter(), options);
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 203 "));
+    EXPECT_EQ(response_body(response),
+              "tail=segment/rest;host=api_context-blue.example.com;host_case=api_context-blue.example.com;"
+              "header_default=header-blue;context=context-blue;cookie=cookie-blue;query=/next;"
+              "request_path=/corpus/segment/rest;request_query=redirect=%2Fnext;request_method=GET;"
+              "origin=https://origin.example.test;forwarded_for=192.0.2.20;remote_addr=192.0.2.10");
+}
+
 TEST(AccessRequestHandlerTest, ReturnsJavaHostEntryPathAndCidrErrors) {
     HostStrategyConfig strategy;
     strategy.net_mask = fiber::access_server::kNetVdi;
@@ -785,6 +827,34 @@ TEST(AccessRequestHandlerTest, AppliesJavaRewriteFallbackAndChunkedRequestBodyPl
                                               {}, {}, proxy_adapter(capture));
     EXPECT_TRUE(preserved.starts_with("HTTP/1.1 200 OK\r\n"));
     EXPECT_EQ(capture.request_target, "/preserve/a%2Fb?x=%23");
+}
+
+TEST(AccessRequestHandlerTest, MatchesProductionRewriteCorpus) {
+    AccessScriptRuntime scripts;
+    RouteConfig wildcard = proxy_route("/rewrite/*tail");
+    wildcard.rewrite = "/v2/${$path.tail}";
+    RouteConfig request_path = proxy_route("/request-path/*tail");
+    request_path.rewrite = "${$req.path}";
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(wildcard), std::move(request_path)}));
+
+    CapturedProxyRequest capture;
+    const std::string wildcard_response = run_request(store,
+                                                      "GET /rewrite/segment/rest?x=%2F HTTP/1.1\r\n"
+                                                      "Host: api.example.com\r\n"
+                                                      "Connection: close\r\n\r\n",
+                                                      scripts.request_adapter(), {}, proxy_adapter(capture));
+    EXPECT_TRUE(wildcard_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(capture.request_target, "/v2/segment/rest?x=%2F");
+
+    const std::string request_path_response = run_request(store,
+                                                          "GET /request-path/segment/rest?x=%2F HTTP/1.1\r\n"
+                                                          "Host: api.example.com\r\n"
+                                                          "Connection: close\r\n\r\n",
+                                                          scripts.request_adapter(), {}, proxy_adapter(capture));
+    EXPECT_TRUE(request_path_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(capture.request_target, "/request-path/segment/rest?x=%2F");
 }
 
 TEST(AccessRequestHandlerTest, EnablesWebsocketOnlyForJavaExactUpgradeHeaders) {
