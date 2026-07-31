@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "future_field": {
+    "nested": [
+      1,
+      2,
+      3
+    ]
+  },
+  "version": "3",
+  "host": {
+    "coerce.example.com": {
+      "https": "S_302",
+      "net": "S_VDI,S_OFFICE",
+      "future_strategy": true
+    }
+  },
+  "routes": [
+    {
+      "path": 7,
+      "type": "RESPONSE",
+      "status": "201",
+      "flush": "true",
+      "timeout": "300S",
+      "websocket_timeout": 250,
+      "max_client_body_size": -1,
+      "max_proxy_body_size": "10M",
+      "addresses": [
+        "127.0.0.1:8080",
+        "127.0.0.1:8080",
+        null
+      ],
+      "response_headers": {
+        "X-Numeric": 5,
+        "X-Null": null,
+        "X-Numeric": 6
+      },
+      "body": {
+        "type": "TEXT",
+        "content": "coerced"
+      },
+      "future_route_field": false
+    }
+  ]
+}

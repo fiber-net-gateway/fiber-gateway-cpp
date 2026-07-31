@@ -10,12 +10,73 @@
 
 ## 当前状态
 
-当前仅完成应用脚手架：
+当前完成应用脚手架、项目配置 codec、Host/Path 不可变路由快照、RESPONSE 执行内核，
+以及 PROXY 请求、普通响应和 WebSocket 101 tunnel：
 
 - CMake 已注册 `fiber_app_access_server`，产物名为 `access-server`；
+- 已建立 `access_server_core` 和 `fiber_access_server_tests`；
+- 已实现项目列表、`ProjectConf`、`HostStrategy`、`RouteItem`、Duration/DataSize 的
+  Java 兼容解码；
+- 已实现 route build-time 校验、CIDR/address 编译、RESPONSE body 预解码和
+  service/cluster 上游计划；
+- 已实现 Java 兼容 Host 校验与 exact/wildcard 匹配，并直接复用本仓库
+  `RoutePathMatcher` 完成 Path/条件路由选择；
+- 已实现跨项目全局 Host 树、候选构建失败保旧、同 version 忽略、Host 为空卸载，
+  以及请求对旧不可变快照的 pin；
+- 已实现 RESPONSE 的 TEXT/BASE64/TEMPLATE/空 body、受保护响应头过滤、header/body
+  模板分阶段提交和统一 JSON/HTML 错误结果；
+- 已实现可直接交给本地 HTTP server 的请求 handler，完成快照 pin、Host/Path/条件
+  路由、X-Entry、HTTPS redirect、CIDR、request body limit 和 RESPONSE 串联；
+- 已将 PROXY 接入同一 live handler，并实现 service/cluster/addresses、method、
+  URI/rewrite/query、Java 固定 header 过滤、proxy/context/source header、body framing/
+  limit、timeout、flush 和 WebSocket 请求条件的请求计划；
+- 已实现基于 `LocalHttp1ConnectionPoolSet`/`ClientHttp1Exchange` 的
+  `ProxyRequestSender`：静态地址或 service selector、DNS adapter、多地址连接、
+  header/body 流式发送、动态 body limit、Java request timeout、连接前失败重选和
+  move-only upstream response 所有权；
+- 已实现普通 upstream response bridge：status/reason/header/body、Java 固定
+  hop-by-hop 过滤、自定义响应头模板、Content-Length 特殊恢复、Location/Refresh
+  回写、flush 和已知/动态 response body limit；
+- 已实现 response header/body 等待期间的 downstream close 竞速、upstream 提前结束
+  处理，以及 WebSocket 101 的双向 raw tunnel；101 不经过普通 HTTP body 完成路径；
+- 真实 loopback upstream 已覆盖 chunked/Content-Length wire 请求、默认 Host/source
+  header、body 字节、service 重选、同一 TCP 连接复用、响应头改写/覆盖、双方提前关闭
+  和 WebSocket 双向字节；
+- condition 和 `${...}` expression 已在候选快照发布前交给本地 C++ 脚本引擎预编译，
+  请求只同步执行不可变程序；支持 `$path/$query/$header/$cookie/$req/$context`，
+  编译失败保留上一版配置，通用 Java 脚本兼容不属于本次迁移范围；
+- Java golden fixtures 已覆盖未知字段、重复字段、null、标量转型和主要配置字段；
+- 已实现 owner-loop Nacos 配置图：项目列表驱动逐项目订阅增删，空/同 version/非法
+  更新保留当前路由，列表移除卸载项目，shutdown 等待全部 listener 关闭；
+- 已实现 production gray 配置 codec、失败保旧的原子规则快照，以及 CIDR/ratio 对
+  NamingService cluster 的覆盖；`context.cluster` 同样会覆盖 route 默认 cluster；
+- 已实现 NamingService route 依赖协调、健康/权重/zone/cluster 过滤、不可变服务目录、
+  discovery generation pin，以及基于本地 `DnsResolver` 的 sender adapter；
 - 已建立兼容边界、详细配置/请求契约和分阶段验收清单；
-- 尚未实现 HTTP listener、Nacos 配置订阅、Host/Path 路由、代理或监控；
-- 当前二进制会明确报告迁移尚未完成并返回非零状态，不能用于部署。
+- 已实现 `AccessServerRuntime`：启动 Nacos client/config/naming，建立 project/gray
+  watcher 和 NamingService selector，在每个 HTTP worker 初始化 DNS resolver 与本地
+  connection pool，并在收到项目列表首值后才绑定 listener；
+- `main` 已装配 SIGINT/SIGTERM、accept loop、HTTP worker group、CAT sender loop、
+  Nacos owner loop 和逆序关闭；关闭顺序为 metrics/业务 listener 与 active exchange、
+  指标采集和 CAT worker 上下文、connection pool/DNS、CAT client、配置和服务订阅、
+  NamingService、ConfigService、NacosClient；
+- 已通过真实 rnacos 验证启动、项目/路由首值、version 热更新和 SIGTERM 退出，并通过
+  loopback listener 测试验证 HTTP worker 资源关闭；
+- 已实现 Java 测试环境 Host cluster 入口规则：`api_gray.example.com` 以
+  `api.example.com` 路由，`gray` 作为请求 cluster，并向上游传递
+  `ploto-origin-host`；无 Host cluster 时读取 `HI-TRACE-CLUSTER`；
+- 已接入本地 CAT request tree：继续入站 `HI-TRACE-ID`/`HI-SPAN-ID-PARENT`/
+  `HI-SPAN-ID`，响应写回 `Hi-Trace-Id`，代理调用生成下一 span；根事务采用 Java
+  `URL` 类型和 `<project><route-pattern>` 名称，并记录 project、route、cluster、
+  upstream、稳定错误名和最终响应状态；
+- 已接入独立 Prometheus listener，默认 `0.0.0.0:16689`，请求完成计数、inflight
+  和 duration 全部使用 worker 预绑定的固定 schema；动态 project/route/cluster
+  不作为指标 label，避免测试 header 或热更新配置形成无限时序；
+- 已接入共享异步 logging 生命周期，访问日志在 `access_server.access` 以结构化
+  key/value 输出 trace、请求、路由、上游、结果、耗时和字节数；队列满时丢弃新日志，
+  不反向影响请求执行；
+- 现网脚本 corpus 差分和阶段 8 全量差分尚未完成；当前二进制可用于继续联调，但尚不
+  满足生产切流条件。
 
 首个迁移基线为 `ploto-gateway` commit
 `22c2bf543b96b52c0ccecd4ceb07d4911c502f45`。后续若 Java 基线发生变化，应先更新
@@ -26,6 +87,8 @@
 ```bash
 cmake -S . -B build -DFIBER_BUILD_APPS=ON
 cmake --build build --target fiber_app_access_server
+cmake --build build --target fiber_access_server_tests
+./build/apps-build/access-server/fiber_access_server_tests
 ```
 
 产物位于：
@@ -36,18 +99,53 @@ build/apps/access-server
 
 ## 运行
 
-当前只提供脚手架状态说明：
+复制示例配置并至少修改 Nacos 地址：
 
 ```bash
-./build/apps/access-server --help
+cp apps/access-server/access-server.env.example access-server.env
+./build/apps/access-server access-server.env
 ```
 
-不带参数启动会返回失败，防止尚未实现的程序被误认为可用服务。
+不传参数时默认读取当前目录的 `access-server.env`。`--help` 只打印命令行用法。
+
+Java 兼容的进程默认值是：
+
+- HTTP 监听 `0.0.0.0:16688`；
+- Prometheus 监听 `0.0.0.0:16689`；
+- 默认 request body 上限 400 MiB；
+- 项目列表 `ploto.unified-access.projects`，route 前缀
+  `ploto.unified-access.route.`，group `ACCESS-SERVER`；
+- gray data ID `ploto.unified-access.gray-match`；
+- Naming/gray group `DEFAULT_GROUP`，默认 cluster `default`。
+- 测试环境 Host cluster 模式默认关闭；仅在明确配置
+  `ACCESS_SERVER_TEST_MODE=true` 时启用。
+
+完整键和值示例见 [`access-server.env.example`](access-server.env.example)。配置文件采用
+严格的 `KEY=VALUE` 行格式，空行和以 `#` 开头的注释会忽略；重复键和未知键会使进程
+启动失败。`NACOS_SERVER_ADDRESSES` 当前要求逗号分隔的 IP literal。
+CAT 默认关闭；任一 `CAT_*` 设置非空后必须给出完整 app key、hostname、IP，以及
+至少一个 router 或 bootstrap collector。CAT 不可用会在启动阶段 fail closed，不会
+静默退化为无 trace 的生产实例。
+
+listener 只在 Nacos client/config/naming、两类 watcher 和项目列表首值就绪后开放；
+若项目列表不存在，服务会等待到
+`ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS` 后失败退出。某个项目的 route 配置尚未
+到达或不可用时不会开放对应 Host/Path，请求仍按现有稳定错误结果 fail closed。
 
 ## 目录
 
 - `CMakeLists.txt`：应用目标和后续应用内静态库、测试的构建入口；
-- `src/main.cpp`：当前占位入口，后续只保留进程级装配和生命周期管理；
+- `src/main.cpp`：进程配置、loop group、信号和有序关闭；
+- `src/config/`：统一接入配置 wire model 和 Java 兼容 codec；
+- `src/routing/`：compiled model、CIDR、Host/Path matcher 和全局不可变快照；
+- `src/execution/`：live request handler、RESPONSE 计划/执行、PROXY 请求计划与执行器
+  边界、模板适配边界和统一错误响应；
+- `src/observability/`：请求 CAT 上下文、固定 schema Prometheus 指标和 logging
+  category；
+- `src/runtime/`：本地脚本 runtime、候选快照编译/原子发布、Nacos 配置 watcher、
+  production gray、NamingService selector、per-worker DNS/pool、HTTP server 和进程
+  runtime；
+- `tests/`：access-server 聚焦测试和 Java golden fixtures；
 - `docs/migration-plan.md`：范围边界、C++ 模块划分、工作包和阶段门槛；
 - `docs/compatibility-contract.md`：配置字段、热更新和 HTTP 请求执行的 Java 契约。
 
@@ -63,7 +161,7 @@ build/apps/access-server
 - 热路径遵循本仓库的内存与异步约束，不按 Java 对象模型逐类机械翻译；
 - 不把通用脚本语法、connection pool 算法或监控客户端内部行为纳入迁移验收；
 - 每一阶段先增加聚焦测试，再接入下一层运行时依赖；
-- 可执行文件在具备最小端到端能力之前持续 fail closed。
+- 缺失或无效的控制面数据不得产生可用路由；切流前仍需完成阶段 7/8 的观测和差分门槛。
 
 详细范围与阶段见 [`docs/migration-plan.md`](docs/migration-plan.md)，字段和请求契约见
 [`docs/compatibility-contract.md`](docs/compatibility-contract.md)。

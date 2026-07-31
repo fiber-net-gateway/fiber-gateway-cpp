@@ -46,7 +46,7 @@ fiber::async::Task<ScriptResult> Script::exec_async(fiber::script::JsValue root,
     co_return vm.result();
 }
 
-ScriptResult Script::exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap) {
+ScriptResult Script::exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap) const {
     if (!compiled_) {
         return ScriptResult::abort(ScriptAbortReason::InvalidState);
     }
@@ -63,6 +63,6 @@ ScriptResult Script::exec_sync(fiber::script::JsValue root, void *attach, fiber:
     return vm.result();
 }
 
-bool Script::contains_async() const { return compiled_ && compiled_->contains_async(); }
+bool Script::contains_async() const noexcept { return compiled_ && compiled_->contains_async(); }
 
 } // namespace fiber::script

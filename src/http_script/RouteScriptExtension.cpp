@@ -91,6 +91,15 @@ AbiResult RouteScriptExtension::cookie_var_fn(void *userdata, const HostCallFram
     return ctx->cookie_var(frame.runtime, ref->name);
 }
 
+AbiResult RouteScriptExtension::context_var_fn(void *userdata, const HostCallFrame &frame) noexcept {
+    auto *ref = static_cast<const VarRef *>(userdata);
+    auto *ctx = ctx_of(frame);
+    if (ref == nullptr || ctx == nullptr) {
+        return AbiResult::abort(ScriptAbortReason::InvalidState);
+    }
+    return ctx->context_var(frame.runtime, ref->name);
+}
+
 AbiResult RouteScriptExtension::req_field_fn(void *userdata, const HostCallFrame &frame) noexcept {
     auto *ref = static_cast<const VarRef *>(userdata);
     auto *ctx = ctx_of(frame);
@@ -117,7 +126,7 @@ const fiber::script::std_lib::StdLibrary::ExtOps &RouteScriptExtension::ops() no
     return kOps;
 }
 
-void RouteScriptExtension::set_compile_path_vars(const std::vector<std::string> &path_var_names) {
+void RouteScriptExtension::set_compile_path_vars(std::span<const std::string> path_var_names) {
     current_path_var_names_.clear();
     current_path_var_names_.reserve(path_var_names.size());
     current_path_var_names_.insert(path_var_names.begin(), path_var_names.end());
@@ -179,6 +188,9 @@ const RouteScriptExtension::HostCallable *RouteScriptExtension::resolve_constant
     if (namespace_name == "$cookie") {
         return get_or_create(VarKind::Cookie, namespace_name, key);
     }
+    if (namespace_name == "$context") {
+        return get_or_create(VarKind::Context, namespace_name, key);
+    }
     if (namespace_name == "$req") {
         // Compile-time existence check: fixed field set.
         if (key != "uri" && key != "method" && key != "path" && key != "query") {
@@ -230,6 +242,10 @@ RouteScriptExtension::get_or_create(VarKind kind, std::string_view namespace_nam
         case VarKind::Cookie:
             callable.constant = &RouteScriptExtension::cookie_var_fn;
             callable.debug_name = "$cookie";
+            break;
+        case VarKind::Context:
+            callable.constant = &RouteScriptExtension::context_var_fn;
+            callable.debug_name = "$context";
             break;
         case VarKind::ReqField:
             callable.constant = &RouteScriptExtension::req_field_fn;

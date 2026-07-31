@@ -1,0 +1,58 @@
+{
+  "version": 12,
+  "host": {
+    "api.example.com": {
+      "https": "S_301",
+      "net": "S_VDI,S_OFFICE"
+    },
+    "*.example.net": {
+      "https": "S_NOT_MUST",
+      "net": "S_INTERNET"
+    }
+  },
+  "routes": [
+    {
+      "path": "/v1/items/:id",
+      "type": "PROXY",
+      "service": "item-service/gray",
+      "cluster": "stable",
+      "addresses": [
+        "127.0.0.1:8080",
+        "127.0.0.1:8080"
+      ],
+      "condition": "$req.method === 'GET'",
+      "proxy_headers": {
+        "X-Project": "items",
+        "X-Optional": null
+      },
+      "response_headers": {
+        "X-Route": "${$path.id}"
+      },
+      "context": {
+        "cluster": "stable"
+      },
+      "rewrite": "/internal/${$path.id}",
+      "timeout": "300S",
+      "max_client_body_size": "100k",
+      "max_proxy_body_size": "10M",
+      "websocket_timeout": "300ms",
+      "flush": true,
+      "allows": [
+        "10.0.0.0/8",
+        "!10.1.0.0/16"
+      ]
+    },
+    {
+      "path": "/health",
+      "type": "RESPONSE",
+      "status": 201,
+      "body": {
+        "type": "TEXT",
+        "content": "ok"
+      },
+      "response_headers": {
+        "Content-Type": "text/plain"
+      }
+    }
+  ]
+}

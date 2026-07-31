@@ -19,9 +19,9 @@ public:
 
     fiber::async::Task<ScriptResult> exec_async(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap);
 
-    ScriptResult exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap);
+    ScriptResult exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap) const;
 
-    bool contains_async() const;
+    [[nodiscard]] bool contains_async() const noexcept;
 
 private:
     std::shared_ptr<ir::Compiled> compiled_;

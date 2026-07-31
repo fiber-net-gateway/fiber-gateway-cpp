@@ -1,0 +1,832 @@
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstring>
+#include <future>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "../../../tests/HttpTransportStub.h"
+#include "async/Spawn.h"
+#include "event/EventLoopGroup.h"
+#include "execution/AccessRequestHandler.h"
+#include "http/Http1Connection.h"
+#include "http/HttpBodySpec.h"
+#include "http/HttpHeaderHash.h"
+#include "runtime/AccessScriptRuntime.h"
+
+namespace {
+
+using namespace std::chrono_literals;
+
+using fiber::access_server::AccessError;
+using fiber::access_server::AccessProxyAdapter;
+using fiber::access_server::AccessRequestHandler;
+using fiber::access_server::AccessRequestHandlerOptions;
+using fiber::access_server::AccessRequestScriptAdapter;
+using fiber::access_server::AccessScriptRuntime;
+using fiber::access_server::BodyType;
+using fiber::access_server::HostConfigEntry;
+using fiber::access_server::HostStrategyConfig;
+using fiber::access_server::HttpsStrategy;
+using fiber::access_server::PathVariable;
+using fiber::access_server::PreparedProxyRequest;
+using fiber::access_server::ProjectConfig;
+using fiber::access_server::ProxyUpstreamKind;
+using fiber::access_server::RouteBodyConfig;
+using fiber::access_server::RouteConfig;
+using fiber::access_server::RouteConfigStore;
+using fiber::access_server::RouteType;
+using fiber::access_server::StringConfigEntry;
+
+class RecordingTransport final : public fiber::test::HttpTransportStub {
+public:
+    RecordingTransport(fiber::event::EventLoop &loop, std::string input, std::string &output) :
+        loop_(loop), input_(std::move(input)), output_(output) {}
+
+    fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
+        co_return fiber::common::IoResult<void>{};
+    }
+
+    fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
+        co_return fiber::common::IoResult<void>{};
+    }
+
+    fiber::async::Task<fiber::common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
+        co_return fiber::common::IoResult<void>{};
+    }
+
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> read(void *, std::size_t,
+                                                                  std::chrono::milliseconds) override {
+        co_return static_cast<std::size_t>(0);
+    }
+
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> read_into(fiber::mem::IoBuf &buffer,
+                                                                       std::chrono::milliseconds) override {
+        if (input_consumed_) {
+            co_return static_cast<std::size_t>(0);
+        }
+        if (buffer.writable() < input_.size()) {
+            co_return std::unexpected(fiber::common::IoErr::MessageTooLarge);
+        }
+        std::memcpy(buffer.writable_data(), input_.data(), input_.size());
+        buffer.commit(input_.size());
+        input_consumed_ = true;
+        co_return input_.size();
+    }
+
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> readv_into(fiber::mem::IoBufChain &,
+                                                                        std::chrono::milliseconds) override {
+        co_return std::unexpected(fiber::common::IoErr::NotSupported);
+    }
+
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> write(const void *buffer, std::size_t size,
+                                                                   std::chrono::milliseconds) override {
+        output_.append(static_cast<const char *>(buffer), size);
+        co_return size;
+    }
+
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> write(fiber::mem::IoBuf &buffer,
+                                                                   std::chrono::milliseconds) override {
+        const std::size_t size = buffer.readable();
+        output_.append(reinterpret_cast<const char *>(buffer.readable_data()), size);
+        buffer.consume(size);
+        co_return size;
+    }
+
+    fiber::async::Task<fiber::common::IoResult<std::size_t>> writev(fiber::mem::IoBufChain &buffers,
+                                                                    std::chrono::milliseconds) override {
+        std::array<iovec, 16> iov{};
+        const int count = buffers.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+        std::size_t size = 0;
+        for (int i = 0; i < count; ++i) {
+            const auto &entry = iov[static_cast<std::size_t>(i)];
+            output_.append(static_cast<const char *>(entry.iov_base), entry.iov_len);
+            size += entry.iov_len;
+        }
+        buffers.consume_and_compact(size);
+        co_return size;
+    }
+
+    void close() override { closed_ = true; }
+    [[nodiscard]] bool valid() const noexcept override { return !closed_; }
+    [[nodiscard]] int fd() const noexcept override { return -1; }
+    [[nodiscard]] std::string_view negotiated_alpn() const noexcept override { return {}; }
+    [[nodiscard]] const fiber::net::SocketAddress &remote_addr() const noexcept override { return remote_addr_; }
+    [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_; }
+
+private:
+    fiber::event::EventLoop &loop_;
+    std::string input_;
+    std::string &output_;
+    fiber::net::SocketAddress remote_addr_{};
+    bool input_consumed_ = false;
+    bool closed_ = false;
+};
+
+fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, const RouteConfigStore *store,
+                                               AccessRequestScriptAdapter script_adapter,
+                                               AccessRequestHandlerOptions options, AccessProxyAdapter proxy_adapter,
+                                               std::string request, std::string *output, std::promise<void> *done) {
+    auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output);
+    AccessRequestHandler access_handler(*store, script_adapter, options, proxy_adapter);
+    fiber::http::HttpHandler handler = [&access_handler](fiber::http::HttpExchange &exchange) {
+        return access_handler.handle(exchange);
+    };
+    fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+    co_await connection.run();
+    done->set_value();
+    co_return;
+}
+
+fiber::async::DetachedTask run_committed_response_on_loop(fiber::event::EventLoop *loop, std::string *output,
+                                                          std::promise<void> *done) {
+    auto transport = std::make_unique<RecordingTransport>(*loop,
+                                                          "GET /committed HTTP/1.1\r\n"
+                                                          "Host: api.example.com\r\n"
+                                                          "Connection: close\r\n\r\n",
+                                                          *output);
+    fiber::http::HttpHandler handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        auto sent = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 204,
+                .body = fiber::http::HttpBodySpec::ContentLength(0),
+                .end_stream = true,
+        });
+        if (sent) {
+            fiber::access_server::ErrorResponder responder;
+            (void) co_await responder.send(exchange, AccessError::entry_error(), {}, {}, "trace", true);
+        }
+        co_return;
+    };
+    fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+    co_await connection.run();
+    done->set_value();
+    co_return;
+}
+
+std::string run_request(const RouteConfigStore &store, std::string request,
+                        AccessRequestScriptAdapter script_adapter = {}, AccessRequestHandlerOptions options = {},
+                        AccessProxyAdapter proxy_adapter = {}) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::string output;
+    std::promise<void> done;
+    auto completed = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_request_on_loop(&group.at(0), &store, script_adapter, options, proxy_adapter, std::move(request),
+                                   &output, &done);
+    });
+
+    EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+    return output;
+}
+
+std::string run_committed_response() {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::string output;
+    std::promise<void> done;
+    auto completed = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return run_committed_response_on_loop(&group.at(0), &output, &done); });
+
+    EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+    return output;
+}
+
+std::string_view response_body(std::string_view response) {
+    const std::size_t separator = response.find("\r\n\r\n");
+    if (separator == std::string_view::npos) {
+        return {};
+    }
+    return response.substr(separator + 4);
+}
+
+HostConfigEntry host(std::string pattern, HostStrategyConfig strategy = {}) {
+    return HostConfigEntry{
+            .pattern = std::move(pattern),
+            .strategy = strategy,
+    };
+}
+
+RouteConfig response_route(std::string path, std::string body, std::int32_t status = 200) {
+    RouteConfig route;
+    route.path = std::move(path);
+    route.type = RouteType::Response;
+    route.status = status;
+    route.body = RouteBodyConfig{
+            .type = BodyType::Template,
+            .content = std::move(body),
+    };
+    return route;
+}
+
+RouteConfig proxy_route(std::string path, std::string service = "orders/gray") {
+    RouteConfig route;
+    route.path = std::move(path);
+    route.service = std::move(service);
+    return route;
+}
+
+ProjectConfig project(HostStrategyConfig strategy, std::vector<std::optional<RouteConfig>> routes) {
+    ProjectConfig config;
+    config.version = 1;
+    config.hosts = std::vector<HostConfigEntry>{host("api.example.com", strategy)};
+    config.routes = std::move(routes);
+    return config;
+}
+
+void publish(RouteConfigStore &store, ProjectConfig config) {
+    auto result = store.apply("orders", config);
+    ASSERT_TRUE(result) << result.error().message;
+}
+
+bool evaluate_condition(void *, fiber::http::HttpExchange &, std::span<const PathVariable> path_variables,
+                        std::string_view, const void *, std::string_view expression) noexcept {
+    return expression == "id-is-42" && path_variables.size() == 1 && path_variables[0].value == "42";
+}
+
+bool evaluate_template(void *, fiber::http::HttpExchange &exchange, std::span<const PathVariable> path_variables,
+                       std::string_view, const void *, std::string_view expression, std::string &output,
+                       AccessError &error) noexcept {
+    if (expression == "fail") {
+        error = AccessError::template_script("fixture failure");
+        return false;
+    }
+    if (expression == "$request.method") {
+        output.assign(exchange.method_view());
+        return true;
+    }
+    if (expression == "$path.id" && path_variables.size() == 1) {
+        output.assign(path_variables[0].value);
+        return true;
+    }
+    output.clear();
+    return true;
+}
+
+AccessRequestScriptAdapter script_adapter() {
+    return AccessRequestScriptAdapter{
+            .evaluate_condition = evaluate_condition,
+            .evaluate_template = evaluate_template,
+    };
+}
+
+struct CapturedProxyRequest {
+    ProxyUpstreamKind upstream_kind = ProxyUpstreamKind::Service;
+    std::string service;
+    std::optional<std::string> cluster;
+    std::optional<std::string> context_cluster;
+    std::vector<std::string> addresses;
+    fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
+    std::string request_target;
+    std::vector<fiber::access_server::EvaluatedHeader> headers;
+    std::vector<fiber::access_server::EvaluatedHeader> context;
+    fiber::http::HttpBodySpec body = fiber::http::HttpBodySpec::None();
+    std::string received_body;
+    std::size_t max_request_body_size = 0;
+    std::int32_t timeout_millis = 0;
+    std::optional<std::uint64_t> max_response_body_size;
+    std::int32_t websocket_timeout_millis = 0;
+    bool websocket_upgrade = false;
+    bool flush = false;
+};
+
+const fiber::access_server::EvaluatedHeader *
+find_header(const std::vector<fiber::access_server::EvaluatedHeader> &headers, std::string_view name,
+            std::size_t occurrence = 0) {
+    for (const auto &header: headers) {
+        if (fiber::http::http_header_name_equals_ci(header.name, name)) {
+            if (occurrence == 0) {
+                return &header;
+            }
+            --occurrence;
+        }
+    }
+    return nullptr;
+}
+
+std::size_t count_header(const std::vector<fiber::access_server::EvaluatedHeader> &headers, std::string_view name) {
+    return static_cast<std::size_t>(std::count_if(headers.begin(), headers.end(), [&](const auto &header) {
+        return fiber::http::http_header_name_equals_ci(header.name, name);
+    }));
+}
+
+fiber::async::Task<fiber::common::IoResult<void>>
+capture_proxy_request(void *context, fiber::http::HttpExchange &exchange, const PreparedProxyRequest &request,
+                      std::span<const fiber::access_server::EvaluatedHeader> base_headers,
+                      fiber::access_server::AccessRequestTelemetry *) noexcept {
+    auto &capture = *static_cast<CapturedProxyRequest *>(context);
+    capture.upstream_kind = request.upstream_kind;
+    capture.service.assign(request.service);
+    if (request.cluster) {
+        capture.cluster = std::string(*request.cluster);
+    } else {
+        capture.cluster.reset();
+    }
+    capture.context_cluster = request.context_cluster;
+    capture.addresses.clear();
+    capture.addresses.reserve(request.addresses.size());
+    for (const fiber::access_server::CompiledProxyAddress &address: request.addresses) {
+        capture.addresses.push_back(address.host_header);
+    }
+    capture.method = request.method;
+    capture.request_target = request.request_target;
+    capture.headers = request.headers;
+    capture.context = request.context;
+    capture.body = request.body;
+    capture.max_request_body_size = request.max_request_body_size;
+    capture.timeout_millis = request.timeout_millis;
+    capture.max_response_body_size = request.max_response_body_size;
+    capture.websocket_timeout_millis = request.websocket_timeout_millis;
+    capture.websocket_upgrade = request.websocket_upgrade;
+    capture.flush = request.flush;
+    capture.received_body.clear();
+
+    if (!exchange.request_body_spec().is_none()) {
+        for (;;) {
+            auto body = co_await exchange.read_body(64 * 1024);
+            if (!body) {
+                co_return std::unexpected(body.error());
+            }
+            const bool complete = body->complete();
+            while (const fiber::mem::IoBuf *part = body->first_readable()) {
+                capture.received_body.append(reinterpret_cast<const char *>(part->readable_data()), part->readable());
+                body->consume_and_compact(part->readable());
+            }
+            if (complete) {
+                break;
+            }
+        }
+    }
+
+    constexpr std::string_view kBody = "proxied";
+    fiber::http::HttpHeaders response_headers(exchange.pool());
+    for (const auto &header: base_headers) {
+        if (!response_headers.set(header.name, header.value)) {
+            co_return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+    }
+    if (!response_headers.set("X-Proxy-Fixture", "captured")) {
+        co_return std::unexpected(fiber::common::IoErr::NoMem);
+    }
+    auto sent_header = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 200,
+            .headers = &response_headers,
+            .body = fiber::http::HttpBodySpec::ContentLength(kBody.size()),
+            .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+            .end_stream = false,
+    });
+    if (!sent_header) {
+        co_return std::unexpected(sent_header.error());
+    }
+    auto sent_body =
+            co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
+    if (!sent_body) {
+        co_return std::unexpected(sent_body.error());
+    }
+    if (*sent_body != kBody.size()) {
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    co_return fiber::common::IoResult<void>{};
+}
+
+AccessProxyAdapter proxy_adapter(CapturedProxyRequest &capture) {
+    return AccessProxyAdapter{
+            .context = &capture,
+            .execute = capture_proxy_request,
+    };
+}
+
+TEST(AccessRequestHandlerTest, WritesLiveResponseAndExposesPathVariablesToScripts) {
+    RouteConfig conditional = response_route("/items/:id", "item=${$path.id};method=${$request.method}", 201);
+    conditional.condition = "id-is-42";
+    conditional.response_headers = {
+            StringConfigEntry{.name = "X-Item", .value = "${$path.id}"},
+            StringConfigEntry{.name = "Content-Length", .value = "999"},
+            StringConfigEntry{.name = "Strict-Transport-Security", .value = "override"},
+    };
+    RouteConfig fallback = response_route("/items/:id", "fallback");
+
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(conditional), std::move(fallback)}));
+
+    const std::string response = run_request(store,
+                                             "POST /items/42 HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "X-Forwarded-Proto: https\r\n"
+                                             "Content-Length: 3\r\n"
+                                             "Connection: close\r\n\r\n"
+                                             "abc",
+                                             script_adapter());
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 201 Created\r\n"));
+    EXPECT_NE(response.find("X-Item: 42\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Strict-Transport-Security: override\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Content-Length: 19\r\n"), std::string::npos);
+    EXPECT_EQ(response_body(response), "item=42;method=POST");
+}
+
+TEST(AccessRequestHandlerTest, ExecutesPrecompiledLocalConditionAndTemplates) {
+    AccessScriptRuntime scripts;
+    RouteConfig conditional = response_route(
+            "/local/:id", "id=${$path.id};method=${$req.method};query=${$query.q};header=${$header.x_test}", 202);
+    conditional.condition = "$path.id === '42'";
+    RouteConfig fallback = response_route("/local/:id", "fallback");
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(conditional), std::move(fallback)}));
+
+    const std::string matched = run_request(store,
+                                            "GET /local/42?q=ok HTTP/1.1\r\n"
+                                            "Host: api.example.com\r\n"
+                                            "X-Test: yes\r\n"
+                                            "Connection: close\r\n\r\n",
+                                            scripts.request_adapter());
+    EXPECT_TRUE(matched.starts_with("HTTP/1.1 202 Accepted\r\n"));
+    EXPECT_EQ(response_body(matched), "id=42;method=GET;query=ok;header=yes");
+
+    const std::string fallback_response = run_request(store,
+                                                      "GET /local/41 HTTP/1.1\r\n"
+                                                      "Host: api.example.com\r\n"
+                                                      "Connection: close\r\n\r\n",
+                                                      scripts.request_adapter());
+    EXPECT_TRUE(fallback_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(response_body(fallback_response), "fallback");
+}
+
+TEST(AccessRequestHandlerTest, ReturnsJavaHostEntryPathAndCidrErrors) {
+    HostStrategyConfig strategy;
+    strategy.net_mask = fiber::access_server::kNetVdi;
+    RouteConfig route = response_route("/allowed", "ok");
+    route.allows = {
+            std::optional<std::string>("10.0.0.0/8"),
+    };
+    RouteConfigStore store;
+    publish(store, project(strategy, {std::move(route)}));
+
+    const std::string host_error = run_request(store, "GET /allowed HTTP/1.1\r\n"
+                                                      "Host: missing.example.com\r\n"
+                                                      "Connection: close\r\n\r\n");
+    EXPECT_TRUE(host_error.starts_with("HTTP/1.1 404 Not Found\r\n"));
+    EXPECT_EQ(host_error.find("Strict-Transport-Security"), std::string::npos);
+    EXPECT_EQ(response_body(host_error), R"({"name":"ROUTER_NOT_FOUND","message":"error find router","meta":null})");
+
+    const std::string entry_error = run_request(store, "GET /allowed HTTP/1.1\r\n"
+                                                       "Host: api.example.com\r\n"
+                                                       "X-Entry: desktop\r\n"
+                                                       "Connection: close\r\n\r\n");
+    EXPECT_TRUE(entry_error.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+    EXPECT_NE(entry_error.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
+    EXPECT_EQ(response_body(entry_error), R"({"name":"ENTRY_ERROR","message":"entry error","meta":null})");
+
+    const std::string path_error = run_request(store, "GET /missing HTTP/1.1\r\n"
+                                                      "Host: api.example.com\r\n"
+                                                      "X-Entry: vdi\r\n"
+                                                      "Connection: close\r\n\r\n");
+    EXPECT_TRUE(path_error.starts_with("HTTP/1.1 404 Not Found\r\n"));
+    EXPECT_EQ(response_body(path_error),
+              R"({"name":"URL_NOT_MATCHED","message":"url not matched is project:orders","meta":null})");
+
+    const std::string cidr_error = run_request(store, "GET /allowed HTTP/1.1\r\n"
+                                                      "Host: api.example.com\r\n"
+                                                      "X-Entry: vdi\r\n"
+                                                      "X-Real-Ip: 192.168.1.1:8080\r\n"
+                                                      "Connection: close\r\n\r\n");
+    EXPECT_TRUE(cidr_error.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+    EXPECT_EQ(response_body(cidr_error), R"({"name":"NOT_ALLOW_IP","message":"source ip is not allowed","meta":null})");
+}
+
+TEST(AccessRequestHandlerTest, RedirectsBeforePathMatching) {
+    HostStrategyConfig strategy;
+    strategy.https = HttpsStrategy::Redirect307;
+    RouteConfigStore store;
+    publish(store, project(strategy, {response_route("/never", "never")}));
+
+    const std::string response = run_request(store, "GET /missing?q=1 HTTP/1.1\r\n"
+                                                    "Host: api.example.com:8080\r\n"
+                                                    "Connection: close\r\n\r\n");
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 307 "));
+    EXPECT_NE(response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Location: https://api.example.com:8080/missing?q=1\r\n"), std::string::npos);
+    EXPECT_EQ(response_body(response), "");
+}
+
+TEST(AccessRequestHandlerTest, PreservesJavaHeaderCommitBoundaryOnLiveErrors) {
+    RouteConfig header_failure = response_route("/header-failure", "unreached");
+    header_failure.response_headers = {
+            StringConfigEntry{.name = "X-First", .value = "one"},
+            StringConfigEntry{.name = "X-Fail", .value = "${fail}"},
+    };
+    RouteConfig body_failure = response_route("/body-failure", "${fail}");
+    body_failure.response_headers = {
+            StringConfigEntry{.name = "X-First", .value = "one"},
+    };
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(header_failure), std::move(body_failure)}));
+
+    const std::string header_response = run_request(store,
+                                                    "GET /header-failure HTTP/1.1\r\n"
+                                                    "Host: api.example.com\r\n"
+                                                    "Connection: close\r\n\r\n",
+                                                    script_adapter());
+    EXPECT_TRUE(header_response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+    EXPECT_EQ(header_response.find("X-First: one\r\n"), std::string::npos);
+    EXPECT_NE(header_response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
+
+    const std::string body_response = run_request(store,
+                                                  "GET /body-failure HTTP/1.1\r\n"
+                                                  "Host: api.example.com\r\n"
+                                                  "Connection: close\r\n\r\n",
+                                                  script_adapter());
+    EXPECT_TRUE(body_response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+    EXPECT_NE(body_response.find("X-First: one\r\n"), std::string::npos);
+    EXPECT_NE(body_response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
+}
+
+TEST(AccessRequestHandlerTest, ChecksKnownBodyLengthBeforeCidr) {
+    RouteConfig route = response_route("/limited", "unreached");
+    route.allows = {
+            std::optional<std::string>("10.0.0.0/8"),
+    };
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(route)}));
+
+    AccessRequestHandlerOptions options;
+    options.default_max_request_body_size = 4;
+    const std::string response = run_request(store,
+                                             "POST /limited HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "X-Real-Ip: 192.168.1.1\r\n"
+                                             "Content-Length: 5\r\n"
+                                             "Connection: close\r\n\r\n"
+                                             "12345",
+                                             {}, options);
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 413 Payload Too Large\r\n"));
+    EXPECT_EQ(response_body(response),
+              R"({"name":"REQ_BODY_TOO_LARGE","message":"request body is too large","meta":null})");
+}
+
+TEST(AccessRequestHandlerTest, AppliesRouteBodyLimitAndJavaNegativeUnlimitedRule) {
+    RouteConfig positive = response_route("/positive", "positive");
+    positive.max_client_body_size = 6;
+    RouteConfig unlimited = response_route("/unlimited", "unlimited");
+    unlimited.max_client_body_size = -1;
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(positive), std::move(unlimited)}));
+
+    AccessRequestHandlerOptions options;
+    options.default_max_request_body_size = 4;
+    const std::string positive_response = run_request(store,
+                                                      "POST /positive HTTP/1.1\r\n"
+                                                      "Host: api.example.com\r\n"
+                                                      "Content-Length: 5\r\n"
+                                                      "Connection: close\r\n\r\n"
+                                                      "12345",
+                                                      {}, options);
+    EXPECT_TRUE(positive_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(response_body(positive_response), "positive");
+
+    const std::string unlimited_response = run_request(store,
+                                                       "POST /unlimited HTTP/1.1\r\n"
+                                                       "Host: api.example.com\r\n"
+                                                       "Content-Length: 5\r\n"
+                                                       "Connection: close\r\n\r\n"
+                                                       "12345",
+                                                       {}, options);
+    EXPECT_TRUE(unlimited_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(response_body(unlimited_response), "unlimited");
+}
+
+TEST(AccessRequestHandlerTest, DoesNotWriteAnErrorAfterResponseCommit) {
+    const std::string response = run_committed_response();
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 204 No Content\r\n"));
+    EXPECT_EQ(std::count(response.begin(), response.end(), '{'), 0);
+    EXPECT_EQ(response.find("ENTRY_ERROR"), std::string::npos);
+    EXPECT_EQ(response.find("HTTP/1.1", std::string_view("HTTP/1.1").size()), std::string::npos);
+}
+
+TEST(AccessRequestHandlerTest, BuildsJavaCompatibleProxyRequestPlanOnLiveExchange) {
+    RouteConfig route = proxy_route("/v1/:id");
+    route.cluster = "stable";
+    route.timeout_millis = 123;
+    route.max_client_body_size = 10;
+    route.max_proxy_body_size = -1;
+    route.websocket_timeout_millis = 500;
+    route.flush = true;
+    route.rewrite = "/items/${$path.id} /?#";
+    route.proxy_headers = {
+            StringConfigEntry{.name = "X-Item", .value = "${$path.id}"},
+            StringConfigEntry{.name = "X-Empty", .value = "${empty}"},
+            StringConfigEntry{.name = "Host", .value = "internal.example:8080"},
+            StringConfigEntry{.name = "Connection", .value = "keep-alive"},
+            StringConfigEntry{.name = "Content-Length", .value = "999"},
+            StringConfigEntry{.name = "X-Override", .value = "configured"},
+            StringConfigEntry{.name = "X-Ploto-Source-App", .value = "spoofed"},
+    };
+    route.context = {
+            StringConfigEntry{.name = "cluster", .value = "${$path.id}"},
+            StringConfigEntry{.name = "remove-me", .value = "${empty}"},
+    };
+
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(route)}));
+
+    CapturedProxyRequest capture;
+    const std::string response = run_request(store,
+                                             "POST /v1/42?raw=%2F HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Content-Length: 4\r\n"
+                                             "Connection: close\r\n"
+                                             "X-Override: incoming\r\n"
+                                             "X-Incoming: one\r\n"
+                                             "X-Incoming: two\r\n"
+                                             "X-Ploto-Source-App: incoming\r\n\r\n"
+                                             "body",
+                                             script_adapter(), {}, proxy_adapter(capture));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_NE(response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
+    EXPECT_EQ(response_body(response), "proxied");
+    EXPECT_EQ(capture.upstream_kind, ProxyUpstreamKind::Service);
+    EXPECT_EQ(capture.service, "orders");
+    ASSERT_TRUE(capture.cluster);
+    EXPECT_EQ(*capture.cluster, "stable");
+    ASSERT_TRUE(capture.context_cluster);
+    EXPECT_EQ(*capture.context_cluster, "42");
+    EXPECT_EQ(capture.method, fiber::http::HttpMethod::Post);
+    EXPECT_EQ(capture.request_target, "/items/42%20/%3F%23?raw=%2F");
+    EXPECT_TRUE(capture.body.is_content_length());
+    EXPECT_EQ(capture.body.content_length(), 4U);
+    EXPECT_EQ(capture.received_body, "body");
+    EXPECT_EQ(capture.max_request_body_size, 10U);
+    EXPECT_EQ(capture.timeout_millis, 123);
+    ASSERT_TRUE(capture.max_response_body_size);
+    EXPECT_EQ(*capture.max_response_body_size, 0U);
+    EXPECT_FALSE(capture.websocket_upgrade);
+    EXPECT_EQ(capture.websocket_timeout_millis, 0);
+    EXPECT_TRUE(capture.flush);
+
+    ASSERT_NE(find_header(capture.headers, "Content-Length"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "Content-Length")->value, "4");
+    ASSERT_NE(find_header(capture.headers, "Host"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "Host")->value, "internal.example:8080");
+    ASSERT_NE(find_header(capture.headers, "X-Item"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "X-Item")->value, "42");
+    ASSERT_NE(find_header(capture.headers, "X-Override"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "X-Override")->value, "configured");
+    ASSERT_NE(find_header(capture.headers, "X-Ploto-Source-App"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "X-Ploto-Source-App")->value, "orders.unifiedAccess");
+    EXPECT_EQ(find_header(capture.headers, "Connection"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "X-Empty"), nullptr);
+    EXPECT_EQ(count_header(capture.headers, "X-Incoming"), 2U);
+    EXPECT_EQ(find_header(capture.headers, "X-Incoming", 0)->value, "one");
+    EXPECT_EQ(find_header(capture.headers, "X-Incoming", 1)->value, "two");
+
+    ASSERT_EQ(capture.context.size(), 2U);
+    EXPECT_EQ(capture.context[0].name, "HI-TRACE-CLUSTER");
+    EXPECT_EQ(capture.context[0].value, "42");
+    EXPECT_EQ(capture.context[1].name, "remove-me");
+    EXPECT_TRUE(capture.context[1].value.empty());
+}
+
+TEST(AccessRequestHandlerTest, UsesJavaTestHostClusterForRoutingAndServiceSelection) {
+    AccessScriptRuntime scripts;
+    RouteConfig route = proxy_route("/cluster");
+    route.proxy_headers = {
+            StringConfigEntry{.name = "X-Request-Cluster", .value = "${$context.cluster}"},
+    };
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(route)}));
+
+    CapturedProxyRequest capture;
+    AccessRequestHandlerOptions options;
+    options.test_mode = true;
+    const std::string response = run_request(store,
+                                             "GET /cluster HTTP/1.1\r\n"
+                                             "Host: api_gray.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter(), options, proxy_adapter(capture));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    ASSERT_TRUE(capture.context_cluster);
+    EXPECT_EQ(*capture.context_cluster, "gray");
+    const auto *origin = find_header(capture.headers, "ploto-origin-host");
+    ASSERT_NE(origin, nullptr);
+    EXPECT_EQ(origin->value, "api_gray.example.com");
+    const auto *cluster = find_header(capture.headers, "X-Request-Cluster");
+    ASSERT_NE(cluster, nullptr);
+    EXPECT_EQ(cluster->value, "gray");
+}
+
+TEST(AccessRequestHandlerTest, UsesTestTraceHeaderWhenHostHasNoCluster) {
+    RouteConfig route = proxy_route("/cluster");
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(route)}));
+
+    CapturedProxyRequest capture;
+    AccessRequestHandlerOptions options;
+    options.test_mode = true;
+    const std::string response = run_request(store,
+                                             "GET /cluster HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "HI-TRACE-CLUSTER: canary\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             {}, options, proxy_adapter(capture));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    ASSERT_TRUE(capture.context_cluster);
+    EXPECT_EQ(*capture.context_cluster, "canary");
+    EXPECT_EQ(find_header(capture.headers, "ploto-origin-host"), nullptr);
+}
+
+TEST(AccessRequestHandlerTest, AppliesJavaRewriteFallbackAndChunkedRequestBodyPlan) {
+    RouteConfig route = proxy_route("/empty");
+    route.rewrite = "${empty}";
+    RouteConfig preserve = proxy_route("/preserve/*tail");
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(route), std::move(preserve)}));
+
+    CapturedProxyRequest capture;
+    const std::string response = run_request(store,
+                                             "GET /empty?x=%2F HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             script_adapter(), {}, proxy_adapter(capture));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(capture.request_target, "/?x=%2F");
+    EXPECT_TRUE(capture.body.is_chunked());
+    EXPECT_TRUE(capture.received_body.empty());
+    EXPECT_EQ(find_header(capture.headers, "Content-Length"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "Transfer-Encoding"), nullptr);
+
+    const std::string preserved = run_request(store,
+                                              "GET /preserve/a%2Fb?x=%23 HTTP/1.1\r\n"
+                                              "Host: api.example.com\r\n"
+                                              "Connection: close\r\n\r\n",
+                                              {}, {}, proxy_adapter(capture));
+    EXPECT_TRUE(preserved.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(capture.request_target, "/preserve/a%2Fb?x=%23");
+}
+
+TEST(AccessRequestHandlerTest, EnablesWebsocketOnlyForJavaExactUpgradeHeaders) {
+    RouteConfig route = proxy_route("/ws");
+    route.websocket_timeout_millis = 700;
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(route)}));
+
+    CapturedProxyRequest capture;
+    const std::string response = run_request(store,
+                                             "GET /ws HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: Upgrade\r\n"
+                                             "Upgrade: WebSocket\r\n\r\n",
+                                             {}, {}, proxy_adapter(capture));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_TRUE(capture.websocket_upgrade);
+    EXPECT_EQ(capture.websocket_timeout_millis, 700);
+    EXPECT_TRUE(capture.body.is_none());
+    ASSERT_NE(find_header(capture.headers, "Connection"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "Connection")->value, "upgrade");
+    ASSERT_NE(find_header(capture.headers, "Upgrade"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "Upgrade")->value, "websocket");
+
+    const std::string non_upgrade = run_request(store,
+                                                "GET /ws HTTP/1.1\r\n"
+                                                "Host: api.example.com\r\n"
+                                                "Connection: keep-alive, Upgrade\r\n"
+                                                "Upgrade: websocket\r\n\r\n",
+                                                {}, {}, proxy_adapter(capture));
+    EXPECT_TRUE(non_upgrade.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_FALSE(capture.websocket_upgrade);
+    EXPECT_EQ(capture.websocket_timeout_millis, 0);
+    EXPECT_TRUE(capture.body.is_chunked());
+    EXPECT_EQ(find_header(capture.headers, "Connection"), nullptr);
+    EXPECT_EQ(find_header(capture.headers, "Upgrade"), nullptr);
+}
+
+TEST(ProxyRequestPlanTest, EscapesUriWithJavaFiberNetGatewayByteMask) {
+    EXPECT_EQ(fiber::access_server::java_escape_uri("/a b#c?d%中"), "/a%20b%23c%3Fd%25%E4%B8%AD");
+    EXPECT_EQ(fiber::access_server::java_escape_uri("/a:b@c&d=1+2,3;4~"), "/a:b@c&d=1+2,3;4~");
+}
+
+} // namespace

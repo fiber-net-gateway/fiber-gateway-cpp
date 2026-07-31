@@ -39,6 +39,8 @@ struct ScriptConnectionInfo {
 //      guards against post-send mutation).
 class ScriptExchangeCtx {
 public:
+    using VariableLookupFunction = bool (*)(void *context, std::string_view name, std::string_view &value) noexcept;
+
     ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap) noexcept;
     ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap,
                       ScriptConnectionInfo connection) noexcept;
@@ -73,6 +75,14 @@ public:
     void set_path_vars(const std::vector<std::pair<std::string_view, std::string_view>> &path_vars) noexcept {
         path_vars_ = path_vars;
     }
+    void set_path_var_lookup(void *context, VariableLookupFunction lookup) noexcept {
+        path_var_lookup_context_ = context;
+        path_var_lookup_ = lookup;
+    }
+    void set_context_var_lookup(void *context, VariableLookupFunction lookup) noexcept {
+        context_var_lookup_context_ = context;
+        context_var_lookup_ = lookup;
+    }
     [[nodiscard]] fiber::script::AbiResult path_var(fiber::script::GcHeap &heap, std::string_view name) const noexcept;
     [[nodiscard]] fiber::script::AbiResult query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept;
     // norm_key is already lowercased with '-' folded to '_' (RouteScriptExtension normalizes at
@@ -81,6 +91,8 @@ public:
                                                       std::string_view norm_key) const noexcept;
     [[nodiscard]] fiber::script::AbiResult cookie_var(fiber::script::GcHeap &heap,
                                                       std::string_view norm_key) const noexcept;
+    [[nodiscard]] fiber::script::AbiResult context_var(fiber::script::GcHeap &heap,
+                                                       std::string_view name) const noexcept;
     // field is one of "uri" / "method" / "path" / "query".
     [[nodiscard]] fiber::script::AbiResult req_field(fiber::script::GcHeap &heap,
                                                      std::string_view field) const noexcept;
@@ -145,6 +157,10 @@ private:
     // Path variables captured by the route matcher for the current request (non-owning
     // views; populated by set_path_vars before the script runs).
     std::span<const std::pair<std::string_view, std::string_view>> path_vars_;
+    void *path_var_lookup_context_ = nullptr;
+    VariableLookupFunction path_var_lookup_ = nullptr;
+    void *context_var_lookup_context_ = nullptr;
+    VariableLookupFunction context_var_lookup_ = nullptr;
 
     fiber::http::HttpHeaders pending_headers_;
     bool header_sent_ = false;
