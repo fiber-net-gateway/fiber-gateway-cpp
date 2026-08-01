@@ -57,8 +57,8 @@ private:
     select(void *context, http::HttpExchange &exchange, std::string_view service,
            std::optional<std::string_view> cluster, std::span<const std::uint64_t> excluded_selection_tokens) noexcept;
     static void report(void *context, ProxyUpstreamEndpoint &endpoint, bool success) noexcept;
-    static void service_updated(void *context, nacos::LoadBalancer &load_balancer, std::string_view service_name,
-                                std::string_view group, bool first_update, nacos::LoadBalancerUpdateResult result);
+    static void service_updated(void *context, nacos::LoadBalancer &load_balancer, nacos::ServiceKeyView key,
+                                bool first_update, nacos::LoadBalancerUpdateResult result) noexcept;
     void publish_directory();
     [[nodiscard]] std::shared_ptr<const Directory> load_directory() const noexcept;
     void store_directory(std::shared_ptr<const Directory> directory, std::memory_order order) noexcept;
@@ -67,7 +67,7 @@ private:
     const GrayMatchStore *gray_match_ = nullptr;
     NacosServiceSelectorOptions options_;
     nacos::ServiceDiscovery discovery_;
-    std::map<std::string, nacos::ServiceDiscovery::Handle, std::less<>> entries_;
+    std::map<std::string, nacos::ServiceDiscovery::Lease, std::less<>> entries_;
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const Directory>> directory_;
 #else

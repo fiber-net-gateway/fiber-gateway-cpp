@@ -197,20 +197,26 @@ void NacosServiceSelector::report(void *, ProxyUpstreamEndpoint &endpoint, bool 
     }
 }
 
-void NacosServiceSelector::service_updated(void *context, nacos::LoadBalancer &, std::string_view, std::string_view,
-                                           bool, nacos::LoadBalancerUpdateResult) {
+void NacosServiceSelector::service_updated(void *context, nacos::LoadBalancer &, nacos::ServiceKeyView,
+                                           bool first_update, nacos::LoadBalancerUpdateResult) noexcept {
     auto &self = *static_cast<NacosServiceSelector *>(context);
     ++self.naming_updates_;
+    if (first_update) {
+        self.publish_directory();
+    }
 }
 
 void NacosServiceSelector::publish_directory() {
     auto directory = std::make_shared<Directory>();
     directory->services.reserve(entries_.size());
     for (const auto &[service, handle]: entries_) {
-        directory->services.push_back(Directory::Item{
-                .service = service,
-                .load_balancer = handle.shared_load_balancer(),
-        });
+        std::shared_ptr<nacos::LoadBalancer> state = handle.try_state();
+        if (state != nullptr) {
+            directory->services.push_back(Directory::Item{
+                    .service = service,
+                    .load_balancer = std::move(state),
+            });
+        }
     }
     store_directory(std::move(directory), std::memory_order_release);
 }

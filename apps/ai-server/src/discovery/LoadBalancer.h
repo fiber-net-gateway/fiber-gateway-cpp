@@ -10,6 +10,7 @@ using nacos::DiscoveredService;
 using nacos::InstanceReportOutcome;
 using nacos::LoadBalanceError;
 using nacos::LoadBalancer;
+using nacos::LoadBalancerOps;
 using nacos::LoadBalancerStats;
 using nacos::LoadBalancerUpdateResult;
 using nacos::ServiceInstanceSelection;
