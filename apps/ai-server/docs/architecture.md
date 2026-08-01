@@ -163,11 +163,10 @@ resolver 仍使用共享的正向/权威负向缓存；ai-server 额外维护一
 DNS transient failure cache。它只缓存 `TimedOut`，默认 TTL 为 2 秒，hostname 以
 ASCII 小写并去除末尾点后比较。缓存命中不会再次访问 resolver，成功解析会清除对应
 项；NXDOMAIN、NoData 和其他 I/O 错误不进入该缓存。
-`service://` 默认按 Nacos 权重执行平滑加权轮询；模型配置
-`service-instance-policy: weighted-rendezvous` 后，以 Provider-scoped route key 和
-实例 endpoint 计算带权 Rendezvous score，使用 Nacos 基础权重稳定选择实例。同一次
-Provider 的实例级失败会加入请求级排除集合，后续 token 尝试选择下一实例。连接池 key
-仍只包含 scheme、host/IP 和 port，不包含 route key；HTTPS name 地址保留 SNI。
+`service://` 以 Provider-scoped route key 和实例 endpoint 计算带权 Rendezvous
+score，使用 Nacos 基础权重稳定选择实例。同一次 Provider 的实例级失败会加入请求级
+排除集合，后续 token 尝试选择下一实例。连接池 key 仍只包含 scheme、host/IP 和
+port，不包含 route key；HTTPS name 地址保留 SNI。
 连接、收发总超时遵循 300 秒 Provider 上限，并保留较短的 connect timeout。
 
 每次上游请求只构造固定头：

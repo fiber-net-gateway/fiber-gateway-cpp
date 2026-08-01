@@ -12,7 +12,6 @@ using fiber::ai_server::parse_models_config;
 using fiber::ai_server::parse_provider_config;
 using fiber::ai_server::parse_user_group_config;
 using fiber::ai_server::ProviderProtocolType;
-using fiber::ai_server::ServiceInstancePolicy;
 
 TEST(LlmConfigCodecTest, ParsesBt1EnvelopeAndDecodesSecrets) {
     constexpr std::string_view input = R"({
@@ -112,7 +111,6 @@ TEST(LlmConfigCodecTest, ParsesModelsWithJavaDefaultsAndAliases) {
     ASSERT_TRUE(model.fallback_provider);
     EXPECT_EQ(*model.fallback_provider, "backup");
     EXPECT_EQ(model.allow_user_groups, std::vector<std::string>({"staff"}));
-    EXPECT_EQ(model.load_balance.service_instance_policy, ServiceInstancePolicy::WeightedRendezvous);
     EXPECT_EQ(model.load_balance.prefix_max_bytes, 4096);
     EXPECT_EQ(model.load_balance.max_primary_attempts, 2);
     EXPECT_FALSE(model.load_balance.fallback_enabled);
@@ -137,6 +135,12 @@ TEST(LlmConfigCodecTest, ValidatesDynamicConfigNamesAndRelationships) {
             "models-md5");
     ASSERT_FALSE(invalid_service_policy);
     EXPECT_EQ(invalid_service_policy.error().field, "data[0].load-balance.service-instance-policy");
+
+    auto swrr = parse_models_config(
+            R"({"data":[{"model-name":"chat","providers":["openai"],"load-balance":{"service-instance-policy":"smooth-weighted-round-robin"}}]})",
+            "models-md5");
+    ASSERT_FALSE(swrr);
+    EXPECT_EQ(swrr.error().field, "data[0].load-balance.service-instance-policy");
 }
 
 } // namespace

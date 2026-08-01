@@ -26,9 +26,10 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/GrayConfigWatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/GrayMatchStore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/NacosServiceSelector.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/SmoothWeightedRoundRobin.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RouteConfigStore.cpp")
 target_include_directories(access_server_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
-target_link_libraries(access_server_core PUBLIC fiber_lib fiber::nacos fiber::nacos_discovery fiber::cat fiber::prometheus)
+target_link_libraries(access_server_core PUBLIC fiber_lib fiber::nacos fiber::cat fiber::prometheus)
 set_target_properties(access_server_core PROPERTIES FOLDER "apps/access-server")
 
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
@@ -57,7 +58,8 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProjectRouteSnapshotTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProxyRequestSenderTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ResponseExecutionTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/RouteConfigStoreTest.cpp")
+        "${CMAKE_CURRENT_LIST_DIR}/tests/RouteConfigStoreTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/SmoothWeightedRoundRobinTest.cpp")
     target_link_libraries(fiber_access_server_tests PRIVATE access_server_core GTest::gtest_main)
     target_compile_definitions(fiber_access_server_tests PRIVATE
         FIBER_ACCESS_SERVER_TEST_FIXTURE_DIR="${CMAKE_CURRENT_LIST_DIR}/tests/fixtures/java")

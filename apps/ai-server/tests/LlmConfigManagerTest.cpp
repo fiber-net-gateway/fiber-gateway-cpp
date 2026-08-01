@@ -21,7 +21,7 @@
 #include "../../../tests/NacosSubscriptionStub.h"
 #include "AiServer.h"
 #include "config/LlmConfigManager.h"
-#include "discovery/LoadBalancer.h"
+#include "discovery/WeightedRendezvous.h"
 
 namespace {
 
@@ -396,7 +396,7 @@ TEST(LlmConfigManagerTest, ModelsCandidateRetainsActiveTreeUntilDependenciesAreR
     EXPECT_TRUE(completed);
 }
 
-TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBalancer) {
+TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedRendezvousState) {
     fiber::event::EventLoop loop;
     FakeConfigService service;
     FakeNamingService naming;
@@ -450,15 +450,11 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBala
         EXPECT_NE(first_provider, nullptr);
         EXPECT_NE(first_provider->service, nullptr);
         EXPECT_EQ(first_provider->service->configured_instance_count(), 1u);
-        auto selected_a = first_provider->service->load_balance();
+        auto selected_a = first_provider->service->select(0);
         EXPECT_TRUE(selected_a);
         if (selected_a) {
-            EXPECT_EQ(selected_a->service_name(), "backend-a");
-            EXPECT_TRUE(selected_a->ip_address());
-            if (selected_a->ip_address()) {
-                EXPECT_EQ(selected_a->ip_address()->to_string(), "10.0.0.1");
-            }
-            first_provider->service->report(std::move(*selected_a), fiber::ai_server::InstanceReportOutcome::Neutral);
+            EXPECT_EQ(selected_a->ip_address().to_string(), "10.0.0.1");
+            selected_a->report(fiber::ai_server::InstanceReportOutcome::Neutral);
         }
 
         service.push("ploto.ai-llm.provider.routed",
@@ -508,15 +504,11 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBala
         EXPECT_NE(second_provider->service, nullptr);
         EXPECT_EQ(second_provider->config->metadata.version, 2);
         EXPECT_EQ(second_provider->service->configured_instance_count(), 1u);
-        auto selected_b = second_provider->service->load_balance();
+        auto selected_b = second_provider->service->select(0);
         EXPECT_TRUE(selected_b);
         if (selected_b) {
-            EXPECT_EQ(selected_b->service_name(), "backend-b");
-            EXPECT_TRUE(selected_b->ip_address());
-            if (selected_b->ip_address()) {
-                EXPECT_EQ(selected_b->ip_address()->to_string(), "10.0.0.2");
-            }
-            second_provider->service->report(std::move(*selected_b), fiber::ai_server::InstanceReportOutcome::Neutral);
+            EXPECT_EQ(selected_b->ip_address().to_string(), "10.0.0.2");
+            selected_b->report(fiber::ai_server::InstanceReportOutcome::Neutral);
         }
         EXPECT_EQ(manager.service_subscription_count(), 1u);
         EXPECT_EQ(first_provider->config->metadata.version, 1);

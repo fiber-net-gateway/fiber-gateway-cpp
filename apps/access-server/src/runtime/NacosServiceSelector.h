@@ -4,6 +4,7 @@
 #include "../execution/ProxyRequestSender.h"
 #include "AccessConfigWatcher.h"
 #include "GrayMatchStore.h"
+#include "SmoothWeightedRoundRobin.h"
 
 #include <atomic>
 #include <cstddef>
@@ -21,6 +22,24 @@
 #include <fiber/nacos/discovery/ServiceDiscovery.h>
 
 namespace fiber::access_server {
+
+class NacosServiceSelector;
+
+struct AccessServiceOps {
+    using State = SmoothWeightedRoundRobin;
+    using StatePtr = std::shared_ptr<State>;
+
+    [[nodiscard]] StatePtr create(nacos::ServiceKeyView key, const std::shared_ptr<const nacos::ServiceInfo> &snapshot);
+    [[nodiscard]] bool update(State &state, nacos::ServiceKeyView key,
+                              const std::shared_ptr<const nacos::ServiceInfo> &snapshot);
+    void on_change(State &state, nacos::ServiceKeyView key, nacos::ServiceChangeKind kind, bool changed) noexcept;
+    void retire(State &state, nacos::ServiceKeyView key, nacos::ServiceRetireReason reason) noexcept;
+
+    NacosServiceSelector *owner = nullptr;
+    State::Options options{};
+};
+
+using AccessServiceDiscovery = nacos::ServiceDiscovery<AccessServiceOps>;
 
 struct NacosServiceSelectorOptions {
     std::string group = std::string(kDefaultNacosGroup);
@@ -50,6 +69,8 @@ public:
     [[nodiscard]] std::uint64_t reconcile_failures() const noexcept { return reconcile_failures_; }
 
 private:
+    friend struct AccessServiceOps;
+
     struct Directory;
 
     static void route_snapshot_updated(void *context, std::shared_ptr<const AccessRouteSnapshot> snapshot) noexcept;
@@ -57,8 +78,6 @@ private:
     select(void *context, http::HttpExchange &exchange, std::string_view service,
            std::optional<std::string_view> cluster, std::span<const std::uint64_t> excluded_selection_tokens) noexcept;
     static void report(void *context, ProxyUpstreamEndpoint &endpoint, bool success) noexcept;
-    static void service_updated(void *context, nacos::LoadBalancer &load_balancer, nacos::ServiceKeyView key,
-                                bool first_update, nacos::LoadBalancerUpdateResult result) noexcept;
     void publish_directory();
     [[nodiscard]] std::shared_ptr<const Directory> load_directory() const noexcept;
     void store_directory(std::shared_ptr<const Directory> directory, std::memory_order order) noexcept;
@@ -66,8 +85,8 @@ private:
     event::EventLoop *loop_ = nullptr;
     const GrayMatchStore *gray_match_ = nullptr;
     NacosServiceSelectorOptions options_;
-    nacos::ServiceDiscovery discovery_;
-    std::map<std::string, nacos::ServiceDiscovery::Lease, std::less<>> entries_;
+    AccessServiceDiscovery discovery_;
+    std::map<std::string, AccessServiceDiscovery::Lease, std::less<>> entries_;
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const Directory>> directory_;
 #else

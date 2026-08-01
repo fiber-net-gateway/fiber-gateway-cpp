@@ -43,6 +43,7 @@
 #include <net/TcpListener.h>
 #include <net/TcpStream.h>
 
+#include "../../../tests/NacosSnapshotTestBuilder.h"
 #include "AiServerLogging.h"
 #include "config/LlmConfigSnapshot.h"
 #include "limit/RateLimitShardRing.h"
@@ -66,20 +67,17 @@ using fiber::ai_server::Bt1KeySnapshot;
 using fiber::ai_server::CompiledModelRateLimitRule;
 using fiber::ai_server::CompiledModelRoute;
 using fiber::ai_server::ConfigMetadata;
-using fiber::ai_server::DiscoveredInstance;
-using fiber::ai_server::DiscoveredService;
 using fiber::ai_server::InstanceReportOutcome;
 using fiber::ai_server::LlmConfigSnapshot;
 using fiber::ai_server::LlmProjectSnapshot;
 using fiber::ai_server::LlmRequestHandler;
 using fiber::ai_server::LlmWireProtocol;
-using fiber::ai_server::LoadBalancer;
 using fiber::ai_server::ProjectProvider;
 using fiber::ai_server::ProviderApiToken;
 using fiber::ai_server::ProviderConfigSnapshot;
 using fiber::ai_server::ProviderProtocol;
 using fiber::ai_server::ProviderProtocolType;
-using fiber::ai_server::ServiceInstancePolicy;
+using fiber::ai_server::WeightedRendezvous;
 
 constexpr std::string_view kBt1Kid = "test1";
 constexpr std::string_view kBt1Secret = "integration-test-secret";
@@ -737,16 +735,12 @@ private:
         return true;
     }
 
-    static DiscoveredInstance make_discovered_instance(std::string id, std::uint16_t port) {
-        const fiber::net::IpAddress ip = fiber::net::IpAddress::loopback_v4();
-        return DiscoveredInstance{
+    static fiber::nacos::Instance make_service_instance(std::string id, std::uint16_t port) {
+        return fiber::nacos::Instance{
                 .instance_id = std::move(id),
-                .host = "127.0.0.1",
-                .ip_address = ip,
+                .ip = "127.0.0.1",
                 .port = port,
-                .authority = "127.0.0.1:" + std::to_string(port),
                 .weight = 1.0,
-                .cluster_name = "primary",
         };
     }
 
@@ -805,25 +799,24 @@ private:
         primary->name = "primary";
         primary->config = std::move(primary_config);
         if (service_rendezvous_) {
-            primary->service = std::make_shared<LoadBalancer>();
-            (void) primary->service->update_instances(DiscoveredService{
-                    .service_name = "mock-provider",
-                    .group = "DEFAULT_GROUP",
-                    .checksum = "service-v1",
-                    .instances =
-                            {
-                                    make_discovered_instance("healthy", provider_port),
-                                    make_discovered_instance("failing", failing_provider_port),
-                            },
-            });
+            primary->service = std::make_shared<WeightedRendezvous>();
+            fiber::tests::ServiceInfoTestData service_data;
+            service_data.name = "mock-provider";
+            service_data.group_name = "DEFAULT_GROUP";
+            service_data.checksum = "service-v1";
+            service_data.hosts = {
+                    make_service_instance("healthy", provider_port),
+                    make_service_instance("failing", failing_provider_port),
+            };
+            const auto service_snapshot = fiber::tests::make_service_info(std::move(service_data));
+            (void) primary->service->update(*service_snapshot);
             for (std::size_t i = 0; i < 1024; ++i) {
                 std::string candidate = "service-route-" + std::to_string(i);
                 const std::uint64_t key = fiber::ai_server::rendezvous_score(candidate, primary->name);
-                auto selected = primary->service->load_balance(key, {}, LoadBalancer::TimePoint{});
+                auto selected = primary->service->select(key, {}, WeightedRendezvous::TimePoint{});
                 FIBER_ASSERT(selected.has_value());
                 const bool selects_failing = selected->port() == failing_provider_port;
-                primary->service->report(std::move(*selected), InstanceReportOutcome::Neutral,
-                                         LoadBalancer::TimePoint{});
+                selected->report(InstanceReportOutcome::Neutral, WeightedRendezvous::TimePoint{});
                 if (selects_failing) {
                     rendezvous_route_key_ = std::move(candidate);
                     break;
@@ -847,9 +840,6 @@ private:
         }
         route.load_balance.max_primary_attempts = 1;
         route.load_balance.fallback_enabled = fallback_enabled_;
-        if (service_rendezvous_) {
-            route.load_balance.service_instance_policy = ServiceInstancePolicy::WeightedRendezvous;
-        }
         route.rate_limit = CompiledModelRateLimitRule{
                 .revision = 17,
                 .window_duration_millis = 60'000,
