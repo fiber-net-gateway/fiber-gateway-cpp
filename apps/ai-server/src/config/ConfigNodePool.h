@@ -101,7 +101,7 @@ public:
         auto [it, inserted] = entries_.emplace(node->key(), Entry{.node = node, .references = 1});
         FIBER_ASSERT(inserted);
         (void) it;
-        node->start(node);
+        node->start();
         return Ref(*this, std::move(node));
     }
 

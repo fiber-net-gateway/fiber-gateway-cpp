@@ -52,7 +52,8 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/PayloadTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/RpcDtoJsonTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ServiceDiscoveryTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/ServiceLoadBalancerTest.cpp")
+        "${CMAKE_CURRENT_LIST_DIR}/tests/ServiceLoadBalancerTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/SubscriptionPoolTest.cpp")
     target_link_libraries(fiber_nacos_tests PRIVATE fiber::nacos_discovery GTest::gtest_main)
     set_target_properties(fiber_nacos_tests PROPERTIES FOLDER "apps/nacos")
     fiber_link_runtime_allocator(fiber_nacos_tests)

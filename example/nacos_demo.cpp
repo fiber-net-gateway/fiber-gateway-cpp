@@ -329,9 +329,8 @@ nacos::Instance make_instance(const CliOptions &cli, std::uint16_t port) {
 // --------------------------------------------------------------------------- //
 // Generic "wait for a Watch subscriber to publish a matching value" helper.
 //
-// Subscribers here are either a Subscription<T>::Subscriber (carrying
-// SubscriptionResult<T>) or an InstanceRegistration::StatusSubscriber (carrying
-// RegistrationStatus). `pred` is applied to the most recent published value; current()
+// This is used for InstanceRegistration status. `pred` is applied to the most
+// recent published value; current()
 // is checked first so a value published before we started waiting is still observed.
 // Returns true on a match, false on timeout.
 // --------------------------------------------------------------------------- //
@@ -354,6 +353,81 @@ fiber::async::Task<bool> wait_for(Subscriber &sub, Pred pred, std::chrono::milli
         }
     }
     co_return false;
+}
+
+template<typename Pred>
+fiber::async::Task<bool> wait_until(Pred pred, std::chrono::milliseconds per_try, int tries) {
+    if (pred()) {
+        co_return true;
+    }
+    for (int i = 0; i < tries; ++i) {
+        co_await fiber::async::sleep(per_try);
+        if (pred()) {
+            co_return true;
+        }
+    }
+    co_return false;
+}
+
+struct ConfigNotifyState {
+    bool version_1 = false;
+    bool version_2 = false;
+    bool conflicting_version = false;
+    bool not_found = false;
+    bool closed = false;
+};
+
+void config_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept {
+    auto &state = *static_cast<ConfigNotifyState *>(context);
+    if (result.kind == nacos::ResultKind::Closed) {
+        state.closed = true;
+        return;
+    }
+    if (!result.data) {
+        return;
+    }
+    if (result.data->state == nacos::ConfigState::NotFound) {
+        state.not_found = true;
+    } else if (result.data->content == "version-1") {
+        state.version_1 = true;
+    } else if (result.data->content == "version-2") {
+        state.version_2 = true;
+    } else if (result.data->content == "should-not-apply") {
+        state.conflicting_version = true;
+    }
+}
+
+struct NamingNotifyState {
+    std::string_view ip;
+    std::uint16_t initial_port = 0;
+    std::uint16_t updated_port = 0;
+    bool initial_seen = false;
+    bool updated_seen = false;
+    bool closed = false;
+};
+
+void naming_notify(void *context, const nacos::SubscriptionResult<nacos::ServiceInfo> &result) noexcept {
+    auto &state = *static_cast<NamingNotifyState *>(context);
+    if (result.kind == nacos::ResultKind::Closed) {
+        state.closed = true;
+        return;
+    }
+    if (!result.data) {
+        return;
+    }
+    std::cout << "[naming] current service info -> ";
+    print_service_info(*result.data);
+    for (const nacos::Instance &host: result.data->hosts) {
+        if (host.ip != state.ip) {
+            continue;
+        }
+        if (host.port == state.initial_port) {
+            state.initial_seen = true;
+        }
+        if (state.updated_port != 0 && host.port == state.updated_port) {
+            state.updated_seen = true;
+        }
+    }
 }
 
 // --------------------------------------------------------------------------- //
@@ -459,20 +533,14 @@ fiber::async::Task<void> config_demo(nacos::ConfigService &svc, const CliOptions
     const std::string md5_1 = fetched->md5;
 
     // 3. subscribe + await initial push
-    auto sub_result = svc.subscribe(cli.data_id, cli.group);
+    ConfigNotifyState notify_state;
+    auto sub_result = svc.subscribe(cli.data_id, cli.group, &config_notify, &notify_state);
     if (!sub_result) {
         std::cout << "[config] subscribe FAILED: " << config_err_name(sub_result.error().code) << "\n";
         co_return;
     }
     auto subscription = std::move(*sub_result);
-    auto &sub = subscription.subscriber();
-    bool ok = co_await wait_for(
-            sub,
-            [](const nacos::SubscriptionResult<nacos::ConfigData> &r) {
-                return r.kind == nacos::ResultKind::Success && r.data && r.data->state == nacos::ConfigState::Present &&
-                       r.data->content == "version-1";
-            },
-            2s, 4);
+    bool ok = co_await wait_until([&notify_state]() { return notify_state.version_1; }, 2s, 4);
     std::cout << "[config] subscribe -> initial push version-1: " << (ok ? "ok" : "TIMEOUT") << "\n";
 
     // 4. publish (CAS update with the captured md5)
@@ -483,13 +551,7 @@ fiber::async::Task<void> config_demo(nacos::ConfigService &svc, const CliOptions
                   << updated.error().message << ")\n";
     } else {
         std::cout << "[config] publish(v2, cas=md5_1) ok\n";
-        ok = co_await wait_for(
-                sub,
-                [](const nacos::SubscriptionResult<nacos::ConfigData> &r) {
-                    return r.kind == nacos::ResultKind::Success && r.data &&
-                           r.data->state == nacos::ConfigState::Present && r.data->content == "version-2";
-                },
-                2s, 4);
+        ok = co_await wait_until([&notify_state]() { return notify_state.version_2; }, 2s, 4);
         std::cout << "[config] subscribe -> change push version-2: " << (ok ? "ok" : "TIMEOUT") << "\n";
     }
 
@@ -501,13 +563,7 @@ fiber::async::Task<void> config_demo(nacos::ConfigService &svc, const CliOptions
                   << " (" << conflict.error().message << ")\n";
     } else {
         std::cout << "[config] publish(wrong cas) was ACCEPTED by the server (no CAS enforcement)\n";
-        ok = co_await wait_for(
-                sub,
-                [](const nacos::SubscriptionResult<nacos::ConfigData> &r) {
-                    return r.kind == nacos::ResultKind::Success && r.data &&
-                           r.data->state == nacos::ConfigState::Present && r.data->content == "should-not-apply";
-                },
-                1s, 2);
+        ok = co_await wait_until([&notify_state]() { return notify_state.conflicting_version; }, 1s, 2);
         (void) ok;
     }
 
@@ -517,13 +573,7 @@ fiber::async::Task<void> config_demo(nacos::ConfigService &svc, const CliOptions
         std::cout << "[config] remove_config FAILED: " << config_err_name(removed.error().code) << "\n";
     } else {
         std::cout << "[config] remove_config ok\n";
-        ok = co_await wait_for(
-                sub,
-                [](const nacos::SubscriptionResult<nacos::ConfigData> &r) {
-                    return r.kind == nacos::ResultKind::Success && r.data &&
-                           r.data->state == nacos::ConfigState::NotFound;
-                },
-                2s, 4);
+        ok = co_await wait_until([&notify_state]() { return notify_state.not_found; }, 2s, 4);
         std::cout << "[config] subscribe -> push NotFound: " << (ok ? "ok" : "TIMEOUT") << "\n";
     }
 
@@ -580,36 +630,23 @@ fiber::async::Task<void> naming_demo(nacos::NamingService &svc, const CliOptions
     }
 
     // 3. subscribe + await a push containing our instance
-    auto sub_result = svc.subscribe(cli.service, cli.group);
+    NamingNotifyState notify_state{
+            .ip = cli.instance_ip,
+            .initial_port = cli.instance_port,
+    };
+    auto sub_result = svc.subscribe(cli.service, cli.group, &naming_notify, &notify_state);
     if (!sub_result) {
         std::cout << "[naming] subscribe FAILED: " << naming_err_name(sub_result.error().code) << "\n";
         registration.close();
         co_return;
     }
     auto subscription = std::move(*sub_result);
-    auto &sub = subscription.subscriber();
-    ok = co_await wait_for(
-            sub,
-            [&cli](const nacos::SubscriptionResult<nacos::ServiceInfo> &r) {
-                if (r.kind != nacos::ResultKind::Success || !r.data) {
-                    return false;
-                }
-                for (const nacos::Instance &h: r.data->hosts) {
-                    if (h.ip == cli.instance_ip && h.port == cli.instance_port) {
-                        return true;
-                    }
-                }
-                return false;
-            },
-            2s, 4);
+    ok = co_await wait_until([&notify_state]() { return notify_state.initial_seen; }, 2s, 4);
     std::cout << "[naming] subscribe -> push with our instance: " << (ok ? "ok" : "TIMEOUT") << "\n";
-    if (auto cur = sub.current(); cur.value && cur.value->data) {
-        std::cout << "[naming] current service info -> ";
-        print_service_info(*cur.value->data);
-    }
 
     // 4. update (change port) -> await Registered + push with the new port
     const std::uint16_t new_port = cli.instance_port + 1;
+    notify_state.updated_port = new_port;
     auto update_res = registration.update(make_instance(cli, new_port));
     if (!update_res) {
         std::cout << "[naming] update FAILED: " << naming_err_name(update_res.error().code) << "\n";
@@ -619,20 +656,7 @@ fiber::async::Task<void> naming_demo(nacos::NamingService &svc, const CliOptions
                 status,
                 [](const nacos::RegistrationStatus &s) { return s.state == nacos::RegistrationState::Registered; }, 2s,
                 4);
-        const bool pushed = co_await wait_for(
-                sub,
-                [&cli, new_port](const nacos::SubscriptionResult<nacos::ServiceInfo> &r) {
-                    if (r.kind != nacos::ResultKind::Success || !r.data) {
-                        return false;
-                    }
-                    for (const nacos::Instance &h: r.data->hosts) {
-                        if (h.ip == cli.instance_ip && h.port == new_port) {
-                            return true;
-                        }
-                    }
-                    return false;
-                },
-                2s, 4);
+        const bool pushed = co_await wait_until([&notify_state]() { return notify_state.updated_seen; }, 2s, 4);
         std::cout << "[naming] update -> Registered: " << (ok ? "ok" : "TIMEOUT")
                   << " push with new port: " << (pushed ? "ok" : "TIMEOUT") << "\n";
     }

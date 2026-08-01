@@ -12,9 +12,7 @@
 #include <string>
 #include <string_view>
 
-#include <async/Spawn.h>
 #include <async/Task.h>
-#include <async/WaitGroup.h>
 #include <async/Watch.h>
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
@@ -77,8 +75,8 @@ private:
     struct ProjectListEntry;
     struct ProjectEntry;
 
-    [[nodiscard]] static async::DetachedTask run_project_list(AccessConfigWatcher &owner) noexcept;
-    [[nodiscard]] static async::DetachedTask run_project(std::shared_ptr<ProjectEntry> entry) noexcept;
+    static void project_list_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
+    static void project_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
 
     void apply_project_list(const nacos::ConfigData &data);
     void apply_project(ProjectEntry &entry, const nacos::ConfigData &data);
@@ -93,7 +91,6 @@ private:
     RouteConfigStore *store_ = nullptr;
     AccessConfigWatcherOptions options_;
     RouteSnapshotObserver observer_;
-    async::WaitGroup tasks_;
     std::unique_ptr<ProjectListEntry> project_list_;
     std::map<std::string, std::shared_ptr<ProjectEntry>, std::less<>> projects_;
     std::optional<AccessConfigWatcherFailure> last_failure_;

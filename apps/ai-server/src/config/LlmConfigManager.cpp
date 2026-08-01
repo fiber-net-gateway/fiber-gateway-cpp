@@ -14,9 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include <async/Spawn.h>
-#include <async/WaitGroup.h>
-#include <async/WhenAny.h>
 #include <common/Assert.h>
 #include <log/Log.h>
 
@@ -52,24 +49,27 @@ public:
     using Key = std::string;
     using CreateError = nacos::ConfigServiceError;
 
-    GroupNode(ConfigGraph &graph, Key key, nacos::Subscription<nacos::ConfigData> subscription);
+    GroupNode(ConfigGraph &graph, Key key);
 
     [[nodiscard]] const Key &key() const noexcept { return key_; }
     [[nodiscard]] const std::shared_ptr<const UserGroupSnapshot> &current() const noexcept { return current_; }
 
-    void start(std::shared_ptr<GroupNode> self);
+    void start();
     void request_stop() noexcept;
 
 private:
-    [[nodiscard]] static async::DetachedTask run(std::shared_ptr<GroupNode> self) noexcept;
+    friend class ConfigGraph;
+
+    static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
+    void attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept;
     void apply(const nacos::ConfigData &data);
 
     ConfigGraph *graph_ = nullptr;
     Key key_;
     nacos::Subscription<nacos::ConfigData> subscription_;
+    std::optional<nacos::ConfigData> pending_;
     std::shared_ptr<const UserGroupSnapshot> current_;
-    async::Watch<bool> stop_{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher_;
+    bool started_ = false;
     bool stopping_ = false;
 };
 
@@ -80,16 +80,18 @@ public:
     using Key = std::string;
     using CreateError = nacos::ConfigServiceError;
 
-    ProviderNode(ConfigGraph &graph, Key key, nacos::Subscription<nacos::ConfigData> subscription);
+    ProviderNode(ConfigGraph &graph, Key key);
 
     [[nodiscard]] const Key &key() const noexcept { return key_; }
     [[nodiscard]] const std::shared_ptr<const ProjectProvider> &current() const noexcept { return current_; }
 
-    void start(std::shared_ptr<ProviderNode> self);
+    void start();
     void request_stop() noexcept;
     [[nodiscard]] bool on_service_initialized(const LoadBalancer &service);
 
 private:
+    friend class ConfigGraph;
+
     struct Generation {
         std::shared_ptr<const ProviderConfigSnapshot> config;
         std::optional<ServiceDiscovery::Handle> service;
@@ -97,7 +99,8 @@ private:
         [[nodiscard]] bool ready() const noexcept { return !service || service->load_balancer().initialized(); }
     };
 
-    [[nodiscard]] static async::DetachedTask run(std::shared_ptr<ProviderNode> self) noexcept;
+    static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
+    void attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept;
     void apply(const nacos::ConfigData &data);
     void activate_candidate();
     void rebuild_current();
@@ -106,11 +109,11 @@ private:
     ConfigGraph *graph_ = nullptr;
     Key key_;
     nacos::Subscription<nacos::ConfigData> subscription_;
+    std::optional<nacos::ConfigData> pending_;
     std::optional<Generation> active_;
     std::optional<Generation> candidate_;
     std::shared_ptr<const ProjectProvider> current_;
-    async::Watch<bool> stop_{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher_;
+    bool started_ = false;
     bool stopping_ = false;
 };
 
@@ -118,17 +121,19 @@ using ProviderNodePool = ConfigNodePool<ProviderNode>;
 
 class ModelsNode final : public common::NonCopyable, public common::NonMovable {
 public:
-    ModelsNode(ConfigGraph &graph, nacos::Subscription<nacos::ConfigData> subscription);
+    explicit ModelsNode(ConfigGraph &graph);
 
     [[nodiscard]] const std::shared_ptr<const LlmProjectSnapshot> &current() const noexcept { return current_; }
 
-    void start(std::shared_ptr<ModelsNode> self);
+    void start();
     void request_stop() noexcept;
     [[nodiscard]] bool on_provider_changed(std::string_view name);
     [[nodiscard]] bool on_providers_changed(const std::vector<std::string> &names);
     [[nodiscard]] bool on_group_changed(std::string_view name);
 
 private:
+    friend class ConfigGraph;
+
     struct Generation {
         std::shared_ptr<const ModelsConfigSnapshot> config;
         std::map<std::string, ProviderNodePool::Ref, std::less<>> providers;
@@ -137,7 +142,8 @@ private:
         [[nodiscard]] bool ready() const noexcept;
     };
 
-    [[nodiscard]] static async::DetachedTask run(std::shared_ptr<ModelsNode> self) noexcept;
+    static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
+    void attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept;
     void apply(const nacos::ConfigData &data);
     void activate_candidate();
     void rebuild_current();
@@ -147,33 +153,36 @@ private:
 
     ConfigGraph *graph_ = nullptr;
     nacos::Subscription<nacos::ConfigData> subscription_;
+    std::optional<nacos::ConfigData> pending_;
     std::optional<Generation> active_;
     std::optional<Generation> candidate_;
     std::shared_ptr<const LlmProjectSnapshot> current_;
     std::uint64_t project_generation_ = 0;
-    async::Watch<bool> stop_{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher_;
+    bool started_ = false;
     bool stopping_ = false;
 };
 
 class Bt1Node final : public common::NonCopyable, public common::NonMovable {
 public:
-    Bt1Node(ConfigGraph &graph, nacos::Subscription<nacos::ConfigData> subscription);
+    explicit Bt1Node(ConfigGraph &graph);
 
     [[nodiscard]] const std::shared_ptr<const Bt1KeySnapshot> &current() const noexcept { return current_; }
 
-    void start(std::shared_ptr<Bt1Node> self);
+    void start();
     void request_stop() noexcept;
 
 private:
-    [[nodiscard]] static async::DetachedTask run(std::shared_ptr<Bt1Node> self) noexcept;
+    friend class ConfigGraph;
+
+    static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
+    void attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept;
     void apply(const nacos::ConfigData &data);
 
     ConfigGraph *graph_ = nullptr;
     nacos::Subscription<nacos::ConfigData> subscription_;
+    std::optional<nacos::ConfigData> pending_;
     std::shared_ptr<const Bt1KeySnapshot> current_;
-    async::Watch<bool> stop_{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher_;
+    bool started_ = false;
     bool stopping_ = false;
 };
 
@@ -194,7 +203,6 @@ public:
 
     ~ConfigGraph() {
         FIBER_ASSERT(state_ == LlmConfigManagerState::Created || state_ == LlmConfigManagerState::Stopped);
-        FIBER_ASSERT(tasks_.empty());
         FIBER_ASSERT(providers_.empty());
         FIBER_ASSERT(groups_.empty());
         FIBER_ASSERT(services_.empty());
@@ -224,8 +232,6 @@ public:
     [[nodiscard]] GroupNodePool &groups() noexcept { return groups_; }
     [[nodiscard]] ServiceDiscovery &services() noexcept { return services_; }
 
-    void task_started() { tasks_.add(); }
-    void task_done() noexcept { tasks_.done(); }
     void accepted_update() noexcept { ++successful_updates_; }
 
     void on_bt1_changed();
@@ -250,7 +256,6 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     nacos::ConfigService *config_service_ = nullptr;
-    async::WaitGroup tasks_;
     ServiceDiscovery services_;
     ProviderNodePool providers_;
     GroupNodePool groups_;
@@ -266,58 +271,47 @@ private:
     bool ready_ = false;
 };
 
-GroupNode::GroupNode(ConfigGraph &graph, Key key, nacos::Subscription<nacos::ConfigData> subscription) :
-    graph_(&graph), key_(std::move(key)), subscription_(std::move(subscription)) {
-    stop_publisher_ = stop_.acquire_publisher();
-    FIBER_ASSERT(stop_publisher_.has_value());
+GroupNode::GroupNode(ConfigGraph &graph, Key key) : graph_(&graph), key_(std::move(key)) {}
+
+void GroupNode::attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept {
+    subscription_ = std::move(subscription);
 }
 
-void GroupNode::start(std::shared_ptr<GroupNode> self) {
+void GroupNode::start() {
     FIBER_ASSERT(graph_->loop().in_loop());
-    graph_->task_started();
-    async::spawn([self = std::move(self)]() mutable { return run(std::move(self)); });
+    started_ = true;
+    if (pending_) {
+        apply(*pending_);
+        pending_.reset();
+    }
 }
 
 void GroupNode::request_stop() noexcept {
     FIBER_ASSERT(graph_->loop().in_loop());
     if (!stopping_) {
         stopping_ = true;
-        stop_publisher_->publish(true);
+        subscription_.close();
+        pending_.reset();
     }
 }
 
-async::DetachedTask GroupNode::run(std::shared_ptr<GroupNode> self) noexcept {
-    auto stop = self->stop_.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = self->subscription_.subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
+void GroupNode::on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept {
+    auto &self = *static_cast<GroupNode *>(context);
+    if (result.kind == nacos::ResultKind::Closed) {
+        if (!self.stopping_) {
+            LOG(LOG_CONFIG, WARN) << "user-group config subscription closed group=" << log::quoted(self.key_);
         }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                if (!self->stopping_) {
-                    LOG(LOG_CONFIG, WARN) << "user-group config subscription closed group=" << log::quoted(self->key_);
-                }
-                break;
-            }
-            if (snapshot.value->data) {
-                self->apply(*snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+        self.subscription_.close();
+        return;
     }
-    self->subscription_.close();
-    self->graph_->task_done();
+    if (!result.data) {
+        return;
+    }
+    if (!self.started_) {
+        self.pending_ = *result.data;
+        return;
+    }
+    self.apply(*result.data);
 }
 
 void GroupNode::apply(const nacos::ConfigData &data) {
@@ -342,16 +336,19 @@ void GroupNode::apply(const nacos::ConfigData &data) {
     graph_->on_group_changed(*this);
 }
 
-ProviderNode::ProviderNode(ConfigGraph &graph, Key key, nacos::Subscription<nacos::ConfigData> subscription) :
-    graph_(&graph), key_(std::move(key)), subscription_(std::move(subscription)) {
-    stop_publisher_ = stop_.acquire_publisher();
-    FIBER_ASSERT(stop_publisher_.has_value());
+ProviderNode::ProviderNode(ConfigGraph &graph, Key key) : graph_(&graph), key_(std::move(key)) {}
+
+void ProviderNode::attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept {
+    subscription_ = std::move(subscription);
 }
 
-void ProviderNode::start(std::shared_ptr<ProviderNode> self) {
+void ProviderNode::start() {
     FIBER_ASSERT(graph_->loop().in_loop());
-    graph_->task_started();
-    async::spawn([self = std::move(self)]() mutable { return run(std::move(self)); });
+    started_ = true;
+    if (pending_) {
+        apply(*pending_);
+        pending_.reset();
+    }
 }
 
 void ProviderNode::request_stop() noexcept {
@@ -362,41 +359,27 @@ void ProviderNode::request_stop() noexcept {
     stopping_ = true;
     candidate_.reset();
     active_.reset();
-    stop_publisher_->publish(true);
+    subscription_.close();
+    pending_.reset();
 }
 
-async::DetachedTask ProviderNode::run(std::shared_ptr<ProviderNode> self) noexcept {
-    auto stop = self->stop_.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = self->subscription_.subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
+void ProviderNode::on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept {
+    auto &self = *static_cast<ProviderNode *>(context);
+    if (result.kind == nacos::ResultKind::Closed) {
+        if (!self.stopping_) {
+            LOG(LOG_CONFIG, WARN) << "provider config subscription closed provider=" << log::quoted(self.key_);
         }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                if (!self->stopping_) {
-                    LOG(LOG_CONFIG, WARN) << "provider config subscription closed provider=" << log::quoted(self->key_);
-                }
-                break;
-            }
-            if (snapshot.value->data) {
-                self->apply(*snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+        self.subscription_.close();
+        return;
     }
-    self->subscription_.close();
-    self->graph_->task_done();
+    if (!result.data) {
+        return;
+    }
+    if (!self.started_) {
+        self.pending_ = *result.data;
+        return;
+    }
+    self.apply(*result.data);
 }
 
 void ProviderNode::apply(const nacos::ConfigData &data) {
@@ -498,16 +481,19 @@ bool ModelsNode::Generation::ready() const noexcept {
     return true;
 }
 
-ModelsNode::ModelsNode(ConfigGraph &graph, nacos::Subscription<nacos::ConfigData> subscription) :
-    graph_(&graph), subscription_(std::move(subscription)) {
-    stop_publisher_ = stop_.acquire_publisher();
-    FIBER_ASSERT(stop_publisher_.has_value());
+ModelsNode::ModelsNode(ConfigGraph &graph) : graph_(&graph) {}
+
+void ModelsNode::attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept {
+    subscription_ = std::move(subscription);
 }
 
-void ModelsNode::start(std::shared_ptr<ModelsNode> self) {
+void ModelsNode::start() {
     FIBER_ASSERT(graph_->loop().in_loop());
-    graph_->task_started();
-    async::spawn([self = std::move(self)]() mutable { return run(std::move(self)); });
+    started_ = true;
+    if (pending_) {
+        apply(*pending_);
+        pending_.reset();
+    }
 }
 
 void ModelsNode::request_stop() noexcept {
@@ -518,41 +504,27 @@ void ModelsNode::request_stop() noexcept {
     stopping_ = true;
     candidate_.reset();
     active_.reset();
-    stop_publisher_->publish(true);
+    subscription_.close();
+    pending_.reset();
 }
 
-async::DetachedTask ModelsNode::run(std::shared_ptr<ModelsNode> self) noexcept {
-    auto stop = self->stop_.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = self->subscription_.subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
+void ModelsNode::on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept {
+    auto &self = *static_cast<ModelsNode *>(context);
+    if (result.kind == nacos::ResultKind::Closed) {
+        if (!self.stopping_) {
+            LOG(LOG_CONFIG, WARN) << "models config subscription closed";
         }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                if (!self->stopping_) {
-                    LOG(LOG_CONFIG, WARN) << "models config subscription closed";
-                }
-                break;
-            }
-            if (snapshot.value->data) {
-                self->apply(*snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+        self.subscription_.close();
+        return;
     }
-    self->subscription_.close();
-    self->graph_->task_done();
+    if (!result.data) {
+        return;
+    }
+    if (!self.started_) {
+        self.pending_ = *result.data;
+        return;
+    }
+    self.apply(*result.data);
 }
 
 void ModelsNode::apply(const nacos::ConfigData &data) {
@@ -751,58 +723,47 @@ void ModelsNode::rebuild_current() {
                                                           std::move(providers), std::move(routes));
 }
 
-Bt1Node::Bt1Node(ConfigGraph &graph, nacos::Subscription<nacos::ConfigData> subscription) :
-    graph_(&graph), subscription_(std::move(subscription)) {
-    stop_publisher_ = stop_.acquire_publisher();
-    FIBER_ASSERT(stop_publisher_.has_value());
+Bt1Node::Bt1Node(ConfigGraph &graph) : graph_(&graph) {}
+
+void Bt1Node::attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept {
+    subscription_ = std::move(subscription);
 }
 
-void Bt1Node::start(std::shared_ptr<Bt1Node> self) {
+void Bt1Node::start() {
     FIBER_ASSERT(graph_->loop().in_loop());
-    graph_->task_started();
-    async::spawn([self = std::move(self)]() mutable { return run(std::move(self)); });
+    started_ = true;
+    if (pending_) {
+        apply(*pending_);
+        pending_.reset();
+    }
 }
 
 void Bt1Node::request_stop() noexcept {
     FIBER_ASSERT(graph_->loop().in_loop());
     if (!stopping_) {
         stopping_ = true;
-        stop_publisher_->publish(true);
+        subscription_.close();
+        pending_.reset();
     }
 }
 
-async::DetachedTask Bt1Node::run(std::shared_ptr<Bt1Node> self) noexcept {
-    auto stop = self->stop_.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = self->subscription_.subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
+void Bt1Node::on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept {
+    auto &self = *static_cast<Bt1Node *>(context);
+    if (result.kind == nacos::ResultKind::Closed) {
+        if (!self.stopping_) {
+            LOG(LOG_CONFIG, WARN) << "BT1 key config subscription closed";
         }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                if (!self->stopping_) {
-                    LOG(LOG_CONFIG, WARN) << "BT1 key config subscription closed";
-                }
-                break;
-            }
-            if (snapshot.value->data) {
-                self->apply(*snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+        self.subscription_.close();
+        return;
     }
-    self->subscription_.close();
-    self->graph_->task_done();
+    if (!result.data) {
+        return;
+    }
+    if (!self.started_) {
+        self.pending_ = *result.data;
+        return;
+    }
+    self.apply(*result.data);
 }
 
 void Bt1Node::apply(const nacos::ConfigData &data) {
@@ -833,20 +794,26 @@ std::expected<void, nacos::ConfigServiceError> ConfigGraph::start() {
         });
     }
 
-    auto bt1_subscription = config_service_->subscribe(kBt1KeysDataId, kLlmConfigGroup);
+    auto bt1 = std::make_shared<Bt1Node>(*this);
+    auto bt1_subscription = config_service_->subscribe(kBt1KeysDataId, kLlmConfigGroup, &Bt1Node::on_notify, bt1.get());
     if (!bt1_subscription) {
         return std::unexpected(std::move(bt1_subscription.error()));
     }
-    auto models_subscription = config_service_->subscribe(kModelsDataId, kLlmConfigGroup);
+    bt1->attach(std::move(*bt1_subscription));
+
+    auto models = std::make_shared<ModelsNode>(*this);
+    auto models_subscription =
+            config_service_->subscribe(kModelsDataId, kLlmConfigGroup, &ModelsNode::on_notify, models.get());
     if (!models_subscription) {
         return std::unexpected(std::move(models_subscription.error()));
     }
+    models->attach(std::move(*models_subscription));
 
-    bt1_ = std::make_shared<Bt1Node>(*this, std::move(*bt1_subscription));
-    models_ = std::make_shared<ModelsNode>(*this, std::move(*models_subscription));
+    bt1_ = std::move(bt1);
+    models_ = std::move(models);
     state_ = LlmConfigManagerState::Running;
-    bt1_->start(bt1_);
-    models_->start(models_);
+    bt1_->start();
+    models_->start();
     LOG(LOG_CONFIG, INFO) << "LLM config graph subscriptions started group=" << log::quoted(kLlmConfigGroup);
     return {};
 }
@@ -865,7 +832,6 @@ async::Task<void> ConfigGraph::shutdown() noexcept {
         models_->request_stop();
         bt1_->request_stop();
     }
-    co_await tasks_.join();
     models_.reset();
     bt1_.reset();
     FIBER_ASSERT(providers_.empty());
@@ -882,11 +848,14 @@ ConfigGraph::create_provider_node(void *context, std::string key) {
     auto &graph = *static_cast<ConfigGraph *>(context);
     FIBER_ASSERT(graph.loop_->in_loop());
     const std::string data_id = std::string(kProviderDataIdPrefix) + key;
-    auto subscription = graph.config_service_->subscribe(data_id, kLlmConfigGroup);
+    auto node = std::make_shared<ProviderNode>(graph, std::move(key));
+    auto subscription =
+            graph.config_service_->subscribe(data_id, kLlmConfigGroup, &ProviderNode::on_notify, node.get());
     if (!subscription) {
         return std::unexpected(std::move(subscription.error()));
     }
-    return std::make_shared<ProviderNode>(graph, std::move(key), std::move(*subscription));
+    node->attach(std::move(*subscription));
+    return node;
 }
 
 std::expected<std::shared_ptr<GroupNode>, nacos::ConfigServiceError> ConfigGraph::create_group_node(void *context,
@@ -894,11 +863,13 @@ std::expected<std::shared_ptr<GroupNode>, nacos::ConfigServiceError> ConfigGraph
     auto &graph = *static_cast<ConfigGraph *>(context);
     FIBER_ASSERT(graph.loop_->in_loop());
     const std::string data_id = std::string(kUserGroupDataIdPrefix) + key;
-    auto subscription = graph.config_service_->subscribe(data_id, kLlmConfigGroup);
+    auto node = std::make_shared<GroupNode>(graph, std::move(key));
+    auto subscription = graph.config_service_->subscribe(data_id, kLlmConfigGroup, &GroupNode::on_notify, node.get());
     if (!subscription) {
         return std::unexpected(std::move(subscription.error()));
     }
-    return std::make_shared<GroupNode>(graph, std::move(key), std::move(*subscription));
+    node->attach(std::move(*subscription));
+    return node;
 }
 
 void ConfigGraph::on_bt1_changed() {

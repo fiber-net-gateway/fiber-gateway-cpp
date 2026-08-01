@@ -48,30 +48,8 @@ std::expected<void, nacos::NamingServiceError> RateLimitClusterMembership::start
         return std::unexpected(invalid_argument("rate limit advertise endpoint is invalid"));
     }
 
-    auto subscribed = naming_service_->subscribe(service_name_, group_);
-    if (!subscribed) {
-        return std::unexpected(std::move(subscribed.error()));
-    }
-    nacos::Instance instance{
-            .instance_id = *node_id,
-            .ip = advertise_ipv4,
-            .port = port,
-            .weight = 1.0,
-            .healthy = true,
-            .enabled = true,
-            .ephemeral = true,
-            .cluster_name = cluster_name_,
-    };
-    auto registered = naming_service_->registry(service_name_, group_, std::move(instance));
-    if (!registered) {
-        subscribed->close();
-        return std::unexpected(std::move(registered.error()));
-    }
-
     advertise_ipv4_ = std::move(advertise_ipv4);
     self_node_id_ = std::move(*node_id);
-    subscription_.emplace(std::move(*subscribed));
-    registration_.emplace(std::move(*registered));
     auto initial = ring_->update(++ring_version_, {
                                                           RateLimitNode{
                                                                   .node_id = self_node_id_,
@@ -82,16 +60,40 @@ std::expected<void, nacos::NamingServiceError> RateLimitClusterMembership::start
                                                           },
                                                   });
     if (!initial) {
-        registration_->close();
-        registration_.reset();
-        subscription_->close();
-        subscription_.reset();
         return std::unexpected(invalid_argument("failed to initialize rate limit ring"));
     }
 
+    auto subscribed = naming_service_->subscribe(service_name_, group_, &service_notify, this);
+    if (!subscribed) {
+        (void) ring_->update(++ring_version_, {});
+        return std::unexpected(std::move(subscribed.error()));
+    }
+    nacos::Instance instance{
+            .instance_id = self_node_id_,
+            .ip = advertise_ipv4_,
+            .port = port,
+            .weight = 1.0,
+            .healthy = true,
+            .enabled = true,
+            .ephemeral = true,
+            .cluster_name = cluster_name_,
+    };
+    auto registered = naming_service_->registry(service_name_, group_, std::move(instance));
+    if (!registered) {
+        subscribed->close();
+        pending_service_.reset();
+        (void) ring_->update(++ring_version_, {});
+        return std::unexpected(std::move(registered.error()));
+    }
+
+    subscription_.emplace(std::move(*subscribed));
+    registration_.emplace(std::move(*registered));
     started_ = true;
-    tasks_.add(2);
-    async::spawn([this]() { return watch_service(); });
+    if (pending_service_) {
+        apply(*pending_service_);
+        pending_service_.reset();
+    }
+    tasks_.add();
     async::spawn([this]() { return watch_registration(); });
     LOG(LOG_RATE_LIMIT, INFO) << "token rate limit cluster started service=" << log::quoted(service_name_)
                               << " group=" << log::quoted(group_) << " cluster=" << log::quoted(cluster_name_)
@@ -99,36 +101,23 @@ std::expected<void, nacos::NamingServiceError> RateLimitClusterMembership::start
     return {};
 }
 
-async::DetachedTask RateLimitClusterMembership::watch_service() noexcept {
-    FIBER_ASSERT(loop_->in_loop());
-    auto stop = stop_.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = subscription_->subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
+void RateLimitClusterMembership::service_notify(void *context,
+                                                const nacos::SubscriptionResult<nacos::ServiceInfo> &result) noexcept {
+    auto &self = *static_cast<RateLimitClusterMembership *>(context);
+    if (result.kind == nacos::ResultKind::Closed) {
+        if (self.subscription_) {
+            self.subscription_->close();
         }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                break;
-            }
-            if (snapshot.value->data) {
-                apply(*snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+        return;
     }
-    subscription_->close();
-    tasks_.done();
+    if (!result.data) {
+        return;
+    }
+    if (!self.started_) {
+        self.pending_service_ = *result.data;
+        return;
+    }
+    self.apply(*result.data);
 }
 
 async::DetachedTask RateLimitClusterMembership::watch_registration() noexcept {
@@ -219,6 +208,7 @@ async::Task<void> RateLimitClusterMembership::shutdown() noexcept {
         stopping_ = true;
         stop_publisher_->publish(true);
     }
+    subscription_->close();
     co_await tasks_.join();
 
     auto status = registration_->subscribe_status();
@@ -229,6 +219,7 @@ async::Task<void> RateLimitClusterMembership::shutdown() noexcept {
     }
     registration_.reset();
     subscription_.reset();
+    pending_service_.reset();
     registered_.store(false, std::memory_order_release);
     (void) ring_->update(++ring_version_, {});
     started_ = false;

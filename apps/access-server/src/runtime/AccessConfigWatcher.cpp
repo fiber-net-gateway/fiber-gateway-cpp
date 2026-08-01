@@ -7,9 +7,6 @@
 #include <utility>
 #include <vector>
 
-#include <async/Spawn.h>
-#include <async/Watch.h>
-#include <async/WhenAny.h>
 #include <common/Assert.h>
 
 namespace fiber::access_server {
@@ -19,38 +16,27 @@ template<typename Entry>
 void request_stop(Entry &entry) noexcept {
     if (!entry.stopping) {
         entry.stopping = true;
-        entry.stop_publisher->publish(true);
+        entry.subscription.close();
     }
 }
 
 } // namespace
 
 struct AccessConfigWatcher::ProjectListEntry final : public common::NonCopyable, public common::NonMovable {
-    explicit ProjectListEntry(nacos::Subscription<nacos::ConfigData> value_subscription) :
-        subscription(std::move(value_subscription)) {
-        stop_publisher = stop.acquire_publisher();
-        FIBER_ASSERT(stop_publisher.has_value());
-    }
+    explicit ProjectListEntry(AccessConfigWatcher &value_owner) : owner(&value_owner) {}
 
+    AccessConfigWatcher *owner = nullptr;
     nacos::Subscription<nacos::ConfigData> subscription;
-    async::Watch<bool> stop{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher;
     bool stopping = false;
 };
 
 struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, public common::NonMovable {
-    ProjectEntry(AccessConfigWatcher &value_owner, std::string value_project,
-                 nacos::Subscription<nacos::ConfigData> value_subscription) :
-        owner(&value_owner), project(std::move(value_project)), subscription(std::move(value_subscription)) {
-        stop_publisher = stop.acquire_publisher();
-        FIBER_ASSERT(stop_publisher.has_value());
-    }
+    ProjectEntry(AccessConfigWatcher &value_owner, std::string value_project) :
+        owner(&value_owner), project(std::move(value_project)) {}
 
     AccessConfigWatcher *owner = nullptr;
     std::string project;
     nacos::Subscription<nacos::ConfigData> subscription;
-    async::Watch<bool> stop{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher;
     bool stopping = false;
 };
 
@@ -66,7 +52,6 @@ AccessConfigWatcher::~AccessConfigWatcher() {
     FIBER_ASSERT(state_ == AccessConfigWatcherState::Created || state_ == AccessConfigWatcherState::Stopped);
     FIBER_ASSERT(project_list_ == nullptr);
     FIBER_ASSERT(projects_.empty());
-    FIBER_ASSERT(tasks_.empty());
 }
 
 std::expected<void, nacos::ConfigServiceError> AccessConfigWatcher::start() {
@@ -79,14 +64,16 @@ std::expected<void, nacos::ConfigServiceError> AccessConfigWatcher::start() {
         });
     }
 
-    auto subscription = config_service_->subscribe(options_.project_list_data_id, options_.project_route_group);
+    state_ = AccessConfigWatcherState::Running;
+    project_list_ = std::make_unique<ProjectListEntry>(*this);
+    auto subscription = config_service_->subscribe(options_.project_list_data_id, options_.project_route_group,
+                                                   &project_list_notify, project_list_.get());
     if (!subscription) {
+        project_list_.reset();
+        state_ = AccessConfigWatcherState::Created;
         return std::unexpected(std::move(subscription.error()));
     }
-    project_list_ = std::make_unique<ProjectListEntry>(std::move(*subscription));
-    state_ = AccessConfigWatcherState::Running;
-    tasks_.add();
-    async::spawn([this]() { return run_project_list(*this); });
+    project_list_->subscription = std::move(*subscription);
     return {};
 }
 
@@ -101,79 +88,46 @@ async::Task<void> AccessConfigWatcher::shutdown() noexcept {
     }
     if (state_ == AccessConfigWatcherState::Running) {
         state_ = AccessConfigWatcherState::Stopping;
-        request_stop(*project_list_);
-        for (auto &[project, entry]: projects_) {
-            (void) project;
-            request_stop(*entry);
-        }
     }
-    co_await tasks_.join();
+    request_stop(*project_list_);
+    for (auto &[project, entry]: projects_) {
+        (void) project;
+        request_stop(*entry);
+    }
     projects_.clear();
     project_list_.reset();
     state_ = AccessConfigWatcherState::Stopped;
 }
 
-async::DetachedTask AccessConfigWatcher::run_project_list(AccessConfigWatcher &owner) noexcept {
-    ProjectListEntry &entry = *owner.project_list_;
-    auto stop = entry.stop.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = entry.subscription.subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
-        }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                break;
-            }
-            if (snapshot.value->data && owner.state_ == AccessConfigWatcherState::Running) {
-                owner.apply_project_list(*snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+void AccessConfigWatcher::project_list_notify(void *context,
+                                              const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept {
+    auto &entry = *static_cast<ProjectListEntry *>(context);
+    AccessConfigWatcher &owner = *entry.owner;
+    if (result.kind == nacos::ResultKind::Closed) {
+        request_stop(entry);
+        return;
     }
-    entry.subscription.close();
-    owner.tasks_.done();
+    if (result.data && owner.state_ == AccessConfigWatcherState::Running) {
+        owner.apply_project_list(*result.data);
+    }
 }
 
-async::DetachedTask AccessConfigWatcher::run_project(std::shared_ptr<ProjectEntry> entry) noexcept {
-    auto stop = entry->stop.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = entry->subscription.subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
-        }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                break;
-            }
-            if (snapshot.value->data && !entry->stopping && entry->owner->state_ == AccessConfigWatcherState::Running) {
-                entry->owner->apply_project(*entry, *snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+void AccessConfigWatcher::project_notify(void *context,
+                                         const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept {
+    auto *entry = static_cast<ProjectEntry *>(context);
+    AccessConfigWatcher &owner = *entry->owner;
+    const auto found = owner.projects_.find(entry->project);
+    if (found == owner.projects_.end() || found->second.get() != entry) {
+        return;
     }
-    entry->subscription.close();
-    entry->owner->tasks_.done();
+    std::shared_ptr<ProjectEntry> hold = found->second;
+    if (result.kind == nacos::ResultKind::Closed) {
+        request_stop(*hold);
+        return;
+    }
+    if (result.data && !hold->stopping && owner.state_ == AccessConfigWatcherState::Running) {
+        owner.apply_project(*hold, *result.data);
+    }
 }
 
 void AccessConfigWatcher::apply_project_list(const nacos::ConfigData &data) {
@@ -241,17 +195,16 @@ void AccessConfigWatcher::add_project(std::string project) {
     FIBER_ASSERT(loop_->in_loop());
     std::string data_id = options_.project_route_data_id_prefix;
     data_id.append(project);
-    auto subscription = config_service_->subscribe(data_id, options_.project_route_group);
+    auto entry = std::make_shared<ProjectEntry>(*this, std::move(project));
+    auto [iterator, inserted] = projects_.emplace(entry->project, entry);
+    FIBER_ASSERT(inserted);
+    auto subscription = config_service_->subscribe(data_id, options_.project_route_group, &project_notify, entry.get());
     if (!subscription) {
+        projects_.erase(iterator);
         ++failed_updates_;
         return;
     }
-    auto entry = std::make_shared<ProjectEntry>(*this, std::move(project), std::move(*subscription));
-    auto [iterator, inserted] = projects_.emplace(entry->project, entry);
-    FIBER_ASSERT(inserted);
-    (void) iterator;
-    tasks_.add();
-    async::spawn([entry = std::move(entry)]() mutable { return run_project(std::move(entry)); });
+    entry->subscription = std::move(*subscription);
 }
 
 void AccessConfigWatcher::remove_project(std::string_view project) {

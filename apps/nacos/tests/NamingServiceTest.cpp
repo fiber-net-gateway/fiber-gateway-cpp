@@ -40,6 +40,29 @@ namespace dto = fiber::nacos::dto;
 namespace nacos_detail = fiber::nacos::detail;
 namespace proto = fiber::nacos::proto;
 
+template<typename T>
+struct CallbackWatch {
+    using Result = fiber::nacos::SubscriptionResult<T>;
+    using Watch = fiber::async::Watch<Result>;
+
+    CallbackWatch() : publisher(watch.acquire_publisher()), subscriber(watch.subscribe()) {
+        FIBER_ASSERT(publisher.has_value());
+    }
+
+    static void notify(void *context, const Result &result) noexcept {
+        auto *self = static_cast<CallbackWatch *>(context);
+        FIBER_ASSERT(self != nullptr);
+        self->publisher->publish(result);
+    }
+
+    Watch watch;
+    std::optional<typename Watch::Publisher> publisher;
+    typename Watch::Subscriber subscriber;
+};
+
+template<typename T>
+void ignore_subscription(void *, const fiber::nacos::SubscriptionResult<T> &) noexcept {}
+
 fiber::common::IoResult<std::uint16_t> local_port(int fd) {
     sockaddr_storage storage{};
     socklen_t len = sizeof(storage);
@@ -479,7 +502,8 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
     auto service = std::move(*created);
 
     auto invalid_get = co_await service->get("", "group");
-    auto invalid_subscription = service->subscribe("service", "");
+    auto invalid_subscription =
+            service->subscribe("service", "", &ignore_subscription<fiber::nacos::ServiceInfo>, nullptr);
     auto invalid_registration = service->registry("service", "group", fiber::nacos::Instance{});
     result.rejects_invalid_arguments =
             !invalid_get && invalid_get.error().code == fiber::nacos::NamingServiceErrorCode::InvalidArgument &&
@@ -488,9 +512,15 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
             !invalid_registration &&
             invalid_registration.error().code == fiber::nacos::NamingServiceErrorCode::InvalidArgument;
 
-    auto first = service->subscribe("service", "group");
-    auto second = service->subscribe("service", "group");
-    auto stopped_subscription = service->subscribe("stopped", "group");
+    CallbackWatch<fiber::nacos::ServiceInfo> first_updates;
+    CallbackWatch<fiber::nacos::ServiceInfo> second_updates;
+    CallbackWatch<fiber::nacos::ServiceInfo> stopped_updates;
+    auto first =
+            service->subscribe("service", "group", &CallbackWatch<fiber::nacos::ServiceInfo>::notify, &first_updates);
+    auto second =
+            service->subscribe("service", "group", &CallbackWatch<fiber::nacos::ServiceInfo>::notify, &second_updates);
+    auto stopped_subscription =
+            service->subscribe("stopped", "group", &CallbackWatch<fiber::nacos::ServiceInfo>::notify, &stopped_updates);
     fiber::nacos::Instance instance{.ip = "127.0.0.1", .port = 8080};
     auto registered = service->registry("service", "group", instance);
     auto status = registered->subscribe_status();
@@ -503,7 +533,7 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
     result.naming_label = server->naming_label_seen();
 
     if (result.ready && first && second && registered) {
-        auto &subscriber = first->subscriber();
+        auto &subscriber = first_updates.subscriber;
         auto current = subscriber.current();
         result.pushed = current.value && current.value->kind == fiber::nacos::ResultKind::Success &&
                         current.value->data && current.value->data->name == "service";
@@ -557,7 +587,7 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
     co_await service->shutdown();
     auth_publisher->publish({.kind = fiber::nacos::NacosAuthAccessKind::Stopped});
     if (stopped_subscription) {
-        const auto stopped = stopped_subscription->subscriber().current();
+        const auto stopped = stopped_updates.subscriber.current();
         result.stopped = stopped.value && stopped.value->kind == fiber::nacos::ResultKind::Closed;
         stopped_subscription->close();
     }
@@ -768,7 +798,7 @@ fiber::async::Task<bool> wait_registration_state(fiber::nacos::InstanceRegistrat
 }
 
 fiber::async::Task<bool>
-wait_instance_port(fiber::nacos::Subscription<fiber::nacos::ServiceInfo>::Subscriber &subscriber,
+wait_instance_port(typename CallbackWatch<fiber::nacos::ServiceInfo>::Watch::Subscriber &subscriber,
                    std::uint64_t &version, std::uint16_t port) {
     for (int i = 0; i < 4; ++i) {
         auto next =
@@ -804,7 +834,9 @@ DetachedTask run_rnacos_naming_case(fiber::event::EventLoop *loop, fiber::nacos:
             {.loop = loop, .config = std::move(shared_config), .auth = std::move(auth)}, std::move(options));
     FIBER_ASSERT(created.has_value());
     auto service = std::move(*created);
-    auto subscription_result = service->subscribe(kService, kGroup);
+    CallbackWatch<fiber::nacos::ServiceInfo> service_updates;
+    auto subscription_result =
+            service->subscribe(kService, kGroup, &CallbackWatch<fiber::nacos::ServiceInfo>::notify, &service_updates);
     fiber::nacos::Instance instance{.ip = "127.0.0.1", .port = 19081};
     auto registration_result = service->registry(kService, kGroup, instance);
 
@@ -831,7 +863,7 @@ DetachedTask run_rnacos_naming_case(fiber::event::EventLoop *loop, fiber::nacos:
                 });
             }
 
-            auto &subscriber = subscription.subscriber();
+            auto &subscriber = service_updates.subscriber;
             std::uint64_t service_version = subscriber.current().version;
             result.subscribed = co_await wait_instance_port(subscriber, service_version, 19081);
 

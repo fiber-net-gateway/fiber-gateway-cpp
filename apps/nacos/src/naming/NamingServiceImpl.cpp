@@ -64,8 +64,9 @@ struct NamingProtocolState {
     bool draining = false;
 };
 
-using NamingEntry = SubscriptionEntry<ServiceInfo, NamingProtocolState>;
-using NamingEntryPtr = EntryPtr<NamingEntry>;
+using NamingSubscriptionPool = SubscriptionPool<ServiceInfo, NamingProtocolState>;
+using NamingEntry = NamingSubscriptionPool::Entry;
+using NamingEntryPtr = NamingSubscriptionPool::EntryPtr;
 using NamingResult = SubscriptionResult<ServiceInfo>;
 
 class NamingServiceImpl final : public NamingService {
@@ -97,7 +98,8 @@ public:
     [[nodiscard]] async::Task<std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>>
     get(std::string service_name, std::string group) noexcept override;
     [[nodiscard]] std::expected<Subscription<ServiceInfo>, NamingServiceError>
-    subscribe(std::string_view service_name, std::string_view group) override;
+    subscribe(std::string_view service_name, std::string_view group,
+              Subscription<ServiceInfo>::NotifyCallback on_notify, void *ctx) override;
     [[nodiscard]] std::expected<InstanceRegistration, NamingServiceError>
     registry(std::string_view service_name, std::string_view group, Instance instance) override;
 
@@ -186,7 +188,7 @@ private:
     std::shared_ptr<const NacosClientConfig> config_;
     NamingServiceOptions options_;
     NacosAuthSubscriber auth_;
-    SubscriptionPool<NamingEntry> pool_;
+    NamingSubscriptionPool pool_;
     std::vector<std::shared_ptr<RegistrationEntry>> registrations_;
     async::WaitGroup tasks_;
     async::Watch<NacosServiceState> lifecycle_{NacosServiceState::Created};
@@ -437,9 +439,9 @@ NamingServiceImpl::get(std::string service_name, std::string group) noexcept {
     }
 
     if (auto entry = pool_.find(service_name, group)) {
-        const auto snapshot = entry->watch.current();
-        if (snapshot.value && snapshot.value->kind == ResultKind::Success && snapshot.value->data) {
-            co_return std::shared_ptr<const ServiceInfo>(snapshot.value, &*snapshot.value->data);
+        const auto snapshot = entry->latest;
+        if (snapshot && snapshot->kind == ResultKind::Success && snapshot->data) {
+            co_return std::shared_ptr<const ServiceInfo>(snapshot, &*snapshot->data);
         }
     }
 
@@ -470,8 +472,9 @@ NamingServiceImpl::get(std::string service_name, std::string group) noexcept {
     co_return std::make_shared<const ServiceInfo>(std::move(*owned));
 }
 
-std::expected<Subscription<ServiceInfo>, NamingServiceError> NamingServiceImpl::subscribe(std::string_view service_name,
-                                                                                          std::string_view group) {
+std::expected<Subscription<ServiceInfo>, NamingServiceError>
+NamingServiceImpl::subscribe(std::string_view service_name, std::string_view group,
+                             Subscription<ServiceInfo>::NotifyCallback on_notify, void *ctx) {
     FIBER_ASSERT(loop_->in_loop());
     if (stopping() || !pool_.active()) {
         return std::unexpected(shutdown_error());
@@ -479,7 +482,14 @@ std::expected<Subscription<ServiceInfo>, NamingServiceError> NamingServiceImpl::
     if (!valid_key(service_name, group)) {
         return std::unexpected(validate_key(service_name, group));
     }
-    auto subscription = pool_.subscribe(service_name, group);
+    if (on_notify == nullptr) {
+        return std::unexpected(NamingServiceError{
+                .code = NamingServiceErrorCode::InvalidArgument,
+                .io_error = common::IoErr::Invalid,
+                .message = "notification callback must not be null",
+        });
+    }
+    auto subscription = pool_.subscribe(service_name, group, on_notify, ctx);
     if (!subscription) {
         return std::unexpected(shutdown_error());
     }
@@ -510,6 +520,7 @@ NamingServiceImpl::registry(std::string_view service_name, std::string_view grou
 }
 
 void NamingServiceImpl::on_subscription_add(EntryPtr entry) {
+    entry->proto.draining = false;
     if (ready_rpc_) {
         schedule_subscription(std::move(entry), true);
     }
@@ -520,9 +531,9 @@ RemoveDecision NamingServiceImpl::on_subscription_remove(EntryPtr entry) {
     entry->proto.draining = true;
     if (!stopping() && ready_rpc_ && (entry->proto.registered || entry->proto.operation_in_flight)) {
         schedule_subscription(std::move(entry), false);
-        return RemoveDecision::Defer;
+        return RemoveDecision::KeepLinked;
     }
-    return RemoveDecision::UnlinkNow;
+    return RemoveDecision::RetireNow;
 }
 
 void NamingServiceImpl::schedule_subscription(EntryPtr entry, bool subscribe_value) {
@@ -560,8 +571,19 @@ async::DetachedTask NamingServiceImpl::run_subscription(EntryPtr entry, bool sub
         entry->proto.registered = false;
     }
 
-    if (!stopping() && ready_rpc_ && entry->proto.draining && entry->proto.registered) {
-        schedule_subscription(entry, false);
+    if (!stopping() && entry->pool != nullptr) {
+        const bool desired = !entry->proto.draining;
+        if (desired != subscribe_value) {
+            if (desired) {
+                schedule_subscription(entry, true);
+            } else if (entry->proto.registered) {
+                schedule_subscription(entry, false);
+            } else {
+                pool_.retire(*entry);
+            }
+        } else if (!desired && !entry->proto.registered) {
+            pool_.retire(*entry);
+        }
     }
     tasks_.done();
 }
@@ -583,9 +605,9 @@ NamingServiceImpl::handle_notify(void *context, NacosServerRequestContext &,
         co_return dto::resp::NotifySubscriberResponse{};
     }
     if (auto entry = self->pool_.find(owned->name, owned->group_name)) {
-        const auto current = entry->watch.current();
-        if (!current.value || current.value->kind != ResultKind::Success || !current.value->data ||
-            current.value->data->last_ref_time != owned->last_ref_time) {
+        const auto current = entry->latest;
+        if (!current || current->kind != ResultKind::Success || !current->data ||
+            current->data->last_ref_time != owned->last_ref_time) {
             self->publish_value(*entry, std::move(*owned));
         }
     }
@@ -753,7 +775,11 @@ async::DetachedTask NamingServiceImpl::run_registration(std::shared_ptr<Registra
 }
 
 void NamingServiceImpl::restore_connection_state() {
-    pool_.for_each([this](NamingEntry &entry) { schedule_subscription(EntryPtr(&entry), true); });
+    pool_.for_each([this](NamingEntry &entry) {
+        if (!entry.proto.draining) {
+            schedule_subscription(EntryPtr(&entry), true);
+        }
+    });
     for (const auto &entry: registrations_) {
         schedule_registration(entry);
     }

@@ -34,7 +34,7 @@ public:
     [[nodiscard]] std::string_view self_node_id() const noexcept { return self_node_id_; }
 
 private:
-    [[nodiscard]] async::DetachedTask watch_service() noexcept;
+    static void service_notify(void *context, const nacos::SubscriptionResult<nacos::ServiceInfo> &result) noexcept;
     [[nodiscard]] async::DetachedTask watch_registration() noexcept;
     void apply(const nacos::ServiceInfo &info);
 
@@ -48,6 +48,7 @@ private:
     std::string self_node_id_;
     std::optional<nacos::Subscription<nacos::ServiceInfo>> subscription_;
     std::optional<nacos::InstanceRegistration> registration_;
+    std::optional<nacos::ServiceInfo> pending_service_;
     async::Watch<bool> stop_{false};
     std::optional<async::Watch<bool>::Publisher> stop_publisher_;
     async::WaitGroup tasks_;
