@@ -331,7 +331,9 @@ private:
             ++listen_count_;
             max_listen_contexts_ = std::max(max_listen_contexts_, request.config_listen_contexts.size());
             for (const dto::req::ConfigListenContext &context: request.config_listen_contexts) {
-                const bool differs = exists_ && (!context.md5.is_present() || context.md5.value() != md5_);
+                const bool exists = exists_ && context.data_id.is_present() && context.data_id.value() == "data" &&
+                                    context.group.is_present() && context.group.value() == "group";
+                const bool differs = exists && (!context.md5.is_present() || context.md5.value() != md5_);
                 if (!differs) {
                     continue;
                 }
@@ -474,6 +476,9 @@ private:
 struct ConfigCaseResult {
     bool ready = false;
     bool initial_present = false;
+    bool initial_present_deduplicated = false;
+    bool initial_not_found = false;
+    bool initial_not_found_deduplicated = false;
     bool cached_get = false;
     bool missing_get = false;
     bool types_match = false;
@@ -575,13 +580,47 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             auto subscription = std::move(*subscribed);
             auto &sub = updates.subscriber;
             auto initial = sub.current();
-            auto next = co_await fiber::async::timeout_for(
-                    [&sub, version = initial.version]() { return sub.next(version); }, 2s);
-            result.initial_present = next && next->value && next->value->kind == fiber::nacos::ResultKind::Success &&
-                                     next->value->data &&
-                                     next->value->data->state == fiber::nacos::ConfigState::Present &&
-                                     next->value->data->content == "type-5";
-            std::uint64_t version = next ? next->version : initial.version;
+            result.initial_present = initial.value && initial.value->kind == fiber::nacos::ResultKind::Success &&
+                                     initial.value->data &&
+                                     initial.value->data->state == fiber::nacos::ConfigState::Present &&
+                                     initial.value->data->content == "type-5";
+            std::uint64_t version = initial.version;
+            if (!result.initial_present) {
+                auto next = co_await fiber::async::timeout_for([&sub, version]() { return sub.next(version); }, 2s);
+                result.initial_present = next && next->value &&
+                                         next->value->kind == fiber::nacos::ResultKind::Success && next->value->data &&
+                                         next->value->data->state == fiber::nacos::ConfigState::Present &&
+                                         next->value->data->content == "type-5";
+                if (next) {
+                    version = next->version;
+                }
+            }
+
+            auto unchanged = co_await fiber::async::timeout_for([&sub, version]() { return sub.next(version); }, 150ms);
+            result.initial_present_deduplicated = !unchanged && unchanged.error() == fiber::common::IoErr::TimedOut;
+
+            auto &missing_sub = stopped_updates.subscriber;
+            const auto missing_current = missing_sub.current();
+            result.initial_not_found = missing_current.value &&
+                                       missing_current.value->kind == fiber::nacos::ResultKind::Success &&
+                                       missing_current.value->data &&
+                                       missing_current.value->data->state == fiber::nacos::ConfigState::NotFound;
+            std::uint64_t missing_version = missing_current.version;
+            if (!result.initial_not_found) {
+                auto missing_initial = co_await fiber::async::timeout_for(
+                        [&missing_sub, missing_version]() { return missing_sub.next(missing_version); }, 2s);
+                result.initial_not_found = missing_initial && missing_initial->value &&
+                                           missing_initial->value->kind == fiber::nacos::ResultKind::Success &&
+                                           missing_initial->value->data &&
+                                           missing_initial->value->data->state == fiber::nacos::ConfigState::NotFound;
+                if (missing_initial) {
+                    missing_version = missing_initial->version;
+                }
+            }
+            auto missing_duplicate = co_await fiber::async::timeout_for(
+                    [&missing_sub, missing_version]() { return missing_sub.next(missing_version); }, 150ms);
+            result.initial_not_found_deduplicated =
+                    !missing_duplicate && missing_duplicate.error() == fiber::common::IoErr::TimedOut;
 
             auto cached = co_await service->get_config("data", "group");
             result.cached_get = cached && cached->has_value() && (*cached)->content == "type-5";
@@ -649,8 +688,9 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             }
 
             co_await service->shutdown();
-            // "stopped" was never synced: shutdown publishes Closed for it.
-            result.stopped_published = stopped_subscription->closed();
+            const auto stopped = stopped_updates.subscriber.current();
+            result.stopped_published = stopped_subscription->closed() && stopped.value &&
+                                       stopped.value->kind == fiber::nacos::ResultKind::Closed;
             stopped_subscription->close();
         } else {
             co_await service->shutdown();
@@ -825,6 +865,9 @@ TEST(NacosConfigServiceTest, UnarySubscriptionDedupDirtyUnregisterAndShutdown) {
     const ConfigCaseResult result = execute_config_case(false);
     EXPECT_TRUE(result.ready);
     EXPECT_TRUE(result.initial_present);
+    EXPECT_TRUE(result.initial_present_deduplicated);
+    EXPECT_TRUE(result.initial_not_found);
+    EXPECT_TRUE(result.initial_not_found_deduplicated);
     EXPECT_TRUE(result.cached_get);
     EXPECT_TRUE(result.missing_get);
     EXPECT_TRUE(result.types_match);
