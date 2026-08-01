@@ -194,7 +194,7 @@ void freeze_transaction_tree(TransactionData &root) noexcept {
 std::expected<mem::IoBuf, EncodeError> encode_tree(MessageTrace *trace, const ClientEncodeContext &client,
                                                    CatEncoderType encoder) noexcept {
     auto encoded = encode_message_tree(*trace->data, client, encoder);
-    delete trace;
+    discard_message_trace(trace);
     return encoded;
 }
 
@@ -207,7 +207,8 @@ std::expected<mem::IoBuf, EncodeError> encode_startup_nt1(const ClientEncodeCont
     RecordLimits limits;
     limits.max_messages = 3;
     limits.max_children_per_transaction = 2;
-    auto root_created = create_transaction_root("System", "Reboot", limits, {.message_id = message_id});
+    mem::BufPool tree_pool;
+    auto root_created = create_transaction_root(tree_pool, "System", "Reboot", limits, {.message_id = message_id});
     if (!root_created) {
         return std::unexpected(root_created.error() == RecordError::NoMemory ? EncodeError::NoMemory
                                                                              : EncodeError::InvalidTrace);
@@ -216,7 +217,7 @@ std::expected<mem::IoBuf, EncodeError> encode_startup_nt1(const ClientEncodeCont
     auto reboot = create_event(*root, "Reboot", ip);
     auto version = create_event(*root, "Cat_Fiber2_Client_Version", client_version);
     if (!reboot || !version) {
-        delete root->trace;
+        discard_message_trace(root->trace);
         return std::unexpected(EncodeError::NoMemory);
     }
     freeze_transaction_tree(*root);
@@ -267,7 +268,8 @@ std::expected<mem::IoBuf, EncodeError> encode_heartbeat_nt1(const ClientEncodeCo
     limits.max_children_per_transaction = 1;
     limits.max_data_bytes_per_message = max_data_bytes;
     limits.max_tree_bytes = max_data_bytes + 16 * 1024;
-    auto root_created = create_transaction_root("System", "Status", limits, {.message_id = message_id});
+    mem::BufPool tree_pool;
+    auto root_created = create_transaction_root(tree_pool, "System", "Status", limits, {.message_id = message_id});
     if (!root_created) {
         return std::unexpected(root_created.error() == RecordError::NoMemory ? EncodeError::NoMemory
                                                                              : EncodeError::InvalidTrace);
@@ -275,12 +277,12 @@ std::expected<mem::IoBuf, EncodeError> encode_heartbeat_nt1(const ClientEncodeCo
     TransactionData *root = *root_created;
     auto heartbeat = create_heartbeat(*root, "Heartbeat", info.ip);
     if (!heartbeat || add_data(*heartbeat, writer.view()) != RecordError::None) {
-        delete root->trace;
+        discard_message_trace(root->trace);
         return std::unexpected(EncodeError::NoMemory);
     }
     if (info.timestamp_millis != 0 && (set_timestamp(root, info.timestamp_millis) != RecordError::None ||
                                        set_timestamp(*heartbeat, info.timestamp_millis) != RecordError::None)) {
-        delete root->trace;
+        discard_message_trace(root->trace);
         return std::unexpected(EncodeError::InvalidTrace);
     }
     freeze_transaction_tree(*root);

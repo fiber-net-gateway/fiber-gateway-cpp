@@ -36,15 +36,13 @@ auto config = fiber::cat::CatClientConfig::create(std::move(params));
 if (config) {
     auto client = fiber::cat::CatClient::create(loop, std::move(*config));
     if (client && (*client)->start()) {
-        auto trace_result = fiber::cat::MessageTrace::create(**client);
-        if (trace_result) {
-            auto trace = std::move(*trace_result);
-            auto root_result = trace.create_transaction("URL", "/orders");
-            if (root_result) {
-                auto root = std::move(*root_result);
-                root.log_event("Cache", "miss");
-                root.complete();
-            }
+        fiber::mem::BufPool pool;
+        auto root_result = (*client)->create_isolated_transaction(pool, "URL", "/orders");
+        if (root_result) {
+            auto root = std::move(*root_result);
+            auto trace = root.message_trace();
+            root.log_event("Cache", "miss");
+            root.complete();
         }
     }
 }
@@ -56,10 +54,16 @@ but should retain an explicit deployment override for multi-interface and
 container/NAT environments. The selected CAT identity must remain stable for
 the client lifetime.
 
-`MessageTrace`, `Transaction`, and `Event` are move-only one-pointer handles. A trace permits exactly one root. The
-final open message completion synchronously encodes the tree, submits the independently owned frame to the client,
-destroys `MessageTraceData`, and resets the trace pool. A still-live public trace handle then becomes an inert shell:
-`valid()` is false and no later root can be created.
+`Transaction` and `Event` are move-only one-pointer handles. `MessageTrace` is a move-only non-owning view obtained
+from either root type. `CatClient::create_isolated_transaction()` and `create_isolated_event()` atomically create the
+trace and its only root. The caller supplies the `BufPool` and must keep it alive until every root and child handle has
+finished and every trace view is no longer used. CAT allocates all trace state and recorded data from that pool, but
+never resets it; the pool may therefore be shared with request state or multiple independent traces.
+
+The final open message completion synchronously encodes the tree, submits the independently owned frame to the client,
+and destroys `MessageTraceData`. Its arena memory remains reserved in the caller's pool until the caller resets or
+destroys the pool. A still-live trace view becomes inert after final completion: `valid()` is false and context access
+returns `RecordError::Completed`.
 
 Call `co_await client->shutdown()` before stopping the sender EventLoop. Shutdown closes frame admission, waits for
 submitters that already reserved capacity, crosses a complete sender-loop Notify phase, drains the connected sender up
@@ -85,21 +89,29 @@ fails explicitly at CAT 3.0's `50,000,000` stored-message index limit instead of
 discard or wrapping to a duplicate.
 
 ```cpp
-auto current = trace.propagation_context();
+auto current = root.message_trace().propagation_context();
 if (current) {
     auto inventory = client->create_remote_context(*current, "inventory");
     // Map the four propagation fields to approved outbound headers/metadata.
 }
 ```
 
-Inbound propagation is passed explicitly to `MessageTrace::create(client, context)`. No OS TLS or implicit current
-transaction stack is used. IDs and session tokens are validated and copied into trace-owned storage.
+Inbound propagation and recording limits are passed together when the isolated root is created:
+
+```cpp
+auto root = client->create_isolated_transaction(
+        pool, "URL", "/orders",
+        {.limits = limits, .context = inbound_context});
+```
+
+For an owning `PropagationContext`, pass `context.view()`. No OS TLS or implicit current transaction stack is used.
+IDs and session tokens are validated and copied into caller-pool storage.
 
 ## Service context
 
-An active `MessageTrace` owns an optional case-sensitive key/value context for request-local service propagation. The
-table is a fiber2 extension and is not encoded into CAT NT1/PT1 messages. HTTP or gRPC integration may populate it from
-approved inbound metadata and synchronously copy it into an outbound request:
+An active trace has an optional case-sensitive key/value context for request-local service propagation. Obtain its
+`MessageTrace` view from the root. The table is a fiber2 extension and is not encoded into CAT NT1/PT1 messages. HTTP
+or gRPC integration may populate it from approved inbound metadata and synchronously copy it into an outbound request:
 
 ```cpp
 trace.put_context("tenant", "blue");
@@ -112,23 +124,24 @@ trace.remove_context("tenant");
 ```
 
 Keys must be non-empty and are matched byte-for-byte. Empty values are valid. Returned `string_view` values and visitor
-arguments borrow trace-owned storage; callers must copy them before retaining them asynchronously. Context access is
-owner-EventLoop-local. It becomes `RecordError::Completed` after final message completion resets the trace pool.
+arguments borrow caller-pool storage; callers must copy them before retaining them asynchronously or resetting the
+pool. Context access is owner-EventLoop-local. It becomes `RecordError::Completed` after final message completion.
 
 `RecordLimits` independently bounds context entry count, key size, value size, and cumulative arena bytes. Removed or
-replaced storage is not subtracted from the byte budget because `BufPool` releases memory only when the complete trace is
-reset. Applications should apply an outbound propagation allowlist instead of forwarding arbitrary context to
+replaced storage is not subtracted from that trace's byte budget because arena allocations are not reclaimed
+individually. Applications should apply an outbound propagation allowlist instead of forwarding arbitrary context to
 untrusted destinations.
 
 ## Transactions and events
 
 Create a trace root and all its child messages on one running EventLoop. Handles may live across coroutine suspension.
 Parent-child relationships are explicit, so interleaved coroutines on one loop do not share an implicit transaction
-stack. Standalone `Transaction::create_root()` and `Event::create_root()` remain available for recording-only use; a
-sendable tree starts from `MessageTrace` bound to a running client.
+stack. There are exactly two public root factories, both on `CatClient`; roots cannot be created from a
+`MessageTrace` view.
 
 ```cpp
-auto root_result = fiber::cat::Transaction::create_root("URL", "/orders");
+fiber::mem::BufPool pool;
+auto root_result = client->create_isolated_transaction(pool, "URL", "/orders");
 if (root_result) {
     auto root = std::move(*root_result);
     root.add_data("method", "GET");
@@ -155,11 +168,12 @@ Repeated `add_data()` calls use CAT's official `&` separator by default. A Trans
 Log View data; only `&` and space are accepted, and changing the separator after data has been added is rejected.
 
 A parent may complete before children that were already created. Its internal data remains in the trace arena until
-the final open child completes, but the consumed parent handle cannot add more children. The final completion destroys
-the complete trace arena in one operation. Views into the internal tree are intentionally not part of the public API.
+the final open child completes, but the consumed parent handle cannot add more children. The trace remains valid until
+that final child completes; afterwards CAT destroys its non-trivial state without resetting the caller's pool. Views
+into the internal message tree are intentionally not part of the public API.
 
 Type, name, status, message count, child count, per-message data, and total tree memory are bounded by `RecordLimits`.
-Message strings and rendered data are copied into trace-owned pooled storage at record time. Transactions store child
+Message strings and rendered data are copied into the supplied pooled storage at record time. Transactions store child
 pointers in linked fixed-capacity chunks of 16; message data is rendered into linked byte chunks. Replacing a type or
 name does not reclaim its previous arena bytes, so repeated changes continue to consume the bounded tree budget.
 
@@ -170,8 +184,8 @@ length, the `NT1` header, and the depth-first message body. PT1 uses the same fr
 plus `t/T/A/E/M/H` line forms. Both encoders perform a counting pass followed by one exact `IoBuf` allocation.
 
 An internally core-bound trace synchronously encodes when its final open message completes. The core receives an
-independently owned buffer, after which the complete trace arena is immediately destroyed. Encoding failures are
-reported to the core without submitting a partial frame.
+independently owned buffer, after which CAT destroys `MessageTraceData`; arena memory remains owned by the caller's
+pool. Encoding failures are reported to the core without submitting a partial frame.
 
 Sampling is decided only after the tree freezes. Problem, incomplete, and truncated trees bypass sampling and enter the
 bounded high-priority path. Ordinary trees not selected for detailed reporting, or rejected by the reserved normal

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <async/Spawn.h>
+#include <common/mem/BufPool.h>
 #include <event/EventLoop.h>
 #include <fiber/cat/CatClientConfig.h>
 #include <fiber/cat/Status.h>
@@ -66,7 +67,8 @@ TEST(CatAggregationTest, AggregatesTransactionEventErrorsAndDurationsByKey) {
                 fiber::cat::detail::AggregationShard::create(fiber::event::EventLoop::current(), 8, 128, 64 * 1024, 16);
         ASSERT_NE(shard, nullptr);
 
-        auto root_created = fiber::cat::detail::create_transaction_root("OldCall", "old-root", {});
+        fiber::mem::BufPool pool;
+        auto root_created = fiber::cat::detail::create_transaction_root(pool, "OldCall", "old-root", {});
         ASSERT_TRUE(root_created);
         auto *root = *root_created;
         auto *trace = root->trace;
@@ -87,7 +89,7 @@ TEST(CatAggregationTest, AggregatesTransactionEventErrorsAndDurationsByKey) {
         freeze_message(*trace->data->root);
         trace->data->open_message_count = 0;
         EXPECT_EQ(shard->aggregate(*trace->data), 0);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
 
         std::vector<AggregateValue> values;
         shard->for_each(&values, [](void *opaque, const AggregateValue &value) noexcept {
@@ -114,7 +116,8 @@ TEST(CatAggregationTest, BoundsCardinalityAndReportsDroppedMessages) {
     run_on_loop([] {
         auto *shard = fiber::cat::detail::AggregationShard::create(fiber::event::EventLoop::current(), 1, 32, 4096, 4);
         ASSERT_NE(shard, nullptr);
-        auto root_created = fiber::cat::detail::create_transaction_root("T", "root", {});
+        fiber::mem::BufPool pool;
+        auto root_created = fiber::cat::detail::create_transaction_root(pool, "T", "root", {});
         ASSERT_TRUE(root_created);
         auto *root = *root_created;
         auto *trace = root->trace;
@@ -123,7 +126,7 @@ TEST(CatAggregationTest, BoundsCardinalityAndReportsDroppedMessages) {
         trace->data->open_message_count = 0;
         EXPECT_GE(shard->aggregate(*trace->data), 1);
         EXPECT_EQ(shard->key_count(), 1);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
         delete shard;
     });
 }
@@ -158,20 +161,24 @@ fiber::async::DetachedTask run_sampling_case(fiber::event::EventLoop *loop, std:
     }
 
     auto *shard = core->aggregation_shard(*loop);
+    fiber::mem::BufPool normal_pool;
     auto normal = fiber::cat::detail::create_transaction_root(
-            "URL", "/sampled", {}, {.core = core, .aggregation_shard = shard, .message_id = "normal"});
+            normal_pool, "URL", "/sampled", {}, {.core = core, .aggregation_shard = shard, .message_id = "normal"});
     if (normal) {
         (void) fiber::cat::detail::set_duration(*normal, 2ms);
         (void) fiber::cat::detail::complete(*normal);
     }
+    fiber::mem::BufPool problem_pool;
     auto problem = fiber::cat::detail::create_event_root(
-            "Error", "failure", {}, {.core = core, .aggregation_shard = shard, .message_id = "problem"});
+            problem_pool, "Error", "failure", {}, {.core = core, .aggregation_shard = shard, .message_id = "problem"});
     if (problem) {
         (void) fiber::cat::detail::set_status(*problem, "ERROR");
         (void) fiber::cat::detail::complete(*problem);
     }
+    fiber::mem::BufPool incomplete_pool;
     auto incomplete = fiber::cat::detail::create_transaction_root(
-            "URL", "/incomplete", {}, {.core = core, .aggregation_shard = shard, .message_id = "incomplete"});
+            incomplete_pool, "URL", "/incomplete", {},
+            {.core = core, .aggregation_shard = shard, .message_id = "incomplete"});
     if (incomplete) {
         fiber::cat::detail::abandon(*incomplete);
     }
@@ -226,8 +233,9 @@ fiber::async::DetachedTask run_mixed_sampling_case(fiber::event::EventLoop *loop
     auto *shard = core->aggregation_shard(*loop);
     constexpr std::size_t trees = 128;
     for (std::size_t index = 0; index < trees; ++index) {
+        fiber::mem::BufPool pool;
         auto root = fiber::cat::detail::create_transaction_root(
-                "URL", "/mixed", {}, {.core = core, .aggregation_shard = shard, .message_id = "mixed"});
+                pool, "URL", "/mixed", {}, {.core = core, .aggregation_shard = shard, .message_id = "mixed"});
         if (root) {
             (void) fiber::cat::detail::set_duration(*root, 2ms);
             (void) fiber::cat::detail::complete(*root);

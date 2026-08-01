@@ -15,11 +15,18 @@
 #include <event/EventLoop.h>
 
 #include "CatClientConfig.h"
+#include "Event.h"
 #include "Message.h"
+#include "MessageTrace.h"
 #include "PropagationContext.h"
+#include "Transaction.h"
 
 namespace fiber::dns {
 class AddressResolver;
+}
+
+namespace fiber::mem {
+class BufPool;
 }
 
 namespace fiber::cat {
@@ -110,6 +117,15 @@ public:
     [[nodiscard]] CatClientState state() const noexcept;
     [[nodiscard]] CatClientStats stats() const noexcept;
     [[nodiscard]] event::EventLoop &sender_loop() const noexcept;
+
+    // The pool is borrowed and must outlive the returned root, all descendants, and MessageTrace views.
+    // CAT never resets it.
+    [[nodiscard]] std::expected<Transaction, RecordError>
+    create_isolated_transaction(mem::BufPool &pool, std::string_view type, std::string_view name,
+                                MessageTraceCreateOptions options = {}) noexcept;
+    [[nodiscard]] std::expected<Event, RecordError>
+    create_isolated_event(mem::BufPool &pool, std::string_view type, std::string_view name,
+                          MessageTraceCreateOptions options = {}) noexcept;
     [[nodiscard]] std::expected<PropagationContext, RecordError>
     create_remote_context(const PropagationContext &current, std::string_view remote_domain) noexcept;
 

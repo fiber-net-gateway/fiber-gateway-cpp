@@ -106,13 +106,14 @@ void freeze_trace(fiber::cat::detail::MessageTrace &trace) {
 
 TEST(CatEncoderTest, EncodesEventRootAsOfficialNt1Frame) {
     run_on_loop([] {
+        fiber::mem::BufPool pool;
         TraceContext context{
                 .message_id = "m",
                 .root_message_id = "r",
                 .parent_message_id = "p",
                 .session_token = "s",
         };
-        auto created = fiber::cat::detail::create_event_root("old-type", "old-name", {}, std::move(context));
+        auto created = fiber::cat::detail::create_event_root(pool, "old-type", "old-name", {}, std::move(context));
         ASSERT_TRUE(created);
         auto *event = *created;
         auto *trace = event->trace;
@@ -131,19 +132,20 @@ TEST(CatEncoderTest, EncodesEventRootAsOfficialNt1Frame) {
                 0x01, 'r',  0x01, 's',  'E', 0x7b, 0x01, 'E',  0x01, 'n', 0x01, '0',  0x00,
         };
         expect_bytes(*encoded, expected);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
 TEST(CatEncoderTest, EncodesMetricRootAsOfficialNt1Frame) {
     run_on_loop([] {
+        fiber::mem::BufPool pool;
         TraceContext context{
                 .message_id = "m",
                 .root_message_id = "r",
                 .parent_message_id = "p",
                 .session_token = "s",
         };
-        auto created = fiber::cat::detail::create_metric_root("", "requests", {}, std::move(context));
+        auto created = fiber::cat::detail::create_metric_root(pool, "", "requests", {}, std::move(context));
         ASSERT_TRUE(created);
         auto *metric = *created;
         auto *trace = metric->trace;
@@ -162,19 +164,20 @@ TEST(CatEncoderTest, EncodesMetricRootAsOfficialNt1Frame) {
                 0x00, 0x08, 'r',  'e',  'q', 'u', 'e',  's',  't',  's', 0x01, 'C',  0x02, '-', '3',
         };
         expect_bytes(*encoded, expected);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
 TEST(CatEncoderTest, EncodesHeartbeatRootAsOfficialNt1Frame) {
     run_on_loop([] {
+        fiber::mem::BufPool pool;
         TraceContext context{
                 .message_id = "m",
                 .root_message_id = "r",
                 .parent_message_id = "p",
                 .session_token = "s",
         };
-        auto created = fiber::cat::detail::create_heartbeat_root("Heartbeat", "1.2.3.4", {}, std::move(context));
+        auto created = fiber::cat::detail::create_heartbeat_root(pool, "Heartbeat", "1.2.3.4", {}, std::move(context));
         ASSERT_TRUE(created);
         auto *heartbeat = *created;
         auto *trace = heartbeat->trace;
@@ -192,7 +195,7 @@ TEST(CatEncoderTest, EncodesHeartbeatRootAsOfficialNt1Frame) {
                 'b',  'e',  'a',  't',  0x07, '1', '.',  '2',  '.',  '3', '.', '4',  0x01, '0', 0x01, 'x',
         };
         expect_bytes(*encoded, expected);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
@@ -301,7 +304,8 @@ TEST(CatEncoderTest, OmitsOptionalSystemStatisticsWhenFieldBudgetIsExhausted) {
 
 TEST(CatEncoderTest, EncodesNestedTransactionVarintsAndChunkedData) {
     run_on_loop([] {
-        auto created = fiber::cat::detail::create_transaction_root("T", "root", {});
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_transaction_root(pool, "T", "root", {});
         ASSERT_TRUE(created);
         auto *root = *created;
         auto *trace = root->trace;
@@ -333,13 +337,14 @@ TEST(CatEncoderTest, EncodesNestedTransactionVarintsAndChunkedData) {
         expected.push_back('y');
         expected.insert(expected.end(), {'T', 0x01, '0', 0x03, 'k', '=', 'v', 0xdc, 0x0b});
         expect_bytes(*encoded, expected);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
 TEST(CatEncoderTest, EncodesChildrenAcrossFixedChunkBoundaryInOrder) {
     run_on_loop([] {
-        auto created = fiber::cat::detail::create_transaction_root("T", "r", {});
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_transaction_root(pool, "T", "r", {});
         ASSERT_TRUE(created);
         auto *root = *created;
         auto *trace = root->trace;
@@ -368,14 +373,15 @@ TEST(CatEncoderTest, EncodesChildrenAcrossFixedChunkBoundaryInOrder) {
         }
         expected.insert(expected.end(), {'T', 0x01, '0', 0x00, 0x00});
         expect_bytes(*encoded, expected);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
 TEST(CatEncoderTest, Nt1TreatsAbsentAndExplicitEmptyDataEqually) {
     run_on_loop([] {
         auto encode = [](bool add_empty) {
-            auto created = fiber::cat::detail::create_event_root("E", "n", {});
+            fiber::mem::BufPool pool;
+            auto created = fiber::cat::detail::create_event_root(pool, "E", "n", {});
             EXPECT_TRUE(created);
             if (!created) {
                 return std::vector<std::uint8_t>{};
@@ -394,7 +400,7 @@ TEST(CatEncoderTest, Nt1TreatsAbsentAndExplicitEmptyDataEqually) {
             if (encoded) {
                 result = encoded_bytes(*encoded);
             }
-            delete trace;
+            fiber::cat::detail::discard_message_trace(trace);
             return result;
         };
 
@@ -404,7 +410,8 @@ TEST(CatEncoderTest, Nt1TreatsAbsentAndExplicitEmptyDataEqually) {
 
 TEST(CatEncoderTest, ReportsInvalidTraceWithoutSubmittingPartialFrame) {
     run_on_loop([] {
-        auto created = fiber::cat::detail::create_event_root("E", "invalid", {});
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_event_root(pool, "E", "invalid", {});
         ASSERT_TRUE(created);
         auto *event = *created;
         auto *trace = event->trace;
@@ -416,7 +423,7 @@ TEST(CatEncoderTest, ReportsInvalidTraceWithoutSubmittingPartialFrame) {
         auto encoded = fiber::cat::detail::encode_nt1(*trace->data, minimal_context());
         ASSERT_FALSE(encoded);
         EXPECT_EQ(encoded.error(), EncodeError::InvalidTrace);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
@@ -424,7 +431,8 @@ TEST(CatEncoderTest, InjectsTruncationMarkerAfterTreeLimitWithoutPoolAllocation)
     run_on_loop([] {
         fiber::cat::RecordLimits limits;
         limits.max_children_per_transaction = 1;
-        auto created = fiber::cat::detail::create_transaction_root("T", "root", limits);
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_transaction_root(pool, "T", "root", limits);
         ASSERT_TRUE(created);
         auto *root = *created;
         auto *trace = root->trace;
@@ -446,7 +454,7 @@ TEST(CatEncoderTest, InjectsTruncationMarkerAfterTreeLimitWithoutPoolAllocation)
         const auto bytes = encoded_bytes(*encoded);
         constexpr std::string_view marker = "base&CatClient.Truncated=count:1,bytes:5,reason:limit";
         EXPECT_NE(std::search(bytes.begin(), bytes.end(), marker.begin(), marker.end()), bytes.end());
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
@@ -454,7 +462,8 @@ TEST(CatEncoderTest, UsesConfiguredDataSeparatorBeforeTruncationMarker) {
     run_on_loop([] {
         fiber::cat::RecordLimits limits;
         limits.max_data_bytes_per_message = 4;
-        auto created = fiber::cat::detail::create_transaction_root("T", "root", limits);
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_transaction_root(pool, "T", "root", limits);
         ASSERT_TRUE(created);
         auto *root = *created;
         auto *trace = root->trace;
@@ -470,7 +479,7 @@ TEST(CatEncoderTest, UsesConfiguredDataSeparatorBeforeTruncationMarker) {
         const auto bytes = encoded_bytes(*encoded);
         constexpr std::string_view marker = "base CatClient.Truncated=count:0,bytes:8,reason:limit";
         EXPECT_NE(std::search(bytes.begin(), bytes.end(), marker.begin(), marker.end()), bytes.end());
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
@@ -482,7 +491,8 @@ TEST(CatEncoderTest, EncodesOfficialPt1NestedTextAndPreservesRawControlCharacter
         ASSERT_EQ(::setenv("TZ", "UTC", 1), 0);
         ::tzset();
 
-        auto created = fiber::cat::detail::create_transaction_root("old-type", "old-root", {});
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_transaction_root(pool, "old-type", "old-root", {});
         ASSERT_TRUE(created);
         auto *root = *created;
         auto *trace = root->trace;
@@ -515,7 +525,7 @@ TEST(CatEncoderTest, EncodesOfficialPt1NestedTextAndPreservesRawControlCharacter
         };
         expected.insert(expected.end(), payload.begin(), payload.end());
         expect_bytes(*encoded, expected);
-        delete trace;
+        fiber::cat::detail::discard_message_trace(trace);
 
         if (had_timezone) {
             ASSERT_EQ(::setenv("TZ", saved_timezone.c_str(), 1), 0);

@@ -108,28 +108,21 @@ AiServerCatRequest::AiServerCatRequest(http::HttpExchange &exchange, cat::CatCli
     const cat::MessageTraceContext inbound = read_cat_trace_context(request_headers);
     const bool inherited = has_inbound_context(inbound);
     bool invalid_fallback = false;
-    auto created = cat::MessageTrace::create(*client_, {}, inbound);
+    auto created =
+            client_->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path, {.context = inbound});
     if (!created && inherited && can_fallback_from(created.error())) {
         invalid_fallback = true;
-        created = cat::MessageTrace::create(*client_);
+        created = client_->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path);
     }
     if (!created) {
         return;
     }
-    trace_.emplace(std::move(*created));
+    root_.emplace(std::move(*created));
 
-    auto propagation = trace_->propagation_context();
+    auto propagation = root_->message_trace().propagation_context();
     if (propagation) {
         context_.emplace(std::move(*propagation));
     }
-
-    auto transaction = trace_->create_transaction("URL", exchange.uri().path);
-    if (!transaction) {
-        context_.reset();
-        trace_.reset();
-        return;
-    }
-    root_.emplace(std::move(*transaction));
     (void) root_->set_data_separator(' ');
     (void) add_root_data("method", exchange.method_view());
     const std::string_view host = request_headers.get(kHostHeader, kHostHeaderHash);

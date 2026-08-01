@@ -13,10 +13,10 @@
 
 `apps/cat` 的实现基线已经扩展为：
 
-- `MessageTrace`、`Transaction` 和 `Event` 是 move-only 单指针句柄，内部消息树使用 trace-owned
-  `BufPool`，Transaction 子节点保存在每块 16 个指针的链式 chunk 中。
+- `Transaction` 和 `Event` 是 move-only 单指针句柄，`MessageTrace` 是由根消息取得的非 owning view；内部消息树
+  使用调用方提供的 `BufPool`，Transaction 子节点保存在每块 16 个指针的链式 chunk 中。
 - 消息树显式表达父子关系，不依赖 OS thread-local transaction stack，能够支持同一 EventLoop 上多个协程交错。
-- 最后一个未完成消息完成时同步冻结并编码消息树，随后立即释放 `MessageTraceData` 和 trace pool。
+- 最后一个未完成消息完成时同步冻结并编码消息树，随后销毁 `MessageTraceData`；调用方的 pool 不由 CAT reset。
 - 已实现官方 NT1 的 Transaction/Event 字段顺序、长度前缀、时间、status、data 和深度优先嵌套编码。
 - 已实现 CAT Router HTTP 拉取、`routers/sample/block` 解析、collector 轮换、连接失败退避和 raw TCP 发送。
 - sender 数据面不使用协程和 CAT 私有 MPSC 队列；跨 loop 的 `OutboundFrame` 直接进入 sender EventLoop
@@ -54,7 +54,8 @@
 
 ## 3. 设计约束
 
-- 保留显式 `MessageTrace` 边界，不给 `CatClient` 增加隐式 `start_transaction()` / `start_event()` stack。
+- `CatClient` 只提供显式的 isolated Transaction/Event 根工厂，不增加隐式 transaction stack；
+  `MessageTrace` 只暴露 context/propagation view。
 - 不使用 OS TLS 保存 active transaction；跨服务传播上下文必须是显式值对象。
 - sender 继续使用非协程 `try_writev()` 数据面；协程只用于 Router/DNS/connect 等需要等待的控制面操作。
 - 所有可增长集合必须有消息数、字节数或 key 数量上限。CAT 故障不能给业务流量造成无界内存压力。
@@ -105,7 +106,7 @@ sender EventLoop        CatClientCore
 
 - [x] 新增 message ID 生成器，生成 CAT 可识别且在进程、小时切换和并发 producer loop 下唯一的 ID。
 - [x] 对齐官方 ID 的 `domain-ipHex-hour-sequence` 可见结构；明确多进程和进程重启时的去重策略。
-- [x] `MessageTrace::create()` 在 `message_id` 为空时自动生成 ID；调用方显式传入时保持原值。
+- [x] isolated root 工厂在 `message_id` 为空时自动生成 ID；调用方显式传入时保持原值。
 - [x] 新增 owning propagation context，至少包含：
   - `message_id`
   - `root_message_id`
@@ -115,7 +116,7 @@ sender EventLoop        CatClientCore
   指向上游 message ID。
 - [x] 支持为指定远端 domain 生成 outbound child context，并允许 HTTP/gRPC 层自行映射到 headers/metadata。
 - [x] 明确根 trace、下游 trace、缺失部分 header、非法/超长 ID 的归一化和拒绝行为。
-- [x] context 字符串在 trace 创建时复制进 trace pool；公共 owning context 不借用即将释放的 trace 内存。
+- [x] context 字符串在 trace 创建时复制进调用方 pool；公共 owning context 不借用该 arena 内存。
 - [x] message ID 生成失败、context 非法或超限时增加独立统计，不伪装成普通 `Completed`。
 
 ### 5.2 API 边界
@@ -123,9 +124,13 @@ sender EventLoop        CatClientCore
 公共 API 保持显式，建议围绕以下能力设计，不引入 implicit current transaction：
 
 ```cpp
-auto trace = MessageTrace::create(client, limits, inbound_context);
-auto current = trace.propagation_context();
-auto outbound = client.create_remote_context(current, remote_domain);
+auto root = client.create_isolated_transaction(pool, type, name, {.limits = limits, .context = inbound_context});
+if (root) {
+    auto current = root->message_trace().propagation_context();
+    if (current) {
+        auto outbound = client.create_remote_context(*current, remote_domain);
+    }
+}
 ```
 
 最终命名可在实现阶段调整，但必须满足：context 是可复制/可移动的 owning 值；生成 outbound context 不要求存在
@@ -146,7 +151,7 @@ OS TLS 或全局 active trace。
 - [x] 把采样决策从 `CatClientCore::submit_encoded()` 前移到 trace 已冻结但尚未 NT1 编码的边界。
 - [x] 将 `MessageTraceData::has_problem` 传入采样决策；任一非成功 status 或 incomplete message 都使树绕过采样。
 - [x] `block=true`、client stopping/stopped、硬预算不足仍可丢弃错误树，并记录准确原因。
-- [x] `sample=0` 时普通树进入聚合器而不是在 `MessageTrace::create()` 边界全部拒绝。
+- [x] `sample=0` 时普通树进入聚合器而不是在 isolated root 创建边界全部拒绝。
 - [x] Router 动态改变 sample 后只影响之后完成的树，不修改已经做出决定的树。
 - [x] 详细树未命中采样时跳过 NT1 详细编码，避免无效的 exact-buffer 分配和 copy。
 - [x] 普通详细树因 normal sender budget 满而无法准入时，在 trace 销毁前回退到聚合，避免统计直接消失。
@@ -245,7 +250,7 @@ OS TLS 或全局 active trace。
 ### 9.1 第一阶段：显式丢失标记
 
 - [x] trace 记录 `truncated`、dropped message count、dropped data bytes 和首次失败原因。
-- [x] 截断标记由 encoder 的固定栈缓冲生成，不依赖已经耗尽的 trace pool。
+- [x] 截断标记由 encoder 的固定栈缓冲生成，不依赖已经耗尽的调用方 trace arena。
 - [x] 编码时给 root data 追加 `CatClient.Truncated` 丢失信息。
 - [x] 限制事件写入失败、aggregate cardinality overflow 和 transport queue drop 使用不同统计。
 
