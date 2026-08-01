@@ -7,8 +7,6 @@
 #include <optional>
 #include <utility>
 
-#include <async/Spawn.h>
-#include <async/WhenAny.h>
 #include <common/Assert.h>
 
 namespace fiber::nacos {
@@ -34,18 +32,14 @@ std::string make_authority(std::string_view host, std::uint16_t port, const std:
 } // namespace
 
 struct ServiceDiscovery::Entry final : public common::NonCopyable, public common::NonMovable {
-    Entry(ServiceDiscovery &value_owner, Key value_key, Subscription<ServiceInfo> value_subscription,
-          LoadBalancer::Options options) :
-        owner(&value_owner), key(std::move(value_key)), subscription(std::move(value_subscription)),
-        load_balancer(std::make_shared<LoadBalancer>(std::move(options))) {
-        stop_publisher = stop.acquire_publisher();
-        FIBER_ASSERT(stop_publisher.has_value());
-    }
+    Entry(ServiceDiscovery &value_owner, Key value_key, LoadBalancer::Options options) :
+        owner(&value_owner), key(std::move(value_key)),
+        load_balancer(std::make_shared<LoadBalancer>(std::move(options))) {}
 
     void request_stop() noexcept {
         if (!stopping) {
             stopping = true;
-            stop_publisher->publish(true);
+            subscription.close();
         }
     }
 
@@ -53,8 +47,6 @@ struct ServiceDiscovery::Entry final : public common::NonCopyable, public common
     Key key;
     Subscription<ServiceInfo> subscription;
     std::shared_ptr<LoadBalancer> load_balancer;
-    async::Watch<bool> stop{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher;
     bool initialized = false;
     bool stopping = false;
 };
@@ -112,10 +104,7 @@ ServiceDiscovery::ServiceDiscovery(event::EventLoop &loop, NamingService &naming
                                    ServiceDiscoveryOptions options, ServiceDiscoveryObserver observer) noexcept :
     loop_(&loop), naming_service_(&naming_service), options_(std::move(options)), observer_(observer) {}
 
-ServiceDiscovery::~ServiceDiscovery() {
-    FIBER_ASSERT(entries_.empty());
-    FIBER_ASSERT(tasks_.empty());
-}
+ServiceDiscovery::~ServiceDiscovery() { FIBER_ASSERT(entries_.empty()); }
 
 std::expected<ServiceDiscovery::Handle, NamingServiceError> ServiceDiscovery::acquire(std::string service_name,
                                                                                       std::string group) {
@@ -136,16 +125,15 @@ std::expected<ServiceDiscovery::Handle, NamingServiceError> ServiceDiscovery::ac
         return Handle(*this, existing->second.first);
     }
 
-    auto subscription = naming_service_->subscribe(key.service_name, key.group);
-    if (!subscription) {
-        return std::unexpected(std::move(subscription.error()));
-    }
-    auto entry = std::make_shared<Entry>(*this, std::move(key), std::move(*subscription), options_.load_balancer);
+    auto entry = std::make_shared<Entry>(*this, std::move(key), options_.load_balancer);
     auto [it, inserted] = entries_.emplace(entry->key, std::pair(entry, 1));
     FIBER_ASSERT(inserted);
-    (void) it;
-    tasks_.add();
-    async::spawn([entry]() mutable { return run(std::move(entry)); });
+    auto subscription = naming_service_->subscribe(entry->key.service_name, entry->key.group, &on_notify, entry.get());
+    if (!subscription) {
+        entries_.erase(it);
+        return std::unexpected(std::move(subscription.error()));
+    }
+    entry->subscription = std::move(*subscription);
     return Handle(*this, std::move(entry));
 }
 
@@ -158,42 +146,30 @@ async::Task<void> ServiceDiscovery::shutdown() noexcept {
             value.first->request_stop();
         }
     }
-    co_await tasks_.join();
+    co_return;
 }
 
-async::DetachedTask ServiceDiscovery::run(std::shared_ptr<Entry> entry) noexcept {
-    auto stop = entry->stop.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = entry->subscription.subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
-        }
-        if (snapshot.value) {
-            if (snapshot.value->kind == ResultKind::Closed) {
-                if (!entry->stopping && entry->owner->observer_.on_closed) {
-                    entry->owner->observer_.on_closed(entry->owner->observer_.context, entry->key.service_name,
-                                                      entry->key.group);
-                }
-                break;
-            }
-            if (snapshot.value->data) {
-                entry->owner->apply(*entry, *snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+void ServiceDiscovery::on_notify(void *context, const SubscriptionResult<ServiceInfo> &result) noexcept {
+    auto *entry = static_cast<Entry *>(context);
+    FIBER_ASSERT(entry != nullptr);
+    ServiceDiscovery *owner = entry->owner;
+    FIBER_ASSERT(owner != nullptr);
+
+    const auto found = owner->entries_.find(entry->key);
+    if (found == owner->entries_.end() || found->second.first.get() != entry) {
+        return;
     }
-    entry->subscription.close();
-    entry->owner->tasks_.done();
+    std::shared_ptr<Entry> hold = found->second.first;
+    if (result.kind == ResultKind::Closed) {
+        if (!hold->stopping && owner->observer_.on_closed) {
+            owner->observer_.on_closed(owner->observer_.context, hold->key.service_name, hold->key.group);
+        }
+        hold->request_stop();
+        return;
+    }
+    if (result.data) {
+        owner->apply(*hold, *result.data);
+    }
 }
 
 void ServiceDiscovery::apply(Entry &entry, const ServiceInfo &info) {

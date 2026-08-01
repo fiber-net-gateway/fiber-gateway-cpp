@@ -47,9 +47,9 @@ enum class ConfigState : std::uint8_t {
 };
 
 // Published configuration value. state is Present for a real config and NotFound
-// for a confirmed-absent config; there is no Pending/Stopped - "never synced" is
-// expressed by Subscription::current() returning a null snapshot, and shutdown
-// by Subscription::next() returning ResultKind::Closed.
+// for a confirmed-absent config; there is no Pending/Stopped. A callback is not
+// invoked until the first synchronization, and shutdown is delivered with
+// ResultKind::Closed.
 struct ConfigData {
     ConfigState state = ConfigState::Present;
     std::string md5;
@@ -96,11 +96,13 @@ public:
     [[nodiscard]] virtual async::Task<std::expected<void, ConfigServiceError>>
     remove_config(std::string data_id, std::string group) noexcept = 0;
 
-    // Subscribe to (data_id, group). Synchronous. Returns Shutdown error when
-    // the service is stopping. The returned Subscription is move-only and must
-    // be closed/destroyed on the client EventLoop.
+    // Subscribe to (data_id, group). Notifications and cached-value replay run
+    // synchronously on the client EventLoop; cached replay may run before this
+    // function returns. Returns Shutdown when the service is stopping. The
+    // move-only handle must be closed/destroyed on that loop.
     [[nodiscard]] virtual std::expected<Subscription<ConfigData>, ConfigServiceError>
-    subscribe(std::string_view data_id, std::string_view group) = 0;
+    subscribe(std::string_view data_id, std::string_view group, Subscription<ConfigData>::NotifyCallback on_notify,
+              void *ctx) = 0;
 
 protected:
     ConfigService() = default;

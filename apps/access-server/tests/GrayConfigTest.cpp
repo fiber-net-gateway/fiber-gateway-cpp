@@ -8,12 +8,12 @@
 #include <string_view>
 
 #include <async/Spawn.h>
-#include <async/Watch.h>
 #include <async/Yield.h>
 #include <event/EventLoop.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/Subscription.h>
 
+#include "../../../tests/NacosSubscriptionStub.h"
 #include "config/AccessConfigCodec.h"
 #include "runtime/GrayConfigWatcher.h"
 
@@ -22,7 +22,6 @@ namespace {
 class FakeConfigService final : public fiber::nacos::ConfigService {
 public:
     using Result = fiber::nacos::SubscriptionResult<fiber::nacos::ConfigData>;
-    using Watch = fiber::async::Watch<Result>;
 
     fiber::common::IoResult<void> start() noexcept override { return {}; }
     fiber::async::Task<void> shutdown() noexcept override { co_return; }
@@ -44,18 +43,19 @@ public:
     }
 
     std::expected<fiber::nacos::Subscription<fiber::nacos::ConfigData>, fiber::nacos::ConfigServiceError>
-    subscribe(std::string_view data_id, std::string_view group) override {
+    subscribe(std::string_view data_id, std::string_view group,
+              fiber::nacos::Subscription<fiber::nacos::ConfigData>::NotifyCallback on_notify, void *ctx) override {
         const std::string key = make_key(data_id, group);
         auto [iterator, inserted] = entries_.try_emplace(key, std::make_unique<Entry>());
         (void) inserted;
-        return fiber::nacos::Subscription<fiber::nacos::ConfigData>({}, iterator->second->watch.subscribe());
+        return iterator->second->subscriptions.subscribe(on_notify, ctx);
     }
 
     void push(std::string content, std::string md5 = {}) {
         const auto iterator = entries_.find(
                 make_key(fiber::access_server::kGrayConfigDataId, fiber::access_server::kDefaultNacosGroup));
         ASSERT_NE(iterator, entries_.end());
-        iterator->second->publisher->publish(Result{
+        iterator->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
                 .data =
                         fiber::nacos::ConfigData{
@@ -68,13 +68,7 @@ public:
 
 private:
     struct Entry {
-        Entry() {
-            publisher = watch.acquire_publisher();
-            EXPECT_TRUE(publisher.has_value());
-        }
-
-        Watch watch;
-        std::optional<Watch::Publisher> publisher;
+        fiber::tests::NacosSubscriptionStub<fiber::nacos::ConfigData> subscriptions;
     };
 
     static std::string make_key(std::string_view data_id, std::string_view group) {

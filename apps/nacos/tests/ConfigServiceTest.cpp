@@ -40,6 +40,29 @@ namespace dto = fiber::nacos::dto;
 namespace nacos_detail = fiber::nacos::detail;
 namespace proto = fiber::nacos::proto;
 
+template<typename T>
+struct CallbackWatch {
+    using Result = fiber::nacos::SubscriptionResult<T>;
+    using Watch = fiber::async::Watch<Result>;
+
+    CallbackWatch() : publisher(watch.acquire_publisher()), subscriber(watch.subscribe()) {
+        FIBER_ASSERT(publisher.has_value());
+    }
+
+    static void notify(void *context, const Result &result) noexcept {
+        auto *self = static_cast<CallbackWatch *>(context);
+        FIBER_ASSERT(self != nullptr);
+        self->publisher->publish(result);
+    }
+
+    Watch watch;
+    std::optional<typename Watch::Publisher> publisher;
+    typename Watch::Subscriber subscriber;
+};
+
+template<typename T>
+void ignore_subscription(void *, const fiber::nacos::SubscriptionResult<T> &) noexcept {}
+
 std::string_view nullable_text(const fiber::json::Nullable<std::string_view> &value) noexcept {
     return value.is_present() ? value.value() : std::string_view{};
 }
@@ -497,7 +520,8 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
     std::vector<fiber::nacos::Subscription<fiber::nacos::ConfigData>> batched_subscriptions;
     if (!reconnect) {
         for (int i = 0; i < 5; ++i) {
-            auto subscription = service->subscribe("batch-" + std::to_string(i), "group");
+            auto subscription = service->subscribe("batch-" + std::to_string(i), "group",
+                                                   &ignore_subscription<fiber::nacos::ConfigData>, nullptr);
             if (subscription) {
                 batched_subscriptions.push_back(std::move(*subscription));
             }
@@ -541,11 +565,15 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
         auto missing = co_await service->get_config("missing", "group");
         result.missing_get = missing && !missing->has_value();
 
-        auto subscribed = service->subscribe("data", "group");
-        auto stopped_subscription = service->subscribe("stopped", "group");
+        CallbackWatch<fiber::nacos::ConfigData> updates;
+        CallbackWatch<fiber::nacos::ConfigData> stopped_updates;
+        auto subscribed =
+                service->subscribe("data", "group", &CallbackWatch<fiber::nacos::ConfigData>::notify, &updates);
+        auto stopped_subscription = service->subscribe(
+                "stopped", "group", &CallbackWatch<fiber::nacos::ConfigData>::notify, &stopped_updates);
         if (subscribed && stopped_subscription) {
             auto subscription = std::move(*subscribed);
-            auto &sub = subscription.subscriber();
+            auto &sub = updates.subscriber;
             auto initial = sub.current();
             auto next = co_await fiber::async::timeout_for(
                     [&sub, version = initial.version]() { return sub.next(version); }, 2s);
@@ -559,10 +587,12 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             result.cached_get = cached && cached->has_value() && (*cached)->content == "type-5";
 
             const std::size_t listen_before_shared = server->listen_count();
-            auto shared = service->subscribe("data", "group");
+            CallbackWatch<fiber::nacos::ConfigData> shared_updates;
+            auto shared = service->subscribe("data", "group", &CallbackWatch<fiber::nacos::ConfigData>::notify,
+                                             &shared_updates);
             if (shared) {
                 auto shared_subscription = std::move(*shared);
-                const auto replay = shared_subscription.subscriber().current();
+                const auto replay = shared_updates.subscriber.current();
                 result.shared_subscription = replay.value && replay.value->data &&
                                              replay.value->data->state == fiber::nacos::ConfigState::Present &&
                                              replay.value->data->content == "type-5" &&
@@ -626,10 +656,12 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
             co_await service->shutdown();
         }
     } else if (result.ready) {
-        auto subscribed = service->subscribe("data", "group");
+        CallbackWatch<fiber::nacos::ConfigData> updates;
+        auto subscribed =
+                service->subscribe("data", "group", &CallbackWatch<fiber::nacos::ConfigData>::notify, &updates);
         if (subscribed) {
             auto subscription = std::move(*subscribed);
-            auto &sub = subscription.subscriber();
+            auto &sub = updates.subscriber;
             auto current = sub.current();
             auto initial = co_await fiber::async::timeout_for(
                     [&sub, version = current.version]() { return sub.next(version); }, 2s);
@@ -895,10 +927,12 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
         auto queried = co_await service->get_config(std::string(kDataId), std::string(kGroup));
         result.queried = queried && queried->has_value() && (*queried)->content == "first";
 
-        auto subscribed = service->subscribe(kDataId, kGroup);
+        CallbackWatch<fiber::nacos::ConfigData> updates;
+        auto subscribed =
+                service->subscribe(kDataId, kGroup, &CallbackWatch<fiber::nacos::ConfigData>::notify, &updates);
         if (subscribed) {
             auto subscription = std::move(*subscribed);
-            auto &sub = subscription.subscriber();
+            auto &sub = updates.subscriber;
             auto current = sub.current();
             auto initial = co_await fiber::async::timeout_for(
                     [&sub, version = current.version]() { return sub.next(version); }, 3s);

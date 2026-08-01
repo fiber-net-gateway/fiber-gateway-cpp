@@ -8,10 +8,7 @@
 #include <optional>
 #include <string>
 
-#include <async/Spawn.h>
 #include <async/Task.h>
-#include <async/WaitGroup.h>
-#include <async/Watch.h>
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <event/EventLoop.h>
@@ -51,7 +48,7 @@ public:
     [[nodiscard]] const std::optional<GrayConfigWatcherFailure> &last_failure() const noexcept { return last_failure_; }
 
 private:
-    [[nodiscard]] static async::DetachedTask run(GrayConfigWatcher &owner) noexcept;
+    static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
     void apply(const nacos::ConfigData &data);
     void request_stop() noexcept;
 
@@ -60,9 +57,6 @@ private:
     GrayMatchStore *store_ = nullptr;
     GrayConfigWatcherOptions options_;
     std::optional<nacos::Subscription<nacos::ConfigData>> subscription_;
-    async::Watch<bool> stop_{false};
-    std::optional<async::Watch<bool>::Publisher> stop_publisher_;
-    async::WaitGroup tasks_;
     std::optional<GrayConfigWatcherFailure> last_failure_;
     GrayConfigWatcherState state_ = GrayConfigWatcherState::Created;
     std::uint64_t successful_updates_ = 0;

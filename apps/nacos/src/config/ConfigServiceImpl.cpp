@@ -61,8 +61,9 @@ struct ConfigProtocolState {
     bool draining = false;
 };
 
-using ConfigEntry = SubscriptionEntry<ConfigData, ConfigProtocolState>;
-using ConfigEntryPtr = EntryPtr<ConfigEntry>;
+using ConfigSubscriptionPool = SubscriptionPool<ConfigData, ConfigProtocolState>;
+using ConfigEntry = ConfigSubscriptionPool::Entry;
+using ConfigEntryPtr = ConfigSubscriptionPool::EntryPtr;
 using ConfigResult = SubscriptionResult<ConfigData>;
 
 class ConfigServiceImpl final : public ConfigService {
@@ -83,7 +84,8 @@ public:
     [[nodiscard]] async::Task<std::expected<void, ConfigServiceError>>
     remove_config(std::string data_id, std::string group) noexcept override;
     [[nodiscard]] std::expected<Subscription<ConfigData>, ConfigServiceError>
-    subscribe(std::string_view data_id, std::string_view group) override;
+    subscribe(std::string_view data_id, std::string_view group, Subscription<ConfigData>::NotifyCallback on_notify,
+              void *ctx) override;
 
 private:
     using EntryPtr = ConfigEntryPtr;
@@ -157,7 +159,7 @@ private:
     std::shared_ptr<const NacosClientConfig> config_;
     ConfigServiceOptions options_;
     NacosAuthSubscriber auth_;
-    SubscriptionPool<ConfigEntry> pool_;
+    ConfigSubscriptionPool pool_;
     async::WaitGroup tasks_;
     async::Watch<NacosServiceState> lifecycle_{NacosServiceState::Created};
     std::optional<async::Watch<NacosServiceState>::Publisher> lifecycle_publisher_;
@@ -299,13 +301,12 @@ ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
 
     // Serve from a synced subscription cache if present.
     if (auto entry = pool_.find(data_id, group)) {
-        const auto snapshot = entry->watch.current();
-        if (snapshot.value != nullptr && snapshot.value->kind == ResultKind::Success &&
-            snapshot.value->data.has_value()) {
-            if (snapshot.value->data->state == ConfigState::Present) {
-                co_return std::optional<ConfigData>(*snapshot.value->data);
+        const auto snapshot = entry->latest;
+        if (snapshot != nullptr && snapshot->kind == ResultKind::Success && snapshot->data.has_value()) {
+            if (snapshot->data->state == ConfigState::Present) {
+                co_return std::optional<ConfigData>(*snapshot->data);
             }
-            if (snapshot.value->data->state == ConfigState::NotFound) {
+            if (snapshot->data->state == ConfigState::NotFound) {
                 co_return std::optional<ConfigData>{};
             }
         }
@@ -418,8 +419,9 @@ async::Task<std::expected<void, ConfigServiceError>> ConfigServiceImpl::remove_c
     co_return std::expected<void, ConfigServiceError>{};
 }
 
-std::expected<Subscription<ConfigData>, ConfigServiceError> ConfigServiceImpl::subscribe(std::string_view data_id,
-                                                                                         std::string_view group) {
+std::expected<Subscription<ConfigData>, ConfigServiceError>
+ConfigServiceImpl::subscribe(std::string_view data_id, std::string_view group,
+                             Subscription<ConfigData>::NotifyCallback on_notify, void *ctx) {
     FIBER_ASSERT(loop_->in_loop());
     if (stopping() || !pool_.active()) {
         return std::unexpected(shutdown_error());
@@ -427,7 +429,14 @@ std::expected<Subscription<ConfigData>, ConfigServiceError> ConfigServiceImpl::s
     if (!valid_key(data_id, group)) {
         return std::unexpected(validate_key(data_id, group));
     }
-    auto subscription = pool_.subscribe(data_id, group);
+    if (on_notify == nullptr) {
+        return std::unexpected(ConfigServiceError{
+                .code = ConfigServiceErrorCode::InvalidArgument,
+                .io_error = common::IoErr::Invalid,
+                .message = "notification callback must not be null",
+        });
+    }
+    auto subscription = pool_.subscribe(data_id, group, on_notify, ctx);
     if (!subscription) {
         return std::unexpected(shutdown_error());
     }
@@ -435,6 +444,7 @@ std::expected<Subscription<ConfigData>, ConfigServiceError> ConfigServiceImpl::s
 }
 
 void ConfigServiceImpl::on_subscription_add(EntryPtr entry) {
+    entry->proto.draining = false;
     if (ready_rpc_) {
         schedule_registration({std::move(entry)}, true);
     }
@@ -444,14 +454,10 @@ RemoveDecision ConfigServiceImpl::on_subscription_remove(EntryPtr entry) {
     FIBER_ASSERT(loop_->in_loop());
     entry->proto.draining = true;
     if (!stopping() && ready_rpc_ && (entry->proto.registered || entry->proto.registration_in_flight)) {
-        // Registered or mid-registration: defer the free. The pool has already
-        // unlinked the entry from the tree; this owning EntryPtr keeps it alive
-        // while an async listen=false runs, and releases it to 0 on completion.
         schedule_registration({std::move(entry)}, false);
-        return RemoveDecision::Defer;
+        return RemoveDecision::KeepLinked;
     }
-    // Never registered, disconnected, or shutting down: free now.
-    return RemoveDecision::UnlinkNow;
+    return RemoveDecision::RetireNow;
 }
 
 void ConfigServiceImpl::publish_value(ConfigEntry &entry, ConfigData value) {
@@ -477,9 +483,8 @@ void ConfigServiceImpl::schedule_query(const EntryPtr &entry) {
 
 async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint64_t sequence) noexcept {
     while (!stopping() && ready_rpc_ && !entry->proto.draining) {
-        // Stop once the entry is detached from the pool tree (last subscriber
-        // gone -> on_subscription_remove set draining and the pool detached it).
-        // The watch/publisher outlive tree membership, so reads above are safe.
+        // Stop after the last callback is gone and protocol reconciliation has
+        // retired the entry from the pool registry.
         if (entry->pool == nullptr) {
             break;
         }
@@ -490,9 +495,9 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
         auto result = co_await request_rpc(request, pool, response);
 
         if (!stopping() && ready_rpc_ && !entry->proto.draining && sequence == entry->proto.query_sequence && result) {
-            const auto snapshot = entry->watch.current();
+            const auto snapshot = entry->latest;
             const ConfigData *current =
-                    (snapshot.value != nullptr && snapshot.value->data.has_value()) ? &*snapshot.value->data : nullptr;
+                    (snapshot != nullptr && snapshot->data.has_value()) ? &*snapshot->data : nullptr;
             if (response.error_code == dto::resp::ConfigQueryResponse::kConfigNotFound) {
                 const bool was_not_found = current != nullptr && current->state == ConfigState::NotFound;
                 if (!was_not_found) {
@@ -550,31 +555,33 @@ void ConfigServiceImpl::complete_registration(const EntryPtr &entry, bool listen
     entry->proto.registration_in_flight = false;
     if (success) {
         entry->proto.registered = listen;
+    } else if (!listen) {
+        // A failed unlisten must not pin an idle local entry forever. Connection
+        // loss or the next server-side redo will discard any stale listener.
+        entry->proto.registered = false;
     }
     const bool dirty = std::exchange(entry->proto.registration_dirty, false);
     if (stopping()) {
         return;
     }
 
-    // Only entries still in the tree (live subscribers) take further action. A
-    // detached draining entry has no subscribers and is just awaiting its async
-    // unregistration to release the owning EntryPtr to 0.
     if (entry->pool == nullptr) {
         return;
     }
     const bool wants_listen = !entry->proto.draining && ready_rpc_;
     if (wants_listen) {
-        if ((!success && (!listen || dirty)) || (success && (!entry->proto.registered || dirty || !listen))) {
+        if (dirty || !listen || (success && !entry->proto.registered)) {
             schedule_registration({entry}, true);
         }
         return;
     }
-    if (ready_rpc_ && entry->proto.registered && (success || dirty || listen)) {
+    if (ready_rpc_ && entry->proto.registered) {
         schedule_registration({entry}, false);
         return;
     }
-    // No further registration needed; if this entry is draining with no live
-    // subscribers the pool already detached it - nothing to do here.
+    if (entry->proto.draining) {
+        pool_.retire(*entry);
+    }
 }
 
 async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> entries, bool listen) noexcept {
@@ -596,10 +603,9 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
             context.group.set_present(entry->group);
             context.data_id.set_present(entry->data_id);
             context.tenant.set_present(config_->tenant());
-            const auto snapshot = entry->watch.current();
-            if (snapshot.value != nullptr && snapshot.value->kind == ResultKind::Success &&
-                snapshot.value->data.has_value()) {
-                const ConfigData &data = *snapshot.value->data;
+            const auto snapshot = entry->latest;
+            if (snapshot != nullptr && snapshot->kind == ResultKind::Success && snapshot->data.has_value()) {
+                const ConfigData &data = *snapshot->data;
                 if (data.state == ConfigState::Present) {
                     context.md5.set_present(data.md5);
                 } else if (data.state == ConfigState::NotFound) {

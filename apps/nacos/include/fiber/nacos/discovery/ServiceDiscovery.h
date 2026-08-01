@@ -11,9 +11,7 @@
 #include <string_view>
 #include <utility>
 
-#include <async/Spawn.h>
 #include <async/Task.h>
-#include <async/WaitGroup.h>
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <event/EventLoop.h>
@@ -96,7 +94,7 @@ private:
         }
     };
 
-    [[nodiscard]] static async::DetachedTask run(std::shared_ptr<Entry> entry) noexcept;
+    static void on_notify(void *context, const SubscriptionResult<ServiceInfo> &result) noexcept;
     void apply(Entry &entry, const ServiceInfo &info);
     void release(const std::shared_ptr<Entry> &entry) noexcept;
     [[nodiscard]] bool contains(const Entry &entry) const noexcept;
@@ -105,7 +103,6 @@ private:
     NamingService *naming_service_ = nullptr;
     ServiceDiscoveryOptions options_;
     ServiceDiscoveryObserver observer_;
-    async::WaitGroup tasks_;
     std::map<Key, std::pair<std::shared_ptr<Entry>, std::size_t>> entries_;
     bool stopping_ = false;
 };

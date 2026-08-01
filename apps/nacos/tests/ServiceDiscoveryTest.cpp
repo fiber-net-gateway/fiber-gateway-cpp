@@ -1,13 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <expected>
 #include <map>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <async/Spawn.h>
-#include <async/Watch.h>
 #include <async/Yield.h>
 #include <event/EventLoop.h>
 #include <fiber/nacos/NamingService.h>
@@ -19,7 +20,7 @@ namespace {
 class FakeNamingService final : public fiber::nacos::NamingService {
 public:
     using Result = fiber::nacos::SubscriptionResult<fiber::nacos::ServiceInfo>;
-    using Watch = fiber::async::Watch<Result>;
+    using Subscription = fiber::nacos::Subscription<fiber::nacos::ServiceInfo>;
 
     fiber::common::IoResult<void> start() noexcept override { return {}; }
     fiber::async::Task<void> shutdown() noexcept override { co_return; }
@@ -33,13 +34,17 @@ public:
         });
     }
 
-    std::expected<fiber::nacos::Subscription<fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>
-    subscribe(std::string_view service_name, std::string_view group) override {
+    std::expected<Subscription, fiber::nacos::NamingServiceError> subscribe(std::string_view service_name,
+                                                                            std::string_view group,
+                                                                            Subscription::NotifyCallback on_notify,
+                                                                            void *ctx) override {
         const std::string key = make_key(service_name, group);
         auto [iterator, inserted] = entries_.try_emplace(key, std::make_unique<Entry>());
         (void) inserted;
         ++iterator->second->subscriptions;
-        return fiber::nacos::Subscription<fiber::nacos::ServiceInfo>({}, iterator->second->watch.subscribe());
+        auto *node = new Node{.entry = iterator->second.get(), .callback = on_notify, .ctx = ctx};
+        iterator->second->nodes.push_back(node);
+        return Subscription(node, &close_node, &node_closed);
     }
 
     std::expected<fiber::nacos::InstanceRegistration, fiber::nacos::NamingServiceError>
@@ -56,10 +61,16 @@ public:
         if (iterator == entries_.end()) {
             return;
         }
-        iterator->second->publisher->publish(Result{
+        Result result{
                 .kind = fiber::nacos::ResultKind::Success,
                 .data = std::move(info),
-        });
+        };
+        const auto nodes = iterator->second->nodes;
+        for (Node *node: nodes) {
+            if (!node->closed) {
+                node->callback(node->ctx, result);
+            }
+        }
     }
 
     [[nodiscard]] std::size_t subscriptions(std::string_view service_name, std::string_view group) const {
@@ -68,16 +79,36 @@ public:
     }
 
 private:
-    struct Entry {
-        Entry() {
-            publisher = watch.acquire_publisher();
-            EXPECT_TRUE(publisher.has_value());
-        }
+    struct Entry;
 
-        Watch watch;
-        std::optional<Watch::Publisher> publisher;
+    struct Node {
+        Entry *entry = nullptr;
+        Subscription::NotifyCallback callback = nullptr;
+        void *ctx = nullptr;
+        bool closed = false;
+    };
+
+    struct Entry {
+        std::vector<Node *> nodes;
         std::size_t subscriptions = 0;
     };
+
+    static void close_node(void *context) noexcept {
+        auto *node = static_cast<Node *>(context);
+        if (node->entry != nullptr) {
+            auto &nodes = node->entry->nodes;
+            const auto found = std::find(nodes.begin(), nodes.end(), node);
+            if (found != nodes.end()) {
+                nodes.erase(found);
+            }
+        }
+        node->closed = true;
+        delete node;
+    }
+
+    [[nodiscard]] static bool node_closed(const void *context) noexcept {
+        return static_cast<const Node *>(context)->closed;
+    }
 
     static std::string make_key(std::string_view service_name, std::string_view group) {
         std::string key(service_name);

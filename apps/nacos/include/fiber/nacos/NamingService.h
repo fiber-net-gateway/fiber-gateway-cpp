@@ -139,8 +139,12 @@ public:
     [[nodiscard]] virtual async::Task<std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>>
     get(std::string service_name, std::string group) noexcept = 0;
 
+    // Notifications and cached replay run synchronously on the client
+    // EventLoop; cached replay may run before this function returns. The
+    // move-only handle must be closed/destroyed on that loop.
     [[nodiscard]] virtual std::expected<Subscription<ServiceInfo>, NamingServiceError>
-    subscribe(std::string_view service_name, std::string_view group) = 0;
+    subscribe(std::string_view service_name, std::string_view group,
+              Subscription<ServiceInfo>::NotifyCallback on_notify, void *ctx) = 0;
 
     [[nodiscard]] virtual std::expected<InstanceRegistration, NamingServiceError>
     registry(std::string_view service_name, std::string_view group, Instance instance) = 0;

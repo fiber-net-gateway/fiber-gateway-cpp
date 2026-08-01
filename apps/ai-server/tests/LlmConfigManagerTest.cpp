@@ -17,6 +17,7 @@
 #include <fiber/nacos/NamingService.h>
 #include <fiber/nacos/Subscription.h>
 
+#include "../../../tests/NacosSubscriptionStub.h"
 #include "AiServer.h"
 #include "config/LlmConfigManager.h"
 #include "discovery/LoadBalancer.h"
@@ -26,7 +27,6 @@ namespace {
 class FakeConfigService final : public fiber::nacos::ConfigService {
 public:
     using Result = fiber::nacos::SubscriptionResult<fiber::nacos::ConfigData>;
-    using Watch = fiber::async::Watch<Result>;
 
     fiber::common::IoResult<void> start() noexcept override { return {}; }
 
@@ -49,17 +49,18 @@ public:
     }
 
     std::expected<fiber::nacos::Subscription<fiber::nacos::ConfigData>, fiber::nacos::ConfigServiceError>
-    subscribe(std::string_view data_id, std::string_view group) override {
+    subscribe(std::string_view data_id, std::string_view group,
+              fiber::nacos::Subscription<fiber::nacos::ConfigData>::NotifyCallback on_notify, void *ctx) override {
         const std::string key = make_key(data_id, group);
         auto [it, inserted] = entries_.try_emplace(key, std::make_unique<Entry>());
         (void) inserted;
-        return fiber::nacos::Subscription<fiber::nacos::ConfigData>({}, it->second->watch.subscribe());
+        return it->second->subscriptions.subscribe(on_notify, ctx);
     }
 
     void push(std::string_view data_id, std::string content, std::string md5) {
         const auto it = entries_.find(make_key(data_id, fiber::ai_server::kLlmConfigGroup));
         ASSERT_NE(it, entries_.end());
-        it->second->publisher->publish(Result{
+        it->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
                 .data =
                         fiber::nacos::ConfigData{
@@ -73,7 +74,7 @@ public:
     void push_not_found(std::string_view data_id) {
         const auto it = entries_.find(make_key(data_id, fiber::ai_server::kLlmConfigGroup));
         ASSERT_NE(it, entries_.end());
-        it->second->publisher->publish(Result{
+        it->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
                 .data =
                         fiber::nacos::ConfigData{
@@ -84,13 +85,7 @@ public:
 
 private:
     struct Entry {
-        Entry() {
-            publisher = watch.acquire_publisher();
-            EXPECT_TRUE(publisher.has_value());
-        }
-
-        Watch watch;
-        std::optional<Watch::Publisher> publisher;
+        fiber::tests::NacosSubscriptionStub<fiber::nacos::ConfigData> subscriptions;
     };
 
     static std::string make_key(std::string_view data_id, std::string_view group) {
@@ -106,7 +101,6 @@ private:
 class FakeNamingService final : public fiber::nacos::NamingService {
 public:
     using Result = fiber::nacos::SubscriptionResult<fiber::nacos::ServiceInfo>;
-    using Watch = fiber::async::Watch<Result>;
 
     fiber::common::IoResult<void> start() noexcept override { return {}; }
 
@@ -122,11 +116,12 @@ public:
     }
 
     std::expected<fiber::nacos::Subscription<fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>
-    subscribe(std::string_view service_name, std::string_view group) override {
+    subscribe(std::string_view service_name, std::string_view group,
+              fiber::nacos::Subscription<fiber::nacos::ServiceInfo>::NotifyCallback on_notify, void *ctx) override {
         const std::string key = make_key(service_name, group);
         auto [it, inserted] = entries_.try_emplace(key, std::make_unique<Entry>());
         (void) inserted;
-        return fiber::nacos::Subscription<fiber::nacos::ServiceInfo>({}, it->second->watch.subscribe());
+        return it->second->subscriptions.subscribe(on_notify, ctx);
     }
 
     std::expected<fiber::nacos::InstanceRegistration, fiber::nacos::NamingServiceError>
@@ -140,7 +135,7 @@ public:
     void push(std::string_view service_name, fiber::nacos::ServiceInfo info) {
         const auto it = entries_.find(make_key(service_name, fiber::ai_server::kDefaultNamingGroup));
         ASSERT_NE(it, entries_.end());
-        it->second->publisher->publish(Result{
+        it->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
                 .data = std::move(info),
         });
@@ -148,13 +143,7 @@ public:
 
 private:
     struct Entry {
-        Entry() {
-            publisher = watch.acquire_publisher();
-            EXPECT_TRUE(publisher.has_value());
-        }
-
-        Watch watch;
-        std::optional<Watch::Publisher> publisher;
+        fiber::tests::NacosSubscriptionStub<fiber::nacos::ServiceInfo> subscriptions;
     };
 
     static std::string make_key(std::string_view service_name, std::string_view group) {

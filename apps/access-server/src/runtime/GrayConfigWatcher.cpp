@@ -4,22 +4,17 @@
 
 #include <utility>
 
-#include <async/WhenAny.h>
 #include <common/Assert.h>
 
 namespace fiber::access_server {
 
 GrayConfigWatcher::GrayConfigWatcher(event::EventLoop &loop, nacos::ConfigService &config_service,
                                      GrayMatchStore &store, GrayConfigWatcherOptions options) :
-    loop_(&loop), config_service_(&config_service), store_(&store), options_(std::move(options)) {
-    stop_publisher_ = stop_.acquire_publisher();
-    FIBER_ASSERT(stop_publisher_.has_value());
-}
+    loop_(&loop), config_service_(&config_service), store_(&store), options_(std::move(options)) {}
 
 GrayConfigWatcher::~GrayConfigWatcher() {
     FIBER_ASSERT(state_ == GrayConfigWatcherState::Created || state_ == GrayConfigWatcherState::Stopped);
     FIBER_ASSERT(!subscription_);
-    FIBER_ASSERT(tasks_.empty());
 }
 
 std::expected<void, nacos::ConfigServiceError> GrayConfigWatcher::start() {
@@ -31,14 +26,13 @@ std::expected<void, nacos::ConfigServiceError> GrayConfigWatcher::start() {
                 .message = "gray config watcher is already started",
         });
     }
-    auto subscription = config_service_->subscribe(options_.data_id, options_.group);
+    state_ = GrayConfigWatcherState::Running;
+    auto subscription = config_service_->subscribe(options_.data_id, options_.group, &on_notify, this);
     if (!subscription) {
+        state_ = GrayConfigWatcherState::Created;
         return std::unexpected(std::move(subscription.error()));
     }
     subscription_.emplace(std::move(*subscription));
-    state_ = GrayConfigWatcherState::Running;
-    tasks_.add();
-    async::spawn([this]() { return run(*this); });
     return {};
 }
 
@@ -55,40 +49,20 @@ async::Task<void> GrayConfigWatcher::shutdown() noexcept {
         state_ = GrayConfigWatcherState::Stopping;
         request_stop();
     }
-    co_await tasks_.join();
+    request_stop();
     subscription_.reset();
     state_ = GrayConfigWatcherState::Stopped;
 }
 
-async::DetachedTask GrayConfigWatcher::run(GrayConfigWatcher &owner) noexcept {
-    auto stop = owner.stop_.subscribe();
-    auto stop_snapshot = stop.current();
-    auto &subscriber = owner.subscription_->subscriber();
-    auto snapshot = subscriber.current();
-    for (;;) {
-        if (stop_snapshot.value && *stop_snapshot.value) {
-            break;
-        }
-        if (snapshot.value) {
-            if (snapshot.value->kind == nacos::ResultKind::Closed) {
-                break;
-            }
-            if (snapshot.value->data && owner.state_ == GrayConfigWatcherState::Running) {
-                owner.apply(*snapshot.value->data);
-            }
-        }
-        auto result = co_await async::when_any(
-                [&subscriber, version = snapshot.version]() { return subscriber.next(version); },
-                [&stop, version = stop_snapshot.version]() { return stop.next(version); });
-        if (result.is<1>()) {
-            std::move(result).get<1>();
-            break;
-        }
-        snapshot = std::move(result).get<0>();
-        stop_snapshot = stop.current();
+void GrayConfigWatcher::on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept {
+    auto &owner = *static_cast<GrayConfigWatcher *>(context);
+    if (result.kind == nacos::ResultKind::Closed) {
+        owner.request_stop();
+        return;
     }
-    owner.subscription_->close();
-    owner.tasks_.done();
+    if (result.data && owner.state_ == GrayConfigWatcherState::Running) {
+        owner.apply(*result.data);
+    }
 }
 
 void GrayConfigWatcher::apply(const nacos::ConfigData &data) {
@@ -111,6 +85,10 @@ void GrayConfigWatcher::apply(const nacos::ConfigData &data) {
     }
 }
 
-void GrayConfigWatcher::request_stop() noexcept { stop_publisher_->publish(true); }
+void GrayConfigWatcher::request_stop() noexcept {
+    if (subscription_) {
+        subscription_->close();
+    }
+}
 
 } // namespace fiber::access_server
