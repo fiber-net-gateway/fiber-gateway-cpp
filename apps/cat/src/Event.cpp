@@ -2,9 +2,14 @@
 
 #include <utility>
 
+#include <fiber/cat/CatClient.h>
+#include <fiber/cat/MessageTrace.h>
+
 #include "CatInternal.h"
 
 namespace fiber::cat {
+
+Event detail::MessageHandleAccess::event(detail::EventData *data) noexcept { return Event(data); }
 
 Event::Event(Event &&other) noexcept : data_(std::exchange(other.data_, nullptr)) {}
 
@@ -19,14 +24,22 @@ Event &Event::operator=(Event &&other) noexcept {
 
 Event::~Event() { reset(); }
 
-std::expected<Event, RecordError> Event::create_root(std::string_view type, std::string_view name,
-                                                     RecordLimits limits) noexcept {
-    auto created = detail::create_event_root(type, name, limits);
+std::expected<Event, RecordError> Event::create_root(CatClient &client, mem::BufPool &pool, std::string_view type,
+                                                     std::string_view name,
+                                                     MessageTraceCreateOptions options) noexcept {
+    auto trace = MessageTrace::create(client, pool, options);
+    if (!trace) {
+        return std::unexpected(trace.error());
+    }
+    auto created = detail::create_event_root(*trace->trace_, type, name);
     if (!created) {
+        detail::discard_message_trace(trace->trace_);
         return std::unexpected(created.error());
     }
     return Event(*created);
 }
+
+MessageTrace Event::message_trace() const noexcept { return MessageTrace(data_ ? data_->trace : nullptr); }
 
 RecordError Event::add_data(std::string_view data) noexcept { return detail::add_data(data_, data); }
 

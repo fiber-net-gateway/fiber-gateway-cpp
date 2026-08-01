@@ -14,6 +14,11 @@
 #include <fiber/cat/Message.h>
 #include <fiber/cat/Status.h>
 
+namespace fiber::cat {
+class Event;
+class Transaction;
+} // namespace fiber::cat
+
 namespace fiber::cat::detail {
 
 inline constexpr std::size_t kChildrenPerChunk = 16;
@@ -91,6 +96,11 @@ struct TransactionData final : MessageData {
     bool explicit_duration = false;
 };
 
+struct MessageHandleAccess {
+    [[nodiscard]] static Transaction transaction(TransactionData *data) noexcept;
+    [[nodiscard]] static Event event(EventData *data) noexcept;
+};
+
 struct ContextEntry {
     std::uint64_t hash = 0;
     StringRef key;
@@ -117,6 +127,9 @@ struct ContextTable {
 };
 
 struct MessageTraceData {
+    explicit MessageTraceData(mem::BufPool &value_pool) noexcept : pool(value_pool) {}
+
+    mem::BufPool &pool;
     std::shared_ptr<CatClientCore> core;
     AggregationShard *aggregation_shard = nullptr;
     event::EventLoop *owner = nullptr;
@@ -141,20 +154,16 @@ struct MessageTraceData {
 
 struct MessageTrace {
     MessageTrace() = default;
-    ~MessageTrace();
 
     MessageTrace(const MessageTrace &) = delete;
     MessageTrace &operator=(const MessageTrace &) = delete;
 
-    mem::BufPool pool;
     MessageTraceData *data = nullptr;
-    std::size_t context_iteration_depth = 0;
-    bool public_handle_alive = false;
 };
 
-[[nodiscard]] std::expected<MessageTrace *, RecordError> create_message_trace(RecordLimits limits,
+[[nodiscard]] std::expected<MessageTrace *, RecordError> create_message_trace(mem::BufPool &pool, RecordLimits limits,
                                                                               TraceContext context = {}) noexcept;
-void release_message_trace(MessageTrace *&trace) noexcept;
+void discard_message_trace(MessageTrace *trace) noexcept;
 
 using ContextVisitorFn = bool (*)(void *, std::string_view, std::string_view) noexcept;
 
@@ -169,12 +178,11 @@ create_transaction_root(MessageTrace &trace, std::string_view type, std::string_
 [[nodiscard]] std::expected<EventData *, RecordError> create_event_root(MessageTrace &trace, std::string_view type,
                                                                         std::string_view name) noexcept;
 
-[[nodiscard]] std::expected<TransactionData *, RecordError> create_transaction_root(std::string_view type,
-                                                                                    std::string_view name,
-                                                                                    RecordLimits limits,
-                                                                                    TraceContext context = {}) noexcept;
-[[nodiscard]] std::expected<EventData *, RecordError> create_event_root(std::string_view type, std::string_view name,
-                                                                        RecordLimits limits,
+[[nodiscard]] std::expected<TransactionData *, RecordError>
+create_transaction_root(mem::BufPool &pool, std::string_view type, std::string_view name, RecordLimits limits,
+                        TraceContext context = {}) noexcept;
+[[nodiscard]] std::expected<EventData *, RecordError> create_event_root(mem::BufPool &pool, std::string_view type,
+                                                                        std::string_view name, RecordLimits limits,
                                                                         TraceContext context = {}) noexcept;
 
 [[nodiscard]] std::expected<TransactionData *, RecordError>
@@ -186,14 +194,12 @@ create_metric(TransactionData &parent, std::string_view type, std::string_view n
 [[nodiscard]] std::expected<HeartbeatData *, RecordError>
 create_heartbeat(TransactionData &parent, std::string_view type, std::string_view name) noexcept;
 
-[[nodiscard]] std::expected<MetricMessageData *, RecordError> create_metric_root(std::string_view type,
-                                                                                 std::string_view name,
-                                                                                 RecordLimits limits,
-                                                                                 TraceContext context = {}) noexcept;
-[[nodiscard]] std::expected<HeartbeatData *, RecordError> create_heartbeat_root(std::string_view type,
-                                                                                std::string_view name,
-                                                                                RecordLimits limits,
-                                                                                TraceContext context = {}) noexcept;
+[[nodiscard]] std::expected<MetricMessageData *, RecordError>
+create_metric_root(mem::BufPool &pool, std::string_view type, std::string_view name, RecordLimits limits,
+                   TraceContext context = {}) noexcept;
+[[nodiscard]] std::expected<HeartbeatData *, RecordError>
+create_heartbeat_root(mem::BufPool &pool, std::string_view type, std::string_view name, RecordLimits limits,
+                      TraceContext context = {}) noexcept;
 
 RecordError add_data(MessageData *message, std::string_view data) noexcept;
 RecordError add_data(MessageData *message, std::string_view key, std::string_view value) noexcept;

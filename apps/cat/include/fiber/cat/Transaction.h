@@ -7,11 +7,16 @@
 
 #include "Event.h"
 #include "Message.h"
+#include "MessageTrace.h"
 #include "Status.h"
 
 namespace fiber::cat {
 
-class MessageTrace;
+class CatClient;
+
+namespace detail {
+struct MessageHandleAccess;
+}
 
 class Transaction {
 public:
@@ -22,10 +27,8 @@ public:
     Transaction &operator=(Transaction &&other) noexcept;
     ~Transaction();
 
-    [[nodiscard]] static std::expected<Transaction, RecordError>
-    create_root(std::string_view type, std::string_view name, RecordLimits limits = {}) noexcept;
-
     [[nodiscard]] bool valid() const noexcept { return data_ != nullptr; }
+    [[nodiscard]] MessageTrace message_trace() const noexcept;
 
     [[nodiscard]] std::expected<Transaction, RecordError> start_transaction(std::string_view type,
                                                                             std::string_view name) noexcept;
@@ -50,7 +53,12 @@ public:
     RecordError complete(std::string_view status) noexcept;
 
 private:
-    friend class MessageTrace;
+    friend struct detail::MessageHandleAccess;
+    friend class CatClient;
+
+    [[nodiscard]] static std::expected<Transaction, RecordError>
+    create_root(CatClient &client, mem::BufPool &pool, std::string_view type, std::string_view name,
+                MessageTraceCreateOptions options) noexcept;
 
     explicit Transaction(detail::TransactionData *data) noexcept : data_(data) {}
 

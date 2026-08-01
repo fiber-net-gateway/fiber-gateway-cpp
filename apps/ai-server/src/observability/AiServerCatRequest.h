@@ -9,7 +9,6 @@
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <fiber/cat/Event.h>
-#include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/PropagationContext.h>
 #include <fiber/cat/Transaction.h>
 
@@ -54,7 +53,6 @@ public:
 private:
     http::HttpExchange *exchange_ = nullptr;
     cat::CatClient *client_ = nullptr;
-    std::optional<cat::MessageTrace> trace_;
     std::optional<cat::Transaction> root_;
     std::optional<cat::PropagationContext> context_;
     std::string_view trace_state_;

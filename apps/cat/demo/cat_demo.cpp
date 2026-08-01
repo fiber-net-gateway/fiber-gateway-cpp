@@ -41,6 +41,7 @@
 
 #include <async/Sleep.h>
 #include <async/Spawn.h>
+#include <common/mem/BufPool.h>
 #include <event/EventLoop.h>
 #include <fiber/cat/Cat.h>
 #include <net/IpAddress.h>
@@ -366,20 +367,16 @@ void print_stats(const fiber::cat::CatClientStats &s) {
 
 // A successful transaction tree: root URL with a child SQL transaction and a Cache event.
 std::string record_success_tree(fiber::cat::CatClient &client, int idx) {
-    auto tr = fiber::cat::MessageTrace::create(client);
-    if (!tr) {
+    fiber::mem::BufPool pool;
+    auto created = client.create_isolated_transaction(pool, "URL", "/api/orders");
+    if (!created) {
         return {};
     }
-    fiber::cat::MessageTrace trace = std::move(*tr);
+    fiber::cat::Transaction root = std::move(*created);
     std::string id;
-    if (auto pc = trace.propagation_context()) {
+    if (auto pc = root.message_trace().propagation_context()) {
         id = std::string(pc->message_id());
     }
-    auto rr = trace.create_transaction("URL", "/api/orders");
-    if (!rr) {
-        return id;
-    }
-    fiber::cat::Transaction root = std::move(*rr);
     (void) root.add_data("method", "GET");
     (void) root.add_data("idx", std::to_string(idx));
     if (auto cr = root.start_transaction("SQL", "select-order")) {
@@ -394,20 +391,16 @@ std::string record_success_tree(fiber::cat::CatClient &client, int idx) {
 
 // An error transaction tree: log_error + fail status => problem tree, bypasses sampling.
 std::string record_error_tree(fiber::cat::CatClient &client, int idx) {
-    auto tr = fiber::cat::MessageTrace::create(client);
-    if (!tr) {
+    fiber::mem::BufPool pool;
+    auto created = client.create_isolated_transaction(pool, "URL", "/api/pay");
+    if (!created) {
         return {};
     }
-    fiber::cat::MessageTrace trace = std::move(*tr);
+    fiber::cat::Transaction root = std::move(*created);
     std::string id;
-    if (auto pc = trace.propagation_context()) {
+    if (auto pc = root.message_trace().propagation_context()) {
         id = std::string(pc->message_id());
     }
-    auto rr = trace.create_transaction("URL", "/api/pay");
-    if (!rr) {
-        return id;
-    }
-    fiber::cat::Transaction root = std::move(*rr);
     (void) root.add_data("order_id", std::to_string(idx));
     (void) root.log_error("NullPointerException", "pay service npe at idx=" + std::to_string(idx));
     (void) root.complete(fiber::cat::status::Fail);
@@ -418,12 +411,13 @@ std::string record_error_tree(fiber::cat::CatClient &client, int idx) {
 // context for the "inventory" domain, then a second trace is created from that
 // inbound context to simulate the downstream service.
 std::string record_propagation_chain(fiber::cat::CatClient &client) {
-    auto t1r = fiber::cat::MessageTrace::create(client);
-    if (!t1r) {
+    fiber::mem::BufPool checkout_pool;
+    auto checkout_created = client.create_isolated_transaction(checkout_pool, "URL", "/checkout");
+    if (!checkout_created) {
         return {};
     }
-    fiber::cat::MessageTrace t1 = std::move(*t1r);
-    auto current = t1.propagation_context();
+    fiber::cat::Transaction checkout = std::move(*checkout_created);
+    auto current = checkout.message_trace().propagation_context();
     if (!current) {
         return {};
     }
@@ -436,21 +430,17 @@ std::string record_propagation_chain(fiber::cat::CatClient &client) {
                   << ")\n";
     }
 
-    if (auto rr = t1.create_transaction("URL", "/checkout")) {
-        fiber::cat::Transaction root = std::move(*rr);
-        (void) root.add_data("service", "checkout");
-        (void) root.complete();
-    }
+    (void) checkout.add_data("service", "checkout");
+    (void) checkout.complete();
 
     if (outbound) {
-        auto t2r = fiber::cat::MessageTrace::create(client, *outbound);
-        if (t2r) {
-            fiber::cat::MessageTrace t2 = std::move(*t2r);
-            if (auto rr = t2.create_transaction("URL", "/inventory/stock")) {
-                fiber::cat::Transaction root2 = std::move(*rr);
-                (void) root2.add_data("service", "inventory");
-                (void) root2.complete();
-            }
+        fiber::mem::BufPool inventory_pool;
+        auto inventory_created = client.create_isolated_transaction(inventory_pool, "URL", "/inventory/stock",
+                                                                    {.context = outbound->view()});
+        if (inventory_created) {
+            fiber::cat::Transaction inventory = std::move(*inventory_created);
+            (void) inventory.add_data("service", "inventory");
+            (void) inventory.complete();
         }
     }
     return root_id;

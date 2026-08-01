@@ -1,21 +1,29 @@
 #ifndef FIBER_CAT_MESSAGE_TRACE_H
 #define FIBER_CAT_MESSAGE_TRACE_H
 
-#include <chrono>
 #include <expected>
 #include <memory>
 #include <optional>
 #include <string_view>
 #include <type_traits>
 
-#include "Event.h"
 #include "Message.h"
 #include "PropagationContext.h"
-#include "Transaction.h"
+
+namespace fiber::mem {
+class BufPool;
+}
 
 namespace fiber::cat {
 
 class CatClient;
+class Event;
+class Transaction;
+
+struct MessageTraceCreateOptions {
+    RecordLimits limits{};
+    MessageTraceContext context{};
+};
 
 namespace detail {
 struct MessageTrace;
@@ -28,12 +36,7 @@ public:
     MessageTrace &operator=(const MessageTrace &) = delete;
     MessageTrace(MessageTrace &&other) noexcept;
     MessageTrace &operator=(MessageTrace &&other) noexcept;
-    ~MessageTrace();
-
-    [[nodiscard]] static std::expected<MessageTrace, RecordError> create(CatClient &client, RecordLimits limits = {},
-                                                                         MessageTraceContext context = {}) noexcept;
-    [[nodiscard]] static std::expected<MessageTrace, RecordError>
-    create(CatClient &client, const PropagationContext &context, RecordLimits limits = {}) noexcept;
+    ~MessageTrace() = default;
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] std::expected<PropagationContext, RecordError> propagation_context() const noexcept;
@@ -56,20 +59,17 @@ public:
                                      });
     }
 
-    [[nodiscard]] std::expected<Transaction, RecordError> create_transaction(std::string_view type,
-                                                                             std::string_view name) noexcept;
-    [[nodiscard]] std::expected<Event, RecordError> create_event(std::string_view type, std::string_view name) noexcept;
-    RecordError log_error(std::string_view message, std::string_view error) noexcept;
-    RecordError log_completed_transaction(std::string_view type, std::string_view name,
-                                          std::chrono::microseconds duration, std::string_view status = status::Success,
-                                          std::string_view data = {}) noexcept;
-
 private:
+    friend class Event;
+    friend class Transaction;
+
     using ContextVisitorFn = bool (*)(void *, std::string_view, std::string_view) noexcept;
+
+    [[nodiscard]] static std::expected<MessageTrace, RecordError> create(CatClient &client, mem::BufPool &pool,
+                                                                         MessageTraceCreateOptions options) noexcept;
 
     explicit MessageTrace(detail::MessageTrace *trace) noexcept : trace_(trace) {}
 
-    void reset() noexcept;
     RecordError for_each_context_impl(void *opaque, ContextVisitorFn visitor) const noexcept;
 
     detail::MessageTrace *trace_ = nullptr;

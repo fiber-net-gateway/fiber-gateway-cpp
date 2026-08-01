@@ -9,6 +9,7 @@
 
 #include <async/Sleep.h>
 #include <async/Spawn.h>
+#include <common/mem/BufPool.h>
 #include <event/EventLoop.h>
 #include <fiber/cat/Cat.h>
 
@@ -56,9 +57,29 @@ std::string flatten_data(const fiber::cat::detail::MessageData &message) {
     return result;
 }
 
+std::expected<Transaction, RecordError> create_transaction_root(fiber::mem::BufPool &pool, std::string_view type,
+                                                                std::string_view name,
+                                                                RecordLimits limits = {}) noexcept {
+    auto created = fiber::cat::detail::create_transaction_root(pool, type, name, limits);
+    if (!created) {
+        return std::unexpected(created.error());
+    }
+    return fiber::cat::detail::MessageHandleAccess::transaction(*created);
+}
+
+std::expected<Event, RecordError> create_event_root(fiber::mem::BufPool &pool, std::string_view type,
+                                                    std::string_view name, RecordLimits limits = {}) noexcept {
+    auto created = fiber::cat::detail::create_event_root(pool, type, name, limits);
+    if (!created) {
+        return std::unexpected(created.error());
+    }
+    return fiber::cat::detail::MessageHandleAccess::event(*created);
+}
+
 TEST(CatMessageTest, BuildsNestedMessagesAndConsumesCompletedHandles) {
     run_on_loop([] {
-        auto root_result = Transaction::create_root("URL", "/orders");
+        fiber::mem::BufPool pool;
+        auto root_result = create_transaction_root(pool, "URL", "/orders");
         ASSERT_TRUE(root_result);
         Transaction root = std::move(*root_result);
         EXPECT_EQ(root.add_data("method=GET"), RecordError::None);
@@ -84,7 +105,8 @@ TEST(CatMessageTest, BuildsNestedMessagesAndConsumesCompletedHandles) {
 
 TEST(CatMessageTest, RenamesTransactionsAndEventsBeforeCompletion) {
     run_on_loop([] {
-        auto root_result = Transaction::create_root("URL", "/v1/chat/completions");
+        fiber::mem::BufPool pool;
+        auto root_result = create_transaction_root(pool, "URL", "/v1/chat/completions");
         ASSERT_TRUE(root_result);
         Transaction root = std::move(*root_result);
         EXPECT_EQ(root.set_type("LLM"), RecordError::None);
@@ -110,7 +132,8 @@ TEST(CatMessageTest, RenameLimitsAreAtomicAndChargeOnlyChangedNonEmptyValues) {
         RecordLimits limits;
         limits.max_type_bytes = 4;
         limits.max_name_bytes = 8;
-        auto root_result = fiber::cat::detail::create_transaction_root("URL", "old", limits);
+        fiber::mem::BufPool pool;
+        auto root_result = fiber::cat::detail::create_transaction_root(pool, "URL", "old", limits);
         ASSERT_TRUE(root_result);
         auto *root = *root_result;
         auto *trace = root->trace;
@@ -144,25 +167,49 @@ TEST(CatMessageTest, RenameLimitsAreAtomicAndChargeOnlyChangedNonEmptyValues) {
 
 TEST(CatMessageTest, RootCanCompleteBeforeExistingChild) {
     run_on_loop([] {
-        auto root_result = Transaction::create_root("URL", "/parallel");
+        fiber::mem::BufPool pool;
+        auto root_result = create_transaction_root(pool, "URL", "/parallel");
         ASSERT_TRUE(root_result);
         Transaction root = std::move(*root_result);
+        fiber::cat::MessageTrace trace = root.message_trace();
         auto child_result = root.start_transaction("Call", "backend");
         ASSERT_TRUE(child_result);
         Transaction child = std::move(*child_result);
 
         EXPECT_EQ(root.complete(), RecordError::None);
         EXPECT_FALSE(root.valid());
+        EXPECT_TRUE(trace.valid());
         EXPECT_TRUE(child.valid());
         EXPECT_EQ(child.add_data("phase", "after-root"), RecordError::None);
         EXPECT_EQ(child.complete(), RecordError::None);
         EXPECT_FALSE(child.valid());
+        EXPECT_FALSE(trace.valid());
+    });
+}
+
+TEST(CatMessageTest, CompletingOneTraceDoesNotResetSharedCallerPool) {
+    run_on_loop([] {
+        fiber::mem::BufPool pool;
+        auto first_result = create_transaction_root(pool, "URL", "/first");
+        auto second_result = create_transaction_root(pool, "URL", "/second");
+        ASSERT_TRUE(first_result);
+        ASSERT_TRUE(second_result);
+        Transaction first = std::move(*first_result);
+        Transaction second = std::move(*second_result);
+
+        EXPECT_EQ(first.complete(), RecordError::None);
+        EXPECT_FALSE(first.valid());
+        EXPECT_TRUE(second.valid());
+        EXPECT_EQ(second.add_data("still", "alive"), RecordError::None);
+        EXPECT_EQ(second.complete(), RecordError::None);
+        EXPECT_FALSE(second.valid());
     });
 }
 
 TEST(CatMessageTest, AbandonedChildCompletesIncompleteWithoutInvalidatingParent) {
     run_on_loop([] {
-        auto root_result = Transaction::create_root("URL", "/incomplete");
+        fiber::mem::BufPool pool;
+        auto root_result = create_transaction_root(pool, "URL", "/incomplete");
         ASSERT_TRUE(root_result);
         Transaction root = std::move(*root_result);
         {
@@ -180,7 +227,8 @@ TEST(CatMessageTest, AbandonedChildCompletesIncompleteWithoutInvalidatingParent)
 
 TEST(CatMessageTest, AbandonMarksInternalMessageIncomplete) {
     run_on_loop([] {
-        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        fiber::mem::BufPool pool;
+        auto root_result = fiber::cat::detail::create_transaction_root(pool, "T", "root", {});
         ASSERT_TRUE(root_result);
         auto *root = *root_result;
         auto child_result = fiber::cat::detail::create_event(*root, "E", "abandoned");
@@ -200,7 +248,8 @@ TEST(CatMessageTest, AbandonMarksInternalMessageIncomplete) {
 
 TEST(CatMessageTest, CompletionPreservesExplicitTransactionDuration) {
     run_on_loop([] {
-        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        fiber::mem::BufPool pool;
+        auto root_result = fiber::cat::detail::create_transaction_root(pool, "T", "root", {});
         ASSERT_TRUE(root_result);
         auto *root = *root_result;
         auto child_result = fiber::cat::detail::create_event(*root, "E", "keep-trace-alive");
@@ -221,8 +270,9 @@ TEST(CatMessageTest, CompletionPreservesExplicitTransactionDuration) {
 
 TEST(CatMessageTest, MoveAssignmentAbandonsPreviousMessage) {
     run_on_loop([] {
-        auto first_result = Transaction::create_root("URL", "/first");
-        auto second_result = Transaction::create_root("URL", "/second");
+        fiber::mem::BufPool pool;
+        auto first_result = create_transaction_root(pool, "URL", "/first");
+        auto second_result = create_transaction_root(pool, "URL", "/second");
         ASSERT_TRUE(first_result);
         ASSERT_TRUE(second_result);
         Transaction first = std::move(*first_result);
@@ -241,7 +291,8 @@ TEST(CatMessageTest, EnforcesTreeChildAndDataLimits) {
         limits.max_messages = 2;
         limits.max_children_per_transaction = 1;
         limits.max_data_bytes_per_message = 4;
-        auto root_result = Transaction::create_root("T", "root", limits);
+        fiber::mem::BufPool pool;
+        auto root_result = create_transaction_root(pool, "T", "root", limits);
         ASSERT_TRUE(root_result);
         Transaction root = std::move(*root_result);
 
@@ -260,7 +311,8 @@ TEST(CatMessageTest, EnforcesTreeChildAndDataLimits) {
 
 TEST(CatMessageTest, SupportsStandaloneEventAndConsumesItOnCompletion) {
     run_on_loop([] {
-        auto event_result = Event::create_root("Exception", "read failed");
+        fiber::mem::BufPool pool;
+        auto event_result = create_event_root(pool, "Exception", "read failed");
         ASSERT_TRUE(event_result);
         Event event = std::move(*event_result);
         EXPECT_EQ(event.add_data("code", "EIO"), RecordError::None);
@@ -273,7 +325,8 @@ TEST(CatMessageTest, SupportsStandaloneEventAndConsumesItOnCompletion) {
 
 TEST(CatMessageTest, FixedChildrenChunksPreserveInsertionOrderAcrossBoundaries) {
     run_on_loop([] {
-        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        fiber::mem::BufPool pool;
+        auto root_result = fiber::cat::detail::create_transaction_root(pool, "T", "root", {});
         ASSERT_TRUE(root_result);
         auto *root = *root_result;
         std::array<fiber::cat::detail::EventData *, 33> children{};
@@ -306,7 +359,8 @@ TEST(CatMessageTest, FixedChildrenChunksPreserveInsertionOrderAcrossBoundaries) 
 
 TEST(CatMessageTest, FlatDataUsesMultipleChunksWithoutExposingPartialEntries) {
     run_on_loop([] {
-        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        fiber::mem::BufPool pool;
+        auto root_result = fiber::cat::detail::create_transaction_root(pool, "T", "root", {});
         ASSERT_TRUE(root_result);
         auto *root = *root_result;
         const std::string first(120, 'a');
@@ -325,7 +379,8 @@ TEST(CatMessageTest, FlatDataUsesMultipleChunksWithoutExposingPartialEntries) {
 
 TEST(CatMessageTest, EmptyDataStillSeparatesTheNextEntry) {
     run_on_loop([] {
-        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        fiber::mem::BufPool pool;
+        auto root_result = fiber::cat::detail::create_transaction_root(pool, "T", "root", {});
         ASSERT_TRUE(root_result);
         auto *root = *root_result;
         EXPECT_EQ(fiber::cat::detail::add_data(root, ""), RecordError::None);
@@ -337,7 +392,8 @@ TEST(CatMessageTest, EmptyDataStillSeparatesTheNextEntry) {
 
 TEST(CatMessageTest, ExplicitSpaceSeparatorMustBeSetBeforeData) {
     run_on_loop([] {
-        auto root_result = fiber::cat::detail::create_transaction_root("T", "root", {});
+        fiber::mem::BufPool pool;
+        auto root_result = fiber::cat::detail::create_transaction_root(pool, "T", "root", {});
         ASSERT_TRUE(root_result);
         auto *root = *root_result;
 
@@ -371,7 +427,8 @@ bool observe_context(void *opaque, std::string_view key, std::string_view value)
 
 TEST(CatMessageTest, TraceContextSupportsUpsertLookupRemovalAndOrderedIteration) {
     run_on_loop([] {
-        auto created = fiber::cat::detail::create_message_trace({});
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_message_trace(pool, {});
         ASSERT_TRUE(created);
         auto *trace = *created;
 
@@ -414,8 +471,8 @@ TEST(CatMessageTest, TraceContextSupportsUpsertLookupRemovalAndOrderedIteration)
         removed = fiber::cat::detail::remove_context(*trace, "missing");
         ASSERT_TRUE(removed);
         EXPECT_FALSE(*removed);
-        fiber::cat::detail::release_message_trace(trace);
-        EXPECT_EQ(trace, nullptr);
+        fiber::cat::detail::discard_message_trace(trace);
+        EXPECT_EQ(trace->data, nullptr);
     });
 }
 
@@ -427,7 +484,8 @@ TEST(CatMessageTest, TraceContextEnforcesLimitsAndChargesRemovedArenaStorage) {
         limits.max_context_value_bytes = 4;
         limits.max_context_bytes =
                 8 * sizeof(fiber::cat::detail::ContextEntry *) + sizeof(fiber::cat::detail::ContextEntry) + 2;
-        auto created = fiber::cat::detail::create_message_trace(limits);
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_message_trace(pool, limits);
         ASSERT_TRUE(created);
         auto *trace = *created;
 
@@ -446,7 +504,7 @@ TEST(CatMessageTest, TraceContextEnforcesLimitsAndChargesRemovedArenaStorage) {
         EXPECT_EQ(fiber::cat::detail::put_context(*trace, "c", "d"), RecordError::LimitExceeded);
         EXPECT_EQ(fiber::cat::detail::put_context(*trace, "", "v"), RecordError::InvalidArgument);
 
-        fiber::cat::detail::release_message_trace(trace);
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
@@ -463,7 +521,8 @@ bool mutate_context(void *opaque, std::string_view, std::string_view) noexcept {
 
 TEST(CatMessageTest, TraceContextDetectsMutationDuringIterationAndExpiresOnCommit) {
     run_on_loop([] {
-        auto created = fiber::cat::detail::create_message_trace({});
+        fiber::mem::BufPool pool;
+        auto created = fiber::cat::detail::create_message_trace(pool, {});
         ASSERT_TRUE(created);
         auto *trace = *created;
         EXPECT_EQ(fiber::cat::detail::put_context(*trace, "first", "value"), RecordError::None);
@@ -483,13 +542,14 @@ TEST(CatMessageTest, TraceContextDetectsMutationDuringIterationAndExpiresOnCommi
         ObservedContexts observed;
         EXPECT_EQ(fiber::cat::detail::for_each_context(*trace, &observed, observe_context), RecordError::Completed);
 
-        fiber::cat::detail::release_message_trace(trace);
+        fiber::cat::detail::discard_message_trace(trace);
     });
 }
 
 TEST(CatMessageTest, ConvenienceApisLogErrorsAndCompletedDurationsWithoutImplicitStack) {
     run_on_loop([] {
-        auto root_result = Transaction::create_root("URL", "/orders");
+        fiber::mem::BufPool pool;
+        auto root_result = create_transaction_root(pool, "URL", "/orders");
         ASSERT_TRUE(root_result);
         Transaction root = std::move(*root_result);
         EXPECT_EQ(root.log_completed_transaction("Cache", "lookup", 2500us, fiber::cat::status::Success, "hit=true"),
@@ -509,7 +569,8 @@ struct InterleaveResult {
 fiber::async::DetachedTask record_interleaved(std::string_view root_name, std::string_view event_name,
                                               std::chrono::milliseconds delay, InterleaveResult *result,
                                               std::atomic<unsigned int> *done) {
-    auto root_result = Transaction::create_root("URL", root_name);
+    fiber::mem::BufPool pool;
+    auto root_result = create_transaction_root(pool, "URL", root_name);
     if (!root_result) {
         done->fetch_add(1, std::memory_order_relaxed);
         co_return;

@@ -19,6 +19,7 @@
 #include <async/Sleep.h>
 #include <async/Spawn.h>
 #include <common/IoError.h>
+#include <common/mem/BufPool.h>
 #include <common/mem/IoBuf.h>
 #include <dns/DnsCache2.h>
 #include <dns/DnsResolver.h>
@@ -275,9 +276,20 @@ struct ProducerState {
 };
 
 fiber::async::DetachedTask run_trace_producer(fiber::cat::CatClient *client, ProducerState *state) {
-    auto trace_result = fiber::cat::MessageTrace::create(*client);
-    if (trace_result) {
-        fiber::cat::MessageTrace trace = std::move(*trace_result);
+    fiber::mem::BufPool pool;
+    fiber::cat::MessageTraceCreateOptions rejected_options;
+    rejected_options.limits.max_type_bytes = 1;
+    auto rejected_event = client->create_isolated_event(pool, "Event", "too-long", rejected_options);
+    const bool event_factory_verified =
+            !rejected_event && rejected_event.error() == fiber::cat::RecordError::LimitExceeded;
+    auto root_result = client->create_isolated_transaction(pool, "URL", "/orders",
+                                                           {.context = {
+                                                                    .root_message_id = "upstream-root",
+                                                                    .parent_message_id = "upstream-parent",
+                                                            }});
+    if (root_result) {
+        fiber::cat::Transaction root = std::move(*root_result);
+        fiber::cat::MessageTrace trace = root.message_trace();
         state->trace_created.store(true, std::memory_order_release);
         bool visited = false;
         const bool put_context = trace.put_context("tenant", "blue") == fiber::cat::RecordError::None;
@@ -291,38 +303,25 @@ fiber::async::DetachedTask run_trace_producer(fiber::cat::CatClient *client, Pro
         auto outbound = propagation ? client->create_remote_context(*propagation, "inventory")
                                     : std::expected<fiber::cat::PropagationContext, fiber::cat::RecordError>(
                                               std::unexpected(fiber::cat::RecordError::InvalidContext));
-        auto inherited_trace = fiber::cat::MessageTrace::create(*client, {},
-                                                                {
-                                                                        .root_message_id = "upstream-root",
-                                                                        .parent_message_id = "upstream-parent",
-                                                                });
-        auto inherited = inherited_trace ? inherited_trace->propagation_context()
-                                         : std::expected<fiber::cat::PropagationContext, fiber::cat::RecordError>(
-                                                   std::unexpected(fiber::cat::RecordError::InvalidContext));
-        const bool inherited_context = inherited && !inherited->message_id().empty() &&
-                                       inherited->root_message_id() == "upstream-root" &&
-                                       inherited->parent_message_id() == "upstream-parent";
+        (void) root.add_data("method", "GET");
+        (void) root.log_event("Cache", "miss");
+        (void) root.complete();
+
         const bool propagated = propagation && outbound &&
                                 propagation->message_id().starts_with("checkout-7f000001-") &&
-                                propagation->root_message_id().empty() && propagation->parent_message_id().empty() &&
+                                propagation->root_message_id() == "upstream-root" &&
+                                propagation->parent_message_id() == "upstream-parent" &&
                                 outbound->message_id().starts_with("inventory-7f000001-") &&
-                                outbound->root_message_id() == propagation->message_id() &&
-                                outbound->parent_message_id() == propagation->message_id() && inherited_context;
-        state->context_verified.store(put_context && got_context && iterated && visited && propagated,
+                                outbound->root_message_id() == "upstream-root" &&
+                                outbound->parent_message_id() == propagation->message_id();
+        state->context_verified.store(event_factory_verified && put_context && got_context && iterated && visited &&
+                                              propagated,
                                       std::memory_order_release);
-        auto root_result = trace.create_transaction("URL", "/orders");
-        if (root_result) {
-            fiber::cat::Transaction root = std::move(*root_result);
-            (void) root.add_data("method", "GET");
-            (void) root.log_event("Cache", "miss");
-            (void) root.complete();
-            auto late = trace.create_event("Late", "ignored");
-            auto expired_context = trace.get_context("tenant");
-            state->trace_frozen.store(!trace.valid() && !late && late.error() == fiber::cat::RecordError::Completed &&
-                                              !expired_context &&
-                                              expired_context.error() == fiber::cat::RecordError::Completed,
-                                      std::memory_order_release);
-        }
+
+        auto expired_context = trace.get_context("tenant");
+        state->trace_frozen.store(!trace.valid() && !expired_context &&
+                                          expired_context.error() == fiber::cat::RecordError::Completed,
+                                  std::memory_order_release);
     }
     state->done.store(true, std::memory_order_release);
     co_return;

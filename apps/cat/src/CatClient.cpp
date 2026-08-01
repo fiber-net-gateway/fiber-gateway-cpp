@@ -102,6 +102,18 @@ CatClientStats CatClient::stats() const noexcept { return core_->stats(); }
 
 event::EventLoop &CatClient::sender_loop() const noexcept { return core_->sender_loop(); }
 
+std::expected<Transaction, RecordError>
+CatClient::create_isolated_transaction(mem::BufPool &pool, std::string_view type, std::string_view name,
+                                       MessageTraceCreateOptions options) noexcept {
+    return Transaction::create_root(*this, pool, type, name, options);
+}
+
+std::expected<Event, RecordError> CatClient::create_isolated_event(mem::BufPool &pool, std::string_view type,
+                                                                   std::string_view name,
+                                                                   MessageTraceCreateOptions options) noexcept {
+    return Event::create_root(*this, pool, type, name, options);
+}
+
 std::expected<PropagationContext, RecordError>
 CatClient::create_remote_context(const PropagationContext &current, std::string_view remote_domain) noexcept {
     if (!core_ || !current.valid() || current.message_id().empty()) {

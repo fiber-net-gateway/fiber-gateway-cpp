@@ -2,9 +2,16 @@
 
 #include <utility>
 
+#include <fiber/cat/CatClient.h>
+#include <fiber/cat/MessageTrace.h>
+
 #include "CatInternal.h"
 
 namespace fiber::cat {
+
+Transaction detail::MessageHandleAccess::transaction(detail::TransactionData *data) noexcept {
+    return Transaction(data);
+}
 
 Transaction::Transaction(Transaction &&other) noexcept : data_(std::exchange(other.data_, nullptr)) {}
 
@@ -19,14 +26,22 @@ Transaction &Transaction::operator=(Transaction &&other) noexcept {
 
 Transaction::~Transaction() { reset(); }
 
-std::expected<Transaction, RecordError> Transaction::create_root(std::string_view type, std::string_view name,
-                                                                 RecordLimits limits) noexcept {
-    auto created = detail::create_transaction_root(type, name, limits);
+std::expected<Transaction, RecordError> Transaction::create_root(CatClient &client, mem::BufPool &pool,
+                                                                 std::string_view type, std::string_view name,
+                                                                 MessageTraceCreateOptions options) noexcept {
+    auto trace = MessageTrace::create(client, pool, options);
+    if (!trace) {
+        return std::unexpected(trace.error());
+    }
+    auto created = detail::create_transaction_root(*trace->trace_, type, name);
     if (!created) {
+        detail::discard_message_trace(trace->trace_);
         return std::unexpected(created.error());
     }
     return Transaction(*created);
 }
+
+MessageTrace Transaction::message_trace() const noexcept { return MessageTrace(data_ ? data_->trace : nullptr); }
 
 std::expected<Transaction, RecordError> Transaction::start_transaction(std::string_view type,
                                                                        std::string_view name) noexcept {

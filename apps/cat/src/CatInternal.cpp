@@ -148,7 +148,7 @@ RecordError ensure_context_buckets(MessageTrace &trace) noexcept {
         return RecordError::LimitExceeded;
     }
 
-    auto **buckets = static_cast<ContextEntry **>(trace.pool.alloc(bucket_bytes, alignof(ContextEntry *)));
+    auto **buckets = static_cast<ContextEntry **>(trace.data->pool.alloc(bucket_bytes, alignof(ContextEntry *)));
     if (!buckets) {
         return RecordError::NoMemory;
     }
@@ -172,7 +172,7 @@ StringRef copy_string(MessageTrace &trace, std::string_view value) noexcept {
     if (value.empty()) {
         return literal_ref("");
     }
-    auto *copy = static_cast<char *>(trace.pool.alloc(value.size(), alignof(char)));
+    auto *copy = static_cast<char *>(trace.data->pool.alloc(value.size(), alignof(char)));
     if (!copy) {
         return {};
     }
@@ -180,7 +180,8 @@ StringRef copy_string(MessageTrace &trace, std::string_view value) noexcept {
     return {copy, value.size()};
 }
 
-std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits, TraceContext context) noexcept {
+std::expected<MessageTrace *, RecordError> create_trace(mem::BufPool &pool, RecordLimits limits,
+                                                        TraceContext context) noexcept {
     event::EventLoop *loop = event::EventLoop::current_or_null();
     if (!loop) {
         return std::unexpected(RecordError::WrongEventLoop);
@@ -193,16 +194,16 @@ std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits, Tra
         return std::unexpected(context_validation);
     }
 
-    auto *trace = new (std::nothrow) MessageTrace;
-    if (!trace) {
+    auto *trace_storage = pool.alloc<MessageTrace>();
+    if (!trace_storage) {
         return std::unexpected(RecordError::NoMemory);
     }
-    auto *storage = trace->pool.alloc<MessageTraceData>();
+    auto *trace = new (trace_storage) MessageTrace;
+    auto *storage = pool.alloc<MessageTraceData>();
     if (!storage) {
-        delete trace;
         return std::unexpected(RecordError::NoMemory);
     }
-    trace->data = new (storage) MessageTraceData;
+    trace->data = new (storage) MessageTraceData(pool);
     trace->data->core = std::move(context.core);
     trace->data->aggregation_shard = context.aggregation_shard;
     trace->data->owner = loop;
@@ -218,7 +219,7 @@ std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits, Tra
         !checked_add(context_bytes, context.parent_message_id.size(), context_bytes) ||
         !checked_add(context_bytes, context.session_token.size(), context_bytes) ||
         !can_charge(*trace->data, context_bytes)) {
-        delete trace;
+        discard_message_trace(trace);
         return std::unexpected(RecordError::LimitExceeded);
     }
     trace->data->message_id = copy_string(*trace, context.message_id);
@@ -229,7 +230,7 @@ std::expected<MessageTrace *, RecordError> create_trace(RecordLimits limits, Tra
         (!context.root_message_id.empty() && !trace->data->root_message_id.data) ||
         (!context.parent_message_id.empty() && !trace->data->parent_message_id.data) ||
         (!context.session_token.empty() && !trace->data->session_token.data)) {
-        delete trace;
+        discard_message_trace(trace);
         return std::unexpected(RecordError::NoMemory);
     }
     trace->data->payload_bytes = context_bytes;
@@ -259,7 +260,7 @@ RecordError validate_message(const MessageTraceData &trace, std::string_view typ
 template<typename Node>
 Node *allocate_message(MessageTrace &trace, std::string_view type, std::string_view name,
                        std::size_t node_charge) noexcept {
-    void *storage = trace.pool.alloc(node_charge, alignof(Node));
+    void *storage = trace.data->pool.alloc(node_charge, alignof(Node));
     if (!storage) {
         return nullptr;
     }
@@ -378,7 +379,7 @@ RecordError append_data(MessageData *message, std::string_view key, std::string_
                 return RecordError::LimitExceeded;
             }
         }
-        void *storage = message->trace->pool.alloc(allocation_charge, alignof(DataChunk));
+        void *storage = message->trace->data->pool.alloc(allocation_charge, alignof(DataChunk));
         if (!storage) {
             mark_truncated(trace_data, 0, rendered_size, RecordError::NoMemory);
             return RecordError::NoMemory;
@@ -494,10 +495,6 @@ void mark_completed(MessageData &message) noexcept {
     }
     std::destroy_at(&trace_data);
     trace->data = nullptr;
-    trace->pool.reset();
-    if (!trace->public_handle_alive && trace->context_iteration_depth == 0) {
-        delete trace;
-    }
 }
 
 void finish_transaction(TransactionData &transaction) noexcept {
@@ -547,39 +544,16 @@ RecordError validate_trace_context(const RecordLimits &limits, const TraceContex
     return RecordError::None;
 }
 
-MessageTrace::~MessageTrace() {
-    if (data) {
-        std::destroy_at(data);
-        data = nullptr;
-    }
+std::expected<MessageTrace *, RecordError> create_message_trace(mem::BufPool &pool, RecordLimits limits,
+                                                                TraceContext context) noexcept {
+    return create_trace(pool, limits, std::move(context));
 }
 
-std::expected<MessageTrace *, RecordError> create_message_trace(RecordLimits limits, TraceContext context) noexcept {
-    auto created = create_trace(limits, std::move(context));
-    if (!created) {
-        return std::unexpected(created.error());
+void discard_message_trace(MessageTrace *trace) noexcept {
+    if (trace && trace->data) {
+        std::destroy_at(trace->data);
+        trace->data = nullptr;
     }
-    (*created)->public_handle_alive = true;
-    return *created;
-}
-
-void release_message_trace(MessageTrace *&trace_handle) noexcept {
-    MessageTrace *trace = std::exchange(trace_handle, nullptr);
-    if (!trace) {
-        return;
-    }
-    if (trace->context_iteration_depth != 0) {
-        FIBER_ASSERT(trace->public_handle_alive);
-        trace->public_handle_alive = false;
-        return;
-    }
-    if (!trace->data || !trace->data->root) {
-        delete trace;
-        return;
-    }
-    FIBER_ASSERT(on_owner_loop(*trace->data));
-    FIBER_ASSERT(trace->public_handle_alive);
-    trace->public_handle_alive = false;
 }
 
 RecordError put_context(MessageTrace &trace, std::string_view key, std::string_view value) noexcept {
@@ -613,7 +587,7 @@ RecordError put_context(MessageTrace &trace, std::string_view key, std::string_v
         if (!can_charge_context(data, value.size())) {
             return RecordError::LimitExceeded;
         }
-        auto *replacement = static_cast<char *>(trace.pool.alloc(value.size(), alignof(char)));
+        auto *replacement = static_cast<char *>(trace.data->pool.alloc(value.size(), alignof(char)));
         if (!replacement) {
             return RecordError::NoMemory;
         }
@@ -639,7 +613,7 @@ RecordError put_context(MessageTrace &trace, std::string_view key, std::string_v
         !checked_add(entry_bytes, value.size(), entry_bytes) || !can_charge_context(data, entry_bytes)) {
         return RecordError::LimitExceeded;
     }
-    void *storage = trace.pool.alloc(entry_bytes, alignof(ContextEntry));
+    void *storage = trace.data->pool.alloc(entry_bytes, alignof(ContextEntry));
     if (!storage) {
         return RecordError::NoMemory;
     }
@@ -745,7 +719,6 @@ RecordError for_each_context(MessageTrace &trace, void *opaque, ContextVisitorFn
     MessageTraceData *const data = trace.data;
     const std::uint64_t version = data->context.version;
     RecordError result = RecordError::None;
-    ++trace.context_iteration_depth;
     for (const ContextEntry *entry = data->context.all_head; entry;) {
         const ContextEntry *next = entry->next_all;
         const bool continue_iteration = visitor(opaque, entry->key.view(), entry->value());
@@ -762,14 +735,6 @@ RecordError for_each_context(MessageTrace &trace, void *opaque, ContextVisitorFn
         }
         entry = next;
     }
-    FIBER_ASSERT(trace.context_iteration_depth > 0);
-    --trace.context_iteration_depth;
-
-    const bool delete_trace =
-            trace.context_iteration_depth == 0 && !trace.public_handle_alive && (!trace.data || !trace.data->root);
-    if (delete_trace) {
-        delete &trace;
-    }
     return result;
 }
 
@@ -783,62 +748,65 @@ std::expected<EventData *, RecordError> create_event_root(MessageTrace &trace, s
     return create_root<EventData>(trace, type, name);
 }
 
-std::expected<TransactionData *, RecordError> create_transaction_root(std::string_view type, std::string_view name,
-                                                                      RecordLimits limits,
+std::expected<TransactionData *, RecordError> create_transaction_root(mem::BufPool &pool, std::string_view type,
+                                                                      std::string_view name, RecordLimits limits,
                                                                       TraceContext context) noexcept {
-    auto created_trace = create_trace(limits, std::move(context));
+    auto created_trace = create_trace(pool, limits, std::move(context));
     if (!created_trace) {
         return std::unexpected(created_trace.error());
     }
     MessageTrace *trace = *created_trace;
     auto root = create_root<TransactionData>(*trace, type, name);
     if (!root) {
-        delete trace;
+        discard_message_trace(trace);
         return std::unexpected(root.error());
     }
     return *root;
 }
 
-std::expected<EventData *, RecordError> create_event_root(std::string_view type, std::string_view name,
-                                                          RecordLimits limits, TraceContext context) noexcept {
-    auto created_trace = create_trace(limits, std::move(context));
+std::expected<EventData *, RecordError> create_event_root(mem::BufPool &pool, std::string_view type,
+                                                          std::string_view name, RecordLimits limits,
+                                                          TraceContext context) noexcept {
+    auto created_trace = create_trace(pool, limits, std::move(context));
     if (!created_trace) {
         return std::unexpected(created_trace.error());
     }
     MessageTrace *trace = *created_trace;
     auto root = create_root<EventData>(*trace, type, name);
     if (!root) {
-        delete trace;
+        discard_message_trace(trace);
         return std::unexpected(root.error());
     }
     return *root;
 }
 
-std::expected<MetricMessageData *, RecordError> create_metric_root(std::string_view type, std::string_view name,
-                                                                   RecordLimits limits, TraceContext context) noexcept {
-    auto created_trace = create_trace(limits, std::move(context));
+std::expected<MetricMessageData *, RecordError> create_metric_root(mem::BufPool &pool, std::string_view type,
+                                                                   std::string_view name, RecordLimits limits,
+                                                                   TraceContext context) noexcept {
+    auto created_trace = create_trace(pool, limits, std::move(context));
     if (!created_trace) {
         return std::unexpected(created_trace.error());
     }
     MessageTrace *trace = *created_trace;
     auto root = create_root<MetricMessageData>(*trace, type, name);
     if (!root) {
-        delete trace;
+        discard_message_trace(trace);
         return std::unexpected(root.error());
     }
     return *root;
 }
 
-std::expected<HeartbeatData *, RecordError> create_heartbeat_root(std::string_view type, std::string_view name,
-                                                                  RecordLimits limits, TraceContext context) noexcept {
-    auto created_trace = create_trace(limits, std::move(context));
+std::expected<HeartbeatData *, RecordError> create_heartbeat_root(mem::BufPool &pool, std::string_view type,
+                                                                  std::string_view name, RecordLimits limits,
+                                                                  TraceContext context) noexcept {
+    auto created_trace = create_trace(pool, limits, std::move(context));
     if (!created_trace) {
         return std::unexpected(created_trace.error());
     }
     MessageTrace *trace = *created_trace;
     auto root = create_root<HeartbeatData>(*trace, type, name);
     if (!root) {
-        delete trace;
+        discard_message_trace(trace);
         return std::unexpected(root.error());
     }
     return *root;
@@ -877,7 +845,7 @@ std::expected<Node *, RecordError> create_child(TransactionData &parent, std::st
 
     ChildrenChunk *new_chunk = nullptr;
     if (needs_chunk) {
-        auto *storage = trace.pool.alloc<ChildrenChunk>();
+        auto *storage = trace_data.pool.alloc<ChildrenChunk>();
         if (!storage) {
             trace_data.payload_bytes += node_charge;
             mark_truncated(trace_data, 1, type.size() + name.size(), RecordError::NoMemory);
