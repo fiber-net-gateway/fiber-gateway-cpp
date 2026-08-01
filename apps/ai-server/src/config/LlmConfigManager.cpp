@@ -94,9 +94,9 @@ private:
 
     struct Generation {
         std::shared_ptr<const ProviderConfigSnapshot> config;
-        std::optional<ServiceDiscovery::Handle> service;
+        std::optional<ServiceDiscovery::Lease> service;
 
-        [[nodiscard]] bool ready() const noexcept { return !service || service->load_balancer().initialized(); }
+        [[nodiscard]] bool ready() const noexcept { return !service || service->try_state() != nullptr; }
     };
 
     static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
@@ -244,9 +244,9 @@ public:
     void report_not_found(std::string_view data_id);
 
 private:
-    static void service_updated(void *context, LoadBalancer &service, std::string_view service_name,
-                                std::string_view group, bool first_update, LoadBalancerUpdateResult result);
-    static void service_closed(void *context, std::string_view service_name, std::string_view group);
+    static void service_updated(void *context, LoadBalancer &service, nacos::ServiceKeyView key, bool first_update,
+                                LoadBalancerUpdateResult result) noexcept;
+    static void service_closed(void *context, nacos::ServiceKeyView key) noexcept;
     [[nodiscard]] static std::expected<std::shared_ptr<ProviderNode>, nacos::ConfigServiceError>
     create_provider_node(void *context, std::string key);
     [[nodiscard]] static std::expected<std::shared_ptr<GroupNode>, nacos::ConfigServiceError>
@@ -430,7 +430,7 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
 }
 
 bool ProviderNode::references(const Generation &generation, const LoadBalancer &service) noexcept {
-    return generation.service && &generation.service->load_balancer() == &service;
+    return generation.service && generation.service->try_state().get() == &service;
 }
 
 bool ProviderNode::on_service_initialized(const LoadBalancer &service) {
@@ -453,7 +453,7 @@ void ProviderNode::rebuild_current() {
     FIBER_ASSERT(active_ && active_->ready());
     std::shared_ptr<LoadBalancer> service;
     if (active_->service) {
-        service = active_->service->shared_load_balancer();
+        service = active_->service->shared_state();
     }
     current_ = std::make_shared<const ProjectProvider>(ProjectProvider{
             .name = key_,
@@ -902,11 +902,11 @@ void ConfigGraph::on_group_changed(GroupNode &group) {
     }
 }
 
-void ConfigGraph::service_updated(void *context, LoadBalancer &service, std::string_view service_name,
-                                  std::string_view group, bool first_update, LoadBalancerUpdateResult result) {
+void ConfigGraph::service_updated(void *context, LoadBalancer &service, nacos::ServiceKeyView key, bool first_update,
+                                  LoadBalancerUpdateResult result) noexcept {
     auto &graph = *static_cast<ConfigGraph *>(context);
-    LOG(LOG_DISCOVERY, DEBUG) << "NamingService instances updated service=" << log::quoted(service_name)
-                              << " group=" << log::quoted(group) << " generation=" << service.generation()
+    LOG(LOG_DISCOVERY, DEBUG) << "NamingService instances updated service=" << log::quoted(key.service_name)
+                              << " group=" << log::quoted(key.group) << " generation=" << service.generation()
                               << " instances=" << service.configured_instance_count()
                               << " changed=" << (result == LoadBalancerUpdateResult::Applied);
     graph.accepted_update();
@@ -915,9 +915,9 @@ void ConfigGraph::service_updated(void *context, LoadBalancer &service, std::str
     }
 }
 
-void ConfigGraph::service_closed(void *, std::string_view service_name, std::string_view group) {
-    LOG(LOG_DISCOVERY, WARN) << "NamingService subscription closed service=" << log::quoted(service_name)
-                             << " group=" << log::quoted(group);
+void ConfigGraph::service_closed(void *, nacos::ServiceKeyView key) noexcept {
+    LOG(LOG_DISCOVERY, WARN) << "NamingService subscription closed service=" << log::quoted(key.service_name)
+                             << " group=" << log::quoted(key.group);
 }
 
 void ConfigGraph::on_service_initialized(LoadBalancer &service) {

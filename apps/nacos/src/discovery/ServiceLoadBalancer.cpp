@@ -308,6 +308,71 @@ std::int64_t scaled_effective_weight(std::int64_t effective, std::int64_t old_ba
     return std::clamp<std::int64_t>(static_cast<std::int64_t>(std::llround(ratio)), 0, new_base);
 }
 
+struct SelectionCandidate {
+    PeerRuntime *runtime = nullptr;
+    std::size_t index = 0;
+    std::int64_t total_weight = 0;
+};
+
+struct SmoothWeightedRoundRobinOp {
+    template<typename Eligible>
+    [[nodiscard]] static SelectionCandidate select(RoundRobin &generation, Eligible &&eligible) noexcept {
+        SelectionCandidate selected;
+        for (std::size_t i = 0; i < generation.peers.size(); ++i) {
+            PeerEntry &peer = generation.peers[i];
+            if (!eligible(peer, true)) {
+                continue;
+            }
+            PeerRuntime &runtime = *peer.runtime;
+            runtime.current_weight += runtime.effective_weight;
+            selected.total_weight += runtime.effective_weight;
+            if (runtime.effective_weight < runtime.base_weight) {
+                ++runtime.effective_weight;
+            }
+            if (selected.runtime == nullptr || runtime.current_weight > selected.runtime->current_weight) {
+                selected.runtime = &runtime;
+                selected.index = i;
+            }
+        }
+        return selected;
+    }
+
+    static void commit(SelectionCandidate &selected) noexcept {
+        FIBER_ASSERT(selected.runtime != nullptr);
+        selected.runtime->current_weight -= selected.total_weight;
+    }
+};
+
+struct WeightedRendezvousOp {
+    template<typename Eligible>
+    [[nodiscard]] static SelectionCandidate select(RoundRobin &generation, std::uint64_t key,
+                                                   Eligible &&eligible) noexcept {
+        SelectionCandidate selected;
+        double best_cost = 0;
+        for (std::size_t i = 0; i < generation.peers.size(); ++i) {
+            PeerEntry &peer = generation.peers[i];
+            if (!eligible(peer, true)) {
+                continue;
+            }
+            PeerRuntime &runtime = *peer.runtime;
+            if (runtime.effective_weight < runtime.base_weight) {
+                ++runtime.effective_weight;
+            }
+            const double cost = weighted_rendezvous_cost(mix_rendezvous_hash(key, peer.instance.selection_hash),
+                                                         peer.normalized_weight);
+            if (selected.runtime == nullptr || cost < best_cost ||
+                (cost == best_cost && compare_entry(peer, generation.peers[selected.index]) < 0)) {
+                selected.runtime = &runtime;
+                selected.index = i;
+                best_cost = cost;
+            }
+        }
+        return selected;
+    }
+
+    static void commit(SelectionCandidate &) noexcept {}
+};
+
 } // namespace
 
 LoadBalancer::Instance::Instance(std::shared_ptr<detail::RoundRobin> owner, std::size_t index,
@@ -464,16 +529,21 @@ LoadBalancer::load_balance(std::uint64_t key, std::span<const std::uint64_t> exc
 
 std::expected<LoadBalancer::Instance, LoadBalanceError>
 LoadBalancer::load_balance(const ServiceInstanceSelection &selection, TimePoint now) noexcept {
-    std::lock_guard guard(core_->mutex);
-    if (core_->shutdown) {
+    return LoadBalancerOps::select(*this, selection, now);
+}
+
+std::expected<LoadBalancerOps::State::Instance, LoadBalanceError>
+LoadBalancerOps::select(State &state, const ServiceInstanceSelection &selection, State::TimePoint now) noexcept {
+    std::lock_guard guard(state.core_->mutex);
+    if (state.core_->shutdown) {
         return std::unexpected(LoadBalanceError::Shutdown);
     }
-    std::shared_ptr<RoundRobin> current = load_current();
+    std::shared_ptr<RoundRobin> current = state.load_current();
     if (!current) {
         return std::unexpected(LoadBalanceError::Uninitialized);
     }
     if (current->peers.empty()) {
-        core_->unavailable.fetch_add(1, std::memory_order_relaxed);
+        state.core_->unavailable.fetch_add(1, std::memory_order_relaxed);
         return std::unexpected(LoadBalanceError::NoAvailableInstance);
     }
 
@@ -483,7 +553,7 @@ LoadBalancer::load_balance(const ServiceInstanceSelection &selection, TimePoint 
         const ClusterMatch match = cluster_match(peer.instance.cluster_name, selection);
         if (match.matches && match.preferred && !runtime.retired &&
             !excluded_peer(selection.excluded_peer_ids, runtime.peer_epoch) &&
-            circuit_available(runtime, core_->options, now)) {
+            circuit_available(runtime, state.core_->options, now)) {
             has_preferred = true;
             break;
         }
@@ -493,79 +563,45 @@ LoadBalancer::load_balance(const ServiceInstanceSelection &selection, TimePoint 
         const ClusterMatch match = cluster_match(peer.instance.cluster_name, selection);
         return match.matches && (!has_preferred || match.preferred) && !runtime.retired &&
                !excluded_peer(selection.excluded_peer_ids, runtime.peer_epoch) &&
-               (!check_circuit || circuit_available(runtime, core_->options, now));
+               (!check_circuit || circuit_available(runtime, state.core_->options, now));
     };
 
-    PeerRuntime *best = nullptr;
-    std::size_t best_index = 0;
-    std::int64_t total = 0;
+    SelectionCandidate selected;
     if (selection.policy == ServiceInstancePolicy::SmoothWeightedRoundRobin) {
-        for (std::size_t i = 0; i < current->peers.size(); ++i) {
-            PeerEntry &peer = current->peers[i];
-            if (!eligible(peer, true)) {
-                continue;
-            }
-            PeerRuntime &runtime = *peer.runtime;
-            runtime.current_weight += runtime.effective_weight;
-            total += runtime.effective_weight;
-            if (runtime.effective_weight < runtime.base_weight) {
-                ++runtime.effective_weight;
-            }
-            if (!best || runtime.current_weight > best->current_weight) {
-                best = &runtime;
-                best_index = i;
-            }
-        }
+        selected = SmoothWeightedRoundRobinOp::select(*current, eligible);
     } else {
-        double best_cost = 0;
-        for (std::size_t i = 0; i < current->peers.size(); ++i) {
-            PeerEntry &peer = current->peers[i];
-            if (!eligible(peer, true)) {
-                continue;
-            }
-            PeerRuntime &runtime = *peer.runtime;
-            if (runtime.effective_weight < runtime.base_weight) {
-                ++runtime.effective_weight;
-            }
-            const double cost = weighted_rendezvous_cost(
-                    mix_rendezvous_hash(selection.rendezvous_key, peer.instance.selection_hash),
-                    peer.normalized_weight);
-            if (!best || cost < best_cost ||
-                (cost == best_cost && compare_entry(peer, current->peers[best_index]) < 0)) {
-                best = &runtime;
-                best_index = i;
-                best_cost = cost;
-            }
-        }
+        selected = WeightedRendezvousOp::select(*current, selection.rendezvous_key, eligible);
     }
 
-    if (!best) {
+    if (selected.runtime == nullptr) {
         std::size_t fallback_count = 0;
-        if (core_->options.fail_open_when_single) {
+        if (state.core_->options.fail_open_when_single) {
             for (std::size_t i = 0; i < current->peers.size(); ++i) {
                 if (eligible(current->peers[i], false)) {
                     ++fallback_count;
-                    best = current->peers[i].runtime.get();
-                    best_index = i;
+                    selected.runtime = current->peers[i].runtime.get();
+                    selected.index = i;
                 }
             }
         }
         if (fallback_count != 1) {
-            core_->unavailable.fetch_add(1, std::memory_order_relaxed);
+            state.core_->unavailable.fetch_add(1, std::memory_order_relaxed);
             return std::unexpected(LoadBalanceError::NoAvailableInstance);
         }
     }
 
     if (selection.policy == ServiceInstancePolicy::SmoothWeightedRoundRobin) {
-        best->current_weight -= total;
+        SmoothWeightedRoundRobinOp::commit(selected);
+    } else {
+        WeightedRendezvousOp::commit(selected);
     }
-    if (now - best->checked > core_->options.fail_timeout) {
-        best->checked = now;
+    if (now - selected.runtime->checked > state.core_->options.fail_timeout) {
+        selected.runtime->checked = now;
     }
-    FIBER_ASSERT(best->in_flight != std::numeric_limits<std::size_t>::max());
-    ++best->in_flight;
-    core_->selections.fetch_add(1, std::memory_order_relaxed);
-    return Instance(std::move(current), best_index, best->peer_epoch);
+    FIBER_ASSERT(selected.runtime->in_flight != std::numeric_limits<std::size_t>::max());
+    ++selected.runtime->in_flight;
+    state.core_->selections.fetch_add(1, std::memory_order_relaxed);
+    return State::Instance(std::move(current), selected.index, selected.runtime->peer_epoch);
 }
 
 void LoadBalancer::report(Instance &&instance, InstanceReportOutcome outcome) noexcept {

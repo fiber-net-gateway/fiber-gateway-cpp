@@ -11,13 +11,18 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <net/IpAddress.h>
 
+#include "ServiceDiscoveryTypes.h"
+
 namespace fiber::nacos {
+
+struct ServiceInfo;
 
 namespace detail {
 struct RoundRobin;
@@ -129,6 +134,7 @@ public:
 
     private:
         friend class LoadBalancer;
+        friend class LoadBalancerOps;
 
         Instance(std::shared_ptr<detail::RoundRobin> owner, std::size_t index, std::uint64_t peer_epoch) noexcept;
         void release_neutral() noexcept;
@@ -172,6 +178,7 @@ public:
 
 private:
     friend struct detail::RoundRobin;
+    friend class LoadBalancerOps;
 
     struct Core;
     static void complete_instance(Instance &instance, InstanceReportOutcome outcome, TimePoint now) noexcept;
@@ -185,6 +192,40 @@ private:
 #else
     std::shared_ptr<detail::RoundRobin> current_;
 #endif
+};
+
+// State operations used by BasicServiceDiscovery. The first Nacos snapshot
+// constructs an initialized LoadBalancer; later snapshots update that stable
+// state while request workers retain it independently through shared_ptr.
+class LoadBalancerOps {
+public:
+    using State = LoadBalancer;
+    using StatePtr = std::shared_ptr<State>;
+    using UpdateResult = LoadBalancerUpdateResult;
+    using CreateResult = ServiceStateCreateResult<StatePtr, UpdateResult>;
+
+    struct Options {
+        LoadBalancer::Options load_balancer;
+        bool require_ip = false;
+    };
+
+    LoadBalancerOps() noexcept = default;
+    LoadBalancerOps(Options options) noexcept : options_(std::move(options)) {}
+
+    [[nodiscard]] CreateResult create(std::string_view service_name, std::string_view group,
+                                      const std::shared_ptr<const ServiceInfo> &snapshot);
+    [[nodiscard]] UpdateResult update(State &state, std::string_view service_name, std::string_view group,
+                                      const std::shared_ptr<const ServiceInfo> &snapshot);
+    void retire(State &) noexcept {}
+
+    [[nodiscard]] static std::expected<State::Instance, LoadBalanceError>
+    select(State &state, const ServiceInstanceSelection &selection, State::TimePoint now) noexcept;
+
+private:
+    [[nodiscard]] DiscoveredService make_update(std::string_view service_name, std::string_view group,
+                                                const ServiceInfo &info) const;
+
+    Options options_;
 };
 
 } // namespace fiber::nacos

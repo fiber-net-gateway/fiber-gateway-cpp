@@ -225,6 +225,23 @@ deregistration. Every new physical naming connection restores active
 subscriptions and re-registers the latest instance values. Creation, update,
 close, and destruction of these handles are owner-EventLoop operations.
 
+`ServiceDiscovery` is the default
+`BasicServiceDiscovery<LoadBalancerOps>` specialization. Its intrusive registry
+stores one entry for each `(serviceName, group)` and shares that entry across
+move-only leases. A load-balancer state is not allocated until the first naming
+notification; an empty host list is still a successful first notification.
+`Lease::try_state()` returns null before that point, while `co_await
+Lease::wait_ready()` suspends the current coroutine until the first value,
+subscription closure, retirement, or shutdown. These lease operations run on
+the NamingService owner EventLoop.
+
+Dropping the last lease removes the entry from lookup and stops its naming
+subscription. `LoadBalancerOps::retire()` runs once at that boundary. The
+shared state itself may remain alive in request-worker directories or old
+configuration snapshots and is destroyed only after their final `shared_ptr`
+is released. Custom derived states can use `BasicServiceDiscovery<StateOps>`
+with the same create, update, retire, and first-notification contract.
+
 Options are split by owner. `NacosClientOptions` controls only authentication
 connect/request timeouts, response limits, and retry backoff.
 `ConfigServiceOptions` and `NamingServiceOptions` own their service-specific
