@@ -153,7 +153,8 @@ public:
         if (!payload) {
             co_return std::unexpected(std::move(payload.error()));
         }
-        auto response_payload = co_await request_payload(*payload, pool, options_->request_timeout);
+        mem::BufPool transport_pool;
+        auto response_payload = co_await request_payload(*payload, transport_pool, options_->request_timeout);
         if (!response_payload) {
             co_return std::unexpected(std::move(response_payload.error()));
         }

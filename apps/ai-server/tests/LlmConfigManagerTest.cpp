@@ -17,6 +17,7 @@
 #include <fiber/nacos/NamingService.h>
 #include <fiber/nacos/Subscription.h>
 
+#include "../../../tests/NacosSnapshotTestBuilder.h"
 #include "../../../tests/NacosSubscriptionStub.h"
 #include "AiServer.h"
 #include "config/LlmConfigManager.h"
@@ -32,9 +33,9 @@ public:
 
     fiber::async::Task<void> shutdown() noexcept override { co_return; }
 
-    fiber::async::Task<std::expected<std::optional<fiber::nacos::ConfigData>, fiber::nacos::ConfigServiceError>>
+    fiber::async::Task<std::expected<std::shared_ptr<const fiber::nacos::ConfigData>, fiber::nacos::ConfigServiceError>>
     get_config(std::string, std::string) noexcept override {
-        co_return std::optional<fiber::nacos::ConfigData>{};
+        co_return fiber::tests::make_config_data(fiber::nacos::ConfigState::NotFound);
     }
 
     fiber::async::Task<std::expected<void, fiber::nacos::ConfigServiceError>>
@@ -62,12 +63,8 @@ public:
         ASSERT_NE(it, entries_.end());
         it->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
-                .data =
-                        fiber::nacos::ConfigData{
-                                .state = fiber::nacos::ConfigState::Present,
-                                .md5 = std::move(md5),
-                                .content = std::move(content),
-                        },
+                .data = fiber::tests::make_config_data(fiber::nacos::ConfigState::Present, std::move(md5),
+                                                       std::move(content)),
         });
     }
 
@@ -76,10 +73,7 @@ public:
         ASSERT_NE(it, entries_.end());
         it->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
-                .data =
-                        fiber::nacos::ConfigData{
-                                .state = fiber::nacos::ConfigState::NotFound,
-                        },
+                .data = fiber::tests::make_config_data(fiber::nacos::ConfigState::NotFound),
         });
     }
 
@@ -132,12 +126,12 @@ public:
         });
     }
 
-    void push(std::string_view service_name, fiber::nacos::ServiceInfo info) {
+    void push(std::string_view service_name, fiber::tests::ServiceInfoTestData info) {
         const auto it = entries_.find(make_key(service_name, fiber::ai_server::kDefaultNamingGroup));
         ASSERT_NE(it, entries_.end());
         it->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
-                .data = std::move(info),
+                .data = fiber::tests::make_service_info(std::move(info)),
         });
     }
 
@@ -435,7 +429,7 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBala
         EXPECT_EQ(manager.service_subscription_count(), 1u);
         EXPECT_EQ(manager.current_project(), nullptr);
 
-        fiber::nacos::ServiceInfo backend_a;
+        fiber::tests::ServiceInfoTestData backend_a;
         backend_a.name = "backend-a";
         backend_a.group_name = "DEFAULT_GROUP";
         backend_a.last_ref_time = 10;
@@ -485,7 +479,7 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBala
         EXPECT_EQ(snapshots.current().value, first);
         EXPECT_EQ(manager.current_project()->find_provider("routed")->config->metadata.version, 1);
 
-        fiber::nacos::ServiceInfo backend_b;
+        fiber::tests::ServiceInfoTestData backend_b;
         backend_b.name = "backend-b";
         backend_b.group_name = "DEFAULT_GROUP";
         backend_b.last_ref_time = 20;
@@ -528,7 +522,7 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedAtomicLoadBala
         EXPECT_EQ(first_provider->config->metadata.version, 1);
         EXPECT_EQ(first_provider->service->configured_instance_count(), 1u);
 
-        fiber::nacos::ServiceInfo empty_backend_b;
+        fiber::tests::ServiceInfoTestData empty_backend_b;
         empty_backend_b.name = "backend-b";
         empty_backend_b.group_name = "DEFAULT_GROUP";
         empty_backend_b.last_ref_time = 30;

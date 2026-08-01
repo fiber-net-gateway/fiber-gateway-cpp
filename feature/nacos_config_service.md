@@ -419,7 +419,8 @@ ConfigEntry
 
 核心 API 只提供协程和 `std::expected`：
 
-- `get_config` 返回 `expected<optional<ConfigData>, ConfigServiceError>`。
+- `get_config` 返回 `expected<shared_ptr<const ConfigData>, ConfigServiceError>`；成功结果始终非空，
+  缺失配置通过 `ConfigState::NotFound` 表达。
 - `publish` 返回 `expected<void, ConfigServiceError>`。
 - `remove_config` 返回 `expected<void, ConfigServiceError>`。
 - `subscribe` 返回 move-only `ConfigSubscription` 或创建错误。
@@ -494,7 +495,8 @@ Java 的 `blockingGetConfig`、`syncPublish` 和 `syncRemoveConfig` 不进入核
 Codec 约束：
 
 - JSON 字段名、null/absent 行为和默认值以 Java Jackson 输出为准。
-- parser 使用 pool-backed `string_view`，需要跨解析生命周期保存的值再显式复制到拥有型对象。
+- parser 使用 pool-backed `string_view`；发布的 ConfigData 共享持有对应 BufPool，避免把 md5/content
+  再复制到独立字符串。
 - 未知 JSON 字段允许跳过，以兼容服务器扩展。
 - 已知字段类型错误、整数越界和错误顶层类型必须拒绝。
 - parse 失败保持输出对象事务性不变。

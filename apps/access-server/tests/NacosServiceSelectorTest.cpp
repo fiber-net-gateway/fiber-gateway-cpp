@@ -12,6 +12,7 @@
 #include <fiber/nacos/NamingService.h>
 #include <fiber/nacos/Subscription.h>
 
+#include "../../../tests/NacosSnapshotTestBuilder.h"
 #include "../../../tests/NacosSubscriptionStub.h"
 #include "runtime/NacosServiceSelector.h"
 
@@ -50,12 +51,12 @@ public:
         });
     }
 
-    void push(std::string_view service_name, fiber::nacos::ServiceInfo info) {
+    void push(std::string_view service_name, fiber::tests::ServiceInfoTestData info) {
         const auto iterator = entries_.find(make_key(service_name, fiber::access_server::kDefaultNacosGroup));
         ASSERT_NE(iterator, entries_.end());
         iterator->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
-                .data = std::move(info),
+                .data = fiber::tests::make_service_info(std::move(info)),
         });
     }
 
@@ -120,7 +121,7 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
         EXPECT_EQ(selector.service_count(), 1u);
         EXPECT_EQ(naming.subscriptions("orders"), 1u);
 
-        fiber::nacos::ServiceInfo info;
+        fiber::tests::ServiceInfoTestData info;
         info.name = "orders";
         info.group_name = "DEFAULT_GROUP";
         info.hosts = {
@@ -178,7 +179,7 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
             EXPECT_EQ(gray->host, "10.0.0.3");
         }
 
-        fiber::nacos::ServiceInfo changed;
+        fiber::tests::ServiceInfoTestData changed;
         changed.name = "orders";
         changed.hosts = {
                 fiber::nacos::Instance{

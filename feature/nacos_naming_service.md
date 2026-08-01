@@ -89,8 +89,9 @@ Naming DTO 与 ploto Java Jackson 字段一致：
 | server -> client | `InstanceResponse` | type |
 
 请求 module 固定为 `naming`。解析阶段使用 pool-backed `string_view`；进入公共 API 的
-`ServiceInfo` 和 `Instance` 会转换为拥有型数据，并在复制前执行 host 数量、metadata
-数量及 key/value 大小限制。
+`ServiceInfo` 是 `BufPool` 支撑的不可变共享快照，hosts 使用 `ServiceInstance` 只读视图。
+注册 API 的 `Instance` 仍是拥有型数据。构建快照前执行 host 数量、metadata 数量及
+key/value 大小限制。
 
 ## 5. 查询与订阅
 

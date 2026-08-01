@@ -67,7 +67,7 @@ private:
     ConfigGraph *graph_ = nullptr;
     Key key_;
     nacos::Subscription<nacos::ConfigData> subscription_;
-    std::optional<nacos::ConfigData> pending_;
+    std::shared_ptr<const nacos::ConfigData> pending_;
     std::shared_ptr<const UserGroupSnapshot> current_;
     bool started_ = false;
     bool stopping_ = false;
@@ -109,7 +109,7 @@ private:
     ConfigGraph *graph_ = nullptr;
     Key key_;
     nacos::Subscription<nacos::ConfigData> subscription_;
-    std::optional<nacos::ConfigData> pending_;
+    std::shared_ptr<const nacos::ConfigData> pending_;
     std::optional<Generation> active_;
     std::optional<Generation> candidate_;
     std::shared_ptr<const ProjectProvider> current_;
@@ -153,7 +153,7 @@ private:
 
     ConfigGraph *graph_ = nullptr;
     nacos::Subscription<nacos::ConfigData> subscription_;
-    std::optional<nacos::ConfigData> pending_;
+    std::shared_ptr<const nacos::ConfigData> pending_;
     std::optional<Generation> active_;
     std::optional<Generation> candidate_;
     std::shared_ptr<const LlmProjectSnapshot> current_;
@@ -180,7 +180,7 @@ private:
 
     ConfigGraph *graph_ = nullptr;
     nacos::Subscription<nacos::ConfigData> subscription_;
-    std::optional<nacos::ConfigData> pending_;
+    std::shared_ptr<const nacos::ConfigData> pending_;
     std::shared_ptr<const Bt1KeySnapshot> current_;
     bool started_ = false;
     bool stopping_ = false;
@@ -308,7 +308,7 @@ void GroupNode::on_notify(void *context, const nacos::SubscriptionResult<nacos::
         return;
     }
     if (!self.started_) {
-        self.pending_ = *result.data;
+        self.pending_ = result.data;
         return;
     }
     self.apply(*result.data);
@@ -376,7 +376,7 @@ void ProviderNode::on_notify(void *context, const nacos::SubscriptionResult<naco
         return;
     }
     if (!self.started_) {
-        self.pending_ = *result.data;
+        self.pending_ = result.data;
         return;
     }
     self.apply(*result.data);
@@ -521,7 +521,7 @@ void ModelsNode::on_notify(void *context, const nacos::SubscriptionResult<nacos:
         return;
     }
     if (!self.started_) {
-        self.pending_ = *result.data;
+        self.pending_ = result.data;
         return;
     }
     self.apply(*result.data);
@@ -760,7 +760,7 @@ void Bt1Node::on_notify(void *context, const nacos::SubscriptionResult<nacos::Co
         return;
     }
     if (!self.started_) {
-        self.pending_ = *result.data;
+        self.pending_ = result.data;
         return;
     }
     self.apply(*result.data);
