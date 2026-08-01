@@ -636,6 +636,13 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
         }
         if (listen) {
             process_changed(response);
+            // A missing config with an omitted MD5 is absent from changedConfigs.
+            // Query never-synced entries once so their initial state becomes NotFound.
+            for (const EntryPtr &entry: included) {
+                if (entry->latest == nullptr && !entry->proto.query_in_flight) {
+                    schedule_query(entry);
+                }
+            }
         }
         for (const EntryPtr &entry: included) {
             complete_registration(entry, listen, true);

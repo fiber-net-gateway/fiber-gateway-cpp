@@ -47,9 +47,9 @@ enum class ConfigState : std::uint8_t {
 };
 
 // Published configuration value. state is Present for a real config and NotFound
-// for a confirmed-absent config; there is no Pending/Stopped. A callback is not
-// invoked until the first synchronization, and shutdown is delivered with
-// ResultKind::Closed.
+// for a confirmed-absent config; there is no Pending/Stopped. The first successful
+// synchronization publishes one of those states, unchanged states are not
+// republished, and shutdown is delivered with ResultKind::Closed.
 struct ConfigData {
     ConfigState state = ConfigState::Present;
     std::string md5;
