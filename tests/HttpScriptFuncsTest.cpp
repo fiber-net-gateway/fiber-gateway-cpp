@@ -488,11 +488,13 @@ TEST(RouteVarTest, SharedExtensionUsesCurrentRouteInfoBeforeCallableCache) {
     fiber::http_script::RouteScriptExtension route_extension;
     library.add_ext_ops(&route_extension, fiber::http_script::RouteScriptExtension::ops());
 
-    route_extension.set_compile_path_vars({"id"});
+    const std::vector<std::string> id_path_vars{"id"};
+    route_extension.set_compile_path_vars(id_path_vars);
     auto first = fiber::script::compile_script(library, "resp.sendJson(200, $path.id);");
     ASSERT_TRUE(first.has_value()) << first.error().message;
 
-    route_extension.set_compile_path_vars({"slug"});
+    const std::vector<std::string> slug_path_vars{"slug"};
+    route_extension.set_compile_path_vars(slug_path_vars);
     auto stale = fiber::script::compile_script(library, "resp.sendJson(200, $path.id);");
     EXPECT_FALSE(stale.has_value());
     auto current = fiber::script::compile_script(library, "resp.sendJson(200, $path.slug);");
