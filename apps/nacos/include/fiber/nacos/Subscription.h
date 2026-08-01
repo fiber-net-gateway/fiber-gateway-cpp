@@ -2,7 +2,7 @@
 #define FIBER_NACOS_SUBSCRIPTION_H
 
 #include <cstdint>
-#include <optional>
+#include <memory>
 #include <utility>
 
 namespace fiber::nacos {
@@ -12,7 +12,7 @@ enum class ResultKind : std::uint8_t { Success, Closed };
 template<typename T>
 struct SubscriptionResult {
     ResultKind kind = ResultKind::Success;
-    std::optional<T> data;
+    std::shared_ptr<const T> data;
 };
 
 // Move-only RAII handle for one callback registration. The callback node and
@@ -23,7 +23,8 @@ struct SubscriptionResult {
 // close()/destruction and callbacks are owner-EventLoop-only. A Closed result
 // is delivered before shutdown detaches the node from its entry. Detached nodes
 // remain owned by this handle and are freed when it is closed or destroyed.
-// The Result reference is valid only for the duration of the callback.
+// The Result reference is valid only for the duration of the callback. Its
+// shared data may be copied and retained beyond the callback.
 template<typename T>
 class Subscription {
 public:

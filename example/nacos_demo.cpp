@@ -292,7 +292,7 @@ void print_config_data(const nacos::ConfigData &c) {
 void print_service_info(const nacos::ServiceInfo &info) {
     std::cout << "    service=" << info.name << " group=" << info.group_name << " clusters=" << info.clusters
               << " hosts=" << info.hosts.size() << "\n";
-    for (const nacos::Instance &h: info.hosts) {
+    for (const nacos::ServiceInstance &h: info.hosts) {
         std::cout << "      - " << h.ip << ":" << h.port << " weight=" << h.weight
                   << " healthy=" << (h.healthy ? "Y" : "N") << " enabled=" << (h.enabled ? "Y" : "N")
                   << " ephemeral=" << (h.ephemeral ? "Y" : "N");
@@ -417,7 +417,7 @@ void naming_notify(void *context, const nacos::SubscriptionResult<nacos::Service
     }
     std::cout << "[naming] current service info -> ";
     print_service_info(*result.data);
-    for (const nacos::Instance &host: result.data->hosts) {
+    for (const nacos::ServiceInstance &host: result.data->hosts) {
         if (host.ip != state.ip) {
             continue;
         }
@@ -513,24 +513,24 @@ fiber::async::Task<void> config_demo(nacos::ConfigService &svc, const CliOptions
 
     // 2. get_config (bounded retry: a freshly created config is not readable via gRPC for a
     //    brief read-after-write window, so retry until it appears)
-    std::optional<nacos::ConfigData> fetched;
+    std::shared_ptr<const nacos::ConfigData> fetched;
     std::string get_err;
     for (int i = 0; i < 8; ++i) { // up to ~4s @ 500ms
         auto got = co_await svc.get_config(cli.data_id, cli.group);
-        if (got && got->has_value()) {
+        if (got && (*got)->state == nacos::ConfigState::Present) {
             fetched = *got;
             break;
         }
         get_err = got ? std::string{"not found"} : std::string{config_err_name(got.error().code)};
         co_await fiber::async::sleep(500ms);
     }
-    if (!fetched.has_value()) {
+    if (!fetched) {
         std::cout << "[config] get_config FAILED: " << get_err << "\n";
         co_return;
     }
     std::cout << "[config] get_config -> ";
     print_config_data(*fetched);
-    const std::string md5_1 = fetched->md5;
+    const std::string md5_1(fetched->md5);
 
     // 3. subscribe + await initial push
     ConfigNotifyState notify_state;
@@ -612,7 +612,7 @@ fiber::async::Task<void> naming_demo(nacos::NamingService &svc, const CliOptions
     for (int i = 0; i < 6; ++i) {
         auto info = co_await svc.get(cli.service, cli.group);
         if (info) {
-            for (const nacos::Instance &h: (*info)->hosts) {
+            for (const nacos::ServiceInstance &h: (*info)->hosts) {
                 if (h.ip == cli.instance_ip && h.port == cli.instance_port) {
                     seen = true;
                 }

@@ -184,7 +184,7 @@ void ServiceDiscovery::apply(Entry &entry, const ServiceInfo &info) {
     update.checksum = info.checksum;
     update.last_ref_time = info.last_ref_time;
     update.instances.reserve(info.hosts.size());
-    for (const Instance &instance: info.hosts) {
+    for (const ServiceInstance &instance: info.hosts) {
         if (!instance.enabled || !instance.healthy || !std::isfinite(instance.weight) || instance.weight <= 0.0 ||
             instance.ip.empty() || instance.port == 0) {
             continue;
@@ -195,13 +195,13 @@ void ServiceDiscovery::apply(Entry &entry, const ServiceInfo &info) {
             continue;
         }
         update.instances.push_back(DiscoveredInstance{
-                .instance_id = instance.instance_id,
-                .host = instance.ip,
+                .instance_id = std::string(instance.instance_id),
+                .host = std::string(instance.ip),
                 .ip_address = parsed_ip ? std::optional(ip) : std::nullopt,
                 .port = instance.port,
                 .authority = make_authority(instance.ip, instance.port, parsed_ip ? std::optional(ip) : std::nullopt),
                 .weight = instance.weight,
-                .cluster_name = instance.cluster_name,
+                .cluster_name = std::string(instance.cluster_name),
         });
     }
 

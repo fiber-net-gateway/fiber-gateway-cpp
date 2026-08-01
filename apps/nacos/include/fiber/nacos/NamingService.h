@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -51,14 +52,42 @@ struct Instance {
     std::vector<NamingMetadataEntry> metadata;
 };
 
+struct ServiceMetadataEntry {
+    std::string_view key;
+    std::string_view value;
+};
+
+// Immutable discovery instance view. Its text and metadata are owned by the
+// shared ServiceInfo snapshot. Instance remains the owning registration input.
+struct ServiceInstance {
+    std::string_view instance_id;
+    std::string_view ip;
+    std::uint16_t port = 0;
+    double weight = 1.0;
+    bool healthy = true;
+    bool enabled = true;
+    bool ephemeral = true;
+    std::string_view cluster_name;
+    std::string_view service_name;
+    std::span<const ServiceMetadataEntry> metadata;
+};
+
+// Immutable service view owned by the shared_ptr returned from get() or carried
+// by SubscriptionResult. Copy that shared_ptr before retaining any nested view.
 struct ServiceInfo {
-    std::string name;
-    std::string group_name;
-    std::string clusters;
+    ServiceInfo() noexcept = default;
+    ServiceInfo(const ServiceInfo &) = delete;
+    ServiceInfo &operator=(const ServiceInfo &) = delete;
+    ServiceInfo(ServiceInfo &&) = delete;
+    ServiceInfo &operator=(ServiceInfo &&) = delete;
+
+    std::string_view name;
+    std::string_view group_name;
+    std::string_view clusters;
     std::int64_t cache_millis = 1000;
-    std::vector<Instance> hosts;
+    std::span<const ServiceInstance> hosts;
     std::int64_t last_ref_time = 0;
-    std::string checksum;
+    std::string_view checksum;
     bool all_ips = false;
     bool reach_protection_threshold = false;
 };

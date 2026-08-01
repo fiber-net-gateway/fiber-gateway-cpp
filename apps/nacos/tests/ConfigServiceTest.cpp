@@ -568,7 +568,7 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                              std::vector<std::string>({"json", "text", "yaml", "properties", "xml", "html"});
 
         auto missing = co_await service->get_config("missing", "group");
-        result.missing_get = missing && !missing->has_value();
+        result.missing_get = missing && (*missing)->state == fiber::nacos::ConfigState::NotFound;
 
         CallbackWatch<fiber::nacos::ConfigData> updates;
         CallbackWatch<fiber::nacos::ConfigData> stopped_updates;
@@ -623,7 +623,8 @@ DetachedTask run_config_case(fiber::event::EventLoop *loop, ScriptedConfigServer
                     !missing_duplicate && missing_duplicate.error() == fiber::common::IoErr::TimedOut;
 
             auto cached = co_await service->get_config("data", "group");
-            result.cached_get = cached && cached->has_value() && (*cached)->content == "type-5";
+            result.cached_get =
+                    cached && (*cached)->state == fiber::nacos::ConfigState::Present && (*cached)->content == "type-5";
 
             const std::size_t listen_before_shared = server->listen_count();
             CallbackWatch<fiber::nacos::ConfigData> shared_updates;
@@ -968,7 +969,8 @@ DetachedTask run_rnacos_config_case(fiber::event::EventLoop *loop, fiber::nacos:
                                                    fiber::nacos::ConfigType::Text);
         result.published = published.has_value();
         auto queried = co_await service->get_config(std::string(kDataId), std::string(kGroup));
-        result.queried = queried && queried->has_value() && (*queried)->content == "first";
+        result.queried =
+                queried && (*queried)->state == fiber::nacos::ConfigState::Present && (*queried)->content == "first";
 
         CallbackWatch<fiber::nacos::ConfigData> updates;
         auto subscribed =

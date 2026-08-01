@@ -73,7 +73,7 @@ void GrayConfigWatcher::apply(const nacos::ConfigData &data) {
     if (!parsed) {
         ++failed_updates_;
         last_failure_ = GrayConfigWatcherFailure{
-                .md5 = data.md5,
+                .md5 = std::string(data.md5),
                 .error = std::move(parsed.error()),
         };
         return;

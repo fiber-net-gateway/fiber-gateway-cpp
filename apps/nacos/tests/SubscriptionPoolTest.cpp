@@ -65,6 +65,21 @@ struct AddContext {
     std::vector<int> *calls = nullptr;
 };
 
+struct RetainAndCloseContext {
+    TestPool *pool = nullptr;
+    std::shared_ptr<const int> retained;
+    std::vector<fiber::nacos::ResultKind> calls;
+};
+
+void retain_and_close(void *context, const TestResult &result) noexcept {
+    auto &state = *static_cast<RetainAndCloseContext *>(context);
+    state.calls.push_back(result.kind);
+    if (result.kind == fiber::nacos::ResultKind::Success) {
+        state.retained = result.data;
+        state.pool->close_all();
+    }
+}
+
 void add_during_notify(void *context, const TestResult &result) noexcept {
     auto &state = *static_cast<AddContext *>(context);
     if (result.kind != fiber::nacos::ResultKind::Success || !result.data) {
@@ -106,7 +121,7 @@ TEST(SubscriptionPoolTest, CallbackCanRemoveCurrentAndNextNode) {
 
     TestEntryPtr entry = pool.find("data", "group");
     ASSERT_TRUE(entry);
-    pool.publish(*entry, TestResult{.data = 7});
+    pool.publish(*entry, std::make_shared<const int>(7));
 
     EXPECT_EQ(calls, std::vector<int>({1, 3}));
     EXPECT_FALSE(first);
@@ -129,7 +144,7 @@ TEST(SubscriptionPoolTest, SubscriberAddedDuringNotifyReceivesVersionOnce) {
     TestEntryPtr entry = pool.find("data", "group");
     ASSERT_TRUE(entry);
 
-    pool.publish(*entry, TestResult{.data = 11});
+    pool.publish(*entry, std::make_shared<const int>(11));
 
     EXPECT_EQ(calls, std::vector<int>({11, 11}));
     first->close();
@@ -211,6 +226,25 @@ TEST(SubscriptionPoolTest, ClosedCallbackCanDestroyItsOwnNode) {
 
     EXPECT_EQ(context.calls, 1U);
     EXPECT_FALSE(subscription);
+    EXPECT_TRUE(pool.empty());
+}
+
+TEST(SubscriptionPoolTest, RetainedSnapshotSurvivesReentrantShutdownAndEntryRetirement) {
+    TestPool pool([](TestEntryPtr) {}, [](TestEntryPtr) { return fiber::nacos::detail::RemoveDecision::RetireNow; });
+    RetainAndCloseContext context{.pool = &pool};
+    auto subscribed = pool.subscribe("data", "group", &retain_and_close, &context);
+    ASSERT_TRUE(subscribed);
+    TestEntryPtr entry = pool.find("data", "group");
+    ASSERT_TRUE(entry);
+
+    pool.publish(*entry, std::make_shared<const int>(17));
+    entry.reset();
+
+    EXPECT_EQ(context.calls, std::vector<fiber::nacos::ResultKind>(
+                                     {fiber::nacos::ResultKind::Success, fiber::nacos::ResultKind::Closed}));
+    ASSERT_NE(context.retained, nullptr);
+    EXPECT_EQ(*context.retained, 17);
+    EXPECT_TRUE(subscribed->closed());
     EXPECT_TRUE(pool.empty());
 }
 

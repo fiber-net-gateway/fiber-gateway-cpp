@@ -15,6 +15,8 @@
 #include <fiber/nacos/Subscription.h>
 #include <fiber/nacos/discovery/ServiceDiscovery.h>
 
+#include "../../../tests/NacosSnapshotTestBuilder.h"
+
 namespace {
 
 class FakeNamingService final : public fiber::nacos::NamingService {
@@ -55,7 +57,7 @@ public:
         });
     }
 
-    void push(std::string_view service_name, std::string_view group, fiber::nacos::ServiceInfo info) {
+    void push(std::string_view service_name, std::string_view group, fiber::tests::ServiceInfoTestData info) {
         const auto iterator = entries_.find(make_key(service_name, group));
         EXPECT_NE(iterator, entries_.end());
         if (iterator == entries_.end()) {
@@ -63,7 +65,7 @@ public:
         }
         Result result{
                 .kind = fiber::nacos::ResultKind::Success,
-                .data = std::move(info),
+                .data = fiber::tests::make_service_info(std::move(info)),
         };
         const auto nodes = iterator->second->nodes;
         for (Node *node: nodes) {
@@ -157,7 +159,7 @@ TEST(ServiceDiscoveryTest, SharesSubscriptionsAndPublishesEmptyThenHostnameGener
         EXPECT_EQ(discovery.size(), 1U);
         EXPECT_EQ(naming.subscriptions("orders", "DEFAULT_GROUP"), 1U);
 
-        fiber::nacos::ServiceInfo empty;
+        fiber::tests::ServiceInfoTestData empty;
         empty.name = "orders";
         empty.group_name = "DEFAULT_GROUP";
         naming.push("orders", "DEFAULT_GROUP", std::move(empty));
@@ -169,7 +171,7 @@ TEST(ServiceDiscoveryTest, SharesSubscriptionsAndPublishesEmptyThenHostnameGener
         }
         EXPECT_EQ(observer.first_updates, 1U);
 
-        fiber::nacos::ServiceInfo hostname;
+        fiber::tests::ServiceInfoTestData hostname;
         hostname.name = "orders";
         hostname.group_name = "DEFAULT_GROUP";
         hostname.hosts = {

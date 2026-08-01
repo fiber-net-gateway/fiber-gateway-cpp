@@ -46,14 +46,20 @@ enum class ConfigState : std::uint8_t {
     NotFound,
 };
 
-// Published configuration value. state is Present for a real config and NotFound
-// for a confirmed-absent config; there is no Pending/Stopped. The first successful
-// synchronization publishes one of those states, unchanged states are not
-// republished, and shutdown is delivered with ResultKind::Closed.
+// Immutable configuration view owned by the shared_ptr returned from get_config()
+// or carried by SubscriptionResult. Copy that shared_ptr to retain the md5 and
+// content views. state is Present for a real config and NotFound for a
+// confirmed-absent config; shutdown is delivered with ResultKind::Closed.
 struct ConfigData {
+    ConfigData() noexcept = default;
+    ConfigData(const ConfigData &) = delete;
+    ConfigData &operator=(const ConfigData &) = delete;
+    ConfigData(ConfigData &&) = delete;
+    ConfigData &operator=(ConfigData &&) = delete;
+
     ConfigState state = ConfigState::Present;
-    std::string md5;
-    std::string content;
+    std::string_view md5;
+    std::string_view content;
 };
 
 enum class ConfigServiceErrorCode : std::uint8_t {
@@ -86,7 +92,9 @@ public:
     [[nodiscard]] virtual common::IoResult<void> start() noexcept = 0;
     [[nodiscard]] virtual async::Task<void> shutdown() noexcept = 0;
 
-    [[nodiscard]] virtual async::Task<std::expected<std::optional<ConfigData>, ConfigServiceError>>
+    // A successful query always returns a non-null snapshot. A missing config
+    // is represented by ConfigState::NotFound, matching subscription results.
+    [[nodiscard]] virtual async::Task<std::expected<std::shared_ptr<const ConfigData>, ConfigServiceError>>
     get_config(std::string data_id, std::string group) noexcept = 0;
 
     [[nodiscard]] virtual async::Task<std::expected<void, ConfigServiceError>>

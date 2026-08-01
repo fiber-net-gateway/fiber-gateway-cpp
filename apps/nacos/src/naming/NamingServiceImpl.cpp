@@ -5,12 +5,15 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -26,6 +29,7 @@
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
+#include "../PoolSnapshot.h"
 #include "../SubscriptionPool.h"
 #include "../dto/JsonCodec.h"
 #include "../rpc/NacosBiRequestHandler.h"
@@ -36,6 +40,9 @@ namespace {
 
 constexpr std::string_view kRegisterInstance = "registerInstance";
 constexpr std::string_view kDeregisterInstance = "deregisterInstance";
+
+static_assert(std::is_trivially_destructible_v<ServiceMetadataEntry>);
+static_assert(std::is_trivially_destructible_v<ServiceInstance>);
 
 NamingServiceError invalid_argument(std::string message) {
     return NamingServiceError{
@@ -56,6 +63,31 @@ std::string_view nullable_text(const json::Nullable<std::string_view> &value) no
     return value.is_present() ? value.value() : std::string_view{};
 }
 
+bool checked_add(std::size_t left, std::size_t right, std::size_t &result) noexcept {
+    if (left > std::numeric_limits<std::size_t>::max() - right) {
+        return false;
+    }
+    result = left + right;
+    return true;
+}
+
+bool checked_multiply(std::size_t left, std::size_t right, std::size_t &result) noexcept {
+    if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left) {
+        return false;
+    }
+    result = left * right;
+    return true;
+}
+
+bool checked_align(std::size_t value, std::size_t alignment, std::size_t &result) noexcept {
+    const std::size_t remainder = value % alignment;
+    if (remainder == 0) {
+        result = value;
+        return true;
+    }
+    return checked_add(value, alignment - remainder, result);
+}
+
 } // namespace
 
 struct NamingProtocolState {
@@ -67,7 +99,6 @@ struct NamingProtocolState {
 using NamingSubscriptionPool = SubscriptionPool<ServiceInfo, NamingProtocolState>;
 using NamingEntry = NamingSubscriptionPool::Entry;
 using NamingEntryPtr = NamingSubscriptionPool::EntryPtr;
-using NamingResult = SubscriptionResult<ServiceInfo>;
 
 class NamingServiceImpl final : public NamingService {
     struct RegistrationEntry {
@@ -140,9 +171,9 @@ private:
     [[nodiscard]] bool valid_instance(const Instance &instance) const noexcept;
     [[nodiscard]] NamingServiceError map_error(NacosRpcError error) const;
     [[nodiscard]] NamingServiceError response_error(const dto::ResponseBase &response) const;
-    [[nodiscard]] std::expected<ServiceInfo, NamingServiceError>
+    [[nodiscard]] std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>
     own_service_info(const dto::NamingServiceInfo &value) const;
-    void publish_value(NamingEntry &entry, ServiceInfo value);
+    void publish_value(NamingEntry &entry, std::shared_ptr<const ServiceInfo> value);
 
     void restore_connection_state();
     void reset_connection_state();
@@ -359,7 +390,7 @@ NamingServiceError NamingServiceImpl::response_error(const dto::ResponseBase &re
     return error;
 }
 
-std::expected<ServiceInfo, NamingServiceError>
+std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>
 NamingServiceImpl::own_service_info(const dto::NamingServiceInfo &value) const {
     if (!value.name.is_present() || !value.group_name.is_present() ||
         !valid_key(value.name.value(), value.group_name.value())) {
@@ -377,17 +408,20 @@ NamingServiceImpl::own_service_info(const dto::NamingServiceInfo &value) const {
         });
     }
 
-    ServiceInfo result{
-            .name = std::string(value.name.value()),
-            .group_name = std::string(value.group_name.value()),
-            .clusters = std::string(nullable_text(value.clusters)),
-            .cache_millis = value.cache_millis,
-            .last_ref_time = value.last_ref_time,
-            .checksum = std::string(nullable_text(value.checksum)),
-            .all_ips = value.all_ips,
-            .reach_protection_threshold = value.reach_protection_threshold,
+    std::size_t metadata_count = 0;
+    std::size_t string_bytes = 0;
+    auto add_text = [&string_bytes](std::string_view text) noexcept {
+        return checked_add(string_bytes, text.size(), string_bytes);
     };
-    result.hosts.reserve(value.hosts.size());
+    if (!add_text(value.name.value()) || !add_text(value.group_name.value()) ||
+        !add_text(nullable_text(value.clusters)) || !add_text(nullable_text(value.checksum))) {
+        return std::unexpected(NamingServiceError{
+                .code = NamingServiceErrorCode::ResponseTooLarge,
+                .io_error = common::IoErr::MessageTooLarge,
+                .message = "Nacos service info size overflows",
+        });
+    }
+
     for (const dto::NamingInstance &wire: value.hosts) {
         if (!wire.ip.is_present() || wire.ip.value().empty() || wire.port <= 0 || wire.port > 65535 ||
             !std::isfinite(wire.weight) || wire.weight < 0.0 ||
@@ -398,19 +432,22 @@ NamingServiceImpl::own_service_info(const dto::NamingServiceInfo &value) const {
                     .message = "Nacos service info contains an invalid instance",
             });
         }
-        Instance host{
-                .instance_id = std::string(nullable_text(wire.instance_id)),
-                .ip = std::string(wire.ip.value()),
-                .port = static_cast<std::uint16_t>(wire.port),
-                .weight = wire.weight,
-                .healthy = wire.healthy,
-                .enabled = wire.enabled,
-                .ephemeral = wire.ephemeral,
-                .cluster_name = std::string(nullable_text(wire.cluster_name)),
-                .service_name = std::string(nullable_text(wire.service_name)),
-        };
+        if (!add_text(nullable_text(wire.instance_id)) || !add_text(wire.ip.value()) ||
+            !add_text(nullable_text(wire.cluster_name)) || !add_text(nullable_text(wire.service_name))) {
+            return std::unexpected(NamingServiceError{
+                    .code = NamingServiceErrorCode::ResponseTooLarge,
+                    .io_error = common::IoErr::MessageTooLarge,
+                    .message = "Nacos service info size overflows",
+            });
+        }
         if (wire.metadata.is_present()) {
-            host.metadata.reserve(wire.metadata.value().size());
+            if (!checked_add(metadata_count, wire.metadata.value().size(), metadata_count)) {
+                return std::unexpected(NamingServiceError{
+                        .code = NamingServiceErrorCode::ResponseTooLarge,
+                        .io_error = common::IoErr::MessageTooLarge,
+                        .message = "Nacos service metadata count overflows",
+                });
+            }
             for (const auto &metadata: wire.metadata.value()) {
                 if (metadata.key.empty() || metadata.key.size() > options_.max_metadata_key_bytes ||
                     metadata.value.size() > options_.max_metadata_value_bytes) {
@@ -420,12 +457,124 @@ NamingServiceImpl::own_service_info(const dto::NamingServiceInfo &value) const {
                             .message = "Nacos instance metadata exceeds configured limit",
                     });
                 }
-                host.metadata.push_back({std::string(metadata.key), std::string(metadata.value)});
+                if (!add_text(metadata.key) || !add_text(metadata.value)) {
+                    return std::unexpected(NamingServiceError{
+                            .code = NamingServiceErrorCode::ResponseTooLarge,
+                            .io_error = common::IoErr::MessageTooLarge,
+                            .message = "Nacos service info size overflows",
+                    });
+                }
             }
         }
-        result.hosts.push_back(std::move(host));
     }
-    return result;
+
+    std::size_t offset = 0;
+    if (!checked_align(offset, alignof(ServiceInstance), offset)) {
+        return std::unexpected(NamingServiceError{
+                .code = NamingServiceErrorCode::ResponseTooLarge,
+                .io_error = common::IoErr::MessageTooLarge,
+                .message = "Nacos service info layout overflows",
+        });
+    }
+    const std::size_t hosts_offset = offset;
+    std::size_t hosts_bytes = 0;
+    if (!checked_multiply(value.hosts.size(), sizeof(ServiceInstance), hosts_bytes) ||
+        !checked_add(offset, hosts_bytes, offset) || !checked_align(offset, alignof(ServiceMetadataEntry), offset)) {
+        return std::unexpected(NamingServiceError{
+                .code = NamingServiceErrorCode::ResponseTooLarge,
+                .io_error = common::IoErr::MessageTooLarge,
+                .message = "Nacos service info layout overflows",
+        });
+    }
+    const std::size_t metadata_offset = offset;
+    std::size_t metadata_bytes = 0;
+    if (!checked_multiply(metadata_count, sizeof(ServiceMetadataEntry), metadata_bytes) ||
+        !checked_add(offset, metadata_bytes, offset)) {
+        return std::unexpected(NamingServiceError{
+                .code = NamingServiceErrorCode::ResponseTooLarge,
+                .io_error = common::IoErr::MessageTooLarge,
+                .message = "Nacos service info layout overflows",
+        });
+    }
+    const std::size_t strings_offset = offset;
+    if (!checked_add(offset, string_bytes, offset)) {
+        return std::unexpected(NamingServiceError{
+                .code = NamingServiceErrorCode::ResponseTooLarge,
+                .io_error = common::IoErr::MessageTooLarge,
+                .message = "Nacos service info layout overflows",
+        });
+    }
+
+    auto owner = make_pool_snapshot_owner<ServiceInfo>(256);
+    constexpr std::size_t storage_alignment = std::max(alignof(ServiceInstance), alignof(ServiceMetadataEntry));
+    auto *storage = static_cast<unsigned char *>(owner->pool.alloc(offset, storage_alignment));
+    if (storage == nullptr) {
+        return std::unexpected(NamingServiceError{
+                .code = NamingServiceErrorCode::Protocol,
+                .io_error = common::IoErr::NoMem,
+                .message = "out of memory while building Nacos service info",
+        });
+    }
+
+    auto *hosts = value.hosts.empty() ? nullptr : reinterpret_cast<ServiceInstance *>(storage + hosts_offset);
+    auto *metadata_entries =
+            metadata_count == 0 ? nullptr : reinterpret_cast<ServiceMetadataEntry *>(storage + metadata_offset);
+    for (std::size_t i = 0; i < value.hosts.size(); ++i) {
+        std::construct_at(hosts + i);
+    }
+    for (std::size_t i = 0; i < metadata_count; ++i) {
+        std::construct_at(metadata_entries + i);
+    }
+
+    char *text_cursor = reinterpret_cast<char *>(storage + strings_offset);
+    auto copy_text = [&text_cursor](std::string_view text) noexcept {
+        if (text.empty()) {
+            return std::string_view{};
+        }
+        std::memcpy(text_cursor, text.data(), text.size());
+        const std::string_view result(text_cursor, text.size());
+        text_cursor += text.size();
+        return result;
+    };
+
+    owner->data.name = copy_text(value.name.value());
+    owner->data.group_name = copy_text(value.group_name.value());
+    owner->data.clusters = copy_text(nullable_text(value.clusters));
+    owner->data.cache_millis = value.cache_millis;
+    owner->data.hosts = std::span<const ServiceInstance>(hosts, value.hosts.size());
+    owner->data.last_ref_time = value.last_ref_time;
+    owner->data.checksum = copy_text(nullable_text(value.checksum));
+    owner->data.all_ips = value.all_ips;
+    owner->data.reach_protection_threshold = value.reach_protection_threshold;
+
+    std::size_t metadata_index = 0;
+    for (std::size_t host_index = 0; host_index < value.hosts.size(); ++host_index) {
+        const dto::NamingInstance &wire = value.hosts[host_index];
+        ServiceInstance &host = hosts[host_index];
+        host.instance_id = copy_text(nullable_text(wire.instance_id));
+        host.ip = copy_text(wire.ip.value());
+        host.port = static_cast<std::uint16_t>(wire.port);
+        host.weight = wire.weight;
+        host.healthy = wire.healthy;
+        host.enabled = wire.enabled;
+        host.ephemeral = wire.ephemeral;
+        host.cluster_name = copy_text(nullable_text(wire.cluster_name));
+        host.service_name = copy_text(nullable_text(wire.service_name));
+        const std::size_t host_metadata_count = wire.metadata.is_present() ? wire.metadata.value().size() : 0;
+        ServiceMetadataEntry *host_metadata = host_metadata_count == 0 ? nullptr : metadata_entries + metadata_index;
+        host.metadata = std::span<const ServiceMetadataEntry>(host_metadata, host_metadata_count);
+        if (wire.metadata.is_present()) {
+            for (const auto &metadata: wire.metadata.value()) {
+                metadata_entries[metadata_index].key = copy_text(metadata.key);
+                metadata_entries[metadata_index].value = copy_text(metadata.value);
+                ++metadata_index;
+            }
+        }
+    }
+    FIBER_ASSERT(metadata_index == metadata_count);
+    FIBER_ASSERT(static_cast<std::size_t>(text_cursor - reinterpret_cast<char *>(storage + strings_offset)) ==
+                 string_bytes);
+    return freeze_pool_snapshot(owner);
 }
 
 async::Task<std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>>
@@ -440,8 +589,8 @@ NamingServiceImpl::get(std::string service_name, std::string group) noexcept {
 
     if (auto entry = pool_.find(service_name, group)) {
         const auto snapshot = entry->latest;
-        if (snapshot && snapshot->kind == ResultKind::Success && snapshot->data) {
-            co_return std::shared_ptr<const ServiceInfo>(snapshot, &*snapshot->data);
+        if (snapshot) {
+            co_return snapshot;
         }
     }
 
@@ -469,7 +618,7 @@ NamingServiceImpl::get(std::string service_name, std::string group) noexcept {
     if (!owned) {
         co_return std::unexpected(std::move(owned.error()));
     }
-    co_return std::make_shared<const ServiceInfo>(std::move(*owned));
+    co_return std::move(*owned);
 }
 
 std::expected<Subscription<ServiceInfo>, NamingServiceError>
@@ -588,8 +737,8 @@ async::DetachedTask NamingServiceImpl::run_subscription(EntryPtr entry, bool sub
     tasks_.done();
 }
 
-void NamingServiceImpl::publish_value(NamingEntry &entry, ServiceInfo value) {
-    pool_.publish(entry, NamingResult{.kind = ResultKind::Success, .data = std::move(value)});
+void NamingServiceImpl::publish_value(NamingEntry &entry, std::shared_ptr<const ServiceInfo> value) {
+    pool_.publish(entry, std::move(value));
 }
 
 async::Task<common::IoResult<dto::resp::NotifySubscriberResponse>>
@@ -600,16 +749,18 @@ NamingServiceImpl::handle_notify(void *context, NacosServerRequestContext &,
     if (self->stopping() || !request.service_info.is_present()) {
         co_return dto::resp::NotifySubscriberResponse{};
     }
-    auto owned = self->own_service_info(request.service_info.value());
-    if (!owned) {
+    const dto::NamingServiceInfo &wire = request.service_info.value();
+    if (!wire.name.is_present() || !wire.group_name.is_present() ||
+        !self->valid_key(wire.name.value(), wire.group_name.value())) {
         co_return dto::resp::NotifySubscriberResponse{};
     }
-    if (auto entry = self->pool_.find(owned->name, owned->group_name)) {
-        const auto current = entry->latest;
-        if (!current || current->kind != ResultKind::Success || !current->data ||
-            current->data->last_ref_time != owned->last_ref_time) {
-            self->publish_value(*entry, std::move(*owned));
-        }
+    auto entry = self->pool_.find(wire.name.value(), wire.group_name.value());
+    if (!entry || (entry->latest && entry->latest->last_ref_time == wire.last_ref_time)) {
+        co_return dto::resp::NotifySubscriberResponse{};
+    }
+    auto owned = self->own_service_info(wire);
+    if (owned) {
+        self->publish_value(*entry, std::move(*owned));
     }
     co_return dto::resp::NotifySubscriberResponse{};
 }

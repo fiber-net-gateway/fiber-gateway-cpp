@@ -48,7 +48,7 @@ private:
     std::string self_node_id_;
     std::optional<nacos::Subscription<nacos::ServiceInfo>> subscription_;
     std::optional<nacos::InstanceRegistration> registration_;
-    std::optional<nacos::ServiceInfo> pending_service_;
+    std::shared_ptr<const nacos::ServiceInfo> pending_service_;
     async::Watch<bool> stop_{false};
     std::optional<async::Watch<bool>::Publisher> stop_publisher_;
     async::WaitGroup tasks_;

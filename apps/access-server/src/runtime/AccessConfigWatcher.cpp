@@ -153,12 +153,14 @@ void AccessConfigWatcher::apply_project(ProjectEntry &entry, const nacos::Config
 
     auto parsed = parse_project_config(data.content);
     if (!parsed) {
-        report_failure(options_.project_route_data_id_prefix + entry.project, data.md5, std::move(parsed.error()));
+        report_failure(options_.project_route_data_id_prefix + entry.project, std::string(data.md5),
+                       std::move(parsed.error()));
         return;
     }
     auto updated = store_->apply(entry.project, *parsed);
     if (!updated) {
-        report_failure(options_.project_route_data_id_prefix + entry.project, data.md5, std::move(updated.error()));
+        report_failure(options_.project_route_data_id_prefix + entry.project, std::string(data.md5),
+                       std::move(updated.error()));
         return;
     }
 

@@ -25,6 +25,7 @@
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
+#include "../PoolSnapshot.h"
 #include "../SubscriptionPool.h"
 #include "../dto/Config.h"
 #include "../rpc/NacosBiRequestHandler.h"
@@ -64,7 +65,15 @@ struct ConfigProtocolState {
 using ConfigSubscriptionPool = SubscriptionPool<ConfigData, ConfigProtocolState>;
 using ConfigEntry = ConfigSubscriptionPool::Entry;
 using ConfigEntryPtr = ConfigSubscriptionPool::EntryPtr;
-using ConfigResult = SubscriptionResult<ConfigData>;
+
+std::shared_ptr<const ConfigData> not_found_snapshot() {
+    static const std::shared_ptr<const ConfigData> snapshot = [] {
+        auto owner = make_pool_snapshot_owner<ConfigData>(256);
+        owner->data.state = ConfigState::NotFound;
+        return freeze_pool_snapshot(owner);
+    }();
+    return snapshot;
+}
 
 class ConfigServiceImpl final : public ConfigService {
 public:
@@ -76,7 +85,7 @@ public:
     [[nodiscard]] common::IoResult<void> start() noexcept override;
     [[nodiscard]] async::Task<void> shutdown() noexcept override;
 
-    [[nodiscard]] async::Task<std::expected<std::optional<ConfigData>, ConfigServiceError>>
+    [[nodiscard]] async::Task<std::expected<std::shared_ptr<const ConfigData>, ConfigServiceError>>
     get_config(std::string data_id, std::string group) noexcept override;
     [[nodiscard]] async::Task<std::expected<void, ConfigServiceError>>
     publish(std::string data_id, std::string group, std::string content, ConfigType type,
@@ -107,7 +116,7 @@ private:
     [[nodiscard]] ConfigServiceError response_error(const dto::ResponseBase &response) const;
     [[nodiscard]] bool valid_key(std::string_view data_id, std::string_view group) const noexcept;
     [[nodiscard]] bool response_content_valid(const dto::resp::ConfigQueryResponse &response) const noexcept;
-    void publish_value(ConfigEntry &entry, ConfigData value);
+    void publish_value(ConfigEntry &entry, std::shared_ptr<const ConfigData> value);
     void schedule_query(const EntryPtr &entry);
     [[nodiscard]] async::DetachedTask query_and_sync(EntryPtr entry, std::uint64_t sequence) noexcept;
     void schedule_registration(std::vector<EntryPtr> entries, bool listen);
@@ -289,7 +298,7 @@ bool ConfigServiceImpl::response_content_valid(const dto::resp::ConfigQueryRespo
            response.content.value().size() <= options_.max_content_bytes;
 }
 
-async::Task<std::expected<std::optional<ConfigData>, ConfigServiceError>>
+async::Task<std::expected<std::shared_ptr<const ConfigData>, ConfigServiceError>>
 ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     if (stopping()) {
@@ -302,25 +311,20 @@ ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
     // Serve from a synced subscription cache if present.
     if (auto entry = pool_.find(data_id, group)) {
         const auto snapshot = entry->latest;
-        if (snapshot != nullptr && snapshot->kind == ResultKind::Success && snapshot->data.has_value()) {
-            if (snapshot->data->state == ConfigState::Present) {
-                co_return std::optional<ConfigData>(*snapshot->data);
-            }
-            if (snapshot->data->state == ConfigState::NotFound) {
-                co_return std::optional<ConfigData>{};
-            }
+        if (snapshot != nullptr) {
+            co_return snapshot;
         }
     }
 
     dto::req::ConfigQueryRequest request = dto::req::ConfigQueryRequest::build(data_id, group, config_->tenant());
+    auto owner = make_pool_snapshot_owner<ConfigData>(256);
     dto::resp::ConfigQueryResponse response;
-    mem::BufPool pool;
-    auto result = co_await request_rpc(request, pool, response);
+    auto result = co_await request_rpc(request, owner->pool, response);
     if (!result) {
         co_return std::unexpected(map_error(std::move(result.error())));
     }
     if (response.error_code == dto::resp::ConfigQueryResponse::kConfigNotFound) {
-        co_return std::optional<ConfigData>{};
+        co_return not_found_snapshot();
     }
     if (!response.success()) {
         co_return std::unexpected(response_error(response));
@@ -339,11 +343,10 @@ ConfigServiceImpl::get_config(std::string data_id, std::string group) noexcept {
                 .message = "Nacos config content exceeds configured limit",
         });
     }
-    co_return std::optional<ConfigData>(ConfigData{
-            .state = ConfigState::Present,
-            .md5 = std::string(response.md5.value()),
-            .content = std::string(response.content.value()),
-    });
+    owner->data.state = ConfigState::Present;
+    owner->data.md5 = response.md5.value();
+    owner->data.content = response.content.value();
+    co_return freeze_pool_snapshot(owner);
 }
 
 async::Task<std::expected<void, ConfigServiceError>>
@@ -460,9 +463,9 @@ RemoveDecision ConfigServiceImpl::on_subscription_remove(EntryPtr entry) {
     return RemoveDecision::RetireNow;
 }
 
-void ConfigServiceImpl::publish_value(ConfigEntry &entry, ConfigData value) {
+void ConfigServiceImpl::publish_value(ConfigEntry &entry, std::shared_ptr<const ConfigData> value) {
     FIBER_ASSERT(loop_->in_loop());
-    pool_.publish(entry, ConfigResult{.kind = ResultKind::Success, .data = std::move(value)});
+    pool_.publish(entry, std::move(value));
 }
 
 void ConfigServiceImpl::schedule_query(const EntryPtr &entry) {
@@ -490,28 +493,26 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
         }
         dto::req::ConfigQueryRequest request =
                 dto::req::ConfigQueryRequest::build(entry->data_id, entry->group, config_->tenant());
+        auto owner = make_pool_snapshot_owner<ConfigData>(256);
         dto::resp::ConfigQueryResponse response;
-        mem::BufPool pool;
-        auto result = co_await request_rpc(request, pool, response);
+        auto result = co_await request_rpc(request, owner->pool, response);
 
         if (!stopping() && ready_rpc_ && !entry->proto.draining && sequence == entry->proto.query_sequence && result) {
             const auto snapshot = entry->latest;
-            const ConfigData *current =
-                    (snapshot != nullptr && snapshot->data.has_value()) ? &*snapshot->data : nullptr;
+            const ConfigData *current = snapshot.get();
             if (response.error_code == dto::resp::ConfigQueryResponse::kConfigNotFound) {
                 const bool was_not_found = current != nullptr && current->state == ConfigState::NotFound;
                 if (!was_not_found) {
-                    publish_value(*entry, ConfigData{.state = ConfigState::NotFound});
+                    publish_value(*entry, not_found_snapshot());
                 }
             } else if (response.success() && response_content_valid(response)) {
                 const std::string_view md5 = response.md5.value();
                 const bool stale = current == nullptr || current->state != ConfigState::Present || current->md5 != md5;
                 if (stale) {
-                    publish_value(*entry, ConfigData{
-                                                  .state = ConfigState::Present,
-                                                  .md5 = std::string(md5),
-                                                  .content = std::string(response.content.value()),
-                                          });
+                    owner->data.state = ConfigState::Present;
+                    owner->data.md5 = md5;
+                    owner->data.content = response.content.value();
+                    publish_value(*entry, freeze_pool_snapshot(owner));
                 }
             }
         }
@@ -604,8 +605,8 @@ async::DetachedTask ConfigServiceImpl::register_entries(std::vector<EntryPtr> en
             context.data_id.set_present(entry->data_id);
             context.tenant.set_present(config_->tenant());
             const auto snapshot = entry->latest;
-            if (snapshot != nullptr && snapshot->kind == ResultKind::Success && snapshot->data.has_value()) {
-                const ConfigData &data = *snapshot->data;
+            if (snapshot != nullptr) {
+                const ConfigData &data = *snapshot;
                 if (data.state == ConfigState::Present) {
                     context.md5.set_present(data.md5);
                 } else if (data.state == ConfigState::NotFound) {

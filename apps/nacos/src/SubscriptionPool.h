@@ -74,7 +74,7 @@ public:
         std::uint64_t key_hash = 0;
         std::string_view data_id;
         std::string_view group;
-        std::shared_ptr<const Result> latest;
+        std::shared_ptr<const Value> latest;
         std::uint64_t notify_version = 0;
         SubscriberList subscribers;
         Node **notify_next_ptr = nullptr;
@@ -208,7 +208,7 @@ public:
         // Replay an existing cached value to a newly added callback. If a
         // notification is already being dispatched, defer replay to its outer
         // loop so callback execution does not recurse.
-        const std::shared_ptr<const Result> latest = entry->latest;
+        std::shared_ptr<const Value> latest = entry->latest;
         if (latest != nullptr && node->last_notified_version < entry->notify_version) {
             if (entry->notifying) {
                 entry->notify_pending = true;
@@ -216,23 +216,25 @@ public:
                 node->last_notified_version = entry->notify_version;
                 NotifyCallback notify = node->callback;
                 void *notify_ctx = node->ctx;
-                notify(notify_ctx, *latest);
+                const Result result{.kind = ResultKind::Success, .data = std::move(latest)};
+                notify(notify_ctx, result);
             }
         }
         return subscription;
     }
 
-    void publish(Entry &raw_entry, Result value) {
+    void publish(Entry &raw_entry, std::shared_ptr<const Value> value) {
         EntryPtr entry(&raw_entry);
-        if (entry->closing && value.kind != ResultKind::Closed) {
+        if (entry->closing) {
             return;
         }
-        if (entry->subscribers.empty() && value.kind != ResultKind::Closed) {
+        if (entry->subscribers.empty()) {
             return;
         }
+        FIBER_ASSERT(value != nullptr);
 
         FIBER_ASSERT(entry->notify_version != std::numeric_limits<std::uint64_t>::max());
-        entry->latest = std::make_shared<const Result>(std::move(value));
+        entry->latest = std::move(value);
         ++entry->notify_version;
         if (entry->notifying) {
             entry->notify_pending = true;
@@ -242,10 +244,13 @@ public:
         entry->notifying = true;
         do {
             entry->notify_pending = false;
-            const std::shared_ptr<const Result> snapshot = entry->latest;
             const std::uint64_t version = entry->notify_version;
-            if (snapshot != nullptr) {
-                notify_round(*entry, *snapshot, version);
+            if (entry->closing) {
+                const Result result{.kind = ResultKind::Closed, .data = nullptr};
+                notify_round(*entry, result, version);
+            } else if (entry->latest != nullptr) {
+                const Result result{.kind = ResultKind::Success, .data = entry->latest};
+                notify_round(*entry, result, version);
             }
         } while (entry->notify_pending && !entry->subscribers.empty());
         entry->notifying = false;
@@ -273,11 +278,18 @@ public:
             EntryPtr entry(raw_entry);
             erase_tree_reference(*entry);
             entry->closing = true;
-            publish(*entry, Result{.kind = ResultKind::Closed, .data = std::nullopt});
-            if (!entry->notifying) {
-                orphan_subscribers(*entry);
-                entry->pool = nullptr;
+            FIBER_ASSERT(entry->notify_version != std::numeric_limits<std::uint64_t>::max());
+            ++entry->notify_version;
+            if (entry->notifying) {
+                entry->notify_pending = true;
+                continue;
             }
+            const Result result{.kind = ResultKind::Closed, .data = nullptr};
+            entry->notifying = true;
+            notify_round(*entry, result, entry->notify_version);
+            entry->notifying = false;
+            orphan_subscribers(*entry);
+            entry->pool = nullptr;
         }
     }
 

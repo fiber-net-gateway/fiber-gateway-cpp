@@ -114,7 +114,7 @@ void RateLimitClusterMembership::service_notify(void *context,
         return;
     }
     if (!self.started_) {
-        self.pending_service_ = *result.data;
+        self.pending_service_ = result.data;
         return;
     }
     self.apply(*result.data);
@@ -154,7 +154,7 @@ void RateLimitClusterMembership::apply(const nacos::ServiceInfo &info) {
     FIBER_ASSERT(loop_->in_loop());
     std::vector<RateLimitNode> nodes;
     nodes.reserve(info.hosts.size());
-    for (const nacos::Instance &instance: info.hosts) {
+    for (const nacos::ServiceInstance &instance: info.hosts) {
         if (!instance.enabled || !instance.healthy || !std::isfinite(instance.weight) || instance.weight <= 0.0 ||
             instance.port == 0) {
             continue;
@@ -181,7 +181,7 @@ void RateLimitClusterMembership::apply(const nacos::ServiceInfo &info) {
         }
         nodes.push_back(RateLimitNode{
                 .node_id = std::move(*node_id),
-                .host = instance.ip,
+                .host = std::string(instance.ip),
                 .port = instance.port,
                 .weight = 1,
                 .local = false,

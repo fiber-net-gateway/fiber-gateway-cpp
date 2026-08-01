@@ -810,7 +810,7 @@ wait_instance_port(typename CallbackWatch<fiber::nacos::ServiceInfo>::Watch::Sub
         if (!next->value || next->value->kind != fiber::nacos::ResultKind::Success || !next->value->data) {
             continue;
         }
-        for (const fiber::nacos::Instance &host: next->value->data->hosts) {
+        for (const fiber::nacos::ServiceInstance &host: next->value->data->hosts) {
             if (host.ip == "127.0.0.1" && host.port == port) {
                 co_return true;
             }

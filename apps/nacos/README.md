@@ -159,34 +159,14 @@ on that EventLoop:
 auto published = co_await (*configs)->publish("routes", "DEFAULT_GROUP", route_json,
                                              fiber::nacos::ConfigType::Json);
 auto queried = co_await (*configs)->get_config("routes", "DEFAULT_GROUP");
-if (queried && *queried) {
+if (queried && (*queried)->state == fiber::nacos::ConfigState::Present) {
     use((*queried)->content, (*queried)->md5);
-}
-
-auto subscribed = (*configs)->subscribe("routes", "DEFAULT_GROUP");
-if (subscribed) {
-    auto subscription = std::move(*subscribed);
-    auto &sub = subscription.subscriber();
-    auto snapshot = sub.current();
-    std::uint64_t version = snapshot.version;
-    for (;;) {
-        snapshot = co_await sub.next(version);
-        const auto &result = *snapshot.value;
-        if (result.kind == fiber::nacos::ResultKind::Closed) {
-            break; // service shutdown
-        }
-        version = snapshot.version;
-        const auto &value = *result.data;
-        if (value.state == fiber::nacos::ConfigState::Present) {
-            reload(value.content);
-        } else if (value.state == fiber::nacos::ConfigState::NotFound) {
-            remove_local_config();
-        }
-    }
 }
 ```
 
-`get_config()` returns an empty optional for a confirmed NotFound response.
+`get_config()` returns a non-null shared snapshot on every successful query. A
+confirmed missing config has `state == ConfigState::NotFound`; Present and
+NotFound therefore use the same representation in queries and subscriptions.
 `publish()` accepts all six Java-compatible types and an optional CAS MD5; an
 empty CAS value is omitted from the wire request. Successful publish and remove
 calls do not mutate the local subscription cache optimistically. The cache
@@ -194,24 +174,21 @@ changes only after a server notification or registration response causes a
 query.
 
 Each `(dataId, group)` has one internal entry regardless of the number of local
-subscriptions. `subscription.subscriber().current()` returns a null snapshot
-until the first server value arrives; `next(version)` blocks until then. The
-watched value is a `SubscriptionResult<ConfigData>`: `kind == Success` carries
-the latest `ConfigData` in `data`; `kind == Closed` marks end-of-subscription
-(service shutdown), with no `data`. Each snapshot carries the Watch version;
-pass that version back to the next `next(version)`. Destroy or
-explicitly close subscriptions on the owner EventLoop, before destroying their
-ConfigService.
+subscriptions. Callbacks receive `SubscriptionResult<ConfigData>`:
+`kind == Success` carries a non-null shared snapshot in `data`, while
+`kind == Closed` marks service shutdown and carries no data. The callback
+result reference is temporary, but `result.data` may be copied and retained.
+Destroy or explicitly close subscriptions on the owner EventLoop before
+destroying their ConfigService.
 
 Transient connection and query failures retain the last Present or NotFound
 value. Each newly ready physical connection re-registers all live entries, and
 a periodic compensating registration covers lost server-side listener state.
 The redo timer is a `when_any` branch in the owning connection coroutine, not
 a separate detached lifecycle task.
-During shutdown every live subscription is closed: `next()` resumes with
-`ResultKind::Closed` (or `closed()` returns true) and config operations reject
-new work. All registration/query tasks finish before shutdown
-returns.
+During shutdown every live callback receives `ResultKind::Closed`, handles
+become closed, and config operations reject new work. All registration/query
+tasks finish before shutdown returns.
 
 `NamingService::create()` follows the same independent ownership model. Naming
 operations use the client's fixed EventLoop:
@@ -219,20 +196,8 @@ operations use the client's fixed EventLoop:
 ```cpp
 auto queried = co_await (*naming)->get("gateway", "DEFAULT_GROUP");
 
-auto subscribed = (*naming)->subscribe("gateway", "DEFAULT_GROUP");
-if (subscribed) {
-    auto subscription = std::move(*subscribed);
-    auto &sub = subscription.subscriber();
-    auto snapshot = sub.current();
-    std::uint64_t version = snapshot.version;
-    for (;;) {
-        snapshot = co_await sub.next(version);
-        if (snapshot.value->kind == fiber::nacos::ResultKind::Closed) {
-            break;
-        }
-        version = snapshot.version;
-        route_to(snapshot.value->data->hosts);
-    }
+if (queried) {
+    route_to((*queried)->hosts);
 }
 
 fiber::nacos::Instance instance{

@@ -13,6 +13,7 @@
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/Subscription.h>
 
+#include "../../../tests/NacosSnapshotTestBuilder.h"
 #include "../../../tests/NacosSubscriptionStub.h"
 #include "runtime/AccessConfigWatcher.h"
 
@@ -25,9 +26,9 @@ public:
     fiber::common::IoResult<void> start() noexcept override { return {}; }
     fiber::async::Task<void> shutdown() noexcept override { co_return; }
 
-    fiber::async::Task<std::expected<std::optional<fiber::nacos::ConfigData>, fiber::nacos::ConfigServiceError>>
+    fiber::async::Task<std::expected<std::shared_ptr<const fiber::nacos::ConfigData>, fiber::nacos::ConfigServiceError>>
     get_config(std::string, std::string) noexcept override {
-        co_return std::optional<fiber::nacos::ConfigData>{};
+        co_return fiber::tests::make_config_data(fiber::nacos::ConfigState::NotFound);
     }
 
     fiber::async::Task<std::expected<void, fiber::nacos::ConfigServiceError>>
@@ -55,12 +56,8 @@ public:
         ASSERT_NE(iterator, entries_.end());
         iterator->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
-                .data =
-                        fiber::nacos::ConfigData{
-                                .state = fiber::nacos::ConfigState::Present,
-                                .md5 = std::move(md5),
-                                .content = std::move(content),
-                        },
+                .data = fiber::tests::make_config_data(fiber::nacos::ConfigState::Present, std::move(md5),
+                                                       std::move(content)),
         });
     }
 
@@ -69,10 +66,7 @@ public:
         ASSERT_NE(iterator, entries_.end());
         iterator->second->subscriptions.publish(Result{
                 .kind = fiber::nacos::ResultKind::Success,
-                .data =
-                        fiber::nacos::ConfigData{
-                                .state = fiber::nacos::ConfigState::NotFound,
-                        },
+                .data = fiber::tests::make_config_data(fiber::nacos::ConfigState::NotFound),
         });
     }
 
