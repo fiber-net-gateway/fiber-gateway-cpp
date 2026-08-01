@@ -436,7 +436,8 @@ TEST(LlmProtocolTest, PromotesProviderFailureToNextProviderWhenCircuitOpens) {
 TEST(LlmProtocolTest, KeepsServiceProviderRetriesAtInstanceLevel) {
     ProjectProvider service_provider;
     const auto owner = std::make_shared<int>(1);
-    service_provider.service = std::shared_ptr<LoadBalancer>(owner, reinterpret_cast<LoadBalancer *>(owner.get()));
+    service_provider.service =
+            std::shared_ptr<WeightedRendezvous>(owner, reinterpret_cast<WeightedRendezvous *>(owner.get()));
     ProviderRuntimeState runtime;
     const std::array<ResolvedProviderAttempt, 2> attempts{{
             {.provider = &service_provider, .runtime = &runtime},

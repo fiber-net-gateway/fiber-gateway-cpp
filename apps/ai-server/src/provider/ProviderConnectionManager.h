@@ -1,7 +1,7 @@
 #ifndef FIBER_AI_SERVER_PROVIDER_CONNECTION_MANAGER_H
 #define FIBER_AI_SERVER_PROVIDER_CONNECTION_MANAGER_H
 
-#include "../discovery/LoadBalancer.h"
+#include "../discovery/WeightedRendezvous.h"
 #include "ExecutionPlan.h"
 #include "ProviderEndpoint.h"
 #include "WorkerDnsService.h"
@@ -43,23 +43,20 @@ struct ProviderConnectionError {
 };
 
 struct ProviderServiceSelection {
-    ServiceInstancePolicy policy = ServiceInstancePolicy::SmoothWeightedRoundRobin;
     std::uint64_t rendezvous_key = 0;
     std::span<const std::uint64_t> excluded_peer_ids;
 };
 
 struct ProviderLoadBalanceLease {
-    std::shared_ptr<LoadBalancer> load_balancer;
-    LoadBalancer::Instance instance;
+    WeightedRendezvous::Selection instance;
 
-    [[nodiscard]] bool valid() const noexcept { return load_balancer != nullptr && instance.valid(); }
+    [[nodiscard]] bool valid() const noexcept { return instance.valid(); }
     [[nodiscard]] std::uint64_t peer_id() const noexcept { return valid() ? instance.peer_id() : 0; }
     void report(InstanceReportOutcome outcome) noexcept {
         if (!valid()) {
             return;
         }
-        load_balancer->report(std::move(instance), outcome);
-        load_balancer.reset();
+        instance.report(outcome);
     }
 };
 

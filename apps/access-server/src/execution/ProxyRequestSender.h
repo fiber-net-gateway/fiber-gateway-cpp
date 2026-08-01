@@ -6,9 +6,8 @@
 #include "../../../../src/http/ClientHttp1Exchange.h"
 #include "../../../../src/http/LocalHttp1ConnectionPoolSet.h"
 #include "../../../../src/net/IpAddress.h"
+#include "../runtime/SmoothWeightedRoundRobin.h"
 #include "ProxyRequestPlan.h"
-
-#include <fiber/nacos/discovery/ServiceLoadBalancer.h>
 
 #include <atomic>
 #include <chrono>
@@ -54,7 +53,7 @@ struct ProxyUpstreamEndpoint {
     std::uint16_t port = 80;
     std::string_view host_header;
     std::optional<net::IpAddress> ip_address;
-    nacos::LoadBalancer::Instance service_instance;
+    SmoothWeightedRoundRobin::Selection service_instance;
     std::uint64_t selection_token = 0;
 };
 

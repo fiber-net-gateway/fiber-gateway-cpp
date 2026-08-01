@@ -162,16 +162,13 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
             co_return std::unexpected(error(ProviderConnectionErrorCode::NoServiceEndpoint,
                                             "provider service discovery is unavailable", common::IoErr::NotFound));
         }
-        auto selected = service_selection.policy == ServiceInstancePolicy::WeightedRendezvous
-                                ? attempt.provider->service->load_balance(service_selection.rendezvous_key,
-                                                                          service_selection.excluded_peer_ids)
-                                : attempt.provider->service->load_balance();
+        auto selected = attempt.provider->service->select(service_selection.rendezvous_key,
+                                                          service_selection.excluded_peer_ids);
         if (!selected) {
             co_return std::unexpected(error(ProviderConnectionErrorCode::NoServiceEndpoint,
                                             "provider service has no usable endpoint", common::IoErr::NotFound));
         }
-        FIBER_ASSERT(selected->ip_address().has_value());
-        const net::IpAddress &selected_ip = *selected->ip_address();
+        const net::IpAddress &selected_ip = selected->ip_address();
         dial.endpoint.scheme = ProviderEndpointScheme::Http;
         dial.endpoint.ip = selected_ip;
         dial.endpoint.host_is_ip = true;
@@ -182,7 +179,6 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
         dial.key = http::Http1ConnectionGroupKey::from_ip(selected_ip, selected->port(),
                                                           http::Http1ConnectionGroupKey::Scheme::Http);
         dial.load_balance = ProviderLoadBalanceLease{
-                .load_balancer = attempt.provider->service,
                 .instance = std::move(*selected),
         };
     } else {

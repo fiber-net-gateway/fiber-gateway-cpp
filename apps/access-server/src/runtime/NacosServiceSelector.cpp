@@ -20,13 +20,38 @@ ProxyRequestError select_error(const char *message, common::IoErr io_error) noex
 
 } // namespace
 
+AccessServiceOps::StatePtr AccessServiceOps::create(nacos::ServiceKeyView,
+                                                    const std::shared_ptr<const nacos::ServiceInfo> &snapshot) {
+    FIBER_ASSERT(snapshot != nullptr);
+    auto state = std::make_shared<State>(options);
+    const bool changed = state->update(*snapshot);
+    FIBER_ASSERT(changed);
+    return state;
+}
+
+bool AccessServiceOps::update(State &state, nacos::ServiceKeyView,
+                              const std::shared_ptr<const nacos::ServiceInfo> &snapshot) {
+    FIBER_ASSERT(snapshot != nullptr);
+    return state.update(*snapshot);
+}
+
+void AccessServiceOps::on_change(State &, nacos::ServiceKeyView, nacos::ServiceChangeKind kind, bool) noexcept {
+    FIBER_ASSERT(owner != nullptr);
+    ++owner->naming_updates_;
+    if (kind == nacos::ServiceChangeKind::Initial) {
+        owner->publish_directory();
+    }
+}
+
+void AccessServiceOps::retire(State &, nacos::ServiceKeyView, nacos::ServiceRetireReason) noexcept {}
+
 struct NacosServiceSelector::Directory {
     struct Item {
         std::string service;
-        std::shared_ptr<nacos::LoadBalancer> load_balancer;
+        std::shared_ptr<SmoothWeightedRoundRobin> load_balancer;
     };
 
-    [[nodiscard]] std::shared_ptr<nacos::LoadBalancer> find(std::string_view service) const noexcept {
+    [[nodiscard]] std::shared_ptr<SmoothWeightedRoundRobin> find(std::string_view service) const noexcept {
         const auto iterator =
                 std::lower_bound(services.begin(), services.end(), service,
                                  [](const Item &item, std::string_view value) { return item.service < value; });
@@ -42,17 +67,7 @@ struct NacosServiceSelector::Directory {
 NacosServiceSelector::NacosServiceSelector(event::EventLoop &loop, nacos::NamingService &naming_service,
                                            NacosServiceSelectorOptions options, const GrayMatchStore *gray_match) :
     loop_(&loop), gray_match_(gray_match), options_(std::move(options)),
-    discovery_(loop, naming_service,
-               nacos::ServiceDiscoveryOptions{
-                       .load_balancer =
-                               nacos::LoadBalancer::Options{
-                                       .max_fails = 25,
-                               },
-               },
-               nacos::ServiceDiscoveryObserver{
-                       .context = this,
-                       .on_update = &NacosServiceSelector::service_updated,
-               }) {
+    discovery_(loop, naming_service, AccessServiceOps{.owner = this}) {
     store_directory(std::make_shared<const Directory>(), std::memory_order_relaxed);
 }
 
@@ -140,7 +155,7 @@ std::expected<ProxyUpstreamEndpoint, ProxyRequestError>
 NacosServiceSelector::select_endpoint(std::string_view service, std::optional<std::string_view> cluster,
                                       std::span<const std::uint64_t> excluded_selection_tokens) noexcept {
     std::shared_ptr<const Directory> directory = load_directory();
-    std::shared_ptr<nacos::LoadBalancer> load_balancer = directory->find(service);
+    std::shared_ptr<SmoothWeightedRoundRobin> load_balancer = directory->find(service);
     if (!load_balancer) {
         return std::unexpected(
                 select_error("service is not present in the active route directory", common::IoErr::NotFound));
@@ -148,16 +163,9 @@ NacosServiceSelector::select_endpoint(std::string_view service, std::optional<st
 
     const std::string_view selected_cluster =
             cluster && !cluster->empty() ? *cluster : std::string_view(options_.default_cluster);
-    auto selected = load_balancer->load_balance(nacos::ServiceInstanceSelection{
-            .cluster = selected_cluster,
-            .preferred_zone = options_.zone,
-            .excluded_peer_ids = excluded_selection_tokens,
-    });
+    auto selected = load_balancer->select(selected_cluster, options_.zone, excluded_selection_tokens);
     if (!selected) {
-        return std::unexpected(select_error(selected.error() == nacos::LoadBalanceError::Uninitialized
-                                                    ? "service discovery has not received an initial value"
-                                                    : "no available service instance",
-                                            common::IoErr::NotFound));
+        return std::unexpected(select_error("no available service instance", common::IoErr::NotFound));
     }
 
     const std::uint64_t selection_token = selected->peer_id();
@@ -192,17 +200,7 @@ NacosServiceSelector::select(void *context, http::HttpExchange &exchange, std::s
 
 void NacosServiceSelector::report(void *, ProxyUpstreamEndpoint &endpoint, bool success) noexcept {
     if (endpoint.service_instance.pending()) {
-        endpoint.service_instance.report(success ? nacos::InstanceReportOutcome::Success
-                                                 : nacos::InstanceReportOutcome::Failure);
-    }
-}
-
-void NacosServiceSelector::service_updated(void *context, nacos::LoadBalancer &, nacos::ServiceKeyView,
-                                           bool first_update, nacos::LoadBalancerUpdateResult) noexcept {
-    auto &self = *static_cast<NacosServiceSelector *>(context);
-    ++self.naming_updates_;
-    if (first_update) {
-        self.publish_directory();
+        endpoint.service_instance.report(success);
     }
 }
 
@@ -210,7 +208,7 @@ void NacosServiceSelector::publish_directory() {
     auto directory = std::make_shared<Directory>();
     directory->services.reserve(entries_.size());
     for (const auto &[service, handle]: entries_) {
-        std::shared_ptr<nacos::LoadBalancer> state = handle.try_state();
+        std::shared_ptr<SmoothWeightedRoundRobin> state = handle.try_state();
         if (state != nullptr) {
             directory->services.push_back(Directory::Item{
                     .service = service,

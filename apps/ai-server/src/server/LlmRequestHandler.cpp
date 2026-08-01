@@ -1656,12 +1656,10 @@ void apply_observed_provider_error(const ResolvedProviderAttempt &attempt, const
 
 class ServiceInstanceRetryState {
 public:
-    [[nodiscard]] bool init(ServiceInstancePolicy policy, std::string_view route_key, std::size_t maximum_attempts,
-                            mem::BufPool &pool) noexcept {
-        policy_ = policy;
+    [[nodiscard]] bool init(std::string_view route_key, std::size_t maximum_attempts, mem::BufPool &pool) noexcept {
         route_key_ = route_key;
         capacity_ = maximum_attempts;
-        if (policy_ == ServiceInstancePolicy::WeightedRendezvous && capacity_ > 1) {
+        if (capacity_ > 1) {
             excluded_peer_ids_ = pool.alloc<std::uint64_t>(capacity_);
             return excluded_peer_ids_ != nullptr;
         }
@@ -1669,9 +1667,6 @@ public:
     }
 
     [[nodiscard]] ProviderServiceSelection selection(const ResolvedProviderAttempt &attempt) noexcept {
-        if (policy_ != ServiceInstancePolicy::WeightedRendezvous) {
-            return {};
-        }
         if (provider_ != attempt.provider) {
             provider_ = attempt.provider;
             excluded_size_ = 0;
@@ -1679,14 +1674,13 @@ public:
                     attempt.provider ? rendezvous_score(route_key_, attempt.provider->name) : std::uint64_t{0};
         }
         return ProviderServiceSelection{
-                .policy = policy_,
                 .rendezvous_key = rendezvous_key_,
                 .excluded_peer_ids = std::span(excluded_peer_ids_, excluded_size_),
         };
     }
 
     void exclude(std::uint64_t peer_id) noexcept {
-        if (policy_ != ServiceInstancePolicy::WeightedRendezvous || peer_id == 0 || !excluded_peer_ids_) {
+        if (peer_id == 0 || !excluded_peer_ids_) {
             return;
         }
         if (std::find(excluded_peer_ids_, excluded_peer_ids_ + excluded_size_, peer_id) !=
@@ -1698,7 +1692,6 @@ public:
     }
 
 private:
-    ServiceInstancePolicy policy_ = ServiceInstancePolicy::SmoothWeightedRoundRobin;
     const ProjectProvider *provider_ = nullptr;
     std::string_view route_key_;
     std::uint64_t rendezvous_key_ = 0;
@@ -2187,8 +2180,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
     audit.reserve_provider_attempts(plan->attempts.size());
 
     ServiceInstanceRetryState service_instances;
-    if (!service_instances.init(plan->load_balance.service_instance_policy, plan->route_key, plan->attempts.size(),
-                                exchange.pool())) {
+    if (!service_instances.init(plan->route_key, plan->attempts.size(), exchange.pool())) {
         co_await send_error(exchange, cat_request, protocol,
                             plan_error(protocol, ExecutionPlanError{
                                                          .code = ExecutionPlanErrorCode::OutOfMemory,

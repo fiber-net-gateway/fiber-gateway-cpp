@@ -257,10 +257,10 @@ std::expected<LoadBalanceConfig, LlmConfigError> parse_load_balance(const JsonAn
     if (*service_policy) {
         const std::string normalized = normalize_option(**service_policy);
         if (normalized == "smooth-weighted-round-robin" || normalized == "smooth-round-robin") {
-            config.service_instance_policy = ServiceInstancePolicy::SmoothWeightedRoundRobin;
-        } else if (normalized == "weighted-rendezvous" || normalized == "weighted-rendezvous-hash") {
-            config.service_instance_policy = ServiceInstancePolicy::WeightedRendezvous;
-        } else {
+            return std::unexpected(invalid_field(std::string(base_path) + ".service-instance-policy",
+                                                 "ai-server only supports weighted rendezvous service selection"));
+        }
+        if (normalized != "weighted-rendezvous" && normalized != "weighted-rendezvous-hash") {
             return std::unexpected(invalid_field(std::string(base_path) + ".service-instance-policy",
                                                  "unsupported service instance policy"));
         }

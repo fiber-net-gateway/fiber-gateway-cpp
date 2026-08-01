@@ -395,12 +395,10 @@ Provider 选择器每个选项显示：
 | 主 Provider 尝试上限 | `max-primary-attempts` | 数字，默认 0 | 0 表示全部；大于 0 时限制不同主 Provider 数 |
 | 启用 Fallback | `fallback-enabled` | 开关，默认开 | 未选择 fallback 时禁用并显示说明 |
 | 可重试 HTTP 状态 | `retryable-status` | 标签数字输入 | 100..599，去重、升序；空输入恢复默认集合 |
-| 服务实例策略 | `service-instance-policy` | 单选，默认平滑加权轮询 | 仅影响 `service://` Provider |
-
-服务实例策略值：
-
-- `smooth-weighted-round-robin`；
-- `weighted-rendezvous`。
+`service://` Provider 固定使用带权 Rendezvous，不向用户提供服务实例算法选项。
+导入旧配置时仅兼容 `service-instance-policy: weighted-rendezvous`（以及旧别名
+`weighted-rendezvous-hash`）；平滑加权轮询值会被 ai-server 拒绝，控制台规范化输出
+不再写这个字段。
 
 需明确展示：
 
@@ -1509,7 +1507,6 @@ ai-server 当前未在 codec 中限制数组规模，控制台后台必须结合
         "prefix-max-bytes": 2048,
         "max-primary-attempts": 2,
         "fallback-enabled": true,
-        "service-instance-policy": "weighted-rendezvous",
         "retryable-status": [
           429,
           502,
@@ -1542,7 +1539,7 @@ ai-server 当前未在 codec 中限制数组规模，控制台后台必须结合
 | 前缀上限 | `prefix-max-bytes`、`prefixMaxBytes` | `prefix-max-bytes` |
 | 主尝试上限 | `max-primary-attempts`、`maxPrimaryAttempts` | `max-primary-attempts` |
 | Fallback 开关 | `fallback-enabled`、`fallbackEnabled` | `fallback-enabled` |
-| 服务实例策略 | `service-instance-policy`、`serviceInstancePolicy` | `service-instance-policy` |
+| 服务实例策略（旧配置） | `service-instance-policy`、`serviceInstancePolicy` | 不输出；仅接受 `weighted-rendezvous` |
 | 重试状态 | `retryable-status`、`retryableStatus` | `retryable-status` |
 | 窗口时长 | `window-duration-millis`、`windowDurationMillis` | `window-duration-millis` |
 | 窗口额度 | `max-tokens-per-window`、`maxTokensPerWindow` | `max-tokens-per-window` |

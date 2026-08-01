@@ -1,7 +1,7 @@
 #ifndef FIBER_AI_SERVER_PROVIDER_ERROR_CLASSIFIER_H
 #define FIBER_AI_SERVER_PROVIDER_ERROR_CLASSIFIER_H
 
-#include "../discovery/LoadBalancer.h"
+#include "../discovery/WeightedRendezvous.h"
 #include "ExecutionPlan.h"
 #include "ProviderHttpClient.h"
 

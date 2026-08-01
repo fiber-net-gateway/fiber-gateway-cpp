@@ -1,6 +1,6 @@
 #include "LlmConfigManager.h"
 
-#include "../discovery/ServiceDiscovery.h"
+#include "../discovery/WeightedRendezvous.h"
 #include "../limit/RateLimitHash.h"
 #include "../observability/AiServerLogCategories.h"
 #include "ConfigNodePool.h"
@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <common/Assert.h>
+#include <fiber/nacos/discovery/ServiceDiscovery.h>
 #include <log/Log.h>
 
 namespace fiber::ai_server {
@@ -43,6 +44,21 @@ void log_config_rejection(bool serving_ready, std::string_view data_id, std::str
 }
 
 class ConfigGraph;
+
+struct AiServiceOps {
+    using State = WeightedRendezvous;
+    using StatePtr = std::shared_ptr<State>;
+
+    [[nodiscard]] StatePtr create(nacos::ServiceKeyView key, const std::shared_ptr<const nacos::ServiceInfo> &snapshot);
+    [[nodiscard]] bool update(State &state, nacos::ServiceKeyView key,
+                              const std::shared_ptr<const nacos::ServiceInfo> &snapshot);
+    void on_change(State &state, nacos::ServiceKeyView key, nacos::ServiceChangeKind kind, bool changed) noexcept;
+    void retire(State &state, nacos::ServiceKeyView key, nacos::ServiceRetireReason reason) noexcept;
+
+    ConfigGraph *graph = nullptr;
+};
+
+using AiServiceDiscovery = nacos::ServiceDiscovery<AiServiceOps>;
 
 class GroupNode final : public common::NonCopyable, public common::NonMovable {
 public:
@@ -87,14 +103,14 @@ public:
 
     void start();
     void request_stop() noexcept;
-    [[nodiscard]] bool on_service_initialized(const LoadBalancer &service);
+    [[nodiscard]] bool on_service_initialized(const WeightedRendezvous &service);
 
 private:
     friend class ConfigGraph;
 
     struct Generation {
         std::shared_ptr<const ProviderConfigSnapshot> config;
-        std::optional<ServiceDiscovery::Lease> service;
+        std::optional<AiServiceDiscovery::Lease> service;
 
         [[nodiscard]] bool ready() const noexcept { return !service || service->try_state() != nullptr; }
     };
@@ -104,7 +120,7 @@ private:
     void apply(const nacos::ConfigData &data);
     void activate_candidate();
     void rebuild_current();
-    [[nodiscard]] static bool references(const Generation &generation, const LoadBalancer &service) noexcept;
+    [[nodiscard]] static bool references(const Generation &generation, const WeightedRendezvous &service) noexcept;
 
     ConfigGraph *graph_ = nullptr;
     Key key_;
@@ -189,13 +205,7 @@ private:
 class ConfigGraph final : public common::NonCopyable, public common::NonMovable {
 public:
     ConfigGraph(event::EventLoop &loop, nacos::ConfigService &config_service, nacos::NamingService &naming_service) :
-        loop_(&loop), config_service_(&config_service),
-        services_(loop, naming_service, ServiceDiscoveryOptions{.require_ip = true},
-                  ServiceDiscoveryObserver{
-                          .context = this,
-                          .on_update = &ConfigGraph::service_updated,
-                          .on_closed = &ConfigGraph::service_closed,
-                  }),
+        loop_(&loop), config_service_(&config_service), services_(loop, naming_service, AiServiceOps{.graph = this}),
         providers_(this, &ConfigGraph::create_provider_node), groups_(this, &ConfigGraph::create_group_node) {
         snapshot_publisher_ = snapshots_.acquire_publisher();
         FIBER_ASSERT(snapshot_publisher_.has_value());
@@ -230,7 +240,7 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] ProviderNodePool &providers() noexcept { return providers_; }
     [[nodiscard]] GroupNodePool &groups() noexcept { return groups_; }
-    [[nodiscard]] ServiceDiscovery &services() noexcept { return services_; }
+    [[nodiscard]] AiServiceDiscovery &services() noexcept { return services_; }
 
     void accepted_update() noexcept { ++successful_updates_; }
 
@@ -238,15 +248,12 @@ public:
     void on_models_changed();
     void on_provider_changed(ProviderNode &provider);
     void on_group_changed(GroupNode &group);
-    void on_service_initialized(LoadBalancer &service);
+    void on_service_initialized(WeightedRendezvous &service);
 
     void report_failure(std::string_view data_id, std::string_view md5, LlmConfigError error);
     void report_not_found(std::string_view data_id);
 
 private:
-    static void service_updated(void *context, LoadBalancer &service, nacos::ServiceKeyView key, bool first_update,
-                                LoadBalancerUpdateResult result) noexcept;
-    static void service_closed(void *context, nacos::ServiceKeyView key) noexcept;
     [[nodiscard]] static std::expected<std::shared_ptr<ProviderNode>, nacos::ConfigServiceError>
     create_provider_node(void *context, std::string key);
     [[nodiscard]] static std::expected<std::shared_ptr<GroupNode>, nacos::ConfigServiceError>
@@ -256,7 +263,7 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     nacos::ConfigService *config_service_ = nullptr;
-    ServiceDiscovery services_;
+    AiServiceDiscovery services_;
     ProviderNodePool providers_;
     GroupNodePool groups_;
     std::shared_ptr<Bt1Node> bt1_;
@@ -429,11 +436,11 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
     }
 }
 
-bool ProviderNode::references(const Generation &generation, const LoadBalancer &service) noexcept {
+bool ProviderNode::references(const Generation &generation, const WeightedRendezvous &service) noexcept {
     return generation.service && generation.service->try_state().get() == &service;
 }
 
-bool ProviderNode::on_service_initialized(const LoadBalancer &service) {
+bool ProviderNode::on_service_initialized(const WeightedRendezvous &service) {
     FIBER_ASSERT(graph_->loop().in_loop());
     if (candidate_ && references(*candidate_, service) && candidate_->ready()) {
         activate_candidate();
@@ -451,7 +458,7 @@ void ProviderNode::activate_candidate() {
 
 void ProviderNode::rebuild_current() {
     FIBER_ASSERT(active_ && active_->ready());
-    std::shared_ptr<LoadBalancer> service;
+    std::shared_ptr<WeightedRendezvous> service;
     if (active_->service) {
         service = active_->service->shared_state();
     }
@@ -902,25 +909,41 @@ void ConfigGraph::on_group_changed(GroupNode &group) {
     }
 }
 
-void ConfigGraph::service_updated(void *context, LoadBalancer &service, nacos::ServiceKeyView key, bool first_update,
-                                  LoadBalancerUpdateResult result) noexcept {
-    auto &graph = *static_cast<ConfigGraph *>(context);
+AiServiceOps::StatePtr AiServiceOps::create(nacos::ServiceKeyView,
+                                            const std::shared_ptr<const nacos::ServiceInfo> &snapshot) {
+    FIBER_ASSERT(snapshot != nullptr);
+    auto state = std::make_shared<State>();
+    const bool changed = state->update(*snapshot);
+    FIBER_ASSERT(changed);
+    return state;
+}
+
+bool AiServiceOps::update(State &state, nacos::ServiceKeyView,
+                          const std::shared_ptr<const nacos::ServiceInfo> &snapshot) {
+    FIBER_ASSERT(snapshot != nullptr);
+    return state.update(*snapshot);
+}
+
+void AiServiceOps::on_change(State &service, nacos::ServiceKeyView key, nacos::ServiceChangeKind kind,
+                             bool changed) noexcept {
+    FIBER_ASSERT(graph != nullptr);
     LOG(LOG_DISCOVERY, DEBUG) << "NamingService instances updated service=" << log::quoted(key.service_name)
                               << " group=" << log::quoted(key.group) << " generation=" << service.generation()
-                              << " instances=" << service.configured_instance_count()
-                              << " changed=" << (result == LoadBalancerUpdateResult::Applied);
-    graph.accepted_update();
-    if (first_update) {
-        graph.on_service_initialized(service);
+                              << " instances=" << service.configured_instance_count() << " changed=" << changed;
+    graph->accepted_update();
+    if (kind == nacos::ServiceChangeKind::Initial) {
+        graph->on_service_initialized(service);
     }
 }
 
-void ConfigGraph::service_closed(void *, nacos::ServiceKeyView key) noexcept {
-    LOG(LOG_DISCOVERY, WARN) << "NamingService subscription closed service=" << log::quoted(key.service_name)
-                             << " group=" << log::quoted(key.group);
+void AiServiceOps::retire(State &, nacos::ServiceKeyView key, nacos::ServiceRetireReason reason) noexcept {
+    if (reason == nacos::ServiceRetireReason::SubscriptionClosed) {
+        LOG(LOG_DISCOVERY, WARN) << "NamingService subscription closed service=" << log::quoted(key.service_name)
+                                 << " group=" << log::quoted(key.group);
+    }
 }
 
-void ConfigGraph::on_service_initialized(LoadBalancer &service) {
+void ConfigGraph::on_service_initialized(WeightedRendezvous &service) {
     FIBER_ASSERT(loop_->in_loop());
     if (!models_) {
         return;

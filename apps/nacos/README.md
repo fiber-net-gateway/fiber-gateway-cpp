@@ -4,8 +4,8 @@
 `apps/`. Consumers should link the `fiber::nacos` target.
 
 The current implementation covers authentication, the reusable Nacos gRPC
-transport layer, ConfigService, NamingService, and an optional client-side
-service-discovery layer:
+transport layer, ConfigService, NamingService, and a generic client-side
+service-discovery registry:
 
 - Immutable, validated client configuration with multiple server IPs.
 - Nacos 2.x authentication flow through its fixed
@@ -44,28 +44,19 @@ service-discovery layer:
   best-effort deregistration, and reconnect replay.
 - Reference-counted `(serviceName, group)` discovery handles over
   NamingService subscriptions.
-- Atomically published immutable instance generations that request workers can
-  pin without touching the NamingService EventLoop.
-- Smooth weighted round-robin and weighted rendezvous selection, request-level
-  peer exclusion, cluster/local-zone preference, failure feedback, and bounded
-  circuit state.
-- IP and hostname instances with application-owned HTTP/DNS adaptation.
+- Application-defined shared state allocated on the first naming notification,
+  updated by later pushes, and retired when the subscription is released.
+- IP and hostname interpretation and all selection policies remain owned by the
+  consuming application.
 
 ## Targets
 
 - `fiber_nacos`: concrete static library.
 - `fiber::nacos`: stable alias for consuming applications.
-- `fiber_nacos_discovery`: optional client-side discovery and load-balancing
-  library.
-- `fiber::nacos_discovery`: stable alias for discovery consumers.
 - `fiber_nacos_tests`: unit and local integration tests when tests are enabled.
 
 The library links `fiber_lib` publicly, so consumers receive the core Fiber
 include paths and dependencies through `fiber::nacos`.
-
-`fiber::nacos_discovery` links `fiber::nacos` publicly. It is intentionally a
-separate target: `NamingService` retains Java-compatible subscribe/get/registry
-semantics, while applications opt into discovery pooling and selection policy.
 
 ## NacosRpc Transport and Reconnection
 
@@ -114,7 +105,6 @@ Discovery consumers additionally include:
 
 ```cpp
 #include <fiber/nacos/discovery/ServiceDiscovery.h>
-#include <fiber/nacos/discovery/ServiceLoadBalancer.h>
 ```
 
 Configuration is created through a validation boundary:
@@ -225,22 +215,25 @@ deregistration. Every new physical naming connection restores active
 subscriptions and re-registers the latest instance values. Creation, update,
 close, and destruction of these handles are owner-EventLoop operations.
 
-`ServiceDiscovery` is the default
-`BasicServiceDiscovery<LoadBalancerOps>` specialization. Its intrusive registry
-stores one entry for each `(serviceName, group)` and shares that entry across
-move-only leases. A load-balancer state is not allocated until the first naming
-notification; an empty host list is still a successful first notification.
-`Lease::try_state()` returns null before that point, while `co_await
-Lease::wait_ready()` suspends the current coroutine until the first value,
-subscription closure, retirement, or shutdown. These lease operations run on
-the NamingService owner EventLoop.
+`ServiceDiscovery<StateOps>` uses an intrusive red-black tree keyed by a cached
+hash plus `(serviceName, group)`. Multiple move-only leases for the same key
+share one entry and one NamingService subscription. It does not contain a
+selection policy: `StateOps::State` and its shared `StateOps::StatePtr` are
+application-defined.
 
-Dropping the last lease removes the entry from lookup and stops its naming
-subscription. `LoadBalancerOps::retire()` runs once at that boundary. The
-shared state itself may remain alive in request-worker directories or old
-configuration snapshots and is destroyed only after their final `shared_ptr`
-is released. Custom derived states can use `BasicServiceDiscovery<StateOps>`
-with the same create, update, retire, and first-notification contract.
+The first successful naming notification calls `StateOps::create()` and then
+`StateOps::on_change(..., ServiceChangeKind::Initial, true)`. An empty host list
+is still a successful first notification. Later pushes call
+`StateOps::update()` followed by `StateOps::on_change(...,
+ServiceChangeKind::Update, changed)`. `Lease::try_state()` returns null before
+the first value, while `co_await Lease::wait_ready()` suspends until the first
+value, subscription closure, lease retirement, or shutdown. These operations
+run on the NamingService owner EventLoop.
+
+Dropping the last lease removes the entry from lookup, stops its naming
+subscription, and calls `StateOps::retire()` once with a reason. The shared
+state may remain alive in request-worker directories or old configuration
+snapshots and is destroyed after their final `shared_ptr` is released.
 
 Options are split by owner. `NacosClientOptions` controls only authentication
 connect/request timeouts, response limits, and retry backoff.

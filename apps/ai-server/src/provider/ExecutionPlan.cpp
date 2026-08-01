@@ -1,6 +1,6 @@
 #include "ExecutionPlan.h"
 
-#include "../discovery/LoadBalancer.h"
+#include "../discovery/WeightedRendezvous.h"
 
 #include <algorithm>
 #include <array>
@@ -39,7 +39,7 @@ ProviderProtocolType provider_protocol_type(LlmWireProtocol protocol) noexcept {
 
 bool service_ready(const ProjectProvider &provider) noexcept {
     return !provider.config->base_url.starts_with("service://") ||
-           (provider.service && provider.service->initialized() && provider.service->configured_instance_count() != 0);
+           (provider.service && provider.service->configured_instance_count() != 0);
 }
 
 std::size_t attempt_capacity(std::span<const std::shared_ptr<const ProjectProvider>> providers) noexcept {
