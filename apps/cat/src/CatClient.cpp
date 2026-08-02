@@ -114,31 +114,6 @@ std::expected<Event, RecordError> CatClient::create_isolated_event(mem::BufPool 
     return Event::create_root(*this, pool, type, name, options);
 }
 
-std::expected<PropagationContext, RecordError>
-CatClient::create_remote_context(const PropagationContext &current, std::string_view remote_domain) noexcept {
-    if (!core_ || !current.valid() || current.message_id().empty()) {
-        if (core_) {
-            core_->on_context_failure(RecordError::InvalidContext);
-        }
-        return std::unexpected(RecordError::InvalidContext);
-    }
-    auto child_id = core_->create_message_id(remote_domain);
-    if (!child_id) {
-        return std::unexpected(child_id.error());
-    }
-    const std::string_view root = current.root_message_id().empty() ? current.message_id() : current.root_message_id();
-    auto result = PropagationContext::create({
-            .message_id = child_id->view(),
-            .root_message_id = root,
-            .parent_message_id = current.message_id(),
-            .session_token = current.session_token(),
-    });
-    if (!result) {
-        core_->on_context_failure(result.error());
-    }
-    return result;
-}
-
 std::shared_ptr<detail::CatClientCore> CatClient::core() const noexcept { return core_; }
 
 } // namespace fiber::cat

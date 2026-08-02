@@ -17,7 +17,7 @@
 #include <http/LocalHttp1ConnectionPoolSet.h>
 
 namespace fiber::cat {
-class PropagationContext;
+struct MessageTraceContext;
 }
 
 namespace fiber::ai_server {
@@ -49,16 +49,16 @@ public:
 
     [[nodiscard]] async::Task<std::expected<RateLimitCheckResponse, RateLimitRemoteError>>
     check(const RateLimitNode &node, const RateLimitCheckRequest &request,
-          const cat::PropagationContext *cat_context = nullptr, std::string_view trace_state = {}) noexcept;
+          const cat::MessageTraceContext *cat_context = nullptr, std::string_view trace_state = {}) noexcept;
 
     [[nodiscard]] async::Task<std::expected<RateLimitSettleResponse, RateLimitRemoteError>>
     settle(const RateLimitNode &node, const RateLimitSettleRequest &request,
-           const cat::PropagationContext *cat_context = nullptr, std::string_view trace_state = {}) noexcept;
+           const cat::MessageTraceContext *cat_context = nullptr, std::string_view trace_state = {}) noexcept;
 
 private:
     [[nodiscard]] async::Task<std::expected<std::string, RateLimitRemoteError>>
     post(const RateLimitNode &node, std::string_view path, std::string request_body,
-         const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept;
+         const cat::MessageTraceContext *cat_context, std::string_view trace_state) noexcept;
 
     http::LocalHttp1ConnectionPoolSet pool_;
     bool initialized_ = false;

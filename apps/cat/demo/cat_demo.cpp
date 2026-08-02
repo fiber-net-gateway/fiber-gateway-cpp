@@ -375,7 +375,7 @@ std::string record_success_tree(fiber::cat::CatClient &client, int idx) {
     fiber::cat::Transaction root = std::move(*created);
     std::string id;
     if (auto pc = root.message_trace().propagation_context()) {
-        id = std::string(pc->message_id());
+        id = std::string(pc->message_id);
     }
     (void) root.add_data("method", "GET");
     (void) root.add_data("idx", std::to_string(idx));
@@ -399,7 +399,7 @@ std::string record_error_tree(fiber::cat::CatClient &client, int idx) {
     fiber::cat::Transaction root = std::move(*created);
     std::string id;
     if (auto pc = root.message_trace().propagation_context()) {
-        id = std::string(pc->message_id());
+        id = std::string(pc->message_id);
     }
     (void) root.add_data("order_id", std::to_string(idx));
     (void) root.log_error("NullPointerException", "pay service npe at idx=" + std::to_string(idx));
@@ -421,22 +421,21 @@ std::string record_propagation_chain(fiber::cat::CatClient &client) {
     if (!current) {
         return {};
     }
-    const std::string root_id = std::string(current->message_id());
+    const std::string root_id = std::string(current->message_id);
 
-    auto outbound = client.create_remote_context(*current, "inventory");
+    fiber::mem::BufPool inventory_pool;
+    auto outbound = checkout.message_trace().create_remote_context(inventory_pool, "inventory");
     if (outbound) {
-        std::cout << "  propagation: root=" << current->message_id() << " child=" << outbound->message_id()
-                  << " (root_id=" << outbound->root_message_id() << " parent_id=" << outbound->parent_message_id()
-                  << ")\n";
+        std::cout << "  propagation: root=" << current->message_id << " child=" << outbound->message_id
+                  << " (root_id=" << outbound->root_message_id << " parent_id=" << outbound->parent_message_id << ")\n";
     }
 
     (void) checkout.add_data("service", "checkout");
     (void) checkout.complete();
 
     if (outbound) {
-        fiber::mem::BufPool inventory_pool;
-        auto inventory_created = client.create_isolated_transaction(inventory_pool, "URL", "/inventory/stock",
-                                                                    {.context = outbound->view()});
+        auto inventory_created =
+                client.create_isolated_transaction(inventory_pool, "URL", "/inventory/stock", {.context = *outbound});
         if (inventory_created) {
             fiber::cat::Transaction inventory = std::move(*inventory_created);
             (void) inventory.add_data("service", "inventory");

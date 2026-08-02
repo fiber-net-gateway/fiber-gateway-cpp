@@ -107,7 +107,7 @@ bool append_chain(mem::IoBuf &buffer, mem::IoBufChain &chunk, std::size_t max_by
 
 common::IoResult<void> build_request_headers(const ProviderConnectionLease &connection,
                                              const ResolvedProviderAttempt &attempt, bool stream,
-                                             http::HttpHeaders &headers, const cat::PropagationContext *cat_context,
+                                             http::HttpHeaders &headers, const cat::MessageTraceContext *cat_context,
                                              std::string_view trace_state) noexcept {
     if (!headers.set("Host", connection.host_header) || !headers.set_view("Content-Type", "application/json") ||
         !headers.set_view("Accept", stream ? "text/event-stream" : "application/json")) {
@@ -175,7 +175,7 @@ std::string_view provider_http_error_code_name(ProviderHttpErrorCode code) noexc
 async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> ProviderHttpClient::execute_buffered(
         const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body, mem::BufPool &request_pool,
         std::size_t max_response_bytes, ProviderServiceSelection service_selection,
-        const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
+        const cat::MessageTraceContext *cat_context, std::string_view trace_state) noexcept {
     auto started = co_await start(attempt, stream, std::move(request_body), request_pool, service_selection,
                                   cat_context, trace_state);
     if (!started) {
@@ -225,7 +225,7 @@ async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> Provider
 async::Task<std::expected<ProviderHttpResponseStream, ProviderHttpError>>
 ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
                           mem::BufPool &request_pool, ProviderServiceSelection service_selection,
-                          const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
+                          const cat::MessageTraceContext *cat_context, std::string_view trace_state) noexcept {
     auto acquired = co_await connections_->acquire(attempt, kConnectTimeout, service_selection);
     if (!acquired) {
         co_return std::unexpected(error(http_error_code(acquired.error().code), acquired.error().io_error,

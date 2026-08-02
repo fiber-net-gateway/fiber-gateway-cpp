@@ -269,9 +269,10 @@ bool write_payload(Writer &writer, const MessageTraceData &trace, const ClientEn
         !writer.write_bytes(kNt1Version.data(), kNt1Version.size()) || !write_string(writer, client.app_key) ||
         !write_string(writer, client.hostname) || !write_string(writer, client.ip) ||
         !write_string(writer, client.thread_group_name) || !write_string(writer, client.thread_id) ||
-        !write_string(writer, client.thread_name) || !write_string(writer, trace.message_id) ||
-        !write_string(writer, trace.parent_message_id) || !write_string(writer, trace.root_message_id) ||
-        !write_string(writer, trace.session_token)) {
+        !write_string(writer, client.thread_name) || !write_string(writer, trace.propagation_context.message_id) ||
+        !write_string(writer, trace.propagation_context.parent_message_id) ||
+        !write_string(writer, trace.propagation_context.root_message_id) ||
+        !write_string(writer, trace.propagation_context.session_token)) {
         return false;
     }
 
@@ -402,10 +403,10 @@ bool write_pt1_payload(Writer &writer, const MessageTraceData &trace, const Clie
         !writer.write_byte('\t') || !write_pt1_field(writer, client.thread_group_name) || !writer.write_byte('\t') ||
         !write_pt1_field(writer, client.thread_id) || !writer.write_byte('\t') ||
         !write_pt1_field(writer, client.thread_name) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, trace.message_id) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, trace.parent_message_id) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, trace.root_message_id) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, trace.session_token) || !writer.write_byte('\n')) {
+        !write_pt1_field(writer, trace.propagation_context.message_id) || !writer.write_byte('\t') ||
+        !write_pt1_field(writer, trace.propagation_context.parent_message_id) || !writer.write_byte('\t') ||
+        !write_pt1_field(writer, trace.propagation_context.root_message_id) || !writer.write_byte('\t') ||
+        !write_pt1_field(writer, trace.propagation_context.session_token) || !writer.write_byte('\n')) {
         return false;
     }
     EncodeState state{trace};

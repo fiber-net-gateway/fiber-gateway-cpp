@@ -421,7 +421,7 @@ bool AggregationShard::flush_kind(CatClientCore &core, AggregateKind kind) noexc
     limits.max_name_bytes = max_key_bytes_;
     limits.max_data_bytes_per_message = kAggregateDataCapacity;
     limits.max_tree_bytes = std::max<std::size_t>(max_bytes_, 64 * 1024);
-    TraceContext context{.message_id = id->view()};
+    TraceContext context{.propagation_context = {.message_id = id->view()}};
     mem::BufPool tree_pool;
     auto root_created = create_transaction_root(
             tree_pool, "System", kind == AggregateKind::Transaction ? "TransactionAggregator" : "EventAggregator",
@@ -539,8 +539,8 @@ bool AggregationShard::flush_metrics(CatClientCore &core) noexcept {
     limits.max_data_bytes_per_message = kAggregateDataCapacity;
     limits.max_tree_bytes = std::max<std::size_t>(max_bytes_, 64 * 1024);
     mem::BufPool tree_pool;
-    auto root_created =
-            create_transaction_root(tree_pool, "System", "MetricAggregator", limits, {.message_id = id->view()});
+    auto root_created = create_transaction_root(tree_pool, "System", "MetricAggregator", limits,
+                                                {.propagation_context = {.message_id = id->view()}});
     if (!root_created) {
         core.on_aggregate_encode_failure();
         return false;

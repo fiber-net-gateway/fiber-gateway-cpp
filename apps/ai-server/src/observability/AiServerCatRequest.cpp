@@ -67,14 +67,14 @@ cat::MessageTraceContext read_cat_trace_context(const http::HttpHeaders &headers
     };
 }
 
-bool inject_cat_headers(http::HttpHeaders &headers, const cat::PropagationContext *context,
+bool inject_cat_headers(http::HttpHeaders &headers, const cat::MessageTraceContext *context,
                         std::string_view trace_state) noexcept {
-    if (!context || !context->valid()) {
+    if (!context) {
         return true;
     }
-    const std::string_view message_id = context->message_id();
-    const std::string_view root_id = context->root_message_id().empty() ? message_id : context->root_message_id();
-    const std::string_view parent_id = context->parent_message_id();
+    const std::string_view message_id = context->message_id;
+    const std::string_view root_id = context->root_message_id.empty() ? message_id : context->root_message_id;
+    const std::string_view parent_id = context->parent_message_id;
     if (message_id.empty() || root_id.empty() || parent_id.empty()) {
         return false;
     }
@@ -94,8 +94,8 @@ bool inject_cat_headers(http::HttpHeaders &headers, const cat::PropagationContex
 }
 
 AiServerCatRequest::AiServerCatRequest(http::HttpExchange &exchange, cat::CatClient *client) noexcept :
-    exchange_(&exchange), client_(client) {
-    if (!client_) {
+    exchange_(&exchange) {
+    if (!client) {
         return;
     }
 
@@ -109,10 +109,10 @@ AiServerCatRequest::AiServerCatRequest(http::HttpExchange &exchange, cat::CatCli
     const bool inherited = has_inbound_context(inbound);
     bool invalid_fallback = false;
     auto created =
-            client_->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path, {.context = inbound});
+            client->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path, {.context = inbound});
     if (!created && inherited && can_fallback_from(created.error())) {
         invalid_fallback = true;
-        created = client_->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path);
+        created = client->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path);
     }
     if (!created) {
         return;
@@ -160,7 +160,7 @@ std::string_view AiServerCatRequest::request_id() const noexcept {
     if (!context_) {
         return {};
     }
-    return context_->root_message_id().empty() ? context_->message_id() : context_->root_message_id();
+    return context_->root_message_id.empty() ? context_->message_id : context_->root_message_id;
 }
 
 void AiServerCatRequest::inject_response_header(http::HttpHeaders &headers) const noexcept {
@@ -200,12 +200,17 @@ cat::RecordError AiServerCatRequest::set_root_model_name(std::string_view model)
     return root->set_name(std::string_view(name, size));
 }
 
-std::expected<cat::PropagationContext, cat::RecordError>
+std::expected<cat::MessageTraceContext, cat::RecordError>
 AiServerCatRequest::create_remote_context(cat::Transaction *parent) noexcept {
-    if (!client_ || !context_ || !context_->valid()) {
+    return create_remote_context(exchange_->pool(), parent);
+}
+
+std::expected<cat::MessageTraceContext, cat::RecordError>
+AiServerCatRequest::create_remote_context(mem::BufPool &destination_pool, cat::Transaction *parent) noexcept {
+    if (!root_ || !root_->valid() || !context_ || context_->message_id.empty()) {
         return std::unexpected(cat::RecordError::InvalidContext);
     }
-    auto remote = client_->create_remote_context(*context_, {});
+    auto remote = root_->message_trace().create_remote_context(destination_pool);
     if (!remote) {
         return std::unexpected(remote.error());
     }
@@ -214,7 +219,7 @@ AiServerCatRequest::create_remote_context(cat::Transaction *parent) noexcept {
     if (event_parent) {
         auto event = event_parent->start_event("RemoteCall", "");
         if (event) {
-            (void) event->add_data(remote->message_id());
+            (void) event->add_data(remote->message_id);
             (void) event->complete(cat::status::Success);
         }
     }

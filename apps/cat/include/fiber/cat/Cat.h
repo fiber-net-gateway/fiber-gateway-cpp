@@ -6,7 +6,6 @@
 #include "Message.h"
 #include "MessageTrace.h"
 #include "Metric.h"
-#include "PropagationContext.h"
 #include "Status.h"
 #include "Transaction.h"
 
