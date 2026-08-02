@@ -2212,7 +2212,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
         std::optional<cat::Transaction> provider_cat_transaction = audit.start_provider_transaction(attempt);
         cat::Transaction *provider_cat_parent =
                 provider_cat_transaction && provider_cat_transaction->valid() ? &*provider_cat_transaction : nullptr;
-        std::optional<cat::PropagationContext> provider_cat_context;
+        std::optional<cat::MessageTraceContext> provider_cat_context;
         if (cat_request) {
             auto remote_context = cat_request->create_remote_context(provider_cat_parent);
             if (remote_context) {

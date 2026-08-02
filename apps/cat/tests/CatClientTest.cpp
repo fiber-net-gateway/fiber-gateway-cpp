@@ -38,8 +38,7 @@ using namespace std::chrono_literals;
 
 static_assert(sizeof(fiber::cat::MessageTrace) == sizeof(void *));
 static_assert(!std::is_copy_constructible_v<fiber::cat::MessageTrace>);
-static_assert(sizeof(fiber::cat::PropagationContext) == sizeof(void *));
-static_assert(std::is_copy_constructible_v<fiber::cat::PropagationContext>);
+static_assert(std::is_trivially_copyable_v<fiber::cat::MessageTraceContext>);
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
@@ -300,20 +299,28 @@ fiber::async::DetachedTask run_trace_producer(fiber::cat::CatClient *client, Pro
             return true;
         }) == fiber::cat::RecordError::None;
         auto propagation = trace.propagation_context();
-        auto outbound = propagation ? client->create_remote_context(*propagation, "inventory")
-                                    : std::expected<fiber::cat::PropagationContext, fiber::cat::RecordError>(
-                                              std::unexpected(fiber::cat::RecordError::InvalidContext));
+        fiber::mem::BufPool copied_pool;
+        auto copied = trace.copy_propagation_context(copied_pool);
+        auto outbound = trace.create_remote_context(pool, "inventory");
+        auto copied_outbound = trace.create_remote_context(copied_pool, "billing");
         (void) root.add_data("method", "GET");
         (void) root.log_event("Cache", "miss");
         (void) root.complete();
 
-        const bool propagated = propagation && outbound &&
-                                propagation->message_id().starts_with("checkout-7f000001-") &&
-                                propagation->root_message_id() == "upstream-root" &&
-                                propagation->parent_message_id() == "upstream-parent" &&
-                                outbound->message_id().starts_with("inventory-7f000001-") &&
-                                outbound->root_message_id() == "upstream-root" &&
-                                outbound->parent_message_id() == propagation->message_id();
+        const bool propagated = propagation && copied && outbound && copied_outbound &&
+                                propagation->message_id.starts_with("checkout-7f000001-") &&
+                                propagation->root_message_id == "upstream-root" &&
+                                propagation->parent_message_id == "upstream-parent" &&
+                                copied->message_id == propagation->message_id &&
+                                copied->message_id.data() != propagation->message_id.data() &&
+                                outbound->message_id.starts_with("inventory-7f000001-") &&
+                                outbound->root_message_id == "upstream-root" &&
+                                outbound->root_message_id.data() == propagation->root_message_id.data() &&
+                                outbound->parent_message_id == propagation->message_id &&
+                                outbound->parent_message_id.data() == propagation->message_id.data() &&
+                                copied_outbound->message_id.starts_with("billing-7f000001-") &&
+                                copied_outbound->root_message_id == propagation->root_message_id &&
+                                copied_outbound->root_message_id.data() != propagation->root_message_id.data();
         state->context_verified.store(event_factory_verified && put_context && got_context && iterated && visited &&
                                               propagated,
                                       std::memory_order_release);

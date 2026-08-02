@@ -18,7 +18,6 @@
 #include "Event.h"
 #include "Message.h"
 #include "MessageTrace.h"
-#include "PropagationContext.h"
 #include "Transaction.h"
 
 namespace fiber::dns {
@@ -126,8 +125,6 @@ public:
     [[nodiscard]] std::expected<Event, RecordError>
     create_isolated_event(mem::BufPool &pool, std::string_view type, std::string_view name,
                           MessageTraceCreateOptions options = {}) noexcept;
-    [[nodiscard]] std::expected<PropagationContext, RecordError>
-    create_remote_context(const PropagationContext &current, std::string_view remote_domain) noexcept;
 
 private:
     friend class MessageTrace;

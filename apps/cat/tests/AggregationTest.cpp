@@ -163,14 +163,16 @@ fiber::async::DetachedTask run_sampling_case(fiber::event::EventLoop *loop, std:
     auto *shard = core->aggregation_shard(*loop);
     fiber::mem::BufPool normal_pool;
     auto normal = fiber::cat::detail::create_transaction_root(
-            normal_pool, "URL", "/sampled", {}, {.core = core, .aggregation_shard = shard, .message_id = "normal"});
+            normal_pool, "URL", "/sampled", {},
+            {.core = core, .aggregation_shard = shard, .propagation_context = {.message_id = "normal"}});
     if (normal) {
         (void) fiber::cat::detail::set_duration(*normal, 2ms);
         (void) fiber::cat::detail::complete(*normal);
     }
     fiber::mem::BufPool problem_pool;
     auto problem = fiber::cat::detail::create_event_root(
-            problem_pool, "Error", "failure", {}, {.core = core, .aggregation_shard = shard, .message_id = "problem"});
+            problem_pool, "Error", "failure", {},
+            {.core = core, .aggregation_shard = shard, .propagation_context = {.message_id = "problem"}});
     if (problem) {
         (void) fiber::cat::detail::set_status(*problem, "ERROR");
         (void) fiber::cat::detail::complete(*problem);
@@ -178,7 +180,7 @@ fiber::async::DetachedTask run_sampling_case(fiber::event::EventLoop *loop, std:
     fiber::mem::BufPool incomplete_pool;
     auto incomplete = fiber::cat::detail::create_transaction_root(
             incomplete_pool, "URL", "/incomplete", {},
-            {.core = core, .aggregation_shard = shard, .message_id = "incomplete"});
+            {.core = core, .aggregation_shard = shard, .propagation_context = {.message_id = "incomplete"}});
     if (incomplete) {
         fiber::cat::detail::abandon(*incomplete);
     }
@@ -235,7 +237,8 @@ fiber::async::DetachedTask run_mixed_sampling_case(fiber::event::EventLoop *loop
     for (std::size_t index = 0; index < trees; ++index) {
         fiber::mem::BufPool pool;
         auto root = fiber::cat::detail::create_transaction_root(
-                pool, "URL", "/mixed", {}, {.core = core, .aggregation_shard = shard, .message_id = "mixed"});
+                pool, "URL", "/mixed", {},
+                {.core = core, .aggregation_shard = shard, .propagation_context = {.message_id = "mixed"}});
         if (root) {
             (void) fiber::cat::detail::set_duration(*root, 2ms);
             (void) fiber::cat::detail::complete(*root);

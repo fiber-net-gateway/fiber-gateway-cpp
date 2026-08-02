@@ -81,7 +81,8 @@ system statistics are enabled by default and can be disabled independently with 
 ## CAT propagation context
 
 An empty `MessageTraceContext::message_id` is filled automatically using the official visible
-`domain-ipHex-hour-sequence` structure. The owning `PropagationContext` can safely outlive the trace:
+`domain-ipHex-hour-sequence` structure. `MessageTraceContext` is a lightweight view: `propagation_context()` does not
+allocate, and its fields borrow the trace's `BufPool`.
 
 For CAT 3.0 Log View compatibility, `hour` and `sequence` are always non-negative Java `int` values. The sequence uses
 a process-specific starting point no greater than `1,000,000`, retains the latest hour across a clock rollback, and
@@ -91,10 +92,14 @@ discard or wrapping to a duplicate.
 ```cpp
 auto current = root.message_trace().propagation_context();
 if (current) {
-    auto inventory = client->create_remote_context(*current, "inventory");
+    auto inventory = root.message_trace().create_remote_context(outbound_pool, "inventory");
     // Map the four propagation fields to approved outbound headers/metadata.
 }
 ```
+
+The returned remote context always borrows `outbound_pool`. When that is the trace pool, the root, parent, and session
+fields reuse their existing storage and only the new child message ID is allocated. Use
+`copy_propagation_context(destination_pool)` when an unchanged context must outlive the source pool.
 
 Inbound propagation and recording limits are passed together when the isolated root is created:
 
@@ -104,8 +109,8 @@ auto root = client->create_isolated_transaction(
         {.limits = limits, .context = inbound_context});
 ```
 
-For an owning `PropagationContext`, pass `context.view()`. No OS TLS or implicit current transaction stack is used.
-IDs and session tokens are validated and copied into caller-pool storage.
+No OS TLS or implicit current transaction stack is used. Inbound IDs and session tokens are validated and copied into
+the trace pool.
 
 ## Service context
 

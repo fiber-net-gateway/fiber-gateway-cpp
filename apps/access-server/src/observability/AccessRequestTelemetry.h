@@ -9,7 +9,7 @@
 
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
-#include <fiber/cat/PropagationContext.h>
+#include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/Transaction.h>
 
 namespace fiber::cat {
@@ -51,10 +51,8 @@ private:
     http::HttpExchange *exchange_ = nullptr;
     AccessServerMetrics::Worker *metrics_ = nullptr;
     std::chrono::steady_clock::time_point started_{};
-    cat::CatClient *cat_client_ = nullptr;
     std::optional<cat::Transaction> root_;
-    std::optional<cat::PropagationContext> context_;
-    std::optional<cat::PropagationContext> remote_context_;
+    std::optional<cat::MessageTraceContext> context_;
     std::string_view project_;
     std::string_view route_;
     std::string_view cluster_;

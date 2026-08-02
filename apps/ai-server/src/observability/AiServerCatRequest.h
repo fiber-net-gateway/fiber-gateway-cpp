@@ -9,11 +9,15 @@
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <fiber/cat/Event.h>
-#include <fiber/cat/PropagationContext.h>
+#include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/Transaction.h>
 
 namespace fiber::cat {
 class CatClient;
+}
+
+namespace fiber::mem {
+class BufPool;
 }
 
 namespace fiber::http {
@@ -28,7 +32,7 @@ inline constexpr std::size_t kMaxAiServerCatUserAgentBytes = 1024;
 
 [[nodiscard]] cat::MessageTraceContext read_cat_trace_context(const http::HttpHeaders &headers) noexcept;
 
-[[nodiscard]] bool inject_cat_headers(http::HttpHeaders &headers, const cat::PropagationContext *context,
+[[nodiscard]] bool inject_cat_headers(http::HttpHeaders &headers, const cat::MessageTraceContext *context,
                                       std::string_view trace_state = {}) noexcept;
 
 class AiServerCatRequest final : public common::NonCopyable, public common::NonMovable {
@@ -43,8 +47,10 @@ public:
     cat::RecordError add_root_data(std::string_view key, std::string_view value) noexcept;
     cat::RecordError set_root_model_name(std::string_view model) noexcept;
 
-    [[nodiscard]] std::expected<cat::PropagationContext, cat::RecordError>
+    [[nodiscard]] std::expected<cat::MessageTraceContext, cat::RecordError>
     create_remote_context(cat::Transaction *parent = nullptr) noexcept;
+    [[nodiscard]] std::expected<cat::MessageTraceContext, cat::RecordError>
+    create_remote_context(mem::BufPool &destination_pool, cat::Transaction *parent = nullptr) noexcept;
     [[nodiscard]] std::expected<cat::Event, cat::RecordError> start_event(std::string_view type,
                                                                           std::string_view name) noexcept;
     [[nodiscard]] std::expected<cat::Transaction, cat::RecordError> start_transaction(std::string_view type,
@@ -52,9 +58,8 @@ public:
 
 private:
     http::HttpExchange *exchange_ = nullptr;
-    cat::CatClient *client_ = nullptr;
     std::optional<cat::Transaction> root_;
-    std::optional<cat::PropagationContext> context_;
+    std::optional<cat::MessageTraceContext> context_;
     std::string_view trace_state_;
     std::string_view user_agent_;
 };

@@ -8,7 +8,6 @@
 #include <type_traits>
 
 #include "Message.h"
-#include "PropagationContext.h"
 
 namespace fiber::mem {
 class BufPool;
@@ -19,6 +18,13 @@ namespace fiber::cat {
 class CatClient;
 class Event;
 class Transaction;
+
+struct MessageTraceContext {
+    std::string_view message_id;
+    std::string_view root_message_id;
+    std::string_view parent_message_id;
+    std::string_view session_token;
+};
 
 struct MessageTraceCreateOptions {
     RecordLimits limits{};
@@ -39,7 +45,14 @@ public:
     ~MessageTrace() = default;
 
     [[nodiscard]] bool valid() const noexcept;
-    [[nodiscard]] std::expected<PropagationContext, RecordError> propagation_context() const noexcept;
+    // The returned views borrow the MessageTrace pool.
+    [[nodiscard]] std::expected<MessageTraceContext, RecordError> propagation_context() const noexcept;
+    // The returned views borrow destination_pool. Same-pool copies reuse the existing storage.
+    [[nodiscard]] std::expected<MessageTraceContext, RecordError>
+    copy_propagation_context(mem::BufPool &destination_pool) const noexcept;
+    // Creates the child message id in destination_pool. Existing fields are reused when it is the trace pool.
+    [[nodiscard]] std::expected<MessageTraceContext, RecordError>
+    create_remote_context(mem::BufPool &destination_pool, std::string_view remote_domain = {}) const noexcept;
 
     RecordError put_context(std::string_view key, std::string_view value) noexcept;
     [[nodiscard]] std::expected<std::optional<std::string_view>, RecordError>

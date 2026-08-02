@@ -6,6 +6,8 @@
 #include <array>
 #include <charconv>
 #include <limits>
+#include <memory>
+#include <new>
 #include <optional>
 #include <utility>
 
@@ -183,7 +185,7 @@ TokenRateLimitCoordinator::check(std::string_view user_id, const CompiledModelRo
     } else {
         remote_transaction = start_rate_limit_transaction(cat_request, "RateLimit.Check", "remote");
         add_check_context(remote_transaction ? &*remote_transaction : nullptr, model_name, &*owner, rule);
-        std::optional<cat::PropagationContext> remote_context;
+        std::optional<cat::MessageTraceContext> remote_context;
         if (cat_request) {
             auto created = cat_request->create_remote_context(remote_transaction ? &*remote_transaction : nullptr);
             if (created) {
@@ -265,21 +267,27 @@ void TokenRateLimitCoordinator::settle(RateLimitNode owner, std::string_view use
         completion.notify(result.applied ? RateLimitSettleOutcome::Applied : RateLimitSettleOutcome::Stale);
         return;
     }
-    std::optional<cat::PropagationContext> remote_context;
+    std::unique_ptr<mem::BufPool> remote_context_pool(new (std::nothrow) mem::BufPool);
+    std::optional<cat::MessageTraceContext> remote_context;
     std::string trace_state;
-    if (cat_request) {
-        auto created = cat_request->create_remote_context(remote_transaction ? &*remote_transaction : nullptr);
+    if (cat_request && remote_context_pool) {
+        auto created = cat_request->create_remote_context(*remote_context_pool,
+                                                          remote_transaction ? &*remote_transaction : nullptr);
         if (created) {
             remote_context.emplace(std::move(*created));
             trace_state.assign(cat_request->trace_state());
         }
     }
+    // CAT traces and transactions are bound to the request EventLoop and pool. The remote settle is detached, so
+    // finish its local record before handing the pool-backed propagation view to the asynchronous operation.
+    complete_cat_record(remote_transaction ? &*remote_transaction : nullptr, "scheduled", true);
+    remote_transaction.reset();
     remote_settles_.add();
     async::spawn([this, owner = std::move(owner), user_id = std::string(user_id), model_name = std::string(model_name),
-                  ticket, tokens, count_usage, completion, cat_transaction = std::move(remote_transaction),
+                  ticket, tokens, count_usage, completion, cat_context_pool = std::move(remote_context_pool),
                   cat_context = std::move(remote_context), trace_state = std::move(trace_state)]() mutable {
         return settle_remote(std::move(owner), std::move(user_id), std::move(model_name), ticket, tokens, count_usage,
-                             completion, std::move(cat_transaction), std::move(cat_context), std::move(trace_state));
+                             completion, std::move(cat_context_pool), std::move(cat_context), std::move(trace_state));
     });
 }
 
@@ -301,7 +309,7 @@ async::Task<std::expected<RateLimitSettleResponse, RateLimitCoordinatorError>>
 TokenRateLimitCoordinator::settle_remote_and_wait(const RateLimitNode &owner, std::string_view user_id,
                                                   std::string_view model_name, TokenRateLimitTicket ticket,
                                                   std::int64_t tokens, bool count_usage,
-                                                  const cat::PropagationContext *cat_context,
+                                                  const cat::MessageTraceContext *cat_context,
                                                   std::string_view trace_state) noexcept {
     FIBER_ASSERT(!owner.local);
     auto response =
@@ -330,25 +338,22 @@ async::DetachedTask TokenRateLimitCoordinator::settle_remote(RateLimitNode owner
                                                              std::string model_name, TokenRateLimitTicket ticket,
                                                              std::int64_t tokens, bool count_usage,
                                                              RateLimitSettleCompletion completion,
-                                                             std::optional<cat::Transaction> cat_transaction,
-                                                             std::optional<cat::PropagationContext> cat_context,
+                                                             std::unique_ptr<mem::BufPool> cat_context_pool,
+                                                             std::optional<cat::MessageTraceContext> cat_context,
                                                              std::string trace_state) noexcept {
     FIBER_ASSERT(!owner.local);
     auto result = co_await settle_remote_and_wait(owner, user_id, model_name, ticket, tokens, count_usage,
                                                   cat_context ? &*cat_context : nullptr, trace_state);
+    (void) cat_context_pool;
     RateLimitSettleOutcome outcome = RateLimitSettleOutcome::Applied;
     if (!result) {
         LOG(LOG_RATE_LIMIT, WARN) << "remote token rate limit settle failed owner=" << log::quoted(owner.node_id)
                                   << " error=" << static_cast<int>(result.error().code)
                                   << " io_error=" << common::io_err_name(result.error().remote.io_error);
         outcome = RateLimitSettleOutcome::Error;
-        complete_cat_record(cat_transaction ? &*cat_transaction : nullptr, "error", false, "owner_request_failed");
     } else if (result->stale || !result->applied) {
         LOG(LOG_RATE_LIMIT, WARN) << "stale token rate limit settle ignored owner=" << log::quoted(owner.node_id);
         outcome = RateLimitSettleOutcome::Stale;
-        complete_cat_record(cat_transaction ? &*cat_transaction : nullptr, "stale", true);
-    } else {
-        complete_cat_record(cat_transaction ? &*cat_transaction : nullptr, "applied", true);
     }
     completion.notify(outcome);
     remote_settles_.done();

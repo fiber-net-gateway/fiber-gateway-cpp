@@ -11,7 +11,7 @@
 
 #include <common/mem/BufPool.h>
 #include <event/EventLoop.h>
-#include <fiber/cat/Message.h>
+#include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/Status.h>
 
 namespace fiber::cat {
@@ -30,10 +30,7 @@ struct MessageTrace;
 struct TraceContext {
     std::shared_ptr<CatClientCore> core;
     AggregationShard *aggregation_shard = nullptr;
-    std::string_view message_id;
-    std::string_view root_message_id;
-    std::string_view parent_message_id;
-    std::string_view session_token;
+    MessageTraceContext propagation_context;
 };
 
 [[nodiscard]] RecordError validate_trace_context(const RecordLimits &limits, const TraceContext &context) noexcept;
@@ -128,10 +125,7 @@ struct MessageTraceData {
     event::EventLoop *owner = nullptr;
     RecordLimits limits;
     MessageData *root = nullptr;
-    std::string_view message_id;
-    std::string_view root_message_id;
-    std::string_view parent_message_id;
-    std::string_view session_token;
+    MessageTraceContext propagation_context;
     std::chrono::steady_clock::time_point steady_base{};
     std::uint64_t wall_base_millis = 0;
     std::size_t payload_bytes = 0;

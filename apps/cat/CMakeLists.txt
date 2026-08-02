@@ -12,7 +12,6 @@ add_library(fiber_cat STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/Event.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/MessageTrace.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Metric.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/PropagationContext.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/Transaction.cpp")
 add_library(fiber::cat ALIAS fiber_cat)
 

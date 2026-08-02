@@ -208,7 +208,8 @@ std::expected<mem::IoBuf, EncodeError> encode_startup_nt1(const ClientEncodeCont
     limits.max_messages = 3;
     limits.max_children_per_transaction = 2;
     mem::BufPool tree_pool;
-    auto root_created = create_transaction_root(tree_pool, "System", "Reboot", limits, {.message_id = message_id});
+    auto root_created = create_transaction_root(tree_pool, "System", "Reboot", limits,
+                                                {.propagation_context = {.message_id = message_id}});
     if (!root_created) {
         return std::unexpected(root_created.error() == RecordError::NoMemory ? EncodeError::NoMemory
                                                                              : EncodeError::InvalidTrace);
@@ -269,7 +270,8 @@ std::expected<mem::IoBuf, EncodeError> encode_heartbeat_nt1(const ClientEncodeCo
     limits.max_data_bytes_per_message = max_data_bytes;
     limits.max_tree_bytes = max_data_bytes + 16 * 1024;
     mem::BufPool tree_pool;
-    auto root_created = create_transaction_root(tree_pool, "System", "Status", limits, {.message_id = message_id});
+    auto root_created = create_transaction_root(tree_pool, "System", "Status", limits,
+                                                {.propagation_context = {.message_id = message_id}});
     if (!root_created) {
         return std::unexpected(root_created.error() == RecordError::NoMemory ? EncodeError::NoMemory
                                                                              : EncodeError::InvalidTrace);

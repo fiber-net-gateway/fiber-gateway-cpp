@@ -213,21 +213,23 @@ std::expected<MessageTrace *, RecordError> create_trace(mem::BufPool &pool, Reco
     trace->data->wall_base_millis = wall_millis > 0 ? static_cast<std::uint64_t>(wall_millis) : 0;
 
     std::size_t context_bytes = 0;
-    if (!checked_add(context.message_id.size(), context.root_message_id.size(), context_bytes) ||
-        !checked_add(context_bytes, context.parent_message_id.size(), context_bytes) ||
-        !checked_add(context_bytes, context.session_token.size(), context_bytes) ||
+    const MessageTraceContext &propagation = context.propagation_context;
+    if (!checked_add(propagation.message_id.size(), propagation.root_message_id.size(), context_bytes) ||
+        !checked_add(context_bytes, propagation.parent_message_id.size(), context_bytes) ||
+        !checked_add(context_bytes, propagation.session_token.size(), context_bytes) ||
         !can_charge(*trace->data, context_bytes)) {
         discard_message_trace(trace);
         return std::unexpected(RecordError::LimitExceeded);
     }
-    trace->data->message_id = copy_string(*trace, context.message_id);
-    trace->data->root_message_id = copy_string(*trace, context.root_message_id);
-    trace->data->parent_message_id = copy_string(*trace, context.parent_message_id);
-    trace->data->session_token = copy_string(*trace, context.session_token);
-    if ((!context.message_id.empty() && !trace->data->message_id.data()) ||
-        (!context.root_message_id.empty() && !trace->data->root_message_id.data()) ||
-        (!context.parent_message_id.empty() && !trace->data->parent_message_id.data()) ||
-        (!context.session_token.empty() && !trace->data->session_token.data())) {
+    MessageTraceContext &stored = trace->data->propagation_context;
+    stored.message_id = copy_string(*trace, propagation.message_id);
+    stored.root_message_id = copy_string(*trace, propagation.root_message_id);
+    stored.parent_message_id = copy_string(*trace, propagation.parent_message_id);
+    stored.session_token = copy_string(*trace, propagation.session_token);
+    if ((!propagation.message_id.empty() && !stored.message_id.data()) ||
+        (!propagation.root_message_id.empty() && !stored.root_message_id.data()) ||
+        (!propagation.parent_message_id.empty() && !stored.parent_message_id.data()) ||
+        (!propagation.session_token.empty() && !stored.session_token.data())) {
         discard_message_trace(trace);
         return std::unexpected(RecordError::NoMemory);
     }
@@ -523,20 +525,22 @@ void abandon_message(Data *&handle) noexcept {
 } // namespace
 
 RecordError validate_trace_context(const RecordLimits &limits, const TraceContext &context) noexcept {
-    if (context.message_id.empty() && (!context.root_message_id.empty() || !context.parent_message_id.empty())) {
+    const MessageTraceContext &propagation = context.propagation_context;
+    if (propagation.message_id.empty() &&
+        (!propagation.root_message_id.empty() || !propagation.parent_message_id.empty())) {
         return RecordError::InvalidContext;
     }
-    if (context.message_id.size() > limits.max_message_id_bytes ||
-        context.root_message_id.size() > limits.max_message_id_bytes ||
-        context.parent_message_id.size() > limits.max_message_id_bytes ||
-        context.session_token.size() > limits.max_session_token_bytes) {
+    if (propagation.message_id.size() > limits.max_message_id_bytes ||
+        propagation.root_message_id.size() > limits.max_message_id_bytes ||
+        propagation.parent_message_id.size() > limits.max_message_id_bytes ||
+        propagation.session_token.size() > limits.max_session_token_bytes) {
         return RecordError::LimitExceeded;
     }
     const auto valid_value = [](std::string_view value) noexcept {
         return std::all_of(value.begin(), value.end(), [](unsigned char byte) { return byte >= 0x21 && byte <= 0x7e; });
     };
-    if (!valid_value(context.message_id) || !valid_value(context.root_message_id) ||
-        !valid_value(context.parent_message_id) || !valid_value(context.session_token)) {
+    if (!valid_value(propagation.message_id) || !valid_value(propagation.root_message_id) ||
+        !valid_value(propagation.parent_message_id) || !valid_value(propagation.session_token)) {
         return RecordError::InvalidContext;
     }
     return RecordError::None;

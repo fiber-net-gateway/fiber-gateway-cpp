@@ -108,10 +108,13 @@ TEST(CatEncoderTest, EncodesEventRootAsOfficialNt1Frame) {
     run_on_loop([] {
         fiber::mem::BufPool pool;
         TraceContext context{
-                .message_id = "m",
-                .root_message_id = "r",
-                .parent_message_id = "p",
-                .session_token = "s",
+                .propagation_context =
+                        {
+                                .message_id = "m",
+                                .root_message_id = "r",
+                                .parent_message_id = "p",
+                                .session_token = "s",
+                        },
         };
         auto created = fiber::cat::detail::create_event_root(pool, "old-type", "old-name", {}, std::move(context));
         ASSERT_TRUE(created);
@@ -140,10 +143,13 @@ TEST(CatEncoderTest, EncodesMetricRootAsOfficialNt1Frame) {
     run_on_loop([] {
         fiber::mem::BufPool pool;
         TraceContext context{
-                .message_id = "m",
-                .root_message_id = "r",
-                .parent_message_id = "p",
-                .session_token = "s",
+                .propagation_context =
+                        {
+                                .message_id = "m",
+                                .root_message_id = "r",
+                                .parent_message_id = "p",
+                                .session_token = "s",
+                        },
         };
         auto created = fiber::cat::detail::create_metric_root(pool, "", "requests", {}, std::move(context));
         ASSERT_TRUE(created);
@@ -172,10 +178,13 @@ TEST(CatEncoderTest, EncodesHeartbeatRootAsOfficialNt1Frame) {
     run_on_loop([] {
         fiber::mem::BufPool pool;
         TraceContext context{
-                .message_id = "m",
-                .root_message_id = "r",
-                .parent_message_id = "p",
-                .session_token = "s",
+                .propagation_context =
+                        {
+                                .message_id = "m",
+                                .root_message_id = "r",
+                                .parent_message_id = "p",
+                                .session_token = "s",
+                        },
         };
         auto created = fiber::cat::detail::create_heartbeat_root(pool, "Heartbeat", "1.2.3.4", {}, std::move(context));
         ASSERT_TRUE(created);

@@ -66,11 +66,11 @@ std::string_view response_result(const http::HttpResponseStats &response) noexce
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
                                                cat::CatClient *cat_client) noexcept :
-    exchange_(&exchange), metrics_(metrics), started_(event::EventLoop::current().now()), cat_client_(cat_client) {
+    exchange_(&exchange), metrics_(metrics), started_(event::EventLoop::current().now()) {
     if (metrics_) {
         metrics_->request_started();
     }
-    if (!cat_client_) {
+    if (!cat_client) {
         return;
     }
 
@@ -78,11 +78,11 @@ AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, Acc
     const bool inherited = has_inbound_context(inbound);
     bool invalid_fallback = false;
     auto created =
-            cat_client_->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path, {.context = inbound});
+            cat_client->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path, {.context = inbound});
     if (!created && inherited &&
         (created.error() == cat::RecordError::InvalidContext || created.error() == cat::RecordError::LimitExceeded)) {
         invalid_fallback = true;
-        created = cat_client_->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path);
+        created = cat_client->create_isolated_transaction(exchange.pool(), "URL", exchange.uri().path);
     }
     if (!created) {
         return;
@@ -207,7 +207,7 @@ std::string_view AccessRequestTelemetry::trace_id() const noexcept {
     if (!context_) {
         return {};
     }
-    return context_->root_message_id().empty() ? context_->message_id() : context_->root_message_id();
+    return context_->root_message_id.empty() ? context_->message_id : context_->root_message_id;
 }
 
 bool AccessRequestTelemetry::inject_response_headers(http::HttpHeaders &headers) const noexcept {
@@ -217,18 +217,16 @@ bool AccessRequestTelemetry::inject_response_headers(http::HttpHeaders &headers)
 }
 
 bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers) noexcept {
-    if (!cat_client_ || !context_ || !context_->valid()) {
+    if (!root_ || !root_->valid() || !context_ || context_->message_id.empty()) {
         return true;
     }
-    auto remote = cat_client_->create_remote_context(*context_, {});
+    auto remote = root_->message_trace().create_remote_context(exchange_->pool());
     if (!remote) {
         return true;
     }
-    remote_context_.emplace(std::move(*remote));
-    const std::string_view message_id = remote_context_->message_id();
-    const std::string_view root_id =
-            remote_context_->root_message_id().empty() ? message_id : remote_context_->root_message_id();
-    const std::string_view parent_id = remote_context_->parent_message_id();
+    const std::string_view message_id = remote->message_id;
+    const std::string_view root_id = remote->root_message_id.empty() ? message_id : remote->root_message_id;
+    const std::string_view parent_id = remote->parent_message_id;
     if (message_id.empty() || root_id.empty() || parent_id.empty()) {
         return true;
     }

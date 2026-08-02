@@ -84,7 +84,7 @@ async::Task<void> TokenRateLimitRemoteClient::shutdown() noexcept {
 
 async::Task<std::expected<RateLimitCheckResponse, RateLimitRemoteError>>
 TokenRateLimitRemoteClient::check(const RateLimitNode &node, const RateLimitCheckRequest &request,
-                                  const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
+                                  const cat::MessageTraceContext *cat_context, std::string_view trace_state) noexcept {
     auto encoded = encode_rate_limit_check_request(request);
     if (!encoded) {
         co_return std::unexpected(
@@ -109,7 +109,7 @@ TokenRateLimitRemoteClient::check(const RateLimitNode &node, const RateLimitChec
 
 async::Task<std::expected<RateLimitSettleResponse, RateLimitRemoteError>>
 TokenRateLimitRemoteClient::settle(const RateLimitNode &node, const RateLimitSettleRequest &request,
-                                   const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
+                                   const cat::MessageTraceContext *cat_context, std::string_view trace_state) noexcept {
     auto encoded = encode_rate_limit_settle_request(request);
     if (!encoded) {
         co_return std::unexpected(
@@ -134,7 +134,7 @@ TokenRateLimitRemoteClient::settle(const RateLimitNode &node, const RateLimitSet
 
 async::Task<std::expected<std::string, RateLimitRemoteError>>
 TokenRateLimitRemoteClient::post(const RateLimitNode &node, std::string_view path, std::string request_body,
-                                 const cat::PropagationContext *cat_context, std::string_view trace_state) noexcept {
+                                 const cat::MessageTraceContext *cat_context, std::string_view trace_state) noexcept {
     if (!initialized_) {
         co_return std::unexpected(error(RateLimitRemoteErrorCode::PoolUnavailable, common::IoErr::Canceled));
     }

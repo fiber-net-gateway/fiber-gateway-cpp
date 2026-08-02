@@ -11,8 +11,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include <fiber/cat/PropagationContext.h>
-
 #include "CatMessageId.h"
 
 namespace {
@@ -113,29 +111,6 @@ TEST(CatMessageIdTest, GeneratesUniqueIdsAcrossConcurrentCallers) {
         caller.join();
     }
     EXPECT_EQ(ids.size(), 2000);
-}
-
-TEST(CatMessageIdTest, OwningPropagationContextCopiesAllFields) {
-    std::string message = "child";
-    auto created = fiber::cat::PropagationContext::create({
-            .message_id = message,
-            .root_message_id = "root",
-            .parent_message_id = "parent",
-            .session_token = "session",
-    });
-    ASSERT_TRUE(created);
-    fiber::cat::PropagationContext context = std::move(*created);
-    fiber::cat::PropagationContext copy = context;
-    message.assign("xxxxx");
-
-    EXPECT_EQ(copy.message_id(), "child");
-    EXPECT_EQ(copy.root_message_id(), "root");
-    EXPECT_EQ(copy.parent_message_id(), "parent");
-    EXPECT_EQ(copy.session_token(), "session");
-
-    auto invalid = fiber::cat::PropagationContext::create({.root_message_id = "orphan"});
-    ASSERT_FALSE(invalid);
-    EXPECT_EQ(invalid.error(), RecordError::InvalidContext);
 }
 
 } // namespace
