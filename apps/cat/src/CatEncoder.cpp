@@ -110,11 +110,6 @@ bool write_string(Writer &writer, std::string_view value) noexcept {
     return write_string(writer, value.data(), value.size());
 }
 
-template<typename Writer>
-bool write_string(Writer &writer, StringRef value) noexcept {
-    return write_string(writer, value.data, value.size);
-}
-
 bool message_timestamp(const MessageTraceData &trace, const MessageData &message, std::uint64_t &result) noexcept {
     using Milliseconds = std::chrono::milliseconds;
 
@@ -346,14 +341,14 @@ bool write_pt1_line(Writer &writer, const MessageTraceData &trace, const Message
         }
     }
     if (!writer.write_byte(code) || !write_pt1_time(writer, timestamp) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, message.type.view()) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, message.name.view()) || !writer.write_byte('\t')) {
+        !write_pt1_field(writer, message.type) || !writer.write_byte('\t') || !write_pt1_field(writer, message.name) ||
+        !writer.write_byte('\t')) {
         return false;
     }
     if (policy == Pt1Policy::WithoutStatus) {
         return writer.write_byte('\n');
     }
-    if (!write_pt1_field(writer, message.status.view()) || !writer.write_byte('\t')) {
+    if (!write_pt1_field(writer, message.status) || !writer.write_byte('\t')) {
         return false;
     }
     if (policy == Pt1Policy::WithDuration &&
@@ -407,10 +402,10 @@ bool write_pt1_payload(Writer &writer, const MessageTraceData &trace, const Clie
         !writer.write_byte('\t') || !write_pt1_field(writer, client.thread_group_name) || !writer.write_byte('\t') ||
         !write_pt1_field(writer, client.thread_id) || !writer.write_byte('\t') ||
         !write_pt1_field(writer, client.thread_name) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, trace.message_id.view()) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, trace.parent_message_id.view()) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, trace.root_message_id.view()) || !writer.write_byte('\t') ||
-        !write_pt1_field(writer, trace.session_token.view()) || !writer.write_byte('\n')) {
+        !write_pt1_field(writer, trace.message_id) || !writer.write_byte('\t') ||
+        !write_pt1_field(writer, trace.parent_message_id) || !writer.write_byte('\t') ||
+        !write_pt1_field(writer, trace.root_message_id) || !writer.write_byte('\t') ||
+        !write_pt1_field(writer, trace.session_token) || !writer.write_byte('\n')) {
         return false;
     }
     EncodeState state{trace};

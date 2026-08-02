@@ -99,7 +99,7 @@ ContextEntry *find_context_entry(ContextTable &table, std::string_view key, std:
     ContextEntry *prev = nullptr;
     ContextEntry *entry = table.buckets[hash & (table.bucket_count - 1)];
     while (entry) {
-        if (entry->hash == hash && entry->key.view() == key) {
+        if (entry->hash == hash && entry->key == key) {
             if (previous) {
                 *previous = prev;
             }
@@ -120,7 +120,7 @@ const ContextEntry *find_context_entry(const ContextTable &table, std::string_vi
     }
     const ContextEntry *entry = table.buckets[hash & (table.bucket_count - 1)];
     while (entry) {
-        if (entry->hash == hash && entry->key.view() == key) {
+        if (entry->hash == hash && entry->key == key) {
             return entry;
         }
         entry = entry->next_bucket;
@@ -166,11 +166,9 @@ bool valid_limits(const RecordLimits &limits) noexcept {
            limits.max_tree_bytes >= sizeof(TransactionData);
 }
 
-StringRef literal_ref(std::string_view value) noexcept { return {value.data(), value.size()}; }
-
-StringRef copy_string(MessageTrace &trace, std::string_view value) noexcept {
+std::string_view copy_string(MessageTrace &trace, std::string_view value) noexcept {
     if (value.empty()) {
-        return literal_ref("");
+        return {"", 0};
     }
     auto *copy = static_cast<char *>(trace.data->pool.alloc(value.size(), alignof(char)));
     if (!copy) {
@@ -226,10 +224,10 @@ std::expected<MessageTrace *, RecordError> create_trace(mem::BufPool &pool, Reco
     trace->data->root_message_id = copy_string(*trace, context.root_message_id);
     trace->data->parent_message_id = copy_string(*trace, context.parent_message_id);
     trace->data->session_token = copy_string(*trace, context.session_token);
-    if ((!context.message_id.empty() && !trace->data->message_id.data) ||
-        (!context.root_message_id.empty() && !trace->data->root_message_id.data) ||
-        (!context.parent_message_id.empty() && !trace->data->parent_message_id.data) ||
-        (!context.session_token.empty() && !trace->data->session_token.data)) {
+    if ((!context.message_id.empty() && !trace->data->message_id.data()) ||
+        (!context.root_message_id.empty() && !trace->data->root_message_id.data()) ||
+        (!context.parent_message_id.empty() && !trace->data->parent_message_id.data()) ||
+        (!context.session_token.empty() && !trace->data->session_token.data())) {
         discard_message_trace(trace);
         return std::unexpected(RecordError::NoMemory);
     }
@@ -271,13 +269,13 @@ Node *allocate_message(MessageTrace &trace, std::string_view type, std::string_v
         node->type = {text, type.size()};
         text += type.size();
     } else {
-        node->type = literal_ref("");
+        node->type = {"", 0};
     }
     if (!name.empty()) {
         std::copy(name.begin(), name.end(), text);
         node->name = {text, name.size()};
     } else {
-        node->name = literal_ref("");
+        node->name = {"", 0};
     }
     node->trace = &trace;
     node->time = event::EventLoop::current().now();
@@ -461,7 +459,7 @@ void mark_completed(MessageData &message) noexcept {
 
     message.completed = true;
     --trace_data.open_message_count;
-    if (message.status.view() != status::Success) {
+    if (message.status != status::Success) {
         trace_data.has_problem = true;
     }
     if (trace_data.open_message_count != 0) {
@@ -514,7 +512,7 @@ void abandon_message(Data *&handle) noexcept {
     MessageTraceData &trace = *handle->trace->data;
     FIBER_ASSERT(on_owner_loop(trace));
     Data *message = std::exchange(handle, nullptr);
-    message->status = literal_ref(status::Incomplete);
+    message->status = status::Incomplete;
     if constexpr (std::same_as<Data, TransactionData>) {
         finish_transaction(*message);
     } else {
@@ -721,7 +719,7 @@ RecordError for_each_context(MessageTrace &trace, void *opaque, ContextVisitorFn
     RecordError result = RecordError::None;
     for (const ContextEntry *entry = data->context.all_head; entry;) {
         const ContextEntry *next = entry->next_all;
-        const bool continue_iteration = visitor(opaque, entry->key.view(), entry->value());
+        const bool continue_iteration = visitor(opaque, entry->key, entry->value());
         if (trace.data != data) {
             result = RecordError::Completed;
             break;
@@ -915,7 +913,7 @@ RecordError set_data_separator(MessageData *message, char separator) noexcept {
 namespace {
 
 RecordError set_message_text(MessageData *message, std::string_view value, std::size_t RecordLimits::*limit_field,
-                             StringRef MessageData::*field) noexcept {
+                             std::string_view MessageData::*field) noexcept {
     const RecordError mutable_result = validate_mutation(message);
     if (mutable_result != RecordError::None) {
         return mutable_result;
@@ -927,20 +925,20 @@ RecordError set_message_text(MessageData *message, std::string_view value, std::
         return RecordError::LimitExceeded;
     }
 
-    StringRef &current = message->*field;
-    if (current.view() == value) {
+    std::string_view &current = message->*field;
+    if (current == value) {
         return RecordError::None;
     }
     if (value.empty()) {
-        current = literal_ref("");
+        current = {"", 0};
         return RecordError::None;
     }
     if (!can_charge(trace_data, value.size())) {
         mark_truncated(trace_data, 0, value.size(), RecordError::LimitExceeded);
         return RecordError::LimitExceeded;
     }
-    StringRef copy = copy_string(*message->trace, value);
-    if (!copy.data) {
+    std::string_view copy = copy_string(*message->trace, value);
+    if (!copy.data()) {
         mark_truncated(trace_data, 0, value.size(), RecordError::NoMemory);
         return RecordError::NoMemory;
     }
@@ -971,15 +969,15 @@ RecordError set_status(MessageData *message, std::string_view value) noexcept {
     }
 
     if (value == status::Success) {
-        message->status = literal_ref(status::Success);
+        message->status = status::Success;
         return RecordError::None;
     }
     if (value == status::Incomplete) {
-        message->status = literal_ref(status::Incomplete);
+        message->status = status::Incomplete;
         return RecordError::None;
     }
-    StringRef copy = copy_string(*message->trace, value);
-    if (!value.empty() && !copy.data) {
+    std::string_view copy = copy_string(*message->trace, value);
+    if (!value.empty() && !copy.data()) {
         mark_truncated(trace_data, 0, value.size(), RecordError::NoMemory);
         return RecordError::NoMemory;
     }

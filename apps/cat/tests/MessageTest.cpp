@@ -145,21 +145,21 @@ TEST(CatMessageTest, RenameLimitsAreAtomicAndChargeOnlyChangedNonEmptyValues) {
 
         EXPECT_EQ(fiber::cat::detail::set_type(root, "LLM"), RecordError::None);
         EXPECT_EQ(fiber::cat::detail::set_name(root, "renamed"), RecordError::None);
-        EXPECT_EQ(root->type.view(), "LLM");
-        EXPECT_EQ(root->name.view(), "renamed");
+        EXPECT_EQ(root->type, "LLM");
+        EXPECT_EQ(root->name, "renamed");
         EXPECT_EQ(trace->data->payload_bytes, initial_payload + 3 + 7);
 
         const std::size_t renamed_payload = trace->data->payload_bytes;
         EXPECT_EQ(fiber::cat::detail::set_type(root, "model"), RecordError::LimitExceeded);
         EXPECT_EQ(fiber::cat::detail::set_name(root, "too-long!"), RecordError::LimitExceeded);
-        EXPECT_EQ(root->type.view(), "LLM");
-        EXPECT_EQ(root->name.view(), "renamed");
+        EXPECT_EQ(root->type, "LLM");
+        EXPECT_EQ(root->name, "renamed");
         EXPECT_EQ(trace->data->payload_bytes, renamed_payload);
 
         EXPECT_EQ(fiber::cat::detail::set_type(root, ""), RecordError::None);
         EXPECT_EQ(fiber::cat::detail::set_name(root, ""), RecordError::None);
-        EXPECT_TRUE(root->type.view().empty());
-        EXPECT_TRUE(root->name.view().empty());
+        EXPECT_TRUE(root->type.empty());
+        EXPECT_TRUE(root->name.empty());
         EXPECT_EQ(trace->data->payload_bytes, renamed_payload);
         EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
     });
@@ -239,7 +239,7 @@ TEST(CatMessageTest, AbandonMarksInternalMessageIncomplete) {
         fiber::cat::detail::abandon(child);
         EXPECT_EQ(child, nullptr);
         EXPECT_TRUE(observed_child->completed);
-        EXPECT_EQ(observed_child->status.view(), fiber::cat::status::Incomplete);
+        EXPECT_EQ(observed_child->status, fiber::cat::status::Incomplete);
         EXPECT_TRUE(root->trace->data->has_problem);
 
         EXPECT_EQ(fiber::cat::detail::complete(root), RecordError::None);
