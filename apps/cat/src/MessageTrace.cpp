@@ -75,10 +75,10 @@ std::expected<PropagationContext, RecordError> MessageTrace::propagation_context
         return std::unexpected(RecordError::WrongEventLoop);
     }
     return PropagationContext::create({
-            .message_id = data.message_id.view(),
-            .root_message_id = data.root_message_id.view(),
-            .parent_message_id = data.parent_message_id.view(),
-            .session_token = data.session_token.view(),
+            .message_id = data.message_id,
+            .root_message_id = data.root_message_id,
+            .parent_message_id = data.parent_message_id,
+            .session_token = data.session_token,
     });
 }
 

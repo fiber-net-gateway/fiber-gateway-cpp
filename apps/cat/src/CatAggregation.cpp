@@ -125,8 +125,8 @@ struct AggregationShard::Entry {
     Entry *next_bucket = nullptr;
     Entry *next_all = nullptr;
     std::uint64_t hash = 0;
-    StringRef type;
-    StringRef name;
+    std::string_view type;
+    std::string_view name;
     AggregateKind kind = AggregateKind::Event;
     std::uint64_t count = 0;
     std::uint64_t error_count = 0;
@@ -239,13 +239,13 @@ std::size_t AggregationShard::aggregate_message(const MessageData &message) noex
     std::size_t dropped = 0;
     const AggregateKind kind =
             message.kind == MessageKind::Transaction ? AggregateKind::Transaction : AggregateKind::Event;
-    Entry *entry = find_or_create(kind, message.type.view(), message.name.view(), dropped);
+    Entry *entry = find_or_create(kind, message.type, message.name, dropped);
     if (entry) {
         if (entry->count == std::numeric_limits<std::uint64_t>::max()) {
             ++dropped;
         } else {
             ++entry->count;
-            if (message.status.view() != status::Success) {
+            if (message.status != status::Success) {
                 if (entry->error_count == std::numeric_limits<std::uint64_t>::max()) {
                     ++dropped;
                 } else {
@@ -290,7 +290,7 @@ AggregationShard::Entry *AggregationShard::find_or_create(AggregateKind kind, st
     const std::uint64_t hash = hash_key(kind, type, name);
     Entry *entry = buckets_[hash & (bucket_count_ - 1)];
     while (entry) {
-        if (entry->hash == hash && entry->kind == kind && entry->type.view() == type && entry->name.view() == name) {
+        if (entry->hash == hash && entry->kind == kind && entry->type == type && entry->name == name) {
             return entry;
         }
         entry = entry->next_bucket;
@@ -461,7 +461,7 @@ bool AggregationShard::flush_kind(CatClientCore &core, AggregateKind kind) noexc
             if (failed) {
                 break;
             }
-            auto child_created = create_transaction(*root, entry->type.view(), entry->name.view());
+            auto child_created = create_transaction(*root, entry->type, entry->name);
             if (!child_created) {
                 failed = true;
                 break;
@@ -480,7 +480,7 @@ bool AggregationShard::flush_kind(CatClientCore &core, AggregateKind kind) noexc
                 failed = true;
                 break;
             }
-            auto child_created = create_event(*root, entry->type.view(), entry->name.view());
+            auto child_created = create_event(*root, entry->type, entry->name);
             if (!child_created) {
                 failed = true;
                 break;
@@ -564,7 +564,7 @@ bool AggregationShard::flush_metrics(CatClientCore &core) noexcept {
         if (failed) {
             break;
         }
-        auto metric_created = create_metric(*root, {}, entry->name.view());
+        auto metric_created = create_metric(*root, {}, entry->name);
         if (!metric_created) {
             failed = true;
             break;
@@ -654,8 +654,8 @@ void AggregationShard::for_each(void *opaque, Visitor visitor) const noexcept {
     for (const Entry *entry = all_head_; entry; entry = entry->next_all) {
         if (!visitor(opaque, AggregateValue{
                                      .kind = entry->kind,
-                                     .type = entry->type.view(),
-                                     .name = entry->name.view(),
+                                     .type = entry->type,
+                                     .name = entry->name,
                                      .count = entry->count,
                                      .error_count = entry->error_count,
                                      .duration_sum_millis = entry->duration_sum_millis,

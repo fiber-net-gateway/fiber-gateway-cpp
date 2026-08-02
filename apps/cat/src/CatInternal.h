@@ -38,13 +38,6 @@ struct TraceContext {
 
 [[nodiscard]] RecordError validate_trace_context(const RecordLimits &limits, const TraceContext &context) noexcept;
 
-struct StringRef {
-    const char *data = nullptr;
-    std::size_t size = 0;
-
-    [[nodiscard]] std::string_view view() const noexcept { return {data, size}; }
-};
-
 struct DataChunk {
     DataChunk *next = nullptr;
     std::size_t capacity = 0;
@@ -57,9 +50,9 @@ struct DataChunk {
 struct MessageData {
     MessageTrace *trace = nullptr;
     MessageKind kind = MessageKind::Event;
-    StringRef type;
-    StringRef name;
-    StringRef status{status::Success.data(), status::Success.size()};
+    std::string_view type;
+    std::string_view name;
+    std::string_view status{fiber::cat::status::Success};
     DataChunk *data_head = nullptr;
     DataChunk *data_tail = nullptr;
     std::chrono::steady_clock::time_point time{};
@@ -103,7 +96,7 @@ struct MessageHandleAccess {
 
 struct ContextEntry {
     std::uint64_t hash = 0;
-    StringRef key;
+    std::string_view key;
     char *value_data = nullptr;
     std::size_t value_size = 0;
     std::size_t value_capacity = 0;
@@ -135,10 +128,10 @@ struct MessageTraceData {
     event::EventLoop *owner = nullptr;
     RecordLimits limits;
     MessageData *root = nullptr;
-    StringRef message_id;
-    StringRef root_message_id;
-    StringRef parent_message_id;
-    StringRef session_token;
+    std::string_view message_id;
+    std::string_view root_message_id;
+    std::string_view parent_message_id;
+    std::string_view session_token;
     std::chrono::steady_clock::time_point steady_base{};
     std::uint64_t wall_base_millis = 0;
     std::size_t payload_bytes = 0;
