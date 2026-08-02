@@ -8,6 +8,8 @@ include_guard()
 # protobuf::libprotobuf-lite. The generated code relies on the .proto option
 # `optimize_for = LITE_RUNTIME;` (protoc has no cpp_out flag for lite).
 function(fiber_proto_library name)
+    fiber_prepare_protobuf_target()
+
     set(proto_files ${ARGN})
     set(proto_root "${CMAKE_CURRENT_SOURCE_DIR}/proto")
     set(out_dir "${CMAKE_BINARY_DIR}/gen/proto/${name}")

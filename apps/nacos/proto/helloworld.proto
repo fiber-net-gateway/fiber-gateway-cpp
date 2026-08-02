@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package helloworld;
 
-// LITE_RUNTIME so generated code depends only on libprotobuf-lite.
+// LITE_RUNTIME keeps the Nacos-private gRPC transport tests on protobuf-lite.
 option optimize_for = LITE_RUNTIME;
 
 message HelloRequest {

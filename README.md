@@ -24,9 +24,9 @@ application, and optional application-layer libraries such as
 - In-tree QUIC v1 transport with TLS, streams, loss recovery, congestion
   control, pacing, connection IDs, address validation, and UDP GSO support
   where available.
-- HPACK, QPACK, gRPC framing/client support, streaming request and response
-  bodies, and WebSocket proxying through HTTP/1 Upgrade or HTTP/2/3 Extended
-  CONNECT.
+- HPACK, QPACK, streaming request and response bodies, and WebSocket proxying
+  through HTTP/1 Upgrade or HTTP/2/3 Extended CONNECT.
+- A Nacos client library with its own private gRPC/protobuf transport.
 - A scripting runtime, common JSON codecs, structured logging, and
   allocation-conscious buffer and memory utilities.
 
@@ -51,11 +51,11 @@ The main source modules are:
 - `src/net/` — socket, listener, stream, TLS, and address abstractions.
 - `src/quic/` — QUIC transport, crypto, recovery, congestion, and streams.
 - `src/http/` — HTTP/1.1, HTTP/2, HTTP/3, clients, servers, and pools.
-- `src/grpc/` — gRPC framing, streams, status handling, and client support.
 - `src/dns/` — DNS messages, clients, resolvers, and caches.
 - `src/common/` — errors, JSON, memory, containers, and shared utilities.
 - `src/script/` and `src/http_script/` — scripting runtime and HTTP bindings.
 - `src/log/` — logger hierarchy, formatting, and appenders.
+- `apps/nacos/` — Nacos client and its private gRPC/protobuf transport.
 
 ## Requirements
 

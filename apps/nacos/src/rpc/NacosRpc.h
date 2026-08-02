@@ -20,13 +20,13 @@
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/nacos/NacosRpcOptions.h>
-#include <grpc/GrpcClient.h>
-#include <grpc/GrpcStream.h>
 #include <nacos_grpc_payload.pb.h>
 #include <net/IpAddress.h>
 #include "../dto/Internal.h"
 
 #include "NacosBiRequestHandler.h"
+#include "grpc/GrpcClient.h"
+#include "grpc/GrpcStream.h"
 
 namespace fiber::nacos::detail {
 

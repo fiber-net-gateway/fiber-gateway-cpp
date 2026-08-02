@@ -9,7 +9,7 @@
 
 #include <google/protobuf/io/zero_copy_stream.h>
 
-namespace fiber::grpc {
+namespace fiber::nacos::detail::grpc {
 namespace {
 
 // Stack array for the common single/few-segment case. Chains with more readable
@@ -149,4 +149,4 @@ common::IoResult<void> decode(const mem::IoBufChain &chain, google::protobuf::Me
     return {};
 }
 
-} // namespace fiber::grpc
+} // namespace fiber::nacos::detail::grpc

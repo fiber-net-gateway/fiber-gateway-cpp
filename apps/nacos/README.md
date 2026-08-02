@@ -3,8 +3,8 @@
 `apps/nacos` is the reusable Nacos client library for applications under
 `apps/`. Consumers should link the `fiber::nacos` target.
 
-The current implementation covers authentication, the reusable Nacos gRPC
-transport layer, ConfigService, NamingService, and a generic client-side
+The current implementation covers authentication, the private Nacos gRPC
+transport, ConfigService, NamingService, and a generic client-side
 service-discovery registry:
 
 - Immutable, validated client configuration with multiple server IPs.
@@ -56,12 +56,16 @@ service-discovery registry:
 - `fiber_nacos_tests`: unit and local integration tests when tests are enabled.
 
 The library links `fiber_lib` publicly, so consumers receive the core Fiber
-include paths and dependencies through `fiber::nacos`.
+include paths and dependencies through `fiber::nacos`. Its protobuf-generated
+payload and gRPC transport headers remain private implementation details;
+`fiber_lib` itself does not link or expose protobuf.
 
 ## NacosRpc Transport and Reconnection
 
-`src/rpc/NacosRpc` is the internal one-physical-connection transport. It
-directly owns a `GrpcClient`; its long-lived `run()` task connects, sends
+`src/rpc/NacosRpc` is the internal one-physical-connection transport. Its
+private `src/rpc/grpc` implementation owns the HTTP/2 gRPC framing, status,
+stream, and protobuf codec support. `NacosRpc` directly owns a `GrpcClient`;
+its long-lived `run()` task connects, sends
 `ServerCheckRequest`, opens the bidirectional stream, sends
 `ConnectionSetupRequest`, processes server requests, runs heartbeats, and
 completes only after full gRPC teardown. It deliberately does not reconnect.

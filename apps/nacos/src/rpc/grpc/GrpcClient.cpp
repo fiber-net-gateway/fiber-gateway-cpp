@@ -2,7 +2,7 @@
 
 #include <utility>
 
-namespace fiber::grpc {
+namespace fiber::nacos::detail::grpc {
 
 int parse_grpc_status(std::string_view s) noexcept {
     // An empty value is treated as OK (0) - matches a missing grpc-status.
@@ -118,4 +118,4 @@ GrpcStream GrpcClient::open_stream(std::string_view service, std::string_view me
     return GrpcStream(conn_, authority_, scheme_, service, method, pool, options);
 }
 
-} // namespace fiber::grpc
+} // namespace fiber::nacos::detail::grpc

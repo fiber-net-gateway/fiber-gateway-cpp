@@ -14,7 +14,8 @@ Fiber Gateway 是一个性能优先的 C++23 网关框架，面向反向代理�
 - HTTP/1.1、HTTP/2 和 HTTP/3 服务端协议栈。
 - HTTP/1.1 连接池，以及 HTTP/2、HTTP/3 客户端连接。
 - 内置 QUIC v1 传输实现，包含 TLS、Stream、丢包恢复、拥塞控制、发送 pacing、Connection ID、地址验证，以及系统支持时的 UDP GSO。
-- HPACK、QPACK、gRPC framing/client、流式请求与响应，以及通过 HTTP/1 Upgrade 或 HTTP/2/3 Extended CONNECT 实现的 WebSocket 代理。
+- HPACK、QPACK、流式请求与响应，以及通过 HTTP/1 Upgrade 或 HTTP/2/3 Extended CONNECT 实现的 WebSocket 代理。
+- Nacos 客户端库及其私有的 gRPC/protobuf 传输实现。
 - 脚本运行时、通用 JSON 编解码、结构化日志，以及关注分配成本的 Buffer 和内存工具。
 
 ## 仓库结构
@@ -38,11 +39,11 @@ Fiber Gateway 是一个性能优先的 C++23 网关框架，面向反向代理�
 - `src/net/`：socket、listener、stream、TLS 和地址抽象。
 - `src/quic/`：QUIC 传输、加密、恢复、拥塞控制和 stream。
 - `src/http/`：HTTP/1.1、HTTP/2、HTTP/3、客户端、服务端和连接池。
-- `src/grpc/`：gRPC framing、stream、状态处理和客户端支持。
 - `src/dns/`：DNS 消息、客户端、resolver 和缓存。
 - `src/common/`：错误、JSON、内存、容器和通用工具。
 - `src/script/` 与 `src/http_script/`：脚本运行时和 HTTP 绑定。
 - `src/log/`：logger 层级、格式化和 appender。
+- `apps/nacos/`：Nacos 客户端及其私有的 gRPC/protobuf 传输实现。
 
 ## 环境要求
 

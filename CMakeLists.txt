@@ -36,7 +36,7 @@ add_library(fiber_stdlib INTERFACE)
 target_include_directories(fiber_lib
     PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src
     PRIVATE ${FIBER_GENERATED_INCLUDE_DIR})
-target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto protobuf::libprotobuf-lite)
+target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto)
 target_compile_definitions(fiber_lib
     PUBLIC FIBER_ENABLE_BENCHMARK_TRACE=$<BOOL:${FIBER_ENABLE_BENCHMARK_TRACE}>
     PRIVATE
@@ -168,9 +168,8 @@ if(FIBER_BUILD_TESTS)
             "${CMAKE_CURRENT_LIST_DIR}/tests/*Test.cpp")
         list(SORT FIBER_TEST_SOURCES)
         if (FIBER_TEST_SOURCES)
-            fiber_proto_library(helloworld helloworld.proto)
             add_executable(fiber_tests ${FIBER_TEST_SOURCES})
-            target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main fiber_proto_helloworld)
+            target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main)
             fiber_link_runtime_allocator(fiber_tests)
             if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
                 set_property(TARGET fiber_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)

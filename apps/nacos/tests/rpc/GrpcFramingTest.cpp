@@ -9,16 +9,16 @@
 
 #include "common/mem/IoBuf.h"
 #include "common/mem/IoBufChain.h"
-#include "grpc/GrpcFraming.h"
+#include "rpc/grpc/GrpcFraming.h"
 
 namespace {
 
 using fiber::common::IoErr;
-using fiber::grpc::frame;
-using fiber::grpc::GrpcFrameReader;
 using fiber::mem::IoBuf;
 using fiber::mem::IoBufChain;
 using fiber::mem::IoBufNodePool;
+using fiber::nacos::detail::grpc::frame;
+using fiber::nacos::detail::grpc::GrpcFrameReader;
 
 IoBufChain make_payload(IoBufNodePool &pool, std::string_view data) {
     IoBufChain chain(pool);

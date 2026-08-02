@@ -13,14 +13,22 @@ add_library(fiber_nacos STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/JsonDecode.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/NamingJson.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/NotifySubscriberResponseJson.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/rpc/grpc/GrpcClient.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/rpc/grpc/GrpcFraming.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/rpc/grpc/GrpcStream.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/rpc/grpc/ProtoCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/rpc/NacosPayloadCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/rpc/NacosRpc.cpp")
 add_library(fiber::nacos ALIAS fiber_nacos)
 
 target_include_directories(fiber_nacos
     PUBLIC
-        "${CMAKE_CURRENT_LIST_DIR}/include")
-target_link_libraries(fiber_nacos PUBLIC fiber_lib fiber_proto_nacos_payload)
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+    PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+target_link_libraries(fiber_nacos
+    PUBLIC fiber_lib
+    PRIVATE fiber_proto_nacos_payload)
 set_target_properties(fiber_nacos PROPERTIES FOLDER "apps/nacos")
 
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
@@ -29,6 +37,7 @@ endif()
 
 if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
+    fiber_proto_library(nacos_grpc_test helloworld.proto)
 
     add_executable(fiber_nacos_tests
         "${CMAKE_CURRENT_LIST_DIR}/tests/DtoJsonTest.cpp"
@@ -40,8 +49,18 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/PayloadTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/RpcDtoJsonTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ServiceDiscoveryTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/SubscriptionPoolTest.cpp")
-    target_link_libraries(fiber_nacos_tests PRIVATE fiber::nacos GTest::gtest_main)
+        "${CMAKE_CURRENT_LIST_DIR}/tests/SubscriptionPoolTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/rpc/GrpcClientTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/rpc/GrpcFramingTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/rpc/GrpcProtoCodecTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/rpc/GrpcStatusTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/rpc/GrpcStreamTest.cpp")
+    target_include_directories(fiber_nacos_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_link_libraries(fiber_nacos_tests PRIVATE
+        fiber::nacos
+        fiber_proto_nacos_payload
+        fiber_proto_nacos_grpc_test
+        GTest::gtest_main)
     set_target_properties(fiber_nacos_tests PROPERTIES FOLDER "apps/nacos")
     fiber_link_runtime_allocator(fiber_nacos_tests)
 

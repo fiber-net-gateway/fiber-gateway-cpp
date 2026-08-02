@@ -1,5 +1,5 @@
-#ifndef FIBER_GRPC_GRPC_CLIENT_H
-#define FIBER_GRPC_GRPC_CLIENT_H
+#ifndef FIBER_NACOS_RPC_GRPC_GRPC_CLIENT_H
+#define FIBER_NACOS_RPC_GRPC_GRPC_CLIENT_H
 
 #include <chrono>
 #include <cstdint>
@@ -7,21 +7,21 @@
 #include <string>
 #include <string_view>
 
-#include "../async/Task.h"
-#include "../common/Assert.h"
-#include "../common/IoError.h"
-#include "../common/NonCopyable.h"
-#include "../common/NonMovable.h"
-#include "../common/mem/BufPool.h"
-#include "../event/EventLoop.h"
-#include "../http/Http2ClientConnection.h"
-#include "../http/Http2Connection.h"
-#include "../net/SocketAddress.h"
-#include "../net/TcpSocketOptions.h"
-#include "../net/TlsOptions.h"
+#include <async/Task.h>
+#include <common/Assert.h>
+#include <common/IoError.h>
+#include <common/NonCopyable.h>
+#include <common/NonMovable.h>
+#include <common/mem/BufPool.h>
+#include <event/EventLoop.h>
+#include <http/Http2ClientConnection.h>
+#include <http/Http2Connection.h>
+#include <net/SocketAddress.h>
+#include <net/TcpSocketOptions.h>
+#include <net/TlsOptions.h>
 #include "GrpcStream.h"
 
-namespace fiber::grpc {
+namespace fiber::nacos::detail::grpc {
 
 // gRPC client over a single multiplexed HTTP/2 connection. connect() starts
 // transport I/O. shutdown() aborts active calls and waits for the connection to
@@ -86,6 +86,6 @@ private:
     std::string scheme_;
 };
 
-} // namespace fiber::grpc
+} // namespace fiber::nacos::detail::grpc
 
-#endif // FIBER_GRPC_GRPC_CLIENT_H
+#endif // FIBER_NACOS_RPC_GRPC_GRPC_CLIENT_H
