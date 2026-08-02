@@ -2,9 +2,9 @@
 
 #include <utility>
 
-#include "../http/HttpHeaderHash.h"
+#include <http/HttpHeaderHash.h>
 
-namespace fiber::grpc {
+namespace fiber::nacos::detail::grpc {
 namespace {
 
 // Pre-hashed trailer/header names for per-response gRPC status extraction.
@@ -379,4 +379,4 @@ fiber::async::Task<common::IoResult<GrpcStatus>> GrpcStream::finish() noexcept {
     co_return GrpcStatus{grpc_code_, grpc_message_};
 }
 
-} // namespace fiber::grpc
+} // namespace fiber::nacos::detail::grpc

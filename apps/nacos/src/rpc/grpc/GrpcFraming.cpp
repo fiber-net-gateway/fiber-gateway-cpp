@@ -6,7 +6,7 @@
 #include <cstring>
 #include <sys/uio.h>
 
-namespace fiber::grpc {
+namespace fiber::nacos::detail::grpc {
 namespace {
 
 constexpr std::size_t kFrameHeaderSize = 5;
@@ -97,4 +97,4 @@ common::IoResult<bool> GrpcFrameReader::next_payload(mem::IoBufChain &out) noexc
 
 std::size_t GrpcFrameReader::buffered_bytes() const noexcept { return buffer_.readable_bytes(); }
 
-} // namespace fiber::grpc
+} // namespace fiber::nacos::detail::grpc

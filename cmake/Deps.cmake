@@ -108,38 +108,45 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(zlib)
 set(FIBER_ZLIB_SOURCE_DIR "${zlib_SOURCE_DIR}" CACHE PATH "Downloaded zlib source directory" FORCE)
 
-# ---- protobuf-lite runtime + protoc codegen ----
-# v21.12 is the last release before protobuf made abseil-cpp a hard dependency
-# (22.x+). Staying on 3.21 keeps the fetched dependency tree small (no abseil /
-# utf8_range); libprotobuf-lite + protoc suffice for gRPC message encode/decode.
-# v21.12 declares cmake_minimum_required(VERSION 3.5), which CMake 4.x still
-# accepts (only < 3.5 was dropped).
-#
-# protobuf is configured here, before the top-level sets CMAKE_CXX_STANDARD 23,
-# so its targets build under the compiler's default standard (C++17) rather than
-# C++23 - this sidesteps C++20/23 removals (e.g. std::iterator) in 3.21.
-set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
-set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
-set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
-fiber_use_cached_content(protobuf)
-FetchContent_Declare(
-    protobuf
-    URL https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.tar.gz
-)
-FetchContent_MakeAvailable(protobuf)
+# ---- optional protobuf-lite runtime + protoc codegen ----
+# Nacos is the only protobuf consumer. Keep the dependency out of the target
+# graph until a proto library is actually requested.
+function(fiber_prepare_protobuf_target)
+    if(TARGET protobuf::libprotobuf-lite AND (TARGET protobuf::protoc OR TARGET protoc))
+        if(TARGET protobuf::protoc)
+            set(FIBER_PROTOC_TARGET "protobuf::protoc" CACHE STRING "protoc target used by fiber_proto_library()")
+        else()
+            set(FIBER_PROTOC_TARGET "protoc" CACHE STRING "protoc target used by fiber_proto_library()")
+        endif()
+        return()
+    endif()
 
-# Ensure the protobuf:: aliases exist (3.21 may or may not create them).
-if(NOT TARGET protobuf::libprotobuf-lite AND TARGET libprotobuf-lite)
-    add_library(protobuf::libprotobuf-lite ALIAS libprotobuf-lite)
-endif()
-# protoc is an executable; aliasing it is unreliable across CMake versions, so
-# capture the real target name for the codegen helper.
-if(TARGET protobuf::protoc)
-    set(FIBER_PROTOC_TARGET "protobuf::protoc" CACHE STRING "protoc target used by fiber_proto_library()")
-elseif(TARGET protoc)
-    set(FIBER_PROTOC_TARGET "protoc" CACHE STRING "protoc target used by fiber_proto_library()")
-else()
-    message(FATAL_ERROR "protobuf was fetched but no protoc target was found.")
-endif()
+    # v21.12 is the last release before protobuf made abseil-cpp a hard
+    # dependency. Build it as C++17 even though Fiber itself is C++23; the
+    # function scope keeps these settings from leaking back to Fiber targets.
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+    set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
+    set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
+    set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
+    fiber_use_cached_content(protobuf)
+    FetchContent_Declare(
+        protobuf
+        URL https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.tar.gz
+    )
+    FetchContent_MakeAvailable(protobuf)
+
+    if(NOT TARGET protobuf::libprotobuf-lite AND TARGET libprotobuf-lite)
+        add_library(protobuf::libprotobuf-lite ALIAS libprotobuf-lite)
+    endif()
+    if(TARGET protobuf::protoc)
+        set(FIBER_PROTOC_TARGET "protobuf::protoc" CACHE STRING "protoc target used by fiber_proto_library()")
+    elseif(TARGET protoc)
+        set(FIBER_PROTOC_TARGET "protoc" CACHE STRING "protoc target used by fiber_proto_library()")
+    else()
+        message(FATAL_ERROR "protobuf was fetched but no protoc target was found.")
+    endif()
+endfunction()

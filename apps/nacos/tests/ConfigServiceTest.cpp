@@ -18,8 +18,6 @@
 #include <event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClientConfig.h>
-#include <grpc/GrpcFraming.h>
-#include <grpc/ProtoCodec.h>
 #include <http/Http2Connection.h>
 #include <http/HttpBodySpec.h>
 #include <http/HttpExchange.h>
@@ -28,6 +26,8 @@
 #include <http/ServerRequestFactory.h>
 #include <net/SocketAddress.h>
 #include <net/TcpListener.h>
+#include "rpc/grpc/GrpcFraming.h"
+#include "rpc/grpc/ProtoCodec.h"
 
 #include "../src/config/ConfigServiceImpl.h"
 #include "../src/rpc/NacosPayloadCodec.h"
@@ -95,8 +95,8 @@ std::string grpc_frame(const google::protobuf::MessageLite &message) {
     return result;
 }
 
-fiber::async::Task<fiber::common::IoResult<proto::Payload>> read_payload(fiber::http::HttpExchange &exchange,
-                                                                         fiber::grpc::GrpcFrameReader &reader) {
+fiber::async::Task<fiber::common::IoResult<proto::Payload>>
+read_payload(fiber::http::HttpExchange &exchange, fiber::nacos::detail::grpc::GrpcFrameReader &reader) {
     for (;;) {
         fiber::mem::IoBufChain message;
         auto next = reader.next_payload(message);
@@ -105,7 +105,7 @@ fiber::async::Task<fiber::common::IoResult<proto::Payload>> read_payload(fiber::
         }
         if (*next) {
             proto::Payload payload;
-            auto decoded = fiber::grpc::decode(message, payload);
+            auto decoded = fiber::nacos::detail::grpc::decode(message, payload);
             if (!decoded) {
                 co_return std::unexpected(decoded.error());
             }
@@ -357,7 +357,7 @@ private:
     }
 
     fiber::async::Task<void> handle_unary(fiber::http::HttpExchange &exchange) {
-        fiber::grpc::GrpcFrameReader reader(1024 * 1024);
+        fiber::nacos::detail::grpc::GrpcFrameReader reader(1024 * 1024);
         auto request = co_await read_payload(exchange, reader);
         if (!request) {
             co_return;
@@ -385,7 +385,7 @@ private:
     }
 
     fiber::async::Task<void> handle_bidi(fiber::http::HttpExchange &exchange) {
-        fiber::grpc::GrpcFrameReader reader(1024 * 1024);
+        fiber::nacos::detail::grpc::GrpcFrameReader reader(1024 * 1024);
         auto setup_payload = co_await read_payload(exchange, reader);
         if (!setup_payload || !(co_await send_response_header(exchange))) {
             co_return;

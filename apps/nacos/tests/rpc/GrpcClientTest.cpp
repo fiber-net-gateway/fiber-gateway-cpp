@@ -19,7 +19,6 @@
 #include "common/mem/IoBuf.h"
 #include "common/mem/IoBufChain.h"
 #include "event/EventLoopGroup.h"
-#include "grpc/GrpcClient.h"
 #include "helloworld.pb.h"
 #include "http/HttpBodySpec.h"
 #include "http/HttpCommon.h"
@@ -29,6 +28,7 @@
 #include "http/HttpServer.h"
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
+#include "rpc/grpc/GrpcClient.h"
 
 namespace {
 
@@ -241,33 +241,33 @@ DetachedTask close_server_on_loop(fiber::http::HttpServer *server, std::promise<
 
 struct ClientResult {
     fiber::common::IoErr err = fiber::common::IoErr::None;
-    fiber::grpc::GrpcStatus status{};
+    fiber::nacos::detail::grpc::GrpcStatus status{};
     helloworld::HelloReply reply{};
     bool got_result = false;
 };
 
 struct TwoCallResult {
     fiber::common::IoErr err = fiber::common::IoErr::None;
-    fiber::grpc::GrpcStatus status1{};
-    fiber::grpc::GrpcStatus status2{};
+    fiber::nacos::detail::grpc::GrpcStatus status1{};
+    fiber::nacos::detail::grpc::GrpcStatus status2{};
     helloworld::HelloReply reply1{};
     helloworld::HelloReply reply2{};
     bool got1 = false;
     bool got2 = false;
 };
 
-DetachedTask wait_for_client_connection(fiber::grpc::GrpcClient *client, bool *returned = nullptr) {
+DetachedTask wait_for_client_connection(fiber::nacos::detail::grpc::GrpcClient *client, bool *returned = nullptr) {
     (void) co_await client->wait_closed();
     if (returned) {
         *returned = true;
     }
 }
 
-fiber::async::Task<fiber::common::IoResult<fiber::grpc::GrpcStatus>>
-call_unary(fiber::grpc::GrpcClient &client, std::string_view service, std::string_view method,
+fiber::async::Task<fiber::common::IoResult<fiber::nacos::detail::grpc::GrpcStatus>>
+call_unary(fiber::nacos::detail::grpc::GrpcClient &client, std::string_view service, std::string_view method,
            const google::protobuf::MessageLite &request, google::protobuf::MessageLite &response,
            fiber::mem::BufPool &pool) {
-    fiber::grpc::GrpcStream stream = client.open_stream(service, method, pool);
+    fiber::nacos::detail::grpc::GrpcStream stream = client.open_stream(service, method, pool);
     if (auto result = co_await stream.open(); !result) {
         co_return std::unexpected(result.error());
     }
@@ -282,12 +282,12 @@ call_unary(fiber::grpc::GrpcClient &client, std::string_view service, std::strin
     if (!first) {
         co_return std::unexpected(first.error());
     }
-    if (*first == fiber::grpc::GrpcReadOutcome::Message) {
+    if (*first == fiber::nacos::detail::grpc::GrpcReadOutcome::Message) {
         const auto second = co_await stream.read(response);
         if (!second) {
             co_return std::unexpected(second.error());
         }
-        if (*second == fiber::grpc::GrpcReadOutcome::Message) {
+        if (*second == fiber::nacos::detail::grpc::GrpcReadOutcome::Message) {
             co_return std::unexpected(fiber::common::IoErr::Invalid);
         }
     }
@@ -299,7 +299,7 @@ call_unary(fiber::grpc::GrpcClient &client, std::string_view service, std::strin
     if (!finish_result->ok()) {
         co_return *finish_result;
     }
-    if (*first != fiber::grpc::GrpcReadOutcome::Message) {
+    if (*first != fiber::nacos::detail::grpc::GrpcReadOutcome::Message) {
         co_return std::unexpected(fiber::common::IoErr::Invalid);
     }
     co_return *finish_result;
@@ -309,14 +309,14 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
                         std::string_view method, const helloworld::HelloRequest &request,
                         std::shared_ptr<std::promise<ClientResult>> promise) {
     ClientResult result;
-    fiber::grpc::GrpcClient::Options options;
+    fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
 
-    fiber::grpc::GrpcClient client(*loop, options);
+    fiber::nacos::detail::grpc::GrpcClient client(*loop, options);
     auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
@@ -349,7 +349,7 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
                                   const helloworld::HelloRequest &request,
                                   std::shared_ptr<std::promise<TwoCallResult>> promise) {
     TwoCallResult result;
-    fiber::grpc::GrpcClient::Options options;
+    fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
@@ -358,7 +358,7 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
     options.authority = "localhost";
     options.scheme = "https";
 
-    fiber::grpc::GrpcClient client(*loop, options);
+    fiber::nacos::detail::grpc::GrpcClient client(*loop, options);
     auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
@@ -403,14 +403,14 @@ struct LifecycleResult {
 DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t port,
                                   std::shared_ptr<std::promise<LifecycleResult>> promise) {
     LifecycleResult result;
-    fiber::grpc::GrpcClient::Options options;
+    fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
 
-    fiber::grpc::GrpcClient client(*loop, options);
+    fiber::nacos::detail::grpc::GrpcClient client(*loop, options);
     auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
@@ -422,8 +422,8 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
                         [&client, &result]() { return wait_for_client_connection(&client, &result.wait_returned); });
     {
         fiber::mem::BufPool pool;
-        fiber::grpc::GrpcStream original = client.open_stream("helloworld.Greeter", "SayHello", pool);
-        fiber::grpc::GrpcStream moved = std::move(original);
+        fiber::nacos::detail::grpc::GrpcStream original = client.open_stream("helloworld.Greeter", "SayHello", pool);
+        fiber::nacos::detail::grpc::GrpcStream moved = std::move(original);
         result.moved_from_invalid = !original.valid() && moved.valid();
     }
 

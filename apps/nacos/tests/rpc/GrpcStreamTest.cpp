@@ -21,8 +21,6 @@
 #include "common/IoError.h"
 #include "event/EventLoop.h"
 #include "event/EventLoopGroup.h"
-#include "grpc/GrpcClient.h"
-#include "grpc/GrpcStream.h"
 #include "helloworld.pb.h"
 #include "http/HttpBodySpec.h"
 #include "http/HttpCommon.h"
@@ -32,6 +30,8 @@
 #include "http/HttpServer.h"
 #include "net/IpAddress.h"
 #include "net/SocketAddress.h"
+#include "rpc/grpc/GrpcClient.h"
+#include "rpc/grpc/GrpcStream.h"
 
 namespace {
 
@@ -393,12 +393,12 @@ enum class Scenario {
 struct Result {
     fiber::common::IoErr err = fiber::common::IoErr::None;
     bool finish_ok = false;
-    fiber::grpc::GrpcStatus status{};
+    fiber::nacos::detail::grpc::GrpcStatus status{};
     std::vector<std::string> messages;
     std::vector<long long> counts;
 };
 
-Task<Result> drive(fiber::grpc::GrpcStream &s, Scenario sc) {
+Task<Result> drive(fiber::nacos::detail::grpc::GrpcStream &s, Scenario sc) {
     Result r;
 
     switch (sc) {
@@ -425,7 +425,7 @@ Task<Result> drive(fiber::grpc::GrpcStream &s, Scenario sc) {
                     r.err = rr.error();
                     break;
                 }
-                if (*rr == fiber::grpc::GrpcReadOutcome::End) {
+                if (*rr == fiber::nacos::detail::grpc::GrpcReadOutcome::End) {
                     break;
                 }
                 r.messages.push_back(reply.message());
@@ -463,7 +463,8 @@ Task<Result> drive(fiber::grpc::GrpcStream &s, Scenario sc) {
             }
             if (r.err == fiber::common::IoErr::None) {
                 helloworld::HelloReply reply;
-                if (auto rr = co_await s.read(reply); rr && *rr == fiber::grpc::GrpcReadOutcome::Message) {
+                if (auto rr = co_await s.read(reply);
+                    rr && *rr == fiber::nacos::detail::grpc::GrpcReadOutcome::Message) {
                     r.messages.push_back(reply.message());
                     r.counts.push_back(reply.count());
                 } else if (!rr) {
@@ -507,7 +508,7 @@ Task<Result> drive(fiber::grpc::GrpcStream &s, Scenario sc) {
                     r.err = rr.error();
                     break;
                 }
-                if (*rr == fiber::grpc::GrpcReadOutcome::End) {
+                if (*rr == fiber::nacos::detail::grpc::GrpcReadOutcome::End) {
                     break;
                 }
                 r.messages.push_back(echo.name());
@@ -648,19 +649,21 @@ Task<Result> drive(fiber::grpc::GrpcStream &s, Scenario sc) {
     co_return r;
 }
 
-DetachedTask wait_for_client_connection(fiber::grpc::GrpcClient *client) { (void) co_await client->wait_closed(); }
+DetachedTask wait_for_client_connection(fiber::nacos::detail::grpc::GrpcClient *client) {
+    (void) co_await client->wait_closed();
+}
 
 DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scenario sc,
                         std::shared_ptr<std::promise<Result>> promise) {
     Result result;
-    fiber::grpc::GrpcClient::Options options;
+    fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
     options.tls.enabled = true;
     options.tls.server_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
 
-    fiber::grpc::GrpcClient client(*loop, options);
+    fiber::nacos::detail::grpc::GrpcClient client(*loop, options);
     auto connect_result = co_await client.connect(5s);
     if (!connect_result) {
         result.err = connect_result.error();
@@ -692,11 +695,11 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
                 method = "OversizeFail";
                 break;
         }
-        fiber::grpc::GrpcStream::Options stream_opts;
+        fiber::nacos::detail::grpc::GrpcStream::Options stream_opts;
         if (sc == Scenario::Deadline) {
             stream_opts.deadline = 100ms;
         }
-        fiber::grpc::GrpcStream stream = client.open_stream(service, method, pool, stream_opts);
+        fiber::nacos::detail::grpc::GrpcStream stream = client.open_stream(service, method, pool, stream_opts);
         result = co_await drive(stream, sc);
     }
 

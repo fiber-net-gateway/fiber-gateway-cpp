@@ -2,10 +2,10 @@
 
 #include <string_view>
 
-#include "grpc/GrpcStatus.h"
+#include "rpc/grpc/GrpcStatus.h"
 
 namespace {
-using fiber::grpc::parse_grpc_status;
+using fiber::nacos::detail::grpc::parse_grpc_status;
 
 TEST(GrpcStatusTest, ParsesOkAndCodes) {
     EXPECT_EQ(parse_grpc_status("0"), 0);

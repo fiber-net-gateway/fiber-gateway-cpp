@@ -1,14 +1,14 @@
-#ifndef FIBER_GRPC_GRPC_FRAMING_H
-#define FIBER_GRPC_GRPC_FRAMING_H
+#ifndef FIBER_NACOS_RPC_GRPC_GRPC_FRAMING_H
+#define FIBER_NACOS_RPC_GRPC_GRPC_FRAMING_H
 
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 
-#include "../common/IoError.h"
-#include "../common/mem/IoBufChain.h"
+#include <common/IoError.h>
+#include <common/mem/IoBufChain.h>
 
-namespace fiber::grpc {
+namespace fiber::nacos::detail::grpc {
 
 // gRPC length-prefixed message frame over HTTP/2:
 //   [1 byte compressed-flag][4 byte big-endian length][payload]
@@ -49,6 +49,6 @@ private:
     std::size_t max_message_bytes_ = std::numeric_limits<std::uint32_t>::max();
 };
 
-} // namespace fiber::grpc
+} // namespace fiber::nacos::detail::grpc
 
-#endif // FIBER_GRPC_GRPC_FRAMING_H
+#endif // FIBER_NACOS_RPC_GRPC_GRPC_FRAMING_H

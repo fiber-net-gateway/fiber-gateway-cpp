@@ -1,5 +1,5 @@
-#ifndef FIBER_GRPC_GRPC_STREAM_H
-#define FIBER_GRPC_GRPC_STREAM_H
+#ifndef FIBER_NACOS_RPC_GRPC_GRPC_STREAM_H
+#define FIBER_NACOS_RPC_GRPC_GRPC_STREAM_H
 
 #include <chrono>
 #include <cstdint>
@@ -9,19 +9,19 @@
 
 #include <google/protobuf/message_lite.h>
 
-#include "../async/Task.h"
-#include "../common/IoError.h"
-#include "../common/mem/BufPool.h"
-#include "../http/ClientHttp2Exchange.h"
-#include "../http/ClientHttp2Types.h"
-#include "../http/Http2ClientConnection.h"
-#include "../http/HttpCommon.h"
-#include "../http/HttpHeaders.h"
+#include <async/Task.h>
+#include <common/IoError.h>
+#include <common/mem/BufPool.h>
+#include <http/ClientHttp2Exchange.h>
+#include <http/ClientHttp2Types.h>
+#include <http/Http2ClientConnection.h>
+#include <http/HttpCommon.h>
+#include <http/HttpHeaders.h>
 #include "GrpcFraming.h"
 #include "GrpcStatus.h"
 #include "ProtoCodec.h"
 
-namespace fiber::grpc {
+namespace fiber::nacos::detail::grpc {
 
 // Result of a single GrpcStream::read(): either a decoded message was produced
 // (Message) or the server's response stream has ended (End). Transport/protocol
@@ -147,6 +147,6 @@ private:
     std::chrono::steady_clock::time_point deadline_abs_{};
 };
 
-} // namespace fiber::grpc
+} // namespace fiber::nacos::detail::grpc
 
-#endif // FIBER_GRPC_GRPC_STREAM_H
+#endif // FIBER_NACOS_RPC_GRPC_GRPC_STREAM_H

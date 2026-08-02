@@ -1,14 +1,14 @@
-#ifndef FIBER_GRPC_PROTO_CODEC_H
-#define FIBER_GRPC_PROTO_CODEC_H
+#ifndef FIBER_NACOS_RPC_GRPC_PROTO_CODEC_H
+#define FIBER_NACOS_RPC_GRPC_PROTO_CODEC_H
 
 #include <string_view>
 
 #include <google/protobuf/message_lite.h>
 
-#include "../common/IoError.h"
-#include "../common/mem/IoBufChain.h"
+#include <common/IoError.h>
+#include <common/mem/IoBufChain.h>
 
-namespace fiber::grpc {
+namespace fiber::nacos::detail::grpc {
 
 // Serialize a protobuf lite message into a single-node IoBufChain ready to be
 // handed to ClientHttp2Exchange::write_all. Sized via ByteSizeLong() then
@@ -25,6 +25,6 @@ common::IoResult<void> decode(std::string_view bytes, google::protobuf::MessageL
 // are coalesced into a temporary buffer first.
 common::IoResult<void> decode(const mem::IoBufChain &chain, google::protobuf::MessageLite &out) noexcept;
 
-} // namespace fiber::grpc
+} // namespace fiber::nacos::detail::grpc
 
-#endif // FIBER_GRPC_PROTO_CODEC_H
+#endif // FIBER_NACOS_RPC_GRPC_PROTO_CODEC_H

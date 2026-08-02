@@ -9,16 +9,16 @@
 
 #include "common/mem/IoBuf.h"
 #include "common/mem/IoBufChain.h"
-#include "grpc/ProtoCodec.h"
 #include "helloworld.pb.h"
+#include "rpc/grpc/ProtoCodec.h"
 
 namespace {
 
-using fiber::grpc::decode;
-using fiber::grpc::encode;
 using fiber::mem::IoBuf;
 using fiber::mem::IoBufChain;
 using fiber::mem::IoBufNodePool;
+using fiber::nacos::detail::grpc::decode;
+using fiber::nacos::detail::grpc::encode;
 
 TEST(GrpcProtoCodecTest, EncodeDecodeRoundTrip) {
     helloworld::HelloRequest req;
