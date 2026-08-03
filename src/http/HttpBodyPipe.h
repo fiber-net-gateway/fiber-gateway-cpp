@@ -14,9 +14,12 @@ namespace fiber::http {
 
 inline constexpr std::size_t kDefaultBodyPipeBufferSize = 64 * 1024;
 inline constexpr std::size_t kDefaultBodyPipeLowWater = 48 * 1024;
+inline constexpr std::size_t kUnbufferedBodyPipeLowWater = 0;
 
 struct HttpBodyPipeOptions {
     std::size_t buffer_size = kDefaultBodyPipeBufferSize;
+    // Zero disables cross-read aggregation: the current source chunk is drained before the
+    // next read. A positive value allows reads while total buffered data stays below the mark.
     std::size_t low_water = kDefaultBodyPipeLowWater;
     std::chrono::milliseconds read_timeout{60000};
     std::chrono::milliseconds write_timeout{60000};

@@ -10,6 +10,7 @@
 #include "../http/ClientHttp1Exchange.h"
 #include "../http/ClientHttp1Types.h"
 #include "../http/Http1ClientConnection.h"
+#include "../http/HttpBodyPipe.h"
 #include "../http/HttpBodySpec.h"
 #include "../http/HttpCommon.h"
 #include "../http/HttpExchange.h"
@@ -806,8 +807,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
                     : (has_content_length ? fiber::http::HttpBodySpec::ContentLength(response_content_length)
                                           : fiber::http::HttpBodySpec::Auto());
 
-    // flush is parsed for API parity; C++ write_all already writes through (no buffering to skip).
-    (void) field_bool(*heap, options, "flush", 5, false);
+    const bool flush = field_bool(*heap, options, "flush", 5, false);
 
     auto response_header_result = co_await exchange.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
@@ -827,20 +827,27 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         (void) co_await upstream.discard_response_body(timeout);
         co_return AbiResult::success(JsValue::make_integer(resp_head->status_code));
     }
+    if (has_content_length && response_content_length == 0) {
+        co_return AbiResult::success(JsValue::make_integer(resp_head->status_code));
+    }
 
-    for (;;) {
-        auto body_result = co_await upstream.read_body(kBodyChunkSize, timeout);
-        if (!body_result) {
+    const fiber::http::HttpBodyPipeOptions pipe_options{
+            .buffer_size = fiber::http::kDefaultBodyPipeBufferSize,
+            .low_water = flush ? fiber::http::kUnbufferedBodyPipeLowWater : fiber::http::kDefaultBodyPipeLowWater,
+            .read_timeout = timeout,
+            .write_timeout = std::chrono::milliseconds::max(),
+    };
+    auto pipe_result = co_await fiber::http::pipe_http_body(
+            fiber::http::make_http_body_pipe_reader(upstream), fiber::http::make_http_body_pipe_writer(exchange),
+            fiber::event::EventLoop::current().io_buf_node_pool(), pipe_options);
+    if (!pipe_result) {
+        if (pipe_result.error().phase == fiber::http::HttpBodyPipePhase::Read) {
             co_return error_exn(*heap, "http.proxyPass: read response body failed");
         }
-        const bool last = body_result->complete();
-        auto write_result = co_await exchange.write_all(std::move(*body_result));
-        if (!write_result) {
+        if (pipe_result.error().phase == fiber::http::HttpBodyPipePhase::Write) {
             co_return error_exn(*heap, "http.proxyPass: write response body failed");
         }
-        if (last) {
-            break;
-        }
+        co_return error_exn(*heap, "http.proxyPass: invalid response body stream");
     }
     co_return AbiResult::success(JsValue::make_integer(resp_head->status_code));
 }

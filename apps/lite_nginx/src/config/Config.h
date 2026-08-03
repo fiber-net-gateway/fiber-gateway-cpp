@@ -108,10 +108,10 @@ struct HeaderOverride {
 
 struct ProxyBufferingSettings {
     std::size_t buffer_size = fiber::http::kDefaultBodyPipeBufferSize;
-    // Zero is the post-inheritance representation of `proxy_buffering off`.
-    std::size_t low_water = 0;
+    // The body pipe's unbuffered mode is the post-inheritance representation of `proxy_buffering off`.
+    std::size_t low_water = fiber::http::kUnbufferedBodyPipeLowWater;
 
-    [[nodiscard]] bool enabled() const noexcept { return low_water != 0; }
+    [[nodiscard]] bool enabled() const noexcept { return low_water != fiber::http::kUnbufferedBodyPipeLowWater; }
 };
 
 struct ProxySettings {

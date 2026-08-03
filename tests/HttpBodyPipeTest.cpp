@@ -22,6 +22,7 @@ using fiber::common::IoResult;
 using fiber::http::HttpBodyPipeOptions;
 using fiber::http::HttpBodyPipePhase;
 using fiber::http::HttpBodyPipeResult;
+using fiber::http::kUnbufferedBodyPipeLowWater;
 using fiber::mem::IoBuf;
 using fiber::mem::IoBufChain;
 
@@ -33,10 +34,14 @@ struct ReadAction {
 
 class FakeBodyReader {
 public:
-    explicit FakeBodyReader(std::vector<ReadAction> actions) : actions_(std::move(actions)) {}
+    explicit FakeBodyReader(std::vector<ReadAction> actions, std::vector<char> *operations = nullptr) :
+        actions_(std::move(actions)), operations_(operations) {}
 
     fiber::async::Task<IoResult<IoBufChain>> read_body(std::size_t max_bytes,
                                                        std::chrono::milliseconds timeout) noexcept {
+        if (operations_) {
+            operations_->push_back('R');
+        }
         max_bytes_.push_back(max_bytes);
         timeouts_.push_back(timeout);
         if (next_action_ >= actions_.size()) {
@@ -78,6 +83,7 @@ public:
 
 private:
     std::vector<ReadAction> actions_;
+    std::vector<char> *operations_ = nullptr;
     std::vector<std::size_t> max_bytes_;
     std::vector<std::chrono::milliseconds> timeouts_;
     std::size_t next_action_ = 0;
@@ -93,9 +99,13 @@ struct WriteAction {
 
 class FakeBodyWriter {
 public:
-    explicit FakeBodyWriter(std::vector<WriteAction> actions = {}) : actions_(std::move(actions)) {}
+    explicit FakeBodyWriter(std::vector<WriteAction> actions = {}, std::vector<char> *operations = nullptr) :
+        actions_(std::move(actions)), operations_(operations) {}
 
     fiber::async::Task<IoResult<std::size_t>> write(IoBufChain &buffer, std::chrono::milliseconds timeout) noexcept {
+        if (operations_) {
+            operations_->push_back('W');
+        }
         buffered_before_write_.push_back(buffer.readable_bytes());
         timeouts_.push_back(timeout);
 
@@ -132,6 +142,7 @@ public:
 
 private:
     std::vector<WriteAction> actions_;
+    std::vector<char> *operations_ = nullptr;
     std::vector<std::size_t> buffered_before_write_;
     std::vector<std::chrono::milliseconds> timeouts_;
     std::size_t next_action_ = 0;
@@ -256,19 +267,70 @@ TEST(HttpBodyPipeTest, WriteErrorAbortsBothEndpointsAndReportsPhase) {
     EXPECT_EQ(writer.abort_calls(), 1u);
 }
 
-TEST(HttpBodyPipeTest, RejectsZeroLowWaterBeforeStartingIo) {
-    FakeBodyReader reader({});
-    FakeBodyWriter writer;
+TEST(HttpBodyPipeTest, ZeroLowWaterDrainsEachReadBeforeReadingAgain) {
+    std::vector<char> operations;
+    FakeBodyReader reader(
+            {
+                    {.bytes = 8 * 1024},
+                    {.bytes = 6 * 1024, .complete = true},
+            },
+            &operations);
+    FakeBodyWriter writer(
+            {
+                    {.max_bytes = 3 * 1024},
+                    {.max_bytes = 5 * 1024},
+            },
+            &operations);
     HttpBodyPipeOptions options;
-    options.low_water = 0;
+    options.low_water = kUnbufferedBodyPipeLowWater;
 
     auto result = execute_pipe(reader, writer, options);
 
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().code, IoErr::Invalid);
-    EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Validate);
-    EXPECT_EQ(reader.abort_calls(), 0u);
-    EXPECT_EQ(writer.abort_calls(), 0u);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(operations, (std::vector<char>{'R', 'W', 'W', 'R', 'W'}));
+    EXPECT_EQ(reader.max_bytes(), (std::vector<std::size_t>{64 * 1024, 64 * 1024}));
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{8 * 1024, 5 * 1024, 6 * 1024}));
+    EXPECT_EQ(result->bytes_read, 14u * 1024u);
+    EXPECT_EQ(result->bytes_written, 14u * 1024u);
+    EXPECT_EQ(result->peak_buffered_bytes, 8u * 1024u);
+    EXPECT_EQ(result->read_calls, 2u);
+    EXPECT_EQ(result->write_calls, 3u);
+}
+
+TEST(HttpBodyPipeTest, ZeroLowWaterForwardsCompletionOnlyRead) {
+    std::vector<char> operations;
+    FakeBodyReader reader({{.complete = true}}, &operations);
+    FakeBodyWriter writer({}, &operations);
+    HttpBodyPipeOptions options;
+    options.low_water = kUnbufferedBodyPipeLowWater;
+
+    auto result = execute_pipe(reader, writer, options);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(operations, (std::vector<char>{'R', 'W'}));
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{0}));
+    EXPECT_EQ(result->bytes_read, 0u);
+    EXPECT_EQ(result->bytes_written, 0u);
+    EXPECT_EQ(result->read_calls, 1u);
+    EXPECT_EQ(result->write_calls, 1u);
+}
+
+TEST(HttpBodyPipeTest, RejectsInvalidBufferBoundsBeforeStartingIo) {
+    for (const HttpBodyPipeOptions options: {
+                 HttpBodyPipeOptions{.buffer_size = 0, .low_water = kUnbufferedBodyPipeLowWater},
+                 HttpBodyPipeOptions{.buffer_size = 1024, .low_water = 1025},
+         }) {
+        FakeBodyReader reader({});
+        FakeBodyWriter writer;
+
+        auto result = execute_pipe(reader, writer, options);
+
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, IoErr::Invalid);
+        EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Validate);
+        EXPECT_EQ(reader.abort_calls(), 0u);
+        EXPECT_EQ(writer.abort_calls(), 0u);
+    }
 }
 
 TEST(HttpBodyPipeTest, RejectsEmptyIncompleteReadAndZeroProgressWrite) {

@@ -8,7 +8,7 @@ namespace fiber::http {
 namespace {
 
 bool valid_options(const HttpBodyPipeOptions &options) noexcept {
-    return options.buffer_size > 0 && options.low_water > 0 && options.low_water <= options.buffer_size &&
+    return options.buffer_size > 0 && options.low_water <= options.buffer_size &&
            options.read_timeout > std::chrono::milliseconds::zero() &&
            options.write_timeout > std::chrono::milliseconds::zero();
 }
@@ -74,7 +74,9 @@ async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBo
             co_return stats;
         }
 
-        if (!input_complete && buffered < options.low_water) {
+        const bool can_read =
+                options.low_water == kUnbufferedBodyPipeLowWater ? buffered == 0 : buffered < options.low_water;
+        if (!input_complete && can_read) {
             const std::size_t capacity = options.buffer_size - buffered;
             ++stats.read_calls;
             auto read_result = co_await source.read(capacity, options.read_timeout);

@@ -674,7 +674,7 @@ interface ProxyPassOptions {
     headers?: RequestHeaderOverrides;
     responseHeaders?: RequestHeaderOverrides;
     timeout?: number; // 毫秒，默认 30000
-    flush?: boolean;  // 当前为兼容字段，写入路径本身已直写
+    flush?: boolean;  // 默认 false；true 关闭本地响应体聚合
     websocket?: boolean;
 }
 
@@ -689,6 +689,10 @@ interface HttpService {
 - 入站请求头会复制到上游，但 framing 和 hop-by-hop 头会过滤；`headers` 随后执行覆盖或删除。
 - 请求体直接从入站流转发，`ProxyPassOptions` 没有独立 body 字段。
 - 上游响应头过滤 hop-by-hop 字段后写回；`responseHeaders` 可覆盖，`null`/`undefined` 可删除。
+- 响应体默认使用 64 KiB buffer 和 48 KiB low-water；不足 low-water 的数据会等待更多上游数据或 EOF。
+- `flush: true` 关闭跨读取聚合：每次最多读取 64 KiB，当前块完整写出后才读取下一块。SSE、流式 JSON
+  和其他低延迟分块响应应显式启用。该选项只影响本地 response body pipe，不会自动设置
+  `X-Accel-Buffering: no`，也不会关闭外层代理或协议栈自身的缓冲。
 - 成功返回上游状态码，但响应此时已经由函数发送。通常应 `return service.proxyPass({...});` 或让它成为脚本的最后一个有效动作，不要再调用 `resp.send*()`。
 - `websocket: true` 支持把入站 HTTP/1.1 WebSocket Upgrade 或 HTTP/2/3 Extended CONNECT 转成上游 HTTP/1.1 Upgrade，并一直等待双向隧道结束。此模式强制上游 GET，显式非 GET method 会报错。
 - WebSocket 模式会在自定义头覆盖之后重新确立握手必需字段，`timeout` 同时作为隧道单次读写超时。
