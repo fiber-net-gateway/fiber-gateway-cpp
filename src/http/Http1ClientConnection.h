@@ -2,6 +2,7 @@
 #define FIBER_HTTP_HTTP1_CLIENT_CONNECTION_H
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 
 #include "../async/Task.h"
@@ -38,6 +39,7 @@ public:
     [[nodiscard]] bool busy() const noexcept;
     [[nodiscard]] bool connected() const noexcept;
     [[nodiscard]] bool reusable() const noexcept;
+    [[nodiscard]] std::uint64_t request_count() const noexcept { return request_count_; }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept;
     [[nodiscard]] const Http1ClientConnectionOptions &options() const noexcept { return options_; }
@@ -52,6 +54,7 @@ private:
 
     static Http1ClientConnectionOptions normalize_options(Http1ClientConnectionOptions options) noexcept;
     void mark_unusable() noexcept;
+    void record_request_started() noexcept;
     [[nodiscard]] bool acquire_exchange(ClientHttp1Exchange *exchange) noexcept;
     void release_exchange(ClientHttp1Exchange *exchange, bool keepalive) noexcept;
     void fail_exchange(ClientHttp1Exchange *exchange) noexcept;
@@ -63,6 +66,7 @@ private:
     net::TlsContext tls_ctx_;
     std::unique_ptr<HttpTransport> transport_;
     ClientHttp1Exchange *active_exchange_ = nullptr;
+    std::uint64_t request_count_ = 0;
     State state_ = State::Init;
     bool keepalive_usable_ = false;
 };

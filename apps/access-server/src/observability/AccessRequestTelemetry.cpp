@@ -41,6 +41,16 @@ bool has_inbound_context(const cat::MessageTraceContext &context) noexcept {
     return !context.message_id.empty() || !context.root_message_id.empty() || !context.parent_message_id.empty();
 }
 
+template<typename T>
+void add_integer(cat::Transaction &transaction, std::string_view key, T value) noexcept {
+    std::array<char, std::numeric_limits<T>::digits10 + 3> buffer{};
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (converted.ec == std::errc{}) {
+        (void) transaction.add_data(
+                key, std::string_view(buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())));
+    }
+}
+
 cat::MessageTraceContext read_trace_context(const http::HttpHeaders &headers) noexcept {
     return {
             .message_id = headers.get(kSpanIdLowcaseHeader, kSpanIdHeaderHash),
@@ -63,6 +73,68 @@ std::string_view response_result(const http::HttpResponseStats &response) noexce
 }
 
 } // namespace
+
+AccessProviderTransaction::AccessProviderTransaction(AccessProviderTransaction &&other) noexcept :
+    transaction_(std::move(other.transaction_)) {}
+
+AccessProviderTransaction &AccessProviderTransaction::operator=(AccessProviderTransaction &&other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    cancel_pending();
+    transaction_ = std::move(other.transaction_);
+    return *this;
+}
+
+AccessProviderTransaction::~AccessProviderTransaction() { cancel_pending(); }
+
+bool AccessProviderTransaction::valid() const noexcept { return transaction_.has_value() && transaction_->valid(); }
+
+cat::Transaction *AccessProviderTransaction::cat_parent() noexcept { return valid() ? &*transaction_ : nullptr; }
+
+void AccessProviderTransaction::add_upstream(std::string_view upstream, std::size_t attempt) noexcept {
+    if (!valid()) {
+        return;
+    }
+    (void) transaction_->add_data("upstream", upstream);
+    add_integer(*transaction_, "attempt", attempt);
+}
+
+void AccessProviderTransaction::add_connection_usage(std::uint64_t request_count) noexcept {
+    if (!valid() || request_count == 0) {
+        return;
+    }
+    add_integer(*transaction_, "connection_request_count", request_count);
+    add_integer(*transaction_, "connection_reuse_count", request_count - 1);
+}
+
+void AccessProviderTransaction::fail(std::string_view phase, common::IoErr error) noexcept {
+    if (!valid()) {
+        return;
+    }
+    if (!phase.empty()) {
+        (void) transaction_->add_data("phase", phase);
+    }
+    if (error != common::IoErr::None) {
+        (void) transaction_->add_data("io_error", common::io_err_name(error));
+    }
+    (void) transaction_->complete(cat::status::Fail);
+}
+
+void AccessProviderTransaction::complete(int status_code) noexcept {
+    if (!valid()) {
+        return;
+    }
+    add_integer(*transaction_, "status", status_code);
+    (void) transaction_->complete(status_code < 500 ? cat::status::Success : cat::status::Fail);
+}
+
+void AccessProviderTransaction::cancel_pending() noexcept {
+    if (valid()) {
+        fail("canceled", common::IoErr::Canceled);
+    }
+    transaction_.reset();
+}
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
                                                cat::CatClient *cat_client) noexcept :
@@ -203,6 +275,17 @@ void AccessRequestTelemetry::set_upstream(const ProxyUpstreamEndpoint &endpoint)
     add_root_data("upstream", endpoint.host_header);
 }
 
+AccessProviderTransaction AccessRequestTelemetry::start_provider_transaction(std::string_view name) noexcept {
+    if (!root_ || !root_->valid()) {
+        return {};
+    }
+    auto transaction = root_->start_transaction("Access.Provider", name);
+    if (!transaction) {
+        return {};
+    }
+    return AccessProviderTransaction(std::move(*transaction));
+}
+
 std::string_view AccessRequestTelemetry::trace_id() const noexcept {
     if (!context_) {
         return {};
@@ -216,7 +299,8 @@ bool AccessRequestTelemetry::inject_response_headers(http::HttpHeaders &headers)
            headers.set_view(kTraceIdHeader, id, kTraceIdLowcaseHeader.data(), kTraceIdHeaderHash) != nullptr;
 }
 
-bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers) noexcept {
+bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers,
+                                                     AccessProviderTransaction *provider) noexcept {
     if (!root_ || !root_->valid() || !context_ || context_->message_id.empty()) {
         return true;
     }
@@ -235,8 +319,12 @@ bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers)
         !headers.set_view(kSpanIdHeader, message_id, kSpanIdLowcaseHeader.data(), kSpanIdHeaderHash)) {
         return false;
     }
-    if (root_ && root_->valid()) {
-        auto event = root_->start_event("RemoteCall", "");
+    cat::Transaction *event_parent = provider ? provider->cat_parent() : nullptr;
+    if (!event_parent && root_ && root_->valid()) {
+        event_parent = &*root_;
+    }
+    if (event_parent) {
+        auto event = event_parent->start_event("RemoteCall", "");
         if (event) {
             (void) event->add_data(message_id);
             (void) event->complete(cat::status::Success);

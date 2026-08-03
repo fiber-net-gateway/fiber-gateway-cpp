@@ -99,6 +99,18 @@ void append_cat_duration(std::string &data, std::string_view key, std::chrono::m
     data.append(buffer.data(), converted.ptr);
 }
 
+void append_cat_uint64(std::string &data, std::string_view key, std::uint64_t value) noexcept {
+    std::array<char, std::numeric_limits<std::uint64_t>::digits10 + 2> buffer{};
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (converted.ec != std::errc{}) {
+        return;
+    }
+    data.push_back(' ');
+    data.append(key);
+    data.push_back('=');
+    data.append(buffer.data(), converted.ptr);
+}
+
 template<std::size_t Capacity>
 class FixedAuditText {
 public:
@@ -711,6 +723,7 @@ struct ProviderAttemptAudit {
 
 struct ProviderAttemptObservation {
     ProviderHttpTiming timing;
+    ProviderConnectionUsage connection_usage;
     std::string_view failure_source;
     std::string_view outcome;
     common::IoErr io_error = common::IoErr::None;
@@ -998,6 +1011,10 @@ public:
             }
             if (observation.timing.body_transfer_observed) {
                 append_cat_duration(data, "body_transfer_us", observation.timing.body_transfer);
+            }
+            if (observation.connection_usage.request_count != 0) {
+                append_cat_uint64(data, "connection_request_count", observation.connection_usage.request_count);
+                append_cat_uint64(data, "connection_reuse_count", observation.connection_usage.request_count - 1);
             }
             data.append(" fallback=");
             data.append(attempt.fallback ? "true" : "false");
@@ -1790,6 +1807,7 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
             .content_type = std::string(upstream.content_type()),
             .retry_after = std::string(upstream.retry_after()),
             .request_id = std::string(upstream.request_id()),
+            .connection_usage = upstream.connection_usage(),
     };
     for (;;) {
         auto chunk = co_await upstream.read_body(kBodyChunkBytes, kProviderTimeout);
@@ -1803,6 +1821,7 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
                     .message = "failed to read provider response body",
                     .failed_service_peer_id = failed_service_peer_id,
                     .timing = timing,
+                    .connection_usage = upstream.connection_usage(),
             });
         }
         const bool complete = chunk->complete();
@@ -1816,6 +1835,7 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
                     .io_error = common::IoErr::MessageTooLarge,
                     .message = "provider response body is too large",
                     .timing = timing,
+                    .connection_usage = upstream.connection_usage(),
             });
         }
         if (!append_chain(response.body, *chunk, maximum)) {
@@ -1827,6 +1847,7 @@ buffer_started_response(ProviderHttpResponseStream upstream, std::size_t maximum
                     .io_error = common::IoErr::NoMem,
                     .message = "failed to buffer provider response body",
                     .timing = timing,
+                    .connection_usage = upstream.connection_usage(),
             });
         }
         if (complete) {
@@ -2243,6 +2264,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                         std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
                         ProviderAttemptObservation{
                                 .timing = started.error().timing,
+                                .connection_usage = started.error().connection_usage,
                                 .failure_source = started.error().dns_backoff_hit ? std::string_view("dns_backoff")
                                                                                   : std::string_view("io"),
                                 .outcome = "transport_error",
@@ -2288,6 +2310,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                             std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
                             ProviderAttemptObservation{
                                     .timing = buffered.error().timing,
+                                    .connection_usage = buffered.error().connection_usage,
                                     .failure_source = "io",
                                     .outcome = "response_read_error",
                                     .io_error = buffered.error().io_error,
@@ -2332,6 +2355,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                         std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
                         ProviderAttemptObservation{
                                 .timing = buffered->timing,
+                                .connection_usage = buffered->connection_usage,
                                 .outcome = "upstream_error",
                                 .retry = selection,
                                 .status = buffered->status_code,
@@ -2370,6 +2394,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                                event::EventLoop::current().now() - attempt_started),
                                        ProviderAttemptObservation{
                                                .timing = started->timing(),
+                                               .connection_usage = started->connection_usage(),
                                                .failure_source = "io",
                                                .outcome = "invalid_content_type",
                                                .io_error = common::IoErr::Invalid,
@@ -2426,6 +2451,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                            event::EventLoop::current().now() - attempt_started),
                                    ProviderAttemptObservation{
                                            .timing = started->timing(),
+                                           .connection_usage = started->connection_usage(),
                                            .failure_source = relay_result.upstream_complete ? std::string_view{}
                                                                                             : std::string_view("io"),
                                            .outcome = outcome,
@@ -2465,6 +2491,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                    std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
                                    ProviderAttemptObservation{
                                            .timing = response.error().timing,
+                                           .connection_usage = response.error().connection_usage,
                                            .failure_source = response.error().dns_backoff_hit
                                                                      ? std::string_view("dns_backoff")
                                                                      : std::string_view("io"),
@@ -2505,6 +2532,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                            event::EventLoop::current().now() - attempt_started),
                                    ProviderAttemptObservation{
                                            .timing = response->timing,
+                                           .connection_usage = response->connection_usage,
                                            .outcome = "success",
                                            .status = response->status_code,
                                    },
@@ -2536,6 +2564,7 @@ async::Task<void> LlmRequestHandler::handle(http::HttpExchange &exchange, LlmWir
                                std::chrono::duration_cast<std::chrono::microseconds>(observed_at - attempt_started),
                                ProviderAttemptObservation{
                                        .timing = response->timing,
+                                       .connection_usage = response->connection_usage,
                                        .outcome = "upstream_error",
                                        .retry = selection,
                                        .status = response->status_code,

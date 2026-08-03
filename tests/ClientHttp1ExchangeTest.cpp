@@ -73,7 +73,14 @@ struct ContentLengthWriteOutcome {
     std::size_t redundant_pointer_written = 0;
     std::size_t redundant_chain_written = 0;
     std::size_t repeated_completion_written = 0;
+    std::uint64_t request_count_before_send = 0;
+    std::uint64_t request_count_after_send = 0;
     bool request_complete = false;
+};
+
+struct HeaderCountOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::Unknown;
+    std::uint64_t request_count = 0;
 };
 
 struct PartialChunkedWriteOutcome {
@@ -539,7 +546,9 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
         head.headers = &headers;
         head.body = fiber::http::HttpBodySpec::ContentLength(5);
 
+        outcome.request_count_before_send = connection.request_count();
         auto header_result = co_await exchange.send_header(head, false);
+        outcome.request_count_after_send = connection.request_count();
         if (!header_result) {
             outcome.body_error = header_result.error();
         } else {
@@ -835,14 +844,14 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
 }
 
 DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop, std::uint16_t port,
-                                       std::promise<fiber::common::IoErr> *result_promise) {
+                                       std::promise<HeaderCountOutcome> *result_promise) {
     fiber::http::Http1ClientConnectionOptions conn_options;
     conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
 
     fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
     auto connect_result = co_await connection.connect(5s);
     if (!connect_result) {
-        result_promise->set_value(connect_result.error());
+        result_promise->set_value({.error = connect_result.error(), .request_count = connection.request_count()});
         co_return;
     }
 
@@ -858,7 +867,10 @@ DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop, std::uint1
     head.body = fiber::http::HttpBodySpec::Auto();
 
     auto header_result = co_await exchange.send_header(head, false);
-    result_promise->set_value(header_result ? fiber::common::IoErr::None : header_result.error());
+    result_promise->set_value({
+            .error = header_result ? fiber::common::IoErr::None : header_result.error(),
+            .request_count = connection.request_count(),
+    });
     connection.close();
 }
 
@@ -1406,6 +1418,8 @@ TEST(ClientHttp1ExchangeTest, SendHeaderAndContentLengthBodyWriteRawHttp1Request
 
     ContentLengthWriteOutcome result = result_future.get();
     EXPECT_EQ(result.body_error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.request_count_before_send, 0U);
+    EXPECT_EQ(result.request_count_after_send, 1U);
     EXPECT_EQ(result.body_written, 5u);
     EXPECT_TRUE(result.request_complete);
     EXPECT_EQ(result.redundant_pointer_error, fiber::common::IoErr::None);
@@ -1623,11 +1637,13 @@ TEST(ClientHttp1ExchangeTest, RejectsAutoBodySpecForHttp1RequestHeader) {
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
-    std::promise<fiber::common::IoErr> result_promise;
+    std::promise<HeaderCountOutcome> result_promise;
     auto result_future = result_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() { return run_auto_body_spec_client(&group.at(0), port, &result_promise); });
 
-    EXPECT_EQ(result_future.get(), fiber::common::IoErr::Invalid);
+    HeaderCountOutcome result = result_future.get();
+    EXPECT_EQ(result.error, fiber::common::IoErr::Invalid);
+    EXPECT_EQ(result.request_count, 0U);
 
     CaptureOutcome capture = capture_future.get();
     EXPECT_EQ(capture.err, fiber::common::IoErr::None);

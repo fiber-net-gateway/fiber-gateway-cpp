@@ -50,6 +50,10 @@ struct ProviderHttpTiming {
     bool body_transfer_observed = false;
 };
 
+struct ProviderConnectionUsage {
+    std::uint64_t request_count = 0;
+};
+
 struct ProviderHttpError {
     ProviderHttpErrorCode code = ProviderHttpErrorCode::Connect;
     common::IoErr io_error = common::IoErr::None;
@@ -57,6 +61,7 @@ struct ProviderHttpError {
     std::uint64_t failed_service_peer_id = 0;
     bool dns_backoff_hit = false;
     ProviderHttpTiming timing;
+    ProviderConnectionUsage connection_usage;
 };
 
 struct BufferedProviderResponse {
@@ -67,6 +72,7 @@ struct BufferedProviderResponse {
     mem::IoBuf body;
     ProviderLoadBalanceLease load_balance;
     ProviderHttpTiming timing;
+    ProviderConnectionUsage connection_usage;
 };
 
 class ProviderHttpResponseStream {
@@ -86,6 +92,7 @@ public:
     [[nodiscard]] bool valid() const noexcept { return upstream_ != nullptr; }
     [[nodiscard]] std::uint64_t service_peer_id() const noexcept { return connection_.load_balance.peer_id(); }
     [[nodiscard]] const ProviderHttpTiming &timing() const noexcept { return timing_; }
+    [[nodiscard]] ProviderConnectionUsage connection_usage() const noexcept { return connection_usage_; }
 
     [[nodiscard]] async::Task<common::IoResult<mem::IoBufChain>>
     read_body(std::size_t max_bytes, std::chrono::milliseconds timeout = std::chrono::seconds(300)) noexcept;
@@ -98,10 +105,11 @@ private:
     ProviderHttpResponseStream(ProviderConnectionLease connection, std::unique_ptr<http::ClientHttp1Exchange> upstream,
                                int status_code, std::string content_type, std::string retry_after,
                                std::string request_id, std::chrono::steady_clock::time_point request_send_started,
-                               ProviderHttpTiming timing) noexcept :
+                               ProviderHttpTiming timing, ProviderConnectionUsage connection_usage) noexcept :
         connection_(std::move(connection)), upstream_(std::move(upstream)), status_code_(status_code),
         content_type_(std::move(content_type)), retry_after_(std::move(retry_after)),
-        request_id_(std::move(request_id)), request_send_started_(request_send_started), timing_(timing) {}
+        request_id_(std::move(request_id)), request_send_started_(request_send_started), timing_(timing),
+        connection_usage_(connection_usage) {}
 
     friend class ProviderHttpClient;
 
@@ -115,6 +123,7 @@ private:
     std::chrono::steady_clock::time_point request_send_started_{};
     std::chrono::steady_clock::time_point first_body_observed_at_{};
     ProviderHttpTiming timing_;
+    ProviderConnectionUsage connection_usage_;
     bool first_body_observed_ = false;
 };
 
