@@ -42,7 +42,7 @@ public:
     [[nodiscard]] cat::Transaction *cat_parent() noexcept;
 
     void add_upstream(std::string_view upstream, std::size_t attempt) noexcept;
-    void add_connection_usage(std::uint64_t request_count) noexcept;
+    void add_connection_reuse(std::uint64_t reuse_count) noexcept;
     void fail(std::string_view phase, common::IoErr error) noexcept;
     void complete(int status_code) noexcept;
 
