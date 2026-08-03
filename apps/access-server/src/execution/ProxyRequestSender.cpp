@@ -405,7 +405,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
 
         http::HttpHeaders headers(downstream.pool());
         if (!build_request_headers(*selected, request, headers) ||
-            (telemetry && !telemetry->inject_upstream_headers(headers, &provider_transaction))) {
+            (telemetry && !telemetry->inject_upstream_headers(headers, provider_transaction))) {
             provider_transaction.fail("build_headers", common::IoErr::NoMem);
             co_return std::unexpected(error(ProxyRequestErrorCode::BuildHeaders,
                                             "failed to build upstream request headers", common::IoErr::NoMem));

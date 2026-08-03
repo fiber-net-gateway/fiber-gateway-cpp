@@ -1449,6 +1449,7 @@ TEST(LlmProxyIntegrationTest, PropagatesCatContextToRemoteLimiterAndEveryProvide
         EXPECT_EQ(provider.trace_state, "tenant=blue");
     }
     EXPECT_NE(providers[0].span_id, providers[1].span_id);
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "RemoteCall"));
 
     ASSERT_TRUE(fixture.wait_for_rate_limit_requests(2));
     const auto rate_limits = fixture.observed_rate_limits();
@@ -1595,8 +1596,8 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
     EXPECT_FALSE(fixture.cat_frame_contains("skipped_attempts="));
     EXPECT_FALSE(fixture.cat_frame_contains("response_started="));
     EXPECT_FALSE(fixture.cat_frame_contains("outcome="));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", " reuse_count=0"));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", " reuse_count=1"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "reuse_count=0"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "reuse_count=1"));
     EXPECT_FALSE(fixture.cat_frame_contains("connection_request_count="));
     EXPECT_FALSE(fixture.cat_frame_contains("connection_reuse_count="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("upstream_model=upstream-anthropic-primary", "time_to_first_token_us="));

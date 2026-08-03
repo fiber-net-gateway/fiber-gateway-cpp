@@ -3,6 +3,8 @@
 #include "../observability/AiServerCatRequest.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -10,6 +12,8 @@
 #include <utility>
 
 #include <event/EventLoop.h>
+#include <fiber/cat/Status.h>
+#include <fiber/cat/Transaction.h>
 #include <http/ClientHttp1Exchange.h>
 #include <http/ClientHttp1Types.h>
 #include <http/HttpBodySpec.h>
@@ -29,7 +33,7 @@ constexpr std::uint64_t kAuthorizationHash = http::http_header_name_hash(kAuthor
 
 ProviderHttpError error(ProviderHttpErrorCode code, common::IoErr io_error, const char *message,
                         std::uint64_t failed_service_peer_id = 0, ProviderHttpTiming timing = {},
-                        bool dns_backoff_hit = false, ProviderConnectionUsage connection_usage = {}) noexcept {
+                        bool dns_backoff_hit = false) noexcept {
     return ProviderHttpError{
             .code = code,
             .io_error = io_error,
@@ -37,8 +41,32 @@ ProviderHttpError error(ProviderHttpErrorCode code, common::IoErr io_error, cons
             .failed_service_peer_id = failed_service_peer_id,
             .dns_backoff_hit = dns_backoff_hit,
             .timing = timing,
-            .connection_usage = connection_usage,
     };
+}
+
+void add_reuse_count(cat::Transaction &transaction, std::uint64_t reuse_count) noexcept {
+    if (!transaction.valid()) {
+        return;
+    }
+    std::array<char, std::numeric_limits<std::uint64_t>::digits10 + 2> buffer{};
+    const auto converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), reuse_count);
+    if (converted.ec == std::errc{}) {
+        (void) transaction.add_data(
+                "reuse_count",
+                std::string_view(buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())));
+    }
+}
+
+void add_remote_call(cat::Transaction &transaction, const cat::MessageTraceContext &context) noexcept {
+    if (!transaction.valid()) {
+        return;
+    }
+    auto event = transaction.start_event("RemoteCall", "");
+    if (!event) {
+        return;
+    }
+    (void) event->add_data(context.message_id);
+    (void) event->complete(cat::status::Success);
 }
 
 ProviderHttpErrorCode http_error_code(ProviderConnectionErrorCode code) noexcept {
@@ -173,12 +201,13 @@ std::string_view provider_http_error_code_name(ProviderHttpErrorCode code) noexc
     return "unknown";
 }
 
-async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> ProviderHttpClient::execute_buffered(
-        const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body, mem::BufPool &request_pool,
-        std::size_t max_response_bytes, ProviderServiceSelection service_selection,
-        const cat::MessageTraceContext *cat_context, std::string_view trace_state) noexcept {
+async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>>
+ProviderHttpClient::execute_buffered(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
+                                     mem::BufPool &request_pool, std::size_t max_response_bytes,
+                                     ProviderServiceSelection service_selection, cat::Transaction &cat_transaction,
+                                     std::string_view trace_state) noexcept {
     auto started = co_await start(attempt, stream, std::move(request_body), request_pool, service_selection,
-                                  cat_context, trace_state);
+                                  cat_transaction, trace_state);
     if (!started) {
         co_return std::unexpected(started.error());
     }
@@ -188,7 +217,6 @@ async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> Provider
             .content_type = std::string(upstream.content_type()),
             .retry_after = std::string(upstream.retry_after()),
             .request_id = std::string(upstream.request_id()),
-            .connection_usage = upstream.connection_usage(),
     };
     for (;;) {
         auto chunk = co_await upstream.read_body(kResponseChunkSize, kProviderTimeout);
@@ -197,8 +225,7 @@ async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> Provider
             const ProviderHttpTiming timing = upstream.timing();
             upstream.report_instance(InstanceReportOutcome::Failure);
             co_return std::unexpected(error(ProviderHttpErrorCode::ReadBody, chunk.error(),
-                                            "failed to read provider response body", failed_service_peer_id, timing,
-                                            false, upstream.connection_usage()));
+                                            "failed to read provider response body", failed_service_peer_id, timing));
         }
         const bool complete = chunk->complete();
         if (chunk->readable_bytes() > max_response_bytes ||
@@ -207,16 +234,14 @@ async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> Provider
             (void) upstream.abort(common::IoErr::MessageTooLarge);
             upstream.report_instance(InstanceReportOutcome::Neutral);
             co_return std::unexpected(error(ProviderHttpErrorCode::ResponseTooLarge, common::IoErr::MessageTooLarge,
-                                            "provider response body is too large", 0, timing, false,
-                                            upstream.connection_usage()));
+                                            "provider response body is too large", 0, timing));
         }
         if (!append_chain(response.body, *chunk, max_response_bytes)) {
             const ProviderHttpTiming timing = upstream.timing();
             (void) upstream.abort(common::IoErr::NoMem);
             upstream.report_instance(InstanceReportOutcome::Neutral);
             co_return std::unexpected(error(ProviderHttpErrorCode::ReadBody, common::IoErr::NoMem,
-                                            "failed to buffer provider response body", 0, timing, false,
-                                            upstream.connection_usage()));
+                                            "failed to buffer provider response body", 0, timing));
         }
         if (complete) {
             break;
@@ -230,7 +255,7 @@ async::Task<std::expected<BufferedProviderResponse, ProviderHttpError>> Provider
 async::Task<std::expected<ProviderHttpResponseStream, ProviderHttpError>>
 ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, mem::IoBufChain request_body,
                           mem::BufPool &request_pool, ProviderServiceSelection service_selection,
-                          const cat::MessageTraceContext *cat_context, std::string_view trace_state) noexcept {
+                          cat::Transaction &cat_transaction, std::string_view trace_state) noexcept {
     auto acquired = co_await connections_->acquire(attempt, kConnectTimeout, service_selection);
     if (!acquired) {
         co_return std::unexpected(error(http_error_code(acquired.error().code), acquired.error().io_error,
@@ -238,22 +263,24 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
                                         acquired.error().dns_backoff_hit));
     }
     ProviderConnectionLease connection = std::move(*acquired);
-    const ProviderConnectionUsage connection_usage{
-            .reuse_count = connection.connection->request_count(),
-            .observed = true,
-    };
+    add_reuse_count(cat_transaction, connection.connection->request_count());
+    auto remote_context = cat_transaction.message_trace().create_remote_context(request_pool);
+    if (remote_context) {
+        add_remote_call(cat_transaction, *remote_context);
+    }
 
     auto upstream = std::unique_ptr<http::ClientHttp1Exchange>(
             new (std::nothrow) http::ClientHttp1Exchange(*connection.connection, request_pool));
     if (!upstream) {
-        co_return std::unexpected(error(ProviderHttpErrorCode::Connect, common::IoErr::NoMem,
-                                        "failed to allocate provider exchange", 0, {}, false, connection_usage));
+        co_return std::unexpected(
+                error(ProviderHttpErrorCode::Connect, common::IoErr::NoMem, "failed to allocate provider exchange"));
     }
     http::HttpHeaders request_headers(request_pool);
-    auto built_headers = build_request_headers(connection, attempt, stream, request_headers, cat_context, trace_state);
+    auto built_headers = build_request_headers(connection, attempt, stream, request_headers,
+                                               remote_context ? &*remote_context : nullptr, trace_state);
     if (!built_headers) {
         co_return std::unexpected(error(ProviderHttpErrorCode::SendHeader, built_headers.error(),
-                                        "failed to build provider request headers", 0, {}, false, connection_usage));
+                                        "failed to build provider request headers"));
     }
     const std::size_t request_size = request_body.readable_bytes();
     http::Http1RequestHead request_head{
@@ -268,17 +295,16 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
         const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
         connection.load_balance.report(InstanceReportOutcome::Failure);
         co_return std::unexpected(error(ProviderHttpErrorCode::SendHeader, sent_header.error(),
-                                        "failed to send provider headers", failed_service_peer_id, {}, false,
-                                        connection_usage));
+                                        "failed to send provider headers", failed_service_peer_id));
     }
     if (request_size > 0) {
         auto sent_body = co_await upstream->write_all(std::move(request_body), kProviderTimeout);
         if (!sent_body || *sent_body != request_size) {
             const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
             connection.load_balance.report(InstanceReportOutcome::Failure);
-            co_return std::unexpected(
-                    error(ProviderHttpErrorCode::SendBody, sent_body ? common::IoErr::Invalid : sent_body.error(),
-                          "failed to send provider request body", failed_service_peer_id, {}, false, connection_usage));
+            co_return std::unexpected(error(ProviderHttpErrorCode::SendBody,
+                                            sent_body ? common::IoErr::Invalid : sent_body.error(),
+                                            "failed to send provider request body", failed_service_peer_id));
         }
     }
 
@@ -289,8 +315,7 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
             const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
             connection.load_balance.report(InstanceReportOutcome::Failure);
             co_return std::unexpected(error(ProviderHttpErrorCode::ReadHeader, received.error(),
-                                            "failed to read provider response headers", failed_service_peer_id, {},
-                                            false, connection_usage));
+                                            "failed to read provider response headers", failed_service_peer_id));
         }
         if (!(*received)->is_informational()) {
             response_head = *received;
@@ -306,14 +331,13 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
         const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
         connection.load_balance.report(InstanceReportOutcome::Failure);
         co_return std::unexpected(error(ProviderHttpErrorCode::InvalidResponse, common::IoErr::Invalid,
-                                        "invalid provider response status", failed_service_peer_id, timing, false,
-                                        connection_usage));
+                                        "invalid provider response status", failed_service_peer_id, timing));
     }
 
     co_return ProviderHttpResponseStream(
             std::move(connection), std::move(upstream), response_head->status_code,
             header_copy(response_head->headers, "content-type"), header_copy(response_head->headers, "retry-after"),
-            header_copy(response_head->headers, "x-request-id"), request_send_started, timing, connection_usage);
+            header_copy(response_head->headers, "x-request-id"), request_send_started, timing);
 }
 
 async::Task<common::IoResult<mem::IoBufChain>>
