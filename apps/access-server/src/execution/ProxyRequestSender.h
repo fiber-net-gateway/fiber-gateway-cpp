@@ -6,6 +6,7 @@
 #include "../../../../src/http/ClientHttp1Exchange.h"
 #include "../../../../src/http/LocalHttp1ConnectionPoolSet.h"
 #include "../../../../src/net/IpAddress.h"
+#include "../observability/AccessRequestTelemetry.h"
 #include "../runtime/SmoothWeightedRoundRobin.h"
 #include "ProxyRequestPlan.h"
 
@@ -21,8 +22,6 @@
 #include <vector>
 
 namespace fiber::access_server {
-
-class AccessRequestTelemetry;
 
 enum class ProxyRequestErrorCode : std::uint8_t {
     SelectUpstream,
@@ -88,7 +87,7 @@ public:
     ProxyUpstreamResponse &operator=(const ProxyUpstreamResponse &) = delete;
     ProxyUpstreamResponse(ProxyUpstreamResponse &&) noexcept = default;
     ProxyUpstreamResponse &operator=(ProxyUpstreamResponse &&other) noexcept;
-    ~ProxyUpstreamResponse() = default;
+    ~ProxyUpstreamResponse();
 
     [[nodiscard]] bool valid() const noexcept { return exchange_ != nullptr && head_ != nullptr; }
     [[nodiscard]] const http::Http1ResponseHead &head() const noexcept;
@@ -109,8 +108,9 @@ private:
     friend class ProxyRequestSender;
 
     ProxyUpstreamResponse(ProxyUpstreamEndpoint endpoint, http::LocalHttp1ConnectionPoolSet::Lease lease,
-                          std::unique_ptr<http::ClientHttp1Exchange> exchange,
-                          const http::Http1ResponseHead *head) noexcept;
+                          std::unique_ptr<http::ClientHttp1Exchange> exchange, const http::Http1ResponseHead *head,
+                          AccessProviderTransaction provider_transaction) noexcept;
+    void finish_provider_transaction() noexcept;
 
     ProxyUpstreamEndpoint endpoint_;
     // exchange_ must be destroyed before lease_ so the connection becomes idle
@@ -118,6 +118,7 @@ private:
     http::LocalHttp1ConnectionPoolSet::Lease lease_;
     std::unique_ptr<http::ClientHttp1Exchange> exchange_;
     const http::Http1ResponseHead *head_ = nullptr;
+    AccessProviderTransaction provider_transaction_;
 };
 
 using ProxyUpstreamResponseResult = std::expected<ProxyUpstreamResponse, ProxyRequestError>;

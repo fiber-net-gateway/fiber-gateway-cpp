@@ -962,6 +962,7 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
         co_return std::unexpected(encode_result.error());
     }
 
+    conn_->record_request_started();
     const TimePoint deadline = deadline_after(timeout);
     auto write_result = co_await transport_write_all(transport, header_buf.readable_data(), header_buf.readable(),
                                                      remaining_timeout(deadline));

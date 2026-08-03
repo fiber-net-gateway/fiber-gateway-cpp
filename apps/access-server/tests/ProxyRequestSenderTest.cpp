@@ -5,10 +5,12 @@
 #include <cstring>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -19,9 +21,14 @@
 #include "execution/AccessRequestHandler.h"
 #include "execution/ProxyExecutor.h"
 #include "execution/ProxyRequestSender.h"
+#include "fiber/cat/CatClient.h"
+#include "fiber/cat/CatClientConfig.h"
 #include "http/Http1Connection.h"
 #include "http/HttpServer.h"
 #include "net/SocketAddress.h"
+#include "net/TcpListener.h"
+#include "net/TcpStream.h"
+#include "observability/AccessRequestTelemetry.h"
 
 namespace {
 
@@ -73,6 +80,25 @@ struct ServiceSelectorState {
     std::string bad_host_header;
     std::size_t select_count = 0;
     std::vector<std::pair<std::uint64_t, bool>> reports;
+};
+
+struct CatFrameCapture {
+    mutable std::mutex mutex;
+    std::vector<std::vector<std::uint8_t>> frames;
+
+    [[nodiscard]] bool contains(std::string_view first, std::string_view second = {}) const {
+        std::lock_guard lock(mutex);
+        for (const auto &frame: frames) {
+            const bool contains_first =
+                    std::search(frame.begin(), frame.end(), first.begin(), first.end()) != frame.end();
+            const bool contains_second = second.empty() || std::search(frame.begin(), frame.end(), second.begin(),
+                                                                       second.end()) != frame.end();
+            if (contains_first && contains_second) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 class RecordingTransport final : public fiber::test::HttpTransportStub {
@@ -184,6 +210,67 @@ fiber::common::IoResult<std::uint16_t> bound_port(int fd) {
         return std::unexpected(fiber::common::IoErr::NotSupported);
     }
     return address.port();
+}
+
+fiber::async::Task<fiber::common::IoResult<void>> read_exact(fiber::net::TcpStream &stream, std::uint8_t *data,
+                                                             std::size_t size) noexcept {
+    std::size_t offset = 0;
+    while (offset < size) {
+        auto read = co_await stream.read(data + offset, size - offset, 5s);
+        if (!read) {
+            co_return std::unexpected(read.error());
+        }
+        if (*read == 0) {
+            co_return std::unexpected(fiber::common::IoErr::NotConnected);
+        }
+        offset += *read;
+    }
+    co_return fiber::common::IoResult<void>{};
+}
+
+fiber::async::DetachedTask collect_cat_frames(fiber::net::TcpListener *listener, CatFrameCapture *capture,
+                                              std::promise<void> *done) noexcept {
+    auto accepted = co_await listener->accept();
+    if (!accepted) {
+        done->set_value();
+        co_return;
+    }
+    listener->close();
+    fiber::net::TcpStream stream(fiber::event::EventLoop::current(), accepted->release_fd(), accepted->take_peer());
+    for (;;) {
+        std::array<std::uint8_t, 4> prefix{};
+        auto prefix_result = co_await read_exact(stream, prefix.data(), prefix.size());
+        if (!prefix_result) {
+            break;
+        }
+        const std::size_t payload_size = static_cast<std::size_t>(prefix[0]) << 24U |
+                                         static_cast<std::size_t>(prefix[1]) << 16U |
+                                         static_cast<std::size_t>(prefix[2]) << 8U | prefix[3];
+        if (payload_size == 0 || payload_size > 2 * 1024 * 1024) {
+            break;
+        }
+        std::vector<std::uint8_t> frame(prefix.begin(), prefix.end());
+        frame.resize(prefix.size() + payload_size);
+        auto payload_result = co_await read_exact(stream, frame.data() + prefix.size(), payload_size);
+        if (!payload_result) {
+            break;
+        }
+        std::lock_guard lock(capture->mutex);
+        capture->frames.push_back(std::move(frame));
+    }
+    stream.close();
+    done->set_value();
+}
+
+bool wait_for_cat_frame(const CatFrameCapture &capture, std::string_view first, std::string_view second = {}) {
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (capture.contains(first, second)) {
+            return true;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    return capture.contains(first, second);
 }
 
 std::string consume_chain(fiber::mem::IoBufChain chain) {
@@ -338,9 +425,9 @@ fiber::async::Task<fiber::common::IoResult<void>>
 execute_proxy(void *context, fiber::http::HttpExchange &exchange,
               const fiber::access_server::PreparedProxyRequest &request,
               std::span<const fiber::access_server::EvaluatedHeader> base_headers,
-              fiber::access_server::AccessRequestTelemetry *) noexcept {
+              fiber::access_server::AccessRequestTelemetry *telemetry) noexcept {
     auto &state = *static_cast<ProxyAdapterState *>(context);
-    auto started = co_await state.sender->start(exchange, request);
+    auto started = co_await state.sender->start(exchange, request, telemetry);
     if (!started) {
         state.error = started.error();
         co_return std::unexpected(started.error().io_error == fiber::common::IoErr::None ? fiber::common::IoErr::Invalid
@@ -370,19 +457,24 @@ execute_proxy(void *context, fiber::http::HttpExchange &exchange,
     });
 }
 
-fiber::async::DetachedTask run_downstream(fiber::event::EventLoop *loop,
-                                          const fiber::access_server::RouteConfigStore *store,
-                                          fiber::access_server::AccessProxyAdapter proxy_adapter, std::string request,
-                                          std::string *output, std::promise<void> *done,
-                                          std::promise<RecordingTransport *> *transport_ready = nullptr,
-                                          bool hold_open_after_input = false) {
+fiber::async::DetachedTask
+run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteConfigStore *store,
+               fiber::access_server::AccessProxyAdapter proxy_adapter, std::string request, std::string *output,
+               std::promise<void> *done, std::promise<RecordingTransport *> *transport_ready = nullptr,
+               bool hold_open_after_input = false, fiber::cat::CatClient *cat_client = nullptr) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, hold_open_after_input);
     if (transport_ready) {
         transport_ready->set_value(transport.get());
     }
     fiber::access_server::AccessRequestHandler handler(*store, {}, {}, proxy_adapter);
-    fiber::http::HttpHandler http_handler = [&handler](fiber::http::HttpExchange &exchange) {
-        return handler.handle(exchange);
+    fiber::http::HttpHandler http_handler =
+            [&handler, cat_client](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        if (!cat_client) {
+            co_await handler.handle(exchange);
+            co_return;
+        }
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, cat_client);
+        co_await handler.handle(exchange, &telemetry);
     };
     fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(http_handler), {});
     co_await connection.run();
@@ -525,7 +617,50 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     fiber::event::EventLoopGroup group(1);
     fiber::http::LocalHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
+
+    fiber::net::TcpListener cat_collector(group.at(0));
+    ASSERT_TRUE(cat_collector.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {}));
+    auto cat_port = bound_port(cat_collector.fd());
+    ASSERT_TRUE(cat_port);
+    fiber::cat::CatClientConfigParams cat_params{
+            .app_key = "access-server-test",
+            .hostname = "test-host",
+            .ip = "127.0.0.1",
+            .thread_group_name = "test",
+            .thread_id = "0",
+            .thread_name = "worker",
+    };
+    cat_params.bootstrap_collectors.emplace_back(fiber::net::IpAddress::loopback_v4(), *cat_port);
+    auto cat_config = fiber::cat::CatClientConfig::create(std::move(cat_params));
+    ASSERT_TRUE(cat_config);
+    fiber::cat::CatClientOptions cat_options;
+    cat_options.enable_heartbeat = false;
+    cat_options.enable_system_stats = false;
+    cat_options.collector_connect_timeout = 10ms;
+    cat_options.collector_write_timeout = 10ms;
+    cat_options.reconnect_initial_delay = 10ms;
+    cat_options.reconnect_max_delay = 10ms;
+    cat_options.shutdown_drain_timeout = 20ms;
+    cat_options.aggregation_flush_interval = 10ms;
+    auto created_cat_client =
+            fiber::cat::CatClient::create(group.at(0), std::move(*cat_config), std::move(cat_options));
+    ASSERT_TRUE(created_cat_client);
+    std::unique_ptr<fiber::cat::CatClient> cat_client = std::move(*created_cat_client);
+    CatFrameCapture cat_capture;
+    std::promise<void> cat_capture_done_promise;
+    auto cat_capture_done = cat_capture_done_promise.get_future();
+    std::promise<bool> cat_started_promise;
+    auto cat_started = cat_started_promise.get_future();
+
     group.start();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return collect_cat_frames(&cat_collector, &cat_capture, &cat_capture_done_promise); });
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        cat_started_promise.set_value(cat_client->start().has_value());
+        co_return;
+    });
+    ASSERT_EQ(cat_started.wait_for(2s), std::future_status::ready);
+    ASSERT_TRUE(cat_started.get());
 
     UpstreamState upstream_state;
     std::promise<std::uint16_t> port_promise;
@@ -568,7 +703,7 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
                                       .context = &adapter_state,
                                       .execute = execute_proxy,
                               },
-                              std::move(requests), &output, &request_promise);
+                              std::move(requests), &output, &request_promise, nullptr, false, cat_client.get());
     });
 
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
@@ -598,11 +733,23 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     EXPECT_NE(first.remote_port, 0);
     EXPECT_EQ(second.remote_port, first.remote_port);
     EXPECT_EQ(count_status(output, "HTTP/1.1 204 No Content\r\n"), 2U);
+    EXPECT_TRUE(
+            wait_for_cat_frame(cat_capture, "Access.Provider", "connection_request_count=1&connection_reuse_count=0"));
+    EXPECT_TRUE(
+            wait_for_cat_frame(cat_capture, "Access.Provider", "connection_request_count=2&connection_reuse_count=1"));
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
     ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    std::promise<void> cat_shutdown_promise;
+    auto cat_shutdown = cat_shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await cat_client->shutdown();
+        cat_shutdown_promise.set_value();
+    });
+    ASSERT_EQ(cat_shutdown.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(cat_capture_done.wait_for(2s), std::future_status::ready);
     group.stop();
     group.join();
     delete server;

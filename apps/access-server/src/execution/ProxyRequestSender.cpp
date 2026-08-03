@@ -128,21 +128,38 @@ std::string_view proxy_request_error_code_name(ProxyRequestErrorCode code) noexc
 ProxyUpstreamResponse::ProxyUpstreamResponse(ProxyUpstreamEndpoint endpoint,
                                              http::LocalHttp1ConnectionPoolSet::Lease lease,
                                              std::unique_ptr<http::ClientHttp1Exchange> exchange,
-                                             const http::Http1ResponseHead *head) noexcept :
-    endpoint_(std::move(endpoint)), lease_(std::move(lease)), exchange_(std::move(exchange)), head_(head) {}
+                                             const http::Http1ResponseHead *head,
+                                             AccessProviderTransaction provider_transaction) noexcept :
+    endpoint_(std::move(endpoint)), lease_(std::move(lease)), exchange_(std::move(exchange)), head_(head),
+    provider_transaction_(std::move(provider_transaction)) {}
+
+ProxyUpstreamResponse::~ProxyUpstreamResponse() { finish_provider_transaction(); }
 
 ProxyUpstreamResponse &ProxyUpstreamResponse::operator=(ProxyUpstreamResponse &&other) noexcept {
     if (this == &other) {
         return *this;
     }
+    finish_provider_transaction();
     exchange_.reset();
     lease_.reset();
     endpoint_ = std::move(other.endpoint_);
     lease_ = std::move(other.lease_);
     exchange_ = std::move(other.exchange_);
     head_ = other.head_;
+    provider_transaction_ = std::move(other.provider_transaction_);
     other.head_ = nullptr;
     return *this;
+}
+
+void ProxyUpstreamResponse::finish_provider_transaction() noexcept {
+    if (!provider_transaction_.valid()) {
+        return;
+    }
+    if (exchange_ && exchange_->response_complete() && head_) {
+        provider_transaction_.complete(head_->status_code);
+        return;
+    }
+    provider_transaction_.fail("canceled", common::IoErr::Canceled);
 }
 
 const http::Http1ResponseHead &ProxyUpstreamResponse::head() const noexcept {
@@ -157,21 +174,41 @@ ProxyUpstreamResponse::read_body(std::size_t max_bytes, std::chrono::millisecond
     if (!exchange_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await exchange_->read_body(max_bytes, timeout);
+    auto result = co_await exchange_->read_body(max_bytes, timeout);
+    if (!result) {
+        provider_transaction_.fail("read_response_body", result.error());
+        co_return std::unexpected(result.error());
+    }
+    if (result->complete() && head_) {
+        provider_transaction_.complete(head_->status_code);
+    }
+    co_return std::move(*result);
 }
 
 async::Task<common::IoResult<void>> ProxyUpstreamResponse::discard_body(std::chrono::milliseconds timeout) noexcept {
     if (!exchange_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_return co_await exchange_->discard_response_body(timeout);
+    auto result = co_await exchange_->discard_response_body(timeout);
+    if (!result) {
+        provider_transaction_.fail("read_response_body", result.error());
+        co_return std::unexpected(result.error());
+    }
+    if (head_) {
+        provider_transaction_.complete(head_->status_code);
+    }
+    co_return common::IoResult<void>{};
 }
 
 common::IoResult<void> ProxyUpstreamResponse::switch_to_raw_stream() noexcept {
     if (!exchange_) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    return exchange_->switch_to_raw_stream();
+    auto result = exchange_->switch_to_raw_stream();
+    if (!result) {
+        provider_transaction_.fail("switch_to_raw_stream", result.error());
+    }
+    return result;
 }
 
 async::Task<void> ProxyUpstreamResponse::relay_websocket(http::HttpExchange &downstream,
@@ -180,13 +217,18 @@ async::Task<void> ProxyUpstreamResponse::relay_websocket(http::HttpExchange &dow
         co_return;
     }
     co_await http::proxy_core::relay_websocket_tunnel(downstream, *exchange_, timeout, timeout);
+    if (head_) {
+        provider_transaction_.complete(head_->status_code);
+    }
 }
 
 common::IoResult<void> ProxyUpstreamResponse::abort(common::IoErr reason) noexcept {
     if (!exchange_) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    return exchange_->abort(reason);
+    auto result = exchange_->abort(reason);
+    provider_transaction_.fail("aborted", reason == common::IoErr::None ? common::IoErr::Canceled : reason);
+    return result;
 }
 
 ProxyRequestSender::ProxyRequestSender(http::LocalHttp1ConnectionPoolSet &pool, ProxyServiceSelector service_selector,
@@ -342,8 +384,16 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                                                              common::IoErr::NotFound));
         }
 
+        const std::string_view provider_name =
+                request.upstream_kind == ProxyUpstreamKind::Service ? request.service : selected->host_header;
+        AccessProviderTransaction provider_transaction =
+                telemetry ? telemetry->start_provider_transaction(provider_name) : AccessProviderTransaction{};
+        provider_transaction.add_upstream(selected->host_header, attempt + 1);
+
         auto connected = co_await connect(*selected);
         if (!connected) {
+            provider_transaction.fail(proxy_request_error_code_name(connected.error().code),
+                                      connected.error().io_error);
             report_selection(*selected, false);
             previous_endpoint = std::move(*selected);
             previous_error = connected.error();
@@ -355,7 +405,8 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
 
         http::HttpHeaders headers(downstream.pool());
         if (!build_request_headers(*selected, request, headers) ||
-            (telemetry && !telemetry->inject_upstream_headers(headers))) {
+            (telemetry && !telemetry->inject_upstream_headers(headers, &provider_transaction))) {
+            provider_transaction.fail("build_headers", common::IoErr::NoMem);
             co_return std::unexpected(error(ProxyRequestErrorCode::BuildHeaders,
                                             "failed to build upstream request headers", common::IoErr::NoMem));
         }
@@ -363,6 +414,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
         auto upstream = std::unique_ptr<http::ClientHttp1Exchange>(
                 new (std::nothrow) http::ClientHttp1Exchange(*connected->connection, downstream.pool()));
         if (!upstream || !upstream->valid()) {
+            provider_transaction.fail("create_exchange", upstream ? common::IoErr::Busy : common::IoErr::NoMem);
             report_selection(*selected, false);
             co_return std::unexpected(error(ProxyRequestErrorCode::Connect, "failed to create upstream HTTP exchange",
                                             upstream ? common::IoErr::Busy : common::IoErr::NoMem));
@@ -376,8 +428,15 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                 .headers = &headers,
                 .body = request.body,
         };
+        const std::uint64_t request_count_before_send = connected->connection->request_count();
         auto sent_header = co_await upstream->send_header(head, end_stream);
+        const std::uint64_t request_count_after_send = connected->connection->request_count();
+        if (sent_header || request_count_after_send != request_count_before_send ||
+            request_count_before_send == std::numeric_limits<std::uint64_t>::max()) {
+            provider_transaction.add_connection_usage(request_count_after_send);
+        }
         if (!sent_header) {
+            provider_transaction.fail("send_header", sent_header.error());
             report_selection(*selected, false);
             co_return std::unexpected(error(ProxyRequestErrorCode::SendHeader, "failed to send upstream request header",
                                             sent_header.error()));
@@ -390,6 +449,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                 auto body = co_await downstream.read_body(options_.body_chunk_size);
                 if (!body) {
                     (void) upstream->abort(body.error());
+                    provider_transaction.fail("read_request_body", body.error());
                     report_selection(*selected, false);
                     co_return std::unexpected(error(ProxyRequestErrorCode::ReadRequestBody,
                                                     "failed to read downstream request body", body.error()));
@@ -398,6 +458,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                 const std::size_t body_bytes = body->readable_bytes();
                 if (!forward_state.accepts(body_bytes)) {
                     (void) upstream->abort(common::IoErr::Invalid);
+                    provider_transaction.fail("read_request_body", common::IoErr::Invalid);
                     report_selection(*selected, false);
                     co_return std::unexpected(error(ProxyRequestErrorCode::ReadRequestBody,
                                                     "downstream request body does not match Content-Length",
@@ -406,6 +467,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                 if (request.max_request_body_size != 0 &&
                     body_bytes > request.max_request_body_size - std::min(received, request.max_request_body_size)) {
                     (void) upstream->abort(common::IoErr::MessageTooLarge);
+                    provider_transaction.fail("request_body_too_large", common::IoErr::MessageTooLarge);
                     report_selection(*selected, false);
                     co_return std::unexpected(error(ProxyRequestErrorCode::RequestBodyTooLarge,
                                                     "downstream request body exceeds route limit",
@@ -415,12 +477,14 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                 if (forward_state.should_write(body_bytes)) {
                     auto written = co_await upstream->write_all(std::move(*body));
                     if (!written) {
+                        provider_transaction.fail("send_request_body", written.error());
                         report_selection(*selected, false);
                         co_return std::unexpected(error(ProxyRequestErrorCode::SendRequestBody,
                                                         "failed to send upstream request body", written.error()));
                     }
                     if (*written != body_bytes) {
                         (void) upstream->abort(common::IoErr::Invalid);
+                        provider_transaction.fail("send_request_body", common::IoErr::Invalid);
                         report_selection(*selected, false);
                         co_return std::unexpected(error(ProxyRequestErrorCode::SendRequestBody,
                                                         "upstream request body write was incomplete",
@@ -431,6 +495,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                 if (complete) {
                     if (request.body.is_content_length() && !forward_state.complete()) {
                         (void) upstream->abort(common::IoErr::Invalid);
+                        provider_transaction.fail("read_request_body", common::IoErr::Invalid);
                         report_selection(*selected, false);
                         co_return std::unexpected(error(ProxyRequestErrorCode::ReadRequestBody,
                                                         "downstream request body ended before Content-Length",
@@ -445,6 +510,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
         for (;;) {
             auto received = co_await upstream->read_header(response_header_timeout(request.timeout_millis));
             if (!received) {
+                provider_transaction.fail("read_response_header", received.error());
                 report_selection(*selected, false);
                 co_return std::unexpected(error(ProxyRequestErrorCode::ReadResponseHeader,
                                                 "failed to read upstream response header", received.error()));
@@ -457,7 +523,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
 
         report_selection(*selected, response_head->status_code < 500);
         co_return ProxyUpstreamResponse(std::move(*selected), std::move(connected->lease), std::move(upstream),
-                                        response_head);
+                                        response_head, std::move(provider_transaction));
     }
 
     co_return std::unexpected(previous_error.value_or(

@@ -1,5 +1,6 @@
 #include "Http1ClientConnection.h"
 
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -126,6 +127,12 @@ bool Http1ClientConnection::connected() const noexcept {
 }
 
 bool Http1ClientConnection::reusable() const noexcept { return idle() && keepalive_usable_; }
+
+void Http1ClientConnection::record_request_started() noexcept {
+    if (request_count_ != std::numeric_limits<std::uint64_t>::max()) {
+        ++request_count_;
+    }
+}
 
 event::EventLoop &Http1ClientConnection::loop() const noexcept {
     FIBER_ASSERT(loop_ != nullptr);
