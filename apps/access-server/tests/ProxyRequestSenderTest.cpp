@@ -733,10 +733,10 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     EXPECT_NE(first.remote_port, 0);
     EXPECT_EQ(second.remote_port, first.remote_port);
     EXPECT_EQ(count_status(output, "HTTP/1.1 204 No Content\r\n"), 2U);
-    EXPECT_TRUE(
-            wait_for_cat_frame(cat_capture, "Access.Provider", "connection_request_count=1&connection_reuse_count=0"));
-    EXPECT_TRUE(
-            wait_for_cat_frame(cat_capture, "Access.Provider", "connection_request_count=2&connection_reuse_count=1"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=0"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=1"));
+    EXPECT_FALSE(cat_capture.contains("connection_request_count="));
+    EXPECT_FALSE(cat_capture.contains("connection_reuse_count="));
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();

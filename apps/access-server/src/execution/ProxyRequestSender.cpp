@@ -11,7 +11,6 @@
 #include "../../../../src/net/SocketAddress.h"
 
 #include <algorithm>
-#include <limits>
 #include <new>
 #include <utility>
 
@@ -399,6 +398,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
             previous_error = connected.error();
             continue;
         }
+        provider_transaction.add_connection_reuse(connected->connection->request_count());
         if (telemetry) {
             telemetry->set_upstream(*selected);
         }
@@ -428,13 +428,7 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
                 .headers = &headers,
                 .body = request.body,
         };
-        const std::uint64_t request_count_before_send = connected->connection->request_count();
         auto sent_header = co_await upstream->send_header(head, end_stream);
-        const std::uint64_t request_count_after_send = connected->connection->request_count();
-        if (sent_header || request_count_after_send != request_count_before_send ||
-            request_count_before_send == std::numeric_limits<std::uint64_t>::max()) {
-            provider_transaction.add_connection_usage(request_count_after_send);
-        }
         if (!sent_header) {
             provider_transaction.fail("send_header", sent_header.error());
             report_selection(*selected, false);

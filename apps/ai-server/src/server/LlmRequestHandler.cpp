@@ -1012,9 +1012,8 @@ public:
             if (observation.timing.body_transfer_observed) {
                 append_cat_duration(data, "body_transfer_us", observation.timing.body_transfer);
             }
-            if (observation.connection_usage.request_count != 0) {
-                append_cat_uint64(data, "connection_request_count", observation.connection_usage.request_count);
-                append_cat_uint64(data, "connection_reuse_count", observation.connection_usage.request_count - 1);
+            if (observation.connection_usage.observed) {
+                append_cat_uint64(data, "reuse_count", observation.connection_usage.reuse_count);
             }
             data.append(" fallback=");
             data.append(attempt.fallback ? "true" : "false");

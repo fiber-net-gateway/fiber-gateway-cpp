@@ -1595,8 +1595,10 @@ TEST(LlmProxyIntegrationTest, CatUrlTransactionNamesIncludeAuthorizedModelForBot
     EXPECT_FALSE(fixture.cat_frame_contains("skipped_attempts="));
     EXPECT_FALSE(fixture.cat_frame_contains("response_started="));
     EXPECT_FALSE(fixture.cat_frame_contains("outcome="));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "connection_request_count=1 connection_reuse_count=0"));
-    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "connection_request_count=2 connection_reuse_count=1"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", " reuse_count=0"));
+    EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", " reuse_count=1"));
+    EXPECT_FALSE(fixture.cat_frame_contains("connection_request_count="));
+    EXPECT_FALSE(fixture.cat_frame_contains("connection_reuse_count="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("upstream_model=upstream-anthropic-primary", "time_to_first_token_us="));
     EXPECT_FALSE(fixture.cat_frame_contains("upstream_model=upstream-primary", "time_to_first_token_us="));
     EXPECT_TRUE(fixture.wait_for_cat_frame("LLM.Provider", "body_transfer_us="));

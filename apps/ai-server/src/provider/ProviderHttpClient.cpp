@@ -238,19 +238,22 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
                                         acquired.error().dns_backoff_hit));
     }
     ProviderConnectionLease connection = std::move(*acquired);
-    ProviderConnectionUsage connection_usage;
+    const ProviderConnectionUsage connection_usage{
+            .reuse_count = connection.connection->request_count(),
+            .observed = true,
+    };
 
     auto upstream = std::unique_ptr<http::ClientHttp1Exchange>(
             new (std::nothrow) http::ClientHttp1Exchange(*connection.connection, request_pool));
     if (!upstream) {
-        co_return std::unexpected(
-                error(ProviderHttpErrorCode::Connect, common::IoErr::NoMem, "failed to allocate provider exchange"));
+        co_return std::unexpected(error(ProviderHttpErrorCode::Connect, common::IoErr::NoMem,
+                                        "failed to allocate provider exchange", 0, {}, false, connection_usage));
     }
     http::HttpHeaders request_headers(request_pool);
     auto built_headers = build_request_headers(connection, attempt, stream, request_headers, cat_context, trace_state);
     if (!built_headers) {
         co_return std::unexpected(error(ProviderHttpErrorCode::SendHeader, built_headers.error(),
-                                        "failed to build provider request headers"));
+                                        "failed to build provider request headers", 0, {}, false, connection_usage));
     }
     const std::size_t request_size = request_body.readable_bytes();
     http::Http1RequestHead request_head{
@@ -260,13 +263,7 @@ ProviderHttpClient::start(const ResolvedProviderAttempt &attempt, bool stream, m
             .body = http::HttpBodySpec::ContentLength(request_size),
     };
     const auto request_send_started = event::EventLoop::current().now();
-    const std::uint64_t request_count_before_send = connection.connection->request_count();
     auto sent_header = co_await upstream->send_header(request_head, request_size == 0, kProviderTimeout);
-    const std::uint64_t request_count_after_send = connection.connection->request_count();
-    if (sent_header || request_count_after_send != request_count_before_send ||
-        request_count_before_send == std::numeric_limits<std::uint64_t>::max()) {
-        connection_usage.request_count = request_count_after_send;
-    }
     if (!sent_header) {
         const std::uint64_t failed_service_peer_id = connection.load_balance.peer_id();
         connection.load_balance.report(InstanceReportOutcome::Failure);

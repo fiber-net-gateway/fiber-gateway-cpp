@@ -51,7 +51,8 @@ struct ProviderHttpTiming {
 };
 
 struct ProviderConnectionUsage {
-    std::uint64_t request_count = 0;
+    std::uint64_t reuse_count = 0;
+    bool observed = false;
 };
 
 struct ProviderHttpError {

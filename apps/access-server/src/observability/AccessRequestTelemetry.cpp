@@ -100,12 +100,11 @@ void AccessProviderTransaction::add_upstream(std::string_view upstream, std::siz
     add_integer(*transaction_, "attempt", attempt);
 }
 
-void AccessProviderTransaction::add_connection_usage(std::uint64_t request_count) noexcept {
-    if (!valid() || request_count == 0) {
+void AccessProviderTransaction::add_connection_reuse(std::uint64_t reuse_count) noexcept {
+    if (!valid()) {
         return;
     }
-    add_integer(*transaction_, "connection_request_count", request_count);
-    add_integer(*transaction_, "connection_reuse_count", request_count - 1);
+    add_integer(*transaction_, "reuse_count", reuse_count);
 }
 
 void AccessProviderTransaction::fail(std::string_view phase, common::IoErr error) noexcept {
