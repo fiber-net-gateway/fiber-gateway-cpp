@@ -12,6 +12,7 @@
 #include <future>
 #include <memory>
 #include <netinet/in.h>
+#include <poll.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -155,6 +156,45 @@ public:
 
 private:
     std::string path_;
+};
+
+class TestScriptFile {
+public:
+    TestScriptFile(std::string_view tag, std::string_view source) {
+        static std::atomic<std::uint32_t> next_id{1};
+        path_ = "/tmp/lite_nginx_";
+        path_.append(tag);
+        path_.push_back('_');
+        path_.append(std::to_string(static_cast<long>(::getpid())));
+        path_.push_back('_');
+        path_.append(std::to_string(next_id.fetch_add(1, std::memory_order_relaxed)));
+        path_.append(".js");
+
+        std::ofstream out(path_, std::ios::binary);
+        if (!out) {
+            path_.clear();
+            return;
+        }
+        out.write(source.data(), static_cast<std::streamsize>(source.size()));
+        ok_ = out.good();
+        if (!ok_) {
+            ::unlink(path_.c_str());
+            path_.clear();
+        }
+    }
+
+    ~TestScriptFile() {
+        if (!path_.empty()) {
+            ::unlink(path_.c_str());
+        }
+    }
+
+    [[nodiscard]] bool ok() const noexcept { return ok_; }
+    [[nodiscard]] const std::string &path() const noexcept { return path_; }
+
+private:
+    std::string path_;
+    bool ok_ = false;
 };
 
 class TestLoggingScope {
@@ -334,6 +374,25 @@ std::string recv_until_contains(int fd, std::string_view expected) {
         out.append(buf.data(), static_cast<std::size_t>(rc));
     }
     return out;
+}
+
+bool socket_readable(int fd, std::chrono::milliseconds timeout) {
+    pollfd descriptor{
+            .fd = fd,
+            .events = POLLIN,
+            .revents = 0,
+    };
+    int rc;
+    do {
+        rc = ::poll(&descriptor, 1, static_cast<int>(timeout.count()));
+    } while (rc < 0 && errno == EINTR);
+    return rc > 0 && (descriptor.revents & (POLLIN | POLLHUP)) != 0;
+}
+
+std::string recv_available(int fd) {
+    std::array<char, 4096> buf{};
+    const ssize_t rc = ::recv(fd, buf.data(), buf.size(), MSG_DONTWAIT);
+    return rc > 0 ? std::string(buf.data(), static_cast<std::size_t>(rc)) : std::string{};
 }
 
 std::string recv_exact(int fd, std::size_t expected) {
@@ -565,6 +624,107 @@ private:
     std::uint16_t port_ = 0;
     std::string response_;
     std::promise<std::string> *request_promise_ = nullptr;
+    std::thread thread_{};
+};
+
+class StagedResponseUpstream {
+public:
+    StagedResponseUpstream(std::string first_segment, std::string tail) :
+        first_segment_(std::move(first_segment)), tail_(std::move(tail)),
+        first_sent_future_(first_sent_promise_.get_future()), release_future_(release_promise_.get_future().share()) {
+        listener_fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        EXPECT_GE(listener_fd_, 0);
+        if (listener_fd_ < 0) {
+            return;
+        }
+
+        int yes = 1;
+        ::setsockopt(listener_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(0);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (::bind(listener_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 ||
+            ::listen(listener_fd_, 16) != 0) {
+            ADD_FAILURE() << "staged upstream listen failed: " << errno;
+            ::close(listener_fd_);
+            listener_fd_ = -1;
+            return;
+        }
+
+        sockaddr_in bound{};
+        socklen_t len = sizeof(bound);
+        if (::getsockname(listener_fd_, reinterpret_cast<sockaddr *>(&bound), &len) != 0) {
+            ADD_FAILURE() << "staged upstream getsockname failed: " << errno;
+            ::close(listener_fd_);
+            listener_fd_ = -1;
+            return;
+        }
+        port_ = ntohs(bound.sin_port);
+
+        thread_ = std::thread([this]() {
+            const int client = ::accept4(listener_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+            if (client < 0) {
+                first_sent_promise_.set_value(false);
+                return;
+            }
+            client_fd_.store(client, std::memory_order_release);
+            (void) read_http_request(client);
+
+            const bool first_sent = send_all(client, first_segment_);
+            first_sent_promise_.set_value(first_sent);
+            if (first_sent) {
+                release_future_.wait();
+                (void) send_all(client, tail_);
+            }
+
+            if (client_fd_.exchange(-1, std::memory_order_acq_rel) == client) {
+                ::shutdown(client, SHUT_RDWR);
+                ::close(client);
+            }
+        });
+    }
+
+    ~StagedResponseUpstream() {
+        release_tail();
+        if (listener_fd_ >= 0) {
+            ::shutdown(listener_fd_, SHUT_RDWR);
+            ::close(listener_fd_);
+        }
+        const int client = client_fd_.exchange(-1, std::memory_order_acq_rel);
+        if (client >= 0) {
+            ::shutdown(client, SHUT_RDWR);
+            ::close(client);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+    bool wait_for_first_segment(std::chrono::milliseconds timeout) {
+        return first_sent_future_.wait_for(timeout) == std::future_status::ready && first_sent_future_.get();
+    }
+
+    void release_tail() {
+        if (!tail_released_) {
+            tail_released_ = true;
+            release_promise_.set_value();
+        }
+    }
+
+private:
+    int listener_fd_ = -1;
+    std::atomic<int> client_fd_{-1};
+    std::uint16_t port_ = 0;
+    std::string first_segment_;
+    std::string tail_;
+    std::promise<bool> first_sent_promise_;
+    std::future<bool> first_sent_future_;
+    std::promise<void> release_promise_;
+    std::shared_future<void> release_future_;
+    bool tail_released_ = false;
     std::thread thread_{};
 };
 
@@ -1020,6 +1180,96 @@ private:
     fiber::lite_nginx::runtime::ServerLauncher launcher_;
     std::thread thread_{};
 };
+
+struct StagedProxyPassOutcome {
+    std::string error;
+    std::string response;
+    bool first_body_arrived_before_tail = false;
+};
+
+StagedProxyPassOutcome run_staged_proxy_pass(std::string_view options) {
+    StagedProxyPassOutcome outcome;
+    std::string source = "directive svc = http \"@backend\";\nsvc.proxyPass(";
+    source.append(options);
+    source.append(");");
+    TestScriptFile script("http_proxy_pass_buffering", source);
+    if (!script.ok()) {
+        outcome.error = "create script failed";
+        return outcome;
+    }
+
+    StagedResponseUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 11\r\nContent-Type: text/plain\r\n\r\nfirst",
+                                    "second");
+    if (upstream.port() == 0) {
+        outcome.error = "create staged upstream failed";
+        return outcome;
+    }
+
+    const std::uint16_t port = reserve_loopback_port();
+    if (port == 0) {
+        outcome.error = "reserve listener port failed";
+        return outcome;
+    }
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "proxy_pass_buffering.conf");
+    if (!config) {
+        outcome.error = config.error().message;
+        return outcome;
+    }
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    if (!runtime) {
+        outcome.error = runtime.error().message;
+        return outcome;
+    }
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    if (client < 0) {
+        outcome.error = "connect downstream failed";
+        return outcome;
+    }
+
+    const std::string_view request = "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if (!send_all(client, request)) {
+        outcome.error = "send downstream request failed";
+        ::close(client);
+        return outcome;
+    }
+    if (!upstream.wait_for_first_segment(3s)) {
+        outcome.error = "upstream first segment was not sent";
+        upstream.release_tail();
+        ::close(client);
+        return outcome;
+    }
+
+    outcome.response = recv_until_contains(client, "\r\n\r\n");
+    if (outcome.response.find("first") == std::string::npos && socket_readable(client, 500ms)) {
+        outcome.response.append(recv_available(client));
+    }
+    outcome.first_body_arrived_before_tail = outcome.response.find("first") != std::string::npos;
+
+    upstream.release_tail();
+    outcome.response.append(recv_until_contains(client, "second"));
+    ::close(client);
+    return outcome;
+}
 
 TEST(LiteNginxRuntimeTest, RejectsDuplicateServerNames) {
     auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
@@ -3239,6 +3489,77 @@ http {
     EXPECT_NE(proxied_request.find("GET /api/42 HTTP/1.1"), std::string::npos) << proxied_request;
 
     ::unlink(script_path.c_str());
+}
+
+TEST(LiteNginxRuntimeTest, HttpProxyPassFlushControlsResponseBodyBuffering) {
+    struct TestCase {
+        std::string_view options;
+        bool expect_first_body_before_tail;
+    };
+    constexpr std::array<TestCase, 3> cases{{
+            {.options = "{}", .expect_first_body_before_tail = false},
+            {.options = "{flush: false}", .expect_first_body_before_tail = false},
+            {.options = "{flush: true}", .expect_first_body_before_tail = true},
+    }};
+
+    for (const TestCase &test: cases) {
+        SCOPED_TRACE(test.options);
+        StagedProxyPassOutcome outcome = run_staged_proxy_pass(test.options);
+
+        ASSERT_TRUE(outcome.error.empty()) << outcome.error;
+        EXPECT_EQ(outcome.first_body_arrived_before_tail, test.expect_first_body_before_tail);
+        EXPECT_NE(outcome.response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << outcome.response;
+        EXPECT_NE(outcome.response.find("first"), std::string::npos) << outcome.response;
+        EXPECT_NE(outcome.response.find("second"), std::string::npos) << outcome.response;
+    }
+}
+
+TEST(LiteNginxRuntimeTest, HttpProxyPassCompletesZeroLengthResponseWithoutBodyWrite) {
+    TestScriptFile script("http_proxy_pass_empty", "directive svc = http \"@backend\";\nsvc.proxyPass({});");
+    ASSERT_TRUE(script.ok());
+
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    connection_pool { keepalive_size 8; keepalive_timeout 30s; }
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "empty_proxy_pass.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const std::string_view request = "GET /empty HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, request));
+
+    const std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Content-Length: 0\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("500"), std::string::npos) << response;
 }
 
 // `directive svc = http "http://127.0.0.1:PORT";` binds a script handle to an ad-hoc IP-literal URL

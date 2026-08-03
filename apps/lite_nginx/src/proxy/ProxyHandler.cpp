@@ -419,27 +419,6 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, const runtime::Locati
         co_return;
     }
 
-    if (!location.buffering.enabled()) {
-        while (true) {
-            auto body_result = co_await upstream_exchange.read_body(kBodyChunkSize, location.read_timeout);
-            if (!body_result) {
-                record_upstream_error(log_context, body_result.error(), "read_body");
-                (void) exchange.abort(body_result.error());
-                co_return;
-            }
-            const bool last = body_result->complete();
-            auto write_result = co_await exchange.write_all(std::move(*body_result), location.send_timeout);
-            if (!write_result) {
-                (void) upstream_exchange.abort(write_result.error());
-                co_return;
-            }
-            if (last) {
-                break;
-            }
-        }
-        co_return;
-    }
-
     const fiber::http::HttpBodyPipeOptions pipe_options{
             .buffer_size = location.buffering.buffer_size,
             .low_water = location.buffering.low_water,
