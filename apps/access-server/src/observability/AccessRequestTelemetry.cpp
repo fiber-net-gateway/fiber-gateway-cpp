@@ -88,23 +88,21 @@ AccessProviderTransaction &AccessProviderTransaction::operator=(AccessProviderTr
 
 AccessProviderTransaction::~AccessProviderTransaction() { cancel_pending(); }
 
-bool AccessProviderTransaction::valid() const noexcept { return transaction_.has_value() && transaction_->valid(); }
-
-cat::Transaction *AccessProviderTransaction::cat_parent() noexcept { return valid() ? &*transaction_ : nullptr; }
+bool AccessProviderTransaction::valid() const noexcept { return transaction_.valid(); }
 
 void AccessProviderTransaction::add_upstream(std::string_view upstream, std::size_t attempt) noexcept {
     if (!valid()) {
         return;
     }
-    (void) transaction_->add_data("upstream", upstream);
-    add_integer(*transaction_, "attempt", attempt);
+    (void) transaction_.add_data("upstream", upstream);
+    add_integer(transaction_, "attempt", attempt);
 }
 
 void AccessProviderTransaction::add_connection_reuse(std::uint64_t reuse_count) noexcept {
     if (!valid()) {
         return;
     }
-    add_integer(*transaction_, "reuse_count", reuse_count);
+    add_integer(transaction_, "reuse_count", reuse_count);
 }
 
 void AccessProviderTransaction::fail(std::string_view phase, common::IoErr error) noexcept {
@@ -112,27 +110,26 @@ void AccessProviderTransaction::fail(std::string_view phase, common::IoErr error
         return;
     }
     if (!phase.empty()) {
-        (void) transaction_->add_data("phase", phase);
+        (void) transaction_.add_data("phase", phase);
     }
     if (error != common::IoErr::None) {
-        (void) transaction_->add_data("io_error", common::io_err_name(error));
+        (void) transaction_.add_data("io_error", common::io_err_name(error));
     }
-    (void) transaction_->complete(cat::status::Fail);
+    (void) transaction_.complete(cat::status::Fail);
 }
 
 void AccessProviderTransaction::complete(int status_code) noexcept {
     if (!valid()) {
         return;
     }
-    add_integer(*transaction_, "status", status_code);
-    (void) transaction_->complete(status_code < 500 ? cat::status::Success : cat::status::Fail);
+    add_integer(transaction_, "status", status_code);
+    (void) transaction_.complete(status_code < 500 ? cat::status::Success : cat::status::Fail);
 }
 
 void AccessProviderTransaction::cancel_pending() noexcept {
     if (valid()) {
         fail("canceled", common::IoErr::Canceled);
     }
-    transaction_.reset();
 }
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
@@ -299,11 +296,12 @@ bool AccessRequestTelemetry::inject_response_headers(http::HttpHeaders &headers)
 }
 
 bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers,
-                                                     AccessProviderTransaction *provider) noexcept {
+                                                     AccessProviderTransaction &provider) noexcept {
     if (!root_ || !root_->valid() || !context_ || context_->message_id.empty()) {
         return true;
     }
-    auto remote = root_->message_trace().create_remote_context(exchange_->pool());
+    cat::Transaction &parent = provider.valid() ? provider.transaction_ : *root_;
+    auto remote = parent.message_trace().create_remote_context(exchange_->pool());
     if (!remote) {
         return true;
     }
@@ -318,16 +316,10 @@ bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers,
         !headers.set_view(kSpanIdHeader, message_id, kSpanIdLowcaseHeader.data(), kSpanIdHeaderHash)) {
         return false;
     }
-    cat::Transaction *event_parent = provider ? provider->cat_parent() : nullptr;
-    if (!event_parent && root_ && root_->valid()) {
-        event_parent = &*root_;
-    }
-    if (event_parent) {
-        auto event = event_parent->start_event("RemoteCall", "");
-        if (event) {
-            (void) event->add_data(message_id);
-            (void) event->complete(cat::status::Success);
-        }
+    auto event = parent.start_event("RemoteCall", "");
+    if (event) {
+        (void) event->add_data(message_id);
+        (void) event->complete(cat::status::Success);
     }
     return true;
 }

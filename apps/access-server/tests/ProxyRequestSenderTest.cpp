@@ -45,6 +45,9 @@ struct ObservedUpstreamRequest {
     std::string connection;
     std::string upgrade;
     std::string websocket_key;
+    std::string trace_id;
+    std::string parent_span_id;
+    std::string span_id;
     std::string body;
     std::uint16_t remote_port = 0;
 };
@@ -310,6 +313,9 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     observed.connection.assign(exchange.header("Connection"));
     observed.upgrade.assign(exchange.header("Upgrade"));
     observed.websocket_key.assign(exchange.header("Sec-WebSocket-Key"));
+    observed.trace_id.assign(exchange.header("HI-TRACE-ID"));
+    observed.parent_span_id.assign(exchange.header("HI-SPAN-ID-PARENT"));
+    observed.span_id.assign(exchange.header("HI-SPAN-ID"));
     observed.remote_port = exchange.remote_addr().port();
 
     auto body = co_await read_body(exchange);
@@ -689,11 +695,17 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     std::string requests = "POST /proxy?item=1 HTTP/1.1\r\n"
                            "Host: api.example.com\r\n"
                            "X-Client: first\r\n"
+                           "HI-TRACE-ID: access-root-1\r\n"
+                           "HI-SPAN-ID-PARENT: access-parent-1\r\n"
+                           "HI-SPAN-ID: access-span-1\r\n"
                            "Transfer-Encoding: chunked\r\n\r\n"
                            "3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n"
                            "POST /proxy?item=2 HTTP/1.1\r\n"
                            "Host: api.example.com\r\n"
                            "X-Client: second\r\n"
+                           "HI-TRACE-ID: access-root-2\r\n"
+                           "HI-SPAN-ID-PARENT: access-parent-2\r\n"
+                           "HI-SPAN-ID: access-span-2\r\n"
                            "Content-Length: 5\r\n"
                            "Connection: close\r\n\r\n"
                            "world";
@@ -720,6 +732,10 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     EXPECT_EQ(first.transfer_encoding, "chunked");
     EXPECT_EQ(first.source, "orders.unifiedAccess");
     EXPECT_EQ(first.client_header, "first");
+    EXPECT_EQ(first.trace_id, "access-root-1");
+    EXPECT_EQ(first.parent_span_id, "access-span-1");
+    EXPECT_FALSE(first.span_id.empty());
+    EXPECT_NE(first.span_id, first.parent_span_id);
     EXPECT_EQ(first.body, "hello");
 
     const ObservedUpstreamRequest &second = upstream_state.requests[1];
@@ -729,12 +745,18 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     EXPECT_TRUE(second.transfer_encoding.empty());
     EXPECT_EQ(second.source, "orders.unifiedAccess");
     EXPECT_EQ(second.client_header, "second");
+    EXPECT_EQ(second.trace_id, "access-root-2");
+    EXPECT_EQ(second.parent_span_id, "access-span-2");
+    EXPECT_FALSE(second.span_id.empty());
+    EXPECT_NE(second.span_id, second.parent_span_id);
+    EXPECT_NE(second.span_id, first.span_id);
     EXPECT_EQ(second.body, "world");
     EXPECT_NE(first.remote_port, 0);
     EXPECT_EQ(second.remote_port, first.remote_port);
     EXPECT_EQ(count_status(output, "HTTP/1.1 204 No Content\r\n"), 2U);
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=0"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=1"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "RemoteCall"));
     EXPECT_FALSE(cat_capture.contains("connection_request_count="));
     EXPECT_FALSE(cat_capture.contains("connection_reuse_count="));
 

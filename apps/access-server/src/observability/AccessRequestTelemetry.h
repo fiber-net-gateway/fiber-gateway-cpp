@@ -39,7 +39,6 @@ public:
     ~AccessProviderTransaction();
 
     [[nodiscard]] bool valid() const noexcept;
-    [[nodiscard]] cat::Transaction *cat_parent() noexcept;
 
     void add_upstream(std::string_view upstream, std::size_t attempt) noexcept;
     void add_connection_reuse(std::uint64_t reuse_count) noexcept;
@@ -52,7 +51,7 @@ private:
     explicit AccessProviderTransaction(cat::Transaction transaction) noexcept : transaction_(std::move(transaction)) {}
     void cancel_pending() noexcept;
 
-    std::optional<cat::Transaction> transaction_;
+    cat::Transaction transaction_;
 };
 
 class AccessRequestTelemetry final : public common::NonCopyable, public common::NonMovable {
@@ -71,7 +70,7 @@ public:
     [[nodiscard]] std::string_view trace_id() const noexcept;
     [[nodiscard]] bool inject_response_headers(http::HttpHeaders &headers) const noexcept;
     [[nodiscard]] bool inject_upstream_headers(http::HttpHeaders &headers,
-                                               AccessProviderTransaction *provider = nullptr) noexcept;
+                                               AccessProviderTransaction &provider) noexcept;
 
 private:
     [[nodiscard]] std::string_view copy_to_request_pool(std::string_view value) noexcept;
