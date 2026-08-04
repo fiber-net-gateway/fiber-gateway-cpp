@@ -6,13 +6,8 @@
 #include <iterator>
 #include <limits>
 #include <set>
-#include <thread>
 #include <utility>
 #include <vector>
-
-#ifdef __linux__
-#include <sched.h>
-#endif
 
 namespace fiber::access_server {
 namespace {
@@ -21,7 +16,6 @@ constexpr std::string_view kListenAddress = "ACCESS_SERVER_LISTEN_ADDRESS";
 constexpr std::string_view kListenPort = "ACCESS_SERVER_LISTEN_PORT";
 constexpr std::string_view kMetricsListenAddress = "ACCESS_SERVER_METRICS_LISTEN_ADDRESS";
 constexpr std::string_view kMetricsListenPort = "ACCESS_SERVER_METRICS_LISTEN_PORT";
-constexpr std::string_view kHttpWorkers = "ACCESS_SERVER_HTTP_WORKERS";
 constexpr std::string_view kInitialConfigTimeout = "ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS";
 constexpr std::string_view kMaxRequestBody = "ACCESS_SERVER_MAX_REQUEST_BODY_SIZE";
 constexpr std::string_view kTestMode = "ACCESS_SERVER_TEST_MODE";
@@ -232,23 +226,8 @@ AccessServerConfigError nacos_error(const nacos::NacosConfigError &source) {
 
 } // namespace
 
-std::size_t default_access_http_worker_count() noexcept {
-#ifdef __linux__
-    cpu_set_t affinity;
-    CPU_ZERO(&affinity);
-    if (::sched_getaffinity(0, sizeof(affinity), &affinity) == 0) {
-        const int count = CPU_COUNT(&affinity);
-        if (count > 0) {
-            return static_cast<std::size_t>(count);
-        }
-    }
-#endif
-    const unsigned int count = std::thread::hardware_concurrency();
-    return count == 0 ? 1 : static_cast<std::size_t>(count);
-}
-
 AccessServerConfig::AccessServerConfig(net::SocketAddress listen_address, net::SocketAddress metrics_listen_address,
-                                       std::size_t http_worker_count, std::chrono::milliseconds initial_config_timeout,
+                                       std::chrono::milliseconds initial_config_timeout,
                                        std::size_t default_max_request_body_size, bool test_mode,
                                        std::optional<cat::CatClientConfig> cat_config,
                                        nacos::NacosClientConfig nacos_config,
@@ -256,9 +235,8 @@ AccessServerConfig::AccessServerConfig(net::SocketAddress listen_address, net::S
                                        GrayConfigWatcherOptions gray_watcher_options,
                                        NacosServiceSelectorOptions selector_options) noexcept :
     listen_address_(std::move(listen_address)), metrics_listen_address_(std::move(metrics_listen_address)),
-    http_worker_count_(http_worker_count), initial_config_timeout_(initial_config_timeout),
-    default_max_request_body_size_(default_max_request_body_size), test_mode_(test_mode),
-    cat_config_(std::move(cat_config)), nacos_config_(std::move(nacos_config)),
+    initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
+    test_mode_(test_mode), cat_config_(std::move(cat_config)), nacos_config_(std::move(nacos_config)),
     watcher_options_(std::move(watcher_options)), gray_watcher_options_(std::move(gray_watcher_options)),
     selector_options_(std::move(selector_options)) {}
 
@@ -287,7 +265,6 @@ AccessServerConfig::load_from_string(std::string_view input) {
     std::uint16_t listen_port = 16688;
     std::optional<net::IpAddress> metrics_ip;
     std::optional<std::uint16_t> metrics_port;
-    std::size_t worker_count = default_access_http_worker_count();
     std::uint64_t timeout_millis = 60000;
     std::size_t max_request_body = 400U << 20U;
     bool test_mode = false;
@@ -329,11 +306,6 @@ AccessServerConfig::load_from_string(std::string_view input) {
                                              "expected a port in range 1..65535"));
             }
             metrics_port = port;
-        } else if (entry.key == kHttpWorkers) {
-            if (!parse_unsigned(value, worker_count) || worker_count == 0 || worker_count > 1024) {
-                return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, entry.line, entry.key,
-                                             "expected a worker count in range 1..1024"));
-            }
         } else if (entry.key == kInitialConfigTimeout) {
             if (!parse_unsigned(value, timeout_millis) ||
                 timeout_millis > static_cast<std::uint64_t>(std::chrono::milliseconds::max().count())) {
@@ -440,7 +412,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
         metrics_port = static_cast<std::uint16_t>(listen_port + 1);
     }
     return AccessServerConfig(net::SocketAddress(listen_ip, listen_port),
-                              net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port), worker_count,
+                              net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port),
                               std::chrono::milliseconds(timeout_millis), max_request_body, test_mode,
                               std::move(cat_config), std::move(*nacos_config), std::move(watcher_options),
                               std::move(gray_options), std::move(selector_options));

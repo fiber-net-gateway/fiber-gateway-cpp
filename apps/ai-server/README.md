@@ -80,6 +80,9 @@ HTTP 和集群成员：
   cluster（默认 `daily1-dev`）；
 - `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS`：默认 `60000`，`0` 表示无限等待。
 
+HTTP worker 数不通过 dotenv 配置；进程在启动时根据 CPU affinity 和 cgroup v1/v2
+CPU quota 自动确定。
+
 日志：
 
 - `AI_SERVER_LOG_CONFIG_PATH`：必填，指向独立日志 JSON；相对路径以 dotenv 文件所在

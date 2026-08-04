@@ -311,8 +311,4 @@ TEST(AiServerRuntimeTest, CreateDoesNotBindListener) {
     runtime->reset();
 }
 
-TEST(AiServerRuntimeTest, DefaultWorkerCountIsNeverZero) {
-    EXPECT_GE(fiber::ai_server::default_http_worker_count(), 1u);
-}
-
 } // namespace

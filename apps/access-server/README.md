@@ -112,6 +112,7 @@ Java 兼容的进程默认值是：
 
 - HTTP 监听 `0.0.0.0:16688`；
 - Prometheus 监听 `0.0.0.0:16689`；
+- HTTP worker 数在启动时根据进程 CPU affinity 和 cgroup v1/v2 CPU quota 自动确定；
 - 默认 request body 上限 400 MiB；
 - 项目列表 `ploto.unified-access.projects`，route 前缀
   `ploto.unified-access.route.`，group `ACCESS-SERVER`；

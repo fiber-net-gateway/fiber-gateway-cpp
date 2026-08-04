@@ -1,16 +1,10 @@
 #include "AiServerRuntime.h"
 #include "observability/AiServerLogCategories.h"
 
-#include <thread>
-
 #include <cerrno>
 #include <new>
 #include <sys/socket.h>
 #include <utility>
-
-#ifdef __linux__
-#include <sched.h>
-#endif
 
 #include <async/Sleep.h>
 #include <async/Spawn.h>
@@ -70,21 +64,6 @@ common::IoResult<std::uint16_t> bound_port(int fd) noexcept {
 }
 
 } // namespace
-
-std::size_t default_http_worker_count() noexcept {
-#ifdef __linux__
-    cpu_set_t affinity;
-    CPU_ZERO(&affinity);
-    if (::sched_getaffinity(0, sizeof(affinity), &affinity) == 0) {
-        const int count = CPU_COUNT(&affinity);
-        if (count > 0) {
-            return static_cast<std::size_t>(count);
-        }
-    }
-#endif
-    const unsigned int count = std::thread::hardware_concurrency();
-    return count == 0 ? 1 : static_cast<std::size_t>(count);
-}
 
 std::expected<std::unique_ptr<AiServerRuntime>, AiServerRuntimeError>
 AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_loop, event::EventLoop &cat_loop,
