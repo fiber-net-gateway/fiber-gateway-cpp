@@ -31,8 +31,6 @@
 
 namespace fiber::ai_server {
 
-[[nodiscard]] std::size_t default_http_worker_count() noexcept;
-
 enum class AiServerRuntimeErrorCode : std::uint8_t {
     CreateNacosClient,
     CreateConfigService,

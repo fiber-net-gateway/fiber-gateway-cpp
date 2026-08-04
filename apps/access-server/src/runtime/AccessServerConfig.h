@@ -46,7 +46,6 @@ public:
 
     [[nodiscard]] const net::SocketAddress &listen_address() const noexcept { return listen_address_; }
     [[nodiscard]] const net::SocketAddress &metrics_listen_address() const noexcept { return metrics_listen_address_; }
-    [[nodiscard]] std::size_t http_worker_count() const noexcept { return http_worker_count_; }
     [[nodiscard]] std::chrono::milliseconds initial_config_timeout() const noexcept { return initial_config_timeout_; }
     [[nodiscard]] std::size_t default_max_request_body_size() const noexcept { return default_max_request_body_size_; }
     [[nodiscard]] bool test_mode() const noexcept { return test_mode_; }
@@ -60,15 +59,14 @@ public:
 
 private:
     AccessServerConfig(net::SocketAddress listen_address, net::SocketAddress metrics_listen_address,
-                       std::size_t http_worker_count, std::chrono::milliseconds initial_config_timeout,
-                       std::size_t default_max_request_body_size, bool test_mode,
-                       std::optional<cat::CatClientConfig> cat_config, nacos::NacosClientConfig nacos_config,
-                       AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_watcher_options,
+                       std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
+                       bool test_mode, std::optional<cat::CatClientConfig> cat_config,
+                       nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
+                       GrayConfigWatcherOptions gray_watcher_options,
                        NacosServiceSelectorOptions selector_options) noexcept;
 
     net::SocketAddress listen_address_;
     net::SocketAddress metrics_listen_address_;
-    std::size_t http_worker_count_ = 0;
     std::chrono::milliseconds initial_config_timeout_{60000};
     std::size_t default_max_request_body_size_ = 400U << 20U;
     bool test_mode_ = false;
@@ -78,8 +76,6 @@ private:
     GrayConfigWatcherOptions gray_watcher_options_;
     NacosServiceSelectorOptions selector_options_;
 };
-
-[[nodiscard]] std::size_t default_access_http_worker_count() noexcept;
 
 } // namespace fiber::access_server
 

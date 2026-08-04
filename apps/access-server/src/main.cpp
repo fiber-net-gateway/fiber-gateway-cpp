@@ -20,6 +20,7 @@
 #include <async/TaskSelect.h>
 #include <async/WhenAny.h>
 #include <common/IoError.h>
+#include <common/util/CpuConcurrency.h>
 #include <event/EventLoop.h>
 #include <event/EventLoopGroup.h>
 #include <event/SignalService.h>
@@ -142,8 +143,9 @@ int main(int argc, char **argv) {
     }
     LoggingShutdownGuard logging_guard;
 
+    const fiber::util::CpuConcurrency cpu = fiber::util::detect_cpu_concurrency();
     fiber::event::EventLoop accept_loop;
-    fiber::event::EventLoopGroup http_workers(config.http_worker_count());
+    fiber::event::EventLoopGroup http_workers(cpu.effective_count);
     fiber::event::EventLoopGroup nacos_group(1);
     fiber::event::EventLoopGroup cat_group(1);
     auto created = fiber::access_server::AccessServerRuntime::create(accept_loop, nacos_group.at(0), cat_group.at(0),
@@ -220,7 +222,11 @@ int main(int argc, char **argv) {
                   << ", nacos servers=" << config.nacos_config().server_ips().size() << std::endl;
         LOG(LOG_LIFECYCLE, INFO) << "server listening address=" << fiber::log::quoted(address.to_string())
                                  << " metrics_address=" << fiber::log::quoted(metrics_address.to_string())
-                                 << " http_workers=" << http_workers.size()
+                                 << " http_workers=" << http_workers.size() << " cpu_affinity=" << cpu.affinity_count
+                                 << " cpu_quota_workers=" << cpu.quota_count << " cpu_quota_us=" << cpu.quota_us
+                                 << " cpu_period_us=" << cpu.period_us
+                                 << " cpu_concurrency_source=" << fiber::util::cpu_concurrency_source_name(cpu.source)
+                                 << " cgroup_probe_failed=" << cpu.cgroup_probe_failed
                                  << " nacos_servers=" << config.nacos_config().server_ips().size()
                                  << " cat_enabled=" << config.cat_config().has_value();
 

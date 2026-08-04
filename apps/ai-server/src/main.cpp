@@ -22,6 +22,7 @@
 #include "async/TaskSelect.h"
 #include "async/WhenAny.h"
 #include "common/IoError.h"
+#include "common/util/CpuConcurrency.h"
 #include "event/EventLoop.h"
 #include "event/EventLoopGroup.h"
 #include "event/SignalService.h"
@@ -172,8 +173,9 @@ int main(int argc, char **argv) {
     }
     LoggingShutdownGuard logging_guard;
 
+    const fiber::util::CpuConcurrency cpu = fiber::util::detect_cpu_concurrency();
     fiber::event::EventLoop accept_loop;
-    fiber::event::EventLoopGroup http_workers(fiber::ai_server::default_http_worker_count());
+    fiber::event::EventLoopGroup http_workers(cpu.effective_count);
     fiber::event::EventLoopGroup nacos_group(1);
     fiber::event::EventLoopGroup cat_group(1);
     fiber::net::ListenOptions listen_options{};
@@ -181,7 +183,11 @@ int main(int argc, char **argv) {
                              << " logging_config_path=" << fiber::log::quoted(config.logging_config_path())
                              << " listen=" << fiber::log::quoted(config.listen_address().to_string())
                              << " advertise_address=" << fiber::log::quoted(config.advertise_address().to_string())
-                             << " http_workers=" << http_workers.size()
+                             << " http_workers=" << http_workers.size() << " cpu_affinity=" << cpu.affinity_count
+                             << " cpu_quota_workers=" << cpu.quota_count << " cpu_quota_us=" << cpu.quota_us
+                             << " cpu_period_us=" << cpu.period_us
+                             << " cpu_concurrency_source=" << fiber::util::cpu_concurrency_source_name(cpu.source)
+                             << " cgroup_probe_failed=" << cpu.cgroup_probe_failed
                              << " nacos_servers=" << config.nacos_config().server_ips().size()
                              << " zone=" << fiber::log::quoted(config.zone())
                              << " cluster=" << fiber::log::quoted(config.cluster())

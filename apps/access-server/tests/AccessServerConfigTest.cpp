@@ -14,7 +14,6 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     ASSERT_TRUE(config) << config.error().detail;
     EXPECT_EQ(config->listen_address().to_string(), "0.0.0.0:16688");
     EXPECT_EQ(config->metrics_listen_address().to_string(), "0.0.0.0:16689");
-    EXPECT_GT(config->http_worker_count(), 0U);
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::seconds(60));
     EXPECT_EQ(config->default_max_request_body_size(), 400U << 20U);
     EXPECT_FALSE(config->test_mode());
@@ -36,7 +35,6 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
         ACCESS_SERVER_LISTEN_PORT=18080
         ACCESS_SERVER_METRICS_LISTEN_ADDRESS=127.0.0.2
         ACCESS_SERVER_METRICS_LISTEN_PORT=19090
-        ACCESS_SERVER_HTTP_WORKERS=3
         ACCESS_SERVER_INITIAL_CONFIG_TIMEOUT_MILLIS=2500
         ACCESS_SERVER_MAX_REQUEST_BODY_SIZE=12345
         ACCESS_SERVER_TEST_MODE=true
@@ -60,7 +58,6 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     ASSERT_TRUE(config) << config.error().detail;
     EXPECT_EQ(config->listen_address().to_string(), "127.0.0.1:18080");
     EXPECT_EQ(config->metrics_listen_address().to_string(), "127.0.0.2:19090");
-    EXPECT_EQ(config->http_worker_count(), 3U);
     EXPECT_EQ(config->initial_config_timeout(), std::chrono::milliseconds(2500));
     EXPECT_EQ(config->default_max_request_body_size(), 12345U);
     EXPECT_TRUE(config->test_mode());
@@ -126,6 +123,15 @@ TEST(AccessServerConfigTest, RejectsDuplicateAndUnknownKeys) {
     ASSERT_FALSE(unknown);
     EXPECT_EQ(unknown.error().code, AccessServerConfigErrorCode::UnknownKey);
     EXPECT_EQ(unknown.error().line, 2U);
+}
+
+TEST(AccessServerConfigTest, RejectsRemovedHttpWorkerSetting) {
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_HTTP_WORKERS=4\n");
+
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::UnknownKey);
+    EXPECT_EQ(config.error().key, "ACCESS_SERVER_HTTP_WORKERS");
 }
 
 TEST(AccessServerConfigTest, RequiresCompleteNacosCredentials) {
