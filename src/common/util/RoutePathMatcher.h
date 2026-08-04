@@ -2,6 +2,7 @@
 #define FIBER_UTIL_ROUTE_PATH_MATCHER_H
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -31,7 +32,7 @@ public:
     [[nodiscard]] bool empty() const noexcept { return handlers_.empty(); }
 
     template<typename Context>
-    [[nodiscard]] bool match_path(std::string_view path, Context &context) const {
+    [[nodiscard]] bool match_path(std::string_view path, Context &context) const noexcept {
         if (nodes_.empty()) {
             return false;
         }
@@ -40,7 +41,7 @@ public:
 
 private:
     struct Node {
-        std::uint32_t name_offset = 0;
+        std::uint32_t name_offset = kInvalidIndex;
         std::uint32_t name_size = 0;
         std::uint32_t hash = 0;
         std::uint32_t id = kInvalidIndex;
@@ -82,11 +83,11 @@ private:
         }
         std::uint32_t slot = hash & (node.static_slot_count - 1);
         while (true) {
-            const std::uint32_t child_index = static_slots_[node.static_slot_begin + slot];
-            if (child_index == kInvalidIndex) {
+            const std::uint32_t child_index = node.static_slot_begin + slot;
+            const Node &child = nodes_[child_index];
+            if (child.name_offset == kInvalidIndex) {
                 return kInvalidIndex;
             }
-            const Node &child = nodes_[child_index];
             if (node_name_equals(child, segment_data, segment_size, hash)) {
                 return child_index;
             }
@@ -95,7 +96,7 @@ private:
     }
 
     template<typename Context>
-    [[nodiscard]] bool match_node(std::uint32_t node_index, Context &context) const {
+    [[nodiscard]] bool match_node(std::uint32_t node_index, Context &context) const noexcept {
         const Node &node = nodes_[node_index];
         if (node.handler_count == 0) {
             return false;
@@ -111,7 +112,8 @@ private:
     }
 
     template<typename Context>
-    [[nodiscard]] bool exec(std::string_view path, std::size_t idx, std::uint32_t node_index, Context &context) const {
+    [[nodiscard]] bool exec(std::string_view path, std::size_t idx, std::uint32_t node_index,
+                            Context &context) const noexcept {
         const std::size_t length = path.size();
         std::size_t begin = idx;
         std::size_t end = idx;
@@ -150,20 +152,19 @@ private:
             const std::string_view value(segment_data, segment_size);
             const std::uint32_t placeholder_end = node.placeholder_begin + node.placeholder_count;
             for (std::uint32_t i = node.placeholder_begin; i < placeholder_end; ++i) {
-                const std::uint32_t child_index = placeholder_children_[i];
-                const Node &child = nodes_[child_index];
+                const Node &child = nodes_[i];
                 const bool has_param = child.name_size != 0;
                 if (has_param) {
                     context.add_path_var(node_name_view(child), value);
                 }
                 if (ends) {
-                    if (match_node(child_index, context)) {
+                    if (match_node(i, context)) {
                         return true;
                     }
-                    if (end > begin && exec(path, end, child_index, context)) {
+                    if (end > begin && exec(path, end, i, context)) {
                         return true;
                     }
-                } else if (exec(path, end, child_index, context)) {
+                } else if (exec(path, end, i, context)) {
                     return true;
                 }
                 if (has_param) {
@@ -176,13 +177,12 @@ private:
             const std::string_view value(path.data() + begin, length - begin);
             const std::uint32_t wildcard_end = node.wildcard_begin + node.wildcard_count;
             for (std::uint32_t i = node.wildcard_begin; i < wildcard_end; ++i) {
-                const std::uint32_t child_index = wildcard_children_[i];
-                const Node &child = nodes_[child_index];
+                const Node &child = nodes_[i];
                 const bool has_param = child.name_size != 0;
                 if (has_param) {
                     context.add_path_var(node_name_view(child), value);
                 }
-                if (match_node(child_index, context)) {
+                if (match_node(i, context)) {
                     return true;
                 }
                 if (has_param) {
@@ -195,9 +195,6 @@ private:
     }
 
     std::vector<Node> nodes_{};
-    std::vector<std::uint32_t> static_slots_{};
-    std::vector<std::uint32_t> placeholder_children_{};
-    std::vector<std::uint32_t> wildcard_children_{};
     std::vector<Handler> handlers_{};
     std::vector<char> text_{};
     std::uint32_t max_path_var_count_{0};
@@ -238,39 +235,75 @@ public:
         complete_ = true;
 
         RoutePathMatcher matcher;
-        matcher.nodes_.resize(nodes_.size());
         matcher.text_ = std::move(text_);
         matcher.handlers_.reserve(payloads_.size());
         matcher.max_path_var_count_ = max_path_var_count_;
 
-        for (std::size_t i = 0; i < nodes_.size(); ++i) {
-            const BuildNode &src = nodes_[i];
-            Node &dst = matcher.nodes_[i];
+        // Each non-root node has exactly one incoming edge. Lay out every parent's static hash slots and ordered
+        // placeholder/wildcard children together so matching can address child nodes directly.
+        std::size_t packed_node_count = 1;
+        for (const BuildNode &node: nodes_) {
+            packed_node_count +=
+                    node.static_slots.size() + node.placeholder_children.size() + node.wildcard_children.size();
+        }
+        matcher.nodes_.resize(packed_node_count);
+
+        std::vector<std::uint32_t> old_to_new(nodes_.size(), kInvalidIndex);
+        std::vector<std::uint32_t> pending;
+        pending.reserve(nodes_.size());
+
+        const auto copy_node = [&](std::uint32_t old_index, std::uint32_t new_index) {
+            assert(old_to_new[old_index] == kInvalidIndex);
+            old_to_new[old_index] = new_index;
+            pending.push_back(old_index);
+
+            const BuildNode &src = nodes_[old_index];
+            Node &dst = matcher.nodes_[new_index];
             dst.name_offset = src.name_offset;
             dst.name_size = src.name_size;
             dst.hash = src.hash;
             dst.id = src.id;
+        };
+
+        copy_node(0, 0);
+        std::uint32_t next_node_index = 1;
+        for (std::size_t cursor = 0; cursor < pending.size(); ++cursor) {
+            const std::uint32_t old_index = pending[cursor];
+            const BuildNode &src = nodes_[old_index];
+            Node &dst = matcher.nodes_[old_to_new[old_index]];
 
             if (!src.static_slots.empty()) {
-                dst.static_slot_begin = static_cast<std::uint32_t>(matcher.static_slots_.size());
+                dst.static_slot_begin = next_node_index;
                 dst.static_slot_count = static_cast<std::uint32_t>(src.static_slots.size());
-                matcher.static_slots_.insert(matcher.static_slots_.end(), src.static_slots.begin(),
-                                             src.static_slots.end());
+                for (const std::uint32_t child_index: src.static_slots) {
+                    if (child_index != kInvalidIndex) {
+                        copy_node(child_index, next_node_index);
+                    }
+                    ++next_node_index;
+                }
             }
 
             if (!src.placeholder_children.empty()) {
-                dst.placeholder_begin = static_cast<std::uint32_t>(matcher.placeholder_children_.size());
+                dst.placeholder_begin = next_node_index;
                 dst.placeholder_count = static_cast<std::uint32_t>(src.placeholder_children.size());
-                matcher.placeholder_children_.insert(matcher.placeholder_children_.end(),
-                                                     src.placeholder_children.begin(), src.placeholder_children.end());
+                for (const std::uint32_t child_index: src.placeholder_children) {
+                    copy_node(child_index, next_node_index++);
+                }
             }
 
             if (!src.wildcard_children.empty()) {
-                dst.wildcard_begin = static_cast<std::uint32_t>(matcher.wildcard_children_.size());
+                dst.wildcard_begin = next_node_index;
                 dst.wildcard_count = static_cast<std::uint32_t>(src.wildcard_children.size());
-                matcher.wildcard_children_.insert(matcher.wildcard_children_.end(), src.wildcard_children.begin(),
-                                                  src.wildcard_children.end());
+                for (const std::uint32_t child_index: src.wildcard_children) {
+                    copy_node(child_index, next_node_index++);
+                }
             }
+        }
+        assert(next_node_index == matcher.nodes_.size());
+
+        for (std::size_t i = 0; i < nodes_.size(); ++i) {
+            const BuildNode &src = nodes_[i];
+            Node &dst = matcher.nodes_[old_to_new[i]];
 
             if (!src.mounted_routes.empty()) {
                 dst.handler_begin = static_cast<std::uint32_t>(matcher.handlers_.size());
