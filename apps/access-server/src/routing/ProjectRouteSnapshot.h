@@ -5,6 +5,7 @@
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
 #include "Cidr.h"
+#include "CompiledTemplate.h"
 #include "HostMatcher.h"
 
 #include <cstddef>
@@ -19,12 +20,9 @@
 
 namespace fiber::access_server {
 
-using CompiledScriptProgram = std::shared_ptr<const void>;
-
 struct CompiledTemplateEntry {
     std::string name;
-    std::string source;
-    std::vector<CompiledScriptProgram> expression_programs;
+    CompiledTemplate value;
 };
 
 enum class ResponseBodyKind : std::uint8_t {
@@ -37,10 +35,10 @@ enum class ResponseBodyKind : std::uint8_t {
 struct CompiledResponseRoute {
     std::int32_t status = 0;
     ResponseBodyKind body_kind = ResponseBodyKind::Empty;
-    // TEXT and decoded BASE64 contain response bytes. TEMPLATE contains the
-    // original template source for the local script adapter.
+    // TEXT and decoded BASE64 contain response bytes. TEMPLATE uses
+    // body_template and leaves this string empty.
     std::string body;
-    std::vector<CompiledScriptProgram> body_expression_programs;
+    std::optional<CompiledTemplate> body_template;
     std::vector<CompiledTemplateEntry> response_headers;
 };
 
@@ -74,8 +72,7 @@ struct CompiledProxyRoute {
     std::vector<CompiledTemplateEntry> proxy_headers;
     std::vector<CompiledTemplateEntry> response_headers;
     std::vector<CompiledTemplateEntry> context;
-    std::optional<std::string> rewrite;
-    std::vector<CompiledScriptProgram> rewrite_expression_programs;
+    std::optional<CompiledTemplate> rewrite;
 };
 
 struct CompiledRoute {

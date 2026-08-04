@@ -16,10 +16,12 @@ namespace {
 
 using fiber::access_server::AccessError;
 using fiber::access_server::CompiledResponseRoute;
+using fiber::access_server::CompiledTemplate;
 using fiber::access_server::CompiledTemplateEntry;
 using fiber::access_server::ErrorResponder;
 using fiber::access_server::evaluate_template;
 using fiber::access_server::is_java_filtered_response_header;
+using fiber::access_server::parse_template;
 using fiber::access_server::prepare_proxy_response_headers;
 using fiber::access_server::prepare_response;
 using fiber::access_server::proxy_response_header_is_configured;
@@ -58,6 +60,19 @@ TemplateEvaluator evaluator(EvaluatorState &state) {
     };
 }
 
+CompiledTemplate compiled_template(std::string_view source) {
+    auto compiled = parse_template(source);
+    EXPECT_TRUE(compiled);
+    return compiled ? std::move(*compiled) : CompiledTemplate{};
+}
+
+CompiledTemplateEntry template_entry(std::string name, std::string_view source) {
+    return CompiledTemplateEntry{
+            .name = std::move(name),
+            .value = compiled_template(source),
+    };
+}
+
 TEST(AccessErrorTest, UsesJavaCompatibleStableErrors) {
     const AccessError router = AccessError::router_not_found();
     EXPECT_EQ(router.status, 404);
@@ -92,7 +107,8 @@ TEST(AccessErrorTest, UsesJavaCompatibleStableErrors) {
 
 TEST(TemplateEvaluatorTest, EvaluatesSegmentsAndJavaEscapes) {
     EvaluatorState state;
-    auto result = evaluate_template(R"(id=${$path.id};method=${$request.method};literal=\$\{\}\\)", evaluator(state));
+    const CompiledTemplate value = compiled_template(R"(id=${$path.id};method=${$request.method};literal=\$\{\}\\)");
+    auto result = evaluate_template(value, evaluator(state));
 
     ASSERT_TRUE(result);
     EXPECT_EQ(*result, "id=42;method=POST;literal=${}\\");
@@ -100,7 +116,8 @@ TEST(TemplateEvaluatorTest, EvaluatesSegmentsAndJavaEscapes) {
 }
 
 TEST(TemplateEvaluatorTest, FailsClosedWithoutAdapter) {
-    auto result = evaluate_template("${$path.id}", {});
+    const CompiledTemplate value = compiled_template("${$path.id}");
+    auto result = evaluate_template(value, {});
 
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().status, 500);
@@ -115,9 +132,9 @@ TEST(ResponsePlanTest, EvaluatesEveryHeaderBeforeApplyingJavaHopHeaderFilter) {
             .body = "created",
             .response_headers =
                     {
-                            {.name = "X-Request", .source = "${$request.method}"},
-                            {.name = "Content-Length", .source = "${$path.id}"},
-                            {.name = "Host", .source = "public.example.com"},
+                            template_entry("X-Request", "${$request.method}"),
+                            template_entry("Content-Length", "${$path.id}"),
+                            template_entry("Host", "public.example.com"),
                     },
     };
     EvaluatorState state;
@@ -159,10 +176,10 @@ TEST(ResponsePlanTest, EvaluatesTemplateBodyAfterHeaders) {
     const CompiledResponseRoute response{
             .status = 200,
             .body_kind = ResponseBodyKind::Template,
-            .body = "item-${$path.id}",
+            .body_template = compiled_template("item-${$path.id}"),
             .response_headers =
                     {
-                            {.name = "X-Method", .source = "${$request.method}"},
+                            template_entry("X-Method", "${$request.method}"),
                     },
     };
     EvaluatorState state;
@@ -181,8 +198,8 @@ TEST(ResponsePlanTest, DiscardsAllConfiguredHeadersWhenAHeaderTemplateFails) {
             .body = "unreached",
             .response_headers =
                     {
-                            {.name = "X-First", .source = "${$path.id}"},
-                            {.name = "X-Fail", .source = "${broken}"},
+                            template_entry("X-First", "${$path.id}"),
+                            template_entry("X-Fail", "${broken}"),
                     },
     };
     EvaluatorState state{.failing_expression = "broken"};
@@ -198,11 +215,11 @@ TEST(ResponsePlanTest, RetainsAllConfiguredHeadersWhenBodyTemplateFails) {
     CompiledResponseRoute response{
             .status = 200,
             .body_kind = ResponseBodyKind::Template,
-            .body = "${broken}",
+            .body_template = compiled_template("${broken}"),
             .response_headers =
                     {
-                            {.name = "X-First", .source = "${$path.id}"},
-                            {.name = "Content-Type", .source = "application/custom"},
+                            template_entry("X-First", "${$path.id}"),
+                            template_entry("Content-Type", "application/custom"),
                     },
     };
     EvaluatorState state{.failing_expression = "broken"};
@@ -225,9 +242,9 @@ TEST(ResponsePlanTest, RetainsOnlyHeadersCommittedBeforeAnInvalidHeader) {
             .body = "unreached",
             .response_headers =
                     {
-                            {.name = "X-First", .source = "one"},
-                            {.name = "Bad Header", .source = "two"},
-                            {.name = "X-Last", .source = "three"},
+                            template_entry("X-First", "one"),
+                            template_entry("Bad Header", "two"),
+                            template_entry("X-Last", "three"),
                     },
     };
 
@@ -261,10 +278,10 @@ TEST(ResponsePlanTest, FiltersTheSameProtectedResponseHeadersAsJava) {
 
 TEST(ProxyResponsePlanTest, EvaluatesAllHeadersBeforeFilteringEmptyAndProtectedValues) {
     const std::vector<CompiledTemplateEntry> headers{
-            {.name = "X-First", .source = "${$path.id}"},
-            {.name = "Content-Length", .source = "${$request.method}"},
-            {.name = "X-Empty", .source = "${empty}"},
-            {.name = "X-Last", .source = "static"},
+            template_entry("X-First", "${$path.id}"),
+            template_entry("Content-Length", "${$request.method}"),
+            template_entry("X-Empty", "${empty}"),
+            template_entry("X-Last", "static"),
     };
     EvaluatorState state;
 

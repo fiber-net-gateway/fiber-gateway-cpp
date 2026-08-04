@@ -77,7 +77,7 @@ evaluate_context(std::span<const CompiledTemplateEntry> context, TemplateEvaluat
     std::vector<EvaluatedHeader> result;
     result.reserve(context.size());
     for (const CompiledTemplateEntry &entry: context) {
-        auto value = evaluate_template(entry.source, entry.expression_programs, evaluator);
+        auto value = evaluate_template(entry.value, evaluator);
         if (!value) {
             return std::unexpected(std::move(value.error()));
         }
@@ -96,7 +96,7 @@ std::expected<std::string, AccessError> resolve_request_target(const http::HttpE
         return preserved_request_target(exchange);
     }
 
-    auto rewritten = evaluate_template(*proxy.rewrite, proxy.rewrite_expression_programs, evaluator);
+    auto rewritten = evaluate_template(*proxy.rewrite, evaluator);
     if (!rewritten) {
         return std::unexpected(std::move(rewritten.error()));
     }
@@ -125,7 +125,7 @@ build_proxy_headers(const http::HttpExchange &exchange, std::string_view project
     }
 
     for (const CompiledTemplateEntry &header: proxy.proxy_headers) {
-        auto value = evaluate_template(header.source, header.expression_programs, evaluator);
+        auto value = evaluate_template(header.value, evaluator);
         if (!value) {
             return std::unexpected(std::move(value.error()));
         }

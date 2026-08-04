@@ -25,7 +25,7 @@ PreparedProxyResponseHeadersResult prepare_proxy_response_headers(std::span<cons
     PreparedProxyResponseHeaders result;
     result.reserve(headers.size());
     for (const CompiledTemplateEntry &header: headers) {
-        auto value = evaluate_template(header.source, header.expression_programs, evaluator);
+        auto value = evaluate_template(header.value, evaluator);
         if (!value) {
             return std::unexpected(std::move(value.error()));
         }
