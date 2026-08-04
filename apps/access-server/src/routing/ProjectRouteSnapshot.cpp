@@ -88,96 +88,23 @@ std::optional<std::string_view> validate_path_pattern(std::string_view path) noe
     return std::nullopt;
 }
 
-bool validate_template_structure(std::string_view source) noexcept {
-    bool escaping = false;
-    bool expression = false;
-    std::size_t expression_size = 0;
-    for (std::size_t i = 0; i < source.size(); ++i) {
-        const char ch = source[i];
-        if (escaping) {
-            if (ch != '\\' && ch != '$' && ch != '{' && ch != '}') {
-                return false;
-            }
-            escaping = false;
-        } else if (expression) {
-            if (ch == '}') {
-                if (expression_size == 0) {
-                    return false;
-                }
-                expression = false;
-                expression_size = 0;
-            } else {
-                ++expression_size;
-            }
-        } else if (ch == '\\') {
-            escaping = true;
-        } else if (ch == '$' && i + 1 < source.size() && source[i + 1] == '{') {
-            ++i;
-            expression = true;
-            expression_size = 0;
-        }
-    }
-    return !escaping && !expression;
-}
-
-std::expected<std::vector<CompiledScriptProgram>, std::string>
-compile_template_expressions(std::string_view source, std::span<const std::string> path_variable_names,
-                             ScriptCompilerAdapter compiler) {
-    std::vector<CompiledScriptProgram> programs;
-    if (!compiler.compile_expression) {
-        return programs;
-    }
-
-    std::string expression;
-    bool escaping = false;
-    bool in_expression = false;
-    for (std::size_t i = 0; i < source.size(); ++i) {
-        const char ch = source[i];
-        if (escaping) {
-            if (in_expression) {
-                expression.push_back(ch);
-            }
-            escaping = false;
-            continue;
-        }
-        if (ch == '\\') {
-            escaping = true;
-            continue;
-        }
-        if (in_expression) {
-            if (ch == '}') {
-                auto program = compiler.compile_expression(compiler.context, expression, path_variable_names);
-                if (!program) {
-                    return std::unexpected(std::move(program.error()));
-                }
-                programs.push_back(std::move(*program));
-                expression.clear();
-                in_expression = false;
-            } else {
-                expression.push_back(ch);
-            }
-            continue;
-        }
-        if (ch == '$' && i + 1 < source.size() && source[i + 1] == '{') {
-            ++i;
-            in_expression = true;
-        }
-    }
-    return programs;
-}
-
 std::expected<std::vector<CompiledTemplateEntry>, AccessConfigError>
 compile_templates(const StringConfigMap &input, std::size_t route_index, std::string_view field) {
     std::vector<CompiledTemplateEntry> result;
     result.reserve(input.size());
     for (const StringConfigEntry &entry: input) {
-        if (!entry.value || !validate_template_structure(*entry.value)) {
+        if (!entry.value) {
+            return std::unexpected(
+                    route_error(AccessConfigErrorCode::InvalidField, route_index, field, "invalid template"));
+        }
+        auto value = parse_template(*entry.value);
+        if (!value) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::InvalidField, route_index, field, "invalid template"));
         }
         result.push_back(CompiledTemplateEntry{
                 .name = entry.name,
-                .source = *entry.value,
+                .value = std::move(*value),
         });
     }
     return result;
@@ -189,21 +116,22 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         return {};
     }
 
-    auto compile_template =
-            [&](std::string_view source, std::string_view field,
-                std::vector<CompiledScriptProgram> &programs) -> std::expected<void, AccessConfigError> {
-        auto compiled = compile_template_expressions(source, route.path_variable_names, compiler);
-        if (!compiled) {
-            return std::unexpected(
-                    route_error(AccessConfigErrorCode::InvalidField, route_index, field, compiled.error()));
+    auto compile_template = [&](CompiledTemplate &value,
+                                std::string_view field) -> std::expected<void, AccessConfigError> {
+        for (CompiledTemplateExpression &expression: value.expressions) {
+            auto program = compiler.compile_expression(compiler.context, expression.source, route.path_variable_names);
+            if (!program) {
+                return std::unexpected(
+                        route_error(AccessConfigErrorCode::InvalidField, route_index, field, program.error()));
+            }
+            expression.program = std::move(*program);
         }
-        programs = std::move(*compiled);
         return {};
     };
     auto compile_entries = [&](std::vector<CompiledTemplateEntry> &entries,
                                std::string_view field) -> std::expected<void, AccessConfigError> {
         for (CompiledTemplateEntry &entry: entries) {
-            auto compiled = compile_template(entry.source, field, entry.expression_programs);
+            auto compiled = compile_template(entry.value, field);
             if (!compiled) {
                 return compiled;
             }
@@ -222,7 +150,11 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
 
     if (route.response) {
         if (route.response->body_kind == ResponseBodyKind::Template) {
-            auto compiled = compile_template(route.response->body, "body", route.response->body_expression_programs);
+            if (!route.response->body_template) {
+                return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "body",
+                                                   "invalid compiled template"));
+            }
+            auto compiled = compile_template(*route.response->body_template, "body");
             if (!compiled) {
                 return compiled;
             }
@@ -243,7 +175,7 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         return context;
     }
     if (route.proxy->rewrite) {
-        return compile_template(*route.proxy->rewrite, "rewrite", route.proxy->rewrite_expression_programs);
+        return compile_template(*route.proxy->rewrite, "rewrite");
     }
     return {};
 }
@@ -282,7 +214,7 @@ std::expected<std::vector<CompiledTemplateEntry>, AccessConfigError> compile_con
         bool replaced = false;
         for (CompiledTemplateEntry &existing: result) {
             if (existing.name == entry.name) {
-                existing.source = std::move(entry.source);
+                existing.value = std::move(entry.value);
                 replaced = true;
                 break;
             }
@@ -422,12 +354,17 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
                 response.body_kind = ResponseBodyKind::Text;
                 response.body = *body.content;
             } else {
-                if (!body.content || !validate_template_structure(*body.content)) {
+                if (!body.content) {
+                    return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "body",
+                                                       "invalid template response body"));
+                }
+                auto compiled_body = parse_template(*body.content);
+                if (!compiled_body) {
                     return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "body",
                                                        "invalid template response body"));
                 }
                 response.body_kind = ResponseBodyKind::Template;
-                response.body = *body.content;
+                response.body_template.emplace(std::move(*compiled_body));
             }
         }
 
@@ -492,11 +429,12 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
         proxy.context = std::move(*context);
 
         if (is_nonempty(source.rewrite)) {
-            if (!validate_template_structure(*source.rewrite)) {
+            auto rewrite = parse_template(*source.rewrite);
+            if (!rewrite) {
                 return std::unexpected(
                         route_error(AccessConfigErrorCode::InvalidField, route_index, "rewrite", "invalid template"));
             }
-            proxy.rewrite = *source.rewrite;
+            proxy.rewrite.emplace(std::move(*rewrite));
         }
         proxy.max_response_body_size = source.max_proxy_body_size;
         if (source.websocket_timeout_millis && *source.websocket_timeout_millis > 0) {

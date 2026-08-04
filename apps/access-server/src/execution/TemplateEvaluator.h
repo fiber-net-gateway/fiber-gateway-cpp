@@ -4,11 +4,10 @@
 #include "AccessError.h"
 
 #include <expected>
-#include <span>
 #include <string>
 #include <string_view>
 
-#include "../routing/ProjectRouteSnapshot.h"
+#include "../routing/CompiledTemplate.h"
 
 namespace fiber::access_server {
 
@@ -23,11 +22,8 @@ struct TemplateEvaluator {
     Function evaluate = nullptr;
 };
 
-[[nodiscard]] std::expected<std::string, AccessError> evaluate_template(std::string_view source,
+[[nodiscard]] std::expected<std::string, AccessError> evaluate_template(const CompiledTemplate &value,
                                                                         TemplateEvaluator evaluator);
-[[nodiscard]] std::expected<std::string, AccessError>
-evaluate_template(std::string_view source, std::span<const CompiledScriptProgram> expression_programs,
-                  TemplateEvaluator evaluator);
 
 } // namespace fiber::access_server
 

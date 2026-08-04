@@ -76,7 +76,7 @@ PreparedResponseResult prepare_response(const CompiledResponseRoute &response, T
 
     prepared.headers.reserve(response.response_headers.size());
     for (const CompiledTemplateEntry &header: response.response_headers) {
-        auto value = evaluate_template(header.source, header.expression_programs, evaluator);
+        auto value = evaluate_template(header.value, evaluator);
         if (!value) {
             return std::unexpected(ResponsePreparationError{
                     .error = std::move(value.error()),
@@ -106,7 +106,13 @@ PreparedResponseResult prepare_response(const CompiledResponseRoute &response, T
     prepared.headers.resize(committed);
 
     if (response.body_kind == ResponseBodyKind::Template) {
-        auto body = evaluate_template(response.body, response.body_expression_programs, evaluator);
+        if (!response.body_template) {
+            return std::unexpected(ResponsePreparationError{
+                    .error = AccessError::template_script("invalid compiled template"),
+                    .inherited_headers = std::move(prepared.headers),
+            });
+        }
+        auto body = evaluate_template(*response.body_template, evaluator);
         if (!body) {
             return std::unexpected(ResponsePreparationError{
                     .error = std::move(body.error()),

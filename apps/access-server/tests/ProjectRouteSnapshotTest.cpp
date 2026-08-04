@@ -36,7 +36,28 @@ using fiber::access_server::ResponseBodyKind;
 using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteType;
+using fiber::access_server::ScriptCompilerAdapter;
 using fiber::access_server::StringConfigEntry;
+
+struct ScriptCompilerCapture {
+    std::vector<std::string> expressions;
+    std::vector<std::vector<std::string>> path_variable_names;
+};
+
+ScriptCompilerAdapter::Result capture_expression(void *context, std::string_view expression,
+                                                 std::span<const std::string> path_variable_names) {
+    auto &capture = *static_cast<ScriptCompilerCapture *>(context);
+    capture.expressions.emplace_back(expression);
+    capture.path_variable_names.emplace_back(path_variable_names.begin(), path_variable_names.end());
+    return std::static_pointer_cast<const void>(std::make_shared<const std::string>(expression));
+}
+
+ScriptCompilerAdapter compiler_adapter(ScriptCompilerCapture &capture) {
+    return ScriptCompilerAdapter{
+            .context = &capture,
+            .compile_expression = capture_expression,
+    };
+}
 
 HostConfigEntry host(std::string pattern, std::uint8_t net_mask = 0) {
     return HostConfigEntry{
@@ -236,7 +257,12 @@ TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
     EXPECT_EQ(compiled.proxy->response_headers.size(), 1U);
     EXPECT_EQ(compiled.proxy->context.size(), 1U);
     EXPECT_EQ(compiled.proxy->context[0].name, "HI-TRACE-CLUSTER");
-    EXPECT_EQ(compiled.proxy->rewrite, R"(/items/${$path.id})");
+    ASSERT_TRUE(compiled.proxy->rewrite);
+    ASSERT_EQ(compiled.proxy->rewrite->expressions.size(), 1U);
+    EXPECT_EQ(compiled.proxy->rewrite->expressions[0].leading_literal, "/items/");
+    EXPECT_EQ(compiled.proxy->rewrite->expressions[0].source, "$path.id");
+    EXPECT_FALSE(compiled.proxy->rewrite->expressions[0].program);
+    EXPECT_TRUE(compiled.proxy->rewrite->trailing_literal.empty());
 }
 
 TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
@@ -295,6 +321,36 @@ TEST(ProjectRouteSnapshotTest, CompilesResponseBodyAndHeaders) {
     EXPECT_EQ(snapshot.routes()[0].response->body_kind, ResponseBodyKind::Base64);
     EXPECT_EQ(snapshot.routes()[0].response->body, "hello");
     EXPECT_EQ(snapshot.routes()[0].response->response_headers.size(), 1U);
+}
+
+TEST(ProjectRouteSnapshotTest, BindsPreparsedTemplateExpressionsAfterDiscoveringPathVariables) {
+    RouteConfig route = response_route("/items/:id", 200);
+    route.body = RouteBodyConfig{
+            .type = BodyType::Template,
+            .content = "item-${$path.id}-${$req.method}",
+    };
+    route.response_headers.push_back(StringConfigEntry{.name = "X-Item", .value = "${$path.id}"});
+    route.response_headers.push_back(StringConfigEntry{.name = "X-Static", .value = "static"});
+    ScriptCompilerCapture capture;
+
+    auto result = compile_project_config("demo", project_with_routes({std::move(route)}), compiler_adapter(capture));
+    const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+    ASSERT_TRUE(snapshot.routes()[0].response);
+    const auto &response = *snapshot.routes()[0].response;
+    ASSERT_TRUE(response.body_template);
+    ASSERT_EQ(response.body_template->expressions.size(), 2U);
+    EXPECT_TRUE(response.body_template->expressions[0].program);
+    EXPECT_TRUE(response.body_template->expressions[1].program);
+    ASSERT_EQ(response.response_headers.size(), 2U);
+    ASSERT_EQ(response.response_headers[0].value.expressions.size(), 1U);
+    EXPECT_TRUE(response.response_headers[0].value.expressions[0].program);
+    EXPECT_FALSE(response.response_headers[1].value.dynamic());
+
+    EXPECT_EQ(capture.expressions, (std::vector<std::string>{"$path.id", "$req.method", "$path.id"}));
+    ASSERT_EQ(capture.path_variable_names.size(), 3U);
+    for (const auto &names: capture.path_variable_names) {
+        EXPECT_EQ(names, (std::vector<std::string>{"id"}));
+    }
 }
 
 TEST(ProjectRouteSnapshotTest, UsesJavaCrc32cRouteKeyAndConditionalOrder) {
