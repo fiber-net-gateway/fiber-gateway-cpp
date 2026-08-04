@@ -28,28 +28,16 @@ ProxyRequestError error(ProxyRequestErrorCode code, const char *message,
     };
 }
 
-http::Http1ConnectionGroupKey::Scheme connection_scheme(ProxyUpstreamScheme scheme) noexcept {
-    return scheme == ProxyUpstreamScheme::Https ? http::Http1ConnectionGroupKey::Scheme::Https
-                                                : http::Http1ConnectionGroupKey::Scheme::Http;
-}
-
-std::optional<http::Http1ConnectionGroupKey> connection_key(const ProxyUpstreamEndpoint &endpoint) noexcept {
-    const auto scheme = connection_scheme(endpoint.scheme);
-    if (endpoint.ip_address) {
-        return http::Http1ConnectionGroupKey::from_ip(*endpoint.ip_address, endpoint.port, scheme);
-    }
-    return http::Http1ConnectionGroupKey::from_name(endpoint.host, endpoint.port, scheme);
-}
-
-http::Http1ClientConnectionOptions connection_options(const ProxyUpstreamEndpoint &endpoint, const net::IpAddress &ip) {
+http::Http1ClientConnectionOptions connection_options(const http::Http1ConnectionGroupKey &key,
+                                                      const net::IpAddress &ip) {
     http::Http1ClientConnectionOptions result;
-    result.peer_addr = net::SocketAddress(ip, endpoint.port);
-    if (endpoint.scheme == ProxyUpstreamScheme::Https) {
+    result.peer_addr = net::SocketAddress(ip, key.port());
+    if (key.scheme() == http::Http1ConnectionGroupKey::Scheme::Https) {
         result.tls.enabled = true;
         // The Java client uses InsecureTrustManagerFactory by default.
         result.tls.verify_peer = false;
-        if (!endpoint.ip_address) {
-            result.tls.server_name.assign(endpoint.host);
+        if (key.is_name()) {
+            result.tls.server_name.assign(key.host_name());
         }
     }
     return result;
@@ -59,7 +47,8 @@ bool same_endpoint(const ProxyUpstreamEndpoint &left, const ProxyUpstreamEndpoin
     if (left.selection_token != 0 && right.selection_token != 0) {
         return left.selection_token == right.selection_token;
     }
-    return left.scheme == right.scheme && left.port == right.port && left.host == right.host;
+    return left.connection_key != nullptr && right.connection_key != nullptr &&
+           *left.connection_key == *right.connection_key;
 }
 
 bool is_header(std::string_view actual, std::string_view expected) noexcept {
@@ -242,24 +231,21 @@ ProxyUpstreamEndpoint ProxyRequestSender::select_static_endpoint(const PreparedP
                                                                  std::size_t index) const noexcept {
     const CompiledProxyAddress &address = request.addresses[index % request.addresses.size()];
     return ProxyUpstreamEndpoint{
-            .scheme = address.scheme,
-            .host = address.host,
-            .port = address.port,
-            .host_header = address.host_header,
-            .ip_address = address.ip_address,
+            .connection_key = &address.connection_key,
+            .host_header = address.authority,
     };
 }
 
 async::Task<std::expected<ProxyRequestSender::ConnectedEndpoint, ProxyRequestError>>
 ProxyRequestSender::connect(const ProxyUpstreamEndpoint &endpoint) noexcept {
-    const auto key = connection_key(endpoint);
-    if (!key) {
+    if (endpoint.connection_key == nullptr) {
         co_return std::unexpected(error(ProxyRequestErrorCode::Connect,
                                         "upstream cannot be used as a connection pool key", common::IoErr::Invalid));
     }
+    const http::Http1ConnectionGroupKey &key = *endpoint.connection_key;
 
     ConnectedEndpoint output;
-    output.lease = pool_->acquire(*key);
+    output.lease = pool_->acquire(key);
     if (!output.lease.valid()) {
         co_return std::unexpected(error(ProxyRequestErrorCode::PoolShutdown,
                                         "upstream connection pool is shutting down", common::IoErr::Canceled));
@@ -271,14 +257,14 @@ ProxyRequestSender::connect(const ProxyUpstreamEndpoint &endpoint) noexcept {
 
     std::vector<net::IpAddress> resolved;
     std::span<const net::IpAddress> addresses;
-    if (endpoint.ip_address) {
-        addresses = std::span(&*endpoint.ip_address, 1);
+    if (key.is_ip()) {
+        addresses = std::span(&key.ip_address(), 1);
     } else {
         if (!dns_resolver_.resolve) {
             co_return std::unexpected(error(ProxyRequestErrorCode::ResolveUpstream,
                                             "upstream DNS resolver is unavailable", common::IoErr::NotFound));
         }
-        auto result = co_await dns_resolver_.resolve(dns_resolver_.context, endpoint.host);
+        auto result = co_await dns_resolver_.resolve(dns_resolver_.context, key.host_name());
         if (!result) {
             co_return std::unexpected(
                     error(ProxyRequestErrorCode::ResolveUpstream, "upstream DNS resolution failed", result.error()));
@@ -294,7 +280,7 @@ ProxyRequestSender::connect(const ProxyUpstreamEndpoint &endpoint) noexcept {
     common::IoErr last_error = common::IoErr::NotFound;
     for (std::size_t i = 0; i < addresses.size(); ++i) {
         if (i > 0) {
-            output.lease = pool_->acquire(*key);
+            output.lease = pool_->acquire(key);
             if (!output.lease.valid()) {
                 co_return std::unexpected(error(ProxyRequestErrorCode::PoolShutdown,
                                                 "upstream connection pool is shutting down", common::IoErr::Canceled));
@@ -305,7 +291,7 @@ ProxyRequestSender::connect(const ProxyUpstreamEndpoint &endpoint) noexcept {
             }
         }
 
-        auto emplaced = output.lease.emplace_connection(connection_options(endpoint, addresses[i]));
+        auto emplaced = output.lease.emplace_connection(connection_options(key, addresses[i]));
         if (!emplaced) {
             last_error = emplaced.error();
             output.lease.reset();

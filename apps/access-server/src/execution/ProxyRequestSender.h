@@ -44,15 +44,14 @@ struct ProxyRequestError {
 
 [[nodiscard]] std::string_view proxy_request_error_code_name(ProxyRequestErrorCode code) noexcept;
 
-// service_instance pins the discovery generation for as long as host and
-// host_header are consumed by the request.
+using AccessUpstreamSwrr = SmoothWeightedRoundRobin<AccessUpstreamInstance>;
+
+// service_selection pins the discovery generation for as long as
+// connection_key and host_header are consumed by the request.
 struct ProxyUpstreamEndpoint {
-    ProxyUpstreamScheme scheme = ProxyUpstreamScheme::Http;
-    std::string_view host;
-    std::uint16_t port = 80;
+    const http::Http1ConnectionGroupKey *connection_key = nullptr;
     std::string_view host_header;
-    std::optional<net::IpAddress> ip_address;
-    SmoothWeightedRoundRobin::Selection service_instance;
+    AccessUpstreamSwrr::Selection service_selection;
     std::uint64_t selection_token = 0;
 };
 

@@ -341,7 +341,7 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange, const 
     capture.addresses.clear();
     capture.addresses.reserve(request.addresses.size());
     for (const fiber::access_server::CompiledProxyAddress &address: request.addresses) {
-        capture.addresses.push_back(address.host_header);
+        capture.addresses.push_back(address.authority);
     }
     capture.method = request.method;
     capture.request_target = request.request_target;
