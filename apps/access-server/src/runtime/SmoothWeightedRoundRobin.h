@@ -19,16 +19,16 @@ enum class SwrrSelectError : std::uint8_t {
     NoAvailableInstance,
 };
 
-namespace detail {
-template<typename Instance>
-struct SwrrGeneration;
-}
-
 // SmoothWeightedRoundRobin deliberately knows nothing about the value it
 // selects. The caller owns routing/grouping semantics and supplies an opaque
 // instance plus a stable, non-zero selection token and its weight.
 template<std::equality_comparable Instance>
 class SmoothWeightedRoundRobin final : public common::NonCopyable, public common::NonMovable {
+private:
+    struct Weighted;
+    struct WeightedStorage;
+    struct State;
+
 public:
     using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -66,11 +66,15 @@ public:
     private:
         friend class SmoothWeightedRoundRobin;
 
-        Selection(std::shared_ptr<detail::SwrrGeneration<Instance>> owner, std::size_t index,
+        Selection(std::weak_ptr<State> state, std::shared_ptr<Weighted> weighted_instances,
+                  std::size_t weighted_instance_count, std::size_t index, std::uint64_t generation,
                   std::uint64_t selection_token) noexcept;
 
-        std::shared_ptr<detail::SwrrGeneration<Instance>> owner_;
+        std::weak_ptr<State> state_;
+        std::shared_ptr<Weighted> weighted_instances_;
+        std::size_t weighted_instance_count_ = 0;
         std::size_t index_ = 0;
+        std::uint64_t generation_ = 0;
         std::uint64_t selection_token_ = 0;
         bool pending_ = false;
     };
@@ -92,13 +96,9 @@ public:
     [[nodiscard]] std::size_t configured_instance_count() const noexcept;
 
 private:
-    friend struct detail::SwrrGeneration<Instance>;
-
-    struct Core;
-
     static void complete(Selection &selection, bool success, TimePoint now) noexcept;
 
-    std::shared_ptr<Core> core_;
+    std::shared_ptr<State> state_;
 };
 
 } // namespace fiber::access_server
