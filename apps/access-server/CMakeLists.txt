@@ -28,7 +28,6 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/GrayConfigWatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/GrayMatchStore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/NacosServiceSelector.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/SmoothWeightedRoundRobin.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RouteConfigStore.cpp")
 target_include_directories(access_server_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
 target_link_libraries(access_server_core PUBLIC fiber_lib fiber::nacos fiber::cat fiber::prometheus)
