@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_PROJECT_ROUTE_SNAPSHOT_H
 
 #include "../../../../src/common/util/RoutePathMatcher.h"
+#include "../../../../src/http/Http1ConnectionGroupKey.h"
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
 #include "Cidr.h"
@@ -42,18 +43,14 @@ enum class ProxyUpstreamKind : std::uint8_t {
     Addresses,
 };
 
-enum class ProxyUpstreamScheme : std::uint8_t {
-    Http,
-    Https,
+struct AccessUpstreamInstance {
+    http::Http1ConnectionGroupKey connection_key;
+    std::string authority;
+
+    friend bool operator==(const AccessUpstreamInstance &, const AccessUpstreamInstance &) noexcept = default;
 };
 
-struct CompiledProxyAddress {
-    ProxyUpstreamScheme scheme = ProxyUpstreamScheme::Http;
-    std::string host;
-    std::uint16_t port = 80;
-    std::string host_header;
-    std::optional<net::IpAddress> ip_address;
-};
+using CompiledProxyAddress = AccessUpstreamInstance;
 
 struct CompiledProxyRoute {
     ProxyUpstreamKind upstream_kind = ProxyUpstreamKind::Service;

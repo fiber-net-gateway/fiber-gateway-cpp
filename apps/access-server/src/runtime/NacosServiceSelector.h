@@ -24,9 +24,10 @@
 namespace fiber::access_server {
 
 class NacosServiceSelector;
+class AccessServiceState;
 
 struct AccessServiceOps {
-    using State = SmoothWeightedRoundRobin;
+    using State = AccessServiceState;
     using StatePtr = std::shared_ptr<State>;
 
     [[nodiscard]] StatePtr create(nacos::ServiceKeyView key, const std::shared_ptr<const nacos::ServiceInfo> &snapshot);
@@ -36,7 +37,8 @@ struct AccessServiceOps {
     void retire(State &state, nacos::ServiceKeyView key, nacos::ServiceRetireReason reason) noexcept;
 
     NacosServiceSelector *owner = nullptr;
-    State::Options options{};
+    AccessUpstreamSwrr::Options swrr_options{};
+    std::string zone;
 };
 
 using AccessServiceDiscovery = nacos::ServiceDiscovery<AccessServiceOps>;

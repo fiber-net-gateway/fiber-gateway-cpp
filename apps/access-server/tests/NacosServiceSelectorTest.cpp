@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <expected>
 #include <map>
 #include <memory>
@@ -103,6 +104,16 @@ fiber::access_server::ProjectConfig project_config(std::string service) {
     return config;
 }
 
+std::string selected_host(const fiber::access_server::ProxyUpstreamEndpoint &endpoint) {
+    if (endpoint.connection_key == nullptr) {
+        return {};
+    }
+    if (endpoint.connection_key->is_ip()) {
+        return endpoint.connection_key->ip_address().to_string();
+    }
+    return std::string(endpoint.connection_key->host_name());
+}
+
 TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGeneration) {
     fiber::event::EventLoop loop;
     FakeNamingService naming;
@@ -160,23 +171,34 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
         auto stable = selector.select_endpoint("orders");
         EXPECT_TRUE(stable);
         if (stable) {
-            EXPECT_EQ(stable->host, "10.0.0.1");
+            EXPECT_EQ(selected_host(*stable), "10.0.0.1");
             EXPECT_EQ(stable->host_header, "10.0.0.1:8080");
-            EXPECT_TRUE(stable->ip_address);
+            EXPECT_NE(stable->connection_key, nullptr);
+            if (stable->connection_key) {
+                EXPECT_TRUE(stable->connection_key->is_ip());
+            }
             auto adapter = selector.adapter();
             adapter.report(adapter.context, *stable, false);
             const std::uint64_t excluded = stable->selection_token;
             auto retry = selector.select_endpoint("orders", std::nullopt, std::span(&excluded, 1));
             EXPECT_TRUE(retry);
             if (retry) {
-                EXPECT_EQ(retry->host, "10.0.0.5");
+                EXPECT_EQ(selected_host(*retry), "10.0.0.5");
+                const std::array excluded_local{excluded, retry->selection_token};
+                auto remote = selector.select_endpoint("orders", std::nullopt, excluded_local);
+                EXPECT_TRUE(remote);
+                if (remote) {
+                    EXPECT_EQ(selected_host(*remote), "10.0.0.2");
+                    EXPECT_NE(remote->selection_token, excluded);
+                    EXPECT_NE(remote->selection_token, retry->selection_token);
+                }
             }
         }
 
         auto gray = selector.select_endpoint("orders", "gray");
         EXPECT_TRUE(gray);
         if (gray) {
-            EXPECT_EQ(gray->host, "10.0.0.3");
+            EXPECT_EQ(selected_host(*gray), "10.0.0.3");
         }
 
         fiber::tests::ServiceInfoTestData changed;
@@ -192,14 +214,17 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
         co_await yield_updates();
 
         if (stable) {
-            EXPECT_EQ(stable->host, "10.0.0.1");
+            EXPECT_EQ(selected_host(*stable), "10.0.0.1");
         }
         auto hostname = selector.select_endpoint("orders");
         EXPECT_TRUE(hostname);
         if (hostname) {
-            EXPECT_EQ(hostname->host, "orders.internal");
+            EXPECT_EQ(selected_host(*hostname), "orders.internal");
             EXPECT_EQ(hostname->host_header, "orders.internal:9090");
-            EXPECT_FALSE(hostname->ip_address);
+            EXPECT_NE(hostname->connection_key, nullptr);
+            if (hostname->connection_key) {
+                EXPECT_TRUE(hostname->connection_key->is_name());
+            }
             if (stable) {
                 EXPECT_NE(hostname->selection_token, stable->selection_token);
             }

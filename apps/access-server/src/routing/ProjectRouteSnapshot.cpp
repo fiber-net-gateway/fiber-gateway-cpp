@@ -299,21 +299,29 @@ std::optional<CompiledProxyAddress> compile_java_http_host(std::string_view valu
         return std::nullopt;
     }
 
-    CompiledProxyAddress address{
-            .scheme = https ? ProxyUpstreamScheme::Https : ProxyUpstreamScheme::Http,
-            .host = std::string(host),
-            .port = static_cast<std::uint16_t>(real_port),
-            .host_header = std::string(host),
-    };
-    if (address.port != default_port) {
-        address.host_header.push_back(':');
-        address.host_header.append(std::to_string(address.port));
+    const std::uint16_t port = static_cast<std::uint16_t>(real_port);
+    std::string authority(host);
+    if (port != default_port) {
+        authority.push_back(':');
+        authority.append(std::to_string(port));
     }
+    const auto scheme =
+            https ? http::Http1ConnectionGroupKey::Scheme::Https : http::Http1ConnectionGroupKey::Scheme::Http;
     net::IpAddress ip;
     if (net::IpAddress::parse(host, ip)) {
-        address.ip_address = ip;
+        return CompiledProxyAddress{
+                .connection_key = http::Http1ConnectionGroupKey::from_ip(ip, port, scheme),
+                .authority = std::move(authority),
+        };
     }
-    return address;
+    auto key = http::Http1ConnectionGroupKey::from_name(host, port, scheme);
+    if (!key) {
+        return std::nullopt;
+    }
+    return CompiledProxyAddress{
+            .connection_key = std::move(*key),
+            .authority = std::move(authority),
+    };
 }
 
 std::expected<std::vector<Cidr>, AccessConfigError> compile_cidr_list(const std::vector<std::string_view> &items,

@@ -1,130 +1,100 @@
 #include <gtest/gtest.h>
 
-#include <array>
 #include <chrono>
 #include <map>
 #include <string>
 #include <utility>
 
-#include "../../../tests/NacosSnapshotTestBuilder.h"
 #include "runtime/SmoothWeightedRoundRobin.h"
 
 namespace {
 
 using namespace std::chrono_literals;
-using fiber::access_server::ServiceSelectError;
-using fiber::access_server::SmoothWeightedRoundRobin;
+using TestSwrr = fiber::access_server::SmoothWeightedRoundRobin<std::string>;
+using fiber::access_server::SwrrSelectError;
 
-fiber::nacos::Instance instance(std::string id, std::string host, std::uint16_t port, double weight,
-                                std::string cluster = "default") {
-    return fiber::nacos::Instance{
-            .instance_id = std::move(id),
-            .ip = std::move(host),
-            .port = port,
+TestSwrr::WeightedInstance instance(std::uint64_t selection_token, std::string value, double weight) {
+    return TestSwrr::WeightedInstance{
+            .selection_token = selection_token,
+            .instance = std::move(value),
             .weight = weight,
-            .cluster_name = std::move(cluster),
     };
 }
 
-std::shared_ptr<const fiber::nacos::ServiceInfo> service(std::string checksum,
-                                                         std::vector<fiber::nacos::Instance> instances) {
-    fiber::tests::ServiceInfoTestData data;
-    data.name = "backend";
-    data.group_name = "DEFAULT_GROUP";
-    data.checksum = std::move(checksum);
-    data.hosts = std::move(instances);
-    return fiber::tests::make_service_info(std::move(data));
-}
-
 TEST(SmoothWeightedRoundRobinTest, UsesNormalizedNginxSequence) {
-    SmoothWeightedRoundRobin state;
-    const auto snapshot = service("v1", {instance("a", "10.0.0.1", 8080, 5.0), instance("b", "10.0.0.2", 8080, 1.0),
-                                         instance("c", "10.0.0.3", 8080, 1.0)});
-    EXPECT_TRUE(state.update(*snapshot));
+    TestSwrr state;
+    EXPECT_TRUE(state.update(
+            {instance(1, "10.0.0.1:8080", 5.0), instance(2, "10.0.0.2:8080", 1.0), instance(3, "10.0.0.3:8080", 1.0)}));
 
     std::map<std::string, std::size_t> selected;
     for (std::size_t i = 0; i < 70; ++i) {
-        auto result = state.select("default", "", {}, SmoothWeightedRoundRobin::TimePoint{});
+        auto result = state.select({}, TestSwrr::TimePoint{});
         ASSERT_TRUE(result);
-        ++selected[std::string(result->instance_id())];
-        result->report(true, SmoothWeightedRoundRobin::TimePoint{});
+        ++selected[result->instance()];
+        result->report(true, TestSwrr::TimePoint{});
     }
-    EXPECT_EQ(selected["a"], 50U);
-    EXPECT_EQ(selected["b"], 10U);
-    EXPECT_EQ(selected["c"], 10U);
+    EXPECT_EQ(selected["10.0.0.1:8080"], 50U);
+    EXPECT_EQ(selected["10.0.0.2:8080"], 10U);
+    EXPECT_EQ(selected["10.0.0.3:8080"], 10U);
 }
 
-TEST(SmoothWeightedRoundRobinTest, PrefersZoneAndSupportsExclusion) {
-    SmoothWeightedRoundRobin state;
-    const auto snapshot = service("v1", {instance("local", "10.0.0.1", 8080, 1.0, "sh-default"),
-                                         instance("remote", "10.0.0.2", 8080, 10.0, "bj-default"),
-                                         instance("gray", "10.0.0.3", 8080, 1.0, "sh-gray")});
-    EXPECT_TRUE(state.update(*snapshot));
+TEST(SmoothWeightedRoundRobinTest, SupportsRequestLevelExclusion) {
+    TestSwrr state;
+    EXPECT_TRUE(state.update({instance(101, "10.0.0.1:8080", 10.0), instance(102, "10.0.0.2:8080", 1.0)}));
 
-    auto local = state.select("default", "sh", {}, SmoothWeightedRoundRobin::TimePoint{});
-    ASSERT_TRUE(local);
-    EXPECT_EQ(local->instance_id(), "local");
-    const std::uint64_t excluded = local->peer_id();
-    local->report(true, SmoothWeightedRoundRobin::TimePoint{});
+    auto first = state.select({}, TestSwrr::TimePoint{});
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->selection_token(), 101U);
+    const std::uint64_t excluded = first->selection_token();
+    first->report(false, TestSwrr::TimePoint{});
 
-    auto remote = state.select("default", "sh", std::span(&excluded, 1), SmoothWeightedRoundRobin::TimePoint{});
-    ASSERT_TRUE(remote);
-    EXPECT_EQ(remote->instance_id(), "remote");
-
-    auto gray = state.select("gray", "sh", {}, SmoothWeightedRoundRobin::TimePoint{});
-    ASSERT_TRUE(gray);
-    EXPECT_EQ(gray->instance_id(), "gray");
+    auto retry = state.select(std::span(&excluded, 1), TestSwrr::TimePoint{});
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(retry->selection_token(), 102U);
 }
 
 TEST(SmoothWeightedRoundRobinTest, CircuitStateSurvivesUpdatesAndRecovers) {
-    SmoothWeightedRoundRobin state(SmoothWeightedRoundRobin::Options{
+    TestSwrr state(TestSwrr::Options{
             .max_fails = 1,
             .fail_timeout = 10s,
     });
-    auto initial = service("v1", {instance("a", "10.0.0.1", 8080, 1.0), instance("b", "10.0.0.2", 8080, 1.0)});
-    EXPECT_TRUE(state.update(*initial));
-    auto failed = state.select("default", "", {}, SmoothWeightedRoundRobin::TimePoint{});
+    EXPECT_TRUE(state.update({instance(1, "10.0.0.1:8080", 1.0), instance(2, "10.0.0.2:8080", 1.0)}));
+    auto failed = state.select({}, TestSwrr::TimePoint{});
     ASSERT_TRUE(failed);
-    EXPECT_EQ(failed->instance_id(), "a");
-    failed->report(false, SmoothWeightedRoundRobin::TimePoint{});
+    EXPECT_EQ(failed->selection_token(), 1U);
+    failed->report(false, TestSwrr::TimePoint{});
 
-    auto changed = service("v2", {instance("a-new", "10.0.0.1", 8080, 3.0), instance("b", "10.0.0.2", 8080, 1.0)});
-    EXPECT_TRUE(state.update(*changed));
-    auto selected = state.select("default", "", {}, SmoothWeightedRoundRobin::TimePoint{} + 1ms);
+    EXPECT_TRUE(state.update({instance(1, "10.0.0.1:8080", 3.0), instance(2, "10.0.0.2:8080", 1.0)}));
+    auto selected = state.select({}, TestSwrr::TimePoint{} + 1ms);
     ASSERT_TRUE(selected);
-    EXPECT_EQ(selected->instance_id(), "b");
+    EXPECT_EQ(selected->selection_token(), 2U);
 
-    auto recovered = state.select("default", "", {}, SmoothWeightedRoundRobin::TimePoint{} + 11s);
+    auto recovered = state.select({}, TestSwrr::TimePoint{} + 11s);
     ASSERT_TRUE(recovered);
 }
 
-TEST(SmoothWeightedRoundRobinTest, SelectionPinsOldGenerationAndHostname) {
-    SmoothWeightedRoundRobin state;
-    auto initial = service("v1", {instance("old", "orders.internal", 8080, 1.0)});
-    EXPECT_TRUE(state.update(*initial));
-    auto old = state.select("default", "", {}, SmoothWeightedRoundRobin::TimePoint{});
+TEST(SmoothWeightedRoundRobinTest, SelectionPinsOldGenerationAndInstance) {
+    TestSwrr state;
+    EXPECT_TRUE(state.update({instance(1, "orders.internal:8080", 1.0)}));
+    auto old = state.select({}, TestSwrr::TimePoint{});
     ASSERT_TRUE(old);
 
-    auto changed = service("v2", {instance("new", "10.0.0.2", 9090, 1.0)});
-    EXPECT_TRUE(state.update(*changed));
-    EXPECT_EQ(old->host(), "orders.internal");
-    EXPECT_EQ(old->authority(), "orders.internal:8080");
-    EXPECT_FALSE(old->ip_address());
+    EXPECT_TRUE(state.update({instance(2, "10.0.0.2:9090", 1.0)}));
+    EXPECT_EQ(old->instance(), "orders.internal:8080");
     EXPECT_EQ(old->generation(), 1U);
 
-    auto current = state.select("default", "", {}, SmoothWeightedRoundRobin::TimePoint{});
+    auto current = state.select({}, TestSwrr::TimePoint{});
     ASSERT_TRUE(current);
-    EXPECT_EQ(current->instance_id(), "new");
+    EXPECT_EQ(current->instance(), "10.0.0.2:9090");
     EXPECT_EQ(current->generation(), 2U);
 }
 
-TEST(SmoothWeightedRoundRobinTest, EmptySnapshotFailsClosed) {
-    SmoothWeightedRoundRobin state;
-    const auto empty = service("v1", {});
-    EXPECT_TRUE(state.update(*empty));
-    auto selected = state.select("default", "", {}, SmoothWeightedRoundRobin::TimePoint{});
+TEST(SmoothWeightedRoundRobinTest, EmptyInstanceSetFailsClosed) {
+    TestSwrr state;
+    EXPECT_TRUE(state.update({}));
+    auto selected = state.select({}, TestSwrr::TimePoint{});
     ASSERT_FALSE(selected);
-    EXPECT_EQ(selected.error(), ServiceSelectError::NoAvailableInstance);
+    EXPECT_EQ(selected.error(), SwrrSelectError::NoAvailableInstance);
 }
 
 } // namespace

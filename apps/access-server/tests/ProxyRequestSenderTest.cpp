@@ -81,6 +81,8 @@ struct ServiceSelectorState {
     std::uint16_t port = 0;
     std::string good_host_header;
     std::string bad_host_header;
+    std::optional<fiber::http::Http1ConnectionGroupKey> good_connection_key;
+    std::optional<fiber::http::Http1ConnectionGroupKey> bad_connection_key;
     std::size_t select_count = 0;
     std::vector<std::pair<std::uint64_t, bool>> reports;
 };
@@ -586,10 +588,8 @@ select_service(void *context, fiber::http::HttpExchange &, std::string_view serv
         });
     }
     return fiber::access_server::ProxyUpstreamEndpoint{
-            .host = first ? std::string_view("127.0.0.2") : std::string_view("127.0.0.1"),
-            .port = state.port,
+            .connection_key = first ? &*state.bad_connection_key : &*state.good_connection_key,
             .host_header = first ? std::string_view(state.bad_host_header) : std::string_view(state.good_host_header),
-            .ip_address = first ? fiber::net::IpAddress::v4({127, 0, 0, 2}) : fiber::net::IpAddress::loopback_v4(),
             .selection_token = first ? 1U : 2U,
     };
 }
@@ -804,6 +804,11 @@ TEST(ProxyRequestSenderTest, RetriesAServiceSelectionBeforeSendingRequestHeaders
             .port = port,
             .good_host_header = "127.0.0.1:" + std::to_string(port),
             .bad_host_header = "127.0.0.2:" + std::to_string(port),
+            .good_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+            .bad_connection_key =
+                    fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
+                                                                  fiber::http::Http1ConnectionGroupKey::Scheme::Http),
     };
     fiber::access_server::ProxyRequestSender sender(pool, {
                                                                   .context = &selector_state,

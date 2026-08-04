@@ -2,35 +2,41 @@
 #define FIBER_ACCESS_SERVER_SMOOTH_WEIGHTED_ROUND_ROBIN_H
 
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
-#include <optional>
 #include <span>
-#include <string_view>
+#include <vector>
 
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
-#include <net/IpAddress.h>
-
-namespace fiber::nacos {
-struct ServiceInfo;
-}
 
 namespace fiber::access_server {
 
-enum class ServiceSelectError : std::uint8_t {
+enum class SwrrSelectError : std::uint8_t {
     NoAvailableInstance,
 };
 
 namespace detail {
+template<typename Instance>
 struct SwrrGeneration;
 }
 
+// SmoothWeightedRoundRobin deliberately knows nothing about the value it
+// selects. The caller owns routing/grouping semantics and supplies an opaque
+// instance plus a stable, non-zero selection token and its weight.
+template<std::equality_comparable Instance>
 class SmoothWeightedRoundRobin final : public common::NonCopyable, public common::NonMovable {
 public:
     using TimePoint = std::chrono::steady_clock::time_point;
+
+    struct WeightedInstance {
+        std::uint64_t selection_token = 0;
+        Instance instance;
+        double weight = 1.0;
+    };
 
     struct Options {
         std::size_t max_fails = 25;
@@ -51,25 +57,21 @@ public:
 
         [[nodiscard]] bool valid() const noexcept;
         [[nodiscard]] bool pending() const noexcept { return pending_; }
-        [[nodiscard]] std::string_view host() const noexcept;
-        [[nodiscard]] const std::optional<net::IpAddress> &ip_address() const noexcept;
-        [[nodiscard]] std::uint16_t port() const noexcept;
-        [[nodiscard]] std::string_view authority() const noexcept;
-        [[nodiscard]] std::string_view instance_id() const noexcept;
-        [[nodiscard]] std::string_view cluster_name() const noexcept;
+        [[nodiscard]] const Instance &instance() const noexcept;
         [[nodiscard]] std::uint64_t generation() const noexcept;
-        [[nodiscard]] std::uint64_t peer_id() const noexcept;
+        [[nodiscard]] std::uint64_t selection_token() const noexcept;
         void report(bool success) noexcept;
         void report(bool success, TimePoint now) noexcept;
 
     private:
         friend class SmoothWeightedRoundRobin;
 
-        Selection(std::shared_ptr<detail::SwrrGeneration> owner, std::size_t index, std::uint64_t peer_epoch) noexcept;
+        Selection(std::shared_ptr<detail::SwrrGeneration<Instance>> owner, std::size_t index,
+                  std::uint64_t selection_token) noexcept;
 
-        std::shared_ptr<detail::SwrrGeneration> owner_;
+        std::shared_ptr<detail::SwrrGeneration<Instance>> owner_;
         std::size_t index_ = 0;
-        std::uint64_t peer_epoch_ = 0;
+        std::uint64_t selection_token_ = 0;
         bool pending_ = false;
     };
 
@@ -77,20 +79,20 @@ public:
     explicit SmoothWeightedRoundRobin(Options options);
     ~SmoothWeightedRoundRobin() = default;
 
-    [[nodiscard]] bool update(const nacos::ServiceInfo &snapshot);
-    [[nodiscard]] std::expected<Selection, ServiceSelectError>
-    select(std::string_view cluster, std::string_view preferred_zone,
-           std::span<const std::uint64_t> excluded_peer_ids = {}) noexcept;
-    [[nodiscard]] std::expected<Selection, ServiceSelectError> select(std::string_view cluster,
-                                                                      std::string_view preferred_zone,
-                                                                      std::span<const std::uint64_t> excluded_peer_ids,
-                                                                      TimePoint now) noexcept;
+    // Control-plane update. selection_token must be non-zero and unique in
+    // the caller's routing domain. Reusing a token preserves that instance's
+    // SWRR and failure state across updates.
+    [[nodiscard]] bool update(std::vector<WeightedInstance> instances);
+    [[nodiscard]] std::expected<Selection, SwrrSelectError>
+    select(std::span<const std::uint64_t> excluded_selection_tokens = {}) noexcept;
+    [[nodiscard]] std::expected<Selection, SwrrSelectError>
+    select(std::span<const std::uint64_t> excluded_selection_tokens, TimePoint now) noexcept;
 
     [[nodiscard]] std::uint64_t generation() const noexcept;
     [[nodiscard]] std::size_t configured_instance_count() const noexcept;
 
 private:
-    friend struct detail::SwrrGeneration;
+    friend struct detail::SwrrGeneration<Instance>;
 
     struct Core;
 
@@ -100,5 +102,7 @@ private:
 };
 
 } // namespace fiber::access_server
+
+#include "SmoothWeightedRoundRobinImpl.h"
 
 #endif // FIBER_ACCESS_SERVER_SMOOTH_WEIGHTED_ROUND_ROBIN_H
