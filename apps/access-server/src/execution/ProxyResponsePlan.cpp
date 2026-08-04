@@ -1,7 +1,5 @@
 #include "ProxyResponsePlan.h"
 
-#include "../../../../src/http/HttpHeaderHash.h"
-
 #include <utility>
 
 namespace fiber::access_server {
@@ -20,37 +18,27 @@ std::string normalized_downstream_scheme(std::string_view scheme) {
 
 } // namespace
 
-PreparedProxyResponseHeadersResult prepare_proxy_response_headers(std::span<const CompiledTemplateEntry> headers,
+PreparedProxyResponseHeadersResult prepare_proxy_response_headers(const CompiledHeaderTemplates &headers,
                                                                   TemplateEvaluator evaluator) {
     PreparedProxyResponseHeaders result;
     result.reserve(headers.size());
-    for (const CompiledTemplateEntry &header: headers) {
-        auto value = evaluate_template(header.value, evaluator);
+    for (const CompiledHeaderTemplates::EntryView header: headers) {
+        auto value = evaluate_template(header.value(), evaluator);
         if (!value) {
             return std::unexpected(std::move(value.error()));
         }
-        if (value->empty() || is_java_filtered_response_header(header.name)) {
+        if (value->empty() || is_java_filtered_response_header(header.name())) {
             continue;
         }
-        if (!is_valid_http_header_name(header.name) || !is_valid_http_header_value(*value)) {
+        if (!is_valid_http_header_name(header.name()) || !is_valid_http_header_value(*value)) {
             return std::unexpected(AccessError::unknown("invalid proxy response header"));
         }
         result.push_back(EvaluatedHeader{
-                .name = header.name,
+                .name = std::string(header.name()),
                 .value = std::move(*value),
         });
     }
     return result;
-}
-
-bool proxy_response_header_is_configured(std::span<const CompiledTemplateEntry> headers,
-                                         std::string_view name) noexcept {
-    for (const CompiledTemplateEntry &header: headers) {
-        if (http::http_header_name_equals_ci(header.name, name)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 std::optional<std::string> rewrite_java_proxy_location(std::string_view upstream_value, std::string_view upstream_host,

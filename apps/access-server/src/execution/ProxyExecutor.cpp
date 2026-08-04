@@ -95,7 +95,7 @@ bool build_downstream_headers(http::HttpExchange &downstream, const PreparedProx
     const http::Http1ResponseHead &head = upstream.head();
     for (const http::HttpHeaders::HeaderField &field: head.headers) {
         if (field.name_len == 0 || is_java_filtered_response_header(field.name_view()) ||
-            proxy_response_header_is_configured(request.response_headers, field.name_view())) {
+            request.response_headers.get().contains(field.lowcase_view(), field.name_hash)) {
             continue;
         }
         if (!output.add_view(field.name_view(), field.value_view(), field.lowcase_name, field.name_hash)) {
@@ -108,7 +108,7 @@ bool build_downstream_headers(http::HttpExchange &downstream, const PreparedProx
         }
     }
 
-    if (!proxy_response_header_is_configured(request.response_headers, "Location")) {
+    if (!request.response_headers.get().contains("Location")) {
         const std::string_view location = head.headers.get("Location");
         if (!location.empty()) {
             auto rewritten =
@@ -119,7 +119,7 @@ bool build_downstream_headers(http::HttpExchange &downstream, const PreparedProx
             }
         }
     }
-    if (!proxy_response_header_is_configured(request.response_headers, "Refresh")) {
+    if (!request.response_headers.get().contains("Refresh")) {
         const std::string_view refresh = head.headers.get("Refresh");
         if (!refresh.empty()) {
             auto rewritten =
@@ -207,7 +207,7 @@ async::Task<common::IoResult<void>> ProxyExecutor::execute_monitored(http::HttpE
 
     const bool websocket_response = request.websocket_upgrade && upstream.status_code() == 101;
 
-    auto custom_headers = prepare_proxy_response_headers(request.response_headers, request.response_evaluator);
+    auto custom_headers = prepare_proxy_response_headers(request.response_headers.get(), request.response_evaluator);
     if (!custom_headers) {
         if (websocket_response) {
             (void) upstream.abort(common::IoErr::Canceled);

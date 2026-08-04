@@ -698,6 +698,7 @@ TEST(AccessRequestHandlerTest, BuildsJavaCompatibleProxyRequestPlanOnLiveExchang
                                              "Content-Length: 4\r\n"
                                              "Connection: close\r\n"
                                              "X-Override: incoming\r\n"
+                                             "x-empty: incoming\r\n"
                                              "X-Incoming: one\r\n"
                                              "X-Incoming: two\r\n"
                                              "X-Ploto-Source-App: incoming\r\n\r\n"

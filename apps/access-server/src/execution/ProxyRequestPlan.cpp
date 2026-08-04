@@ -17,15 +17,6 @@ bool header_name_equals(std::string_view left, std::string_view right) noexcept 
     return http::http_header_name_equals_ci(left, right);
 }
 
-bool contains_header_name(std::span<const CompiledTemplateEntry> headers, std::string_view name) noexcept {
-    for (const CompiledTemplateEntry &header: headers) {
-        if (header_name_equals(header.name, name)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void set_header(std::vector<EvaluatedHeader> &headers, std::string name, std::string value) {
     std::erase_if(headers, [&](const EvaluatedHeader &header) { return header_name_equals(header.name, name); });
     headers.push_back(EvaluatedHeader{
@@ -124,23 +115,23 @@ build_proxy_headers(const http::HttpExchange &exchange, std::string_view project
         }
     }
 
-    for (const CompiledTemplateEntry &header: proxy.proxy_headers) {
-        auto value = evaluate_template(header.value, evaluator);
+    for (const CompiledHeaderTemplates::EntryView header: proxy.proxy_headers) {
+        auto value = evaluate_template(header.value(), evaluator);
         if (!value) {
             return std::unexpected(std::move(value.error()));
         }
-        if (value->empty() || is_java_filtered_response_header(header.name)) {
+        if (value->empty() || is_java_filtered_response_header(header.name())) {
             continue;
         }
-        if (!is_valid_http_header_name(header.name) || !is_valid_http_header_value(*value)) {
+        if (!is_valid_http_header_name(header.name()) || !is_valid_http_header_value(*value)) {
             return std::unexpected(AccessError::unknown("invalid proxy request header"));
         }
-        set_header(result, header.name, std::move(*value));
+        set_header(result, std::string(header.name()), std::move(*value));
     }
 
     for (const http::HttpHeaders::HeaderField &header: exchange.request_headers()) {
         if (header.name_len == 0 || is_java_filtered_proxy_request_header(header.name_view()) ||
-            contains_header_name(proxy.proxy_headers, header.name_view())) {
+            proxy.proxy_headers.contains(header.lowcase_view(), header.name_hash)) {
             continue;
         }
         add_header(result, header.name_view(), header.value_view());
@@ -205,14 +196,13 @@ PreparedProxyRequestResult prepare_proxy_request(const http::HttpExchange &excha
                                                  const CompiledProxyRoute &proxy, TemplateEvaluator evaluator,
                                                  std::size_t max_request_body_size,
                                                  std::string_view initial_context_cluster) {
-    PreparedProxyRequest result;
+    PreparedProxyRequest result(proxy.response_headers);
     result.upstream_kind = proxy.upstream_kind;
     result.service = proxy.service;
     if (proxy.cluster) {
         result.cluster = *proxy.cluster;
     }
     result.addresses = proxy.addresses;
-    result.response_headers = proxy.response_headers;
     result.response_evaluator = evaluator;
     result.method = exchange.method();
     result.max_request_body_size = max_request_body_size;

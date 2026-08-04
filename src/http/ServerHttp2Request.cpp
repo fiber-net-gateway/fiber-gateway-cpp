@@ -161,13 +161,13 @@ const Http2HpackDecoder::Ops &ServerHttp2Request::decoder_ops() noexcept {
 
 const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::pseudo_header_handler_map() noexcept {
     static HeaderMap<PseudoHeaderHandler> handlers = []() {
-        HeaderMap<PseudoHeaderHandler> map;
-        map.insert(":method", &ServerHttp2Request::handle_method);
-        map.insert(":path", &ServerHttp2Request::handle_path);
-        map.insert(":scheme", &ServerHttp2Request::handle_scheme);
-        map.insert(":authority", &ServerHttp2Request::handle_authority);
-        map.insert(":protocol", &ServerHttp2Request::handle_protocol);
-        return map;
+        HeaderMap<PseudoHeaderHandler>::Builder builder(5);
+        builder.insert(":method", &ServerHttp2Request::handle_method);
+        builder.insert(":path", &ServerHttp2Request::handle_path);
+        builder.insert(":scheme", &ServerHttp2Request::handle_scheme);
+        builder.insert(":authority", &ServerHttp2Request::handle_authority);
+        builder.insert(":protocol", &ServerHttp2Request::handle_protocol);
+        return std::move(builder).build();
     }();
     return handlers;
 }

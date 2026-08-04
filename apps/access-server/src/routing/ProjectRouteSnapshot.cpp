@@ -110,7 +110,27 @@ compile_templates(const StringConfigMap &input, std::size_t route_index, std::st
     return result;
 }
 
+std::expected<CompiledHeaderTemplates::Builder, AccessConfigError>
+compile_header_templates(const StringConfigMap &input, std::size_t route_index, std::string_view field) {
+    auto entries = compile_templates(input, route_index, field);
+    if (!entries) {
+        return std::unexpected(std::move(entries.error()));
+    }
+
+    CompiledHeaderTemplates::Builder result(entries->size());
+    for (CompiledTemplateEntry &entry: *entries) {
+        result.insert(std::move(entry.name), std::move(entry.value));
+    }
+    return result;
+}
+
+struct PendingProxyHeaders {
+    CompiledHeaderTemplates::Builder proxy_headers;
+    CompiledHeaderTemplates::Builder response_headers;
+};
+
 std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &route, std::size_t route_index,
+                                                             PendingProxyHeaders &pending_headers,
                                                              ScriptCompilerAdapter compiler) {
     if (!compiler.compile_expression) {
         return {};
@@ -128,7 +148,7 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         }
         return {};
     };
-    auto compile_entries = [&](std::vector<CompiledTemplateEntry> &entries,
+    auto compile_entries = [&](std::span<CompiledTemplateEntry> entries,
                                std::string_view field) -> std::expected<void, AccessConfigError> {
         for (CompiledTemplateEntry &entry: entries) {
             auto compiled = compile_template(entry.value, field);
@@ -162,11 +182,11 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         return compile_entries(route.response->response_headers, "response_headers");
     }
 
-    auto proxy_headers = compile_entries(route.proxy->proxy_headers, "proxy_headers");
+    auto proxy_headers = compile_entries(pending_headers.proxy_headers.entries(), "proxy_headers");
     if (!proxy_headers) {
         return proxy_headers;
     }
-    auto response_headers = compile_entries(route.proxy->response_headers, "response_headers");
+    auto response_headers = compile_entries(pending_headers.response_headers.entries(), "response_headers");
     if (!response_headers) {
         return response_headers;
     }
@@ -307,7 +327,8 @@ std::expected<std::vector<Cidr>, AccessConfigError> compile_cidr_list(const std:
     return result;
 }
 
-std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig &source, std::size_t route_index) {
+std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig &source, std::size_t route_index,
+                                                              PendingProxyHeaders &pending_headers) {
     if (!source.path || source.path->empty()) {
         return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "path", "path is empty"));
     }
@@ -410,17 +431,17 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
                                                "no service or addresses"));
         }
 
-        auto proxy_headers = compile_templates(source.proxy_headers, route_index, "proxy_headers");
+        auto proxy_headers = compile_header_templates(source.proxy_headers, route_index, "proxy_headers");
         if (!proxy_headers) {
             return std::unexpected(std::move(proxy_headers.error()));
         }
-        proxy.proxy_headers = std::move(*proxy_headers);
+        pending_headers.proxy_headers = std::move(*proxy_headers);
 
-        auto response_headers = compile_templates(source.response_headers, route_index, "response_headers");
+        auto response_headers = compile_header_templates(source.response_headers, route_index, "response_headers");
         if (!response_headers) {
             return std::unexpected(std::move(response_headers.error()));
         }
-        proxy.response_headers = std::move(*response_headers);
+        pending_headers.response_headers = std::move(*response_headers);
 
         auto context = compile_context(source.context, route_index);
         if (!context) {
@@ -600,12 +621,15 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
     snapshot.project_ = project;
     snapshot.version_ = config.version;
     snapshot.routes_.reserve(config.routes->size());
+    std::vector<PendingProxyHeaders> pending_headers;
+    pending_headers.reserve(config.routes->size());
     for (std::size_t i = 0; i < config.routes->size(); ++i) {
         const std::optional<RouteConfig> &source = (*config.routes)[i];
         if (!source) {
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, i, {}, "route entry is null"));
         }
-        auto route = compile_route(*source, i);
+        PendingProxyHeaders &pending = pending_headers.emplace_back();
+        auto route = compile_route(*source, i, pending);
         if (!route) {
             return std::unexpected(std::move(route.error()));
         }
@@ -622,9 +646,13 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
         return std::unexpected(*definer.error());
     }
     for (std::size_t i = 0; i < snapshot.routes_.size(); ++i) {
-        auto compiled = compile_route_scripts(snapshot.routes_[i], i, compiler);
+        auto compiled = compile_route_scripts(snapshot.routes_[i], i, pending_headers[i], compiler);
         if (!compiled) {
             return std::unexpected(std::move(compiled.error()));
+        }
+        if (CompiledRoute &route = snapshot.routes_[i]; route.proxy) {
+            route.proxy->proxy_headers = std::move(pending_headers[i].proxy_headers).build();
+            route.proxy->response_headers = std::move(pending_headers[i].response_headers).build();
         }
     }
 

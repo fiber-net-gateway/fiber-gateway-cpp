@@ -353,6 +353,55 @@ TEST(ProjectRouteSnapshotTest, BindsPreparsedTemplateExpressionsAfterDiscovering
     }
 }
 
+TEST(ProjectRouteSnapshotTest, BindsProxyHeaderTemplatesBeforeFreezingThem) {
+    RouteConfig route = proxy_route("/items/:id");
+    route.proxy_headers.push_back(StringConfigEntry{.name = "X-Item", .value = "${$path.id}"});
+    route.response_headers.push_back(StringConfigEntry{.name = "X-Reply", .value = "${$path.id}"});
+    ScriptCompilerCapture capture;
+
+    auto result = compile_project_config("demo", project_with_routes({std::move(route)}), compiler_adapter(capture));
+    const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+    ASSERT_TRUE(snapshot.routes()[0].proxy);
+    const auto &proxy = *snapshot.routes()[0].proxy;
+
+    ASSERT_EQ(proxy.proxy_headers.size(), 1U);
+    const auto proxy_header = *proxy.proxy_headers.begin();
+    EXPECT_EQ(proxy_header.name(), "X-Item");
+    ASSERT_EQ(proxy_header.value().expressions.size(), 1U);
+    EXPECT_TRUE(proxy_header.value().expressions[0].program);
+
+    ASSERT_EQ(proxy.response_headers.size(), 1U);
+    const auto response_header = *proxy.response_headers.begin();
+    EXPECT_EQ(response_header.name(), "X-Reply");
+    ASSERT_EQ(response_header.value().expressions.size(), 1U);
+    EXPECT_TRUE(response_header.value().expressions[0].program);
+
+    EXPECT_EQ(capture.expressions, (std::vector<std::string>{"$path.id", "$path.id"}));
+    ASSERT_EQ(capture.path_variable_names.size(), 2U);
+    EXPECT_EQ(capture.path_variable_names[0], (std::vector<std::string>{"id"}));
+    EXPECT_EQ(capture.path_variable_names[1], (std::vector<std::string>{"id"}));
+}
+
+TEST(ProjectRouteSnapshotTest, PreservesCaseInsensitiveProxyHeaderDuplicates) {
+    RouteConfig route = proxy_route("/items");
+    route.proxy_headers.push_back(StringConfigEntry{.name = "X-Duplicate", .value = "first"});
+    route.proxy_headers.push_back(StringConfigEntry{.name = "x-duplicate", .value = "second"});
+
+    auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
+    const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+    ASSERT_TRUE(snapshot.routes()[0].proxy);
+    const auto &headers = snapshot.routes()[0].proxy->proxy_headers;
+
+    ASSERT_EQ(headers.size(), 2U);
+    EXPECT_TRUE(headers.contains("X-DUPLICATE"));
+    auto iterator = headers.begin();
+    EXPECT_EQ((*iterator).name(), "X-Duplicate");
+    EXPECT_EQ((*iterator).value().trailing_literal, "first");
+    ++iterator;
+    EXPECT_EQ((*iterator).name(), "x-duplicate");
+    EXPECT_EQ((*iterator).value().trailing_literal, "second");
+}
+
 TEST(ProjectRouteSnapshotTest, UsesJavaCrc32cRouteKeyAndConditionalOrder) {
     RouteConfig first = proxy_route("/same/:id");
     first.condition = "never";

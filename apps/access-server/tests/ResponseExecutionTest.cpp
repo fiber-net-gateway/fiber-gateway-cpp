@@ -15,6 +15,7 @@
 namespace {
 
 using fiber::access_server::AccessError;
+using fiber::access_server::CompiledHeaderTemplates;
 using fiber::access_server::CompiledResponseRoute;
 using fiber::access_server::CompiledTemplate;
 using fiber::access_server::CompiledTemplateEntry;
@@ -24,7 +25,6 @@ using fiber::access_server::is_java_filtered_response_header;
 using fiber::access_server::parse_template;
 using fiber::access_server::prepare_proxy_response_headers;
 using fiber::access_server::prepare_response;
-using fiber::access_server::proxy_response_header_is_configured;
 using fiber::access_server::ResponseBodyKind;
 using fiber::access_server::rewrite_java_proxy_location;
 using fiber::access_server::rewrite_java_proxy_refresh;
@@ -71,6 +71,14 @@ CompiledTemplateEntry template_entry(std::string name, std::string_view source) 
             .name = std::move(name),
             .value = compiled_template(source),
     };
+}
+
+CompiledHeaderTemplates compiled_headers(std::vector<CompiledTemplateEntry> entries) {
+    CompiledHeaderTemplates::Builder builder(entries.size());
+    for (CompiledTemplateEntry &entry: entries) {
+        builder.insert(std::move(entry.name), std::move(entry.value));
+    }
+    return std::move(builder).build();
 }
 
 TEST(AccessErrorTest, UsesJavaCompatibleStableErrors) {
@@ -277,12 +285,12 @@ TEST(ResponsePlanTest, FiltersTheSameProtectedResponseHeadersAsJava) {
 }
 
 TEST(ProxyResponsePlanTest, EvaluatesAllHeadersBeforeFilteringEmptyAndProtectedValues) {
-    const std::vector<CompiledTemplateEntry> headers{
+    const CompiledHeaderTemplates headers = compiled_headers({
             template_entry("X-First", "${$path.id}"),
             template_entry("Content-Length", "${$request.method}"),
             template_entry("X-Empty", "${empty}"),
             template_entry("X-Last", "static"),
-    };
+    });
     EvaluatorState state;
 
     auto result = prepare_proxy_response_headers(headers, evaluator(state));
@@ -294,9 +302,9 @@ TEST(ProxyResponsePlanTest, EvaluatesAllHeadersBeforeFilteringEmptyAndProtectedV
     EXPECT_EQ((*result)[1].name, "X-Last");
     EXPECT_EQ((*result)[1].value, "static");
     EXPECT_EQ(state.expressions, (std::vector<std::string>{"$path.id", "$request.method", "empty"}));
-    EXPECT_TRUE(proxy_response_header_is_configured(headers, "content-length"));
-    EXPECT_TRUE(proxy_response_header_is_configured(headers, "x-empty"));
-    EXPECT_FALSE(proxy_response_header_is_configured(headers, "Location"));
+    EXPECT_TRUE(headers.contains("content-length"));
+    EXPECT_TRUE(headers.contains("x-empty"));
+    EXPECT_FALSE(headers.contains("Location"));
 }
 
 TEST(ProxyResponsePlanTest, RewritesLocationWithJavaAuthorityPrefixSemantics) {

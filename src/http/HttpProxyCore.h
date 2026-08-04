@@ -75,19 +75,19 @@ void for_each_token(std::string_view value, F &&fn) {
 // the proxy-specific Connection/Keep-Alive/TE/Trailers/Transfer-Encoding/Upgrade family.
 inline const fiber::http::HeaderMap<std::uint8_t> &hop_by_hop_header_map() {
     static const fiber::http::HeaderMap<std::uint8_t> map = []() {
-        fiber::http::HeaderMap<std::uint8_t> headers;
-        headers.insert("connection", fiber::http::http_header_name_hash("connection"), kSkipHeaderValue);
-        headers.insert("keep-alive", fiber::http::http_header_name_hash("keep-alive"), kSkipHeaderValue);
-        headers.insert("proxy-connection", fiber::http::http_header_name_hash("proxy-connection"), kSkipHeaderValue);
-        headers.insert("transfer-encoding", fiber::http::http_header_name_hash("transfer-encoding"), kSkipHeaderValue);
-        headers.insert("upgrade", fiber::http::http_header_name_hash("upgrade"), kSkipHeaderValue);
-        headers.insert("te", fiber::http::http_header_name_hash("te"), kSkipHeaderValue);
-        headers.insert("trailer", fiber::http::http_header_name_hash("trailer"), kSkipHeaderValue);
-        headers.insert("proxy-authenticate", fiber::http::http_header_name_hash("proxy-authenticate"),
+        fiber::http::HeaderMap<std::uint8_t>::Builder builder(9);
+        builder.insert("connection", fiber::http::http_header_name_hash("connection"), kSkipHeaderValue);
+        builder.insert("keep-alive", fiber::http::http_header_name_hash("keep-alive"), kSkipHeaderValue);
+        builder.insert("proxy-connection", fiber::http::http_header_name_hash("proxy-connection"), kSkipHeaderValue);
+        builder.insert("transfer-encoding", fiber::http::http_header_name_hash("transfer-encoding"), kSkipHeaderValue);
+        builder.insert("upgrade", fiber::http::http_header_name_hash("upgrade"), kSkipHeaderValue);
+        builder.insert("te", fiber::http::http_header_name_hash("te"), kSkipHeaderValue);
+        builder.insert("trailer", fiber::http::http_header_name_hash("trailer"), kSkipHeaderValue);
+        builder.insert("proxy-authenticate", fiber::http::http_header_name_hash("proxy-authenticate"),
                        kSkipHeaderValue);
-        headers.insert("proxy-authorization", fiber::http::http_header_name_hash("proxy-authorization"),
+        builder.insert("proxy-authorization", fiber::http::http_header_name_hash("proxy-authorization"),
                        kSkipHeaderValue);
-        return headers;
+        return std::move(builder).build();
     }();
     return map;
 }

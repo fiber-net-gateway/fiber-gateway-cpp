@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -24,6 +25,9 @@ class HttpExchange;
 namespace fiber::access_server {
 
 struct PreparedProxyRequest {
+    explicit PreparedProxyRequest(const CompiledHeaderTemplates &configured_response_headers) noexcept :
+        response_headers(configured_response_headers) {}
+
     // Views into the pinned route snapshot. The plan must not outlive the
     // AccessRequestHandler invocation that created it.
     ProxyUpstreamKind upstream_kind = ProxyUpstreamKind::Service;
@@ -41,7 +45,7 @@ struct PreparedProxyRequest {
     std::vector<EvaluatedHeader> headers;
     // Empty values mean remove the trace user-data key, matching Java.
     std::vector<EvaluatedHeader> context;
-    std::span<const CompiledTemplateEntry> response_headers;
+    std::reference_wrapper<const CompiledHeaderTemplates> response_headers;
     // The callback context is owned by AccessRequestHandler and is valid for
     // the synchronous lifetime of the proxy adapter invocation.
     TemplateEvaluator response_evaluator;
