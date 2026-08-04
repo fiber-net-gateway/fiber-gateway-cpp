@@ -72,15 +72,6 @@ RequestHostContext resolve_request_host(const http::HttpExchange &exchange, bool
     return result;
 }
 
-bool template_header_configured(std::span<const CompiledTemplateEntry> headers, std::string_view name) noexcept {
-    for (const CompiledTemplateEntry &header: headers) {
-        if (http::http_header_name_equals_ci(header.name, name)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void set_prepared_header(std::vector<EvaluatedHeader> &headers, std::string_view name, std::string_view value) {
     std::erase_if(headers,
                   [&](const EvaluatedHeader &header) { return http::http_header_name_equals_ci(header.name, name); });
@@ -314,8 +305,7 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
             co_return co_await error_responder_.send(exchange, AccessError::unknown("proxy executor is not configured"),
                                                      base_headers, {}, request_trace_id(telemetry), false, telemetry);
         }
-        if (request_host.extracted_cluster &&
-            !template_header_configured(route.proxy->proxy_headers, kOriginHostHeader)) {
+        if (request_host.extracted_cluster && !route.proxy->proxy_headers.contains(kOriginHostHeader)) {
             set_prepared_header(prepared->headers, kOriginHostHeader, request_host.origin_host);
         }
         co_return co_await proxy_adapter_.execute(proxy_adapter_.context, exchange, *prepared, base_headers, telemetry);

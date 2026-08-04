@@ -8,7 +8,6 @@
 
 #include <expected>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,11 +17,8 @@ namespace fiber::access_server {
 using PreparedProxyResponseHeaders = std::vector<EvaluatedHeader>;
 using PreparedProxyResponseHeadersResult = std::expected<PreparedProxyResponseHeaders, AccessError>;
 
-[[nodiscard]] PreparedProxyResponseHeadersResult
-prepare_proxy_response_headers(std::span<const CompiledTemplateEntry> headers, TemplateEvaluator evaluator);
-
-[[nodiscard]] bool proxy_response_header_is_configured(std::span<const CompiledTemplateEntry> headers,
-                                                       std::string_view name) noexcept;
+[[nodiscard]] PreparedProxyResponseHeadersResult prepare_proxy_response_headers(const CompiledHeaderTemplates &headers,
+                                                                                TemplateEvaluator evaluator);
 
 [[nodiscard]] std::optional<std::string> rewrite_java_proxy_location(std::string_view upstream_value,
                                                                      std::string_view upstream_host,

@@ -141,11 +141,11 @@ bool Http1Connection::handle_connection(HttpExchange &exchange, const HttpHeader
 
 const HeaderMap<Http1Connection::HeaderHandler> &Http1Connection::header_handler_map() {
     static HeaderMap<HeaderHandler> handlers = []() {
-        HeaderMap<HeaderHandler> map;
-        map.insert("content-length", &Http1Connection::handle_content_length);
-        map.insert("transfer-encoding", &Http1Connection::handle_transfer_encoding);
-        map.insert("connection", &Http1Connection::handle_connection);
-        return map;
+        HeaderMap<HeaderHandler>::Builder builder(3);
+        builder.insert("content-length", &Http1Connection::handle_content_length);
+        builder.insert("transfer-encoding", &Http1Connection::handle_transfer_encoding);
+        builder.insert("connection", &Http1Connection::handle_connection);
+        return std::move(builder).build();
     }();
     return handlers;
 }

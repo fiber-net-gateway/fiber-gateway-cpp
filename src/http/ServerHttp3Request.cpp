@@ -312,13 +312,13 @@ const Http3QpackDecoder::Ops &ServerHttp3Request::HeaderBlockParser::decoder_ops
 const HeaderMap<ServerHttp3Request::HeaderBlockParser::PseudoHeaderRule> &
 ServerHttp3Request::HeaderBlockParser::pseudo_header_map() noexcept {
     static HeaderMap<PseudoHeaderRule> handlers = []() {
-        HeaderMap<PseudoHeaderRule> map;
-        map.insert(":method", PseudoHeaderRule{MethodSeen, &HeaderBlockParser::handle_method});
-        map.insert(":path", PseudoHeaderRule{PathSeen, &HeaderBlockParser::handle_path});
-        map.insert(":scheme", PseudoHeaderRule{SchemeSeen, &HeaderBlockParser::handle_scheme});
-        map.insert(":authority", PseudoHeaderRule{AuthoritySeen, &HeaderBlockParser::handle_authority});
-        map.insert(":protocol", PseudoHeaderRule{ProtocolSeen, &HeaderBlockParser::handle_protocol});
-        return map;
+        HeaderMap<PseudoHeaderRule>::Builder builder(5);
+        builder.insert(":method", PseudoHeaderRule{MethodSeen, &HeaderBlockParser::handle_method});
+        builder.insert(":path", PseudoHeaderRule{PathSeen, &HeaderBlockParser::handle_path});
+        builder.insert(":scheme", PseudoHeaderRule{SchemeSeen, &HeaderBlockParser::handle_scheme});
+        builder.insert(":authority", PseudoHeaderRule{AuthoritySeen, &HeaderBlockParser::handle_authority});
+        builder.insert(":protocol", PseudoHeaderRule{ProtocolSeen, &HeaderBlockParser::handle_protocol});
+        return std::move(builder).build();
     }();
     return handlers;
 }
@@ -326,14 +326,14 @@ ServerHttp3Request::HeaderBlockParser::pseudo_header_map() noexcept {
 const HeaderMap<ServerHttp3Request::HeaderBlockParser::RegularHeaderHandler> &
 ServerHttp3Request::HeaderBlockParser::regular_header_handler_map() noexcept {
     static HeaderMap<RegularHeaderHandler> handlers = []() {
-        HeaderMap<RegularHeaderHandler> map;
-        map.insert("content-length", &HeaderBlockParser::handle_content_length);
-        map.insert("connection", &HeaderBlockParser::handle_forbidden_regular_header);
-        map.insert("keep-alive", &HeaderBlockParser::handle_forbidden_regular_header);
-        map.insert("transfer-encoding", &HeaderBlockParser::handle_forbidden_regular_header);
-        map.insert("upgrade", &HeaderBlockParser::handle_forbidden_regular_header);
-        map.insert("te", &HeaderBlockParser::handle_te);
-        return map;
+        HeaderMap<RegularHeaderHandler>::Builder builder(6);
+        builder.insert("content-length", &HeaderBlockParser::handle_content_length);
+        builder.insert("connection", &HeaderBlockParser::handle_forbidden_regular_header);
+        builder.insert("keep-alive", &HeaderBlockParser::handle_forbidden_regular_header);
+        builder.insert("transfer-encoding", &HeaderBlockParser::handle_forbidden_regular_header);
+        builder.insert("upgrade", &HeaderBlockParser::handle_forbidden_regular_header);
+        builder.insert("te", &HeaderBlockParser::handle_te);
+        return std::move(builder).build();
     }();
     return handlers;
 }

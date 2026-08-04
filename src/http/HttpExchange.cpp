@@ -37,13 +37,13 @@ bool is_terminal_response_write_error(common::IoErr error) noexcept {
 
 const HeaderMap<RequestHeaderRefKind> &request_header_ref_map() noexcept {
     static HeaderMap<RequestHeaderRefKind> refs = []() {
-        HeaderMap<RequestHeaderRefKind> map;
-        map.insert("host", RequestHeaderRefKind::Host);
-        map.insert("content-type", RequestHeaderRefKind::ContentType);
-        map.insert("range", RequestHeaderRefKind::Range);
-        map.insert("if-range", RequestHeaderRefKind::IfRange);
-        map.insert("expect", RequestHeaderRefKind::Expect);
-        return map;
+        HeaderMap<RequestHeaderRefKind>::Builder builder(5);
+        builder.insert("host", RequestHeaderRefKind::Host);
+        builder.insert("content-type", RequestHeaderRefKind::ContentType);
+        builder.insert("range", RequestHeaderRefKind::Range);
+        builder.insert("if-range", RequestHeaderRefKind::IfRange);
+        builder.insert("expect", RequestHeaderRefKind::Expect);
+        return std::move(builder).build();
     }();
     return refs;
 }

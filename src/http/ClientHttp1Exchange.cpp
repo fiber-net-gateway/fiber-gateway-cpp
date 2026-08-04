@@ -246,11 +246,11 @@ bool handle_response_connection(ResponseHeaderParseState &state, const HttpHeade
 
 const HeaderMap<ResponseHeaderHandler> &response_header_handler_map() {
     static HeaderMap<ResponseHeaderHandler> handlers = []() {
-        HeaderMap<ResponseHeaderHandler> map;
-        map.insert("content-length", &handle_response_content_length);
-        map.insert("transfer-encoding", &handle_response_transfer_encoding);
-        map.insert("connection", &handle_response_connection);
-        return map;
+        HeaderMap<ResponseHeaderHandler>::Builder builder(3);
+        builder.insert("content-length", &handle_response_content_length);
+        builder.insert("transfer-encoding", &handle_response_transfer_encoding);
+        builder.insert("connection", &handle_response_connection);
+        return std::move(builder).build();
     }();
     return handlers;
 }

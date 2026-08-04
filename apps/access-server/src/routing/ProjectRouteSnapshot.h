@@ -5,7 +5,7 @@
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
 #include "Cidr.h"
-#include "CompiledTemplate.h"
+#include "CompiledHeaderTemplates.h"
 #include "HostMatcher.h"
 
 #include <cstddef>
@@ -19,11 +19,6 @@
 #include <vector>
 
 namespace fiber::access_server {
-
-struct CompiledTemplateEntry {
-    std::string name;
-    CompiledTemplate value;
-};
 
 enum class ResponseBodyKind : std::uint8_t {
     Empty,
@@ -69,8 +64,8 @@ struct CompiledProxyRoute {
     std::optional<std::int64_t> max_response_body_size;
     std::optional<std::int32_t> websocket_timeout_millis;
     std::optional<bool> flush;
-    std::vector<CompiledTemplateEntry> proxy_headers;
-    std::vector<CompiledTemplateEntry> response_headers;
+    CompiledHeaderTemplates proxy_headers;
+    CompiledHeaderTemplates response_headers;
     std::vector<CompiledTemplateEntry> context;
     std::optional<CompiledTemplate> rewrite;
 };

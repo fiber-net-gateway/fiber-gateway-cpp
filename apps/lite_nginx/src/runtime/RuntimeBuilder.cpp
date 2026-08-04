@@ -155,19 +155,19 @@ std::chrono::milliseconds resolve_timeout(const std::optional<std::chrono::milli
     return fallback;
 }
 
-fiber::http::HeaderMap<std::uint8_t> make_default_skip_headers() {
-    fiber::http::HeaderMap<std::uint8_t> headers;
-    headers.insert("connection", fiber::http::http_header_name_hash("connection"), kSkipHeaderValue);
-    headers.insert("keep-alive", fiber::http::http_header_name_hash("keep-alive"), kSkipHeaderValue);
-    headers.insert("proxy-connection", fiber::http::http_header_name_hash("proxy-connection"), kSkipHeaderValue);
-    headers.insert("transfer-encoding", fiber::http::http_header_name_hash("transfer-encoding"), kSkipHeaderValue);
-    headers.insert("upgrade", fiber::http::http_header_name_hash("upgrade"), kSkipHeaderValue);
-    headers.insert("te", fiber::http::http_header_name_hash("te"), kSkipHeaderValue);
-    headers.insert("trailer", fiber::http::http_header_name_hash("trailer"), kSkipHeaderValue);
-    headers.insert("proxy-authenticate", fiber::http::http_header_name_hash("proxy-authenticate"), kSkipHeaderValue);
-    headers.insert("proxy-authorization", fiber::http::http_header_name_hash("proxy-authorization"), kSkipHeaderValue);
-    headers.insert("host", fiber::http::http_header_name_hash("host"), kSkipHeaderValue);
-    return headers;
+fiber::http::HeaderMap<std::uint8_t>::Builder make_default_skip_headers_builder(std::size_t custom_header_count) {
+    fiber::http::HeaderMap<std::uint8_t>::Builder builder(10 + custom_header_count);
+    builder.insert("connection", fiber::http::http_header_name_hash("connection"), kSkipHeaderValue);
+    builder.insert("keep-alive", fiber::http::http_header_name_hash("keep-alive"), kSkipHeaderValue);
+    builder.insert("proxy-connection", fiber::http::http_header_name_hash("proxy-connection"), kSkipHeaderValue);
+    builder.insert("transfer-encoding", fiber::http::http_header_name_hash("transfer-encoding"), kSkipHeaderValue);
+    builder.insert("upgrade", fiber::http::http_header_name_hash("upgrade"), kSkipHeaderValue);
+    builder.insert("te", fiber::http::http_header_name_hash("te"), kSkipHeaderValue);
+    builder.insert("trailer", fiber::http::http_header_name_hash("trailer"), kSkipHeaderValue);
+    builder.insert("proxy-authenticate", fiber::http::http_header_name_hash("proxy-authenticate"), kSkipHeaderValue);
+    builder.insert("proxy-authorization", fiber::http::http_header_name_hash("proxy-authorization"), kSkipHeaderValue);
+    builder.insert("host", fiber::http::http_header_name_hash("host"), kSkipHeaderValue);
+    return builder;
 }
 
 std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config::SourceLocation &location,
@@ -409,7 +409,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             runtime_location.upstream_index = upstream_index;
             runtime_location.reuse_connection = location.reuse_connection;
             runtime_location.close_on_client_abort = location.proxy.close_on_client_abort;
-            runtime_location.skip_headers = make_default_skip_headers();
+            auto skip_headers_builder = make_default_skip_headers_builder(location.proxy.set_headers.size());
             // Add the route first so the matcher extracts the pattern's path variable names
             // (e.g. /api/:id -> ["id"]) into path_var_names; template header values are then
             // compiled with the shared route extension set to those names, so $path references
@@ -477,8 +477,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 runtime_header.name_hash = fiber::http::http_header_name_hash(runtime_header.lowercase_name);
                 runtime_location.host_header_overridden =
                         runtime_location.host_header_overridden || runtime_header.lowercase_name == "host";
-                runtime_location.skip_headers.insert(runtime_header.lowercase_name, runtime_header.name_hash,
-                                                     kSkipHeaderValue);
+                skip_headers_builder.insert(runtime_header.lowercase_name, runtime_header.name_hash, kSkipHeaderValue);
                 if (header.is_template) {
                     auto compiled = fiber::script::compile_template_string(*runtime.script_library, header.value);
                     if (!compiled) {
@@ -495,6 +494,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 runtime_header.value = header.value; // literal value, or template source (diagnostics)
                 runtime_location.set_headers.push_back(std::move(runtime_header));
             }
+            runtime_location.skip_headers = std::move(skip_headers_builder).build();
             runtime_server.locations.push_back(std::move(runtime_location));
         }
 

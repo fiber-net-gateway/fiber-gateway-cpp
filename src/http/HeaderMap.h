@@ -1,10 +1,14 @@
 #ifndef FIBER_HTTP_HEADER_MAP_H
 #define FIBER_HTTP_HEADER_MAP_H
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <string>
+#include <cstring>
+#include <iterator>
+#include <limits>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -14,42 +18,28 @@ namespace fiber::http {
 
 template<typename V>
 class HeaderMap {
-public:
-    HeaderMap() { init_buckets(kDefaultBuckets); }
-    explicit HeaderMap(size_t bucket_count) { init_buckets(bucket_count); }
+    static_assert(std::is_nothrow_move_constructible_v<V>, "HeaderMap values must be nothrow move constructible");
+    static_assert(std::is_nothrow_destructible_v<V>, "HeaderMap values must be nothrow destructible");
 
-    bool insert(std::string_view name, const V &value) { return insert_impl(name, hash_name(name), value); }
-    bool insert(std::string_view name, V &&value) { return insert_impl(name, hash_name(name), std::move(value)); }
-    bool insert(std::string_view lowcase_name, std::uint64_t hash, const V &value) {
-        return insert_impl(lowcase_name, narrow_hash(hash), value);
-    }
-    bool insert(std::string_view lowcase_name, std::uint64_t hash, V &&value) {
-        return insert_impl(lowcase_name, narrow_hash(hash), std::move(value));
-    }
-
-    V *get(std::string_view name) { return get_impl(name, hash_name(name)); }
-    const V *get(std::string_view name) const { return get_impl(name, hash_name(name)); }
-    V *get(std::string_view name, std::uint64_t hash) { return get_impl(name, narrow_hash(hash)); }
-    const V *get(std::string_view name, std::uint64_t hash) const { return get_impl(name, narrow_hash(hash)); }
-
-    size_t size() const noexcept { return nodes_.size(); }
-
-private:
-    struct Node {
-        std::string key;
-        std::uint32_t hash = 0;
-        std::uint32_t next = kInvalidIndex;
+    struct Entry {
         V value;
+        std::uint32_t hash = 0;
+        std::uint32_t name_offset = 0;
+        std::uint32_t name_size = 0;
     };
 
-    static constexpr std::uint32_t kInvalidIndex = 0xFFFFFFFFu;
-    static constexpr size_t kDefaultBuckets = 32;
+    static constexpr std::uint32_t kInvalidIndex = std::numeric_limits<std::uint32_t>::max();
+    static constexpr std::size_t kStorageHeaderWords = 1;
+    static constexpr std::size_t kMaxNameBytes =
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) - (sizeof(std::uint32_t) - 1);
+    // Keep bucket_count_for() and the combined storage word count representable on 32-bit size_t.
+    static constexpr std::size_t kMaxEntries = std::numeric_limits<std::uint32_t>::max() / 4U;
 
     static std::uint32_t narrow_hash(std::uint64_t hash) noexcept { return static_cast<std::uint32_t>(hash); }
 
     static std::uint32_t hash_name(std::string_view name) noexcept { return narrow_hash(http_header_name_hash(name)); }
 
-    static size_t next_pow2(size_t value) {
+    static std::size_t next_pow2(std::size_t value) noexcept {
         if (value <= 1) {
             return 1;
         }
@@ -59,66 +49,239 @@ private:
         value |= value >> 4;
         value |= value >> 8;
         value |= value >> 16;
-        if constexpr (sizeof(size_t) >= 8) {
+        if constexpr (sizeof(std::size_t) >= 8) {
             value |= value >> 32;
         }
         return value + 1;
     }
 
-    void init_buckets(size_t count) {
-        if (count == 0) {
-            count = kDefaultBuckets;
+    static std::size_t bucket_count_for(std::size_t entry_count) noexcept {
+        if (entry_count == 0) {
+            return 0;
         }
-        count = next_pow2(count);
-        if (count < kDefaultBuckets) {
-            count = kDefaultBuckets;
-        }
-        bucket_head_.assign(count, kInvalidIndex);
+        // Keep the immutable open-addressed table at or below a 75% load factor.
+        return next_pow2(entry_count + (entry_count + 2) / 3);
     }
 
-    template<typename T>
-    bool insert_impl(std::string_view key, std::uint32_t hash, T &&value) {
-        if (bucket_head_.empty()) {
-            init_buckets(kDefaultBuckets);
+public:
+    class EntryView {
+    public:
+        [[nodiscard]] std::string_view name() const noexcept { return name_; }
+        [[nodiscard]] std::uint64_t hash() const noexcept { return hash_; }
+        [[nodiscard]] const V &value() const noexcept { return *value_; }
+
+    private:
+        friend class HeaderMap;
+        friend class ConstIterator;
+
+        EntryView(std::string_view name, std::uint32_t hash, const V &value) noexcept :
+            name_(name), hash_(hash), value_(&value) {}
+
+        std::string_view name_;
+        std::uint32_t hash_ = 0;
+        const V *value_ = nullptr;
+    };
+
+    class ConstIterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = EntryView;
+        using difference_type = std::ptrdiff_t;
+        using pointer = void;
+        using reference = EntryView;
+
+        ConstIterator() noexcept = default;
+
+        [[nodiscard]] EntryView operator*() const noexcept { return map_->entry_view(index_); }
+
+        ConstIterator &operator++() noexcept {
+            ++index_;
+            return *this;
         }
-        std::uint32_t bucket = hash & static_cast<std::uint32_t>(bucket_head_.size() - 1);
-        std::uint32_t index = bucket_head_[bucket];
-        while (index != kInvalidIndex) {
-            const auto &node = nodes_[index];
-            if (node.hash == hash && http_header_name_equals_ci(node.key, key)) {
+
+        ConstIterator operator++(int) noexcept {
+            ConstIterator copy = *this;
+            ++(*this);
+            return copy;
+        }
+
+        [[nodiscard]] bool operator==(const ConstIterator &other) const noexcept {
+            return map_ == other.map_ && index_ == other.index_;
+        }
+
+        [[nodiscard]] bool operator!=(const ConstIterator &other) const noexcept { return !(*this == other); }
+
+    private:
+        friend class HeaderMap;
+
+        ConstIterator(const HeaderMap *map, std::size_t index) noexcept : map_(map), index_(index) {}
+
+        const HeaderMap *map_ = nullptr;
+        std::size_t index_ = 0;
+    };
+
+    class Builder {
+    public:
+        Builder() = default;
+
+        explicit Builder(std::size_t expected_size) {
+            if (expected_size > kMaxEntries) {
+                expected_size = kMaxEntries;
+            }
+            entries_.reserve(expected_size);
+        }
+
+        Builder(const Builder &) = delete;
+        Builder &operator=(const Builder &) = delete;
+        Builder(Builder &&) noexcept = default;
+        Builder &operator=(Builder &&) noexcept = default;
+
+        // Header names are unique under ASCII case-insensitive comparison. False means
+        // either a duplicate name or an input too large for the compact 32-bit layout.
+        bool insert(std::string_view name, const V &value) { return insert_impl(name, hash_name(name), value); }
+        bool insert(std::string_view name, V &&value) { return insert_impl(name, hash_name(name), std::move(value)); }
+        bool insert(std::string_view lowcase_name, std::uint64_t hash, const V &value) {
+            return insert_impl(lowcase_name, narrow_hash(hash), value);
+        }
+        bool insert(std::string_view lowcase_name, std::uint64_t hash, V &&value) {
+            return insert_impl(lowcase_name, narrow_hash(hash), std::move(value));
+        }
+
+        [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+        [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+
+        [[nodiscard]] HeaderMap build() && {
+            if (entries_.empty()) {
+                return HeaderMap{};
+            }
+
+            const std::size_t bucket_count = bucket_count_for(entries_.size());
+            const std::size_t name_words = (names_.size() + sizeof(std::uint32_t) - 1) / sizeof(std::uint32_t);
+
+            std::vector<std::uint32_t> storage(kStorageHeaderWords + bucket_count + name_words, 0);
+            storage[0] = static_cast<std::uint32_t>(bucket_count - 1);
+            std::fill_n(storage.begin() + kStorageHeaderWords, bucket_count, kInvalidIndex);
+
+            const std::size_t bucket_mask = bucket_count - 1;
+            for (std::size_t index = 0; index < entries_.size(); ++index) {
+                std::size_t slot = entries_[index].hash & bucket_mask;
+                while (storage[kStorageHeaderWords + slot] != kInvalidIndex) {
+                    slot = (slot + 1) & bucket_mask;
+                }
+                storage[kStorageHeaderWords + slot] = static_cast<std::uint32_t>(index);
+            }
+
+            if (!names_.empty()) {
+                void *name_storage = storage.data() + kStorageHeaderWords + bucket_count;
+                std::memcpy(name_storage, names_.data(), names_.size());
+            }
+
+            HeaderMap map;
+            map.entries_ = std::move(entries_);
+            map.storage_ = std::move(storage);
+            return map;
+        }
+
+    private:
+        [[nodiscard]] std::string_view entry_name(const Entry &entry) const noexcept {
+            const char *base = names_.empty() ? "" : names_.data();
+            return std::string_view(base + entry.name_offset, entry.name_size);
+        }
+
+        template<typename T>
+        bool insert_impl(std::string_view name, std::uint32_t hash, T &&value) {
+            if (entries_.size() >= kMaxEntries || name.size() > kMaxNameBytes - names_.size()) {
                 return false;
             }
-            index = node.next;
+            for (const Entry &entry: entries_) {
+                if (entry.hash == hash && http_header_name_equals_ci(entry_name(entry), name)) {
+                    return false;
+                }
+            }
+
+            const auto name_offset = static_cast<std::uint32_t>(names_.size());
+            Entry entry{
+                    .value = std::forward<T>(value),
+                    .hash = hash,
+                    .name_offset = name_offset,
+                    .name_size = static_cast<std::uint32_t>(name.size()),
+            };
+            names_.insert(names_.end(), name.begin(), name.end());
+            entries_.push_back(std::move(entry));
+            return true;
         }
 
-        Node node{std::string(key), hash, bucket_head_[bucket], std::forward<T>(value)};
-        nodes_.push_back(std::move(node));
-        bucket_head_[bucket] = static_cast<std::uint32_t>(nodes_.size() - 1);
-        return true;
+        std::vector<Entry> entries_;
+        std::vector<char> names_;
+    };
+
+    HeaderMap() noexcept = default;
+    HeaderMap(const HeaderMap &) = default;
+    HeaderMap &operator=(const HeaderMap &) = default;
+    HeaderMap(HeaderMap &&) noexcept = default;
+    HeaderMap &operator=(HeaderMap &&) noexcept = default;
+    ~HeaderMap() = default;
+
+    [[nodiscard]] const V *get(std::string_view name) const noexcept { return get_impl(name, hash_name(name)); }
+    [[nodiscard]] const V *get(std::string_view lowcase_name, std::uint64_t hash) const noexcept {
+        return get_impl(lowcase_name, narrow_hash(hash));
     }
 
-    V *get_impl(std::string_view key, std::uint32_t hash) {
-        return const_cast<V *>(static_cast<const HeaderMap *>(this)->get_impl(key, hash));
+    [[nodiscard]] bool contains(std::string_view name) const noexcept { return get(name) != nullptr; }
+    [[nodiscard]] bool contains(std::string_view lowcase_name, std::uint64_t hash) const noexcept {
+        return get(lowcase_name, hash) != nullptr;
     }
 
-    const V *get_impl(std::string_view key, std::uint32_t hash) const {
-        if (bucket_head_.empty()) {
+    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+
+    [[nodiscard]] ConstIterator begin() const noexcept { return ConstIterator(this, 0); }
+    [[nodiscard]] ConstIterator end() const noexcept { return ConstIterator(this, entries_.size()); }
+
+private:
+    [[nodiscard]] std::size_t bucket_count() const noexcept {
+        return storage_.empty() ? 0 : static_cast<std::size_t>(storage_[0]) + 1;
+    }
+
+    [[nodiscard]] const char *name_data() const noexcept {
+        if (storage_.empty()) {
+            return "";
+        }
+        return reinterpret_cast<const char *>(storage_.data() + kStorageHeaderWords + bucket_count());
+    }
+
+    [[nodiscard]] std::string_view entry_name(const Entry &entry) const noexcept {
+        return std::string_view(name_data() + entry.name_offset, entry.name_size);
+    }
+
+    [[nodiscard]] EntryView entry_view(std::size_t index) const noexcept {
+        const Entry &entry = entries_[index];
+        return EntryView(entry_name(entry), entry.hash, entry.value);
+    }
+
+    [[nodiscard]] const V *get_impl(std::string_view name, std::uint32_t hash) const noexcept {
+        if (entries_.empty()) {
             return nullptr;
         }
-        std::uint32_t bucket = hash & static_cast<std::uint32_t>(bucket_head_.size() - 1);
-        std::uint32_t index = bucket_head_[bucket];
-        while (index != kInvalidIndex) {
-            const auto &node = nodes_[index];
-            if (node.hash == hash && http_header_name_equals_ci(node.key, key)) {
-                return &node.value;
+
+        const std::size_t mask = bucket_count() - 1;
+        std::size_t slot = hash & mask;
+        for (;;) {
+            const std::uint32_t index = storage_[kStorageHeaderWords + slot];
+            if (index == kInvalidIndex) {
+                return nullptr;
             }
-            index = node.next;
+            const Entry &entry = entries_[index];
+            if (entry.hash == hash && http_header_name_equals_ci(entry_name(entry), name)) {
+                return &entry.value;
+            }
+            slot = (slot + 1) & mask;
         }
-        return nullptr;
     }
 
-    std::vector<Node> nodes_;
-    std::vector<std::uint32_t> bucket_head_;
+    std::vector<Entry> entries_;
+    // [bucket mask][open-addressed entry indices][packed header-name bytes].
+    std::vector<std::uint32_t> storage_;
 };
 
 } // namespace fiber::http
