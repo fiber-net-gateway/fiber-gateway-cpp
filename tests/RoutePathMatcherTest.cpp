@@ -107,6 +107,9 @@ private:
     bool built_ = false;
 };
 
+static_assert(noexcept(std::declval<const RoutePathMatcher<int> &>().match_path(std::declval<std::string_view>(),
+                                                                                std::declval<Tester &>())));
+
 TEST(RoutePathMatcherTest, MatchesStaticWildcardAndTrailingSlash) {
     {
         Tester tester;
@@ -213,6 +216,34 @@ TEST(RoutePathMatcherTest, HandlesLargeStaticRouteSets) {
             tester.expect_match(pattern, token);
         }
     }
+}
+
+TEST(RoutePathMatcherTest, PreservesInterleavedChildrenAndFallbackOrderingAfterBuild) {
+    Tester tester;
+    const int static_x = tester.add_path("/static/a/x");
+    const int static_b = tester.add_path("/static/b");
+    const int static_y = tester.add_path("/static/a/y");
+    const int placeholder_x = tester.add_path("/placeholder/:first/x");
+    const int placeholder_y = tester.add_path("/placeholder/:second/y");
+    const int wildcard_first = tester.add_path("/wildcard/*first");
+    const int wildcard_second = tester.add_path("/wildcard/*second");
+    const int exact_choice = tester.add_path("/choice/value");
+    const int placeholder_choice = tester.add_path("/choice/:name");
+    const int collision_a = tester.add_path("/collision/a");
+    const int collision_i = tester.add_path("/collision/i");
+
+    tester.expect_match("/static/a/x", static_x);
+    tester.expect_match("/static/b", static_b);
+    tester.expect_match("/static/a/y", static_y);
+    tester.expect_match("/placeholder/value/x", placeholder_x, {{"first", "value"}});
+    tester.expect_match("/placeholder/value/y", placeholder_y, {{"second", "value"}});
+    tester.expect_match("/wildcard/a/b", wildcard_first, {{"first", "a/b"}});
+    tester.expect_match("/wildcard/a/b", wildcard_second, {{"second", "a/b"}});
+    tester.expect_match("/choice/value", exact_choice);
+    tester.expect_match("/choice/value", placeholder_choice, {{"name", "value"}});
+    tester.expect_match("/collision/a", collision_a);
+    tester.expect_match("/collision/i", collision_i);
+    tester.expect_unmatched("/collision/q");
 }
 
 TEST(RoutePathMatcherTest, PreservesOriginalPatternPerMountedRoute) {
