@@ -16,63 +16,42 @@
 namespace fiber::access_server {
 
 template<std::equality_comparable Instance>
-struct SmoothWeightedRoundRobin<Instance>::Core {
-    explicit Core(Options value_options) noexcept : options(std::move(value_options)) {}
+struct SmoothWeightedRoundRobin<Instance>::Weighted {
+    std::uint64_t selection_token = 0;
+    std::int64_t base_weight = 1;
+    std::int64_t current_weight = 0;
+    std::int64_t effective_weight = 1;
+    std::size_t fails = 0;
+    TimePoint accessed{};
+    TimePoint checked{};
+    double configured_weight = 1.0;
+    Instance instance;
+};
+
+template<std::equality_comparable Instance>
+struct SmoothWeightedRoundRobin<Instance>::WeightedStorage {
+    std::vector<Weighted> values;
+};
+
+template<std::equality_comparable Instance>
+struct SmoothWeightedRoundRobin<Instance>::State {
+    explicit State(Options value_options) noexcept : options(std::move(value_options)) {}
 
     Options options;
     std::mutex mutex;
-    std::shared_ptr<detail::SwrrGeneration<Instance>> current;
+    std::shared_ptr<Weighted> weighted_instances;
+    std::unique_ptr<std::uint32_t[]> token_to_index;
+    std::size_t weighted_instance_count = 0;
+    std::size_t token_to_index_capacity = 0;
+    std::uint64_t generation = 0;
 };
 
 namespace detail {
 
-struct SwrrPeerRuntime {
-    std::int64_t base_weight = 1;
-    std::int64_t effective_weight = 1;
-    std::int64_t current_weight = 0;
-    std::size_t fails = 0;
-    std::chrono::steady_clock::time_point accessed{};
-    std::chrono::steady_clock::time_point checked{};
-    std::uint64_t selection_token = 0;
-    bool retired = false;
-};
+inline constexpr std::uint32_t kSwrrEmptyIndex = std::numeric_limits<std::uint32_t>::max();
 
-template<std::equality_comparable Instance>
-struct SwrrPeer {
-    typename SmoothWeightedRoundRobin<Instance>::WeightedInstance value;
-    std::int64_t normalized_weight = 1;
-    std::shared_ptr<SwrrPeerRuntime> runtime;
-};
-
-template<typename Instance>
-struct SwrrGeneration {
-    std::shared_ptr<typename SmoothWeightedRoundRobin<Instance>::Core> core;
-    std::uint64_t generation = 0;
-    std::vector<SwrrPeer<Instance>> peers;
-};
-
-template<std::equality_comparable Instance>
-bool swrr_same_definition(const SwrrPeer<Instance> &left, const SwrrPeer<Instance> &right) noexcept {
-    return left.value.selection_token == right.value.selection_token && left.value.instance == right.value.instance &&
-           left.value.weight == right.value.weight && left.normalized_weight == right.normalized_weight;
-}
-
-template<std::equality_comparable Instance>
-bool swrr_same_generation(const SwrrGeneration<Instance> &current, const SwrrGeneration<Instance> &next) noexcept {
-    if (current.peers.size() != next.peers.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < current.peers.size(); ++i) {
-        if (!swrr_same_definition(current.peers[i], next.peers[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-template<std::equality_comparable Instance>
-std::int64_t swrr_quantize_weight(double weight,
-                                  const typename SmoothWeightedRoundRobin<Instance>::Options &options) noexcept {
+template<typename Options>
+std::int64_t swrr_quantize_weight(double weight, const Options &options) noexcept {
     const long double scaled = static_cast<long double>(weight) * options.weight_precision;
     if (scaled >= static_cast<long double>(options.max_normalized_weight)) {
         return options.max_normalized_weight;
@@ -80,30 +59,34 @@ std::int64_t swrr_quantize_weight(double weight,
     return std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(scaled)));
 }
 
-template<std::equality_comparable Instance>
-void swrr_normalize_weights(std::vector<SwrrPeer<Instance>> &peers,
-                            const typename SmoothWeightedRoundRobin<Instance>::Options &options) noexcept {
+template<typename Weighted, typename Options>
+void swrr_normalize_weights(Weighted *weighted_instances, std::size_t count, const Options &options) noexcept {
     std::int64_t divisor = 0;
-    for (SwrrPeer<Instance> &peer: peers) {
-        peer.normalized_weight = swrr_quantize_weight<Instance>(peer.value.weight, options);
-        divisor = std::gcd(divisor, peer.normalized_weight);
+    for (std::size_t i = 0; i < count; ++i) {
+        Weighted &weighted = weighted_instances[i];
+        weighted.base_weight = swrr_quantize_weight(weighted.configured_weight, options);
+        divisor = std::gcd(divisor, weighted.base_weight);
     }
     if (divisor > 1) {
-        for (SwrrPeer<Instance> &peer: peers) {
-            peer.normalized_weight /= divisor;
+        for (std::size_t i = 0; i < count; ++i) {
+            weighted_instances[i].base_weight /= divisor;
         }
     }
 
     long double total = 0;
-    for (const SwrrPeer<Instance> &peer: peers) {
-        total += peer.normalized_weight;
+    for (std::size_t i = 0; i < count; ++i) {
+        total += weighted_instances[i].base_weight;
     }
-    if (total <= static_cast<long double>(options.max_total_weight)) {
-        return;
+    if (total > static_cast<long double>(options.max_total_weight)) {
+        const long double scale = static_cast<long double>(options.max_total_weight) / total;
+        for (std::size_t i = 0; i < count; ++i) {
+            Weighted &weighted = weighted_instances[i];
+            weighted.base_weight = std::max<std::int64_t>(1, static_cast<std::int64_t>(weighted.base_weight * scale));
+        }
     }
-    const long double scale = static_cast<long double>(options.max_total_weight) / total;
-    for (SwrrPeer<Instance> &peer: peers) {
-        peer.normalized_weight = std::max<std::int64_t>(1, static_cast<std::int64_t>(peer.normalized_weight * scale));
+
+    for (std::size_t i = 0; i < count; ++i) {
+        weighted_instances[i].effective_weight = weighted_instances[i].base_weight;
     }
 }
 
@@ -116,28 +99,117 @@ inline std::int64_t swrr_scaled_weight(std::int64_t value, std::int64_t old_base
     return static_cast<std::int64_t>(std::llround(ratio));
 }
 
+inline std::size_t swrr_token_hash(std::uint64_t token) noexcept {
+    token ^= token >> 30U;
+    token *= 0xbf58476d1ce4e5b9ULL;
+    token ^= token >> 27U;
+    token *= 0x94d049bb133111ebULL;
+    token ^= token >> 31U;
+    return static_cast<std::size_t>(token);
+}
+
+inline std::size_t swrr_mapping_capacity(std::size_t count) noexcept {
+    if (count == 0) {
+        return 0;
+    }
+    FIBER_ASSERT(count < static_cast<std::size_t>(kSwrrEmptyIndex));
+    FIBER_ASSERT(count <= std::numeric_limits<std::size_t>::max() / 2);
+    const std::size_t required = count * 2;
+    std::size_t capacity = 2;
+    while (capacity < required) {
+        FIBER_ASSERT(capacity <= std::numeric_limits<std::size_t>::max() / 2);
+        capacity *= 2;
+    }
+    return capacity;
+}
+
+template<typename Weighted>
+void swrr_build_token_mapping(const Weighted *weighted_instances, std::size_t count,
+                              std::unique_ptr<std::uint32_t[]> &mapping, std::size_t &capacity) {
+    capacity = swrr_mapping_capacity(count);
+    if (capacity == 0) {
+        mapping.reset();
+        return;
+    }
+
+    mapping = std::make_unique<std::uint32_t[]>(capacity);
+    std::fill_n(mapping.get(), capacity, kSwrrEmptyIndex);
+    const std::size_t mask = capacity - 1;
+    for (std::size_t i = 0; i < count; ++i) {
+        std::size_t slot = swrr_token_hash(weighted_instances[i].selection_token) & mask;
+        while (mapping[slot] != kSwrrEmptyIndex) {
+            slot = (slot + 1) & mask;
+        }
+        mapping[slot] = static_cast<std::uint32_t>(i);
+    }
+}
+
+template<typename Weighted>
+std::size_t swrr_find_token(const Weighted *weighted_instances, std::size_t count, const std::uint32_t *mapping,
+                            std::size_t capacity, std::uint64_t selection_token) noexcept {
+    if (count == 0 || mapping == nullptr || capacity == 0) {
+        return count;
+    }
+
+    const std::size_t mask = capacity - 1;
+    std::size_t slot = swrr_token_hash(selection_token) & mask;
+    for (std::size_t probes = 0; probes < capacity; ++probes) {
+        const std::uint32_t mapped_index = mapping[slot];
+        if (mapped_index == kSwrrEmptyIndex) {
+            return count;
+        }
+        FIBER_ASSERT(static_cast<std::size_t>(mapped_index) < count);
+        if (weighted_instances[mapped_index].selection_token == selection_token) {
+            return mapped_index;
+        }
+        slot = (slot + 1) & mask;
+    }
+    return count;
+}
+
+template<typename Weighted>
+bool swrr_same_definition(const Weighted *current, std::size_t current_count, const Weighted *next,
+                          std::size_t next_count) noexcept {
+    if (current_count != next_count) {
+        return false;
+    }
+    for (std::size_t i = 0; i < current_count; ++i) {
+        if (current[i].selection_token != next[i].selection_token || current[i].instance != next[i].instance ||
+            current[i].configured_weight != next[i].configured_weight ||
+            current[i].base_weight != next[i].base_weight) {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline bool swrr_excluded(std::span<const std::uint64_t> selection_tokens, std::uint64_t selection_token) noexcept {
     return std::find(selection_tokens.begin(), selection_tokens.end(), selection_token) != selection_tokens.end();
 }
 
-template<std::equality_comparable Instance>
-bool swrr_circuit_available(const SwrrPeerRuntime &runtime,
-                            const typename SmoothWeightedRoundRobin<Instance>::Options &options,
-                            typename SmoothWeightedRoundRobin<Instance>::TimePoint now) noexcept {
-    return options.max_fails == 0 || runtime.fails < options.max_fails || now - runtime.checked > options.fail_timeout;
+template<typename Weighted, typename Options, typename TimePoint>
+bool swrr_circuit_available(const Weighted &weighted, const Options &options, TimePoint now) noexcept {
+    return options.max_fails == 0 || weighted.fails < options.max_fails ||
+           now - weighted.checked > options.fail_timeout;
 }
 
 } // namespace detail
 
 template<std::equality_comparable Instance>
-SmoothWeightedRoundRobin<Instance>::Selection::Selection(std::shared_ptr<detail::SwrrGeneration<Instance>> owner,
-                                                         std::size_t index, std::uint64_t selection_token) noexcept :
-    owner_(std::move(owner)), index_(index), selection_token_(selection_token), pending_(true) {}
+SmoothWeightedRoundRobin<Instance>::Selection::Selection(std::weak_ptr<State> state,
+                                                         std::shared_ptr<Weighted> weighted_instances,
+                                                         std::size_t weighted_instance_count, std::size_t index,
+                                                         std::uint64_t generation,
+                                                         std::uint64_t selection_token) noexcept :
+    state_(std::move(state)), weighted_instances_(std::move(weighted_instances)),
+    weighted_instance_count_(weighted_instance_count), index_(index), generation_(generation),
+    selection_token_(selection_token), pending_(true) {}
 
 template<std::equality_comparable Instance>
 SmoothWeightedRoundRobin<Instance>::Selection::Selection(Selection &&other) noexcept :
-    owner_(std::move(other.owner_)), index_(other.index_), selection_token_(other.selection_token_),
-    pending_(other.pending_) {
+    state_(std::move(other.state_)), weighted_instances_(std::move(other.weighted_instances_)),
+    weighted_instance_count_(other.weighted_instance_count_), index_(other.index_), generation_(other.generation_),
+    selection_token_(other.selection_token_), pending_(other.pending_) {
     other.pending_ = false;
 }
 
@@ -145,8 +217,11 @@ template<std::equality_comparable Instance>
 typename SmoothWeightedRoundRobin<Instance>::Selection &
 SmoothWeightedRoundRobin<Instance>::Selection::operator=(Selection &&other) noexcept {
     if (this != &other) {
-        owner_ = std::move(other.owner_);
+        state_ = std::move(other.state_);
+        weighted_instances_ = std::move(other.weighted_instances_);
+        weighted_instance_count_ = other.weighted_instance_count_;
         index_ = other.index_;
+        generation_ = other.generation_;
         selection_token_ = other.selection_token_;
         pending_ = other.pending_;
         other.pending_ = false;
@@ -156,20 +231,20 @@ SmoothWeightedRoundRobin<Instance>::Selection::operator=(Selection &&other) noex
 
 template<std::equality_comparable Instance>
 bool SmoothWeightedRoundRobin<Instance>::Selection::valid() const noexcept {
-    return owner_ && index_ < owner_->peers.size() &&
-           owner_->peers[index_].runtime->selection_token == selection_token_;
+    return weighted_instances_ && index_ < weighted_instance_count_ &&
+           weighted_instances_.get()[index_].selection_token == selection_token_;
 }
 
 template<std::equality_comparable Instance>
 const Instance &SmoothWeightedRoundRobin<Instance>::Selection::instance() const noexcept {
     FIBER_ASSERT(valid());
-    return owner_->peers[index_].value.instance;
+    return weighted_instances_.get()[index_].instance;
 }
 
 template<std::equality_comparable Instance>
 std::uint64_t SmoothWeightedRoundRobin<Instance>::Selection::generation() const noexcept {
     FIBER_ASSERT(valid());
-    return owner_->generation;
+    return generation_;
 }
 
 template<std::equality_comparable Instance>
@@ -193,12 +268,12 @@ SmoothWeightedRoundRobin<Instance>::SmoothWeightedRoundRobin() : SmoothWeightedR
 
 template<std::equality_comparable Instance>
 SmoothWeightedRoundRobin<Instance>::SmoothWeightedRoundRobin(Options options) :
-    core_(std::make_shared<Core>(std::move(options))) {
-    FIBER_ASSERT(core_->options.max_fails <= static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()));
-    FIBER_ASSERT(core_->options.fail_timeout > std::chrono::milliseconds::zero());
-    FIBER_ASSERT(core_->options.weight_precision > 0);
-    FIBER_ASSERT(core_->options.max_normalized_weight > 0);
-    FIBER_ASSERT(core_->options.max_total_weight >= core_->options.max_normalized_weight);
+    state_(std::make_shared<State>(std::move(options))) {
+    FIBER_ASSERT(state_->options.max_fails <= static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()));
+    FIBER_ASSERT(state_->options.fail_timeout > std::chrono::milliseconds::zero());
+    FIBER_ASSERT(state_->options.weight_precision > 0);
+    FIBER_ASSERT(state_->options.max_normalized_weight > 0);
+    FIBER_ASSERT(state_->options.max_total_weight >= state_->options.max_normalized_weight);
 }
 
 template<std::equality_comparable Instance>
@@ -207,9 +282,8 @@ bool SmoothWeightedRoundRobin<Instance>::update(std::vector<WeightedInstance> in
         return left.selection_token < right.selection_token;
     });
 
-    auto next = std::make_shared<detail::SwrrGeneration<Instance>>();
-    next->core = core_;
-    next->peers.reserve(instances.size());
+    auto next_storage = std::make_shared<WeightedStorage>();
+    next_storage->values.reserve(instances.size());
     std::uint64_t previous_token = 0;
     for (WeightedInstance &instance: instances) {
         FIBER_ASSERT(instance.selection_token != 0);
@@ -217,58 +291,56 @@ bool SmoothWeightedRoundRobin<Instance>::update(std::vector<WeightedInstance> in
         FIBER_ASSERT(std::isfinite(instance.weight));
         FIBER_ASSERT(instance.weight > 0.0);
         previous_token = instance.selection_token;
-        next->peers.push_back(detail::SwrrPeer<Instance>{
-                .value = std::move(instance),
-                .runtime = std::make_shared<detail::SwrrPeerRuntime>(),
+        next_storage->values.push_back(Weighted{
+                .selection_token = instance.selection_token,
+                .configured_weight = instance.weight,
+                .instance = std::move(instance.instance),
         });
     }
-    detail::swrr_normalize_weights(next->peers, core_->options);
 
-    std::lock_guard guard(core_->mutex);
-    const std::shared_ptr<detail::SwrrGeneration<Instance>> current = core_->current;
-    if (current && detail::swrr_same_generation(*current, *next)) {
+    Weighted *next_values = next_storage->values.data();
+    const std::size_t next_count = next_storage->values.size();
+    detail::swrr_normalize_weights(next_values, next_count, state_->options);
+    std::shared_ptr<Weighted> next_weighted_instances;
+    if (next_count != 0) {
+        next_weighted_instances = std::shared_ptr<Weighted>(next_storage, next_values);
+    }
+    std::unique_ptr<std::uint32_t[]> next_token_to_index;
+    std::size_t next_token_to_index_capacity = 0;
+    detail::swrr_build_token_mapping(next_values, next_count, next_token_to_index, next_token_to_index_capacity);
+
+    std::lock_guard guard(state_->mutex);
+    Weighted *current_values = state_->weighted_instances.get();
+    if (state_->generation != 0 &&
+        detail::swrr_same_definition(current_values, state_->weighted_instance_count, next_values, next_count)) {
         return false;
     }
 
-    FIBER_ASSERT(!current || current->generation != std::numeric_limits<std::uint64_t>::max());
-    next->generation = current ? current->generation + 1 : 1;
-    std::size_t old_index = 0;
-    std::size_t new_index = 0;
-    while (current && old_index < current->peers.size() && new_index < next->peers.size()) {
-        detail::SwrrPeer<Instance> &old_peer = current->peers[old_index];
-        detail::SwrrPeer<Instance> &new_peer = next->peers[new_index];
-        if (old_peer.value.selection_token < new_peer.value.selection_token) {
-            old_peer.runtime->retired = true;
-            ++old_index;
-            continue;
-        }
-        if (old_peer.value.selection_token > new_peer.value.selection_token) {
-            ++new_index;
+    FIBER_ASSERT(state_->generation != std::numeric_limits<std::uint64_t>::max());
+    for (std::size_t i = 0; i < next_count; ++i) {
+        Weighted &next = next_values[i];
+        const std::size_t old_index =
+                detail::swrr_find_token(current_values, state_->weighted_instance_count, state_->token_to_index.get(),
+                                        state_->token_to_index_capacity, next.selection_token);
+        if (old_index == state_->weighted_instance_count) {
             continue;
         }
 
-        const std::shared_ptr<detail::SwrrPeerRuntime> runtime = old_peer.runtime;
-        runtime->current_weight =
-                detail::swrr_scaled_weight(runtime->current_weight, runtime->base_weight, new_peer.normalized_weight);
-        runtime->effective_weight = std::clamp(
-                detail::swrr_scaled_weight(runtime->effective_weight, runtime->base_weight, new_peer.normalized_weight),
-                std::int64_t{0}, new_peer.normalized_weight);
-        runtime->base_weight = new_peer.normalized_weight;
-        new_peer.runtime = runtime;
-        ++old_index;
-        ++new_index;
+        const Weighted &current = current_values[old_index];
+        next.current_weight = detail::swrr_scaled_weight(current.current_weight, current.base_weight, next.base_weight);
+        next.effective_weight =
+                std::clamp(detail::swrr_scaled_weight(current.effective_weight, current.base_weight, next.base_weight),
+                           std::int64_t{0}, next.base_weight);
+        next.fails = current.fails;
+        next.accessed = current.accessed;
+        next.checked = current.checked;
     }
-    while (current && old_index < current->peers.size()) {
-        current->peers[old_index++].runtime->retired = true;
-    }
-    for (detail::SwrrPeer<Instance> &peer: next->peers) {
-        if (peer.runtime->selection_token == 0) {
-            peer.runtime->selection_token = peer.value.selection_token;
-            peer.runtime->base_weight = peer.normalized_weight;
-            peer.runtime->effective_weight = peer.normalized_weight;
-        }
-    }
-    core_->current = std::move(next);
+
+    state_->weighted_instances = std::move(next_weighted_instances);
+    state_->weighted_instance_count = next_count;
+    state_->token_to_index = std::move(next_token_to_index);
+    state_->token_to_index_capacity = next_token_to_index_capacity;
+    ++state_->generation;
     return true;
 }
 
@@ -282,29 +354,28 @@ template<std::equality_comparable Instance>
 std::expected<typename SmoothWeightedRoundRobin<Instance>::Selection, SwrrSelectError>
 SmoothWeightedRoundRobin<Instance>::select(std::span<const std::uint64_t> excluded_selection_tokens,
                                            TimePoint now) noexcept {
-    std::lock_guard guard(core_->mutex);
-    const std::shared_ptr<detail::SwrrGeneration<Instance>> current = core_->current;
-    if (!current || current->peers.empty()) {
+    std::lock_guard guard(state_->mutex);
+    Weighted *weighted_instances = state_->weighted_instances.get();
+    if (state_->weighted_instance_count == 0) {
         return std::unexpected(SwrrSelectError::NoAvailableInstance);
     }
 
-    detail::SwrrPeerRuntime *best = nullptr;
+    Weighted *best = nullptr;
     std::size_t best_index = 0;
     std::int64_t total = 0;
-    for (std::size_t i = 0; i < current->peers.size(); ++i) {
-        detail::SwrrPeer<Instance> &peer = current->peers[i];
-        detail::SwrrPeerRuntime &runtime = *peer.runtime;
-        if (runtime.retired || detail::swrr_excluded(excluded_selection_tokens, runtime.selection_token) ||
-            !detail::swrr_circuit_available<Instance>(runtime, core_->options, now)) {
+    for (std::size_t i = 0; i < state_->weighted_instance_count; ++i) {
+        Weighted &weighted = weighted_instances[i];
+        if (detail::swrr_excluded(excluded_selection_tokens, weighted.selection_token) ||
+            !detail::swrr_circuit_available(weighted, state_->options, now)) {
             continue;
         }
-        runtime.current_weight += runtime.effective_weight;
-        total += runtime.effective_weight;
-        if (runtime.effective_weight < runtime.base_weight) {
-            ++runtime.effective_weight;
+        weighted.current_weight += weighted.effective_weight;
+        total += weighted.effective_weight;
+        if (weighted.effective_weight < weighted.base_weight) {
+            ++weighted.effective_weight;
         }
-        if (!best || runtime.current_weight > best->current_weight) {
-            best = &runtime;
+        if (!best || weighted.current_weight > best->current_weight) {
+            best = &weighted;
             best_index = i;
         }
     }
@@ -313,10 +384,11 @@ SmoothWeightedRoundRobin<Instance>::select(std::span<const std::uint64_t> exclud
     }
 
     best->current_weight -= total;
-    if (now - best->checked > core_->options.fail_timeout) {
+    if (now - best->checked > state_->options.fail_timeout) {
         best->checked = now;
     }
-    return Selection(std::move(current), best_index, best->selection_token);
+    return Selection(state_, state_->weighted_instances, state_->weighted_instance_count, best_index,
+                     state_->generation, best->selection_token);
 }
 
 template<std::equality_comparable Instance>
@@ -324,31 +396,46 @@ void SmoothWeightedRoundRobin<Instance>::complete(Selection &selection, bool suc
     if (!selection.pending_ || !selection.valid()) {
         return;
     }
-    const std::shared_ptr<detail::SwrrGeneration<Instance>> generation = selection.owner_;
-    const std::shared_ptr<Core> core = generation->core;
-    std::lock_guard guard(core->mutex);
-    detail::SwrrPeerRuntime &runtime = *generation->peers[selection.index_].runtime;
-    if (runtime.selection_token != selection.selection_token_) {
+
+    const std::shared_ptr<State> state = selection.state_.lock();
+    if (!state) {
         selection.pending_ = false;
         return;
     }
 
+    std::lock_guard guard(state->mutex);
+    Weighted *current_values = state->weighted_instances.get();
+    std::size_t current_index = state->weighted_instance_count;
+    if (selection.generation_ == state->generation && selection.index_ < state->weighted_instance_count &&
+        current_values[selection.index_].selection_token == selection.selection_token_) {
+        current_index = selection.index_;
+    } else {
+        current_index =
+                detail::swrr_find_token(current_values, state->weighted_instance_count, state->token_to_index.get(),
+                                        state->token_to_index_capacity, selection.selection_token_);
+    }
+    if (current_index == state->weighted_instance_count) {
+        selection.pending_ = false;
+        return;
+    }
+
+    Weighted &weighted = current_values[current_index];
     if (success) {
-        if (!runtime.retired && runtime.accessed < runtime.checked) {
-            runtime.fails = 0;
+        if (weighted.accessed < weighted.checked) {
+            weighted.fails = 0;
         }
-    } else if (!runtime.retired) {
-        const TimePoint failure_time = std::max(now, runtime.checked);
-        if (runtime.fails != std::numeric_limits<std::size_t>::max()) {
-            ++runtime.fails;
+    } else {
+        const TimePoint failure_time = std::max(now, weighted.checked);
+        if (weighted.fails != std::numeric_limits<std::size_t>::max()) {
+            ++weighted.fails;
         }
-        runtime.accessed = failure_time;
-        runtime.checked = failure_time;
-        if (core->options.max_fails != 0) {
+        weighted.accessed = failure_time;
+        weighted.checked = failure_time;
+        if (state->options.max_fails != 0) {
             const std::int64_t penalty = std::max<std::int64_t>(
-                    1, (runtime.base_weight + static_cast<std::int64_t>(core->options.max_fails) - 1) /
-                               static_cast<std::int64_t>(core->options.max_fails));
-            runtime.effective_weight = std::max<std::int64_t>(0, runtime.effective_weight - penalty);
+                    1, (weighted.base_weight + static_cast<std::int64_t>(state->options.max_fails) - 1) /
+                               static_cast<std::int64_t>(state->options.max_fails));
+            weighted.effective_weight = std::max<std::int64_t>(0, weighted.effective_weight - penalty);
         }
     }
     selection.pending_ = false;
@@ -356,14 +443,14 @@ void SmoothWeightedRoundRobin<Instance>::complete(Selection &selection, bool suc
 
 template<std::equality_comparable Instance>
 std::uint64_t SmoothWeightedRoundRobin<Instance>::generation() const noexcept {
-    std::lock_guard guard(core_->mutex);
-    return core_->current ? core_->current->generation : 0;
+    std::lock_guard guard(state_->mutex);
+    return state_->generation;
 }
 
 template<std::equality_comparable Instance>
 std::size_t SmoothWeightedRoundRobin<Instance>::configured_instance_count() const noexcept {
-    std::lock_guard guard(core_->mutex);
-    return core_->current ? core_->current->peers.size() : 0;
+    std::lock_guard guard(state_->mutex);
+    return state_->weighted_instance_count;
 }
 
 } // namespace fiber::access_server
