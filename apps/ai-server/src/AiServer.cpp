@@ -1,5 +1,4 @@
 #include "AiServer.h"
-#include "config/LlmConfigStatus.h"
 #include "observability/AiServerCatRequest.h"
 #include "observability/AiServerLogCategories.h"
 #include "server/LlmRequestHandler.h"
@@ -33,7 +32,6 @@ constexpr std::string_view kAnthropicMessagesPath = "/v1/messages";
 constexpr std::string_view kAnthropicMessageAliasPath = "/v1/message";
 constexpr std::string_view kMetricsPath = "/metrics";
 constexpr std::string_view kMetricsAliasPath = "/_metric_prometheus";
-constexpr std::string_view kConfigStatusPath = "/internal/config/status";
 constexpr std::string_view kRateLimitCheckPath = "/internal/llm/rate-limit/check";
 constexpr std::string_view kRateLimitSettlePath = "/internal/llm/rate-limit/settle";
 constexpr std::string_view kReadyBody = "{\"status\":\"ready\"}\n";
@@ -93,18 +91,13 @@ AiServer::AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_
                    std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id) :
     accept_loop_(&accept_loop), worker_group_(&worker_group), cat_client_(cat_client),
     audit_max_record_bytes_(audit_max_record_bytes), audit_appender_id_(audit_appender_id),
-    workers_(worker_group.size()),
-    worker_config_generations_(std::make_unique<std::atomic<std::uint64_t>[]>(worker_group.size())),
-    rate_limiters_(worker_group.size()), rate_limit_remote_client_(worker_group),
+    workers_(worker_group.size()), rate_limiters_(worker_group.size()), rate_limit_remote_client_(worker_group),
     rate_limit_coordinator_(rate_limiters_, rate_limit_ring_, rate_limit_remote_client_),
     provider_connections_(worker_group), provider_client_(provider_connections_), metrics_(worker_group),
     server_(
             accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); }, make_server_options(),
             &worker_group) {
     FIBER_ASSERT(worker_group.size() > 0);
-    for (std::size_t i = 0; i < worker_group.size(); ++i) {
-        worker_config_generations_[i].store(0, std::memory_order_relaxed);
-    }
     config_stop_publisher_ = config_stop_.acquire_publisher();
     FIBER_ASSERT(config_stop_publisher_.has_value());
 }
@@ -199,7 +192,6 @@ async::DetachedTask AiServer::watch_config(std::size_t worker_index,
                 worker.provider_runtime.reconcile(*snapshot.value->project);
             }
             worker.config = snapshot.value;
-            worker_config_generations_[worker_index].store(snapshot.value->generation, std::memory_order_release);
             if (!worker.initial_installed) {
                 worker.initial_installed = true;
                 initial_installs_.done();
@@ -309,26 +301,6 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
             collected->mark_complete();
             (void) co_await exchange.write_all(std::move(*collected));
         }
-        co_return;
-    }
-    if (path == kConfigStatusPath) {
-        if (exchange.method() != http::HttpMethod::Get) {
-            co_await send_json(exchange, cat_request, 405, kMethodNotAllowedBody, true);
-            co_return;
-        }
-        const auto config = current_config();
-        if (!config) {
-            co_await send_json(exchange, cat_request, 503, kNotReadyBody);
-            co_return;
-        }
-        std::vector<std::uint64_t> worker_generations;
-        worker_generations.reserve(workers_.size());
-        for (std::size_t i = 0; i < workers_.size(); ++i) {
-            worker_generations.push_back(worker_config_generations_[i].load(std::memory_order_acquire));
-        }
-        const std::string body =
-                render_llm_config_status(*config, event::EventLoop::current().group_index(), worker_generations);
-        co_await send_json(exchange, cat_request, 200, body);
         co_return;
     }
     if (path == kOpenAiChatPath || path == kAnthropicMessagesPath || path == kAnthropicMessageAliasPath) {
