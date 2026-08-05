@@ -73,7 +73,6 @@ private:
     std::size_t audit_max_record_bytes_ = 0;
     log::AppenderId audit_appender_id_ = log::kInvalidAppenderId;
     std::vector<WorkerState> workers_;
-    std::unique_ptr<std::atomic<std::uint64_t>[]> worker_config_generations_;
     async::WaitGroup initial_installs_;
     async::WaitGroup config_tasks_;
     async::WaitGroup sweep_tasks_;

@@ -78,20 +78,17 @@ Nacos 的多个 Data ID 不具备跨配置事务。配置后台即使按正确�
 - 发布详情必须展示每个资源的写入状态和每个实例的生效状态；
 - 严格的跨 Data ID 原子发布需要后续扩展 ai-server 配置协议，见第 18 节。
 
-### 2.3 当前运行时配置证据
+### 2.3 当前运行时观测缺口
 
 当前 ai-server 提供：
 
 - `GET /health`：进程存活；
 - `GET /ready`：完整配置快照和限流成员环是否就绪；
 - `GET /metrics`：包括 `ai_server_config_generation`；
-- `GET /internal/config/status`：当前活跃快照的 Data ID/MD5/version、config generation
-  以及所有 HTTP worker generation 收敛状态；
-- 进程内 `LlmConfigManager` 保存最后一次失败信息，当前安全状态接口不返回失败详情。
+- 进程内 `LlmConfigManager` 保存最后一次失败信息，但没有对外状态接口。
 
-控制台只有在直连实例返回 `ACTIVE`、worker generation 全部收敛且目标 Data ID
-的 MD5 全部匹配时才能认定“已生效”。该接口当前无应用层认证，必须网络隔离；
-多实例聚合还需要服务发现提供稳定实例集合。
+仅靠上述接口无法证明某个 Data ID 的指定 MD5 是否被每个实例接受。控制台当前只记录
+rnacos 发布和回读结果，不主动查询 ai-server，也不把发布成功表述为实例已生效。
 
 ## 3. 产品目标与非目标
 
