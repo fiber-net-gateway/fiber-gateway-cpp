@@ -20,7 +20,6 @@
 #include "event/EventLoopGroup.h"
 #include "execution/AccessRequestHandler.h"
 #include "execution/ProxyExecutor.h"
-#include "execution/ProxyRequestSender.h"
 #include "fiber/cat/CatClient.h"
 #include "fiber/cat/CatClientConfig.h"
 #include "http/Http1Connection.h"
@@ -68,13 +67,6 @@ struct UpstreamState {
     std::vector<ObservedUpstreamRequest> requests;
     std::string websocket_client_data;
     Response response;
-};
-
-struct ProxyAdapterState {
-    fiber::access_server::ProxyRequestSender *sender = nullptr;
-    std::vector<int> statuses;
-    std::vector<std::string> bodies;
-    std::optional<fiber::access_server::ProxyRequestError> error;
 };
 
 struct ServiceSelectorState {
@@ -435,42 +427,6 @@ fiber::async::DetachedTask start_server(fiber::event::EventLoop *loop, UpstreamS
     fiber::async::spawn(*loop, [server]() { return server->serve(); });
 }
 
-fiber::async::Task<fiber::common::IoResult<void>>
-execute_proxy(void *context, fiber::http::HttpExchange &exchange,
-              const fiber::access_server::PreparedProxyRequest &request,
-              std::span<const fiber::access_server::EvaluatedHeader> base_headers,
-              fiber::access_server::AccessRequestTelemetry *telemetry) noexcept {
-    auto &state = *static_cast<ProxyAdapterState *>(context);
-    auto started = co_await state.sender->start(exchange, request, telemetry);
-    if (!started) {
-        state.error = started.error();
-        co_return std::unexpected(started.error().io_error == fiber::common::IoErr::None ? fiber::common::IoErr::Invalid
-                                                                                         : started.error().io_error);
-    }
-
-    state.statuses.push_back(started->status_code());
-    auto body = co_await read_body(*started);
-    if (!body) {
-        (void) started->abort(body.error());
-        co_return std::unexpected(body.error());
-    }
-    state.bodies.push_back(std::move(*body));
-
-    fiber::http::HttpHeaders headers(exchange.pool());
-    for (const auto &header: base_headers) {
-        if (!headers.set(header.name, header.value)) {
-            co_return std::unexpected(fiber::common::IoErr::NoMem);
-        }
-    }
-    co_return co_await exchange.send_header({
-            .kind = fiber::http::OutgoingHeaderKind::Final,
-            .status_code = 204,
-            .headers = &headers,
-            .body = fiber::http::HttpBodySpec::None(),
-            .end_stream = true,
-    });
-}
-
 fiber::async::DetachedTask
 run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteConfigStore *store,
                fiber::access_server::AccessProxyAdapter proxy_adapter, std::string request, std::string *output,
@@ -645,7 +601,7 @@ std::size_t count_header(std::string_view response, std::string_view header) {
     return count;
 }
 
-TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnection) {
+TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnection) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::LocalHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
@@ -711,10 +667,7 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     auto published = store.apply("orders", project_config(port));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    ProxyAdapterState adapter_state{
-            .sender = &sender,
-    };
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -736,18 +689,11 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
                            "Connection: close\r\n\r\n"
                            "world";
     fiber::async::spawn(group.at(0), [&]() {
-        return run_downstream(&group.at(0), &store,
-                              {
-                                      .context = &adapter_state,
-                                      .execute = execute_proxy,
-                              },
-                              std::move(requests), &output, &request_promise, nullptr, false, cat_client.get());
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(requests), &output, &request_promise,
+                              nullptr, false, cat_client.get());
     });
 
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
-    ASSERT_FALSE(adapter_state.error);
-    ASSERT_EQ(adapter_state.statuses, (std::vector<int>{201, 201}));
-    ASSERT_EQ(adapter_state.bodies, (std::vector<std::string>{"upstream-1", "upstream-2"}));
     ASSERT_EQ(upstream_state.requests.size(), 2U);
 
     const ObservedUpstreamRequest &first = upstream_state.requests[0];
@@ -779,7 +725,9 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     EXPECT_EQ(second.body, "world");
     EXPECT_NE(first.remote_port, 0);
     EXPECT_EQ(second.remote_port, first.remote_port);
-    EXPECT_EQ(count_status(output, "HTTP/1.1 204 No Content\r\n"), 2U);
+    EXPECT_EQ(count_status(output, "HTTP/1.1 201 Created\r\n"), 2U);
+    EXPECT_NE(output.find("upstream-1"), std::string::npos);
+    EXPECT_NE(output.find("upstream-2"), std::string::npos);
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=0"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "&reuse_count=1"));
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "RemoteCall"));
@@ -803,7 +751,7 @@ TEST(ProxyRequestSenderTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamCo
     delete server;
 }
 
-TEST(ProxyRequestSenderTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
+TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     fiber::event::EventLoopGroup group(1);
     fiber::http::LocalHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
@@ -839,13 +787,10 @@ TEST(ProxyRequestSenderTest, RetriesAServiceSelectionBeforeSendingRequestHeaders
     auto published = store.apply("orders", service_project_config());
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool, fiber::access_server::ProxyClusterMatcher{
-                                                                  .context = &selector_state,
-                                                                  .matches = never_match_gray,
-                                                          });
-    ProxyAdapterState adapter_state{
-            .sender = &sender,
-    };
+    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
+                                                               .context = &selector_state,
+                                                               .matches = never_match_gray,
+                                                       });
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -853,16 +798,10 @@ TEST(ProxyRequestSenderTest, RetriesAServiceSelectionBeforeSendingRequestHeaders
                           "Host: api.example.com\r\n"
                           "Connection: close\r\n\r\n";
     fiber::async::spawn(group.at(0), [&]() {
-        return run_downstream(&group.at(0), &store,
-                              {
-                                      .context = &adapter_state,
-                                      .execute = execute_proxy,
-                              },
-                              std::move(request), &output, &request_promise);
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
     });
 
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
-    ASSERT_FALSE(adapter_state.error);
     EXPECT_EQ(selector_state.select_count, 2U);
     EXPECT_EQ(selector_state.cluster_match_count, 1U);
     EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
@@ -873,7 +812,77 @@ TEST(ProxyRequestSenderTest, RetriesAServiceSelectionBeforeSendingRequestHeaders
     EXPECT_EQ(upstream_state.requests[0].host, selector_state.good_host_header);
     EXPECT_EQ(upstream_state.requests[0].transfer_encoding, "chunked");
     EXPECT_TRUE(upstream_state.requests[0].body.empty());
-    EXPECT_EQ(count_status(output, "HTTP/1.1 204 No Content\r\n"), 1U);
+    EXPECT_EQ(count_status(output, "HTTP/1.1 201 Created\r\n"), 1U);
+    EXPECT_NE(output.find("upstream-1"), std::string::npos);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+    delete server;
+}
+
+TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    UpstreamState upstream_state;
+    std::promise<std::uint16_t> port_promise;
+    std::promise<fiber::http::HttpServer *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    fiber::http::HttpServer *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    ServiceSelectorState selector_state{
+            .port = port,
+            .good_host_header = "127.0.0.1:" + std::to_string(port),
+            .bad_host_header = "127.0.0.2:" + std::to_string(port),
+            .good_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+            .bad_connection_key =
+                    fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
+                                                                  fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto config = service_project_config();
+    (**config.routes->begin()).max_client_body_size = 4;
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
+                                                               .context = &selector_state,
+                                                               .matches = never_match_gray,
+                                                       });
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "POST /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Transfer-Encoding: chunked\r\n"
+                          "Connection: close\r\n\r\n"
+                          "5\r\nhello\r\n0\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+    });
+
+    ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
+                                              {1, false},
+                                      }));
+    EXPECT_NE(output.find("HTTP/1.1 413 Payload Too Large\r\n"), std::string::npos);
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
@@ -922,8 +931,7 @@ TEST(ProxyExecutorTest, BridgesJavaCompatibleResponseHeadersAndBody) {
     auto published = store.apply("orders", proxy_response_project_config(port));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -981,8 +989,7 @@ TEST(ProxyExecutorTest, ForwardsFinalStatusAndHonorsNoBodyResponses) {
     fiber::access_server::RouteConfigStore store;
     auto published = store.apply("orders", proxy_response_project_config(port));
     ASSERT_TRUE(published) << published.error().message;
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool);
 
     struct StatusCase {
         std::string_view method;
@@ -1071,8 +1078,7 @@ TEST(ProxyExecutorTest, RejectsKnownOversizedResponseBeforeCommittingUpstreamSta
     auto published = store.apply("orders", proxy_response_project_config(port, 4, false));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1128,8 +1134,7 @@ TEST(ProxyExecutorTest, AbortsCommittedChunkedResponseWhenDynamicLimitIsExceeded
     auto published = store.apply("orders", proxy_response_project_config(port, 4, false));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1180,12 +1185,27 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
-    fiber::access_server::RouteConfigStore store;
-    auto published = store.apply("orders", proxy_response_project_config(port));
+    ServiceSelectorState selector_state{
+            .port = port,
+            .good_host_header = "127.0.0.1:" + std::to_string(port),
+            .bad_host_header = "127.0.0.2:" + std::to_string(port),
+            .good_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+            .bad_connection_key =
+                    fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
+                                                                  fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto published = store.apply("orders", service_project_config());
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
+                                                               .context = &selector_state,
+                                                               .matches = never_match_gray,
+                                                       });
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1202,6 +1222,10 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
     EXPECT_NE(output.find("hello"), std::string::npos);
     EXPECT_EQ(output.find("READ_RESP_BODY"), std::string::npos);
     EXPECT_EQ(count_status(output, "HTTP/1.1 "), 1U);
+    EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
+                                              {1, false},
+                                              {2, false},
+                                      }));
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
@@ -1244,8 +1268,7 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
     auto published = store.apply("orders", proxy_response_project_config(port));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     std::promise<RecordingTransport *> transport_promise;
@@ -1308,8 +1331,7 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1386,8 +1408,7 @@ TEST(ProxyExecutorTest, AbortsUpgradeBeforeRenderingAResponseTemplateFailure) {
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
@@ -1450,8 +1471,7 @@ TEST(ProxyExecutorTest, AppliesConfiguredWebSocketTunnelTimeout) {
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
-    fiber::access_server::ProxyRequestSender sender(pool);
-    fiber::access_server::ProxyExecutor executor(sender);
+    fiber::access_server::ProxyExecutor executor(pool);
     std::string output;
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();

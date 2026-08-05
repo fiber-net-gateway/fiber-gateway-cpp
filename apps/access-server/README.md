@@ -30,10 +30,10 @@
 - 已将 PROXY 接入同一 live handler，并实现 service/cluster/addresses、method、
   URI/rewrite/query、Java 固定 header 过滤、proxy/context/source header、body framing/
   limit、timeout、flush 和 WebSocket 请求条件的请求计划；
-- 已实现基于 `LocalHttp1ConnectionPoolSet`/`ClientHttp1Exchange` 的
-  `ProxyRequestSender`：静态地址或 service selector、DNS adapter、多地址连接、
-  header/body 流式发送、动态 body limit、Java request timeout、连接前失败重选和
-  move-only upstream response 所有权；
+- 已实现基于 `LocalHttp1ConnectionPoolSet`/`ClientHttp1Exchange` 的完整 `ProxyExecutor`
+  状态机：静态地址或 service selector、pool miss 后 DNS、多地址连接、header/body
+  流式收发、动态 body limit、Java request timeout 和连接前失败重选；pool lease、
+  discovery generation 与栈上的 upstream exchange 保持到 response/tunnel 结束；
 - 已实现普通 upstream response bridge：status/reason/header/body、Java 固定
   hop-by-hop 过滤、自定义响应头模板、Content-Length 特殊恢复、Location/Refresh
   回写、flush 和已知/动态 response body limit；
@@ -51,7 +51,7 @@
 - 已实现 production gray 配置 codec、失败保旧的原子规则快照，以及 CIDR/ratio 对
   NamingService cluster 的覆盖；`context.cluster` 同样会覆盖 route 默认 cluster；
 - 已实现 NamingService route 依赖协调、健康/权重/zone/cluster 过滤、不可变服务目录、
-  discovery generation pin，以及基于本地 `DnsResolver` 的 sender adapter；
+  discovery generation pin，以及基于本地 `DnsResolver` 的执行器 DNS adapter；
 - 已建立兼容边界、详细配置/请求契约和分阶段验收清单；
 - 已实现 `AccessServerRuntime`：启动 Nacos client/config/naming，建立 project/gray
   watcher 和 NamingService selector，在每个 HTTP worker 初始化 DNS resolver 与本地

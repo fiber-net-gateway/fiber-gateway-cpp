@@ -3,9 +3,10 @@
 
 #include "../../../../src/common/NonCopyable.h"
 #include "../../../../src/common/NonMovable.h"
+#include "../routing/ProxyAddressSelector.h"
 #include "AccessRequestHandler.h"
 #include "ErrorResponder.h"
-#include "ProxyRequestSender.h"
+#include "ProxyUpstreamConnection.h"
 
 #include <chrono>
 #include <cstddef>
@@ -14,6 +15,8 @@
 namespace fiber::access_server {
 
 struct ProxyExecutorOptions {
+    std::chrono::milliseconds connect_timeout{3000};
+    std::size_t request_body_chunk_size = 64 * 1024;
     std::size_t response_body_chunk_size = 64 * 1024;
     std::chrono::milliseconds downstream_write_timeout{30000};
     ErrorResponderOptions error{};
@@ -21,7 +24,8 @@ struct ProxyExecutorOptions {
 
 class ProxyExecutor final : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit ProxyExecutor(ProxyRequestSender &sender, ProxyExecutorOptions options = {}) noexcept;
+    explicit ProxyExecutor(http::LocalHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher = {},
+                           ProxyDnsResolver dns_resolver = {}, ProxyExecutorOptions options = {}) noexcept;
 
     [[nodiscard]] AccessProxyAdapter adapter() noexcept;
     [[nodiscard]] async::Task<common::IoResult<void>> execute(http::HttpExchange &exchange,
@@ -40,7 +44,9 @@ private:
                                                                         std::span<const EvaluatedHeader> base_headers,
                                                                         AccessRequestTelemetry *telemetry) noexcept;
 
-    ProxyRequestSender *sender_ = nullptr;
+    http::LocalHttp1ConnectionPoolSet *pool_ = nullptr;
+    ProxyClusterMatcher cluster_matcher_{};
+    ProxyDnsResolver dns_resolver_{};
     ProxyExecutorOptions options_{};
     ErrorResponder error_responder_;
 };

@@ -2,8 +2,8 @@
 #include "AccessServerLogCategories.h"
 
 #include "../execution/AccessError.h"
-#include "../execution/ProxyRequestSender.h"
 #include "../routing/ProjectRouteSnapshot.h"
+#include "../routing/ProxyAddressSelector.h"
 
 #include <algorithm>
 #include <array>

@@ -453,14 +453,16 @@ service/cluster/addresses 是契约。
   Java 遗留判断。
 
 Java `requestTimeout` 在请求 body 全部发送后启动，到收到 response header 为止；连接
-建立使用 Java client 默认的 3000 ms connect timeout。C++ sender 保留这个边界：
+建立使用 Java client 默认的 3000 ms connect timeout。C++ executor 保留这个边界：
 connect 不占 route timeout，请求 body 写完后才把 route timeout 用于 response header
 读取；负的遗留 int32 timeout 表示不启动该 timer。
 
 连接/解析在 request header 尚未发送时失败，可以重新选择 service 实例，最多包含首选
 实例在内尝试 4 次；选回同一失败实例时停止。request header 已开始发送后不重试，避免
-重复提交非幂等请求。实例收到 `<500` response header report 成功，`>=500` 或 I/O
-失败 report 失败。
+重复提交非幂等请求。实例收到 `>=500` response header、upstream 写入/读取失败或
+response body 未完整结束时 report 失败；`<500` 普通响应在 body 完整结束后 report
+成功，WebSocket 在 101 成功切换 raw stream 后 report 成功。downstream body 错误、
+本地 body limit、响应构造失败和 downstream 写入失败不归因给 upstream，不提交 report。
 
 ### 10.3 Request header
 
@@ -504,10 +506,12 @@ context 模板先计算后更新 trace user data：
 - CAT 的底层 message 编码和线程行为不属于兼容范围。
 
 当前 C++ 已将上述结果固化为 `PreparedProxyRequest` 并接入 live handler。
-`ProxyRequestSender` 使用 `LocalHttp1ConnectionPoolSet`，可通过同步 service selector
-和异步 DNS adapter 获取实际 peer；它拥有 pool lease 和 `ClientHttp1Exchange`，直到
-调用者消费或放弃 upstream response。真实 loopback upstream 已覆盖 chunked、
-Content-Length、默认 Host、source header、body 字节、service 连接失败重选和连接复用。
+`ProxyExecutor` 通过同步 service selector 和独立的 `ProxyUpstreamConnection` 获取实际
+peer：先以 `Http1ConnectionGroupKey` 查询 local pool，仅在 miss 且 key 为 hostname 时
+调用异步 DNS adapter，并依次尝试全部地址。executor coroutine 保持 pool lease、选中
+generation 和栈上的 `ClientHttp1Exchange`，直到消费或放弃 upstream response。真实
+loopback upstream 已覆盖 chunked、Content-Length、默认 Host、source header、body
+字节、service 连接失败重选和连接复用。
 
 service/cluster/address 视图只在当前 pinned snapshot 生命周期内有效。C++ 已实现
 NamingService route 依赖协调和原子服务目录：仅接受 enabled、healthy、正 weight
@@ -517,8 +521,8 @@ NamingService route 依赖协调和原子服务目录：仅接受 enabled、heal
 
 production gray 原子快照在 selector 前覆盖 cluster，非空 context cluster 次之，
 最后才使用 route 默认 cluster。最终 PROXY adapter 已统一监视 downstream response
-channel；在等待 response header/body 或 tunnel 时关闭 downstream，会销毁未完成
-sender 并使 active upstream exchange 退出 pool 复用。上述组件已在
+channel；在等待 response header/body 或 tunnel 时关闭 downstream，会销毁未完成的
+executor coroutine，并使 active upstream exchange 退出 pool 复用。上述组件已在
 `AccessServerRuntime` 完成进程级装配：每个 request worker 使用自己的 DNS resolver
 和 local pool shard，项目列表首值到达前不绑定 listener，关闭时先停止 listener 和
 active exchange，再关闭 pool/DNS 和 Nacos 控制面。本地脚本 adapter 和测试环境
