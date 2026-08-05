@@ -384,24 +384,17 @@ TEST(ProjectRouteSnapshotTest, BindsProxyHeaderTemplatesBeforeFreezingThem) {
     EXPECT_EQ(capture.path_variable_names[1], (std::vector<std::string>{"id"}));
 }
 
-TEST(ProjectRouteSnapshotTest, PreservesCaseInsensitiveProxyHeaderDuplicates) {
+TEST(ProjectRouteSnapshotTest, RejectsCaseInsensitiveProxyHeaderDuplicates) {
     RouteConfig route = proxy_route("/items");
     route.proxy_headers.push_back(StringConfigEntry{.name = "X-Duplicate", .value = "first"});
     route.proxy_headers.push_back(StringConfigEntry{.name = "x-duplicate", .value = "second"});
 
     auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
-    const ProjectRouteSnapshot &snapshot = require_snapshot(result);
-    ASSERT_TRUE(snapshot.routes()[0].proxy);
-    const auto &headers = snapshot.routes()[0].proxy->proxy_headers;
 
-    ASSERT_EQ(headers.size(), 2U);
-    EXPECT_TRUE(headers.contains("X-DUPLICATE"));
-    auto iterator = headers.begin();
-    EXPECT_EQ((*iterator).name(), "X-Duplicate");
-    EXPECT_EQ((*iterator).value().trailing_literal, "first");
-    ++iterator;
-    EXPECT_EQ((*iterator).name(), "x-duplicate");
-    EXPECT_EQ((*iterator).value().trailing_literal, "second");
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, AccessConfigErrorCode::Conflict);
+    EXPECT_EQ(result.error().field, "routes[0].proxy_headers");
+    EXPECT_EQ(result.error().message, "header name is duplicate ignoring ASCII case");
 }
 
 TEST(ProjectRouteSnapshotTest, UsesJavaCrc32cRouteKeyAndConditionalOrder) {

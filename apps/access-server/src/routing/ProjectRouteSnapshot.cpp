@@ -119,7 +119,15 @@ compile_header_templates(const StringConfigMap &input, std::size_t route_index, 
 
     CompiledHeaderTemplates::Builder result(entries->size());
     for (CompiledTemplateEntry &entry: *entries) {
-        result.insert(std::move(entry.name), std::move(entry.value));
+        auto inserted = result.insert(std::move(entry.name), std::move(entry.value));
+        if (!inserted) {
+            if (inserted.error() == CompiledHeaderTemplates::InsertError::DuplicateName) {
+                return std::unexpected(route_error(AccessConfigErrorCode::Conflict, route_index, field,
+                                                   "header name is duplicate ignoring ASCII case"));
+            }
+            return std::unexpected(route_error(AccessConfigErrorCode::OutOfRange, route_index, field,
+                                               "header collection is too large"));
+        }
     }
     return result;
 }

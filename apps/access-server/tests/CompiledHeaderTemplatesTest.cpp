@@ -34,9 +34,9 @@ CompiledTemplate compiled_template(std::string_view source) {
 
 TEST(CompiledHeaderTemplatesTest, BuildsCaseInsensitiveIndexAndPreservesInsertionOrder) {
     CompiledHeaderTemplates::Builder builder(3);
-    builder.insert("X-First", compiled_template("first"));
-    builder.insert("x-second", compiled_template("second"));
-    builder.insert("X-Third", compiled_template("third"));
+    ASSERT_TRUE(builder.insert("X-First", compiled_template("first")));
+    ASSERT_TRUE(builder.insert("x-second", compiled_template("second")));
+    ASSERT_TRUE(builder.insert("X-Third", compiled_template("third")));
 
     const CompiledHeaderTemplates headers = std::move(builder).build();
 
@@ -56,25 +56,14 @@ TEST(CompiledHeaderTemplatesTest, BuildsCaseInsensitiveIndexAndPreservesInsertio
     EXPECT_EQ(values, (std::vector<std::string>{"first", "second", "third"}));
 }
 
-TEST(CompiledHeaderTemplatesTest, PreservesCaseInsensitiveDuplicatesForJavaCompatibility) {
+TEST(CompiledHeaderTemplatesTest, RejectsCaseInsensitiveDuplicates) {
     CompiledHeaderTemplates::Builder builder(3);
-    builder.insert("X-Duplicate", compiled_template("first"));
-    builder.insert("x-duplicate", compiled_template("second"));
-    builder.insert("X-Last", compiled_template("last"));
+    ASSERT_TRUE(builder.insert("X-Duplicate", compiled_template("first")));
 
-    const CompiledHeaderTemplates headers = std::move(builder).build();
+    const auto duplicate = builder.insert("x-duplicate", compiled_template("second"));
 
-    EXPECT_EQ(headers.size(), 3U);
-    EXPECT_TRUE(headers.contains("X-DUPLICATE"));
-
-    std::vector<std::string> names;
-    std::vector<std::string> values;
-    for (const CompiledHeaderTemplates::EntryView entry: headers) {
-        names.emplace_back(entry.name());
-        values.push_back(entry.value().trailing_literal);
-    }
-    EXPECT_EQ(names, (std::vector<std::string>{"X-Duplicate", "x-duplicate", "X-Last"}));
-    EXPECT_EQ(values, (std::vector<std::string>{"first", "second", "last"}));
+    ASSERT_FALSE(duplicate);
+    EXPECT_EQ(duplicate.error(), CompiledHeaderTemplates::InsertError::DuplicateName);
 }
 
 TEST(CompiledHeaderTemplatesTest, BuildsEmptyImmutableCollection) {

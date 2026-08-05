@@ -6,12 +6,12 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
+#include <expected>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace fiber::access_server {
@@ -22,85 +22,18 @@ struct CompiledTemplateEntry {
 };
 
 class CompiledHeaderTemplates {
-    using IndexedStorage = http::HeaderMap<CompiledTemplate>;
-    using OrderedStorage = std::vector<CompiledTemplateEntry>;
+    using Storage = http::HeaderMap<CompiledTemplate>;
 
 public:
-    class EntryView {
-    public:
-        [[nodiscard]] std::string_view name() const noexcept { return name_; }
-        [[nodiscard]] std::uint64_t hash() const noexcept { return hash_; }
-        [[nodiscard]] const CompiledTemplate &value() const noexcept { return *value_; }
-
-    private:
-        friend class CompiledHeaderTemplates;
-        friend class ConstIterator;
-
-        EntryView(std::string_view name, std::uint64_t hash, const CompiledTemplate &value) noexcept :
-            name_(name), hash_(hash), value_(&value) {}
-
-        std::string_view name_;
-        std::uint64_t hash_ = 0;
-        const CompiledTemplate *value_ = nullptr;
+    enum class InsertError : std::uint8_t {
+        DuplicateName,
+        TooLarge,
     };
 
-    class ConstIterator {
-        using IndexedIterator = IndexedStorage::ConstIterator;
-        using OrderedIterator = OrderedStorage::const_iterator;
+    using EntryView = Storage::EntryView;
+    using ConstIterator = Storage::ConstIterator;
 
-    public:
-        using iterator_category = std::forward_iterator_tag;
-        using value_type = EntryView;
-        using difference_type = std::ptrdiff_t;
-        using pointer = void;
-        using reference = EntryView;
-
-        ConstIterator() noexcept = default;
-
-        [[nodiscard]] EntryView operator*() const noexcept;
-
-        ConstIterator &operator++() noexcept;
-
-        ConstIterator operator++(int) noexcept {
-            ConstIterator copy = *this;
-            ++(*this);
-            return copy;
-        }
-
-        [[nodiscard]] bool operator==(const ConstIterator &other) const noexcept;
-        [[nodiscard]] bool operator!=(const ConstIterator &other) const noexcept { return !(*this == other); }
-
-    private:
-        friend class CompiledHeaderTemplates;
-
-        explicit ConstIterator(IndexedIterator iterator) noexcept : iterator_(iterator) {}
-        explicit ConstIterator(OrderedIterator iterator) noexcept : iterator_(iterator) {}
-
-        std::variant<std::monostate, IndexedIterator, OrderedIterator> iterator_;
-    };
-
-    class Builder {
-    public:
-        Builder() = default;
-        explicit Builder(std::size_t expected_size) { entries_.reserve(expected_size); }
-
-        Builder(const Builder &) = delete;
-        Builder &operator=(const Builder &) = delete;
-        Builder(Builder &&) noexcept = default;
-        Builder &operator=(Builder &&) noexcept = default;
-
-        void insert(std::string name, CompiledTemplate value);
-
-        [[nodiscard]] std::span<CompiledTemplateEntry> entries() noexcept { return entries_; }
-        [[nodiscard]] std::span<const CompiledTemplateEntry> entries() const noexcept { return entries_; }
-        [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
-        [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
-
-        [[nodiscard]] CompiledHeaderTemplates build() &&;
-
-    private:
-        OrderedStorage entries_;
-    };
+    class Builder;
 
     CompiledHeaderTemplates() noexcept = default;
     CompiledHeaderTemplates(const CompiledHeaderTemplates &) = default;
@@ -119,10 +52,37 @@ public:
     [[nodiscard]] ConstIterator end() const noexcept;
 
 private:
-    explicit CompiledHeaderTemplates(IndexedStorage storage) noexcept : storage_(std::move(storage)) {}
-    explicit CompiledHeaderTemplates(OrderedStorage storage) noexcept : storage_(std::move(storage)) {}
+    explicit CompiledHeaderTemplates(Storage storage) noexcept : storage_(std::move(storage)) {}
 
-    std::variant<IndexedStorage, OrderedStorage> storage_;
+    Storage storage_;
+};
+
+class CompiledHeaderTemplates::Builder {
+public:
+    Builder() = default;
+    explicit Builder(std::size_t expected_size);
+
+    Builder(const Builder &) = delete;
+    Builder &operator=(const Builder &) = delete;
+    Builder(Builder &&) noexcept = default;
+    Builder &operator=(Builder &&) noexcept = default;
+
+    [[nodiscard]] std::expected<void, InsertError> insert(std::string name, CompiledTemplate value);
+
+    [[nodiscard]] std::span<CompiledTemplateEntry> entries() noexcept { return entries_; }
+    [[nodiscard]] std::span<const CompiledTemplateEntry> entries() const noexcept { return entries_; }
+    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+
+    [[nodiscard]] CompiledHeaderTemplates build() &&;
+
+private:
+    static constexpr std::size_t kMaxEntries = std::numeric_limits<std::uint32_t>::max() / 4U;
+    static constexpr std::size_t kMaxNameBytes =
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) - (sizeof(std::uint32_t) - 1);
+
+    std::vector<CompiledTemplateEntry> entries_;
+    std::size_t name_bytes_ = 0;
 };
 
 } // namespace fiber::access_server

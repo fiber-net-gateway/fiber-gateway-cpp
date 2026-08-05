@@ -76,7 +76,7 @@ CompiledTemplateEntry template_entry(std::string name, std::string_view source) 
 CompiledHeaderTemplates compiled_headers(std::vector<CompiledTemplateEntry> entries) {
     CompiledHeaderTemplates::Builder builder(entries.size());
     for (CompiledTemplateEntry &entry: entries) {
-        builder.insert(std::move(entry.name), std::move(entry.value));
+        EXPECT_TRUE(builder.insert(std::move(entry.name), std::move(entry.value)));
     }
     return std::move(builder).build();
 }
