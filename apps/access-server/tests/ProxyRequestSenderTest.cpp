@@ -84,8 +84,14 @@ struct ServiceSelectorState {
     std::optional<fiber::http::Http1ConnectionGroupKey> good_connection_key;
     std::optional<fiber::http::Http1ConnectionGroupKey> bad_connection_key;
     std::size_t select_count = 0;
+    std::size_t cluster_match_count = 0;
     std::vector<std::pair<std::uint64_t, bool>> reports;
 };
+
+bool never_match_gray(void *context, const fiber::http::HttpExchange &) noexcept {
+    ++static_cast<ServiceSelectorState *>(context)->cluster_match_count;
+    return false;
+}
 
 struct CatFrameCapture {
     mutable std::mutex mutex;
@@ -559,44 +565,64 @@ fiber::access_server::ProjectConfig service_project_config() {
     return config;
 }
 
-std::expected<fiber::access_server::ProxyUpstreamEndpoint, fiber::access_server::ProxyRequestError>
-select_service(void *context, fiber::http::HttpExchange &, std::string_view service,
-               std::optional<std::string_view> cluster,
-               std::span<const std::uint64_t> excluded_selection_tokens) noexcept {
-    auto &state = *static_cast<ServiceSelectorState *>(context);
-    if (service != "inventory" || cluster != std::optional<std::string_view>("stable")) {
-        return std::unexpected(fiber::access_server::ProxyRequestError{
-                .code = fiber::access_server::ProxyRequestErrorCode::SelectUpstream,
-                .io_error = fiber::common::IoErr::Invalid,
-                .message = "unexpected service selector input",
-        });
-    }
-    const bool first = state.select_count++ == 0;
-    if (first) {
-        if (!excluded_selection_tokens.empty()) {
-            return std::unexpected(fiber::access_server::ProxyRequestError{
-                    .code = fiber::access_server::ProxyRequestErrorCode::SelectUpstream,
+class TestServiceAddressSelector final : public fiber::access_server::ProxyAddressSelector {
+public:
+    TestServiceAddressSelector(ServiceSelectorState &state, std::string service, std::optional<std::string> cluster) :
+        state_(&state), service_(std::move(service)), cluster_(std::move(cluster)) {}
+
+    std::expected<fiber::access_server::ProxyUpstreamEndpoint, fiber::access_server::ProxyAddressSelectError>
+    select_address(std::optional<std::string_view> cluster_override,
+                   std::span<const std::uint64_t> excluded_selection_tokens) noexcept override {
+        if (service_ != "inventory" || cluster_override || cluster_ != std::optional<std::string>("stable")) {
+            return std::unexpected(fiber::access_server::ProxyAddressSelectError{
                     .io_error = fiber::common::IoErr::Invalid,
-                    .message = "first selection unexpectedly excluded an instance",
+                    .message = "unexpected service selector input",
             });
         }
-    } else if (excluded_selection_tokens.size() != 1 || excluded_selection_tokens.front() != 1U) {
-        return std::unexpected(fiber::access_server::ProxyRequestError{
-                .code = fiber::access_server::ProxyRequestErrorCode::SelectUpstream,
-                .io_error = fiber::common::IoErr::Invalid,
-                .message = "retry did not exclude the failed instance",
-        });
-    }
-    return fiber::access_server::ProxyUpstreamEndpoint{
-            .connection_key = first ? &*state.bad_connection_key : &*state.good_connection_key,
-            .host_header = first ? std::string_view(state.bad_host_header) : std::string_view(state.good_host_header),
-            .selection_token = first ? 1U : 2U,
-    };
-}
 
-void report_service(void *context, fiber::access_server::ProxyUpstreamEndpoint &endpoint, bool success) noexcept {
-    auto &state = *static_cast<ServiceSelectorState *>(context);
-    state.reports.emplace_back(endpoint.selection_token, success);
+        const bool first = state_->select_count++ == 0;
+        if (first) {
+            if (!excluded_selection_tokens.empty()) {
+                return std::unexpected(fiber::access_server::ProxyAddressSelectError{
+                        .io_error = fiber::common::IoErr::Invalid,
+                        .message = "first selection unexpectedly excluded an instance",
+                });
+            }
+        } else if (excluded_selection_tokens.size() != 1 || excluded_selection_tokens.front() != 1U) {
+            return std::unexpected(fiber::access_server::ProxyAddressSelectError{
+                    .io_error = fiber::common::IoErr::Invalid,
+                    .message = "retry did not exclude the failed instance",
+            });
+        }
+        return fiber::access_server::ProxyUpstreamEndpoint{
+                .connection_key = first ? &*state_->bad_connection_key : &*state_->good_connection_key,
+                .host_header =
+                        first ? std::string_view(state_->bad_host_header) : std::string_view(state_->good_host_header),
+                .provider_name = service_,
+                .selection_token = first ? 1U : 2U,
+        };
+    }
+
+    void report_address(fiber::access_server::ProxyUpstreamEndpoint &endpoint, bool success) noexcept override {
+        state_->reports.emplace_back(endpoint.selection_token, success);
+    }
+
+    [[nodiscard]] std::string_view service_name() const noexcept override { return service_; }
+
+    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override {
+        return cluster_ ? std::optional<std::string_view>(*cluster_) : std::nullopt;
+    }
+
+private:
+    ServiceSelectorState *state_ = nullptr;
+    std::string service_;
+    std::optional<std::string> cluster_;
+};
+
+std::shared_ptr<fiber::access_server::ProxyAddressSelector>
+make_test_service_selector(void *context, std::string service, std::optional<std::string> cluster) {
+    return std::make_shared<TestServiceAddressSelector>(*static_cast<ServiceSelectorState *>(context),
+                                                        std::move(service), std::move(cluster));
 }
 
 std::size_t count_status(std::string_view response, std::string_view status) {
@@ -796,10 +822,6 @@ TEST(ProxyRequestSenderTest, RetriesAServiceSelectionBeforeSendingRequestHeaders
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
-    fiber::access_server::RouteConfigStore store;
-    auto published = store.apply("orders", service_project_config());
-    ASSERT_TRUE(published) << published.error().message;
-
     ServiceSelectorState selector_state{
             .port = port,
             .good_host_header = "127.0.0.1:" + std::to_string(port),
@@ -810,10 +832,16 @@ TEST(ProxyRequestSenderTest, RetriesAServiceSelectionBeforeSendingRequestHeaders
                     fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http),
     };
-    fiber::access_server::ProxyRequestSender sender(pool, {
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto published = store.apply("orders", service_project_config());
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyRequestSender sender(pool, fiber::access_server::ProxyClusterMatcher{
                                                                   .context = &selector_state,
-                                                                  .select = select_service,
-                                                                  .report = report_service,
+                                                                  .matches = never_match_gray,
                                                           });
     ProxyAdapterState adapter_state{
             .sender = &sender,
@@ -836,6 +864,7 @@ TEST(ProxyRequestSenderTest, RetriesAServiceSelectionBeforeSendingRequestHeaders
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
     ASSERT_FALSE(adapter_state.error);
     EXPECT_EQ(selector_state.select_count, 2U);
+    EXPECT_EQ(selector_state.cluster_match_count, 1U);
     EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
                                               {1, false},
                                               {2, true},

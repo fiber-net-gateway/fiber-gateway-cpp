@@ -197,12 +197,7 @@ PreparedProxyRequestResult prepare_proxy_request(const http::HttpExchange &excha
                                                  std::size_t max_request_body_size,
                                                  std::string_view initial_context_cluster) {
     PreparedProxyRequest result(proxy.response_headers);
-    result.upstream_kind = proxy.upstream_kind;
-    result.service = proxy.service;
-    if (proxy.cluster) {
-        result.cluster = *proxy.cluster;
-    }
-    result.addresses = proxy.addresses;
+    result.address_selector = proxy.address_selector.get();
     result.response_evaluator = evaluator;
     result.method = exchange.method();
     result.max_request_body_size = max_request_body_size;

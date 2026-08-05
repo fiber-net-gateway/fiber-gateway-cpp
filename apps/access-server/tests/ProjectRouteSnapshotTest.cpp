@@ -9,6 +9,9 @@
 #include <string_view>
 #include <vector>
 
+#include <async/Spawn.h>
+#include <event/EventLoop.h>
+
 #include "routing/AccessRouteSnapshot.h"
 #include "routing/Cidr.h"
 #include "routing/HostMatcher.h"
@@ -31,7 +34,6 @@ using fiber::access_server::HttpsStrategy;
 using fiber::access_server::PathVariable;
 using fiber::access_server::ProjectConfig;
 using fiber::access_server::ProjectRouteSnapshot;
-using fiber::access_server::ProxyUpstreamKind;
 using fiber::access_server::ResponseBodyKind;
 using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
@@ -97,6 +99,35 @@ const ProjectRouteSnapshot &require_snapshot(const fiber::access_server::Project
     EXPECT_TRUE(result) << (result ? "" : result.error().message);
     EXPECT_TRUE(result && *result);
     return **result;
+}
+
+std::vector<fiber::access_server::AccessUpstreamInstance>
+select_addresses(fiber::access_server::ProxyAddressSelector &selector, std::size_t count) {
+    fiber::event::EventLoop loop;
+    std::vector<fiber::access_server::AccessUpstreamInstance> addresses;
+    std::vector<std::uint64_t> excluded;
+    bool completed = false;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        for (std::size_t i = 0; i < count; ++i) {
+            auto selected = selector.select_address(std::nullopt, excluded);
+            EXPECT_TRUE(selected);
+            if (!selected || selected->connection_key == nullptr) {
+                break;
+            }
+            addresses.push_back(fiber::access_server::AccessUpstreamInstance{
+                    .connection_key = *selected->connection_key,
+                    .authority = std::string(selected->host_header),
+            });
+            excluded.push_back(selected->selection_token);
+            selected->report(true);
+        }
+        completed = true;
+        loop.stop();
+        co_return;
+    });
+    loop.run();
+    EXPECT_TRUE(completed);
+    return addresses;
 }
 
 TEST(HostMatcherTest, MatchesJavaNormalizationAndWildcardRules) {
@@ -242,10 +273,10 @@ TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
     ASSERT_EQ(snapshot.routes().size(), 1U);
     const CompiledRoute &compiled = snapshot.routes()[0];
     ASSERT_TRUE(compiled.proxy);
-    EXPECT_EQ(compiled.proxy->upstream_kind, ProxyUpstreamKind::Service);
-    EXPECT_EQ(compiled.proxy->service, "orders");
-    ASSERT_TRUE(compiled.proxy->cluster);
-    EXPECT_EQ(*compiled.proxy->cluster, "stable");
+    ASSERT_TRUE(compiled.proxy->address_selector);
+    EXPECT_EQ(compiled.proxy->address_selector->service_name(), "orders");
+    ASSERT_TRUE(compiled.proxy->address_selector->configured_cluster());
+    EXPECT_EQ(*compiled.proxy->address_selector->configured_cluster(), "stable");
     EXPECT_EQ(compiled.proxy->timeout_millis, 1);
     ASSERT_TRUE(compiled.proxy->websocket_timeout_millis);
     EXPECT_EQ(*compiled.proxy->websocket_timeout_millis, 2);
@@ -277,9 +308,10 @@ TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     auto result = compile_project_config("demo", project_with_routes({std::move(route)}));
     const ProjectRouteSnapshot &snapshot = require_snapshot(result);
     ASSERT_TRUE(snapshot.routes()[0].proxy);
-    EXPECT_EQ(snapshot.routes()[0].proxy->upstream_kind, ProxyUpstreamKind::Addresses);
-    ASSERT_EQ(snapshot.routes()[0].proxy->addresses.size(), 4U);
-    const auto &addresses = snapshot.routes()[0].proxy->addresses;
+    ASSERT_TRUE(snapshot.routes()[0].proxy->address_selector);
+    EXPECT_TRUE(snapshot.routes()[0].proxy->address_selector->service_name().empty());
+    const auto addresses = select_addresses(*snapshot.routes()[0].proxy->address_selector, 4);
+    ASSERT_EQ(addresses.size(), 4U);
     using ConnectionKey = fiber::http::Http1ConnectionGroupKey;
     EXPECT_EQ(addresses[0].connection_key.scheme(), ConnectionKey::Scheme::Http);
     EXPECT_TRUE(addresses[0].connection_key.is_ip());

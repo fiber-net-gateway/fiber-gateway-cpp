@@ -123,7 +123,7 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
                                                                 .default_cluster = "default",
                                                                 .zone = "sh",
                                                         });
-    fiber::access_server::RouteConfigStore store;
+    fiber::access_server::RouteConfigStore store({}, selector.address_selector_factory());
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
@@ -168,7 +168,18 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
         naming.push("orders", std::move(info));
         co_await yield_updates();
 
-        auto stable = selector.select_endpoint("orders");
+        const std::shared_ptr<const fiber::access_server::AccessRouteSnapshot> route_snapshot = store.pin();
+        const auto &compiled_route = route_snapshot->projects().front()->routes().front();
+        EXPECT_TRUE(compiled_route.proxy);
+        fiber::access_server::ProxyAddressSelector *address_selector =
+                compiled_route.proxy ? compiled_route.proxy->address_selector.get() : nullptr;
+        EXPECT_NE(address_selector, nullptr);
+        if (address_selector == nullptr) {
+            co_await selector.shutdown();
+            loop.stop();
+            co_return;
+        }
+        auto stable = address_selector->select_address(std::nullopt, {});
         EXPECT_TRUE(stable);
         if (stable) {
             EXPECT_EQ(selected_host(*stable), "10.0.0.1");
@@ -177,15 +188,14 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
             if (stable->connection_key) {
                 EXPECT_TRUE(stable->connection_key->is_ip());
             }
-            auto adapter = selector.adapter();
-            adapter.report(adapter.context, *stable, false);
+            stable->report(false);
             const std::uint64_t excluded = stable->selection_token;
-            auto retry = selector.select_endpoint("orders", std::nullopt, std::span(&excluded, 1));
+            auto retry = address_selector->select_address(std::nullopt, std::span(&excluded, 1));
             EXPECT_TRUE(retry);
             if (retry) {
                 EXPECT_EQ(selected_host(*retry), "10.0.0.5");
                 const std::array excluded_local{excluded, retry->selection_token};
-                auto remote = selector.select_endpoint("orders", std::nullopt, excluded_local);
+                auto remote = address_selector->select_address(std::nullopt, excluded_local);
                 EXPECT_TRUE(remote);
                 if (remote) {
                     EXPECT_EQ(selected_host(*remote), "10.0.0.2");
@@ -195,7 +205,7 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
             }
         }
 
-        auto gray = selector.select_endpoint("orders", "gray");
+        auto gray = address_selector->select_address("gray", {});
         EXPECT_TRUE(gray);
         if (gray) {
             EXPECT_EQ(selected_host(*gray), "10.0.0.3");
@@ -216,7 +226,7 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
         if (stable) {
             EXPECT_EQ(selected_host(*stable), "10.0.0.1");
         }
-        auto hostname = selector.select_endpoint("orders");
+        auto hostname = address_selector->select_address(std::nullopt, {});
         EXPECT_TRUE(hostname);
         if (hostname) {
             EXPECT_EQ(selected_host(*hostname), "orders.internal");
@@ -234,7 +244,7 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
         EXPECT_TRUE(store.remove_project("demo"));
         EXPECT_TRUE(selector.reconcile(*store.pin()));
         EXPECT_EQ(selector.service_count(), 0u);
-        EXPECT_FALSE(selector.select_endpoint("orders"));
+        EXPECT_FALSE(address_selector->select_address(std::nullopt, {}));
 
         co_await selector.shutdown();
         completed = true;
@@ -249,16 +259,19 @@ TEST(NacosServiceSelectorTest, EmptyAndClosedLifecycleRemainFailClosed) {
     fiber::event::EventLoop loop;
     FakeNamingService naming;
     fiber::access_server::NacosServiceSelector selector(loop, naming);
-    fiber::access_server::RouteConfigStore store;
+    fiber::access_server::RouteConfigStore store({}, selector.address_selector_factory());
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         EXPECT_TRUE(store.apply("demo", project_config("orders")));
+        const std::shared_ptr<const fiber::access_server::AccessRouteSnapshot> snapshot = store.pin();
+        fiber::access_server::ProxyAddressSelector *address_selector =
+                snapshot->projects().front()->routes().front().proxy->address_selector.get();
         EXPECT_TRUE(selector.reconcile(*store.pin()));
-        EXPECT_FALSE(selector.select_endpoint("orders"));
+        EXPECT_FALSE(address_selector->select_address(std::nullopt, {}));
         co_await selector.shutdown();
         EXPECT_EQ(selector.service_count(), 0u);
-        EXPECT_FALSE(selector.select_endpoint("orders"));
+        EXPECT_FALSE(address_selector->select_address(std::nullopt, {}));
         completed = true;
         loop.stop();
     });

@@ -30,14 +30,10 @@ struct PreparedProxyRequest {
 
     // Views into the pinned route snapshot. The plan must not outlive the
     // AccessRequestHandler invocation that created it.
-    ProxyUpstreamKind upstream_kind = ProxyUpstreamKind::Service;
-    std::string_view service;
-    std::optional<std::string_view> cluster;
+    ProxyAddressSelector *address_selector = nullptr;
     // Evaluated HI-TRACE-CLUSTER/cluster context overrides the route default
     // for service discovery. Empty context values remove the override.
     std::optional<std::string> context_cluster;
-    std::span<const CompiledProxyAddress> addresses;
-
     http::HttpMethod method = http::HttpMethod::Unknown;
     std::string request_target;
     // Does not contain the selected upstream's default Host. A configured Host
