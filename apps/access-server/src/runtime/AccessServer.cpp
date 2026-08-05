@@ -21,10 +21,10 @@ http::HttpServerOptions make_http_options() noexcept {
 } // namespace
 
 AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup &workers,
-                           const RouteConfigStore &config_store, ProxyServiceSelector service_selector,
+                           const RouteConfigStore &config_store, ProxyClusterMatcher cluster_matcher,
                            AccessServerOptions options) :
     accept_loop_(&accept_loop), workers_(&workers), pool_(workers),
-    sender_(pool_, service_selector, dns_.adapter(), options.sender), executor_(sender_, options.executor),
+    sender_(pool_, cluster_matcher, dns_.adapter(), options.sender), executor_(sender_, options.executor),
     handler_(config_store, options.script_adapter,
              AccessRequestHandlerOptions{
                      .default_max_request_body_size = options.default_max_request_body_size,

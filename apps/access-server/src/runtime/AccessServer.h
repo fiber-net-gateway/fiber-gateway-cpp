@@ -40,7 +40,7 @@ struct AccessServerOptions {
 class AccessServer final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup &workers, const RouteConfigStore &config_store,
-                 ProxyServiceSelector service_selector, AccessServerOptions options = {});
+                 ProxyClusterMatcher cluster_matcher, AccessServerOptions options = {});
     ~AccessServer();
 
     [[nodiscard]] common::IoResult<void> initialize() noexcept;

@@ -2,12 +2,12 @@
 #define FIBER_ACCESS_SERVER_PROJECT_ROUTE_SNAPSHOT_H
 
 #include "../../../../src/common/util/RoutePathMatcher.h"
-#include "../../../../src/http/Http1ConnectionGroupKey.h"
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
 #include "Cidr.h"
 #include "CompiledHeaderTemplates.h"
 #include "HostMatcher.h"
+#include "ProxyAddressSelector.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -38,25 +38,8 @@ struct CompiledResponseRoute {
     std::vector<CompiledTemplateEntry> response_headers;
 };
 
-enum class ProxyUpstreamKind : std::uint8_t {
-    Service,
-    Addresses,
-};
-
-struct AccessUpstreamInstance {
-    http::Http1ConnectionGroupKey connection_key;
-    std::string authority;
-
-    friend bool operator==(const AccessUpstreamInstance &, const AccessUpstreamInstance &) noexcept = default;
-};
-
-using CompiledProxyAddress = AccessUpstreamInstance;
-
 struct CompiledProxyRoute {
-    ProxyUpstreamKind upstream_kind = ProxyUpstreamKind::Service;
-    std::string service;
-    std::optional<std::string> cluster;
-    std::vector<CompiledProxyAddress> addresses;
+    std::shared_ptr<ProxyAddressSelector> address_selector;
     std::int32_t timeout_millis = 60000;
     std::optional<std::int64_t> max_response_body_size;
     std::optional<std::int32_t> websocket_timeout_millis;
@@ -130,7 +113,8 @@ public:
 
 private:
     friend std::expected<std::optional<ProjectRouteSnapshot>, AccessConfigError>
-    compile_project_config(std::string_view project, const ProjectConfig &config, ScriptCompilerAdapter compiler);
+    compile_project_config(std::string_view project, const ProjectConfig &config, ScriptCompilerAdapter compiler,
+                           ProxyAddressSelectorFactory selector_factory);
 
     std::string project_;
     std::int32_t version_ = 0;
@@ -147,6 +131,9 @@ using ProjectSnapshotResult = std::expected<std::optional<ProjectRouteSnapshot>,
 [[nodiscard]] ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config);
 [[nodiscard]] ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
                                                            ScriptCompilerAdapter compiler);
+[[nodiscard]] ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
+                                                           ScriptCompilerAdapter compiler,
+                                                           ProxyAddressSelectorFactory selector_factory);
 
 } // namespace fiber::access_server
 

@@ -11,6 +11,7 @@
 #include "../../../../src/net/SocketAddress.h"
 
 #include <algorithm>
+#include <array>
 #include <new>
 #include <utility>
 
@@ -41,14 +42,6 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
         }
     }
     return result;
-}
-
-bool same_endpoint(const ProxyUpstreamEndpoint &left, const ProxyUpstreamEndpoint &right) noexcept {
-    if (left.selection_token != 0 && right.selection_token != 0) {
-        return left.selection_token == right.selection_token;
-    }
-    return left.connection_key != nullptr && right.connection_key != nullptr &&
-           *left.connection_key == *right.connection_key;
 }
 
 bool is_header(std::string_view actual, std::string_view expected) noexcept {
@@ -219,21 +212,12 @@ common::IoResult<void> ProxyUpstreamResponse::abort(common::IoErr reason) noexce
     return result;
 }
 
-ProxyRequestSender::ProxyRequestSender(http::LocalHttp1ConnectionPoolSet &pool, ProxyServiceSelector service_selector,
+ProxyRequestSender::ProxyRequestSender(http::LocalHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher,
                                        ProxyDnsResolver dns_resolver, ProxyRequestSenderOptions options) noexcept :
-    pool_(&pool), service_selector_(service_selector), dns_resolver_(dns_resolver), options_(options) {
+    pool_(&pool), cluster_matcher_(cluster_matcher), dns_resolver_(dns_resolver), options_(options) {
     if (options_.body_chunk_size == 0) {
         options_.body_chunk_size = 64 * 1024;
     }
-}
-
-ProxyUpstreamEndpoint ProxyRequestSender::select_static_endpoint(const PreparedProxyRequest &request,
-                                                                 std::size_t index) const noexcept {
-    const CompiledProxyAddress &address = request.addresses[index % request.addresses.size()];
-    return ProxyUpstreamEndpoint{
-            .connection_key = &address.connection_key,
-            .host_header = address.authority,
-    };
 }
 
 async::Task<std::expected<ProxyRequestSender::ConnectedEndpoint, ProxyRequestError>>
@@ -308,12 +292,6 @@ ProxyRequestSender::connect(const ProxyUpstreamEndpoint &endpoint) noexcept {
     co_return std::unexpected(error(ProxyRequestErrorCode::Connect, "upstream connection failed", last_error));
 }
 
-void ProxyRequestSender::report(ProxyUpstreamEndpoint &endpoint, bool success) const noexcept {
-    if (service_selector_.report) {
-        service_selector_.report(service_selector_.context, endpoint, success);
-    }
-}
-
 async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExchange &downstream,
                                                                    const PreparedProxyRequest &request,
                                                                    AccessRequestTelemetry *telemetry) noexcept {
@@ -321,56 +299,43 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
         co_return std::unexpected(error(ProxyRequestErrorCode::PoolShutdown, "upstream connection pool is unavailable",
                                         common::IoErr::Invalid));
     }
-    if (request.upstream_kind == ProxyUpstreamKind::Addresses && request.addresses.empty()) {
-        co_return std::unexpected(
-                error(ProxyRequestErrorCode::SelectUpstream, "no static upstream address", common::IoErr::NotFound));
-    }
-    if (request.upstream_kind == ProxyUpstreamKind::Service && !service_selector_.select) {
+    if (request.address_selector == nullptr) {
         co_return std::unexpected(error(ProxyRequestErrorCode::SelectUpstream,
-                                        "service upstream selector is unavailable", common::IoErr::NotFound));
+                                        "upstream address selector is unavailable", common::IoErr::NotFound));
     }
 
-    const std::size_t static_start =
-            request.upstream_kind == ProxyUpstreamKind::Addresses
-                    ? next_static_address_.fetch_add(1, std::memory_order_relaxed) % request.addresses.size()
-                    : 0;
-    const std::size_t attempts = request.upstream_kind == ProxyUpstreamKind::Addresses
-                                         ? std::min(kMaxJavaAttempts, request.addresses.size())
-                                         : kMaxJavaAttempts;
-    std::optional<ProxyUpstreamEndpoint> previous_endpoint;
+    std::optional<std::string_view> cluster_override;
+    if (request.context_cluster) {
+        cluster_override = *request.context_cluster;
+    }
+    if (cluster_matcher_.matches && cluster_matcher_.matches(cluster_matcher_.context, downstream)) {
+        cluster_override = std::string_view("gray");
+    }
+
+    std::array<std::uint64_t, kMaxJavaAttempts> excluded_selection_tokens{};
+    std::size_t excluded_selection_token_count = 0;
     std::optional<ProxyRequestError> previous_error;
     const auto report_selection = [&](ProxyUpstreamEndpoint &endpoint, bool success) noexcept {
-        if (request.upstream_kind == ProxyUpstreamKind::Service) {
-            report(endpoint, success);
-        }
+        request.address_selector->report_address(endpoint, success);
     };
 
-    for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
-        const std::uint64_t previous_selection_token = previous_endpoint ? previous_endpoint->selection_token : 0;
-        const std::span<const std::uint64_t> excluded_selection_tokens =
-                previous_selection_token == 0 ? std::span<const std::uint64_t>{}
-                                              : std::span<const std::uint64_t>(&previous_selection_token, 1);
-        std::expected<ProxyUpstreamEndpoint, ProxyRequestError> selected =
-                request.upstream_kind == ProxyUpstreamKind::Addresses
-                        ? std::expected<ProxyUpstreamEndpoint, ProxyRequestError>(
-                                  select_static_endpoint(request, static_start + attempt))
-                        : service_selector_.select(service_selector_.context, downstream, request.service,
-                                                   request.context_cluster
-                                                           ? std::optional<std::string_view>(*request.context_cluster)
-                                                           : request.cluster,
-                                                   excluded_selection_tokens);
+    for (std::size_t attempt = 0; attempt < kMaxJavaAttempts; ++attempt) {
+        auto selected = request.address_selector->select_address(
+                cluster_override,
+                std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
         if (!selected) {
-            co_return std::unexpected(previous_error ? *previous_error : selected.error());
-        }
-        if (previous_endpoint && same_endpoint(*previous_endpoint, *selected)) {
             co_return std::unexpected(previous_error ? *previous_error
                                                      : error(ProxyRequestErrorCode::SelectUpstream,
-                                                             "service selector returned the failed upstream",
-                                                             common::IoErr::NotFound));
+                                                             selected.error().message, selected.error().io_error));
+        }
+        if (selected->selection_token == 0) {
+            co_return std::unexpected(error(ProxyRequestErrorCode::SelectUpstream,
+                                            "upstream selector returned an invalid selection token",
+                                            common::IoErr::Invalid));
         }
 
         const std::string_view provider_name =
-                request.upstream_kind == ProxyUpstreamKind::Service ? request.service : selected->host_header;
+                selected->provider_name.empty() ? selected->host_header : selected->provider_name;
         AccessProviderTransaction provider_transaction =
                 telemetry ? telemetry->start_provider_transaction(provider_name) : AccessProviderTransaction{};
         provider_transaction.add_upstream(selected->host_header, attempt + 1);
@@ -380,7 +345,8 @@ async::Task<ProxyUpstreamResponseResult> ProxyRequestSender::start(http::HttpExc
             provider_transaction.fail(proxy_request_error_code_name(connected.error().code),
                                       connected.error().io_error);
             report_selection(*selected, false);
-            previous_endpoint = std::move(*selected);
+            FIBER_ASSERT(excluded_selection_token_count < excluded_selection_tokens.size());
+            excluded_selection_tokens[excluded_selection_token_count++] = selected->selection_token;
             previous_error = connected.error();
             continue;
         }

@@ -129,9 +129,9 @@ private:
     std::unique_ptr<nacos::ConfigService> config_service_;
     std::unique_ptr<nacos::NamingService> naming_service_;
     AccessScriptRuntime script_runtime_;
-    RouteConfigStore route_store_;
     GrayMatchStore gray_store_;
     NacosServiceSelector service_selector_;
+    RouteConfigStore route_store_;
     AccessConfigWatcher config_watcher_;
     GrayConfigWatcher gray_watcher_;
     AccessServer server_;

@@ -33,7 +33,8 @@ using ConfigUpdateOutcome = std::expected<ConfigUpdateResult, AccessConfigError>
 // immutable published snapshot from any serving thread.
 class RouteConfigStore {
 public:
-    explicit RouteConfigStore(ScriptCompilerAdapter script_compiler = {});
+    explicit RouteConfigStore(ScriptCompilerAdapter script_compiler = {},
+                              ProxyAddressSelectorFactory selector_factory = {});
 
     [[nodiscard]] ConfigUpdateOutcome apply(std::string_view project, const std::optional<ProjectConfig> &config);
     [[nodiscard]] ConfigUpdateOutcome remove_project(std::string_view project);
@@ -61,6 +62,7 @@ private:
     std::vector<std::shared_ptr<const ProjectRouteSnapshot>> projects_;
     std::vector<PublishedVersion> published_versions_;
     ScriptCompilerAdapter script_compiler_;
+    ProxyAddressSelectorFactory selector_factory_;
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     std::atomic<std::shared_ptr<const AccessRouteSnapshot>> published_;
 #else

@@ -18,6 +18,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/CompiledTemplate.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/HostMatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProjectRouteSnapshot.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProxyAddressSelector.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessConfigWatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessScriptRuntime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessDnsResolver.cpp"

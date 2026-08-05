@@ -274,7 +274,7 @@ std::optional<std::int32_t> parse_java_port(std::string_view value) noexcept {
     return port;
 }
 
-std::optional<CompiledProxyAddress> compile_java_http_host(std::string_view value) {
+std::optional<AccessUpstreamInstance> compile_java_http_host(std::string_view value) {
     if (value.empty()) {
         return std::nullopt;
     }
@@ -317,7 +317,7 @@ std::optional<CompiledProxyAddress> compile_java_http_host(std::string_view valu
             https ? http::Http1ConnectionGroupKey::Scheme::Https : http::Http1ConnectionGroupKey::Scheme::Http;
     net::IpAddress ip;
     if (net::IpAddress::parse(host, ip)) {
-        return CompiledProxyAddress{
+        return AccessUpstreamInstance{
                 .connection_key = http::Http1ConnectionGroupKey::from_ip(ip, port, scheme),
                 .authority = std::move(authority),
         };
@@ -326,7 +326,7 @@ std::optional<CompiledProxyAddress> compile_java_http_host(std::string_view valu
     if (!key) {
         return std::nullopt;
     }
-    return CompiledProxyAddress{
+    return AccessUpstreamInstance{
             .connection_key = std::move(*key),
             .authority = std::move(authority),
     };
@@ -344,7 +344,8 @@ std::expected<std::vector<Cidr>, AccessConfigError> compile_cidr_list(const std:
 }
 
 std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig &source, std::size_t route_index,
-                                                              PendingProxyHeaders &pending_headers) {
+                                                              PendingProxyHeaders &pending_headers,
+                                                              ProxyAddressSelectorFactory selector_factory) {
     if (!source.path || source.path->empty()) {
         return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "path", "path is empty"));
     }
@@ -420,31 +421,42 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
         CompiledProxyRoute proxy;
         proxy.timeout_millis = source.timeout_millis ? java_int32_narrow(*source.timeout_millis) : 60000;
         if (is_nonempty(source.service)) {
-            proxy.upstream_kind = ProxyUpstreamKind::Service;
+            std::string service;
+            std::optional<std::string> cluster;
             const std::size_t slash = source.service->find('/');
             if (slash > 0 && slash != std::string::npos) {
-                proxy.service = source.service->substr(0, slash);
-                proxy.cluster = source.service->substr(slash + 1);
+                service = source.service->substr(0, slash);
+                cluster = source.service->substr(slash + 1);
             } else {
-                proxy.service = *source.service;
+                service = *source.service;
             }
             if (is_nonempty(source.cluster)) {
-                proxy.cluster = *source.cluster;
+                cluster = *source.cluster;
             }
+            proxy.address_selector =
+                    selector_factory.create_service
+                            ? selector_factory.create_service(selector_factory.context, std::move(service),
+                                                              std::move(cluster))
+                            : make_unavailable_service_address_selector(std::move(service), std::move(cluster));
         } else if (!source.addresses.empty()) {
-            proxy.upstream_kind = ProxyUpstreamKind::Addresses;
-            proxy.addresses.reserve(source.addresses.size());
+            std::vector<AccessUpstreamInstance> addresses;
+            addresses.reserve(source.addresses.size());
             for (const std::optional<std::string> &address: source.addresses) {
                 auto compiled_address = address ? compile_java_http_host(*address) : std::nullopt;
                 if (!compiled_address) {
                     return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "addresses",
                                                        "invalid HTTP host"));
                 }
-                proxy.addresses.push_back(std::move(*compiled_address));
+                addresses.push_back(std::move(*compiled_address));
             }
+            proxy.address_selector = make_static_proxy_address_selector(std::move(addresses));
         } else {
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "service",
                                                "no service or addresses"));
+        }
+        if (!proxy.address_selector) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidCombination, route_index, "service",
+                                               "upstream selector factory returned null"));
         }
 
         auto proxy_headers = compile_header_templates(source.proxy_headers, route_index, "proxy_headers");
@@ -618,11 +630,17 @@ RouteMatch ProjectRouteSnapshot::match_route(std::string_view path, std::span<Pa
 }
 
 ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config) {
-    return compile_project_config(project, config, {});
+    return compile_project_config(project, config, {}, {});
 }
 
 ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
                                              ScriptCompilerAdapter compiler) {
+    return compile_project_config(project, config, compiler, {});
+}
+
+ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config,
+                                             ScriptCompilerAdapter compiler,
+                                             ProxyAddressSelectorFactory selector_factory) {
     if (project.empty()) {
         return std::unexpected(project_error("project", "project name is empty"));
     }
@@ -645,7 +663,7 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, i, {}, "route entry is null"));
         }
         PendingProxyHeaders &pending = pending_headers.emplace_back();
-        auto route = compile_route(*source, i, pending);
+        auto route = compile_route(*source, i, pending, selector_factory);
         if (!route) {
             return std::unexpected(std::move(route.error()));
         }

@@ -39,7 +39,6 @@ using fiber::access_server::HttpsStrategy;
 using fiber::access_server::PathVariable;
 using fiber::access_server::PreparedProxyRequest;
 using fiber::access_server::ProjectConfig;
-using fiber::access_server::ProxyUpstreamKind;
 using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
@@ -286,11 +285,9 @@ AccessRequestScriptAdapter script_adapter() {
 }
 
 struct CapturedProxyRequest {
-    ProxyUpstreamKind upstream_kind = ProxyUpstreamKind::Service;
     std::string service;
     std::optional<std::string> cluster;
     std::optional<std::string> context_cluster;
-    std::vector<std::string> addresses;
     fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
     std::string request_target;
     std::vector<fiber::access_server::EvaluatedHeader> headers;
@@ -330,19 +327,15 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange, const 
                       std::span<const fiber::access_server::EvaluatedHeader> base_headers,
                       fiber::access_server::AccessRequestTelemetry *) noexcept {
     auto &capture = *static_cast<CapturedProxyRequest *>(context);
-    capture.upstream_kind = request.upstream_kind;
-    capture.service.assign(request.service);
-    if (request.cluster) {
-        capture.cluster = std::string(*request.cluster);
+    capture.service.assign(request.address_selector ? request.address_selector->service_name() : std::string_view{});
+    const std::optional<std::string_view> configured_cluster =
+            request.address_selector ? request.address_selector->configured_cluster() : std::nullopt;
+    if (configured_cluster) {
+        capture.cluster = std::string(*configured_cluster);
     } else {
         capture.cluster.reset();
     }
     capture.context_cluster = request.context_cluster;
-    capture.addresses.clear();
-    capture.addresses.reserve(request.addresses.size());
-    for (const fiber::access_server::CompiledProxyAddress &address: request.addresses) {
-        capture.addresses.push_back(address.authority);
-    }
     capture.method = request.method;
     capture.request_target = request.request_target;
     capture.headers = request.headers;
@@ -708,7 +701,6 @@ TEST(AccessRequestHandlerTest, BuildsJavaCompatibleProxyRequestPlanOnLiveExchang
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
     EXPECT_NE(response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
     EXPECT_EQ(response_body(response), "proxied");
-    EXPECT_EQ(capture.upstream_kind, ProxyUpstreamKind::Service);
     EXPECT_EQ(capture.service, "orders");
     ASSERT_TRUE(capture.cluster);
     EXPECT_EQ(*capture.cluster, "stable");

@@ -4,6 +4,7 @@
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
 #include "../routing/Cidr.h"
+#include "../routing/ProxyAddressSelector.h"
 
 #include <atomic>
 #include <cstdint>
@@ -33,9 +34,11 @@ public:
     [[nodiscard]] bool matches(const http::HttpExchange &exchange) const noexcept;
     [[nodiscard]] bool matches(std::string_view entry, std::string_view real_ip,
                                std::uint32_t random_sample) const noexcept;
+    [[nodiscard]] ProxyClusterMatcher adapter() noexcept;
     [[nodiscard]] std::size_t rule_count() const noexcept;
 
 private:
+    static bool matches_request(void *context, const http::HttpExchange &exchange) noexcept;
     struct Rule {
         std::string entry;
         std::int32_t ratio = 0;

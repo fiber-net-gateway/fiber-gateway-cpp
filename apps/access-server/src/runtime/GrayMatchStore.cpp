@@ -54,6 +54,17 @@ bool GrayMatchStore::matches(const http::HttpExchange &exchange) const noexcept 
     return matches(exchange.header("X-Entry"), exchange.header("X-Real-Ip"), next_sample());
 }
 
+ProxyClusterMatcher GrayMatchStore::adapter() noexcept {
+    return ProxyClusterMatcher{
+            .context = this,
+            .matches = &GrayMatchStore::matches_request,
+    };
+}
+
+bool GrayMatchStore::matches_request(void *context, const http::HttpExchange &exchange) noexcept {
+    return static_cast<GrayMatchStore *>(context)->matches(exchange);
+}
+
 bool GrayMatchStore::matches(std::string_view entry, std::string_view real_ip,
                              std::uint32_t random_sample) const noexcept {
     std::shared_ptr<const Snapshot> snapshot = pin();

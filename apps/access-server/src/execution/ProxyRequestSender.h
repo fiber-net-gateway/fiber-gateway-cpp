@@ -7,10 +7,8 @@
 #include "../../../../src/http/LocalHttp1ConnectionPoolSet.h"
 #include "../../../../src/net/IpAddress.h"
 #include "../observability/AccessRequestTelemetry.h"
-#include "../runtime/SmoothWeightedRoundRobin.h"
 #include "ProxyRequestPlan.h"
 
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -43,28 +41,6 @@ struct ProxyRequestError {
 };
 
 [[nodiscard]] std::string_view proxy_request_error_code_name(ProxyRequestErrorCode code) noexcept;
-
-using AccessUpstreamSwrr = SmoothWeightedRoundRobin<AccessUpstreamInstance>;
-
-// service_selection pins the discovery generation for as long as
-// connection_key and host_header are consumed by the request.
-struct ProxyUpstreamEndpoint {
-    const http::Http1ConnectionGroupKey *connection_key = nullptr;
-    std::string_view host_header;
-    AccessUpstreamSwrr::Selection service_selection;
-    std::uint64_t selection_token = 0;
-};
-
-struct ProxyServiceSelector {
-    using SelectFunction = std::expected<ProxyUpstreamEndpoint, ProxyRequestError> (*)(
-            void *context, http::HttpExchange &exchange, std::string_view service,
-            std::optional<std::string_view> cluster, std::span<const std::uint64_t> excluded_selection_tokens) noexcept;
-    using ReportFunction = void (*)(void *context, ProxyUpstreamEndpoint &endpoint, bool success) noexcept;
-
-    void *context = nullptr;
-    SelectFunction select = nullptr;
-    ReportFunction report = nullptr;
-};
 
 struct ProxyDnsResolver {
     using Function = async::Task<common::IoResult<std::vector<net::IpAddress>>> (*)(void *context,
@@ -124,7 +100,7 @@ using ProxyUpstreamResponseResult = std::expected<ProxyUpstreamResponse, ProxyRe
 
 class ProxyRequestSender {
 public:
-    ProxyRequestSender(http::LocalHttp1ConnectionPoolSet &pool, ProxyServiceSelector service_selector = {},
+    ProxyRequestSender(http::LocalHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher = {},
                        ProxyDnsResolver dns_resolver = {}, ProxyRequestSenderOptions options = {}) noexcept;
 
     [[nodiscard]] async::Task<ProxyUpstreamResponseResult> start(http::HttpExchange &downstream,
@@ -137,17 +113,13 @@ private:
         http::Http1ClientConnection *connection = nullptr;
     };
 
-    [[nodiscard]] ProxyUpstreamEndpoint select_static_endpoint(const PreparedProxyRequest &request,
-                                                               std::size_t index) const noexcept;
     [[nodiscard]] async::Task<std::expected<ConnectedEndpoint, ProxyRequestError>>
     connect(const ProxyUpstreamEndpoint &endpoint) noexcept;
-    void report(ProxyUpstreamEndpoint &endpoint, bool success) const noexcept;
 
     http::LocalHttp1ConnectionPoolSet *pool_ = nullptr;
-    ProxyServiceSelector service_selector_{};
+    ProxyClusterMatcher cluster_matcher_{};
     ProxyDnsResolver dns_resolver_{};
     ProxyRequestSenderOptions options_{};
-    std::atomic<std::size_t> next_static_address_{0};
 };
 
 } // namespace fiber::access_server

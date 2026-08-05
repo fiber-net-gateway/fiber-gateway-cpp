@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <limits>
@@ -15,9 +16,8 @@
 namespace fiber::access_server {
 namespace {
 
-ProxyRequestError select_error(const char *message, common::IoErr io_error) noexcept {
-    return ProxyRequestError{
-            .code = ProxyRequestErrorCode::SelectUpstream,
+ProxyAddressSelectError select_error(const char *message, common::IoErr io_error) noexcept {
+    return ProxyAddressSelectError{
             .io_error = io_error,
             .message = message,
     };
@@ -313,6 +313,94 @@ private:
     bool initialized_ = false;
 };
 
+class NacosServiceAddressHandle final : public common::NonCopyable, public common::NonMovable {
+public:
+    explicit NacosServiceAddressHandle(std::string service) : service_(std::move(service)) {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+        state_.store(nullptr, std::memory_order_relaxed);
+#else
+        std::atomic_store_explicit(&state_, std::shared_ptr<AccessServiceState>{}, std::memory_order_relaxed);
+#endif
+    }
+
+    [[nodiscard]] std::string_view service_name() const noexcept { return service_; }
+
+    [[nodiscard]] std::shared_ptr<AccessServiceState> load() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+        return state_.load(std::memory_order_acquire);
+#else
+        return std::atomic_load_explicit(&state_, std::memory_order_acquire);
+#endif
+    }
+
+    void store(std::shared_ptr<AccessServiceState> state) noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+        state_.store(std::move(state), std::memory_order_release);
+#else
+        std::atomic_store_explicit(&state_, std::move(state), std::memory_order_release);
+#endif
+    }
+
+private:
+    std::string service_;
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    std::atomic<std::shared_ptr<AccessServiceState>> state_;
+#else
+    std::shared_ptr<AccessServiceState> state_;
+#endif
+};
+
+namespace {
+
+class NacosProxyAddressSelector final : public ProxyAddressSelector {
+public:
+    NacosProxyAddressSelector(std::shared_ptr<NacosServiceAddressHandle> handle,
+                              std::optional<std::string> configured_cluster, std::string default_cluster) :
+        handle_(std::move(handle)), configured_cluster_(std::move(configured_cluster)),
+        default_cluster_(std::move(default_cluster)) {
+        FIBER_ASSERT(handle_ != nullptr);
+    }
+
+    std::expected<ProxyUpstreamEndpoint, ProxyAddressSelectError>
+    select_address(std::optional<std::string_view> cluster_override,
+                   std::span<const std::uint64_t> excluded_selection_tokens) noexcept override {
+        std::shared_ptr<AccessServiceState> state = handle_->load();
+        if (!state) {
+            return std::unexpected(
+                    select_error("service is not present in the active route directory", common::IoErr::NotFound));
+        }
+
+        std::string_view cluster = default_cluster_;
+        if (configured_cluster_ && !configured_cluster_->empty()) {
+            cluster = *configured_cluster_;
+        }
+        if (cluster_override && !cluster_override->empty()) {
+            cluster = *cluster_override;
+        }
+        auto selected = state->select(cluster, excluded_selection_tokens);
+        if (!selected) {
+            return std::unexpected(select_error("no available service instance", common::IoErr::NotFound));
+        }
+        return make_proxy_upstream_endpoint(std::move(*selected), handle_->service_name());
+    }
+
+    [[nodiscard]] std::string_view service_name() const noexcept override { return handle_->service_name(); }
+
+    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override {
+        if (!configured_cluster_) {
+            return std::nullopt;
+        }
+        return *configured_cluster_;
+    }
+
+private:
+    std::shared_ptr<NacosServiceAddressHandle> handle_;
+    std::optional<std::string> configured_cluster_;
+    std::string default_cluster_;
+};
+
+} // namespace
+
 AccessServiceOps::StatePtr AccessServiceOps::create(nacos::ServiceKeyView,
                                                     const std::shared_ptr<const nacos::ServiceInfo> &snapshot) {
     FIBER_ASSERT(snapshot != nullptr);
@@ -332,37 +420,19 @@ void AccessServiceOps::on_change(State &, nacos::ServiceKeyView, nacos::ServiceC
     FIBER_ASSERT(owner != nullptr);
     ++owner->naming_updates_;
     if (kind == nacos::ServiceChangeKind::Initial) {
-        owner->publish_directory();
+        owner->publish_handles();
     }
 }
 
-void AccessServiceOps::retire(State &, nacos::ServiceKeyView, nacos::ServiceRetireReason) noexcept {}
-
-struct NacosServiceSelector::Directory {
-    struct Item {
-        std::string service;
-        std::shared_ptr<AccessServiceState> load_balancer;
-    };
-
-    [[nodiscard]] std::shared_ptr<AccessServiceState> find(std::string_view service) const noexcept {
-        const auto iterator =
-                std::lower_bound(services.begin(), services.end(), service,
-                                 [](const Item &item, std::string_view value) { return item.service < value; });
-        if (iterator == services.end() || iterator->service != service) {
-            return nullptr;
-        }
-        return iterator->load_balancer;
-    }
-
-    std::vector<Item> services;
-};
+void AccessServiceOps::retire(State &, nacos::ServiceKeyView key, nacos::ServiceRetireReason) noexcept {
+    FIBER_ASSERT(owner != nullptr);
+    owner->clear_handle(key.service_name);
+}
 
 NacosServiceSelector::NacosServiceSelector(event::EventLoop &loop, nacos::NamingService &naming_service,
-                                           NacosServiceSelectorOptions options, const GrayMatchStore *gray_match) :
-    loop_(&loop), gray_match_(gray_match), options_(std::move(options)),
-    discovery_(loop, naming_service, AccessServiceOps{.owner = this, .zone = options_.zone}) {
-    store_directory(std::make_shared<const Directory>(), std::memory_order_relaxed);
-}
+                                           NacosServiceSelectorOptions options) :
+    loop_(&loop), options_(std::move(options)),
+    discovery_(loop, naming_service, AccessServiceOps{.owner = this, .zone = options_.zone}) {}
 
 NacosServiceSelector::~NacosServiceSelector() { FIBER_ASSERT(entries_.empty()); }
 
@@ -379,8 +449,11 @@ std::expected<void, nacos::NamingServiceError> NacosServiceSelector::reconcile(c
     std::set<std::string, std::less<>> requested;
     for (const std::shared_ptr<const ProjectRouteSnapshot> &project: routes.projects()) {
         for (const CompiledRoute &route: project->routes()) {
-            if (route.proxy && route.proxy->upstream_kind == ProxyUpstreamKind::Service) {
-                requested.emplace(route.proxy->service);
+            if (route.proxy && route.proxy->address_selector) {
+                const std::string_view service = route.proxy->address_selector->service_name();
+                if (!service.empty()) {
+                    requested.emplace(service);
+                }
             }
         }
     }
@@ -390,15 +463,18 @@ std::expected<void, nacos::NamingServiceError> NacosServiceSelector::reconcile(c
         if (entries_.contains(service)) {
             continue;
         }
+        std::shared_ptr<NacosServiceAddressHandle> handle = get_or_create_handle(service);
         auto acquired = discovery_.acquire(service, options_.group);
         if (!acquired) {
             for (const std::string &added_service: added) {
+                entries_.at(added_service).handle->store(nullptr);
                 entries_.erase(added_service);
             }
             ++reconcile_failures_;
             return std::unexpected(std::move(acquired.error()));
         }
-        auto [iterator, inserted] = entries_.emplace(service, std::move(*acquired));
+        auto [iterator, inserted] =
+                entries_.emplace(service, ServiceEntry{.lease = std::move(*acquired), .handle = std::move(handle)});
         FIBER_ASSERT(inserted);
         (void) iterator;
         added.push_back(service);
@@ -406,16 +482,24 @@ std::expected<void, nacos::NamingServiceError> NacosServiceSelector::reconcile(c
 
     std::vector<std::string> removed;
     removed.reserve(entries_.size());
-    for (const auto &[service, handle]: entries_) {
-        (void) handle;
+    for (const auto &[service, entry]: entries_) {
+        (void) entry;
         if (!requested.contains(service)) {
             removed.push_back(service);
         }
     }
     for (const std::string &service: removed) {
+        entries_.at(service).handle->store(nullptr);
         entries_.erase(service);
     }
-    publish_directory();
+    publish_handles();
+    for (auto iterator = handles_.begin(); iterator != handles_.end();) {
+        if (iterator->second.expired()) {
+            iterator = handles_.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
     return {};
 }
 
@@ -423,51 +507,60 @@ async::Task<void> NacosServiceSelector::shutdown() noexcept {
     FIBER_ASSERT(loop_->in_loop());
     if (!stopping_) {
         stopping_ = true;
-        store_directory(std::make_shared<const Directory>(), std::memory_order_release);
+        for (auto &[service, entry]: entries_) {
+            (void) service;
+            entry.handle->store(nullptr);
+        }
         entries_.clear();
+        handles_.clear();
     }
     co_await discovery_.shutdown();
 }
 
-ProxyServiceSelector NacosServiceSelector::adapter() noexcept {
-    return ProxyServiceSelector{
+ProxyAddressSelectorFactory NacosServiceSelector::address_selector_factory() noexcept {
+    return ProxyAddressSelectorFactory{
             .context = this,
-            .select = &NacosServiceSelector::select,
-            .report = &NacosServiceSelector::report,
+            .create_service = &NacosServiceSelector::create_address_selector,
     };
+}
+
+std::shared_ptr<ProxyAddressSelector>
+NacosServiceSelector::create_address_selector(void *context, std::string service, std::optional<std::string> cluster) {
+    auto &self = *static_cast<NacosServiceSelector *>(context);
+    FIBER_ASSERT(self.loop_->in_loop());
+    std::shared_ptr<NacosServiceAddressHandle> handle = self.get_or_create_handle(service);
+    return std::make_shared<NacosProxyAddressSelector>(std::move(handle), std::move(cluster),
+                                                       self.options_.default_cluster);
+}
+
+std::shared_ptr<NacosServiceAddressHandle> NacosServiceSelector::get_or_create_handle(std::string_view service) {
+    FIBER_ASSERT(loop_->in_loop());
+    auto iterator = handles_.find(service);
+    if (iterator != handles_.end()) {
+        if (std::shared_ptr<NacosServiceAddressHandle> current = iterator->second.lock()) {
+            return current;
+        }
+        handles_.erase(iterator);
+    }
+    auto handle = std::make_shared<NacosServiceAddressHandle>(std::string(service));
+    handles_.emplace(std::string(service), handle);
+    return handle;
+}
+
+void NacosServiceSelector::clear_handle(std::string_view service) noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    const auto iterator = handles_.find(service);
+    if (iterator != handles_.end()) {
+        if (std::shared_ptr<NacosServiceAddressHandle> handle = iterator->second.lock()) {
+            handle->store(nullptr);
+        }
+    }
 }
 
 RouteSnapshotObserver NacosServiceSelector::route_observer() noexcept {
     return RouteSnapshotObserver{
             .context = this,
             .on_update = &NacosServiceSelector::route_snapshot_updated,
-    };
-}
-
-std::expected<ProxyUpstreamEndpoint, ProxyRequestError>
-NacosServiceSelector::select_endpoint(std::string_view service, std::optional<std::string_view> cluster,
-                                      std::span<const std::uint64_t> excluded_selection_tokens) noexcept {
-    std::shared_ptr<const Directory> directory = load_directory();
-    std::shared_ptr<AccessServiceState> load_balancer = directory->find(service);
-    if (!load_balancer) {
-        return std::unexpected(
-                select_error("service is not present in the active route directory", common::IoErr::NotFound));
-    }
-
-    const std::string_view selected_cluster =
-            cluster && !cluster->empty() ? *cluster : std::string_view(options_.default_cluster);
-    auto selected = load_balancer->select(selected_cluster, excluded_selection_tokens);
-    if (!selected) {
-        return std::unexpected(select_error("no available service instance", common::IoErr::NotFound));
-    }
-
-    const std::uint64_t selection_token = selected->selection_token();
-    const AccessUpstreamInstance &instance = selected->instance();
-    return ProxyUpstreamEndpoint{
-            .connection_key = &instance.connection_key,
-            .host_header = instance.authority,
-            .service_selection = std::move(*selected),
-            .selection_token = selection_token,
     };
 }
 
@@ -478,53 +571,12 @@ void NacosServiceSelector::route_snapshot_updated(void *context,
     (void) reconciled;
 }
 
-std::expected<ProxyUpstreamEndpoint, ProxyRequestError>
-NacosServiceSelector::select(void *context, http::HttpExchange &exchange, std::string_view service,
-                             std::optional<std::string_view> cluster,
-                             std::span<const std::uint64_t> excluded_selection_tokens) noexcept {
-    auto &self = *static_cast<NacosServiceSelector *>(context);
-    if (self.gray_match_ && self.gray_match_->matches(exchange)) {
-        cluster = std::string_view("gray");
+void NacosServiceSelector::publish_handles() {
+    for (const auto &[service, entry]: entries_) {
+        (void) service;
+        std::shared_ptr<AccessServiceState> state = entry.lease.try_state();
+        entry.handle->store(std::move(state));
     }
-    return self.select_endpoint(service, cluster, excluded_selection_tokens);
-}
-
-void NacosServiceSelector::report(void *, ProxyUpstreamEndpoint &endpoint, bool success) noexcept {
-    if (endpoint.service_selection.pending()) {
-        endpoint.service_selection.report(success);
-    }
-}
-
-void NacosServiceSelector::publish_directory() {
-    auto directory = std::make_shared<Directory>();
-    directory->services.reserve(entries_.size());
-    for (const auto &[service, handle]: entries_) {
-        std::shared_ptr<AccessServiceState> state = handle.try_state();
-        if (state != nullptr) {
-            directory->services.push_back(Directory::Item{
-                    .service = service,
-                    .load_balancer = std::move(state),
-            });
-        }
-    }
-    store_directory(std::move(directory), std::memory_order_release);
-}
-
-std::shared_ptr<const NacosServiceSelector::Directory> NacosServiceSelector::load_directory() const noexcept {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    return directory_.load(std::memory_order_acquire);
-#else
-    return std::atomic_load_explicit(&directory_, std::memory_order_acquire);
-#endif
-}
-
-void NacosServiceSelector::store_directory(std::shared_ptr<const Directory> directory,
-                                           std::memory_order order) noexcept {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    directory_.store(std::move(directory), order);
-#else
-    std::atomic_store_explicit(&directory_, std::move(directory), order);
-#endif
 }
 
 } // namespace fiber::access_server
