@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <expected>
 #include <map>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <async/Spawn.h>
@@ -152,18 +154,23 @@ private:
 struct FakeOpsCounters {
     std::size_t creates = 0;
     std::size_t updates = 0;
-    std::size_t changes = 0;
-    std::size_t initial_changes = 0;
     std::size_t retires = 0;
     std::size_t destroys = 0;
     fiber::nacos::ServiceRetireReason last_retire_reason = fiber::nacos::ServiceRetireReason::Released;
 };
 
 struct FakeState {
-    explicit FakeState(FakeOpsCounters &value_counters, std::int64_t value_last_ref_time) noexcept :
-        counters(&value_counters), last_ref_time(value_last_ref_time) {}
+    FakeState() noexcept = default;
+    FakeState(const FakeState &) = delete;
+    FakeState &operator=(const FakeState &) = delete;
+    FakeState(FakeState &&) = delete;
+    FakeState &operator=(FakeState &&) = delete;
 
-    ~FakeState() { ++counters->destroys; }
+    ~FakeState() noexcept {
+        if (counters != nullptr) {
+            ++counters->destroys;
+        }
+    }
 
     FakeOpsCounters *counters = nullptr;
     std::int64_t last_ref_time = 0;
@@ -171,28 +178,19 @@ struct FakeState {
 
 struct FakeStateOps {
     using State = FakeState;
-    using StatePtr = std::shared_ptr<State>;
 
-    [[nodiscard]] StatePtr create(fiber::nacos::ServiceKeyView,
-                                  const std::shared_ptr<const fiber::nacos::ServiceInfo> &snapshot) {
+    void on_init(const fiber::nacos::ServiceKeyView &, State &state) noexcept {
         ++counters->creates;
-        return std::make_shared<State>(*counters, snapshot->last_ref_time);
+        state.counters = counters;
     }
 
-    [[nodiscard]] bool update(State &state, fiber::nacos::ServiceKeyView,
-                              const std::shared_ptr<const fiber::nacos::ServiceInfo> &snapshot) {
+    void on_update(const fiber::nacos::ServiceKeyView &, State &state,
+                   const std::shared_ptr<const fiber::nacos::ServiceInfo> &snapshot) noexcept {
         ++counters->updates;
-        const bool changed = state.last_ref_time != snapshot->last_ref_time;
         state.last_ref_time = snapshot->last_ref_time;
-        return changed;
     }
 
-    void on_change(State &, fiber::nacos::ServiceKeyView, fiber::nacos::ServiceChangeKind kind, bool) noexcept {
-        ++counters->changes;
-        counters->initial_changes += kind == fiber::nacos::ServiceChangeKind::Initial ? 1U : 0U;
-    }
-
-    void retire(State &, fiber::nacos::ServiceKeyView, fiber::nacos::ServiceRetireReason reason) noexcept {
+    void on_retire(const fiber::nacos::ServiceKeyView &, State &, fiber::nacos::ServiceRetireReason reason) noexcept {
         ++counters->retires;
         counters->last_retire_reason = reason;
     }
@@ -226,7 +224,6 @@ TEST(ServiceDiscoveryTest, WaitReadyCreatesStateOnceAndSeparatesRetireFromDestro
             loop.stop();
             co_return;
         }
-        EXPECT_EQ(first->try_state(), nullptr);
         EXPECT_EQ(counters.creates, 0U);
 
         fiber::async::spawn([&]() -> fiber::async::DetachedTask {
@@ -248,32 +245,26 @@ TEST(ServiceDiscoveryTest, WaitReadyCreatesStateOnceAndSeparatesRetireFromDestro
             loop.stop();
             co_return;
         }
-        std::shared_ptr<FakeState> retained = *ready;
-        ready = std::unexpected(fiber::nacos::ServiceReadyError::Retired);
-        EXPECT_EQ(retained->last_ref_time, 7);
+        EXPECT_EQ(first->state().last_ref_time, 7);
         EXPECT_EQ(counters.creates, 1U);
-        EXPECT_EQ(counters.changes, 1U);
-        EXPECT_EQ(counters.initial_changes, 1U);
-        EXPECT_EQ(first->shared_state(), second->shared_state());
+        EXPECT_EQ(counters.updates, 1U);
+        EXPECT_EQ(&first->state(), &second->state());
 
         fiber::tests::ServiceInfoTestData update;
         update.name = "orders";
         update.group_name = "DEFAULT_GROUP";
         update.last_ref_time = 9;
         naming.push("orders", "DEFAULT_GROUP", std::move(update));
-        EXPECT_EQ(retained->last_ref_time, 9);
-        EXPECT_EQ(counters.updates, 1U);
-        EXPECT_EQ(counters.changes, 2U);
+        EXPECT_EQ(first->state().last_ref_time, 9);
+        EXPECT_EQ(counters.updates, 2U);
 
         first->reset();
         EXPECT_EQ(counters.retires, 0U);
         second->reset();
         EXPECT_EQ(counters.retires, 1U);
         EXPECT_EQ(counters.last_retire_reason, fiber::nacos::ServiceRetireReason::Released);
-        EXPECT_EQ(counters.destroys, 0U);
         EXPECT_TRUE(discovery.empty());
 
-        retained.reset();
         // The notification callback still pins Entry until the waiter yields
         // back to ServiceDiscovery::apply().
         co_await fiber::async::yield();
@@ -308,10 +299,9 @@ TEST(ServiceDiscoveryTest, CachedReplayInitializesBeforeAcquireReturns) {
             loop.stop();
             co_return;
         }
-        EXPECT_NE(lease->try_state(), nullptr);
         EXPECT_EQ(lease->state().last_ref_time, 11);
         EXPECT_EQ(counters.creates, 1U);
-        EXPECT_EQ(counters.initial_changes, 1U);
+        EXPECT_EQ(counters.updates, 1U);
         auto ready = co_await lease->wait_ready();
         EXPECT_TRUE(ready);
         lease->reset();
@@ -392,26 +382,15 @@ TEST(ServiceDiscoveryTest, ClosedAfterFirstNotifyRetiresStateOnce) {
         info.group_name = "DEFAULT_GROUP";
         info.last_ref_time = 7;
         naming.push("orders", "DEFAULT_GROUP", std::move(info));
-        std::shared_ptr<FakeState> retained = lease->shared_state();
-        EXPECT_NE(retained, nullptr);
-        if (!retained) {
-            lease->reset();
-            co_await discovery.shutdown();
-            completed = true;
-            loop.stop();
-            co_return;
-        }
-
         naming.close("orders", "DEFAULT_GROUP");
         EXPECT_TRUE(discovery.empty());
         EXPECT_EQ(counters.retires, 1U);
         EXPECT_EQ(counters.last_retire_reason, fiber::nacos::ServiceRetireReason::SubscriptionClosed);
         EXPECT_EQ(counters.destroys, 0U);
-        EXPECT_EQ(retained->last_ref_time, 7);
+        EXPECT_EQ(lease->state().last_ref_time, 7);
 
         lease->reset();
         EXPECT_EQ(counters.retires, 1U);
-        retained.reset();
         EXPECT_EQ(counters.destroys, 1U);
         co_await discovery.shutdown();
         completed = true;
@@ -454,6 +433,117 @@ TEST(ServiceDiscoveryTest, ShutdownBeforeFirstNotifyWakesWaiter) {
         co_await discovery.shutdown();
         completed = true;
         loop.stop();
+    });
+
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(ServiceDiscoveryTest, WorkerCanDestroyLastLeaseAndShutdownWaitsForOwnerRelease) {
+    fiber::event::EventLoop loop;
+    FakeNamingService naming;
+    FakeOpsCounters counters;
+    FakeServiceDiscovery discovery(loop, naming, FakeStateOps{.counters = &counters});
+    bool shutdown_completed = false;
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto acquired = discovery.acquire("orders", "DEFAULT_GROUP");
+        EXPECT_TRUE(acquired);
+        if (!acquired) {
+            co_await discovery.shutdown();
+            completed = true;
+            loop.stop();
+            co_return;
+        }
+
+        fiber::tests::ServiceInfoTestData info;
+        info.name = "orders";
+        info.group_name = "DEFAULT_GROUP";
+        info.last_ref_time = 13;
+        naming.push("orders", "DEFAULT_GROUP", std::move(info));
+        auto ready = co_await acquired->wait_ready();
+        EXPECT_TRUE(ready);
+        if (!ready) {
+            acquired->reset();
+            co_await discovery.shutdown();
+            completed = true;
+            loop.stop();
+            co_return;
+        }
+
+        fiber::async::spawn([&]() -> fiber::async::DetachedTask {
+            co_await discovery.shutdown();
+            shutdown_completed = true;
+            EXPECT_EQ(counters.destroys, 1U);
+            EXPECT_TRUE(discovery.empty());
+            co_await discovery.shutdown();
+            completed = true;
+            loop.stop();
+        });
+        co_await fiber::async::yield();
+        EXPECT_FALSE(shutdown_completed);
+
+        std::thread worker([lease = std::move(*acquired)]() mutable { lease.reset(); });
+        worker.join();
+        EXPECT_EQ(counters.retires, 1U);
+        EXPECT_EQ(counters.destroys, 0U);
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_TRUE(completed);
+}
+
+TEST(ServiceDiscoveryTest, ConcurrentWorkerLeaseDestructionIsCoalescedOnOwnerLoop) {
+    fiber::event::EventLoop loop;
+    FakeNamingService naming;
+    FakeOpsCounters counters;
+    FakeServiceDiscovery discovery(loop, naming, FakeStateOps{.counters = &counters});
+    bool completed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        constexpr std::size_t kLeaseCount = 16;
+        std::vector<FakeServiceDiscovery::Lease> leases;
+        leases.reserve(kLeaseCount);
+        for (std::size_t i = 0; i < kLeaseCount; ++i) {
+            auto acquired = discovery.acquire("orders", "DEFAULT_GROUP");
+            EXPECT_TRUE(acquired);
+            if (acquired) {
+                leases.push_back(std::move(*acquired));
+            }
+        }
+        EXPECT_EQ(leases.size(), kLeaseCount);
+
+        fiber::tests::ServiceInfoTestData info;
+        info.name = "orders";
+        info.group_name = "DEFAULT_GROUP";
+        naming.push("orders", "DEFAULT_GROUP", std::move(info));
+
+        fiber::async::spawn([&]() -> fiber::async::DetachedTask {
+            co_await discovery.shutdown();
+            EXPECT_EQ(counters.retires, 1U);
+            EXPECT_EQ(counters.destroys, 1U);
+            completed = true;
+            loop.stop();
+        });
+        co_await fiber::async::yield();
+
+        std::atomic<bool> release{false};
+        std::vector<std::thread> workers;
+        workers.reserve(leases.size());
+        for (FakeServiceDiscovery::Lease &lease: leases) {
+            workers.emplace_back([lease = std::move(lease), &release]() mutable {
+                while (!release.load(std::memory_order_acquire)) {
+                }
+                lease.reset();
+            });
+        }
+        release.store(true, std::memory_order_release);
+        for (std::thread &worker: workers) {
+            worker.join();
+        }
+        co_return;
     });
 
     loop.run();

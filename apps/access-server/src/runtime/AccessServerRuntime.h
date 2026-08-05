@@ -5,9 +5,9 @@
 #include "AccessScriptRuntime.h"
 #include "AccessServer.h"
 #include "AccessServerConfig.h"
+#include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
 #include "GrayMatchStore.h"
-#include "NacosServiceSelector.h"
 #include "RouteConfigStore.h"
 
 #include <cstdint>
@@ -99,7 +99,7 @@ private:
                         net::SocketAddress metrics_listen_address, net::ListenOptions listen_options,
                         std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size,
                         bool test_mode, AccessConfigWatcherOptions watcher_options,
-                        GrayConfigWatcherOptions gray_options, NacosServiceSelectorOptions selector_options,
+                        GrayConfigWatcherOptions gray_options, AccessServiceDiscoveryOptions service_discovery_options,
                         std::unique_ptr<cat::CatClient> cat_client, std::unique_ptr<nacos::NacosClient> nacos_client,
                         std::unique_ptr<nacos::ConfigService> config_service,
                         std::unique_ptr<nacos::NamingService> naming_service) noexcept;
@@ -130,7 +130,7 @@ private:
     std::unique_ptr<nacos::NamingService> naming_service_;
     AccessScriptRuntime script_runtime_;
     GrayMatchStore gray_store_;
-    NacosServiceSelector service_selector_;
+    AccessServiceDiscovery service_discovery_;
     RouteConfigStore route_store_;
     AccessConfigWatcher config_watcher_;
     GrayConfigWatcher gray_watcher_;

@@ -14,6 +14,10 @@
 #include <utility>
 #include <vector>
 
+#include <async/Spawn.h>
+#include <async/TaskSelect.h>
+#include <async/WaitGroup.h>
+#include <async/WhenAny.h>
 #include <common/Assert.h>
 #include <fiber/nacos/discovery/ServiceDiscovery.h>
 #include <log/Log.h>
@@ -47,18 +51,29 @@ class ConfigGraph;
 
 struct AiServiceOps {
     using State = WeightedRendezvous;
-    using StatePtr = std::shared_ptr<State>;
 
-    [[nodiscard]] StatePtr create(nacos::ServiceKeyView key, const std::shared_ptr<const nacos::ServiceInfo> &snapshot);
-    [[nodiscard]] bool update(State &state, nacos::ServiceKeyView key,
-                              const std::shared_ptr<const nacos::ServiceInfo> &snapshot);
-    void on_change(State &state, nacos::ServiceKeyView key, nacos::ServiceChangeKind kind, bool changed) noexcept;
-    void retire(State &state, nacos::ServiceKeyView key, nacos::ServiceRetireReason reason) noexcept;
+    void on_init(const nacos::ServiceKeyView &key, State &state) noexcept;
+    void on_update(const nacos::ServiceKeyView &key, State &state,
+                   const std::shared_ptr<const nacos::ServiceInfo> &snapshot) noexcept;
+    void on_retire(const nacos::ServiceKeyView &key, State &state, nacos::ServiceRetireReason reason) noexcept;
 
     ConfigGraph *graph = nullptr;
 };
 
 using AiServiceDiscovery = nacos::ServiceDiscovery<AiServiceOps>;
+
+class AiServiceLease final : public common::NonCopyable, public common::NonMovable {
+public:
+    explicit AiServiceLease(AiServiceDiscovery::Lease lease) noexcept : lease_(std::move(lease)) {
+        FIBER_ASSERT(lease_);
+    }
+
+    [[nodiscard]] AiServiceDiscovery::ReadyAwaiter wait_ready() const noexcept { return lease_.wait_ready(); }
+    [[nodiscard]] WeightedRendezvous &state() const noexcept { return lease_.state(); }
+
+private:
+    AiServiceDiscovery::Lease lease_;
+};
 
 class GroupNode final : public common::NonCopyable, public common::NonMovable {
 public:
@@ -91,7 +106,9 @@ private:
 
 using GroupNodePool = ConfigNodePool<GroupNode>;
 
-class ProviderNode final : public common::NonCopyable, public common::NonMovable {
+class ProviderNode final : public common::NonCopyable,
+                           public common::NonMovable,
+                           public std::enable_shared_from_this<ProviderNode> {
 public:
     using Key = std::string;
     using CreateError = nacos::ConfigServiceError;
@@ -103,24 +120,27 @@ public:
 
     void start();
     void request_stop() noexcept;
-    [[nodiscard]] bool on_service_initialized(const WeightedRendezvous &service);
 
 private:
     friend class ConfigGraph;
 
     struct Generation {
         std::shared_ptr<const ProviderConfigSnapshot> config;
-        std::optional<AiServiceDiscovery::Lease> service;
+        std::shared_ptr<AiServiceLease> service;
+        std::uint64_t generation = 0;
+        bool service_ready = false;
 
-        [[nodiscard]] bool ready() const noexcept { return !service || service->try_state() != nullptr; }
+        [[nodiscard]] bool ready() const noexcept { return !service || service_ready; }
     };
 
     static void on_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
     void attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept;
     void apply(const nacos::ConfigData &data);
+    [[nodiscard]] async::DetachedTask wait_candidate(std::shared_ptr<AiServiceLease> service, std::uint64_t generation,
+                                                     std::uint64_t revision_version) noexcept;
+    void advance_generation() noexcept;
     void activate_candidate();
     void rebuild_current();
-    [[nodiscard]] static bool references(const Generation &generation, const WeightedRendezvous &service) noexcept;
 
     ConfigGraph *graph_ = nullptr;
     Key key_;
@@ -129,6 +149,9 @@ private:
     std::optional<Generation> active_;
     std::optional<Generation> candidate_;
     std::shared_ptr<const ProjectProvider> current_;
+    async::Watch<std::uint64_t> revisions_{0};
+    std::optional<async::Watch<std::uint64_t>::Publisher> revision_publisher_;
+    std::uint64_t generation_ = 0;
     bool started_ = false;
     bool stopping_ = false;
 };
@@ -248,7 +271,8 @@ public:
     void on_models_changed();
     void on_provider_changed(ProviderNode &provider);
     void on_group_changed(GroupNode &group);
-    void on_service_initialized(WeightedRendezvous &service);
+    void service_wait_started() { service_waiters_.add(); }
+    void service_wait_finished() { service_waiters_.done(); }
 
     void report_failure(std::string_view data_id, std::string_view md5, LlmConfigError error);
     void report_not_found(std::string_view data_id);
@@ -271,6 +295,7 @@ private:
     async::Watch<LlmConfigSnapshot> snapshots_;
     std::optional<async::Watch<LlmConfigSnapshot>::Publisher> snapshot_publisher_;
     std::optional<LlmConfigFailure> last_failure_;
+    async::WaitGroup service_waiters_;
     LlmConfigManagerState state_ = LlmConfigManagerState::Created;
     std::uint64_t snapshot_generation_ = 0;
     std::uint64_t successful_updates_ = 0;
@@ -343,7 +368,10 @@ void GroupNode::apply(const nacos::ConfigData &data) {
     graph_->on_group_changed(*this);
 }
 
-ProviderNode::ProviderNode(ConfigGraph &graph, Key key) : graph_(&graph), key_(std::move(key)) {}
+ProviderNode::ProviderNode(ConfigGraph &graph, Key key) : graph_(&graph), key_(std::move(key)) {
+    revision_publisher_ = revisions_.acquire_publisher();
+    FIBER_ASSERT(revision_publisher_.has_value());
+}
 
 void ProviderNode::attach(nacos::Subscription<nacos::ConfigData> subscription) noexcept {
     subscription_ = std::move(subscription);
@@ -364,6 +392,7 @@ void ProviderNode::request_stop() noexcept {
         return;
     }
     stopping_ = true;
+    advance_generation();
     candidate_.reset();
     active_.reset();
     subscription_.close();
@@ -394,6 +423,7 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
     if (!graph_->providers().contains(*this)) {
         return;
     }
+    advance_generation();
     const std::string data_id = std::string(kProviderDataIdPrefix) + key_;
     if (data.state == nacos::ConfigState::NotFound) {
         graph_->report_not_found(data_id);
@@ -406,6 +436,7 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
     }
 
     Generation next;
+    next.generation = generation_;
     next.config = std::make_shared<const ProviderConfigSnapshot>(std::move(*parsed));
     constexpr std::string_view service_prefix = "service://";
     if (next.config->base_url.starts_with(service_prefix)) {
@@ -422,7 +453,7 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
                                    });
             return;
         }
-        next.service.emplace(std::move(*service));
+        next.service = std::make_shared<AiServiceLease>(std::move(*service));
     }
 
     candidate_.emplace(std::move(next));
@@ -433,20 +464,51 @@ void ProviderNode::apply(const nacos::ConfigData &data) {
     if (candidate_->ready()) {
         activate_candidate();
         graph_->on_provider_changed(*this);
+        return;
     }
+    const std::uint64_t revision_version = revisions_.current().version;
+    std::shared_ptr<AiServiceLease> service = candidate_->service;
+    const std::uint64_t generation = candidate_->generation;
+    graph_->service_wait_started();
+    async::spawn([self = shared_from_this(), service = std::move(service), generation, revision_version]() mutable {
+        return self->wait_candidate(std::move(service), generation, revision_version);
+    });
 }
 
-bool ProviderNode::references(const Generation &generation, const WeightedRendezvous &service) noexcept {
-    return generation.service && generation.service->try_state().get() == &service;
+void ProviderNode::advance_generation() noexcept {
+    FIBER_ASSERT(generation_ != std::numeric_limits<std::uint64_t>::max());
+    revision_publisher_->publish(++generation_);
 }
 
-bool ProviderNode::on_service_initialized(const WeightedRendezvous &service) {
-    FIBER_ASSERT(graph_->loop().in_loop());
-    if (candidate_ && references(*candidate_, service) && candidate_->ready()) {
-        activate_candidate();
-        return true;
+async::DetachedTask ProviderNode::wait_candidate(std::shared_ptr<AiServiceLease> service, std::uint64_t generation,
+                                                 std::uint64_t revision_version) noexcept {
+    auto revisions = revisions_.subscribe();
+    auto ready_or_replaced =
+            co_await async::when_any([&service]() { return service->wait_ready(); },
+                                     [&revisions, revision_version]() { return revisions.next(revision_version); });
+    if (ready_or_replaced.is<0>()) {
+        auto ready = std::move(ready_or_replaced).get<0>();
+        const bool current = !stopping_ && graph_->providers().contains(*this) && candidate_ &&
+                             candidate_->generation == generation && candidate_->service == service;
+        if (current && !ready) {
+            const std::string data_id = std::string(kProviderDataIdPrefix) + key_;
+            const std::string md5 = candidate_->config->metadata.md5;
+            candidate_.reset();
+            graph_->report_failure(data_id, md5,
+                                   LlmConfigError{
+                                           .code = LlmConfigErrorCode::InvalidField,
+                                           .field = "data.baseurl",
+                                           .message = "provider naming service closed before its initial update",
+                                   });
+        } else if (current) {
+            candidate_->service_ready = true;
+            activate_candidate();
+            graph_->on_provider_changed(*this);
+        }
+    } else {
+        std::move(ready_or_replaced).get<1>();
     }
-    return false;
+    graph_->service_wait_finished();
 }
 
 void ProviderNode::activate_candidate() {
@@ -460,7 +522,7 @@ void ProviderNode::rebuild_current() {
     FIBER_ASSERT(active_ && active_->ready());
     std::shared_ptr<WeightedRendezvous> service;
     if (active_->service) {
-        service = active_->service->shared_state();
+        service = std::shared_ptr<WeightedRendezvous>(active_->service, &active_->service->state());
     }
     current_ = std::make_shared<const ProjectProvider>(ProjectProvider{
             .name = key_,
@@ -843,7 +905,8 @@ async::Task<void> ConfigGraph::shutdown() noexcept {
     bt1_.reset();
     FIBER_ASSERT(providers_.empty());
     FIBER_ASSERT(groups_.empty());
-    FIBER_ASSERT(services_.empty());
+    snapshot_publisher_->publish(LlmConfigSnapshot{});
+    co_await service_waiters_.join();
     co_await services_.shutdown();
     state_ = LlmConfigManagerState::Stopped;
     LOG(LOG_CONFIG, INFO) << "LLM config graph stopped successful_updates=" << successful_updates_
@@ -909,53 +972,25 @@ void ConfigGraph::on_group_changed(GroupNode &group) {
     }
 }
 
-AiServiceOps::StatePtr AiServiceOps::create(nacos::ServiceKeyView,
-                                            const std::shared_ptr<const nacos::ServiceInfo> &snapshot) {
-    FIBER_ASSERT(snapshot != nullptr);
-    auto state = std::make_shared<State>();
-    const bool changed = state->update(*snapshot);
-    FIBER_ASSERT(changed);
-    return state;
-}
+void AiServiceOps::on_init(const nacos::ServiceKeyView &, State &) noexcept {}
 
-bool AiServiceOps::update(State &state, nacos::ServiceKeyView,
-                          const std::shared_ptr<const nacos::ServiceInfo> &snapshot) {
+void AiServiceOps::on_update(const nacos::ServiceKeyView &key, State &state,
+                             const std::shared_ptr<const nacos::ServiceInfo> &snapshot) noexcept {
     FIBER_ASSERT(snapshot != nullptr);
-    return state.update(*snapshot);
-}
-
-void AiServiceOps::on_change(State &service, nacos::ServiceKeyView key, nacos::ServiceChangeKind kind,
-                             bool changed) noexcept {
+    const bool changed = state.update(*snapshot);
     FIBER_ASSERT(graph != nullptr);
     LOG(LOG_DISCOVERY, DEBUG) << "NamingService instances updated service=" << log::quoted(key.service_name)
-                              << " group=" << log::quoted(key.group) << " generation=" << service.generation()
-                              << " instances=" << service.configured_instance_count() << " changed=" << changed;
+                              << " group=" << log::quoted(key.group) << " generation=" << state.generation()
+                              << " instances=" << state.configured_instance_count() << " changed=" << changed;
     graph->accepted_update();
-    if (kind == nacos::ServiceChangeKind::Initial) {
-        graph->on_service_initialized(service);
-    }
 }
 
-void AiServiceOps::retire(State &, nacos::ServiceKeyView key, nacos::ServiceRetireReason reason) noexcept {
+void AiServiceOps::on_retire(const nacos::ServiceKeyView &key, State &state,
+                             nacos::ServiceRetireReason reason) noexcept {
     if (reason == nacos::ServiceRetireReason::SubscriptionClosed) {
         LOG(LOG_DISCOVERY, WARN) << "NamingService subscription closed service=" << log::quoted(key.service_name)
                                  << " group=" << log::quoted(key.group);
-    }
-}
-
-void ConfigGraph::on_service_initialized(WeightedRendezvous &service) {
-    FIBER_ASSERT(loop_->in_loop());
-    if (!models_) {
-        return;
-    }
-    std::vector<std::string> changed;
-    providers_.for_each([&](ProviderNode &provider) {
-        if (provider.on_service_initialized(service)) {
-            changed.push_back(provider.key());
-        }
-    });
-    if (!changed.empty() && models_->on_providers_changed(changed)) {
-        publish_if_ready();
+        (void) state.update(nacos::ServiceInfo{});
     }
 }
 

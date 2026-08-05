@@ -25,8 +25,8 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->watcher_options().project_route_data_id_prefix, kProjectRouteDataIdPrefix);
     EXPECT_EQ(config->watcher_options().project_route_group, kProjectRouteGroup);
     EXPECT_EQ(config->gray_watcher_options().data_id, kGrayConfigDataId);
-    EXPECT_EQ(config->selector_options().group, kDefaultNacosGroup);
-    EXPECT_EQ(config->selector_options().default_cluster, "default");
+    EXPECT_EQ(config->service_discovery_options().group, kDefaultNacosGroup);
+    EXPECT_EQ(config->service_discovery_options().default_cluster, "default");
 }
 
 TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
@@ -66,9 +66,9 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->watcher_options().project_route_group, "CUSTOM-ROUTE");
     EXPECT_EQ(config->gray_watcher_options().data_id, "custom.gray");
     EXPECT_EQ(config->gray_watcher_options().group, "CUSTOM-GROUP");
-    EXPECT_EQ(config->selector_options().group, "CUSTOM-GROUP");
-    EXPECT_EQ(config->selector_options().default_cluster, "stable");
-    EXPECT_EQ(config->selector_options().zone, "sh");
+    EXPECT_EQ(config->service_discovery_options().group, "CUSTOM-GROUP");
+    EXPECT_EQ(config->service_discovery_options().default_cluster, "stable");
+    EXPECT_EQ(config->service_discovery_options().zone, "sh");
     EXPECT_EQ(config->nacos_config().username(), "user");
     EXPECT_EQ(config->nacos_config().password(), "pass");
 }

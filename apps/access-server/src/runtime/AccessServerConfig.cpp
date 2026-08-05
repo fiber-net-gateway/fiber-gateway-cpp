@@ -233,12 +233,12 @@ AccessServerConfig::AccessServerConfig(net::SocketAddress listen_address, net::S
                                        nacos::NacosClientConfig nacos_config,
                                        AccessConfigWatcherOptions watcher_options,
                                        GrayConfigWatcherOptions gray_watcher_options,
-                                       NacosServiceSelectorOptions selector_options) noexcept :
+                                       AccessServiceDiscoveryOptions service_discovery_options) noexcept :
     listen_address_(std::move(listen_address)), metrics_listen_address_(std::move(metrics_listen_address)),
     initial_config_timeout_(initial_config_timeout), default_max_request_body_size_(default_max_request_body_size),
     test_mode_(test_mode), cat_config_(std::move(cat_config)), nacos_config_(std::move(nacos_config)),
     watcher_options_(std::move(watcher_options)), gray_watcher_options_(std::move(gray_watcher_options)),
-    selector_options_(std::move(selector_options)) {}
+    service_discovery_options_(std::move(service_discovery_options)) {}
 
 std::expected<AccessServerConfig, AccessServerConfigError> AccessServerConfig::load_from_file(std::string_view path) {
     std::ifstream input(std::string(path), std::ios::binary);
@@ -278,7 +278,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
     nacos_params.namespace_id = "public";
     AccessConfigWatcherOptions watcher_options;
     GrayConfigWatcherOptions gray_options;
-    NacosServiceSelectorOptions selector_options;
+    AccessServiceDiscoveryOptions service_discovery_options;
 
     for (const Entry &entry: *entries) {
         const std::string_view value = entry.value;
@@ -331,12 +331,12 @@ AccessServerConfig::load_from_string(std::string_view input) {
         } else if (entry.key == kGrayDataId) {
             gray_options.data_id = entry.value;
         } else if (entry.key == kNamingGroup) {
-            selector_options.group = entry.value;
+            service_discovery_options.group = entry.value;
             gray_options.group = entry.value;
         } else if (entry.key == kDefaultCluster) {
-            selector_options.default_cluster = entry.value;
+            service_discovery_options.default_cluster = entry.value;
         } else if (entry.key == kZone) {
-            selector_options.zone = entry.value;
+            service_discovery_options.zone = entry.value;
         } else if (entry.key == kNacosServers) {
             auto parsed = parse_nacos_servers(value, entry.line);
             if (!parsed) {
@@ -386,7 +386,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
 
     if (watcher_options.project_list_data_id.empty() || watcher_options.project_route_data_id_prefix.empty() ||
         watcher_options.project_route_group.empty() || gray_options.data_id.empty() || gray_options.group.empty() ||
-        selector_options.group.empty() || selector_options.default_cluster.empty()) {
+        service_discovery_options.group.empty() || service_discovery_options.default_cluster.empty()) {
         return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, {},
                                      "Nacos data IDs, groups, and default cluster must be non-empty"));
     }
@@ -415,7 +415,7 @@ AccessServerConfig::load_from_string(std::string_view input) {
                               net::SocketAddress(metrics_ip.value_or(listen_ip), *metrics_port),
                               std::chrono::milliseconds(timeout_millis), max_request_body, test_mode,
                               std::move(cat_config), std::move(*nacos_config), std::move(watcher_options),
-                              std::move(gray_options), std::move(selector_options));
+                              std::move(gray_options), std::move(service_discovery_options));
 }
 
 } // namespace fiber::access_server

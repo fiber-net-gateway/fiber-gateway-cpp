@@ -28,7 +28,7 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessServerRuntime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/GrayConfigWatcher.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/GrayMatchStore.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/NacosServiceSelector.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/AccessServiceDiscovery.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RouteConfigStore.cpp")
 target_include_directories(access_server_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
 target_link_libraries(access_server_core PUBLIC fiber_lib fiber::nacos fiber::cat fiber::prometheus)
@@ -57,7 +57,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/CompiledHeaderTemplatesTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/CompiledTemplateTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/GrayConfigTest.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/tests/NacosServiceSelectorTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/AccessServiceDiscoveryTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProductionScriptCorpusTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProjectRouteSnapshotTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/ProxyRequestSenderTest.cpp"

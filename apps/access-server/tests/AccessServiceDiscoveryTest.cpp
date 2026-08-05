@@ -15,7 +15,8 @@
 
 #include "../../../tests/NacosSnapshotTestBuilder.h"
 #include "../../../tests/NacosSubscriptionStub.h"
-#include "runtime/NacosServiceSelector.h"
+#include "runtime/AccessServiceDiscovery.h"
+#include "runtime/RouteConfigStore.h"
 
 namespace {
 
@@ -90,7 +91,10 @@ fiber::async::Task<void> yield_updates() {
 fiber::access_server::ProjectConfig project_config(std::string service) {
     fiber::access_server::RouteConfig route;
     route.path = "/";
-    route.service = std::move(service);
+    route.service = service;
+    fiber::access_server::RouteConfig alternate;
+    alternate.path = "/alternate";
+    alternate.service = std::move(service);
 
     fiber::access_server::ProjectConfig config;
     config.version = 1;
@@ -100,7 +104,8 @@ fiber::access_server::ProjectConfig project_config(std::string service) {
                     .strategy = fiber::access_server::HostStrategyConfig{},
             },
     };
-    config.routes = std::vector<std::optional<fiber::access_server::RouteConfig>>{std::move(route)};
+    config.routes =
+            std::vector<std::optional<fiber::access_server::RouteConfig>>{std::move(route), std::move(alternate)};
     return config;
 }
 
@@ -114,22 +119,29 @@ std::string selected_host(const fiber::access_server::ProxyUpstreamEndpoint &end
     return std::string(endpoint.connection_key->host_name());
 }
 
-TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGeneration) {
+TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
     fiber::event::EventLoop loop;
     FakeNamingService naming;
-    fiber::access_server::NacosServiceSelector selector(loop, naming,
-                                                        fiber::access_server::NacosServiceSelectorOptions{
-                                                                .group = "DEFAULT_GROUP",
-                                                                .default_cluster = "default",
-                                                                .zone = "sh",
-                                                        });
-    fiber::access_server::RouteConfigStore store({}, selector.address_selector_factory());
+    fiber::access_server::AccessServiceDiscoveryOptions options{
+            .group = "DEFAULT_GROUP",
+            .default_cluster = "default",
+            .zone = "sh",
+    };
+    fiber::access_server::AccessServiceDiscovery discovery(
+            loop, naming, fiber::access_server::AccessServiceOps{.zone = options.zone});
+    fiber::access_server::RouteConfigStore store({}, discovery, options);
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
-        EXPECT_TRUE(store.apply("demo", project_config("orders")));
-        EXPECT_TRUE(selector.reconcile(*store.pin()));
-        EXPECT_EQ(selector.service_count(), 1u);
+        auto prepared = store.prepare("demo", project_config("orders"));
+        EXPECT_TRUE(prepared);
+        if (!prepared) {
+            co_await discovery.shutdown();
+            loop.stop();
+            co_return;
+        }
+        EXPECT_TRUE(store.pin()->projects().empty());
+        EXPECT_EQ(discovery.size(), 1u);
         EXPECT_EQ(naming.subscriptions("orders"), 1u);
 
         fiber::tests::ServiceInfoTestData info;
@@ -166,16 +178,32 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
                 },
         };
         naming.push("orders", std::move(info));
-        co_await yield_updates();
+        auto ready = co_await prepared->project_snapshot->wait_ready();
+        EXPECT_TRUE(ready);
+        if (!ready) {
+            prepared = std::unexpected(fiber::access_server::AccessConfigError{});
+            co_await discovery.shutdown();
+            loop.stop();
+            co_return;
+        }
+        auto committed = store.commit(std::move(*prepared));
+        EXPECT_TRUE(committed);
+        if (!committed) {
+            store.clear();
+            co_await discovery.shutdown();
+            loop.stop();
+            co_return;
+        }
 
-        const std::shared_ptr<const fiber::access_server::AccessRouteSnapshot> route_snapshot = store.pin();
+        std::shared_ptr<const fiber::access_server::AccessRouteSnapshot> route_snapshot = store.pin();
         const auto &compiled_route = route_snapshot->projects().front()->routes().front();
         EXPECT_TRUE(compiled_route.proxy);
         fiber::access_server::ProxyAddressSelector *address_selector =
                 compiled_route.proxy ? compiled_route.proxy->address_selector.get() : nullptr;
         EXPECT_NE(address_selector, nullptr);
         if (address_selector == nullptr) {
-            co_await selector.shutdown();
+            store.clear();
+            co_await discovery.shutdown();
             loop.stop();
             co_return;
         }
@@ -239,14 +267,16 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
                 EXPECT_NE(hostname->selection_token, stable->selection_token);
             }
         }
-        EXPECT_EQ(selector.naming_updates(), 2u);
-
         EXPECT_TRUE(store.remove_project("demo"));
-        EXPECT_TRUE(selector.reconcile(*store.pin()));
-        EXPECT_EQ(selector.service_count(), 0u);
-        EXPECT_FALSE(address_selector->select_address(std::nullopt, {}));
+        EXPECT_EQ(discovery.size(), 1u);
+        EXPECT_TRUE(address_selector->select_address(std::nullopt, {}));
 
-        co_await selector.shutdown();
+        committed = std::unexpected(fiber::access_server::AccessConfigError{});
+        route_snapshot.reset();
+        co_await yield_updates();
+        EXPECT_TRUE(discovery.empty());
+        store.clear();
+        co_await discovery.shutdown();
         completed = true;
         loop.stop();
     });
@@ -255,23 +285,29 @@ TEST(NacosServiceSelectorTest, FiltersNacosInstancesByClusterAndPinsDiscoveryGen
     EXPECT_TRUE(completed);
 }
 
-TEST(NacosServiceSelectorTest, EmptyAndClosedLifecycleRemainFailClosed) {
+TEST(AccessServiceDiscoveryTest, ClosedBeforeInitialUpdateRejectsCandidate) {
     fiber::event::EventLoop loop;
     FakeNamingService naming;
-    fiber::access_server::NacosServiceSelector selector(loop, naming);
-    fiber::access_server::RouteConfigStore store({}, selector.address_selector_factory());
+    fiber::access_server::AccessServiceDiscoveryOptions options;
+    fiber::access_server::AccessServiceDiscovery discovery(loop, naming, fiber::access_server::AccessServiceOps{});
+    fiber::access_server::RouteConfigStore store({}, discovery, options);
     bool completed = false;
 
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
-        EXPECT_TRUE(store.apply("demo", project_config("orders")));
-        const std::shared_ptr<const fiber::access_server::AccessRouteSnapshot> snapshot = store.pin();
-        fiber::access_server::ProxyAddressSelector *address_selector =
-                snapshot->projects().front()->routes().front().proxy->address_selector.get();
-        EXPECT_TRUE(selector.reconcile(*store.pin()));
-        EXPECT_FALSE(address_selector->select_address(std::nullopt, {}));
-        co_await selector.shutdown();
-        EXPECT_EQ(selector.service_count(), 0u);
-        EXPECT_FALSE(address_selector->select_address(std::nullopt, {}));
+        auto prepared = store.prepare("demo", project_config("orders"));
+        EXPECT_TRUE(prepared);
+        EXPECT_TRUE(store.pin()->projects().empty());
+        if (prepared) {
+            fiber::async::spawn([&]() -> fiber::async::DetachedTask {
+                co_await fiber::async::yield();
+                co_await discovery.shutdown();
+            });
+            auto ready = co_await prepared->project_snapshot->wait_ready();
+            EXPECT_FALSE(ready);
+            EXPECT_TRUE(store.pin()->projects().empty());
+            prepared = std::unexpected(fiber::access_server::AccessConfigError{});
+        }
+        co_await discovery.shutdown();
         completed = true;
         loop.stop();
     });

@@ -3,10 +3,14 @@
 #include "../config/AccessConfigCodec.h"
 
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <utility>
 #include <vector>
 
+#include <async/Spawn.h>
+#include <async/TaskSelect.h>
+#include <async/WhenAny.h>
 #include <common/Assert.h>
 
 namespace fiber::access_server {
@@ -32,11 +36,22 @@ struct AccessConfigWatcher::ProjectListEntry final : public common::NonCopyable,
 
 struct AccessConfigWatcher::ProjectEntry final : public common::NonCopyable, public common::NonMovable {
     ProjectEntry(AccessConfigWatcher &value_owner, std::string value_project) :
-        owner(&value_owner), project(std::move(value_project)) {}
+        owner(&value_owner), project(std::move(value_project)), revisions(0),
+        revision_publisher(revisions.acquire_publisher()) {
+        FIBER_ASSERT(revision_publisher.has_value());
+    }
+
+    void advance() noexcept {
+        FIBER_ASSERT(generation != std::numeric_limits<std::uint64_t>::max());
+        revision_publisher->publish(++generation);
+    }
 
     AccessConfigWatcher *owner = nullptr;
     std::string project;
     nacos::Subscription<nacos::ConfigData> subscription;
+    async::Watch<std::uint64_t> revisions;
+    std::optional<async::Watch<std::uint64_t>::Publisher> revision_publisher;
+    std::uint64_t generation = 0;
     bool stopping = false;
 };
 
@@ -92,8 +107,10 @@ async::Task<void> AccessConfigWatcher::shutdown() noexcept {
     request_stop(*project_list_);
     for (auto &[project, entry]: projects_) {
         (void) project;
+        entry->advance();
         request_stop(*entry);
     }
+    co_await readiness_tasks_.join();
     projects_.clear();
     project_list_.reset();
     state_ = AccessConfigWatcherState::Stopped;
@@ -126,7 +143,7 @@ void AccessConfigWatcher::project_notify(void *context,
         return;
     }
     if (result.data && !hold->stopping && owner.state_ == AccessConfigWatcherState::Running) {
-        owner.apply_project(*hold, *result.data);
+        owner.apply_project(hold, *result.data);
     }
 }
 
@@ -143,31 +160,88 @@ void AccessConfigWatcher::apply_project_list(const nacos::ConfigData &data) {
     }
 }
 
-void AccessConfigWatcher::apply_project(ProjectEntry &entry, const nacos::ConfigData &data) {
+void AccessConfigWatcher::apply_project(const std::shared_ptr<ProjectEntry> &entry, const nacos::ConfigData &data) {
     FIBER_ASSERT(loop_->in_loop());
+    entry->advance();
     if (data.state == nacos::ConfigState::NotFound || data.content.empty()) {
-        auto ignored = store_->apply(entry.project, std::nullopt);
+        auto ignored = store_->prepare(entry->project, std::nullopt);
         FIBER_ASSERT(ignored.has_value());
         return;
     }
 
     auto parsed = parse_project_config(data.content);
     if (!parsed) {
-        report_failure(options_.project_route_data_id_prefix + entry.project, std::string(data.md5),
+        report_failure(options_.project_route_data_id_prefix + entry->project, std::string(data.md5),
                        std::move(parsed.error()));
         return;
     }
-    auto updated = store_->apply(entry.project, *parsed);
-    if (!updated) {
-        report_failure(options_.project_route_data_id_prefix + entry.project, std::string(data.md5),
-                       std::move(updated.error()));
+    auto prepared = store_->prepare(entry->project, *parsed);
+    if (!prepared) {
+        report_failure(options_.project_route_data_id_prefix + entry->project, std::string(data.md5),
+                       std::move(prepared.error()));
         return;
     }
 
-    if (updated->status == ConfigUpdateStatus::Published || updated->status == ConfigUpdateStatus::Unloaded) {
+    if (!prepared->needs_publish()) {
+        return;
+    }
+    if (prepared->status == ConfigUpdateStatus::Unloaded) {
+        auto updated = store_->commit(std::move(*prepared));
+        if (!updated) {
+            report_failure(options_.project_route_data_id_prefix + entry->project, std::string(data.md5),
+                           std::move(updated.error()));
+            return;
+        }
         ++successful_updates_;
         publish_observer(updated->snapshot);
+        return;
     }
+
+    const std::uint64_t generation = entry->generation;
+    const std::uint64_t revision_version = entry->revisions.current().version;
+    std::string data_id = options_.project_route_data_id_prefix + entry->project;
+    readiness_tasks_.add();
+    async::spawn([this, entry, prepared = std::move(*prepared), generation, revision_version,
+                  data_id = std::move(data_id), md5 = std::string(data.md5)]() mutable {
+        return apply_ready_project(std::move(entry), std::move(prepared), generation, revision_version,
+                                   std::move(data_id), std::move(md5));
+    });
+}
+
+async::DetachedTask AccessConfigWatcher::apply_ready_project(std::shared_ptr<ProjectEntry> entry,
+                                                             PreparedConfigUpdate prepared, std::uint64_t generation,
+                                                             std::uint64_t revision_version, std::string data_id,
+                                                             std::string md5) noexcept {
+    auto revisions = entry->revisions.subscribe();
+    auto ready_or_replaced =
+            co_await async::when_any([&prepared]() { return prepared.project_snapshot->wait_ready().select(); },
+                                     [&revisions, revision_version]() { return revisions.next(revision_version); });
+
+    if (ready_or_replaced.is<0>()) {
+        auto ready = std::move(ready_or_replaced).get<0>();
+        const auto found = projects_.find(entry->project);
+        const bool current = state_ == AccessConfigWatcherState::Running && found != projects_.end() &&
+                             found->second.get() == entry.get() && entry->generation == generation;
+        if (current && !ready) {
+            report_failure(std::move(data_id), std::move(md5),
+                           AccessConfigError{
+                                   .code = AccessConfigErrorCode::InvalidCombination,
+                                   .field = "service",
+                                   .message = ready.error().message,
+                           });
+        } else if (current) {
+            auto updated = store_->commit(std::move(prepared));
+            if (!updated) {
+                report_failure(std::move(data_id), std::move(md5), std::move(updated.error()));
+            } else {
+                ++successful_updates_;
+                publish_observer(updated->snapshot);
+            }
+        }
+    } else {
+        std::move(ready_or_replaced).get<1>();
+    }
+    readiness_tasks_.done();
 }
 
 void AccessConfigWatcher::reconcile_projects(std::string_view content) {
@@ -217,6 +291,7 @@ void AccessConfigWatcher::remove_project(std::string_view project) {
     }
     std::shared_ptr<ProjectEntry> retiring = std::move(iterator->second);
     projects_.erase(iterator);
+    retiring->advance();
     request_stop(*retiring);
 
     auto removed = store_->remove_project(project);

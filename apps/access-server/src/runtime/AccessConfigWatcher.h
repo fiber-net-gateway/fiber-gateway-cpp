@@ -12,7 +12,9 @@
 #include <string>
 #include <string_view>
 
+#include <async/Spawn.h>
 #include <async/Task.h>
+#include <async/WaitGroup.h>
 #include <async/Watch.h>
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
@@ -79,7 +81,11 @@ private:
     static void project_notify(void *context, const nacos::SubscriptionResult<nacos::ConfigData> &result) noexcept;
 
     void apply_project_list(const nacos::ConfigData &data);
-    void apply_project(ProjectEntry &entry, const nacos::ConfigData &data);
+    void apply_project(const std::shared_ptr<ProjectEntry> &entry, const nacos::ConfigData &data);
+    [[nodiscard]] async::DetachedTask apply_ready_project(std::shared_ptr<ProjectEntry> entry,
+                                                          PreparedConfigUpdate prepared, std::uint64_t generation,
+                                                          std::uint64_t revision_version, std::string data_id,
+                                                          std::string md5) noexcept;
     void reconcile_projects(std::string_view content);
     void add_project(std::string project);
     void remove_project(std::string_view project);
@@ -96,6 +102,7 @@ private:
     std::optional<AccessConfigWatcherFailure> last_failure_;
     async::Watch<bool> ready_{false};
     std::optional<async::Watch<bool>::Publisher> ready_publisher_;
+    async::WaitGroup readiness_tasks_;
     AccessConfigWatcherState state_ = AccessConfigWatcherState::Created;
     bool initial_project_list_received_ = false;
     std::uint64_t successful_updates_ = 0;

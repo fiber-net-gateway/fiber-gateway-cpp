@@ -100,8 +100,8 @@ AccessServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nac
     auto runtime = std::unique_ptr<AccessServerRuntime>(new (std::nothrow) AccessServerRuntime(
             accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), config.metrics_listen_address(),
             listen_options, config.initial_config_timeout(), config.default_max_request_body_size(), config.test_mode(),
-            config.watcher_options(), config.gray_watcher_options(), config.selector_options(), std::move(cat_client),
-            std::move(*client), std::move(*config_service), std::move(*naming_service)));
+            config.watcher_options(), config.gray_watcher_options(), config.service_discovery_options(),
+            std::move(cat_client), std::move(*client), std::move(*config_service), std::move(*naming_service)));
     if (!runtime) {
         return std::unexpected(AccessServerRuntimeError{
                 .code = AccessServerRuntimeErrorCode::AllocateRuntime,
@@ -117,7 +117,7 @@ AccessServerRuntime::AccessServerRuntime(
         net::SocketAddress metrics_listen_address, net::ListenOptions listen_options,
         std::chrono::milliseconds initial_config_timeout, std::size_t default_max_request_body_size, bool test_mode,
         AccessConfigWatcherOptions watcher_options, GrayConfigWatcherOptions gray_options,
-        NacosServiceSelectorOptions selector_options, std::unique_ptr<cat::CatClient> cat_client,
+        AccessServiceDiscoveryOptions service_discovery_options, std::unique_ptr<cat::CatClient> cat_client,
         std::unique_ptr<nacos::NacosClient> nacos_client, std::unique_ptr<nacos::ConfigService> config_service,
         std::unique_ptr<nacos::NamingService> naming_service) noexcept :
     accept_loop_(&accept_loop), nacos_loop_(&nacos_loop), cat_loop_(&cat_loop),
@@ -125,10 +125,11 @@ AccessServerRuntime::AccessServerRuntime(
     listen_options_(std::move(listen_options)), initial_config_timeout_(initial_config_timeout),
     cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
     config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
-    service_selector_(nacos_loop, *naming_service_, std::move(selector_options)),
-    route_store_(script_runtime_.compiler_adapter(), service_selector_.address_selector_factory()),
-    config_watcher_(nacos_loop, *config_service_, route_store_, std::move(watcher_options),
-                    service_selector_.route_observer()),
+    service_discovery_(nacos_loop, *naming_service_,
+                       AccessServiceOps{.swrr_options = service_discovery_options.swrr_options,
+                                        .zone = service_discovery_options.zone}),
+    route_store_(script_runtime_.compiler_adapter(), service_discovery_, std::move(service_discovery_options)),
+    config_watcher_(nacos_loop, *config_service_, route_store_, std::move(watcher_options)),
     gray_watcher_(nacos_loop, *config_service_, gray_store_, std::move(gray_options)),
     server_(accept_loop, http_workers, route_store_, gray_store_.adapter(),
             AccessServerOptions{
@@ -228,7 +229,8 @@ async::DetachedTask AccessServerRuntime::shutdown_nacos() noexcept {
     co_await nacos_start_tasks_.join();
     co_await config_watcher_.shutdown();
     co_await gray_watcher_.shutdown();
-    co_await service_selector_.shutdown();
+    route_store_.clear();
+    co_await service_discovery_.shutdown();
     co_await naming_service_->shutdown();
     co_await config_service_->shutdown();
     co_await nacos_client_->shutdown();
