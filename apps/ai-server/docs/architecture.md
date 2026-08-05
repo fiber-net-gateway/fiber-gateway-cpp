@@ -14,6 +14,7 @@ Nacos、CAT 和 Prometheus 设施，不机械复制 Java 对象图。
 - `POST /v1/message`
 - `POST /internal/llm/rate-limit/check`
 - `POST /internal/llm/rate-limit/settle`
+- `GET /internal/config/status`
 - `GET /health`
 - `GET /ready`
 - `GET /metrics`
