@@ -19,6 +19,8 @@
 #include <string_view>
 #include <vector>
 
+#include <async/Task.h>
+
 namespace fiber::access_server {
 
 enum class ResponseBodyKind : std::uint8_t {
@@ -110,6 +112,8 @@ public:
     [[nodiscard]] const CompiledHost *match_host(std::string_view host) const noexcept;
     [[nodiscard]] RouteMatch match_route(std::string_view path, std::span<PathVariable> path_variables,
                                          ConditionEvaluator evaluator = {}) const noexcept;
+    [[nodiscard]] async::Task<std::expected<void, ProxyAddressReadyError>> wait_ready() const noexcept;
+    [[nodiscard]] bool ready_for_publish() const noexcept;
 
 private:
     friend std::expected<std::optional<ProjectRouteSnapshot>, AccessConfigError>

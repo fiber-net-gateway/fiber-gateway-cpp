@@ -211,6 +211,7 @@ async::DetachedTask AiServer::watch_config(std::size_t worker_index,
         initial_install_failed_.store(true, std::memory_order_release);
         initial_installs_.done();
     }
+    worker.config.reset();
     config_tasks_.done();
 }
 

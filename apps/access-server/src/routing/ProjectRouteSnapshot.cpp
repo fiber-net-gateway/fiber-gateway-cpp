@@ -629,6 +629,28 @@ RouteMatch ProjectRouteSnapshot::match_route(std::string_view path, std::span<Pa
     };
 }
 
+async::Task<std::expected<void, ProxyAddressReadyError>> ProjectRouteSnapshot::wait_ready() const noexcept {
+    for (const CompiledRoute &route: routes_) {
+        if (!route.proxy || !route.proxy->address_selector) {
+            continue;
+        }
+        auto ready = co_await route.proxy->address_selector->wait_ready();
+        if (!ready) {
+            co_return std::unexpected(ready.error());
+        }
+    }
+    co_return std::expected<void, ProxyAddressReadyError>{};
+}
+
+bool ProjectRouteSnapshot::ready_for_publish() const noexcept {
+    for (const CompiledRoute &route: routes_) {
+        if (route.proxy && route.proxy->address_selector && !route.proxy->address_selector->ready_for_publish()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 ProjectSnapshotResult compile_project_config(std::string_view project, const ProjectConfig &config) {
     return compile_project_config(project, config, {}, {});
 }

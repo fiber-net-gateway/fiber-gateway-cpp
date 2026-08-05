@@ -222,22 +222,26 @@ close, and destruction of these handles are owner-EventLoop operations.
 `ServiceDiscovery<StateOps>` uses an intrusive red-black tree keyed by a cached
 hash plus `(serviceName, group)`. Multiple move-only leases for the same key
 share one entry and one NamingService subscription. It does not contain a
-selection policy: `StateOps::State` and its shared `StateOps::StatePtr` are
-application-defined.
+selection policy: `StateOps::State` is application-defined and is owned in
+place by the discovery entry.
 
-The first successful naming notification calls `StateOps::create()` and then
-`StateOps::on_change(..., ServiceChangeKind::Initial, true)`. An empty host list
-is still a successful first notification. Later pushes call
-`StateOps::update()` followed by `StateOps::on_change(...,
-ServiceChangeKind::Update, changed)`. `Lease::try_state()` returns null before
-the first value, while `co_await Lease::wait_ready()` suspends until the first
-value, subscription closure, lease retirement, or shutdown. These operations
+The state contract is `StateOps::on_init(key, state)`,
+`StateOps::on_update(key, state, snapshot)`, and
+`StateOps::on_retire(key, state, reason)`; all three callbacks are `noexcept`.
+The first successful naming notification constructs `State`, calls `on_init`,
+then applies that notification through `on_update`. An empty host list is still
+a successful first notification. Later pushes call `on_update` directly.
+`co_await Lease::wait_ready()` suspends until the first value, subscription
+closure, lease retirement, or shutdown. After it succeeds, `Lease::state()`
+returns the entry-owned `State` by reference. Acquisition and readiness waiting
 run on the NamingService owner EventLoop.
 
 Dropping the last lease removes the entry from lookup, stops its naming
-subscription, and calls `StateOps::retire()` once with a reason. The shared
-state may remain alive in request-worker directories or old configuration
-snapshots and is destroyed after their final `shared_ptr` is released.
+subscription, and calls `StateOps::on_retire()` once with a reason. A lease may
+be destroyed on a request worker: release is posted back to the owner loop, and
+the state is always retired and destroyed there. `shutdown()` is a drain
+barrier; the owner EventLoop must keep running until leases held by worker
+directories or pinned configuration snapshots have been released.
 
 Options are split by owner. `NacosClientOptions` controls only authentication
 connect/request timeouts, response limits, and retry backoff.

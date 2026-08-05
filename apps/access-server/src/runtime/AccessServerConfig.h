@@ -2,8 +2,8 @@
 #define FIBER_ACCESS_SERVER_ACCESS_SERVER_CONFIG_H
 
 #include "AccessConfigWatcher.h"
+#include "AccessServiceDiscovery.h"
 #include "GrayConfigWatcher.h"
-#include "NacosServiceSelector.h"
 
 #include <chrono>
 #include <cstddef>
@@ -55,7 +55,9 @@ public:
     [[nodiscard]] const GrayConfigWatcherOptions &gray_watcher_options() const noexcept {
         return gray_watcher_options_;
     }
-    [[nodiscard]] const NacosServiceSelectorOptions &selector_options() const noexcept { return selector_options_; }
+    [[nodiscard]] const AccessServiceDiscoveryOptions &service_discovery_options() const noexcept {
+        return service_discovery_options_;
+    }
 
 private:
     AccessServerConfig(net::SocketAddress listen_address, net::SocketAddress metrics_listen_address,
@@ -63,7 +65,7 @@ private:
                        bool test_mode, std::optional<cat::CatClientConfig> cat_config,
                        nacos::NacosClientConfig nacos_config, AccessConfigWatcherOptions watcher_options,
                        GrayConfigWatcherOptions gray_watcher_options,
-                       NacosServiceSelectorOptions selector_options) noexcept;
+                       AccessServiceDiscoveryOptions service_discovery_options) noexcept;
 
     net::SocketAddress listen_address_;
     net::SocketAddress metrics_listen_address_;
@@ -74,7 +76,7 @@ private:
     nacos::NacosClientConfig nacos_config_;
     AccessConfigWatcherOptions watcher_options_;
     GrayConfigWatcherOptions gray_watcher_options_;
-    NacosServiceSelectorOptions selector_options_;
+    AccessServiceDiscoveryOptions service_discovery_options_;
 };
 
 } // namespace fiber::access_server

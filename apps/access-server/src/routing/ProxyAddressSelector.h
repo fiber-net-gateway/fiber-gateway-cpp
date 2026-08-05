@@ -4,6 +4,7 @@
 #include "../../../../src/http/Http1ConnectionGroupKey.h"
 #include "../runtime/SmoothWeightedRoundRobin.h"
 
+#include <async/Task.h>
 #include <common/IoError.h>
 
 #include <cstdint>
@@ -23,6 +24,11 @@ class HttpExchange;
 namespace fiber::access_server {
 
 struct ProxyAddressSelectError {
+    common::IoErr io_error = common::IoErr::None;
+    const char *message = nullptr;
+};
+
+struct ProxyAddressReadyError {
     common::IoErr io_error = common::IoErr::None;
     const char *message = nullptr;
 };
@@ -68,6 +74,11 @@ struct ProxyUpstreamEndpoint {
 class ProxyAddressSelector {
 public:
     virtual ~ProxyAddressSelector() = default;
+
+    [[nodiscard]] virtual async::Task<std::expected<void, ProxyAddressReadyError>> wait_ready() noexcept {
+        co_return std::expected<void, ProxyAddressReadyError>{};
+    }
+    [[nodiscard]] virtual bool ready_for_publish() const noexcept { return true; }
 
     [[nodiscard]] virtual std::expected<ProxyUpstreamEndpoint, ProxyAddressSelectError>
     select_address(std::optional<std::string_view> cluster_override,

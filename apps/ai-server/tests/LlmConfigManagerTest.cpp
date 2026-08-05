@@ -510,7 +510,7 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedRendezvousStat
             EXPECT_EQ(selected_b->ip_address().to_string(), "10.0.0.2");
             selected_b->report(fiber::ai_server::InstanceReportOutcome::Neutral);
         }
-        EXPECT_EQ(manager.service_subscription_count(), 1u);
+        EXPECT_EQ(manager.service_subscription_count(), 2u);
         EXPECT_EQ(first_provider->config->metadata.version, 1);
         EXPECT_EQ(first_provider->service->configured_instance_count(), 1u);
 
@@ -529,6 +529,11 @@ TEST(LlmConfigManagerTest, ProviderServiceCandidatePublishesSharedRendezvousStat
         EXPECT_EQ(second_provider->service->configured_instance_count(), 0u);
         EXPECT_EQ(first_provider->service->configured_instance_count(), 1u);
 
+        first.reset();
+        second.reset();
+        empty.reset();
+        co_await yield_updates();
+        EXPECT_EQ(manager.service_subscription_count(), 1u);
         co_await manager.shutdown();
         completed = true;
         loop.stop();

@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <utility>
 
+#include <common/Assert.h>
+
 namespace fiber::access_server {
 
 RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler,
@@ -15,37 +17,103 @@ RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler,
 #endif
 }
 
-ConfigUpdateOutcome RouteConfigStore::apply(std::string_view project, const std::optional<ProjectConfig> &config) {
+RouteConfigStore::RouteConfigStore(ScriptCompilerAdapter script_compiler, AccessServiceDiscovery &service_discovery,
+                                   AccessServiceDiscoveryOptions discovery_options) :
+    script_compiler_(script_compiler), service_selector_factory_(service_discovery, std::move(discovery_options)),
+    selector_factory_(service_selector_factory_.adapter()), uses_service_discovery_(true) {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    published_.store(std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);
+#else
+    std::atomic_store_explicit(&published_, std::make_shared<const AccessRouteSnapshot>(), std::memory_order_relaxed);
+#endif
+}
+
+PreparedConfigUpdateOutcome RouteConfigStore::prepare(std::string_view project,
+                                                      const std::optional<ProjectConfig> &config) {
     if (!config) {
-        return ConfigUpdateResult{
+        return PreparedConfigUpdate{
                 .status = ConfigUpdateStatus::IgnoredEmpty,
-                .snapshot = pin(),
+                .project = std::string(project),
         };
     }
 
     const std::optional<std::int32_t> current_version = published_version(project);
     if (current_version && *current_version == config->version) {
-        return ConfigUpdateResult{
+        return PreparedConfigUpdate{
                 .status = ConfigUpdateStatus::VersionUnchanged,
-                .snapshot = pin(),
+                .project = std::string(project),
+                .version = config->version,
         };
     }
 
+    if (uses_service_discovery_) {
+        service_selector_factory_.begin_compile();
+    }
     auto compiled = compile_project_config(project, *config, script_compiler_, selector_factory_);
+    std::optional<nacos::NamingServiceError> acquire_error;
+    if (uses_service_discovery_) {
+        acquire_error = service_selector_factory_.take_error();
+    }
     if (!compiled) {
         return std::unexpected(std::move(compiled.error()));
+    }
+    if (acquire_error) {
+        return std::unexpected(AccessConfigError{
+                .code = AccessConfigErrorCode::InvalidCombination,
+                .field = "service",
+                .message = std::move(acquire_error->message),
+        });
+    }
+
+    if (!*compiled) {
+        return PreparedConfigUpdate{
+                .status = ConfigUpdateStatus::Unloaded,
+                .project = std::string(project),
+                .version = config->version,
+        };
+    }
+
+    return PreparedConfigUpdate{
+            .status = ConfigUpdateStatus::Published,
+            .project = std::string(project),
+            .version = config->version,
+            .project_snapshot = std::make_shared<const ProjectRouteSnapshot>(std::move(**compiled)),
+    };
+}
+
+ConfigUpdateOutcome RouteConfigStore::apply(std::string_view project, const std::optional<ProjectConfig> &config) {
+    auto prepared = prepare(project, config);
+    if (!prepared) {
+        return std::unexpected(std::move(prepared.error()));
+    }
+    if (prepared->project_snapshot && !prepared->project_snapshot->ready_for_publish()) {
+        return std::unexpected(AccessConfigError{
+                .code = AccessConfigErrorCode::InvalidCombination,
+                .field = "service",
+                .message = "service routes must complete wait_ready before publication",
+        });
+    }
+    return commit(std::move(*prepared));
+}
+
+ConfigUpdateOutcome RouteConfigStore::commit(PreparedConfigUpdate prepared) {
+    if (!prepared.needs_publish()) {
+        return ConfigUpdateResult{
+                .status = prepared.status,
+                .snapshot = pin(),
+        };
     }
 
     std::vector<std::shared_ptr<const ProjectRouteSnapshot>> candidate = projects_;
     std::size_t existing = candidate.size();
     for (std::size_t i = 0; i < candidate.size(); ++i) {
-        if (candidate[i]->project() == project) {
+        if (candidate[i]->project() == prepared.project) {
             existing = i;
             break;
         }
     }
 
-    if (!*compiled) {
+    if (prepared.status == ConfigUpdateStatus::Unloaded) {
         if (existing != candidate.size()) {
             candidate.erase(candidate.begin() + static_cast<std::ptrdiff_t>(existing));
         }
@@ -54,16 +122,16 @@ ConfigUpdateOutcome RouteConfigStore::apply(std::string_view project, const std:
         return publish_candidate(std::move(candidate), ConfigUpdateStatus::Unloaded);
     }
 
-    auto project_snapshot = std::make_shared<const ProjectRouteSnapshot>(std::move(**compiled));
+    FIBER_ASSERT(prepared.project_snapshot != nullptr);
     if (existing == candidate.size()) {
-        candidate.push_back(std::move(project_snapshot));
+        candidate.push_back(std::move(prepared.project_snapshot));
     } else {
-        candidate[existing] = std::move(project_snapshot);
+        candidate[existing] = std::move(prepared.project_snapshot);
     }
 
     auto published = publish_candidate(std::move(candidate), ConfigUpdateStatus::Published);
     if (published) {
-        set_published_version(project, config->version);
+        set_published_version(prepared.project, prepared.version);
     }
     return published;
 }
@@ -82,6 +150,17 @@ ConfigUpdateOutcome RouteConfigStore::remove_project(std::string_view project) {
         remove_published_version(project);
     }
     return published;
+}
+
+void RouteConfigStore::clear() noexcept {
+    projects_.clear();
+    published_versions_.clear();
+    auto empty = std::make_shared<const AccessRouteSnapshot>();
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    published_.store(std::move(empty), std::memory_order_release);
+#else
+    std::atomic_store_explicit(&published_, std::move(empty), std::memory_order_release);
+#endif
 }
 
 std::optional<std::int32_t> RouteConfigStore::published_version(std::string_view project) const noexcept {
