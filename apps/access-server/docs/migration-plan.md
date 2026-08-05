@@ -266,9 +266,10 @@ listener；通用脚本兼容仍按范围决定排除。
 
 ### 阶段 4：PROXY 请求构造
 
-状态：完成。上游选择输入和 Java 兼容请求计划已接入 live handler；
-`ProxyRequestSender` 已使用本项目 HTTP/1 connection pool 完成静态地址/可注入 service
-实例的连接、请求发送和响应头接收，并通过真实 loopback upstream 验证实际 wire 请求。
+状态：完成。上游选择输入和 Java 兼容请求计划已接入 live handler；`ProxyExecutor` 已
+通过独立的 `ProxyUpstreamConnection` 使用本项目 HTTP/1 connection pool，完成静态地址/
+可注入 service 实例的连接、请求发送和完整响应处理，并通过真实 loopback upstream
+验证实际 wire 请求。
 最终 adapter 已在等待 response header/body 和 WebSocket tunnel 期间统一监视
 downstream close；NamingService/DNS runtime 适配留在阶段 6。
 
@@ -281,24 +282,25 @@ downstream close；NamingService/DNS runtime 适配留在阶段 6。
 - [x] 请求 body framing、client/proxy body limit、timeout、flush 参数；
 - [x] WebSocket upgrade 请求条件；
 - [x] 将 `PreparedProxyRequest` 通过 callback 接入 `AccessRequestHandler`；
-- [x] 使用本项目 connection pool 实现 production upstream request sender；
-- [x] sender 中完成 Content-Length/chunked request body 流式转发和动态超限中止；
+- [x] 使用本项目 connection pool 实现 production upstream connection acquisition；
+- [x] executor 中完成 Content-Length/chunked request body 流式转发和动态超限中止；
 - [x] 连接失败时按 Java 上限在 request header 发送前重新选择 service 实例；
-- [x] 完成等待 upstream 时的 downstream 断开竞速；最终 adapter 必须取消 sender 并关闭
-  正在使用的连接。
+- [x] 完成等待 upstream 时的 downstream 断开竞速；最终 adapter 必须取消 executor
+  coroutine 并关闭正在使用的连接。
 
 聚焦测试：
 
 - [x] 使用可控网络 echo upstream 对比实际收到的 method、URI、header、body；
 - [x] 连续 chunked/Content-Length 请求复用同一 upstream TCP 连接；
 - [x] 首个 service 实例连接失败后重新选择、失败/成功 report；
+- [x] upstream response 完整结束后才 report 成功，downstream/local policy 错误不惩罚实例；
 - [x] live downstream exchange 将请求 body 交给 capture executor；
 - [x] rewrite 空值变 `/`，保留原 query；无 rewrite 保留 raw URI；
 - [x] service 中 `/cluster` 与显式 cluster 覆盖；
 - [x] header 大小写、空模板值、重复 header、Content-Length 和最终 source 覆盖；
 - [x] timeout 下限、body limit 参数和 WebSocket 开关；
 - [x] Java `UriCodec.escapeUri` byte mask。
-- [x] downstream 在 response header 前关闭时取消 sender，并使 active upstream
+- [x] downstream 在 response header 前关闭时取消 executor coroutine，并使 active upstream
   exchange 退出 connection pool 复用。
 
 门槛：

@@ -1,7 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_DNS_SERVICE_H
 #define FIBER_ACCESS_SERVER_ACCESS_DNS_SERVICE_H
 
-#include "../execution/ProxyRequestSender.h"
+#include "../execution/ProxyUpstreamConnection.h"
 
 #include <memory>
 #include <string_view>

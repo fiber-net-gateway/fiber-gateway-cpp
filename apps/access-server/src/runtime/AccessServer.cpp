@@ -24,7 +24,7 @@ AccessServer::AccessServer(event::EventLoop &accept_loop, event::EventLoopGroup 
                            const RouteConfigStore &config_store, ProxyClusterMatcher cluster_matcher,
                            AccessServerOptions options) :
     accept_loop_(&accept_loop), workers_(&workers), pool_(workers),
-    sender_(pool_, cluster_matcher, dns_.adapter(), options.sender), executor_(sender_, options.executor),
+    executor_(pool_, cluster_matcher, dns_.adapter(), options.executor),
     handler_(config_store, options.script_adapter,
              AccessRequestHandlerOptions{
                      .default_max_request_body_size = options.default_max_request_body_size,
