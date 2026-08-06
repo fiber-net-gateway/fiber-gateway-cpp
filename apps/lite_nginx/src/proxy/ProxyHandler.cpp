@@ -18,6 +18,7 @@
 #include "http/HttpHeaderHash.h"
 #include "http/HttpHeaders.h"
 #include "http/HttpWebSocketProxy.h"
+#include "http_script/ConstPackage.h"
 #include "http_script/ScriptExchangeCtx.h"
 #include "log/Log.h"
 #include "script/JsValue.h"
@@ -89,7 +90,13 @@ bool evaluate_proxy_templates(fiber::http::HttpExchange &exchange, const runtime
                               fiber::http_script::ScriptConnectionInfo connection, ResolvedProxyValues &resolved) {
     fiber::script::GcHeap heap(exchange.pool());
     fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, connection};
-    ctx.set_path_vars(path_vars);
+    if (!location.const_package) {
+        return false;
+    }
+    auto constants_ready = ctx.prepare_constants(*location.const_package);
+    if (!constants_ready || !ctx.bind_path_constants(*location.const_package, path_vars)) {
+        return false;
+    }
     ctx.set_services(services);
     resolved.header_values.resize(location.set_headers.size());
 

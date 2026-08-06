@@ -14,70 +14,6 @@
 namespace fiber::access_server {
 namespace {
 
-struct InvocationVariables {
-    std::span<const PathVariable> path_variables;
-    std::string_view context_cluster;
-};
-
-bool lookup_path_variable(void *context, std::string_view name, std::string_view &value) noexcept;
-bool lookup_context_variable(void *context, std::string_view name, std::string_view &value) noexcept;
-
-class InvocationBinding final : public common::NonCopyable, public common::NonMovable {
-public:
-    InvocationBinding(http_script::ScriptExchangeCtx &context, InvocationVariables &variables) noexcept :
-        context_(context) {
-        context_.set_path_var_lookup(&variables, lookup_path_variable);
-        context_.set_context_var_lookup(&variables, lookup_context_variable);
-    }
-
-    ~InvocationBinding() { context_.clear_variable_lookups(); }
-
-private:
-    http_script::ScriptExchangeCtx &context_;
-};
-
-bool lookup_path_variable(void *context, std::string_view name, std::string_view &value) noexcept {
-    const auto &variables = *static_cast<const InvocationVariables *>(context);
-    for (const PathVariable &entry: variables.path_variables) {
-        if (entry.name == name) {
-            value = entry.value;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool is_context_cluster_key(std::string_view name) noexcept {
-    if (name == "cluster") {
-        return true;
-    }
-    constexpr std::string_view kNormalizedKey = "hi_trace_cluster";
-    if (name.size() != kNormalizedKey.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < name.size(); ++i) {
-        unsigned char ch = static_cast<unsigned char>(name[i]);
-        if (ch == '-') {
-            ch = '_';
-        } else if (ch >= 'A' && ch <= 'Z') {
-            ch = static_cast<unsigned char>(ch - 'A' + 'a');
-        }
-        if (ch != static_cast<unsigned char>(kNormalizedKey[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool lookup_context_variable(void *context, std::string_view name, std::string_view &value) noexcept {
-    const auto &variables = *static_cast<const InvocationVariables *>(context);
-    if (!is_context_cluster_key(name) || variables.context_cluster.empty()) {
-        return false;
-    }
-    value = variables.context_cluster;
-    return true;
-}
-
 std::string script_failure_message(const script::ScriptResult &result) {
     if (result.is_abort()) {
         std::string message = "local script aborted: ";
@@ -113,11 +49,11 @@ AccessRequestScriptAdapter AccessScriptRuntime::request_adapter() noexcept {
 }
 
 ScriptCompilerAdapter::Result
-AccessScriptRuntime::compile_expression(void *context, std::string_view expression,
-                                        std::span<const std::string> path_variable_names) {
+AccessScriptRuntime::compile_expression(void *context, http_script::ConstPackage::Builder &constants,
+                                        std::string_view expression, std::span<const std::string> path_variable_names) {
     auto &runtime = *static_cast<AccessScriptRuntime *>(context);
-    runtime.route_extension_.set_compile_path_vars(path_variable_names);
-    runtime.route_extension_.set_http_directives_enabled(false);
+    http_script::RouteScriptExtension::CompileScope compile_scope(runtime.route_extension_, constants,
+                                                                  path_variable_names, false);
 
     std::string source;
     source.reserve(expression.size() + 8);
@@ -138,14 +74,7 @@ AccessScriptRuntime::compile_expression(void *context, std::string_view expressi
 }
 
 bool AccessScriptRuntime::evaluate_condition(void *, http_script::ScriptExchangeCtx &script_context,
-                                             std::span<const PathVariable> path_variables,
-                                             std::string_view request_context_cluster,
                                              const script::Script &program) noexcept {
-    InvocationVariables variables{
-            .path_variables = path_variables,
-            .context_cluster = request_context_cluster,
-    };
-    InvocationBinding binding(script_context, variables);
     auto result = program.exec_sync(script::JsValue::make_null(), &script_context, script_context.heap());
     if (!result.is_value()) {
         return false;
@@ -155,15 +84,8 @@ bool AccessScriptRuntime::evaluate_condition(void *, http_script::ScriptExchange
 }
 
 Result<void> AccessScriptRuntime::evaluate_template(void *, http_script::ScriptExchangeCtx &script_context,
-                                                    std::span<const PathVariable> path_variables,
-                                                    std::string_view request_context_cluster,
                                                     const script::Script &program, std::string_view,
                                                     std::string &output) noexcept {
-    InvocationVariables variables{
-            .path_variables = path_variables,
-            .context_cluster = request_context_cluster,
-    };
-    InvocationBinding binding(script_context, variables);
     auto result = program.exec_sync(script::JsValue::make_null(), &script_context, script_context.heap());
     if (!result.is_value()) {
         auto exception =

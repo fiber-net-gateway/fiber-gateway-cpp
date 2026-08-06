@@ -13,6 +13,7 @@
 #include "../script/json/JsValueEncode.h"
 
 #include <array>
+#include <cstring>
 #include <string>
 #include <string_view>
 
@@ -54,35 +55,32 @@ bool put_string(fiber::script::GcHeap &heap, fiber::script::ValueHandle obj_root
     return fiber::script::gc_object_set_key(&heap, obj_root, key.data(), key.size(), *item);
 }
 
-// Builds a String JsValue; aborts on allocation failure. Used by the route-variable
-// accessors to materialize a borrowed name/value view into the GC heap.
-fiber::script::AbiResult make_string_value(fiber::script::GcHeap &heap, std::string_view text) noexcept {
-    fiber::script::JsValue v = fiber::script::JsValue::make_string(heap, text.data(), text.size());
-    if (fiber::script::js_value_type(v) != fiber::script::JsNodeType::String) {
-        return fiber::script::AbiResult::abort(fiber::script::ScriptAbortReason::OutOfMemory);
+std::string_view copy_to_pool(fiber::mem::BufPool &pool, std::string_view value) noexcept {
+    if (value.empty()) {
+        return std::string_view("", 0);
     }
-    return fiber::script::AbiResult::success(v);
+    auto *data = static_cast<char *>(pool.alloc(value.size(), alignof(char)));
+    if (data == nullptr) {
+        return {};
+    }
+    std::memcpy(data, value.data(), value.size());
+    return {data, value.size()};
 }
 
-// Compares a header/cookie name against a pre-normalized key (lowercase, '-' folded to '_').
-// `name` is matched under the same normalization so that $header.x_forwarded_for matches the
-// "X-Forwarded-For" header.
-bool name_matches_normalized(std::string_view name, std::string_view norm_key) noexcept {
-    if (name.size() != norm_key.size()) {
-        return false;
+std::string_view http_version_text(fiber::http::HttpVersion version) noexcept {
+    switch (version) {
+        case fiber::http::HttpVersion::HTTP_0_9:
+            return "HTTP/0.9";
+        case fiber::http::HttpVersion::HTTP_1_0:
+            return "HTTP/1.0";
+        case fiber::http::HttpVersion::HTTP_1_1:
+            return "HTTP/1.1";
+        case fiber::http::HttpVersion::HTTP_2_0:
+            return "HTTP/2";
+        case fiber::http::HttpVersion::HTTP_3_0:
+            return "HTTP/3";
     }
-    for (std::size_t i = 0; i < name.size(); ++i) {
-        unsigned char c = static_cast<unsigned char>(name[i]);
-        if (c == '-') {
-            c = '_';
-        } else if (c >= 'A' && c <= 'Z') {
-            c = static_cast<unsigned char>(c - 'A' + 'a');
-        }
-        if (c != static_cast<unsigned char>(norm_key[i])) {
-            return false;
-        }
-    }
-    return true;
+    return {};
 }
 
 } // namespace
@@ -162,6 +160,204 @@ fiber::script::JsValue ScriptExchangeCtx::cookies() noexcept {
     return *cookies_root_;
 }
 
+fiber::common::IoResult<void>
+ScriptExchangeCtx::prepare_constants(const ConstPackage &package,
+                                     std::span<const IndexedConstValue> external_values) noexcept {
+    if (const_package_identity_ != nullptr) {
+        return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+
+    constant_slot_count_ = package.size();
+    const_package_identity_ = package.identity();
+    if (constant_slot_count_ != 0) {
+        constant_slots_ = static_cast<fiber::script::JsValue *>(exchange_.pool().alloc(
+                constant_slot_count_ * sizeof(fiber::script::JsValue), alignof(fiber::script::JsValue)));
+        if (constant_slots_ == nullptr) {
+            const_package_identity_ = nullptr;
+            constant_slot_count_ = 0;
+            return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+        for (std::size_t i = 0; i < constant_slot_count_; ++i) {
+            constant_slots_[i] = fiber::script::JsValue::make_null();
+        }
+    }
+
+    auto set_string = [&](ConstIndex index, std::string_view value, bool copy) -> bool {
+        if (index >= constant_slot_count_) {
+            return false;
+        }
+        if (copy) {
+            value = copy_to_pool(exchange_.pool(), value);
+            if (value.data() == nullptr) {
+                return false;
+            }
+        }
+        constant_slots_[index] = fiber::script::JsValue::make_native_string(value.data(), value.size());
+        return true;
+    };
+
+    for (const ConstPackage::Entry &entry: package.entries(ConstType::Request)) {
+        const std::string_view name = entry.name();
+        std::string_view value;
+        if (name == "uri") {
+            value = exchange_.uri().unparsed_uri;
+        } else if (name == "method") {
+            value = exchange_.method_view();
+        } else if (name == "path") {
+            value = exchange_.uri().path;
+        } else if (name == "query") {
+            value = exchange_.uri().query;
+        } else {
+            continue;
+        }
+        if (!set_string(entry.index, value, false)) {
+            return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+    }
+
+    for (const ConstPackage::Entry &entry: package.entries(ConstType::Connection)) {
+        const std::string_view name = entry.name();
+        if (entry.index >= constant_slot_count_) {
+            return std::unexpected(fiber::common::IoErr::Invalid);
+        }
+        if (name == "remote_port") {
+            constant_slots_[entry.index] = fiber::script::JsValue::make_integer(exchange_.remote_addr().port());
+        } else if (name == "tls") {
+            constant_slots_[entry.index] = fiber::script::JsValue::make_boolean(connection_.tls);
+        } else if (name == "scheme") {
+            if (!set_string(entry.index, connection_.scheme, false)) {
+                return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+        } else if (name == "http_version") {
+            if (!set_string(entry.index, http_version_text(exchange_.version()), false)) {
+                return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+        } else if (name == "remote_addr") {
+            std::array<char, INET6_ADDRSTRLEN> buffer{};
+            const auto &ip = exchange_.remote_addr().ip();
+            const void *source = nullptr;
+            int family = AF_INET;
+            std::array<std::uint8_t, fiber::net::IpAddress::kV4Size> v4{};
+            if (ip.is_v4()) {
+                v4 = ip.v4_bytes();
+                source = v4.data();
+            } else {
+                family = AF_INET6;
+                source = ip.v6_bytes().data();
+            }
+            const char *result = ::inet_ntop(family, source, buffer.data(), static_cast<socklen_t>(buffer.size()));
+            if (result != nullptr && !set_string(entry.index, result, true)) {
+                return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+        }
+    }
+
+    if (!package.entries(ConstType::Header).empty()) {
+        for (const fiber::http::HttpHeaders::HeaderField &field: exchange_.request_headers()) {
+            const ConstIndex index = package.find(ConstType::Header, field.lowcase_view());
+            if (index == kInvalidConstIndex) {
+                continue;
+            }
+            if (index >= constant_slot_count_) {
+                return std::unexpected(fiber::common::IoErr::Invalid);
+            }
+            if (fiber::script::js_value_type(constant_slots_[index]) == fiber::script::JsNodeType::Null &&
+                !set_string(index, field.value_view(), false)) {
+                return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+        }
+    }
+
+    if (!package.entries(ConstType::Query).empty()) {
+        auto decoded = fiber::util::form_decode_query(
+                exchange_.uri().query, [&](std::string_view name, std::string_view value) -> bool {
+                    const ConstIndex index = package.find(ConstType::Query, name);
+                    return index == kInvalidConstIndex || set_string(index, value, true);
+                });
+        if (!decoded && decoded.error() == fiber::common::IoErr::NoMem) {
+            return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+        // Preserve the existing lenient behavior: malformed escapes leave any values
+        // decoded before the error available to the script.
+    }
+
+    if (!package.entries(ConstType::Cookie).empty()) {
+        fiber::http::HttpHeaders::MatchRange cookie_headers =
+                exchange_.request_headers().get_all("cookie", kCookieHash);
+        for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
+            fiber::util::decode_cookie_header(field.value_view(), [&](std::string_view name, std::string_view value) {
+                const ConstIndex index = package.find(ConstType::Cookie, name);
+                if (index != kInvalidConstIndex && index < constant_slot_count_ &&
+                    fiber::script::js_value_type(constant_slots_[index]) == fiber::script::JsNodeType::Null) {
+                    (void) set_string(index, value, false);
+                }
+            });
+        }
+    }
+
+    if (!bind_constants(external_values)) {
+        return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    return {};
+}
+
+bool ScriptExchangeCtx::bind_constants(std::span<const IndexedConstValue> values) noexcept {
+    if (const_package_identity_ == nullptr) {
+        return false;
+    }
+    for (const IndexedConstValue &entry: values) {
+        if (entry.index == kInvalidConstIndex) {
+            continue;
+        }
+        if (!bind_constant(entry.index, entry.value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ScriptExchangeCtx::bind_constant(ConstIndex index, std::string_view value) noexcept {
+    if (const_package_identity_ == nullptr || index >= constant_slot_count_) {
+        return false;
+    }
+    if (value.empty()) {
+        value = std::string_view("", 0);
+    }
+    constant_slots_[index] = fiber::script::JsValue::make_native_string(value.data(), value.size());
+    return true;
+}
+
+bool ScriptExchangeCtx::bind_path_constants(
+        const ConstPackage &package,
+        std::span<const std::pair<std::string_view, std::string_view>> path_values) noexcept {
+    if (const_package_identity_ != package.identity()) {
+        return false;
+    }
+    for (const auto &[name, value]: path_values) {
+        const ConstIndex index = package.find(ConstType::Path, name);
+        if (index != kInvalidConstIndex && !bind_constant(index, value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void ScriptExchangeCtx::clear_constants(std::span<const ConstIndex> indices) noexcept {
+    for (ConstIndex index: indices) {
+        if (index != kInvalidConstIndex && index < constant_slot_count_) {
+            constant_slots_[index] = fiber::script::JsValue::make_null();
+        }
+    }
+}
+
+fiber::script::AbiResult ScriptExchangeCtx::constant(const void *package_identity, ConstIndex index) const noexcept {
+    if (package_identity == nullptr || package_identity != const_package_identity_ || index >= constant_slot_count_ ||
+        constant_slots_ == nullptr) {
+        return fiber::script::AbiResult::abort(fiber::script::ScriptAbortReason::InvalidState);
+    }
+    return fiber::script::AbiResult::success(constant_slots_[index]);
+}
+
 fiber::script::AbiResult ScriptExchangeCtx::lookup_property(fiber::script::GcHeap &heap, fiber::script::JsValue object,
                                                             std::string_view key) noexcept {
     using namespace fiber::script;
@@ -181,141 +377,6 @@ fiber::script::AbiResult ScriptExchangeCtx::lookup_property(fiber::script::GcHea
         return AbiResult::success(JsValue::make_undefined()); // absent
     }
     return AbiResult::success(*found);
-}
-
-fiber::script::AbiResult ScriptExchangeCtx::path_var(fiber::script::GcHeap &heap,
-                                                     std::string_view name) const noexcept {
-    if (path_var_lookup_) {
-        std::string_view value;
-        if (path_var_lookup_(path_var_lookup_context_, name, value)) {
-            return make_string_value(heap, value);
-        }
-        return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
-    }
-    for (const auto &pv: path_vars_) {
-        if (pv.first == name) {
-            return make_string_value(heap, pv.second);
-        }
-    }
-    // Absent -> null (mirrors Java NullNode; undefined is not JSON-encodable here).
-    return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
-}
-
-fiber::script::AbiResult ScriptExchangeCtx::context_var(fiber::script::GcHeap &heap,
-                                                        std::string_view name) const noexcept {
-    if (context_var_lookup_) {
-        std::string_view value;
-        if (context_var_lookup_(context_var_lookup_context_, name, value)) {
-            return make_string_value(heap, value);
-        }
-    }
-    return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
-}
-
-fiber::script::AbiResult ScriptExchangeCtx::query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept {
-    fiber::script::AbiResult result = lookup_property(heap, query(), name);
-    if (result.is_success() && fiber::script::js_value_type(result.value()) == fiber::script::JsNodeType::Undefined) {
-        return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
-    }
-    return result;
-}
-
-fiber::script::AbiResult ScriptExchangeCtx::header_var(fiber::script::GcHeap &heap,
-                                                       std::string_view norm_key) const noexcept {
-    for (const fiber::http::HttpHeaders::HeaderField &field: exchange_.request_headers()) {
-        if (name_matches_normalized(field.lowcase_view(), norm_key)) {
-            return make_string_value(heap, field.value_view());
-        }
-    }
-    return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
-}
-
-fiber::script::AbiResult ScriptExchangeCtx::cookie_var(fiber::script::GcHeap &heap,
-                                                       std::string_view norm_key) const noexcept {
-    fiber::http::HttpHeaders::MatchRange cookie_headers = exchange_.request_headers().get_all("cookie", kCookieHash);
-    for (const fiber::http::HttpHeaders::HeaderField &field: cookie_headers) {
-        std::string_view matched;
-        bool found = false;
-        fiber::util::decode_cookie_header(field.value_view(), [&](std::string_view name, std::string_view value) {
-            if (!found && name_matches_normalized(name, norm_key)) {
-                found = true;
-                matched = value;
-            }
-        });
-        if (found) {
-            return make_string_value(heap, matched);
-        }
-    }
-    return fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
-}
-
-fiber::script::AbiResult ScriptExchangeCtx::req_field(fiber::script::GcHeap &heap,
-                                                      std::string_view field) const noexcept {
-    if (field == "uri") {
-        return make_string_value(heap, exchange_.uri().unparsed_uri);
-    }
-    if (field == "method") {
-        return make_string_value(heap, exchange_.method_view());
-    }
-    if (field == "path") {
-        return make_string_value(heap, exchange_.uri().path);
-    }
-    if (field == "query") {
-        return make_string_value(heap, exchange_.uri().query);
-    }
-    return fiber::script::AbiResult::success(fiber::script::JsValue::make_undefined());
-}
-
-fiber::script::AbiResult ScriptExchangeCtx::conn_field(fiber::script::GcHeap &heap,
-                                                       std::string_view field) const noexcept {
-    if (field == "remote_port") {
-        return fiber::script::AbiResult::success(fiber::script::JsValue::make_integer(exchange_.remote_addr().port()));
-    }
-    if (field == "tls") {
-        return fiber::script::AbiResult::success(fiber::script::JsValue::make_boolean(connection_.tls));
-    }
-    if (field == "scheme") {
-        return make_string_value(heap, connection_.scheme);
-    }
-    if (field == "http_version") {
-        std::string_view value;
-        switch (exchange_.version()) {
-            case fiber::http::HttpVersion::HTTP_0_9:
-                value = "HTTP/0.9";
-                break;
-            case fiber::http::HttpVersion::HTTP_1_0:
-                value = "HTTP/1.0";
-                break;
-            case fiber::http::HttpVersion::HTTP_1_1:
-                value = "HTTP/1.1";
-                break;
-            case fiber::http::HttpVersion::HTTP_2_0:
-                value = "HTTP/2";
-                break;
-            case fiber::http::HttpVersion::HTTP_3_0:
-                value = "HTTP/3";
-                break;
-        }
-        return make_string_value(heap, value);
-    }
-    if (field == "remote_addr") {
-        std::array<char, INET6_ADDRSTRLEN> buffer{};
-        const auto &ip = exchange_.remote_addr().ip();
-        const void *source = nullptr;
-        int family = AF_INET;
-        std::array<std::uint8_t, fiber::net::IpAddress::kV4Size> v4{};
-        if (ip.is_v4()) {
-            v4 = ip.v4_bytes();
-            source = v4.data();
-        } else {
-            family = AF_INET6;
-            source = ip.v6_bytes().data();
-        }
-        const char *result = ::inet_ntop(family, source, buffer.data(), static_cast<socklen_t>(buffer.size()));
-        return result ? make_string_value(heap, result)
-                      : fiber::script::AbiResult::success(fiber::script::JsValue::make_null());
-    }
-    return fiber::script::AbiResult::success(fiber::script::JsValue::make_undefined());
 }
 
 void ScriptExchangeCtx::set_response_header(std::string_view name, std::string_view value) noexcept {

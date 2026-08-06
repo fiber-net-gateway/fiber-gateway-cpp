@@ -48,13 +48,14 @@ struct ScriptCompilerCapture {
     std::vector<std::vector<std::string>> path_variable_names;
 };
 
-ScriptCompilerAdapter::Result capture_expression(void *context, std::string_view expression,
+ScriptCompilerAdapter::Result capture_expression(void *context, fiber::http_script::ConstPackage::Builder &constants,
+                                                 std::string_view expression,
                                                  std::span<const std::string> path_variable_names) {
     auto &capture = *static_cast<ScriptCompilerCapture *>(context);
     capture.expressions.emplace_back(expression);
     capture.path_variable_names.emplace_back(path_variable_names.begin(), path_variable_names.end());
     ScriptCompilerAdapter delegate = capture.runtime.compiler_adapter();
-    return delegate.compile_expression(delegate.context, expression, path_variable_names);
+    return delegate.compile_expression(delegate.context, constants, expression, path_variable_names);
 }
 
 ScriptCompilerAdapter compiler_adapter(ScriptCompilerCapture &capture) {

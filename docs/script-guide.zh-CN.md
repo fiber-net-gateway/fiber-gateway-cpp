@@ -581,12 +581,12 @@ resp.sendJson(200, {
 
 解析规则：
 
-- `$path.<name>` 必须是宿主在编译当前路由前通过 `set_compile_path_vars()` 声明的路径变量，否则脚本编译失败。运行时找不到时返回 `null`。
+- `$path.<name>` 必须是宿主创建 `RouteScriptExtension::CompileScope` 时声明的路径变量，否则脚本编译失败。运行时找不到时返回 `null`。
 - `$req` 只允许 `uri`、`method`、`path`、`query`，`$conn` 只允许上面列出的五个字段；未知字段是编译错误。
 - `$query.<key>` 和 `$context.<key>` 可按任意合法标识符编译，不存在返回 `null`。
 - `$header`/`$cookie` 的 key 在匹配时转成 ASCII 小写并把 `-` 折叠为 `_`，所以 `$header.x_forwarded_for` 可以读取 `X-Forwarded-For`。
 - 点号后的 key 必须是脚本标识符。含其他特殊字符的 query/cookie key 应使用 `req.getQuery("...")` 或 `req.getCookie("...")`。
-- `$context` 的值由 C++ 宿主通过 `ScriptExchangeCtx::set_context_var_lookup()` 提供。
+- 编译单元中的常量名由 `ConstPackage::Builder` 归一化、去重并分配连续 index；运行期先通过不可变 `ConstPackage` 准备槽位，再按 index 绑定 `$path`/`$context` 等宿主值。
 
 ### 6.4 上游 HTTP 指令
 
@@ -1008,6 +1008,7 @@ return {environment: $env.name};
 #include <vector>
 
 #include "http_script/HttpScriptLib.h"
+#include "http_script/ConstPackage.h"
 #include "http_script/RouteScriptExtension.h"
 #include "script/ScriptCompiler.h"
 #include "script/std/StdLibrary.h"
@@ -1025,22 +1026,28 @@ struct ScriptRuntime {
 
 std::expected<fiber::script::Script, fiber::script::parse::ParseError>
 compile_route_script(ScriptRuntime &runtime,
+                     fiber::http_script::ConstPackage::Builder &constants,
                      std::string_view source,
                      const std::vector<std::string> &path_variables) {
-    // RouteScriptExtension 的编译上下文是可变的，多个路由必须串行设置并编译。
-    runtime.route_extension.set_compile_path_vars(path_variables);
-    runtime.route_extension.set_http_directives_enabled(true);
+    // 同一配置快照中的所有脚本共享 builder；CompileScope 只在本次串行编译期间有效。
+    fiber::http_script::RouteScriptExtension::CompileScope scope(
+            runtime.route_extension, constants, path_variables, true);
     return fiber::script::compile_script(runtime.library, source);
 }
+
+// 所有脚本编译成功后调用一次，并把 package 与这些脚本放进同一个不可变快照。
+// auto package = constants.build();
 ```
 
 生命周期要求：
 
-- `StdLibrary`、`RouteScriptExtension` 以及它们引用的 userdata 必须比所有编译出的脚本活得更久。
-- `RouteScriptExtension` 会持有 directive 定义，编译结果中的上游函数 userdata 指向这些定义。
-- `set_compile_path_vars()` 和 `set_http_directives_enabled()` 修改编译上下文，路由编译必须串行；脚本执行不读取这份可变编译状态。
+- `ConstPackage::Builder` 只在编译期可变；`build()` 后不可再添加常量。
+- `ConstPackage` 拥有常量 HostCallable 的 userdata，必须与使用它编译出的脚本一起存入快照并至少同寿命。
+- `build()` 生成按 type 分区的紧凑 Entry/桶数组；每个分区使用不超过 50% 装载率的二次探测哈希。编译期的去重表、顺序表和 `HostCallable` 不进入不可变 package，package 只保留脚本 userdata 所需的稳定引用与归一化名称。
+- `StdLibrary` 只参与编译；含 HTTP directive 的脚本仍要求 `RouteScriptExtension` 持有的 directive 定义比脚本活得更久，因为编译结果中的上游函数 userdata 指向这些定义。
+- `CompileScope` 修改扩展的临时编译上下文，因此共享扩展时必须串行编译；脚本执行不读取这份可变状态。
 - 只编译同步模板时应把 HTTP directives 关闭，并在编译后拒绝 `contains_async()`。
-- 每请求传给 `set_path_vars()` 的 name/value 视图，以及 `ScriptConnectionInfo::scheme` 指向的文本，都必须持续到该次脚本执行结束。
+- 运行期绑定进常量槽的借用文本，以及 `ScriptConnectionInfo::scheme` 指向的文本，都必须持续到该次脚本执行结束；query 解码结果由 `prepare_constants()` 自动复制进请求池。
 
 ### 8.2 每请求执行
 
@@ -1058,13 +1065,18 @@ fiber::async::Task<void>
 execute_http_script(
         fiber::http::HttpExchange &exchange,
         fiber::script::Script &script,
+        const fiber::http_script::ConstPackage &constants,
         const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
         fiber::http_script::HttpScriptServices *services,
         fiber::http_script::ScriptConnectionInfo connection) {
     // 也可以传 exchange.pool() 构造堆，让 GC 对象使用请求的 BufPool。
     fiber::script::GcHeap heap(exchange.pool());
     fiber::http_script::ScriptExchangeCtx context(exchange, heap, connection);
-    context.set_path_vars(path_vars);
+    auto prepared = context.prepare_constants(constants);
+    if (!prepared || !context.bind_path_constants(constants, path_vars)) {
+        (void) co_await context.write_error_json(500, "SCRIPT_CONSTANTS");
+        co_return;
+    }
     context.set_services(services);
 
     auto result = co_await script.exec_async(
@@ -1119,22 +1131,16 @@ execute_http_script(
 
 必须像上例一样在局部 `heap` 和 `context` 仍然存活时消费结果；返回后不能再解引用其中的堆值。`apps/lite_nginx/src/runtime/ServerLauncher.cpp` 的 `run_script()` 是完整参考实现。
 
-`ScriptExchangeCtx` 还可配置：
+`$context` 等宿主值也按编译期确定的 index 设置。例如：
 
 ```cpp
-context.set_path_var_lookup(host_context, lookup_path_variable);
-context.set_context_var_lookup(host_context, lookup_context_variable);
+auto index = constants.find(fiber::http_script::ConstType::Context, "cluster");
+if (index != fiber::http_script::kInvalidConstIndex) {
+    context.bind_constant(index, cluster);
+}
 ```
 
-回调签名是：
-
-```cpp
-bool lookup(void *context,
-            std::string_view name,
-            std::string_view &value) noexcept;
-```
-
-返回 `true` 表示找到，并把 `value` 指向在脚本执行期间有效的文本；返回 `false` 时脚本常量得到 `null`。
+也可以把一组 `IndexedConstValue` 传给 `prepare_constants()` 或 `bind_constants()`。未设置的槽保持 `null`；脚本执行时 HostCallable 只校验 package identity 和 index，然后直接返回槽值，不再按名称扫描请求数据。
 
 ### 8.3 提供上游连接服务
 
@@ -1182,7 +1188,7 @@ lite-nginx 已提供基于 `UpstreamRegistry + ConnectionPool + DnsService` 的�
 
 ### 为什么 `$path.name` 编译失败？
 
-当前路由编译上下文没有声明该变量。先从路由模式提取变量名，调用 `set_compile_path_vars()`，再编译脚本。这个检查有意放在编译期。
+当前路由编译上下文没有声明该变量。先从路由模式提取变量名，用这些名称创建 `RouteScriptExtension::CompileScope`，再编译脚本。这个检查有意放在编译期。
 
 ### 为什么上游 `url` 被拒绝？
 

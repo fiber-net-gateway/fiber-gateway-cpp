@@ -96,9 +96,7 @@ struct TemplateEvaluationState {
 };
 
 fiber::access_server::Result<void> evaluate_counted_template(void *context, fiber::http_script::ScriptExchangeCtx &,
-                                                             std::span<const fiber::access_server::PathVariable>,
-                                                             std::string_view, const fiber::script::Script &,
-                                                             std::string_view expression,
+                                                             const fiber::script::Script &, std::string_view expression,
                                                              std::string &output) noexcept {
     ++static_cast<TemplateEvaluationState *>(context)->count;
     if (expression == "'attempt'") {

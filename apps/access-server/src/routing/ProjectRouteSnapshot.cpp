@@ -140,7 +140,8 @@ struct PendingRouteCompile {
 
 std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &route, std::size_t route_index,
                                                              PendingRouteCompile &pending,
-                                                             ScriptCompilerAdapter compiler) {
+                                                             ScriptCompilerAdapter compiler,
+                                                             http_script::ConstPackage::Builder &constants) {
     auto compile_template = [&](CompiledTemplate &value,
                                 std::string_view field) -> std::expected<void, AccessConfigError> {
         for (CompiledTemplateExpression &expression: value.expressions) {
@@ -148,7 +149,8 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
                 return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, field,
                                                    "script compiler is not configured"));
             }
-            auto program = compiler.compile_expression(compiler.context, expression.source, route.path_variable_names);
+            auto program = compiler.compile_expression(compiler.context, constants, expression.source,
+                                                       route.path_variable_names);
             if (!program) {
                 return std::unexpected(
                         route_error(AccessConfigErrorCode::InvalidField, route_index, field, program.error()));
@@ -177,7 +179,8 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "condition",
                                                "script compiler is not configured"));
         }
-        auto program = compiler.compile_expression(compiler.context, *pending.condition, route.path_variable_names);
+        auto program =
+                compiler.compile_expression(compiler.context, constants, *pending.condition, route.path_variable_names);
         if (!program) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::InvalidField, route_index, "condition", program.error()));
@@ -636,6 +639,7 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
     }
 
     ProjectRouteSnapshot snapshot;
+    http_script::ConstPackage::Builder constants;
     snapshot.project_ = project;
     snapshot.version_ = config.version;
     snapshot.routes_.reserve(config.routes->size());
@@ -664,13 +668,30 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
         return std::unexpected(*definer.error());
     }
     for (std::size_t i = 0; i < snapshot.routes_.size(); ++i) {
-        auto compiled = compile_route_scripts(snapshot.routes_[i], i, pending[i], compiler);
+        auto compiled = compile_route_scripts(snapshot.routes_[i], i, pending[i], compiler, constants);
         if (!compiled) {
             return std::unexpected(std::move(compiled.error()));
         }
         if (CompiledRoute &route = snapshot.routes_[i]; route.proxy) {
             route.proxy->proxy_headers = std::move(pending[i].proxy_headers).build();
             route.proxy->response_headers = std::move(pending[i].response_headers).build();
+        }
+    }
+
+    snapshot.const_package_ = constants.build();
+    if (!snapshot.const_package_) {
+        return std::unexpected(project_error("routes", "failed to finalize route constant package"));
+    }
+    for (CompiledRoute &route: snapshot.routes_) {
+        route.path_constant_indices.reserve(route.path_variable_names.size());
+        for (const std::string &name: route.path_variable_names) {
+            route.path_constant_indices.push_back(snapshot.const_package_->find(http_script::ConstType::Path, name));
+        }
+    }
+    for (const http_script::ConstPackage::Entry &entry:
+         snapshot.const_package_->entries(http_script::ConstType::Context)) {
+        if (entry.name() == "cluster" || entry.name() == "hi_trace_cluster") {
+            snapshot.context_cluster_indices_.push_back(entry.index);
         }
     }
 

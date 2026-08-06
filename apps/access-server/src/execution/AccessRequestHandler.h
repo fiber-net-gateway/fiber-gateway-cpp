@@ -28,13 +28,10 @@ class AccessRequestTelemetry;
 
 struct AccessRequestScriptAdapter {
     using ConditionFunction = bool (*)(void *context, http_script::ScriptExchangeCtx &script_context,
-                                       std::span<const PathVariable> path_variables,
-                                       std::string_view request_context_cluster,
                                        const script::Script &program) noexcept;
     using TemplateFunction = Result<void> (*)(void *context, http_script::ScriptExchangeCtx &script_context,
-                                              std::span<const PathVariable> path_variables,
-                                              std::string_view request_context_cluster, const script::Script &program,
-                                              std::string_view expression, std::string &output) noexcept;
+                                              const script::Script &program, std::string_view expression,
+                                              std::string &output) noexcept;
 
     void *context = nullptr;
     ConditionFunction evaluate_condition = nullptr;

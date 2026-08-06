@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "http/HttpExchange.h"
+#include "http_script/ConstPackage.h"
 #include "log/Log.h"
 #include "script/JsGc.h"
 #include "script/Script.h"
@@ -103,7 +104,19 @@ void AccessLogger::write(fiber::http::HttpExchange &exchange, const RequestLogCo
     };
     fiber::script::GcHeap heap(exchange.pool());
     AccessLogEvalContext script_context(exchange, heap, context.connection, data);
-    script_context.set_path_vars(context.path_vars);
+    if (!bound.runtime->const_package) {
+        LOG(LOG_ACCESS_ERROR, ERROR) << "request_id=" << context.request_id
+                                     << " access_log constant package is missing logger="
+                                     << fiber::log::quoted(bound.runtime->logger_name);
+        return;
+    }
+    auto constants_ready = script_context.prepare_constants(*bound.runtime->const_package);
+    if (!constants_ready || !script_context.bind_path_constants(*bound.runtime->const_package, context.path_vars)) {
+        LOG(LOG_ACCESS_ERROR, ERROR) << "request_id=" << context.request_id
+                                     << " access_log constant preparation failed logger="
+                                     << fiber::log::quoted(bound.runtime->logger_name);
+        return;
+    }
     auto result =
             bound.runtime->template_script->exec_sync(fiber::script::JsValue::make_undefined(), &script_context, heap);
     if (!result.is_value()) {

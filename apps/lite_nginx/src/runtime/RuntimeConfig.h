@@ -21,8 +21,9 @@
 #include "script/std/StdLibrary.h"
 
 namespace fiber::http_script {
+class ConstPackage;
 class RouteScriptExtension;
-}
+} // namespace fiber::http_script
 
 namespace fiber::lite_nginx::logging {
 class AccessLogScriptExtension;
@@ -44,6 +45,7 @@ struct AccessLogRuntime {
     // A source without interpolation uses literal_message directly.
     std::string literal_message;
     std::shared_ptr<fiber::script::Script> template_script;
+    std::shared_ptr<const fiber::http_script::ConstPackage> const_package;
 };
 
 // Global keepalive connection pool shared across all upstreams. Configured once under
@@ -132,6 +134,8 @@ struct LocationRuntime {
     bool close_on_client_abort = false;
     // Non-null when this location runs a script (kind == Script) instead of proxying.
     std::shared_ptr<fiber::script::Script> script;
+    // Immutable constant layout shared by every script/template compiled for this location.
+    std::shared_ptr<const fiber::http_script::ConstPackage> const_package;
 };
 
 struct ServerRuntime {
@@ -172,8 +176,8 @@ struct RuntimeConfig {
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;
     ConnectionPoolRuntime connection_pool;
-    // Shared across all script compilation in this runtime. Extension contexts are configured
-    // before each serial compile and own userdata referenced by the compiled scripts.
+    // Shared across serial script compilation in this runtime. Compiled constant userdata is
+    // owned by the immutable package attached to each script-bearing runtime object.
     std::shared_ptr<fiber::script::std_lib::StdLibrary> script_library;
     std::shared_ptr<fiber::http_script::RouteScriptExtension> route_script_extension;
     std::shared_ptr<fiber::lite_nginx::logging::AccessLogScriptExtension> access_log_script_extension;
