@@ -373,11 +373,15 @@ adapter 编译为同步程序，请求热路径只执行已编译程序。通用
 
 1. 丢弃请求 body；
 2. 先计算全部 response header 模板；
-3. 任一 header 模板失败时，不提交任何配置 header，进入错误处理；
-4. 设置 header；
-5. 计算/发送配置 status 和 body；
-6. body 模板失败发生在 header 提交之后，因此错误响应保留已经提交的完整配置 header
-   集；错误处理随后覆盖 `Content-Type`。
+3. 计算 body 模板；
+4. 任一 header/body 模板或 header 校验失败时，不提交任何 route header/body，进入错误处理；
+5. 全部准备成功后，将 route header 写入请求级最终 header 集，随后发送配置 status 和 body。
+
+Java 会在全部 header 模板成功后先提交配置 header，再计算 body，因此 body 模板失败时
+错误响应会继承这些 header。C++ 有意采用原子准备语义：body 模板失败时丢弃全部 route
+header，只保留项目匹配后已经确定的 access-owned header，以及错误响应自身的
+`Content-Type`/trace header。这是已登记的兼容差异，用来避免未成功 route 的 header
+污染错误响应。
 
 `setResponseHeader` 会忽略以下大小写不敏感的名称，`Host` 不在忽略集合：
 
@@ -523,9 +527,10 @@ NamingService route 依赖协调和原子服务目录：仅接受 enabled、heal
 不属于兼容边界。
 
 production gray 原子快照在 selector 前覆盖 cluster，非空 context cluster 次之，
-最后才使用 route 默认 cluster。最终 PROXY adapter 已统一监视 downstream response
-channel；在等待 response header/body 或 tunnel 时关闭 downstream，会销毁未完成的
-executor coroutine，并使 active upstream exchange 退出 pool 复用。上述组件已在
+最后才使用 route 默认 cluster。最终请求 handler 统一监视 downstream response
+channel；在 RESPONSE、错误响应、等待 proxy response header/body 或 tunnel 时关闭
+downstream，都会销毁未完成的执行 coroutine，并使 active upstream exchange 退出 pool
+复用。上述组件已在
 `AccessServerRuntime` 完成进程级装配：每个 request worker 使用自己的 DNS resolver
 和 local pool shard，项目列表首值到达前不绑定 listener，关闭时先停止 listener 和
 active exchange，再关闭 pool/DNS 和 Nacos 控制面。本地脚本 adapter 和测试环境
@@ -536,7 +541,7 @@ Host cluster 已装配。
 - CAT 根事务类型为 `URL`，命中后名称为 `<project><route-pattern>`；
 - 入站三段 CAT ID 被继续，无有效上下文时生成新 tree；响应写回 `Hi-Trace-Id`，
   upstream 写入新的 `HI-TRACE-ID`、`HI-SPAN-ID-PARENT`、`HI-SPAN-ID`；
-- project、route、context cluster、实际 upstream、稳定 `AccessError.name` 和最终
+- project、route、context cluster、实际 upstream、稳定 `Exception.name` 和最终
   response completion 同时进入 CAT 与 `access_server.access`；
 - Prometheus 在独立 listener 输出固定 `result` 标签的请求总数、inflight 和 duration。
   project/route/cluster 属于动态控制面或请求输入，不建立无限增长的 label series；
@@ -584,7 +589,20 @@ tunnel，保留 upstream `Sec-WebSocket-Accept` 和非 hop-by-hop header，并�
 
 ## 12. 错误响应
 
-错误处理先 discard request body。若 response 已经提交，则不再二次写入。
+RESPONSE、PROXY、脚本和路由中间层只返回 `Result<T>`：`Err::Exception` 表示响应尚未
+提交、可以渲染为业务错误；`Err::Error` 表示底层 IO/内存或提交后的失败，只中止
+exchange。只有请求 handler 最外层把 Exception 交给 `ErrorResponder`，若 response
+已经提交则不再二次写入。
+
+`ErrorResponder` 不读取或 discard request body，而是立即发送可用的错误响应。handler
+返回后的未读请求体清理由 HTTP connection/stream 层负责；因此已知 Content-Length
+超限等前置错误不会等待慢速请求体上传完成。RESPONSE 路由正常执行前仍会按其业务语义
+读取并丢弃请求 body，这与错误响应职责无关。
+
+最终 downstream response header 由请求级 `AccessRequestTelemetry::response_headers()`
+持有：Host 匹配成功后立即写入 HSTS；route/proxy 仅在准备成功后写入自己的 header；
+错误响应写入 Content-Type；trace header 在每次最终发送前最后覆盖。header 集一旦开始
+提交，后续失败只能作为 `Err::Error` 处理。
 
 内容协商规则是 Java 遗留的前缀判断：
 

@@ -154,10 +154,11 @@ bool AccessScriptRuntime::evaluate_condition(void *, http_script::ScriptExchange
     return script::run::Compares::logic(script::ConstValueHandle(&value));
 }
 
-bool AccessScriptRuntime::evaluate_template(void *, http_script::ScriptExchangeCtx &script_context,
-                                            std::span<const PathVariable> path_variables,
-                                            std::string_view request_context_cluster, const script::Script &program,
-                                            std::string_view, std::string &output, AccessError &error) noexcept {
+Result<void> AccessScriptRuntime::evaluate_template(void *, http_script::ScriptExchangeCtx &script_context,
+                                                    std::span<const PathVariable> path_variables,
+                                                    std::string_view request_context_cluster,
+                                                    const script::Script &program, std::string_view,
+                                                    std::string &output) noexcept {
     InvocationVariables variables{
             .path_variables = path_variables,
             .context_cluster = request_context_cluster,
@@ -165,14 +166,18 @@ bool AccessScriptRuntime::evaluate_template(void *, http_script::ScriptExchangeC
     InvocationBinding binding(script_context, variables);
     auto result = program.exec_sync(script::JsValue::make_null(), &script_context, script_context.heap());
     if (!result.is_value()) {
-        error = AccessError::template_script(script_failure_message(result));
-        return false;
+        auto exception =
+                make_template_script_exception(script_context.exchange().pool(), script_failure_message(result));
+        if (!exception) {
+            return std::unexpected(Err::from_error(exception.error()));
+        }
+        return std::unexpected(Err::from_exception(*exception));
     }
     const script::JsNodeType type = script::js_value_type(result.value());
     if (type != script::JsNodeType::Null && type != script::JsNodeType::Undefined) {
         script::std_lib::node_as_text(result.value(), output);
     }
-    return true;
+    return {};
 }
 
 } // namespace fiber::access_server

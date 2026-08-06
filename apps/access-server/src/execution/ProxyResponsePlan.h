@@ -2,11 +2,10 @@
 #define FIBER_ACCESS_SERVER_PROXY_RESPONSE_PLAN_H
 
 #include "../routing/ProjectRouteSnapshot.h"
-#include "AccessError.h"
+#include "AccessResult.h"
 #include "ResponsePlan.h"
 #include "TemplateEvaluator.h"
 
-#include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -15,7 +14,7 @@
 namespace fiber::access_server {
 
 using PreparedProxyResponseHeaders = std::vector<EvaluatedHeader>;
-using PreparedProxyResponseHeadersResult = std::expected<PreparedProxyResponseHeaders, AccessError>;
+using PreparedProxyResponseHeadersResult = Result<PreparedProxyResponseHeaders>;
 
 [[nodiscard]] PreparedProxyResponseHeadersResult prepare_proxy_response_headers(const CompiledHeaderTemplates &headers,
                                                                                 TemplateEvaluator evaluator);

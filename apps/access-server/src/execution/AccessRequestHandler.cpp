@@ -1,6 +1,8 @@
 #include "AccessRequestHandler.h"
 #include "../observability/AccessRequestTelemetry.h"
 
+#include "../../../../src/async/TaskSelect.h"
+#include "../../../../src/async/WhenAny.h"
 #include "../../../../src/http/HttpBodySpec.h"
 #include "../../../../src/http/HttpExchange.h"
 #include "../../../../src/http/HttpHeaderHash.h"
@@ -13,9 +15,12 @@
 namespace fiber::access_server {
 namespace {
 
-constexpr std::string_view kTraceId = "unknown-trace-id";
 constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
 constexpr std::string_view kOriginHostHeader = "ploto-origin-host";
+constexpr std::string_view kStrictTransportSecurity = "Strict-Transport-Security";
+constexpr std::string_view kStrictTransportSecurityLowcase = "strict-transport-security";
+constexpr std::uint64_t kStrictTransportSecurityHash = http::http_header_name_hash(kStrictTransportSecurityLowcase);
+constexpr std::string_view kStrictTransportSecurityValue = "max-age=31536000";
 
 struct RequestHostContext {
     std::string normalized_host;
@@ -32,13 +37,19 @@ struct RequestEvaluationContext {
     std::string_view request_context_cluster;
 };
 
-bool evaluate_template(void *context, const script::Script &program, std::string_view expression, std::string &output,
-                       AccessError &error) noexcept {
+Result<void> evaluate_template(void *context, const script::Script &program, std::string_view expression,
+                               std::string &output) noexcept {
     auto &request = *static_cast<RequestEvaluationContext *>(context);
-    return request.adapter.evaluate_template &&
-           request.adapter.evaluate_template(request.adapter.context, request.telemetry.script_context(),
+    if (!request.adapter.evaluate_template) {
+        return std::unexpected(Err::from_exception(Exception{
+                .name = "TEMPLATE_SCRIPT",
+                .message = "error exec for template expression: template evaluator is not configured",
+                .status = 500,
+        }));
+    }
+    return request.adapter.evaluate_template(request.adapter.context, request.telemetry.script_context(),
                                              request.matched_path_variables, request.request_context_cluster, program,
-                                             expression, output, error);
+                                             expression, output);
 }
 
 struct RouteMatch {
@@ -197,25 +208,18 @@ std::size_t request_body_limit(const CompiledRoute &route, std::size_t default_l
     return static_cast<std::size_t>(value);
 }
 
-async::Task<common::IoResult<void>> send_redirect(http::HttpExchange &exchange, int status, std::string_view host,
-                                                  std::span<const EvaluatedHeader> base_headers,
-                                                  std::chrono::milliseconds timeout,
-                                                  AccessRequestTelemetry &telemetry) noexcept {
+async::Task<Result<void>> send_redirect(http::HttpExchange &exchange, int status, std::string_view host,
+                                        std::chrono::milliseconds timeout, AccessRequestTelemetry &telemetry) noexcept {
     std::string location = "https://";
     location.append(host);
     location.append(exchange.uri().unparsed_uri);
 
-    http::HttpHeaders headers(exchange.pool());
-    for (const EvaluatedHeader &header: base_headers) {
-        if (!headers.set(header.name, header.value)) {
-            co_return std::unexpected(common::IoErr::NoMem);
-        }
-    }
-    if (!headers.set("Location", location) || !telemetry.inject_response_headers(headers)) {
-        co_return std::unexpected(common::IoErr::NoMem);
+    http::HttpHeaders &headers = telemetry.response_headers();
+    if (!headers.set("Location", location) || !telemetry.finalize_response_headers()) {
+        co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
     }
 
-    co_return co_await exchange.send_header(
+    auto sent = co_await exchange.send_header(
             {
                     .kind = http::OutgoingHeaderKind::Final,
                     .status_code = status,
@@ -225,16 +229,13 @@ async::Task<common::IoResult<void>> send_redirect(http::HttpExchange &exchange, 
                     .end_stream = true,
             },
             timeout);
+    if (!sent) {
+        co_return std::unexpected(Err::from_error(sent.error()));
+    }
+    co_return Result<void>{};
 }
 
 int redirect_status(HttpsStrategy strategy) noexcept { return static_cast<int>(strategy); }
-
-std::string_view request_trace_id(const AccessRequestTelemetry &telemetry) noexcept {
-    if (telemetry.trace_id().empty()) {
-        return kTraceId;
-    }
-    return telemetry.trace_id();
-}
 
 } // namespace
 
@@ -243,53 +244,75 @@ AccessRequestHandler::AccessRequestHandler(const RouteConfigStore &config_store,
                                            AccessRequestHandlerOptions options,
                                            AccessProxyAdapter proxy_adapter) noexcept :
     config_store_(config_store), script_adapter_(script_adapter), options_(options), proxy_adapter_(proxy_adapter),
-    project_base_headers_{
-            EvaluatedHeader{
-                    .name = "Strict-Transport-Security",
-                    .value = "max-age=31536000",
-            },
-    },
-    response_executor_(options.response), error_responder_(ErrorResponderOptions{
-                                                  .body_timeout = options.response.body_timeout,
-                                                  .write_timeout = options.response.write_timeout,
-                                          }) {}
+    response_executor_(options.response),
+    error_responder_(ErrorResponderOptions{.write_timeout = options.response.write_timeout}) {}
 
 async::Task<void> AccessRequestHandler::handle(http::HttpExchange &exchange,
                                                AccessRequestTelemetry &telemetry) const noexcept {
-    auto result = co_await handle_impl(exchange, telemetry);
-    if (!result) {
-        (void) exchange.abort(result.error());
+    if (exchange.response_channel_closed()) {
+        co_return;
     }
-    co_return;
+
+    auto completed = co_await async::when_any([&exchange]() { return exchange.wait_response_channel_closed(); },
+                                              [&]() { return handle_and_finalize(exchange, telemetry).select(); });
+    if (completed.is<1>()) {
+        auto result = std::move(completed).get<1>();
+        if (!result) {
+            (void) exchange.abort(result.error());
+        }
+        co_return;
+    }
+
+    auto closed = std::move(completed).get<0>();
+    if (!closed && !exchange.response_channel_closed()) {
+        (void) exchange.abort(closed.error());
+    }
 }
 
 async::Task<common::IoResult<void>>
-AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTelemetry &telemetry) const noexcept {
+AccessRequestHandler::handle_and_finalize(http::HttpExchange &exchange,
+                                          AccessRequestTelemetry &telemetry) const noexcept {
+    auto result = co_await handle_impl(exchange, telemetry);
+    if (result) {
+        co_return common::IoResult<void>{};
+    }
+    const Err &error = result.error();
+    if (error.kind == Err::Kind::Error) {
+        co_return std::unexpected(error.error);
+    }
+    if (exchange.response_stats().header_sent) {
+        co_return std::unexpected(common::IoErr::Already);
+    }
+    co_return co_await error_responder_.send(exchange, telemetry, error.exception);
+}
+
+async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &exchange,
+                                                            AccessRequestTelemetry &telemetry) const noexcept {
     const std::shared_ptr<const AccessRouteSnapshot> snapshot = config_store_.pin();
     RequestHostContext request_host = resolve_request_host(exchange, options_.test_mode);
     const ProjectHostMatch host_match = snapshot->match_host(request_host.effective_host);
     if (!host_match) {
-        co_return co_await error_responder_.send(exchange, AccessError::router_not_found(), {}, {},
-                                                 request_trace_id(telemetry), false, &telemetry);
+        co_return std::unexpected(Err::from_exception(Exception::router_not_found()));
     }
     telemetry.set_project(host_match.project->project(), request_host.effective_host, request_host.cluster);
+    if (!telemetry.response_headers().set_view(kStrictTransportSecurity, kStrictTransportSecurityValue,
+                                               kStrictTransportSecurityLowcase.data(), kStrictTransportSecurityHash)) {
+        co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
+    }
 
-    const auto &base_headers = project_base_headers_;
     const HostStrategyConfig &strategy = host_match.host->strategy;
     if (strategy.net_mask != 0 && (strategy.net_mask & entry_bit(exchange.header("X-Entry"))) == 0) {
-        co_return co_await error_responder_.send(exchange, AccessError::entry_error(), base_headers, {},
-                                                 request_trace_id(telemetry), false, &telemetry);
+        co_return std::unexpected(Err::from_exception(Exception::entry_error()));
     }
 
     const bool request_is_https = is_https(exchange);
     if (!strategy.https) {
         if (!request_is_https) {
-            co_return co_await error_responder_.send(exchange, AccessError::unknown("invalid HTTPS strategy"),
-                                                     base_headers, {}, request_trace_id(telemetry), false, &telemetry);
+            co_return std::unexpected(Err::from_exception(Exception::unknown("invalid HTTPS strategy")));
         }
     } else if (*strategy.https != HttpsStrategy::NotRequired && !request_is_https) {
         co_return co_await send_redirect(exchange, redirect_status(*strategy.https), request_host.effective_host,
-                                         base_headers, options_.response.write_timeout, telemetry);
+                                         options_.response.write_timeout, telemetry);
     }
 
     RequestEvaluationContext evaluation{
@@ -299,12 +322,15 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
     };
     auto route_match_result = match_route(*host_match.project, exchange, evaluation);
     if (!route_match_result) {
-        co_return std::unexpected(route_match_result.error());
+        co_return std::unexpected(Err::from_error(route_match_result.error()));
     }
     const RouteMatch route_match = *route_match_result;
     if (!route_match) {
-        co_return co_await error_responder_.send(exchange, AccessError::url_not_matched(host_match.project->project()),
-                                                 base_headers, {}, request_trace_id(telemetry), false, &telemetry);
+        auto exception = make_url_not_matched_exception(exchange.pool(), host_match.project->project());
+        if (!exception) {
+            co_return std::unexpected(Err::from_error(exception.error()));
+        }
+        co_return std::unexpected(Err::from_exception(*exception));
     }
 
     const CompiledRoute &route = *route_match.route;
@@ -312,12 +338,10 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
     const std::size_t body_limit = request_body_limit(route, options_.default_max_request_body_size);
     const http::HttpBodySpec body_spec = exchange.request_body_spec();
     if (body_limit != 0 && body_spec.is_content_length() && body_spec.content_length() > body_limit) {
-        co_return co_await error_responder_.send(exchange, AccessError::request_body_too_large(), base_headers, {},
-                                                 request_trace_id(telemetry), true, &telemetry);
+        co_return std::unexpected(Err::from_exception(Exception::request_body_too_large()));
     }
     if (!source_ip_allowed(route, exchange.header("X-Real-Ip"))) {
-        co_return co_await error_responder_.send(exchange, AccessError::source_ip_not_allowed(), base_headers, {},
-                                                 request_trace_id(telemetry), false, &telemetry);
+        co_return std::unexpected(Err::from_exception(Exception::source_ip_not_allowed()));
     }
     evaluation.matched_path_variables = route_match.path_variables;
     TemplateEvaluator template_evaluator;
@@ -330,8 +354,7 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
 
     if (route.type == RouteType::Proxy) {
         if (!proxy_adapter_.execute) {
-            co_return co_await error_responder_.send(exchange, AccessError::unknown("proxy executor is not configured"),
-                                                     base_headers, {}, request_trace_id(telemetry), false, &telemetry);
+            co_return std::unexpected(Err::from_exception(Exception::unknown("proxy executor is not configured")));
         }
         const std::string_view origin_host =
                 request_host.extracted_cluster && !route.proxy->proxy_headers.contains(kOriginHostHeader)
@@ -345,11 +368,10 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
                                                           .template_evaluator = template_evaluator,
                                                           .max_request_body_size = body_limit,
                                                   },
-                                                  base_headers, &telemetry);
+                                                  telemetry);
     }
 
-    co_return co_await response_executor_.execute(exchange, route, base_headers, template_evaluator, body_limit,
-                                                  request_trace_id(telemetry), &telemetry);
+    co_return co_await response_executor_.execute(exchange, route, telemetry, template_evaluator, body_limit);
 }
 
 } // namespace fiber::access_server

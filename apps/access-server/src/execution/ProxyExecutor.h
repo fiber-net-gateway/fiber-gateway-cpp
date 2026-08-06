@@ -5,12 +5,10 @@
 #include "../../../../src/common/NonMovable.h"
 #include "../routing/ProxyAddressSelector.h"
 #include "AccessRequestHandler.h"
-#include "ErrorResponder.h"
 #include "ProxyUpstreamConnection.h"
 
 #include <chrono>
 #include <cstddef>
-#include <span>
 
 namespace fiber::access_server {
 
@@ -19,7 +17,6 @@ struct ProxyExecutorOptions {
     std::size_t request_body_chunk_size = 64 * 1024;
     std::size_t response_body_chunk_size = 64 * 1024;
     std::chrono::milliseconds downstream_write_timeout{30000};
-    ErrorResponderOptions error{};
 };
 
 class ProxyExecutor final : public common::NonCopyable, public common::NonMovable {
@@ -28,26 +25,19 @@ public:
                            ProxyDnsResolver dns_resolver = {}, ProxyExecutorOptions options = {}) noexcept;
 
     [[nodiscard]] AccessProxyAdapter adapter() noexcept;
-    [[nodiscard]] async::Task<common::IoResult<void>>
-    execute(http::HttpExchange &exchange, const CompiledProxyRoute &proxy, ProxyExecutionInput input,
-            std::span<const EvaluatedHeader> base_headers, AccessRequestTelemetry *telemetry = nullptr) noexcept;
+    [[nodiscard]] async::Task<Result<void>> execute(http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
+                                                    ProxyExecutionInput input,
+                                                    AccessRequestTelemetry &telemetry) noexcept;
 
 private:
-    static async::Task<common::IoResult<void>> execute_adapter(void *context, http::HttpExchange &exchange,
-                                                               const CompiledProxyRoute &proxy,
-                                                               ProxyExecutionInput input,
-                                                               std::span<const EvaluatedHeader> base_headers,
-                                                               AccessRequestTelemetry *telemetry) noexcept;
-
-    [[nodiscard]] async::Task<common::IoResult<void>>
-    execute_monitored(http::HttpExchange &exchange, const CompiledProxyRoute &proxy, ProxyExecutionInput input,
-                      std::span<const EvaluatedHeader> base_headers, AccessRequestTelemetry *telemetry) noexcept;
+    static async::Task<Result<void>> execute_adapter(void *context, http::HttpExchange &exchange,
+                                                     const CompiledProxyRoute &proxy, ProxyExecutionInput input,
+                                                     AccessRequestTelemetry &telemetry) noexcept;
 
     http::LocalHttp1ConnectionPoolSet &pool_;
     ProxyClusterMatcher cluster_matcher_{};
     ProxyDnsResolver dns_resolver_{};
     ProxyExecutorOptions options_{};
-    ErrorResponder error_responder_;
 };
 
 } // namespace fiber::access_server

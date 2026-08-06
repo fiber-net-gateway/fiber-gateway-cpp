@@ -15,6 +15,7 @@
 #include <common/NonMovable.h>
 #include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/Transaction.h>
+#include <http/HttpHeaders.h>
 #include <http_script/ScriptExchangeCtx.h>
 
 namespace fiber::cat {
@@ -23,12 +24,11 @@ class CatClient;
 
 namespace fiber::http {
 class HttpExchange;
-class HttpHeaders;
 } // namespace fiber::http
 
 namespace fiber::access_server {
 
-struct AccessError;
+struct Exception;
 struct CompiledRoute;
 struct ProxyUpstreamEndpoint;
 
@@ -55,7 +55,7 @@ private:
     cat::Transaction transaction_;
 };
 
-// Request-lifetime owner for script execution state and optional observability sinks.
+// Request-lifetime owner for access-server execution state and optional observability sinks.
 class AccessRequestTelemetry final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
@@ -65,14 +65,16 @@ public:
     void set_project(std::string_view project, std::string_view effective_host,
                      std::string_view context_cluster) noexcept;
     void set_route(const CompiledRoute &route) noexcept;
-    void set_error(const AccessError &error) noexcept;
+    void set_error(const Exception &error) noexcept;
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept;
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
 
     [[nodiscard]] std::string_view trace_id() const noexcept;
     [[nodiscard]] http_script::ScriptExchangeCtx &script_context() noexcept { return script_context_; }
     [[nodiscard]] const http_script::ScriptExchangeCtx &script_context() const noexcept { return script_context_; }
-    [[nodiscard]] bool inject_response_headers(http::HttpHeaders &headers) const noexcept;
+    [[nodiscard]] http::HttpHeaders &response_headers() noexcept { return response_headers_; }
+    [[nodiscard]] const http::HttpHeaders &response_headers() const noexcept { return response_headers_; }
+    [[nodiscard]] bool finalize_response_headers() noexcept;
     [[nodiscard]] bool inject_upstream_headers(http::HttpHeaders &headers,
                                                AccessProviderTransaction &provider) noexcept;
 
@@ -83,6 +85,7 @@ private:
 
     script::GcHeap script_heap_;
     http_script::ScriptExchangeCtx script_context_;
+    http::HttpHeaders response_headers_;
     AccessServerMetrics::Worker *metrics_ = nullptr;
     std::chrono::steady_clock::time_point started_{};
     cat::Transaction root_;

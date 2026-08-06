@@ -1,7 +1,7 @@
 #include "AccessRequestTelemetry.h"
 #include "AccessServerLogCategories.h"
 
-#include "../execution/AccessError.h"
+#include "../execution/AccessResult.h"
 #include "../routing/ProjectRouteSnapshot.h"
 #include "../routing/ProxyAddressSelector.h"
 
@@ -134,8 +134,8 @@ void AccessProviderTransaction::cancel_pending() noexcept {
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
                                                cat::CatClient *cat_client) noexcept :
-    script_heap_(exchange.pool()), script_context_(exchange, script_heap_), metrics_(metrics),
-    started_(event::EventLoop::current().now()) {
+    script_heap_(exchange.pool()), script_context_(exchange, script_heap_), response_headers_(exchange.pool()),
+    metrics_(metrics), started_(event::EventLoop::current().now()) {
     if (metrics_) {
         metrics_->request_started();
     }
@@ -253,7 +253,7 @@ void AccessRequestTelemetry::set_route(const CompiledRoute &route) noexcept {
     update_transaction_name();
 }
 
-void AccessRequestTelemetry::set_error(const AccessError &error) noexcept {
+void AccessRequestTelemetry::set_error(const Exception &error) noexcept {
     if (!error_.empty()) {
         return;
     }
@@ -291,10 +291,10 @@ std::string_view AccessRequestTelemetry::trace_id() const noexcept {
     return context_->root_message_id.empty() ? context_->message_id : context_->root_message_id;
 }
 
-bool AccessRequestTelemetry::inject_response_headers(http::HttpHeaders &headers) const noexcept {
+bool AccessRequestTelemetry::finalize_response_headers() noexcept {
     const std::string_view id = trace_id();
     return id.empty() ||
-           headers.set_view(kTraceIdHeader, id, kTraceIdLowcaseHeader.data(), kTraceIdHeaderHash) != nullptr;
+           response_headers_.set_view(kTraceIdHeader, id, kTraceIdLowcaseHeader.data(), kTraceIdHeaderHash) != nullptr;
 }
 
 bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers,

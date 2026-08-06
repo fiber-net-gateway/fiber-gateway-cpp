@@ -30,11 +30,11 @@ private:
                                                  std::span<const PathVariable> path_variables,
                                                  std::string_view request_context_cluster,
                                                  const script::Script &program) noexcept;
-    [[nodiscard]] static bool evaluate_template(void *context, http_script::ScriptExchangeCtx &script_context,
-                                                std::span<const PathVariable> path_variables,
-                                                std::string_view request_context_cluster, const script::Script &program,
-                                                std::string_view expression, std::string &output,
-                                                AccessError &error) noexcept;
+    [[nodiscard]] static Result<void> evaluate_template(void *context, http_script::ScriptExchangeCtx &script_context,
+                                                        std::span<const PathVariable> path_variables,
+                                                        std::string_view request_context_cluster,
+                                                        const script::Script &program, std::string_view expression,
+                                                        std::string &output) noexcept;
 
     script::std_lib::StdLibrary library_;
     http_script::RouteScriptExtension route_extension_;

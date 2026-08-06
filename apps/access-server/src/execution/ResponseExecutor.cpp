@@ -23,14 +23,11 @@ bool apply_headers(http::HttpHeaders &headers, std::span<const EvaluatedHeader> 
     return true;
 }
 
-async::Task<common::IoResult<void>> send_response(http::HttpExchange &exchange, const PreparedResponse &response,
-                                                  std::span<const EvaluatedHeader> base_headers,
-                                                  std::chrono::milliseconds timeout,
-                                                  AccessRequestTelemetry *telemetry) noexcept {
-    http::HttpHeaders headers(exchange.pool());
-    if (!apply_headers(headers, base_headers) || !apply_headers(headers, response.headers) ||
-        (telemetry && !telemetry->inject_response_headers(headers))) {
-        co_return std::unexpected(common::IoErr::NoMem);
+async::Task<Result<void>> send_response(http::HttpExchange &exchange, const PreparedResponse &response,
+                                        std::chrono::milliseconds timeout, AccessRequestTelemetry &telemetry) noexcept {
+    http::HttpHeaders &headers = telemetry.response_headers();
+    if (!apply_headers(headers, response.headers) || !telemetry.finalize_response_headers()) {
+        co_return std::unexpected(Err::from_error(common::IoErr::NoMem));
     }
 
     const bool empty = response.body.empty();
@@ -45,18 +42,18 @@ async::Task<common::IoResult<void>> send_response(http::HttpExchange &exchange, 
             },
             timeout);
     if (!header_result) {
-        co_return std::unexpected(header_result.error());
+        co_return std::unexpected(Err::from_error(header_result.error()));
     }
     if (empty) {
-        co_return common::IoResult<void>{};
+        co_return Result<void>{};
     }
 
     auto body_result = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(response.body.data()),
                                                    response.body.size(), true, timeout);
     if (!body_result) {
-        co_return std::unexpected(body_result.error());
+        co_return std::unexpected(Err::from_error(body_result.error()));
     }
-    co_return common::IoResult<void>{};
+    co_return Result<void>{};
 }
 
 async::Task<common::IoResult<BodyDiscardStatus>> discard_request_body(http::HttpExchange &exchange,
@@ -88,31 +85,25 @@ async::Task<common::IoResult<BodyDiscardStatus>> discard_request_body(http::Http
 
 } // namespace
 
-async::Task<common::IoResult<void>> ResponseExecutor::execute(http::HttpExchange &exchange, const CompiledRoute &route,
-                                                              std::span<const EvaluatedHeader> base_headers,
-                                                              TemplateEvaluator evaluator,
-                                                              std::size_t max_request_body_size,
-                                                              std::string_view trace_id,
-                                                              AccessRequestTelemetry *telemetry) const noexcept {
+async::Task<Result<void>> ResponseExecutor::execute(http::HttpExchange &exchange, const CompiledRoute &route,
+                                                    AccessRequestTelemetry &telemetry, TemplateEvaluator evaluator,
+                                                    std::size_t max_request_body_size) const noexcept {
     auto discard_result = co_await discard_request_body(exchange, max_request_body_size, options_.body_timeout);
     if (!discard_result) {
-        co_return std::unexpected(discard_result.error());
+        co_return std::unexpected(Err::from_error(discard_result.error()));
     }
     if (*discard_result == BodyDiscardStatus::TooLarge) {
-        co_return co_await error_responder_.send(exchange, AccessError::request_body_too_large(), base_headers, {},
-                                                 trace_id, true, telemetry);
+        co_return std::unexpected(Err::from_exception(Exception::request_body_too_large()));
     }
     if (!route.response) {
-        co_return co_await error_responder_.send(exchange, AccessError::unknown("route is not a response route"),
-                                                 base_headers, {}, trace_id, true, telemetry);
+        co_return std::unexpected(Err::from_exception(Exception::unknown("route is not a response route")));
     }
 
     auto prepared = prepare_response(*route.response, evaluator);
     if (!prepared) {
-        co_return co_await error_responder_.send(exchange, prepared.error().error, base_headers,
-                                                 prepared.error().inherited_headers, trace_id, true, telemetry);
+        co_return std::unexpected(prepared.error());
     }
-    co_return co_await send_response(exchange, *prepared, base_headers, options_.write_timeout, telemetry);
+    co_return co_await send_response(exchange, *prepared, options_.write_timeout, telemetry);
 }
 
 } // namespace fiber::access_server

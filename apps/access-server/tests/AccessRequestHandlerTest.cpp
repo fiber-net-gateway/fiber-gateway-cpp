@@ -27,19 +27,21 @@ namespace {
 
 using namespace std::chrono_literals;
 
-using fiber::access_server::AccessError;
 using fiber::access_server::AccessProxyAdapter;
 using fiber::access_server::AccessRequestHandler;
 using fiber::access_server::AccessRequestHandlerOptions;
 using fiber::access_server::AccessRequestScriptAdapter;
 using fiber::access_server::AccessScriptRuntime;
 using fiber::access_server::BodyType;
+using fiber::access_server::Err;
+using fiber::access_server::Exception;
 using fiber::access_server::HostConfigEntry;
 using fiber::access_server::HostStrategyConfig;
 using fiber::access_server::HttpsStrategy;
 using fiber::access_server::PathVariable;
 using fiber::access_server::ProjectConfig;
 using fiber::access_server::ProxyExecutionInput;
+using fiber::access_server::Result;
 using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
@@ -156,6 +158,7 @@ fiber::async::DetachedTask run_committed_response_on_loop(fiber::event::EventLoo
                                                           "Connection: close\r\n\r\n",
                                                           *output);
     fiber::http::HttpHandler handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr);
         auto sent = co_await exchange.send_header({
                 .kind = fiber::http::OutgoingHeaderKind::Final,
                 .status_code = 204,
@@ -164,7 +167,7 @@ fiber::async::DetachedTask run_committed_response_on_loop(fiber::event::EventLoo
         });
         if (sent) {
             fiber::access_server::ErrorResponder responder;
-            (void) co_await responder.send(exchange, AccessError::entry_error(), {}, {}, "trace", true);
+            (void) co_await responder.send(exchange, telemetry, Exception::entry_error());
         }
         co_return;
     };
@@ -261,23 +264,27 @@ bool evaluate_condition(void *, fiber::http_script::ScriptExchangeCtx &, std::sp
     return path_variables.size() == 1 && path_variables[0].value == "42";
 }
 
-bool evaluate_template(void *, fiber::http_script::ScriptExchangeCtx &script_context,
-                       std::span<const PathVariable> path_variables, std::string_view, const fiber::script::Script &,
-                       std::string_view expression, std::string &output, AccessError &error) noexcept {
+Result<void> evaluate_template(void *, fiber::http_script::ScriptExchangeCtx &script_context,
+                               std::span<const PathVariable> path_variables, std::string_view,
+                               const fiber::script::Script &, std::string_view expression,
+                               std::string &output) noexcept {
     if (expression == "'fail'") {
-        error = AccessError::template_script("fixture failure");
-        return false;
+        return std::unexpected(Err::from_exception(Exception{
+                .name = "TEMPLATE_SCRIPT",
+                .message = "error exec for template expression: fixture failure",
+                .status = 500,
+        }));
     }
     if (expression == "$req.method") {
         output.assign(script_context.exchange().method_view());
-        return true;
+        return {};
     }
     if (expression == "$path.id" && path_variables.size() == 1) {
         output.assign(path_variables[0].value);
-        return true;
+        return {};
     }
     output.clear();
-    return true;
+    return {};
 }
 
 AccessRequestScriptAdapter script_adapter() {
@@ -313,14 +320,15 @@ bool reject_with_shared_context(void *opaque, fiber::http_script::ScriptExchange
     return false;
 }
 
-bool evaluate_with_shared_context(void *opaque, fiber::http_script::ScriptExchangeCtx &context,
-                                  std::span<const PathVariable>, std::string_view, const fiber::script::Script &,
-                                  std::string_view, std::string &output, AccessError &) noexcept {
+Result<void> evaluate_with_shared_context(void *opaque, fiber::http_script::ScriptExchangeCtx &context,
+                                          std::span<const PathVariable>, std::string_view,
+                                          const fiber::script::Script &, std::string_view,
+                                          std::string &output) noexcept {
     auto &state = *static_cast<SharedScriptContextState *>(opaque);
     record_script_context(state, context);
     ++state.template_calls;
     output = "shared";
-    return true;
+    return {};
 }
 
 struct CapturedProxyRequest {
@@ -342,11 +350,10 @@ struct CapturedProxyRequest {
     bool template_evaluator_configured = false;
 };
 
-fiber::async::Task<fiber::common::IoResult<void>>
+fiber::async::Task<Result<void>>
 capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
                       const fiber::access_server::CompiledProxyRoute &proxy, ProxyExecutionInput input,
-                      std::span<const fiber::access_server::EvaluatedHeader> base_headers,
-                      fiber::access_server::AccessRequestTelemetry *) noexcept {
+                      fiber::access_server::AccessRequestTelemetry &telemetry) noexcept {
     auto &capture = *static_cast<CapturedProxyRequest *>(context);
     capture.service.assign(proxy.address_selector ? proxy.address_selector->service_name() : std::string_view{});
     const std::optional<std::string_view> configured_cluster =
@@ -375,7 +382,7 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
         for (;;) {
             auto body = co_await exchange.read_body(64 * 1024);
             if (!body) {
-                co_return std::unexpected(body.error());
+                co_return std::unexpected(Err::from_error(body.error()));
             }
             const bool complete = body->complete();
             while (const fiber::mem::IoBuf *part = body->first_readable()) {
@@ -389,14 +396,9 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
     }
 
     constexpr std::string_view kBody = "proxied";
-    fiber::http::HttpHeaders response_headers(exchange.pool());
-    for (const auto &header: base_headers) {
-        if (!response_headers.set(header.name, header.value)) {
-            co_return std::unexpected(fiber::common::IoErr::NoMem);
-        }
-    }
-    if (!response_headers.set("X-Proxy-Fixture", "captured")) {
-        co_return std::unexpected(fiber::common::IoErr::NoMem);
+    fiber::http::HttpHeaders &response_headers = telemetry.response_headers();
+    if (!response_headers.set("X-Proxy-Fixture", "captured") || !telemetry.finalize_response_headers()) {
+        co_return std::unexpected(Err::from_error(fiber::common::IoErr::NoMem));
     }
     auto sent_header = co_await exchange.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
@@ -407,17 +409,17 @@ capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
             .end_stream = false,
     });
     if (!sent_header) {
-        co_return std::unexpected(sent_header.error());
+        co_return std::unexpected(Err::from_error(sent_header.error()));
     }
     auto sent_body =
             co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true);
     if (!sent_body) {
-        co_return std::unexpected(sent_body.error());
+        co_return std::unexpected(Err::from_error(sent_body.error()));
     }
     if (*sent_body != kBody.size()) {
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
+        co_return std::unexpected(Err::from_error(fiber::common::IoErr::Invalid));
     }
-    co_return fiber::common::IoResult<void>{};
+    co_return Result<void>{};
 }
 
 AccessProxyAdapter proxy_adapter(CapturedProxyRequest &capture) {
@@ -628,7 +630,7 @@ TEST(AccessRequestHandlerTest, RedirectsBeforePathMatching) {
     EXPECT_EQ(response_body(response), "");
 }
 
-TEST(AccessRequestHandlerTest, PreservesJavaHeaderCommitBoundaryOnLiveErrors) {
+TEST(AccessRequestHandlerTest, DiscardsRouteHeadersOnLivePreparationErrors) {
     AccessScriptRuntime scripts;
     RouteConfig header_failure = response_route("/header-failure", "unreached");
     header_failure.response_headers = {
@@ -657,7 +659,7 @@ TEST(AccessRequestHandlerTest, PreservesJavaHeaderCommitBoundaryOnLiveErrors) {
                                                   "Connection: close\r\n\r\n",
                                                   script_adapter());
     EXPECT_TRUE(body_response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
-    EXPECT_NE(body_response.find("X-First: one\r\n"), std::string::npos);
+    EXPECT_EQ(body_response.find("X-First: one\r\n"), std::string::npos);
     EXPECT_NE(body_response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
 }
 
@@ -678,6 +680,24 @@ TEST(AccessRequestHandlerTest, ChecksKnownBodyLengthBeforeCidr) {
                                              "Content-Length: 5\r\n"
                                              "Connection: close\r\n\r\n"
                                              "12345",
+                                             {}, options);
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 413 Payload Too Large\r\n"));
+    EXPECT_EQ(response_body(response),
+              R"({"name":"REQ_BODY_TOO_LARGE","message":"request body is too large","meta":null})");
+}
+
+TEST(AccessRequestHandlerTest, SendsKnownLengthErrorWithoutWaitingForRequestBody) {
+    RouteConfigStore store;
+    publish(store, project({}, {response_route("/limited", "unreached")}));
+
+    AccessRequestHandlerOptions options;
+    options.default_max_request_body_size = 4;
+    const std::string response = run_request(store,
+                                             "POST /limited HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Content-Length: 5\r\n"
+                                             "Connection: close\r\n\r\n",
                                              {}, options);
 
     EXPECT_TRUE(response.starts_with("HTTP/1.1 413 Payload Too Large\r\n"));
