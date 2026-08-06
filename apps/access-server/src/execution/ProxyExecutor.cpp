@@ -1,6 +1,8 @@
 #include "ProxyExecutor.h"
 #include "../observability/AccessRequestTelemetry.h"
 
+#include "../../../../src/async/TaskSelect.h"
+#include "../../../../src/async/WhenAny.h"
 #include "../../../../src/common/Assert.h"
 #include "../../../../src/http/ClientHttp1Exchange.h"
 #include "../../../../src/http/Http1ClientConnection.h"
@@ -440,6 +442,27 @@ async::Task<Result<void>> ProxyExecutor::execute_adapter(void *context, http::Ht
 async::Task<Result<void>> ProxyExecutor::execute(http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
                                                  ProxyExecutionInput input,
                                                  AccessRequestTelemetry &telemetry) noexcept {
+    if (exchange.response_channel_closed()) {
+        co_return Result<void>{};
+    }
+
+    auto completed =
+            co_await async::when_any([&exchange]() { return exchange.wait_response_channel_closed(); },
+                                     [&]() { return execute_impl(exchange, proxy, input, telemetry).select(); });
+    if (completed.is<1>()) {
+        co_return std::move(completed).get<1>();
+    }
+
+    auto closed = std::move(completed).get<0>();
+    if (!closed && !exchange.response_channel_closed()) {
+        co_return std::unexpected(Err::from_error(closed.error()));
+    }
+    co_return Result<void>{};
+}
+
+async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
+                                                      ProxyExecutionInput input,
+                                                      AccessRequestTelemetry &telemetry) noexcept {
     FIBER_ASSERT(proxy.address_selector != nullptr);
 
     auto context_cluster =

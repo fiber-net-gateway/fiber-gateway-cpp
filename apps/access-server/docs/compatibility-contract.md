@@ -527,10 +527,10 @@ NamingService route 依赖协调和原子服务目录：仅接受 enabled、heal
 不属于兼容边界。
 
 production gray 原子快照在 selector 前覆盖 cluster，非空 context cluster 次之，
-最后才使用 route 默认 cluster。最终请求 handler 统一监视 downstream response
-channel；在 RESPONSE、错误响应、等待 proxy response header/body 或 tunnel 时关闭
-downstream，都会销毁未完成的执行 coroutine，并使 active upstream exchange 退出 pool
-复用。上述组件已在
+最后才使用 route 默认 cluster。`ProxyExecutor` 在选择/连接 upstream、转发 request/response
+以及 tunnel 期间监视 downstream response channel；downstream 关闭会销毁未完成的 proxy
+coroutine，并使 active upstream exchange 退出 pool 复用。RESPONSE、redirect 和错误响应
+直接等待 downstream IO，由相应读写操作返回 channel 关闭错误。上述组件已在
 `AccessServerRuntime` 完成进程级装配：每个 request worker 使用自己的 DNS resolver
 和 local pool shard，项目列表首值到达前不绑定 listener，关闭时先停止 listener 和
 active exchange，再关闭 pool/DNS 和 Nacos 控制面。本地脚本 adapter 和测试环境
@@ -589,10 +589,11 @@ tunnel，保留 upstream `Sec-WebSocket-Accept` 和非 hop-by-hop header，并�
 
 ## 12. 错误响应
 
-RESPONSE、PROXY、脚本和路由中间层只返回 `Result<T>`：`Err::Exception` 表示响应尚未
-提交、可以渲染为业务错误；`Err::Error` 表示底层 IO/内存或提交后的失败，只中止
-exchange。只有请求 handler 最外层把 Exception 交给 `ErrorResponder`，若 response
-已经提交则不再二次写入。
+RESPONSE、PROXY、脚本和路由中间层只返回 `Result<T>`：`Err::Exception` 携带可渲染的
+业务错误，`Err::Error` 保留底层 IO/内存错误。只有请求 handler 最外层调用
+`ErrorResponder`：response header 尚未提交且 channel 可用时，Exception 按原错误发送，
+Error 统一映射为 `ACCESS_UNKNOWN_ERROR` 500；header 已提交或 channel 已关闭时不再写入
+第二份响应，只终止 exchange。
 
 `ErrorResponder` 不读取或 discard request body，而是立即发送可用的错误响应。handler
 返回后的未读请求体清理由 HTTP connection/stream 层负责；因此已知 Content-Length

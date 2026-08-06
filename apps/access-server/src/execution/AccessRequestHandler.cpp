@@ -1,8 +1,6 @@
 #include "AccessRequestHandler.h"
 #include "../observability/AccessRequestTelemetry.h"
 
-#include "../../../../src/async/TaskSelect.h"
-#include "../../../../src/async/WhenAny.h"
 #include "../../../../src/http/HttpBodySpec.h"
 #include "../../../../src/http/HttpExchange.h"
 #include "../../../../src/http/HttpHeaderHash.h"
@@ -253,19 +251,9 @@ async::Task<void> AccessRequestHandler::handle(http::HttpExchange &exchange,
         co_return;
     }
 
-    auto completed = co_await async::when_any([&exchange]() { return exchange.wait_response_channel_closed(); },
-                                              [&]() { return handle_and_finalize(exchange, telemetry).select(); });
-    if (completed.is<1>()) {
-        auto result = std::move(completed).get<1>();
-        if (!result) {
-            (void) exchange.abort(result.error());
-        }
-        co_return;
-    }
-
-    auto closed = std::move(completed).get<0>();
-    if (!closed && !exchange.response_channel_closed()) {
-        (void) exchange.abort(closed.error());
+    auto result = co_await handle_and_finalize(exchange, telemetry);
+    if (!result) {
+        (void) exchange.abort(result.error());
     }
 }
 
@@ -276,14 +264,15 @@ AccessRequestHandler::handle_and_finalize(http::HttpExchange &exchange,
     if (result) {
         co_return common::IoResult<void>{};
     }
-    const Err &error = result.error();
-    if (error.kind == Err::Kind::Error) {
-        co_return std::unexpected(error.error);
-    }
+    const Err error = result.error();
     if (exchange.response_stats().header_sent) {
-        co_return std::unexpected(common::IoErr::Already);
+        co_return std::unexpected(error.kind == Err::Kind::Error ? error.error : common::IoErr::Already);
     }
-    co_return co_await error_responder_.send(exchange, telemetry, error.exception);
+    if (exchange.response_channel_closed()) {
+        co_return std::unexpected(error.kind == Err::Kind::Error ? error.error : common::IoErr::Canceled);
+    }
+    const Exception response_error = error.kind == Err::Kind::Exception ? error.exception : Exception::unknown();
+    co_return co_await error_responder_.send(exchange, telemetry, response_error);
 }
 
 async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &exchange,

@@ -429,6 +429,40 @@ AccessProxyAdapter proxy_adapter(CapturedProxyRequest &capture) {
     };
 }
 
+fiber::async::Task<Result<void>> fail_proxy_before_response(void *, fiber::http::HttpExchange &,
+                                                            const fiber::access_server::CompiledProxyRoute &,
+                                                            ProxyExecutionInput,
+                                                            fiber::access_server::AccessRequestTelemetry &) noexcept {
+    co_return std::unexpected(Err::from_error(fiber::common::IoErr::NoMem));
+}
+
+fiber::async::Task<Result<void>>
+fail_proxy_after_response_header(void *, fiber::http::HttpExchange &exchange,
+                                 const fiber::access_server::CompiledProxyRoute &, ProxyExecutionInput,
+                                 fiber::access_server::AccessRequestTelemetry &telemetry) noexcept {
+    if (!telemetry.finalize_response_headers()) {
+        co_return std::unexpected(Err::from_error(fiber::common::IoErr::NoMem));
+    }
+    auto sent = co_await exchange.send_header({
+            .kind = fiber::http::OutgoingHeaderKind::Final,
+            .status_code = 204,
+            .headers = &telemetry.response_headers(),
+            .body = fiber::http::HttpBodySpec::ContentLength(0),
+            .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+            .end_stream = true,
+    });
+    if (!sent) {
+        co_return std::unexpected(Err::from_error(sent.error()));
+    }
+    co_return std::unexpected(Err::from_error(fiber::common::IoErr::Invalid));
+}
+
+AccessProxyAdapter failing_proxy_adapter(AccessProxyAdapter::ExecuteFunction execute) {
+    return AccessProxyAdapter{
+            .execute = execute,
+    };
+}
+
 TEST(AccessRequestHandlerTest, WritesLiveResponseAndExposesPathVariablesToScripts) {
     AccessScriptRuntime scripts;
     RouteConfig conditional = response_route("/items/:id", "item=${$path.id};method=${$req.method}", 201);
@@ -742,6 +776,38 @@ TEST(AccessRequestHandlerTest, DoesNotWriteAnErrorAfterResponseCommit) {
     EXPECT_TRUE(response.starts_with("HTTP/1.1 204 No Content\r\n"));
     EXPECT_EQ(std::count(response.begin(), response.end(), '{'), 0);
     EXPECT_EQ(response.find("ENTRY_ERROR"), std::string::npos);
+    EXPECT_EQ(response.find("HTTP/1.1", std::string_view("HTTP/1.1").size()), std::string::npos);
+}
+
+TEST(AccessRequestHandlerTest, RendersIoErrorAsUnknownErrorBeforeResponseCommit) {
+    RouteConfigStore store;
+    publish(store, project({}, {proxy_route("/failure")}));
+
+    const std::string response = run_request(store,
+                                             "GET /failure HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             {}, {}, failing_proxy_adapter(fail_proxy_before_response));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+    EXPECT_NE(response.find("Strict-Transport-Security: max-age=31536000\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Content-Type: application/json; charset=utf-8\r\n"), std::string::npos);
+    EXPECT_EQ(response_body(response), R"({"name":"ACCESS_UNKNOWN_ERROR","message":"unknown error","meta":null})");
+    EXPECT_EQ(response.find("HTTP/1.1", std::string_view("HTTP/1.1").size()), std::string::npos);
+}
+
+TEST(AccessRequestHandlerTest, DoesNotRenderIoErrorAfterResponseCommit) {
+    RouteConfigStore store;
+    publish(store, project({}, {proxy_route("/committed-failure")}));
+
+    const std::string response = run_request(store,
+                                             "GET /committed-failure HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             {}, {}, failing_proxy_adapter(fail_proxy_after_response_header));
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 204 No Content\r\n"));
+    EXPECT_EQ(response.find("ACCESS_UNKNOWN_ERROR"), std::string::npos);
     EXPECT_EQ(response.find("HTTP/1.1", std::string_view("HTTP/1.1").size()), std::string::npos);
 }
 
