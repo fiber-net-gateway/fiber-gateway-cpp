@@ -259,13 +259,12 @@ void publish(RouteConfigStore &store, ProjectConfig config) {
     ASSERT_TRUE(result) << result.error().message;
 }
 
-bool evaluate_condition(void *, fiber::http_script::ScriptExchangeCtx &, std::span<const PathVariable> path_variables,
-                        std::string_view, const fiber::script::Script &) noexcept {
-    return path_variables.size() == 1 && path_variables[0].value == "42";
+bool evaluate_condition(void *, fiber::http_script::ScriptExchangeCtx &script_context,
+                        const fiber::script::Script &) noexcept {
+    return script_context.exchange().uri().path.ends_with("/42");
 }
 
 Result<void> evaluate_template(void *, fiber::http_script::ScriptExchangeCtx &script_context,
-                               std::span<const PathVariable> path_variables, std::string_view,
                                const fiber::script::Script &, std::string_view expression,
                                std::string &output) noexcept {
     if (expression == "'fail'") {
@@ -279,8 +278,10 @@ Result<void> evaluate_template(void *, fiber::http_script::ScriptExchangeCtx &sc
         output.assign(script_context.exchange().method_view());
         return {};
     }
-    if (expression == "$path.id" && path_variables.size() == 1) {
-        output.assign(path_variables[0].value);
+    if (expression == "$path.id") {
+        const std::string_view path = script_context.exchange().uri().path;
+        const std::size_t slash = path.rfind('/');
+        output.assign(slash == std::string_view::npos ? path : path.substr(slash + 1));
         return {};
     }
     output.clear();
@@ -312,7 +313,6 @@ void record_script_context(SharedScriptContextState &state, fiber::http_script::
 }
 
 bool reject_with_shared_context(void *opaque, fiber::http_script::ScriptExchangeCtx &context,
-                                std::span<const PathVariable>, std::string_view,
                                 const fiber::script::Script &) noexcept {
     auto &state = *static_cast<SharedScriptContextState *>(opaque);
     record_script_context(state, context);
@@ -321,7 +321,6 @@ bool reject_with_shared_context(void *opaque, fiber::http_script::ScriptExchange
 }
 
 Result<void> evaluate_with_shared_context(void *opaque, fiber::http_script::ScriptExchangeCtx &context,
-                                          std::span<const PathVariable>, std::string_view,
                                           const fiber::script::Script &, std::string_view,
                                           std::string &output) noexcept {
     auto &state = *static_cast<SharedScriptContextState *>(opaque);

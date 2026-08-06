@@ -31,8 +31,6 @@ struct RequestHostContext {
 struct RequestEvaluationContext {
     AccessRequestScriptAdapter adapter;
     AccessRequestTelemetry &telemetry;
-    std::span<const PathVariable> matched_path_variables;
-    std::string_view request_context_cluster;
 };
 
 Result<void> evaluate_template(void *context, const script::Script &program, std::string_view expression,
@@ -45,8 +43,7 @@ Result<void> evaluate_template(void *context, const script::Script &program, std
                 .status = 500,
         }));
     }
-    return request.adapter.evaluate_template(request.adapter.context, request.telemetry.script_context(),
-                                             request.matched_path_variables, request.request_context_cluster, program,
+    return request.adapter.evaluate_template(request.adapter.context, request.telemetry.script_context(), program,
                                              expression, output);
 }
 
@@ -65,15 +62,25 @@ public:
 
     bool matched(std::uint32_t, std::uint32_t route_index) noexcept {
         const CompiledRoute &route = routes_[route_index];
+        const std::span<const PathVariable> captures = path_variables_.first(path_variable_count_);
+        std::size_t bound_count = 0;
+        for (; bound_count < route.path_constant_indices.size() && bound_count < captures.size(); ++bound_count) {
+            const http_script::ConstIndex index = route.path_constant_indices[bound_count];
+            if (index != http_script::kInvalidConstIndex &&
+                !request_.telemetry.script_context().bind_constant(index, captures[bound_count].value)) {
+                request_.telemetry.script_context().clear_constants(route.path_constant_indices);
+                return false;
+            }
+        }
         if (route.condition_program &&
             (!request_.adapter.evaluate_condition ||
              !request_.adapter.evaluate_condition(request_.adapter.context, request_.telemetry.script_context(),
-                                                  path_variables_.first(path_variable_count_),
-                                                  request_.request_context_cluster, *route.condition_program))) {
+                                                  *route.condition_program))) {
+            request_.telemetry.script_context().clear_constants(route.path_constant_indices);
             return false;
         }
         matched_route_ = &route;
-        matched_path_variables_ = path_variables_.first(path_variable_count_);
+        matched_path_variables_ = captures;
         return true;
     }
 
@@ -304,10 +311,21 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
                                          options_.response.write_timeout, telemetry);
     }
 
+    auto constants_ready = telemetry.script_context().prepare_constants(host_match.project->const_package());
+    if (!constants_ready) {
+        co_return std::unexpected(Err::from_error(constants_ready.error()));
+    }
+    if (!request_host.cluster.empty()) {
+        for (http_script::ConstIndex index: host_match.project->context_cluster_indices()) {
+            if (!telemetry.script_context().bind_constant(index, request_host.cluster)) {
+                co_return std::unexpected(Err::from_error(common::IoErr::Invalid));
+            }
+        }
+    }
+
     RequestEvaluationContext evaluation{
             .adapter = script_adapter_,
             .telemetry = telemetry,
-            .request_context_cluster = request_host.cluster,
     };
     auto route_match_result = match_route(*host_match.project, exchange, evaluation);
     if (!route_match_result) {
@@ -332,7 +350,6 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
     if (!source_ip_allowed(route, exchange.header("X-Real-Ip"))) {
         co_return std::unexpected(Err::from_exception(Exception::source_ip_not_allowed()));
     }
-    evaluation.matched_path_variables = route_match.path_variables;
     TemplateEvaluator template_evaluator;
     if (script_adapter_.evaluate_template) {
         template_evaluator = TemplateEvaluator{

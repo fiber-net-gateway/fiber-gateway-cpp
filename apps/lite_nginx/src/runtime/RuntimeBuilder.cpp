@@ -26,12 +26,6 @@ constexpr std::chrono::milliseconds kDefaultReadTimeout{60000};
 constexpr std::chrono::milliseconds kDefaultSendTimeout{60000};
 constexpr std::uint8_t kSkipHeaderValue = 1;
 
-enum class ScriptCompileScope : std::uint8_t {
-    RouteScript,
-    ProxyTemplate,
-    AccessLogTemplate,
-};
-
 using fiber::util::RoutePatternError;
 
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
@@ -41,9 +35,7 @@ RuntimeError make_error(const config::SourceLocation &location, std::string mess
     };
 }
 
-// Reads a script file and compiles it against the runtime's StdLibrary. Host-call function
-// pointers and userdata are copied into the compiled script; extension userdata is owned by
-// RuntimeConfig's shared extension contexts.
+// Reads a script file and compiles it against the runtime's StdLibrary.
 std::expected<std::shared_ptr<fiber::script::Script>, RuntimeError>
 compile_script_file(fiber::script::Library &library, const std::string &path, const config::SourceLocation &loc) {
     std::ifstream file(path, std::ios::binary);
@@ -72,13 +64,6 @@ void ensure_script_library(RuntimeConfig &runtime) {
                                         fiber::http_script::RouteScriptExtension::ops());
 }
 
-void set_script_compile_context(RuntimeConfig &runtime, const std::vector<std::string> &path_var_names,
-                                ScriptCompileScope scope) {
-    runtime.route_script_extension->set_compile_path_vars(path_var_names);
-    runtime.route_script_extension->set_http_directives_enabled(scope == ScriptCompileScope::RouteScript);
-    runtime.access_log_script_extension->set_compile_enabled(scope == ScriptCompileScope::AccessLogTemplate);
-}
-
 std::expected<AccessLogId, RuntimeError> compile_access_log(RuntimeConfig &runtime,
                                                             const std::optional<config::AccessLogConfig> &access_log,
                                                             AccessLogId inherited,
@@ -100,8 +85,12 @@ std::expected<AccessLogId, RuntimeError> compile_access_log(RuntimeConfig &runti
         compiled_log.literal_message = access_log->message_template;
     } else {
         ensure_script_library(runtime);
-        set_script_compile_context(runtime, path_var_names, ScriptCompileScope::AccessLogTemplate);
+        fiber::http_script::ConstPackage::Builder constants;
+        fiber::http_script::RouteScriptExtension::CompileScope compile_scope(*runtime.route_script_extension, constants,
+                                                                             path_var_names, false);
+        runtime.access_log_script_extension->set_compile_enabled(true);
         auto compiled = fiber::script::compile_template_string(*runtime.script_library, access_log->message_template);
+        runtime.access_log_script_extension->set_compile_enabled(false);
         if (!compiled) {
             return std::unexpected(
                     make_error(access_log->location, "access_log template compile error: " + compiled.error().message));
@@ -110,6 +99,10 @@ std::expected<AccessLogId, RuntimeError> compile_access_log(RuntimeConfig &runti
             return std::unexpected(make_error(access_log->location, "access_log template must be synchronous"));
         }
         compiled_log.template_script = std::make_shared<fiber::script::Script>(std::move(*compiled));
+        compiled_log.const_package = constants.build();
+        if (!compiled_log.const_package) {
+            return std::unexpected(make_error(access_log->location, "failed to build access_log constants"));
+        }
     }
 
     const AccessLogId id = static_cast<AccessLogId>(runtime.access_logs.size());
@@ -339,12 +332,18 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 }
                 runtime_location.access_log = *location_access_log;
 
-                set_script_compile_context(runtime, path_var_names, ScriptCompileScope::RouteScript);
+                fiber::http_script::ConstPackage::Builder constants;
+                fiber::http_script::RouteScriptExtension::CompileScope compile_scope(*runtime.route_script_extension,
+                                                                                     constants, path_var_names, true);
                 auto script = compile_script_file(*runtime.script_library, location.script_file, location.location);
                 if (!script) {
                     return std::unexpected(script.error());
                 }
                 runtime_location.script = std::move(*script);
+                runtime_location.const_package = constants.build();
+                if (!runtime_location.const_package) {
+                    return std::unexpected(make_error(location.location, "failed to build script constants"));
+                }
                 runtime_server.locations.push_back(std::move(runtime_location));
                 continue;
             }
@@ -442,9 +441,13 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                     break;
                 }
             }
+            std::unique_ptr<fiber::http_script::ConstPackage::Builder> constants;
+            std::unique_ptr<fiber::http_script::RouteScriptExtension::CompileScope> compile_scope;
             if (has_proxy_template) {
                 ensure_script_library(runtime);
-                set_script_compile_context(runtime, path_var_names, ScriptCompileScope::ProxyTemplate);
+                constants = std::make_unique<fiber::http_script::ConstPackage::Builder>();
+                compile_scope = std::make_unique<fiber::http_script::RouteScriptExtension::CompileScope>(
+                        *runtime.route_script_extension, *constants, path_var_names, false);
             }
 
             if (location.rewrite_path) {
@@ -495,6 +498,12 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 runtime_location.set_headers.push_back(std::move(runtime_header));
             }
             runtime_location.skip_headers = std::move(skip_headers_builder).build();
+            if (has_proxy_template) {
+                runtime_location.const_package = constants->build();
+                if (!runtime_location.const_package) {
+                    return std::unexpected(make_error(location.location, "failed to build proxy template constants"));
+                }
+            }
             runtime_server.locations.push_back(std::move(runtime_location));
         }
 

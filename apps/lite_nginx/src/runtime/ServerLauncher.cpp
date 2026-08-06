@@ -1,6 +1,7 @@
 #include "ServerLauncher.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cerrno>
 #include <cstring>
 #include <memory>
@@ -15,6 +16,7 @@
 #include "http/HttpExchange.h"
 #include "http/HttpExchangeIo.h"
 #include "http/HttpHeaders.h"
+#include "http_script/ConstPackage.h"
 #include "http_script/ScriptExchangeCtx.h"
 #include "log/Log.h"
 #include "net/IpAddress.h"
@@ -83,12 +85,17 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
 // path_vars are the route captures for this request (name/value pairs borrowing the matcher
 // text and request path buffer).
 fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::script::Script &script,
+                                    const fiber::http_script::ConstPackage &const_package,
                                     const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
                                     fiber::http_script::HttpScriptServices *services,
                                     const logging::RequestLogContext &log_context) {
     fiber::script::GcHeap heap;
     fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection};
-    ctx.set_path_vars(path_vars);
+    auto constants_ready = ctx.prepare_constants(const_package);
+    if (!constants_ready || !ctx.bind_path_constants(const_package, path_vars)) {
+        co_await ctx.write_error_json(500, "SCRIPT_CONSTANTS");
+        co_return;
+    }
     ctx.set_services(services);
     fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
     auto result = co_await script.exec_async(root, &ctx, heap);
@@ -312,7 +319,9 @@ private:
         log_context.location_pattern = location.pattern;
         log_context.path_vars = std::move(match_context.path_vars);
         if (location.script) {
-            co_await run_script(exchange, *location.script, log_context.path_vars, script_services_, log_context);
+            assert(location.const_package != nullptr);
+            co_await run_script(exchange, *location.script, *location.const_package, log_context.path_vars,
+                                script_services_, log_context);
         } else {
             co_await proxy_.handle(exchange, listener, location, log_context.path_vars, script_services_, log_context);
         }

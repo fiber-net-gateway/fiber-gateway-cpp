@@ -20,6 +20,7 @@
 #include <vector>
 
 #include <async/Task.h>
+#include <http_script/ConstPackage.h>
 
 namespace fiber::access_server {
 
@@ -58,6 +59,9 @@ struct CompiledRoute {
     RouteType type = RouteType::Proxy;
     std::optional<script::Script> condition_program;
     std::vector<std::string> path_variable_names;
+    // Aligned with path_variable_names. Entries not referenced by any script use
+    // kInvalidConstIndex and are skipped when a candidate route binds captures.
+    std::vector<http_script::ConstIndex> path_constant_indices;
     std::optional<std::int64_t> max_client_body_size;
     std::vector<Cidr> allow_cidrs;
     std::vector<Cidr> deny_cidrs;
@@ -77,8 +81,8 @@ struct PathVariable {
 
 struct ScriptCompilerAdapter {
     using Result = std::expected<script::Script, std::string>;
-    using Function = Result (*)(void *context, std::string_view expression,
-                                std::span<const std::string> path_variable_names);
+    using Function = Result (*)(void *context, http_script::ConstPackage::Builder &constants,
+                                std::string_view expression, std::span<const std::string> path_variable_names);
 
     void *context = nullptr;
     Function compile_expression = nullptr;
@@ -90,6 +94,10 @@ public:
     [[nodiscard]] std::int32_t version() const noexcept { return version_; }
     [[nodiscard]] const std::vector<CompiledHost> &hosts() const noexcept { return hosts_; }
     [[nodiscard]] const std::vector<CompiledRoute> &routes() const noexcept { return routes_; }
+    [[nodiscard]] const http_script::ConstPackage &const_package() const noexcept { return *const_package_; }
+    [[nodiscard]] std::span<const http_script::ConstIndex> context_cluster_indices() const noexcept {
+        return context_cluster_indices_;
+    }
     [[nodiscard]] std::size_t max_path_variable_count() const noexcept { return path_matcher_.max_path_var_count(); }
 
     [[nodiscard]] const CompiledHost *match_host(std::string_view host) const noexcept;
@@ -109,6 +117,8 @@ private:
     std::int32_t version_ = 0;
     std::vector<CompiledHost> hosts_;
     std::vector<CompiledRoute> routes_;
+    std::shared_ptr<const http_script::ConstPackage> const_package_;
+    std::vector<http_script::ConstIndex> context_cluster_indices_;
     HostMatcher host_matcher_;
     util::RoutePathMatcher<std::uint32_t> path_matcher_;
 };

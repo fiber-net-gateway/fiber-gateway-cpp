@@ -25,14 +25,11 @@ public:
 
 private:
     [[nodiscard]] static ScriptCompilerAdapter::Result
-    compile_expression(void *context, std::string_view expression, std::span<const std::string> path_variable_names);
+    compile_expression(void *context, http_script::ConstPackage::Builder &constants, std::string_view expression,
+                       std::span<const std::string> path_variable_names);
     [[nodiscard]] static bool evaluate_condition(void *context, http_script::ScriptExchangeCtx &script_context,
-                                                 std::span<const PathVariable> path_variables,
-                                                 std::string_view request_context_cluster,
                                                  const script::Script &program) noexcept;
     [[nodiscard]] static Result<void> evaluate_template(void *context, http_script::ScriptExchangeCtx &script_context,
-                                                        std::span<const PathVariable> path_variables,
-                                                        std::string_view request_context_cluster,
                                                         const script::Script &program, std::string_view expression,
                                                         std::string &output) noexcept;
 

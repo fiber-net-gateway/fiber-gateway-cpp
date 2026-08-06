@@ -5,7 +5,6 @@
 #include <span>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -15,6 +14,7 @@
 #include "../script/JsValue.h"
 #include "../script/ScriptResult.h"
 
+#include "ConstPackage.h"
 #include "HttpScriptServices.h"
 
 namespace fiber::http_script {
@@ -24,23 +24,27 @@ struct ScriptConnectionInfo {
     bool tls = false;
 };
 
+struct IndexedConstValue {
+    ConstIndex index = kInvalidConstIndex;
+    std::string_view value;
+};
+
 // Per-request script attach payload. Bound to one HttpExchange and one script GcHeap for
 // the request lifetime and reused by serial script invocations. The host passes `&ctx` as
 // the `attach` argument to Script::exec_async/exec_sync, so req.*/resp.* host functions can
 // recover it via `static_cast<ScriptExchangeCtx *>(frame.attach)`.
 //
-// It centralizes two concerns that the C++ HttpExchange does not expose directly (unlike
+// It centralizes three concerns that the C++ HttpExchange does not expose directly (unlike
 // Java's HttpExchange):
 //   1. Lazy, cached JsValue views of the request query/headers/cookies, held across calls
 //      in persistent GC root slots (GcHeap::global_value), mirroring Java ReqFunc.Ctx
 //      stored via HttpExchange.Attr.
-//   2. A response state machine: response headers accumulate in pending_headers_ until a
+//   2. An indexed constant frame prepared from an immutable ConstPackage before scripts run.
+//   3. A response state machine: response headers accumulate in pending_headers_ until a
 //      send/write flushes them via HttpExchange::send_header + write_all (header_sent_
 //      guards against post-send mutation).
 class ScriptExchangeCtx {
 public:
-    using VariableLookupFunction = bool (*)(void *context, std::string_view name, std::string_view &value) noexcept;
-
     ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap) noexcept;
     ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap,
                       ScriptConnectionInfo connection) noexcept;
@@ -65,53 +69,27 @@ public:
     [[nodiscard]] fiber::script::JsValue headers() noexcept;
     [[nodiscard]] fiber::script::JsValue cookies() noexcept;
 
-    // ---- Route-variable constant accessors ($namespace.key) ----
-    // Back the $path/$query/$header/$cookie/$req constants resolved by RouteScriptExtension.
-    // Each returns a String JsValue, or Undefined when the named value is absent.
+    // Prepares the request-wide constant slots used by every compiled script bound to
+    // package. The slot array contains only immediate or borrowed JsValues; decoded query
+    // values are copied into the request pool before they are stored. Path variables are
+    // bound separately once the route matcher has selected a candidate.
+    [[nodiscard]] fiber::common::IoResult<void>
+    prepare_constants(const ConstPackage &package, std::span<const IndexedConstValue> external_values = {}) noexcept;
+    [[nodiscard]] bool bind_constant(ConstIndex index, std::string_view value) noexcept;
+    [[nodiscard]] bool bind_constants(std::span<const IndexedConstValue> values) noexcept;
+    [[nodiscard]] bool
+    bind_path_constants(const ConstPackage &package,
+                        std::span<const std::pair<std::string_view, std::string_view>> path_values) noexcept;
+    void clear_constants(std::span<const ConstIndex> indices) noexcept;
 
-    // Path variables captured by the route matcher for this request. name/value pairs borrow
-    // the matcher text and request path buffer, so the caller must keep them alive for the
-    // duration of the script invocation.
-    void set_path_vars(const std::vector<std::pair<std::string_view, std::string_view>> &path_vars) noexcept {
-        path_vars_ = path_vars;
-    }
-    void set_path_var_lookup(void *context, VariableLookupFunction lookup) noexcept {
-        path_var_lookup_context_ = context;
-        path_var_lookup_ = lookup;
-    }
-    void set_context_var_lookup(void *context, VariableLookupFunction lookup) noexcept {
-        context_var_lookup_context_ = context;
-        context_var_lookup_ = lookup;
-    }
-    void clear_variable_lookups() noexcept {
-        path_vars_ = {};
-        path_var_lookup_context_ = nullptr;
-        path_var_lookup_ = nullptr;
-        context_var_lookup_context_ = nullptr;
-        context_var_lookup_ = nullptr;
-    }
-    [[nodiscard]] fiber::script::AbiResult path_var(fiber::script::GcHeap &heap, std::string_view name) const noexcept;
-    [[nodiscard]] fiber::script::AbiResult query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept;
-    // norm_key is already lowercased with '-' folded to '_' (RouteScriptExtension normalizes at
-    // compile time); header/cookie names are matched under the same rule.
-    [[nodiscard]] fiber::script::AbiResult header_var(fiber::script::GcHeap &heap,
-                                                      std::string_view norm_key) const noexcept;
-    [[nodiscard]] fiber::script::AbiResult cookie_var(fiber::script::GcHeap &heap,
-                                                      std::string_view norm_key) const noexcept;
-    [[nodiscard]] fiber::script::AbiResult context_var(fiber::script::GcHeap &heap,
-                                                       std::string_view name) const noexcept;
-    // field is one of "uri" / "method" / "path" / "query".
-    [[nodiscard]] fiber::script::AbiResult req_field(fiber::script::GcHeap &heap,
-                                                     std::string_view field) const noexcept;
-    // field is one of remote_addr / remote_port / http_version / scheme / tls.
-    [[nodiscard]] fiber::script::AbiResult conn_field(fiber::script::GcHeap &heap,
-                                                      std::string_view field) const noexcept;
+    // Called by ConstPackage's compiled HostCallable. package_identity must match the
+    // immutable package used by prepare_constants.
+    [[nodiscard]] fiber::script::AbiResult constant(const void *package_identity, ConstIndex index) const noexcept;
 
     // Looks up key on a GC object (the cached query/headers/cookies views). Returns Undefined
     // when the object is absent or the key is not present; aborts only on allocation failure.
     [[nodiscard]] static fiber::script::AbiResult
     lookup_property(fiber::script::GcHeap &heap, fiber::script::JsValue object, std::string_view key) noexcept;
-
 
     // ---- Response state machine ----
     // Accumulate response headers. No-ops once the header has been sent.
@@ -161,13 +139,9 @@ private:
     fiber::script::ValueHandle headers_root_{};
     fiber::script::ValueHandle cookies_root_{};
 
-    // Path variables captured by the route matcher for the current request (non-owning
-    // views; populated by set_path_vars before the script runs).
-    std::span<const std::pair<std::string_view, std::string_view>> path_vars_;
-    void *path_var_lookup_context_ = nullptr;
-    VariableLookupFunction path_var_lookup_ = nullptr;
-    void *context_var_lookup_context_ = nullptr;
-    VariableLookupFunction context_var_lookup_ = nullptr;
+    const void *const_package_identity_ = nullptr;
+    fiber::script::JsValue *constant_slots_ = nullptr;
+    std::size_t constant_slot_count_ = 0;
 
     fiber::http::HttpHeaders pending_headers_;
     bool header_sent_ = false;
