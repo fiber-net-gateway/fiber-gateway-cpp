@@ -37,8 +37,8 @@ using fiber::access_server::HostConfigEntry;
 using fiber::access_server::HostStrategyConfig;
 using fiber::access_server::HttpsStrategy;
 using fiber::access_server::PathVariable;
-using fiber::access_server::PreparedProxyRequest;
 using fiber::access_server::ProjectConfig;
+using fiber::access_server::ProxyExecutionInput;
 using fiber::access_server::RouteBodyConfig;
 using fiber::access_server::RouteConfig;
 using fiber::access_server::RouteConfigStore;
@@ -287,66 +287,49 @@ AccessRequestScriptAdapter script_adapter() {
 struct CapturedProxyRequest {
     std::string service;
     std::optional<std::string> cluster;
-    std::optional<std::string> context_cluster;
+    std::string project;
+    std::string initial_context_cluster;
+    std::string origin_host;
     fiber::http::HttpMethod method = fiber::http::HttpMethod::Unknown;
-    std::string request_target;
-    std::vector<fiber::access_server::EvaluatedHeader> headers;
-    std::vector<fiber::access_server::EvaluatedHeader> context;
-    fiber::http::HttpBodySpec body = fiber::http::HttpBodySpec::None();
     std::string received_body;
     std::size_t max_request_body_size = 0;
     std::int32_t timeout_millis = 0;
-    std::optional<std::uint64_t> max_response_body_size;
-    std::int32_t websocket_timeout_millis = 0;
-    bool websocket_upgrade = false;
+    std::optional<std::int64_t> max_response_body_size;
+    std::optional<std::int32_t> websocket_timeout_millis;
+    std::size_t proxy_header_count = 0;
+    std::size_t context_count = 0;
+    bool rewrite_configured = false;
     bool flush = false;
+    bool template_evaluator_configured = false;
 };
 
-const fiber::access_server::EvaluatedHeader *
-find_header(const std::vector<fiber::access_server::EvaluatedHeader> &headers, std::string_view name,
-            std::size_t occurrence = 0) {
-    for (const auto &header: headers) {
-        if (fiber::http::http_header_name_equals_ci(header.name, name)) {
-            if (occurrence == 0) {
-                return &header;
-            }
-            --occurrence;
-        }
-    }
-    return nullptr;
-}
-
-std::size_t count_header(const std::vector<fiber::access_server::EvaluatedHeader> &headers, std::string_view name) {
-    return static_cast<std::size_t>(std::count_if(headers.begin(), headers.end(), [&](const auto &header) {
-        return fiber::http::http_header_name_equals_ci(header.name, name);
-    }));
-}
-
 fiber::async::Task<fiber::common::IoResult<void>>
-capture_proxy_request(void *context, fiber::http::HttpExchange &exchange, const PreparedProxyRequest &request,
+capture_proxy_request(void *context, fiber::http::HttpExchange &exchange,
+                      const fiber::access_server::CompiledProxyRoute &proxy, ProxyExecutionInput input,
                       std::span<const fiber::access_server::EvaluatedHeader> base_headers,
                       fiber::access_server::AccessRequestTelemetry *) noexcept {
     auto &capture = *static_cast<CapturedProxyRequest *>(context);
-    capture.service.assign(request.address_selector ? request.address_selector->service_name() : std::string_view{});
+    capture.service.assign(proxy.address_selector ? proxy.address_selector->service_name() : std::string_view{});
     const std::optional<std::string_view> configured_cluster =
-            request.address_selector ? request.address_selector->configured_cluster() : std::nullopt;
+            proxy.address_selector ? proxy.address_selector->configured_cluster() : std::nullopt;
     if (configured_cluster) {
         capture.cluster = std::string(*configured_cluster);
     } else {
         capture.cluster.reset();
     }
-    capture.context_cluster = request.context_cluster;
-    capture.method = request.method;
-    capture.request_target = request.request_target;
-    capture.headers = request.headers;
-    capture.context = request.context;
-    capture.body = request.body;
-    capture.max_request_body_size = request.max_request_body_size;
-    capture.timeout_millis = request.timeout_millis;
-    capture.max_response_body_size = request.max_response_body_size;
-    capture.websocket_timeout_millis = request.websocket_timeout_millis;
-    capture.websocket_upgrade = request.websocket_upgrade;
-    capture.flush = request.flush;
+    capture.project.assign(input.project);
+    capture.initial_context_cluster.assign(input.initial_context_cluster);
+    capture.origin_host.assign(input.origin_host);
+    capture.method = exchange.method();
+    capture.max_request_body_size = input.max_request_body_size;
+    capture.timeout_millis = proxy.timeout_millis;
+    capture.max_response_body_size = proxy.max_response_body_size;
+    capture.websocket_timeout_millis = proxy.websocket_timeout_millis;
+    capture.proxy_header_count = proxy.proxy_headers.size();
+    capture.context_count = proxy.context.size();
+    capture.rewrite_configured = proxy.rewrite.has_value();
+    capture.flush = proxy.flush.value_or(false);
+    capture.template_evaluator_configured = input.template_evaluator.evaluate != nullptr;
     capture.received_body.clear();
 
     if (!exchange.request_body_spec().is_none()) {
@@ -658,7 +641,7 @@ TEST(AccessRequestHandlerTest, DoesNotWriteAnErrorAfterResponseCommit) {
     EXPECT_EQ(response.find("HTTP/1.1", std::string_view("HTTP/1.1").size()), std::string::npos);
 }
 
-TEST(AccessRequestHandlerTest, BuildsJavaCompatibleProxyRequestPlanOnLiveExchange) {
+TEST(AccessRequestHandlerTest, PassesPinnedProxyRouteAndExecutionInputToAdapter) {
     RouteConfig route = proxy_route("/v1/:id");
     route.cluster = "stable";
     route.timeout_millis = 123;
@@ -704,45 +687,25 @@ TEST(AccessRequestHandlerTest, BuildsJavaCompatibleProxyRequestPlanOnLiveExchang
     EXPECT_EQ(capture.service, "orders");
     ASSERT_TRUE(capture.cluster);
     EXPECT_EQ(*capture.cluster, "stable");
-    ASSERT_TRUE(capture.context_cluster);
-    EXPECT_EQ(*capture.context_cluster, "42");
+    EXPECT_EQ(capture.project, "orders");
+    EXPECT_TRUE(capture.initial_context_cluster.empty());
+    EXPECT_TRUE(capture.origin_host.empty());
     EXPECT_EQ(capture.method, fiber::http::HttpMethod::Post);
-    EXPECT_EQ(capture.request_target, "/items/42%20/%3F%23?raw=%2F");
-    EXPECT_TRUE(capture.body.is_content_length());
-    EXPECT_EQ(capture.body.content_length(), 4U);
     EXPECT_EQ(capture.received_body, "body");
     EXPECT_EQ(capture.max_request_body_size, 10U);
     EXPECT_EQ(capture.timeout_millis, 123);
     ASSERT_TRUE(capture.max_response_body_size);
-    EXPECT_EQ(*capture.max_response_body_size, 0U);
-    EXPECT_FALSE(capture.websocket_upgrade);
-    EXPECT_EQ(capture.websocket_timeout_millis, 0);
+    EXPECT_EQ(*capture.max_response_body_size, -1);
+    ASSERT_TRUE(capture.websocket_timeout_millis);
+    EXPECT_EQ(*capture.websocket_timeout_millis, 500);
+    EXPECT_EQ(capture.proxy_header_count, 7U);
+    EXPECT_EQ(capture.context_count, 2U);
+    EXPECT_TRUE(capture.rewrite_configured);
     EXPECT_TRUE(capture.flush);
-
-    ASSERT_NE(find_header(capture.headers, "Content-Length"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "Content-Length")->value, "4");
-    ASSERT_NE(find_header(capture.headers, "Host"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "Host")->value, "internal.example:8080");
-    ASSERT_NE(find_header(capture.headers, "X-Item"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "X-Item")->value, "42");
-    ASSERT_NE(find_header(capture.headers, "X-Override"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "X-Override")->value, "configured");
-    ASSERT_NE(find_header(capture.headers, "X-Ploto-Source-App"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "X-Ploto-Source-App")->value, "orders.unifiedAccess");
-    EXPECT_EQ(find_header(capture.headers, "Connection"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "X-Empty"), nullptr);
-    EXPECT_EQ(count_header(capture.headers, "X-Incoming"), 2U);
-    EXPECT_EQ(find_header(capture.headers, "X-Incoming", 0)->value, "one");
-    EXPECT_EQ(find_header(capture.headers, "X-Incoming", 1)->value, "two");
-
-    ASSERT_EQ(capture.context.size(), 2U);
-    EXPECT_EQ(capture.context[0].name, "HI-TRACE-CLUSTER");
-    EXPECT_EQ(capture.context[0].value, "42");
-    EXPECT_EQ(capture.context[1].name, "remove-me");
-    EXPECT_TRUE(capture.context[1].value.empty());
+    EXPECT_TRUE(capture.template_evaluator_configured);
 }
 
-TEST(AccessRequestHandlerTest, UsesJavaTestHostClusterForRoutingAndServiceSelection) {
+TEST(AccessRequestHandlerTest, PassesJavaTestHostClusterAndOriginHostToProxyExecutor) {
     AccessScriptRuntime scripts;
     RouteConfig route = proxy_route("/cluster");
     route.proxy_headers = {
@@ -761,14 +724,8 @@ TEST(AccessRequestHandlerTest, UsesJavaTestHostClusterForRoutingAndServiceSelect
                                              scripts.request_adapter(), options, proxy_adapter(capture));
 
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    ASSERT_TRUE(capture.context_cluster);
-    EXPECT_EQ(*capture.context_cluster, "gray");
-    const auto *origin = find_header(capture.headers, "ploto-origin-host");
-    ASSERT_NE(origin, nullptr);
-    EXPECT_EQ(origin->value, "api_gray.example.com");
-    const auto *cluster = find_header(capture.headers, "X-Request-Cluster");
-    ASSERT_NE(cluster, nullptr);
-    EXPECT_EQ(cluster->value, "gray");
+    EXPECT_EQ(capture.initial_context_cluster, "gray");
+    EXPECT_EQ(capture.origin_host, "api_gray.example.com");
 }
 
 TEST(AccessRequestHandlerTest, UsesTestTraceHeaderWhenHostHasNoCluster) {
@@ -787,109 +744,8 @@ TEST(AccessRequestHandlerTest, UsesTestTraceHeaderWhenHostHasNoCluster) {
                                              {}, options, proxy_adapter(capture));
 
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    ASSERT_TRUE(capture.context_cluster);
-    EXPECT_EQ(*capture.context_cluster, "canary");
-    EXPECT_EQ(find_header(capture.headers, "ploto-origin-host"), nullptr);
-}
-
-TEST(AccessRequestHandlerTest, AppliesJavaRewriteFallbackAndChunkedRequestBodyPlan) {
-    RouteConfig route = proxy_route("/empty");
-    route.rewrite = "${empty}";
-    RouteConfig preserve = proxy_route("/preserve/*tail");
-    RouteConfigStore store;
-    publish(store, project({}, {std::move(route), std::move(preserve)}));
-
-    CapturedProxyRequest capture;
-    const std::string response = run_request(store,
-                                             "GET /empty?x=%2F HTTP/1.1\r\n"
-                                             "Host: api.example.com\r\n"
-                                             "Connection: close\r\n\r\n",
-                                             script_adapter(), {}, proxy_adapter(capture));
-
-    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    EXPECT_EQ(capture.request_target, "/?x=%2F");
-    EXPECT_TRUE(capture.body.is_chunked());
-    EXPECT_TRUE(capture.received_body.empty());
-    EXPECT_EQ(find_header(capture.headers, "Content-Length"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "Transfer-Encoding"), nullptr);
-
-    const std::string preserved = run_request(store,
-                                              "GET /preserve/a%2Fb?x=%23 HTTP/1.1\r\n"
-                                              "Host: api.example.com\r\n"
-                                              "Connection: close\r\n\r\n",
-                                              {}, {}, proxy_adapter(capture));
-    EXPECT_TRUE(preserved.starts_with("HTTP/1.1 200 OK\r\n"));
-    EXPECT_EQ(capture.request_target, "/preserve/a%2Fb?x=%23");
-}
-
-TEST(AccessRequestHandlerTest, MatchesProductionRewriteCorpus) {
-    AccessScriptRuntime scripts;
-    RouteConfig wildcard = proxy_route("/rewrite/*tail");
-    wildcard.rewrite = "/v2/${$path.tail}";
-    RouteConfig request_path = proxy_route("/request-path/*tail");
-    request_path.rewrite = "${$req.path}";
-
-    RouteConfigStore store(scripts.compiler_adapter());
-    publish(store, project({}, {std::move(wildcard), std::move(request_path)}));
-
-    CapturedProxyRequest capture;
-    const std::string wildcard_response = run_request(store,
-                                                      "GET /rewrite/segment/rest?x=%2F HTTP/1.1\r\n"
-                                                      "Host: api.example.com\r\n"
-                                                      "Connection: close\r\n\r\n",
-                                                      scripts.request_adapter(), {}, proxy_adapter(capture));
-    EXPECT_TRUE(wildcard_response.starts_with("HTTP/1.1 200 OK\r\n"));
-    EXPECT_EQ(capture.request_target, "/v2/segment/rest?x=%2F");
-
-    const std::string request_path_response = run_request(store,
-                                                          "GET /request-path/segment/rest?x=%2F HTTP/1.1\r\n"
-                                                          "Host: api.example.com\r\n"
-                                                          "Connection: close\r\n\r\n",
-                                                          scripts.request_adapter(), {}, proxy_adapter(capture));
-    EXPECT_TRUE(request_path_response.starts_with("HTTP/1.1 200 OK\r\n"));
-    EXPECT_EQ(capture.request_target, "/request-path/segment/rest?x=%2F");
-}
-
-TEST(AccessRequestHandlerTest, EnablesWebsocketOnlyForJavaExactUpgradeHeaders) {
-    RouteConfig route = proxy_route("/ws");
-    route.websocket_timeout_millis = 700;
-    RouteConfigStore store;
-    publish(store, project({}, {std::move(route)}));
-
-    CapturedProxyRequest capture;
-    const std::string response = run_request(store,
-                                             "GET /ws HTTP/1.1\r\n"
-                                             "Host: api.example.com\r\n"
-                                             "Connection: Upgrade\r\n"
-                                             "Upgrade: WebSocket\r\n\r\n",
-                                             {}, {}, proxy_adapter(capture));
-
-    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    EXPECT_TRUE(capture.websocket_upgrade);
-    EXPECT_EQ(capture.websocket_timeout_millis, 700);
-    EXPECT_TRUE(capture.body.is_none());
-    ASSERT_NE(find_header(capture.headers, "Connection"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "Connection")->value, "upgrade");
-    ASSERT_NE(find_header(capture.headers, "Upgrade"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "Upgrade")->value, "websocket");
-
-    const std::string non_upgrade = run_request(store,
-                                                "GET /ws HTTP/1.1\r\n"
-                                                "Host: api.example.com\r\n"
-                                                "Connection: keep-alive, Upgrade\r\n"
-                                                "Upgrade: websocket\r\n\r\n",
-                                                {}, {}, proxy_adapter(capture));
-    EXPECT_TRUE(non_upgrade.starts_with("HTTP/1.1 200 OK\r\n"));
-    EXPECT_FALSE(capture.websocket_upgrade);
-    EXPECT_EQ(capture.websocket_timeout_millis, 0);
-    EXPECT_TRUE(capture.body.is_chunked());
-    EXPECT_EQ(find_header(capture.headers, "Connection"), nullptr);
-    EXPECT_EQ(find_header(capture.headers, "Upgrade"), nullptr);
-}
-
-TEST(ProxyRequestPlanTest, EscapesUriWithJavaFiberNetGatewayByteMask) {
-    EXPECT_EQ(fiber::access_server::java_escape_uri("/a b#c?d%中"), "/a%20b%23c%3Fd%25%E4%B8%AD");
-    EXPECT_EQ(fiber::access_server::java_escape_uri("/a:b@c&d=1+2,3;4~"), "/a:b@c&d=1+2,3;4~");
+    EXPECT_EQ(capture.initial_context_cluster, "canary");
+    EXPECT_TRUE(capture.origin_host.empty());
 }
 
 } // namespace

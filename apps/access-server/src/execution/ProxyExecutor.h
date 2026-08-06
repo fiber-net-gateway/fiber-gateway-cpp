@@ -28,23 +28,22 @@ public:
                            ProxyDnsResolver dns_resolver = {}, ProxyExecutorOptions options = {}) noexcept;
 
     [[nodiscard]] AccessProxyAdapter adapter() noexcept;
-    [[nodiscard]] async::Task<common::IoResult<void>> execute(http::HttpExchange &exchange,
-                                                              const PreparedProxyRequest &request,
-                                                              std::span<const EvaluatedHeader> base_headers,
-                                                              AccessRequestTelemetry *telemetry = nullptr) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<void>>
+    execute(http::HttpExchange &exchange, const CompiledProxyRoute &proxy, ProxyExecutionInput input,
+            std::span<const EvaluatedHeader> base_headers, AccessRequestTelemetry *telemetry = nullptr) noexcept;
 
 private:
     static async::Task<common::IoResult<void>> execute_adapter(void *context, http::HttpExchange &exchange,
-                                                               const PreparedProxyRequest &request,
+                                                               const CompiledProxyRoute &proxy,
+                                                               ProxyExecutionInput input,
                                                                std::span<const EvaluatedHeader> base_headers,
                                                                AccessRequestTelemetry *telemetry) noexcept;
 
-    [[nodiscard]] async::Task<common::IoResult<void>> execute_monitored(http::HttpExchange &exchange,
-                                                                        const PreparedProxyRequest &request,
-                                                                        std::span<const EvaluatedHeader> base_headers,
-                                                                        AccessRequestTelemetry *telemetry) noexcept;
+    [[nodiscard]] async::Task<common::IoResult<void>>
+    execute_monitored(http::HttpExchange &exchange, const CompiledProxyRoute &proxy, ProxyExecutionInput input,
+                      std::span<const EvaluatedHeader> base_headers, AccessRequestTelemetry *telemetry) noexcept;
 
-    http::LocalHttp1ConnectionPoolSet *pool_ = nullptr;
+    http::LocalHttp1ConnectionPoolSet &pool_;
     ProxyClusterMatcher cluster_matcher_{};
     ProxyDnsResolver dns_resolver_{};
     ProxyExecutorOptions options_{};

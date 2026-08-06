@@ -72,15 +72,6 @@ RequestHostContext resolve_request_host(const http::HttpExchange &exchange, bool
     return result;
 }
 
-void set_prepared_header(std::vector<EvaluatedHeader> &headers, std::string_view name, std::string_view value) {
-    std::erase_if(headers,
-                  [&](const EvaluatedHeader &header) { return http::http_header_name_equals_ci(header.name, name); });
-    headers.push_back(EvaluatedHeader{
-            .name = std::string(name),
-            .value = std::string(value),
-    });
-}
-
 std::uint8_t entry_bit(std::string_view entry) noexcept {
     if (entry == "vdi") {
         return kNetVdi;
@@ -295,20 +286,23 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
     }
 
     if (route.type == RouteType::Proxy) {
-        auto prepared = prepare_proxy_request(exchange, host_match.project->project(), *route.proxy, template_evaluator,
-                                              body_limit, request_host.cluster);
-        if (!prepared) {
-            co_return co_await error_responder_.send(exchange, prepared.error(), base_headers, {},
-                                                     request_trace_id(telemetry), false, telemetry);
-        }
         if (!proxy_adapter_.execute) {
             co_return co_await error_responder_.send(exchange, AccessError::unknown("proxy executor is not configured"),
                                                      base_headers, {}, request_trace_id(telemetry), false, telemetry);
         }
-        if (request_host.extracted_cluster && !route.proxy->proxy_headers.contains(kOriginHostHeader)) {
-            set_prepared_header(prepared->headers, kOriginHostHeader, request_host.origin_host);
-        }
-        co_return co_await proxy_adapter_.execute(proxy_adapter_.context, exchange, *prepared, base_headers, telemetry);
+        const std::string_view origin_host =
+                request_host.extracted_cluster && !route.proxy->proxy_headers.contains(kOriginHostHeader)
+                        ? request_host.origin_host
+                        : std::string_view{};
+        co_return co_await proxy_adapter_.execute(proxy_adapter_.context, exchange, *route.proxy,
+                                                  ProxyExecutionInput{
+                                                          .project = host_match.project->project(),
+                                                          .initial_context_cluster = request_host.cluster,
+                                                          .origin_host = origin_host,
+                                                          .template_evaluator = template_evaluator,
+                                                          .max_request_body_size = body_limit,
+                                                  },
+                                                  base_headers, telemetry);
     }
 
     co_return co_await response_executor_.execute(exchange, route, base_headers, template_evaluator, body_limit,
