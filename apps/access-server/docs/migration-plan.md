@@ -243,6 +243,8 @@ listener；通用脚本兼容仍按范围决定排除。
 - [x] URL 未匹配、Host 未匹配、bad route、entry、CIDR 等稳定错误映射；
 - [x] Host/Path/X-Entry/HTTPS/CIDR/body limit 失败返回统一 Result，由 handler 最外层接到
   `ErrorResponder`；
+- [x] 底层 IO/内存错误保留为 `Err::Error`，在 response 尚未提交且 channel 可用时由
+  handler 统一映射为 unknown 500；
 - [x] 提供可交给 HTTP listener 的 `AccessRequestHandler`，串联 snapshot pin、route
   selection 与 `ResponseExecutor`；
 - [x] 在 `main` 的 runtime 生命周期中创建并启动真实 listener。
@@ -271,8 +273,9 @@ listener；通用脚本兼容仍按范围决定排除。
 通过独立的 `ProxyUpstreamConnection` 使用本项目 HTTP/1 connection pool，完成静态地址/
 可注入 service 实例的连接、请求发送和完整响应处理，并通过真实 loopback upstream
 验证实际 wire 请求。
-最终请求 handler 已统一监视 RESPONSE、错误响应、PROXY response header/body 和
-WebSocket tunnel 期间的 downstream close；NamingService/DNS runtime 适配留在阶段 6。
+`ProxyExecutor` 已统一监视上游选择、连接、请求/响应转发和 WebSocket tunnel 期间的
+downstream close；RESPONSE、redirect 和错误响应直接依赖 downstream IO 完成通知。
+NamingService/DNS runtime 适配留在阶段 6。
 
 工作：
 

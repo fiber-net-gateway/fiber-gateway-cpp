@@ -33,6 +33,9 @@ private:
     static async::Task<Result<void>> execute_adapter(void *context, http::HttpExchange &exchange,
                                                      const CompiledProxyRoute &proxy, ProxyExecutionInput input,
                                                      AccessRequestTelemetry &telemetry) noexcept;
+    [[nodiscard]] async::Task<Result<void>> execute_impl(http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
+                                                         ProxyExecutionInput input,
+                                                         AccessRequestTelemetry &telemetry) noexcept;
 
     http::LocalHttp1ConnectionPoolSet &pool_;
     ProxyClusterMatcher cluster_matcher_{};
