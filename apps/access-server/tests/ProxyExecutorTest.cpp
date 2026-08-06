@@ -41,6 +41,10 @@ struct ObservedUpstreamRequest {
     std::string transfer_encoding;
     std::string source;
     std::string client_header;
+    std::string attempt_header;
+    std::string override_header;
+    std::string empty_header;
+    std::string origin_host;
     std::string connection;
     std::string upgrade;
     std::string websocket_key;
@@ -77,11 +81,33 @@ struct ServiceSelectorState {
     std::optional<fiber::http::Http1ConnectionGroupKey> bad_connection_key;
     std::size_t select_count = 0;
     std::size_t cluster_match_count = 0;
+    std::optional<std::string> expected_cluster_override;
     std::vector<std::pair<std::uint64_t, bool>> reports;
 };
 
 bool never_match_gray(void *context, const fiber::http::HttpExchange &) noexcept {
     ++static_cast<ServiceSelectorState *>(context)->cluster_match_count;
+    return false;
+}
+
+struct TemplateEvaluationState {
+    std::size_t count = 0;
+};
+
+bool evaluate_counted_template(void *context, fiber::http::HttpExchange &,
+                               std::span<const fiber::access_server::PathVariable>, std::string_view, const void *,
+                               std::string_view expression, std::string &output,
+                               fiber::access_server::AccessError &error) noexcept {
+    ++static_cast<TemplateEvaluationState *>(context)->count;
+    if (expression == "attempt") {
+        output = "evaluated-once";
+        return true;
+    }
+    if (expression == "fail") {
+        error = fiber::access_server::AccessError::template_script("fixture failure");
+        return false;
+    }
+    error = fiber::access_server::AccessError::template_script("unexpected test expression");
     return false;
 }
 
@@ -310,6 +336,10 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     observed.transfer_encoding.assign(exchange.header("Transfer-Encoding"));
     observed.source.assign(exchange.header("X-Ploto-Source-App"));
     observed.client_header.assign(exchange.header("X-Client"));
+    observed.attempt_header.assign(exchange.header("X-Attempt"));
+    observed.override_header.assign(exchange.header("X-Override"));
+    observed.empty_header.assign(exchange.header("X-Empty"));
+    observed.origin_host.assign(exchange.header("Ploto-Origin-Host"));
     observed.connection.assign(exchange.header("Connection"));
     observed.upgrade.assign(exchange.header("Upgrade"));
     observed.websocket_key.assign(exchange.header("Sec-WebSocket-Key"));
@@ -431,12 +461,14 @@ fiber::async::DetachedTask
 run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteConfigStore *store,
                fiber::access_server::AccessProxyAdapter proxy_adapter, std::string request, std::string *output,
                std::promise<void> *done, std::promise<RecordingTransport *> *transport_ready = nullptr,
-               bool hold_open_after_input = false, fiber::cat::CatClient *cat_client = nullptr) {
+               bool hold_open_after_input = false, fiber::cat::CatClient *cat_client = nullptr,
+               fiber::access_server::AccessRequestScriptAdapter script_adapter = {},
+               fiber::access_server::AccessRequestHandlerOptions handler_options = {}) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, hold_open_after_input);
     if (transport_ready) {
         transport_ready->set_value(transport.get());
     }
-    fiber::access_server::AccessRequestHandler handler(*store, {}, {}, proxy_adapter);
+    fiber::access_server::AccessRequestHandler handler(*store, script_adapter, handler_options, proxy_adapter);
     fiber::http::HttpHandler http_handler =
             [&handler, cat_client](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         if (!cat_client) {
@@ -529,7 +561,11 @@ public:
     std::expected<fiber::access_server::ProxyUpstreamEndpoint, fiber::access_server::ProxyAddressSelectError>
     select_address(std::optional<std::string_view> cluster_override,
                    std::span<const std::uint64_t> excluded_selection_tokens) noexcept override {
-        if (service_ != "inventory" || cluster_override || cluster_ != std::optional<std::string>("stable")) {
+        const bool cluster_override_matches =
+                state_->expected_cluster_override
+                        ? cluster_override && *cluster_override == *state_->expected_cluster_override
+                        : !cluster_override;
+        if (service_ != "inventory" || !cluster_override_matches || cluster_ != std::optional<std::string>("stable")) {
             return std::unexpected(fiber::access_server::ProxyAddressSelectError{
                     .io_error = fiber::common::IoErr::Invalid,
                     .message = "unexpected service selector input",
@@ -663,8 +699,19 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
+    auto config = project_config(port);
+    auto &route = **config.routes->begin();
+    route.rewrite = "/items /?#";
+    route.proxy_headers = {
+            {.name = "Host", .value = "internal.example:8080"},
+            {.name = "Connection", .value = "keep-alive"},
+            {.name = "Content-Length", .value = "999"},
+            {.name = "X-Override", .value = "configured"},
+            {.name = "X-Empty", .value = ""},
+            {.name = "X-Ploto-Source-App", .value = "spoofed"},
+    };
     fiber::access_server::RouteConfigStore store;
-    auto published = store.apply("orders", project_config(port));
+    auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
     fiber::access_server::ProxyExecutor executor(pool);
@@ -672,16 +719,20 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     std::promise<void> request_promise;
     auto request_future = request_promise.get_future();
     std::string requests = "POST /proxy?item=1 HTTP/1.1\r\n"
-                           "Host: api.example.com\r\n"
+                           "Host: api_gray.example.com\r\n"
                            "X-Client: first\r\n"
+                           "X-Override: incoming\r\n"
+                           "X-Empty: incoming\r\n"
                            "HI-TRACE-ID: access-root-1\r\n"
                            "HI-SPAN-ID-PARENT: access-parent-1\r\n"
                            "HI-SPAN-ID: access-span-1\r\n"
                            "Transfer-Encoding: chunked\r\n\r\n"
                            "3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n"
                            "POST /proxy?item=2 HTTP/1.1\r\n"
-                           "Host: api.example.com\r\n"
+                           "Host: api_gray.example.com\r\n"
                            "X-Client: second\r\n"
+                           "X-Override: incoming\r\n"
+                           "X-Empty: incoming\r\n"
                            "HI-TRACE-ID: access-root-2\r\n"
                            "HI-SPAN-ID-PARENT: access-parent-2\r\n"
                            "HI-SPAN-ID: access-span-2\r\n"
@@ -690,7 +741,7 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
                            "world";
     fiber::async::spawn(group.at(0), [&]() {
         return run_downstream(&group.at(0), &store, executor.adapter(), std::move(requests), &output, &request_promise,
-                              nullptr, false, cat_client.get());
+                              nullptr, false, cat_client.get(), {}, {.test_mode = true});
     });
 
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
@@ -698,12 +749,16 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
 
     const ObservedUpstreamRequest &first = upstream_state.requests[0];
     EXPECT_EQ(first.method, fiber::http::HttpMethod::Post);
-    EXPECT_EQ(first.target, "/proxy?item=1");
-    EXPECT_EQ(first.host, "127.0.0.1:" + std::to_string(port));
+    EXPECT_EQ(first.target, "/items%20/%3F%23?item=1");
+    EXPECT_EQ(first.host, "internal.example:8080");
     EXPECT_TRUE(first.content_length.empty());
     EXPECT_EQ(first.transfer_encoding, "chunked");
     EXPECT_EQ(first.source, "orders.unifiedAccess");
     EXPECT_EQ(first.client_header, "first");
+    EXPECT_EQ(first.override_header, "configured");
+    EXPECT_TRUE(first.empty_header.empty());
+    EXPECT_EQ(first.origin_host, "api_gray.example.com");
+    EXPECT_TRUE(first.connection.empty());
     EXPECT_EQ(first.trace_id, "access-root-1");
     EXPECT_EQ(first.parent_span_id, "access-span-1");
     EXPECT_FALSE(first.span_id.empty());
@@ -711,8 +766,8 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_EQ(first.body, "hello");
 
     const ObservedUpstreamRequest &second = upstream_state.requests[1];
-    EXPECT_EQ(second.target, "/proxy?item=2");
-    EXPECT_EQ(second.host, "127.0.0.1:" + std::to_string(port));
+    EXPECT_EQ(second.target, "/items%20/%3F%23?item=2");
+    EXPECT_EQ(second.host, "internal.example:8080");
     EXPECT_EQ(second.content_length, "5");
     EXPECT_TRUE(second.transfer_encoding.empty());
     EXPECT_EQ(second.source, "orders.unifiedAccess");
@@ -784,7 +839,15 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
                                                              .context = &selector_state,
                                                              .create_service = make_test_service_selector,
                                                      });
-    auto published = store.apply("orders", service_project_config());
+    auto config = service_project_config();
+    (**config.routes->begin()).proxy_headers = {
+            {.name = "X-Attempt", .value = "${attempt}"},
+    };
+    (**config.routes->begin()).context = {
+            {.name = "cluster", .value = "canary"},
+    };
+    selector_state.expected_cluster_override = "canary";
+    auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 
     fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
@@ -797,19 +860,27 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     std::string request = "GET /proxy HTTP/1.1\r\n"
                           "Host: api.example.com\r\n"
                           "Connection: close\r\n\r\n";
+    TemplateEvaluationState template_state;
     fiber::async::spawn(group.at(0), [&]() {
-        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise);
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
+                              nullptr, false, nullptr,
+                              fiber::access_server::AccessRequestScriptAdapter{
+                                      .context = &template_state,
+                                      .evaluate_template = evaluate_counted_template,
+                              });
     });
 
     ASSERT_EQ(request_future.wait_for(5s), std::future_status::ready);
     EXPECT_EQ(selector_state.select_count, 2U);
     EXPECT_EQ(selector_state.cluster_match_count, 1U);
+    EXPECT_EQ(template_state.count, 1U);
     EXPECT_EQ(selector_state.reports, (std::vector<std::pair<std::uint64_t, bool>>{
                                               {1, false},
                                               {2, true},
                                       }));
     ASSERT_EQ(upstream_state.requests.size(), 1U);
     EXPECT_EQ(upstream_state.requests[0].host, selector_state.good_host_header);
+    EXPECT_EQ(upstream_state.requests[0].attempt_header, "evaluated-once");
     EXPECT_EQ(upstream_state.requests[0].transfer_encoding, "chunked");
     EXPECT_TRUE(upstream_state.requests[0].body.empty());
     EXPECT_EQ(count_status(output, "HTTP/1.1 201 Created\r\n"), 1U);
@@ -822,6 +893,73 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     group.stop();
     group.join();
     delete server;
+}
+
+TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparationFails) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    constexpr std::uint16_t kUnusedPort = 1;
+    ServiceSelectorState selector_state{
+            .port = kUnusedPort,
+            .good_host_header = "127.0.0.1:1",
+            .bad_host_header = "127.0.0.2:1",
+            .good_connection_key =
+                    fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), kUnusedPort,
+                                                                  fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+            .bad_connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+                    fiber::net::IpAddress::v4({127, 0, 0, 2}), kUnusedPort,
+                    fiber::http::Http1ConnectionGroupKey::Scheme::Http),
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto config = service_project_config();
+    (**config.routes->begin()).proxy_headers = {
+            {.name = "X-Failure", .value = "${fail}"},
+    };
+    auto published = store.apply("orders", std::move(config));
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
+                                                               .context = &selector_state,
+                                                               .matches = never_match_gray,
+                                                       });
+    std::string output;
+    std::promise<void> request_promise;
+    auto request_future = request_promise.get_future();
+    std::string request = "GET /proxy HTTP/1.1\r\n"
+                          "Host: api.example.com\r\n"
+                          "Connection: close\r\n\r\n";
+    TemplateEvaluationState template_state;
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output, &request_promise,
+                              nullptr, false, nullptr,
+                              fiber::access_server::AccessRequestScriptAdapter{
+                                      .context = &template_state,
+                                      .evaluate_template = evaluate_counted_template,
+                              });
+    });
+
+    ASSERT_EQ(request_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(template_state.count, 1U);
+    EXPECT_EQ(selector_state.select_count, 1U);
+    EXPECT_TRUE(selector_state.reports.empty());
+    EXPECT_NE(output.find("HTTP/1.1 500 Internal Server Error\r\n"), std::string::npos);
+    EXPECT_NE(output.find("TEMPLATE_SCRIPT"), std::string::npos);
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await pool.shutdown_async();
+        shutdown_promise.set_value();
+    });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
 }
 
 TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {

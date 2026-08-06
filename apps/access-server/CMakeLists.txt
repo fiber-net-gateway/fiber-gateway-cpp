@@ -4,7 +4,6 @@ add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessRequestHandler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ErrorResponder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyExecutor.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyRequestPlan.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyResponsePlan.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ProxyUpstreamConnection.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/ResponseExecutor.cpp"

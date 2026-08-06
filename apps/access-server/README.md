@@ -27,13 +27,15 @@
   模板分阶段提交和统一 JSON/HTML 错误结果；
 - 已实现可直接交给本地 HTTP server 的请求 handler，完成快照 pin、Host/Path/条件
   路由、X-Entry、HTTPS redirect、CIDR、request body limit 和 RESPONSE 串联；
-- 已将 PROXY 接入同一 live handler，并实现 service/cluster/addresses、method、
-  URI/rewrite/query、Java 固定 header 过滤、proxy/context/source header、body framing/
-  limit、timeout、flush 和 WebSocket 请求条件的请求计划；
+- 已将 PROXY 接入同一 live handler；handler 将 pinned route 和轻量请求上下文直接交给
+  executor，由 executor 完成 service/cluster/addresses、method、URI/rewrite/query、Java
+  固定 header 过滤、proxy/context/source header、body framing/limit、timeout、flush 和
+  WebSocket 请求条件；
 - 已实现基于 `LocalHttp1ConnectionPoolSet`/`ClientHttp1Exchange` 的完整 `ProxyExecutor`
-  状态机：静态地址或 service selector、pool miss 后 DNS、多地址连接、header/body
-  流式收发、动态 body limit、Java request timeout 和连接前失败重选；pool lease、
-  discovery generation 与栈上的 upstream exchange 保持到 response/tunnel 结束；
+  状态机：先选择静态地址或 service endpoint，再构造实际 `Http1RequestHead`，随后查询
+  connection pool，并在 miss 后完成 DNS/多地址连接；header/body 流式收发、动态 body
+  limit、Java request timeout 和 request header 发送前的连接失败重选均已实现；pool
+  lease、discovery generation 与栈上的 upstream exchange 保持到 response/tunnel 结束；
 - 已实现普通 upstream response bridge：status/reason/header/body、Java 固定
   hop-by-hop 过滤、自定义响应头模板、Content-Length 特殊恢复、Location/Refresh
   回写、flush 和已知/动态 response body limit；

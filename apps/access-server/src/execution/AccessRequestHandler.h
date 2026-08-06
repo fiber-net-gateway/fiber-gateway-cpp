@@ -6,8 +6,8 @@
 #include "../routing/ProjectRouteSnapshot.h"
 #include "../runtime/RouteConfigStore.h"
 #include "ErrorResponder.h"
-#include "ProxyRequestPlan.h"
 #include "ResponseExecutor.h"
+#include "TemplateEvaluator.h"
 
 #include <array>
 #include <cstddef>
@@ -45,9 +45,18 @@ struct AccessRequestHandlerOptions {
     bool test_mode = false;
 };
 
+struct ProxyExecutionInput {
+    std::string_view project;
+    std::string_view initial_context_cluster;
+    std::string_view origin_host;
+    TemplateEvaluator template_evaluator;
+    std::size_t max_request_body_size = 0;
+};
+
 struct AccessProxyAdapter {
     using ExecuteFunction = async::Task<common::IoResult<void>> (*)(void *context, http::HttpExchange &exchange,
-                                                                    const PreparedProxyRequest &request,
+                                                                    const CompiledProxyRoute &proxy,
+                                                                    ProxyExecutionInput input,
                                                                     std::span<const EvaluatedHeader> base_headers,
                                                                     AccessRequestTelemetry *telemetry) noexcept;
 

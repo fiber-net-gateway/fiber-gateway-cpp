@@ -505,13 +505,16 @@ context 模板先计算后更新 trace user data：
 - 该步骤的业务 key/value 结果属于排障契约；
 - CAT 的底层 message 编码和线程行为不属于兼容范围。
 
-当前 C++ 已将上述结果固化为 `PreparedProxyRequest` 并接入 live handler。
-`ProxyExecutor` 通过同步 service selector 和独立的 `ProxyUpstreamConnection` 获取实际
-peer：先以 `Http1ConnectionGroupKey` 查询 local pool，仅在 miss 且 key 为 hostname 时
-调用异步 DNS adapter，并依次尝试全部地址。executor coroutine 保持 pool lease、选中
-generation 和栈上的 `ClientHttp1Exchange`，直到消费或放弃 upstream response。真实
-loopback upstream 已覆盖 chunked、Content-Length、默认 Host、source header、body
-字节、service 连接失败重选和连接复用。
+当前 C++ live handler 将 pinned `CompiledProxyRoute` 和轻量 `ProxyExecutionInput` 直接交给
+`ProxyExecutor`，不再固化跨层的 prepared request。executor 先计算 selector 所需 context，
+选择并 pin service/static endpoint，再构造实际 `Http1RequestHead`；随后通过独立的
+`ProxyUpstreamConnection` 以 `Http1ConnectionGroupKey` 查询 local pool，仅在 miss 且 key
+为 hostname 时调用异步 DNS adapter，并依次尝试全部地址。连接失败重选时只更新由 endpoint
+派生的 Host，不重复计算 request 模板；CAT attempt header 在连接成功后、发送 request header
+前注入。executor coroutine 保持 pool lease、选中 generation 和栈上的
+`ClientHttp1Exchange`，直到消费或放弃 upstream response。真实 loopback upstream 已覆盖
+chunked、Content-Length、默认/配置 Host、source header、body 字节、service 连接失败重选
+和连接复用。
 
 service/cluster/address 视图只在当前 pinned snapshot 生命周期内有效。C++ 已实现
 NamingService route 依赖协调和原子服务目录：仅接受 enabled、healthy、正 weight

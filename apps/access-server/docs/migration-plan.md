@@ -281,8 +281,10 @@ downstream close；NamingService/DNS runtime 适配留在阶段 6。
 - [x] proxy header、context 和最终 source header；
 - [x] 请求 body framing、client/proxy body limit、timeout、flush 参数；
 - [x] WebSocket upgrade 请求条件；
-- [x] 将 `PreparedProxyRequest` 通过 callback 接入 `AccessRequestHandler`；
+- [x] `AccessRequestHandler` 通过 callback 传递 pinned `CompiledProxyRoute` 和轻量
+  `ProxyExecutionInput`，不引入跨层 prepared request；
 - [x] 使用本项目 connection pool 实现 production upstream connection acquisition；
+- [x] executor 先选择 endpoint 并构造实际 `Http1RequestHead`，再查池或建立连接；
 - [x] executor 中完成 Content-Length/chunked request body 流式转发和动态超限中止；
 - [x] 连接失败时按 Java 上限在 request header 发送前重新选择 service 实例；
 - [x] 完成等待 upstream 时的 downstream 断开竞速；最终 adapter 必须取消 executor
