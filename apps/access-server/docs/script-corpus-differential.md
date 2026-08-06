@@ -92,8 +92,9 @@ truthiness；不比较 Java/C++ PRNG 序列。
 - C++ 原实现只接受 `cluster`、`HI_TRACE_CLUSTER` 和 `HI-TRACE-CLUSTER` 的精确拼写，
   导致现网 36 个 `$context.hi_trace_cluster` 引用得到 null，并错误使用 `||` fallback。
 
-C++ 现由共享 `ConstPackage::Builder` 在编译期执行同等归一化，并在请求执行前按 package index
-填充 context 槽位，不改动共享脚本 VM。
+C++ 现由共享 `ConstPackage::Builder` 只收集这些动态名称常量，在编译期执行同等归一化，
+并在请求执行前按 package index 填充 context 槽位；固定的 `$req`/`$conn` 由 exchange
+extension 直接读取，不改动共享脚本 VM。
 修复后 Java golden、condition/template 请求结果和两类 rewrite 结果一致。
 
 ## 5. 当前结论

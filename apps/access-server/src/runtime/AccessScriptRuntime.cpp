@@ -30,6 +30,7 @@ std::string script_failure_message(const script::ScriptResult &result) {
 
 AccessScriptRuntime::AccessScriptRuntime() {
     http_script::register_request_funcs(library_);
+    library_.add_ext_ops(&exchange_const_extension_, http_script::ExchangeConstExtension::ops());
     library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
 }
 

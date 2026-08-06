@@ -105,19 +105,6 @@ const RouteScriptExtension::HostCallable *RouteScriptExtension::resolve_constant
     if (namespace_name == "$context") {
         return const_builder_->add_constant(ConstType::Context, key);
     }
-    if (namespace_name == "$req") {
-        // Compile-time existence check: fixed field set.
-        if (key != "uri" && key != "method" && key != "path" && key != "query") {
-            return nullptr;
-        }
-        return const_builder_->add_constant(ConstType::Request, key);
-    }
-    if (namespace_name == "$conn") {
-        if (key != "remote_addr" && key != "remote_port" && key != "http_version" && key != "scheme" && key != "tls") {
-            return nullptr;
-        }
-        return const_builder_->add_constant(ConstType::Connection, key);
-    }
     return nullptr;
 }
 

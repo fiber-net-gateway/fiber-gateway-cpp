@@ -12,6 +12,7 @@
 #include "common/util/RoutePathMatcher.h"
 #include "http/HeaderMap.h"
 #include "http/HttpHeaderHash.h"
+#include "http_script/ExchangeConstExtension.h"
 #include "http_script/HttpScriptLib.h"
 #include "http_script/RouteScriptExtension.h"
 #include "logging/AccessLogScriptExtension.h"
@@ -56,8 +57,11 @@ void ensure_script_library(RuntimeConfig &runtime) {
     }
     runtime.script_library = std::make_shared<fiber::script::std_lib::StdLibrary>();
     fiber::http_script::register_http_functions_to_lib(*runtime.script_library);
+    runtime.exchange_const_extension = std::make_shared<fiber::http_script::ExchangeConstExtension>();
     runtime.route_script_extension = std::make_shared<fiber::http_script::RouteScriptExtension>();
     runtime.access_log_script_extension = std::make_shared<logging::AccessLogScriptExtension>();
+    runtime.script_library->add_ext_ops(runtime.exchange_const_extension.get(),
+                                        fiber::http_script::ExchangeConstExtension::ops());
     runtime.script_library->add_ext_ops(runtime.access_log_script_extension.get(),
                                         logging::AccessLogScriptExtension::ops());
     runtime.script_library->add_ext_ops(runtime.route_script_extension.get(),

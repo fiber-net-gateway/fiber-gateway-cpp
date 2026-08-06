@@ -273,9 +273,10 @@ access_log lite_nginx.access "request_id=${$access.request_id} remote_addr=${$co
 
 The category is resolved through the normal hierarchical logging configuration. The template is
 compiled while the runtime configuration is built and must be synchronous; use of an async
-function such as `req.readJson()` rejects the configuration. It can use the regular request
-constants plus `$conn.remote_addr`, `$conn.remote_port`, `$conn.http_version`, `$conn.scheme`, and
-`$conn.tls`; access-only fields are `$access.request_id`, `$access.server`, `$access.location`,
+function such as `req.readJson()` rejects the configuration. It can use the regular dynamic
+constants plus the fixed exchange constants `$req.*`, `$conn.remote_addr`, `$conn.remote_port`,
+`$conn.http_version`, `$conn.scheme`, and `$conn.tls`; access-only fields are
+`$access.request_id`, `$access.server`, `$access.location`,
 `$access.status`, `$access.body_bytes_sent`, `$access.request_time_us`, and `$access.outcome`.
 Upstream fields are `$upstream.host`, `$upstream.port`, `$upstream.status`, `$upstream.time_us`,
 and `$upstream.error`, and resolve to `null` when no upstream value is available. `access_log`
@@ -295,8 +296,8 @@ Request-side functions (sync unless noted): `req.getHeader([name])`, `req.getQue
 Response-side functions: `resp.setHeader(name, value)`, `resp.addHeader(name, value)`,
 `resp.sendJson(status, body)` (async), `resp.send(status[, body])` (async), `resp.addCookie(obj)`.
 
-Route-variable constants (`$namespace.key`, resolved at compile time and read from the request
-at runtime -- see `conf/scripts/vars.js`):
+Dynamic route constants (`$namespace.key`, collected into an immutable per-location package at
+compile time and bound by index at runtime -- see `conf/scripts/vars.js`):
 
 - `$path.<name>` - a path variable captured by the location's pattern (e.g. `/api/:id` makes
   `$path.id` available). Referencing a name the pattern does not capture is a compile-time
@@ -305,11 +306,16 @@ at runtime -- see `conf/scripts/vars.js`):
 - `$header.<key>` - a request header, matched case-insensitively with `-` folded to `_`
   (e.g. `$header.x_forwarded_for` reads `X-Forwarded-For`).
 - `$cookie.<key>` - a request cookie, same normalization as `$header`.
+
+Fixed exchange constants are resolved by a separate immutable extension and read directly from
+the current request without package slots:
+
 - `$req.<field>` - one of `uri` / `method` / `path` / `query` (fixed set; unknown = compile
   error). `query` is the raw query string (empty when absent).
 - `$conn.<field>` - one of `remote_addr` / `remote_port` / `http_version` / `scheme` / `tls`.
   These values describe the accepted downstream connection and are also available to access-log
-  templates.
+  templates. Exchange-owned strings are borrowed without copying; `remote_addr` is formatted and
+  cached in the request pool on first use.
 
 Absent `$query`/`$header`/`$cookie` values resolve to `null` (not an error). `$path.<name>`
 is always present for a matched route (the pattern captured it).

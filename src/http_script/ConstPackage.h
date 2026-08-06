@@ -17,8 +17,6 @@ enum class ConstType : std::uint8_t {
     Header,
     Cookie,
     Context,
-    Request,
-    Connection,
     Count,
 };
 
