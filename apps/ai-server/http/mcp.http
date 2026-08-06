@@ -1,0 +1,73 @@
+@baseUrl = http://127.0.0.1:8080
+@project = demo
+
+### 初始化 Streamable HTTP session
+POST {{baseUrl}}/{{project}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-03-26",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "ai-server-http-example",
+      "version": "1.0"
+    }
+  }
+}
+
+> {% client.global.set("mcpSessionId", response.headers.valueOf("mcp-session-id")); %}
+
+### 完成初始化通知
+POST {{baseUrl}}/{{project}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+Mcp-Protocol-Version: 2025-03-26
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/initialized"
+}
+
+### 查询工具
+POST {{baseUrl}}/{{project}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+Mcp-Protocol-Version: 2025-03-26
+
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list",
+  "params": {}
+}
+
+### 调用工具（把 name 和 arguments 改成实际配置）
+POST {{baseUrl}}/{{project}}/mcp
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+Mcp-Protocol-Version: 2025-03-26
+
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "weather",
+    "arguments": {
+      "city": "青岛"
+    }
+  }
+}
+
+### 删除 session
+DELETE {{baseUrl}}/{{project}}/mcp
+Accept: text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+Mcp-Protocol-Version: 2025-03-26

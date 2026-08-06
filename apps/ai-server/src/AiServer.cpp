@@ -2,6 +2,7 @@
 #include "observability/AiServerCatRequest.h"
 #include "observability/AiServerLogCategories.h"
 #include "server/LlmRequestHandler.h"
+#include "server/McpHttpHandler.h"
 #include "server/TokenRateLimitHttpHandler.h"
 
 #include <chrono>
@@ -39,6 +40,7 @@ constexpr std::string_view kNotReadyBody = "{\"status\":\"not_ready\"}\n";
 constexpr std::string_view kMethodNotAllowedBody = "{\"error\":\"method_not_allowed\"}\n";
 constexpr std::string_view kNotFoundBody = "{\"error\":\"not_found\"}\n";
 constexpr std::chrono::minutes kRateLimitSweepInterval{1};
+constexpr std::chrono::seconds kMcpSessionSweepInterval{65};
 
 std::int64_t wall_now_millis() noexcept {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -88,12 +90,15 @@ async::Task<void> send_json(http::HttpExchange &exchange, const AiServerCatReque
 } // namespace
 
 AiServer::AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group, cat::CatClient *cat_client,
-                   std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id) :
+                   std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id, McpConfigStore *mcp_config,
+                   McpScriptServices *mcp_script_services) :
     accept_loop_(&accept_loop), worker_group_(&worker_group), cat_client_(cat_client),
     audit_max_record_bytes_(audit_max_record_bytes), audit_appender_id_(audit_appender_id),
-    workers_(worker_group.size()), rate_limiters_(worker_group.size()), rate_limit_remote_client_(worker_group),
+    workers_(worker_group.size()), rate_limiters_(worker_group.size()), mcp_forwarder_(worker_group, rate_limit_ring_),
+    rate_limit_remote_client_(worker_group),
     rate_limit_coordinator_(rate_limiters_, rate_limit_ring_, rate_limit_remote_client_),
     provider_connections_(worker_group), provider_client_(provider_connections_), metrics_(worker_group),
+    mcp_config_(mcp_config), mcp_script_services_(mcp_script_services),
     server_(
             accept_loop, [this](http::HttpExchange &exchange) { return handle(exchange); }, make_server_options(),
             &worker_group) {
@@ -107,7 +112,20 @@ AiServer::~AiServer() {
     FIBER_ASSERT(config_tasks_.empty());
     FIBER_ASSERT(initial_installs_.empty());
     FIBER_ASSERT(sweep_tasks_.empty());
+    FIBER_ASSERT(mcp_tasks_.empty());
     FIBER_ASSERT(cat_detach_tasks_.empty());
+}
+
+bool AiServer::start_mcp(std::string node_prefix) {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    if (!mcp_config_ || node_prefix.size() != 12 || mcp_handler_) {
+        return false;
+    }
+    mcp_sessions_ = std::make_unique<McpSessionManager>(std::move(node_prefix));
+    mcp_handler_ = std::make_unique<McpHttpHandler>(*mcp_config_, *mcp_sessions_, &mcp_forwarder_);
+    mcp_tasks_.add();
+    async::spawn([this]() { return sweep_mcp_sessions(); });
+    return true;
 }
 
 async::Task<bool> AiServer::start_config_workers(LlmConfigManager &config_manager) noexcept {
@@ -116,7 +134,18 @@ async::Task<bool> AiServer::start_config_workers(LlmConfigManager &config_manage
     if (!metrics_.valid() || !rate_limit_coordinator_.init()) {
         co_return false;
     }
+    if (!mcp_forwarder_.init()) {
+        co_await rate_limit_coordinator_.shutdown();
+        co_return false;
+    }
     if (!co_await provider_connections_.init()) {
+        co_await mcp_forwarder_.shutdown();
+        co_await rate_limit_coordinator_.shutdown();
+        co_return false;
+    }
+    if (mcp_script_services_ && !co_await mcp_script_services_->init_workers()) {
+        co_await provider_connections_.shutdown();
+        co_await mcp_forwarder_.shutdown();
         co_await rate_limit_coordinator_.shutdown();
         co_return false;
     }
@@ -153,6 +182,27 @@ async::DetachedTask AiServer::sweep_rate_limits() noexcept {
         stop_snapshot = stop.current();
     }
     sweep_tasks_.done();
+}
+
+async::DetachedTask AiServer::sweep_mcp_sessions() noexcept {
+    FIBER_ASSERT(accept_loop_->in_loop());
+    auto stop = config_stop_.subscribe();
+    auto stop_snapshot = stop.current();
+    while (!stop_snapshot.value || !*stop_snapshot.value) {
+        auto result =
+                co_await async::when_any([]() { return async::sleep(kMcpSessionSweepInterval); },
+                                         [&stop, version = stop_snapshot.version]() { return stop.next(version); });
+        if (result.is<1>()) {
+            std::move(result).get<1>();
+            break;
+        }
+        std::move(result).get<0>();
+        if (mcp_sessions_) {
+            (void) mcp_sessions_->sweep(event::EventLoop::current().now());
+        }
+        stop_snapshot = stop.current();
+    }
+    mcp_tasks_.done();
 }
 
 async::DetachedTask AiServer::detach_cat_worker() noexcept {
@@ -226,18 +276,27 @@ void AiServer::close() { server_.close(); }
 
 async::Task<void> AiServer::shutdown_and_wait() {
     FIBER_ASSERT(accept_loop_->in_loop());
-    co_await server_.shutdown_and_wait();
-    co_await detach_cat_workers();
-    if (config_workers_started_ && !config_workers_stopping_) {
+    if (mcp_sessions_) {
+        mcp_sessions_->close_all();
+    }
+    if ((config_workers_started_ || mcp_handler_) && !config_workers_stopping_) {
         config_workers_stopping_ = true;
         config_stop_publisher_->publish(true);
     }
+    co_await server_.shutdown_and_wait();
+    co_await detach_cat_workers();
     co_await config_tasks_.join();
     co_await sweep_tasks_.join();
+    co_await mcp_tasks_.join();
     co_await rate_limit_coordinator_.shutdown();
+    co_await mcp_forwarder_.shutdown();
     co_await provider_connections_.shutdown();
+    if (mcp_script_services_) {
+        co_await mcp_script_services_->shutdown_workers();
+    }
     metrics_.stop_collecting();
     co_await metrics_.wait_for_idle();
+    mcp_handler_.reset();
 }
 
 int AiServer::fd() const noexcept { return server_.fd(); }
@@ -317,6 +376,10 @@ async::Task<void> AiServer::handle(http::HttpExchange &exchange) {
         metrics.request_finished(
                 protocol, exchange.response_stats(),
                 std::chrono::duration_cast<std::chrono::microseconds>(event::EventLoop::current().now() - started));
+        co_return;
+    }
+    if (mcp_handler_ && mcp_handler_->matches(path)) {
+        co_await mcp_handler_->handle(exchange);
         co_return;
     }
     if (path != kHealthPath && path != kReadyPath) {

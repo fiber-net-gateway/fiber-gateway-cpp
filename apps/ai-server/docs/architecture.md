@@ -23,6 +23,11 @@ Provider 只执行与入站协议相同的协议。OpenAI/Anthropic 隐式协议
 确认的有意差异：不转换请求、响应或 SSE；缺少同协议候选时返回
 `provider_protocol_unsupported`。`openai-embedding` 配置可加载，但没有入站路由。
 
+ai-server 同时承载从 Java `ploto-ai` 迁移的动态 MCP 项目路由：
+`/<project>/mcp`、`/<project>/sse` 和 `/<project>/message`。MCP 的源端契约、配置图、
+会话状态机和迁移边界单独见
+[`ploto-ai-mcp-migration-plan.md`](ploto-ai-mcp-migration-plan.md)。
+
 ## 2. 所有权模型
 
 ```text
@@ -35,19 +40,22 @@ HTTP worker EventLoopGroup
 │   ├── ProviderRuntimeRegistry
 │   └── request-local ParsedLlmBody / execution plan / audit context
 ├── LocalHttp1ConnectionPoolSet[N]
-└── WorkerDnsService[N] + one shared DNS cache
+├── WorkerDnsService[N] + one shared DNS cache
+└── McpHttpHandler + MCP tool HTTP clients
 
 process-wide request service
 ├── TokenRateLimitService fixed hash shards + per-shard mutex
 ├── RateLimitShardRing immutable snapshot
 ├── TokenRateLimitCoordinator
-└── fixed-schema AiServerMetrics worker slots
+├── fixed-schema AiServerMetrics worker slots
+└── McpSessionManager + immutable MCP config snapshot
 
 Nacos EventLoop
 ├── NacosClient
 ├── ConfigService
 ├── NamingService
 ├── LlmConfigManager dependency graph
+├── McpConfigManager + tool loader/compiler + service discovery snapshots
 ├── ai-server instance registration
 └── provider and rate-limit membership subscriptions
 

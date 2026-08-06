@@ -18,6 +18,15 @@ add_library(ai_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/TokenRateLimitRemoteClient.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/TokenRateLimitService.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/limit/TokenRateLimiter.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpConfigSnapshot.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpConfigManager.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpJsonCodec.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpProtocol.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpScriptRuntime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpScriptServices.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpSessionManager.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpSessionForwarder.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/mcp/McpToolLoader.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AiServerCatRequest.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/AiServerMetrics.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/observability/ProcessMetrics.cpp"
@@ -36,6 +45,7 @@ add_library(ai_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ModelAuthorization.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/routing/ProviderRouteKey.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/server/LlmRequestHandler.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/server/McpHttpHandler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/server/TokenRateLimitHttpHandler.cpp")
 target_include_directories(ai_server_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
 target_link_libraries(ai_server_core
@@ -73,6 +83,11 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmProxyIntegrationTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmRateLimitTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmRoutingTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/McpJsonCodecTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/McpConfigManagerTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/McpHttpIntegrationTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/McpProtocolTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/McpScriptRuntimeTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/WeightedRendezvousTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/WorkerDnsServiceTest.cpp")
     target_link_libraries(fiber_ai_server_tests PRIVATE ai_server_core GTest::gtest_main)

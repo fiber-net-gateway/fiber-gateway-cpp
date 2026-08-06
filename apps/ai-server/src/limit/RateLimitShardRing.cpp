@@ -119,6 +119,20 @@ std::optional<RateLimitNode> RateLimitShardRing::locate(std::string_view user_id
     return current->nodes[found->node_index];
 }
 
+std::optional<RateLimitNode> RateLimitShardRing::find_node(std::string_view node_id) const {
+    const auto current = snapshot();
+    if (!current) {
+        return std::nullopt;
+    }
+    const auto found =
+            std::lower_bound(current->nodes.begin(), current->nodes.end(), node_id,
+                             [](const RateLimitNode &node, std::string_view id) { return node.node_id < id; });
+    if (found == current->nodes.end() || found->node_id != node_id) {
+        return std::nullopt;
+    }
+    return *found;
+}
+
 std::optional<std::string> java_self_service_node_id(std::string_view ipv4, std::uint16_t port) {
     net::IpAddress address;
     if (port == 0 || !net::IpAddress::parse(ipv4, address) || !address.is_v4() || address.is_unspecified() ||

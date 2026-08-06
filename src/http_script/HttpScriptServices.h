@@ -2,6 +2,7 @@
 #define FIBER_HTTP_SCRIPT_HTTP_SCRIPT_SERVICES_H
 
 #include <memory>
+#include <string_view>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -33,6 +34,7 @@ public:
     virtual ~HttpUpstreamConnection() = default;
 
     [[nodiscard]] virtual fiber::http::Http1ClientConnection &connection() noexcept = 0;
+    [[nodiscard]] virtual std::string_view authority() const noexcept { return {}; }
 };
 
 // App-provided bridge that resolves an HttpTargetSpec (named upstream or ad-hoc URL, the latter

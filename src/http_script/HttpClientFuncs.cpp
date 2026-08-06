@@ -25,6 +25,7 @@
 #include "../script/Library.h"
 #include "../script/ScriptResult.h"
 #include "../script/gc/GcInternal.h"
+#include "../script/json/JsValueDecode.h"
 #include "../script/json/JsValueEncode.h"
 #include "../script/std/NodeText.h"
 #include "../script/std/StdLibrary.h"
@@ -300,8 +301,8 @@ bool json_encode_value(GcHeap &heap, const JsValue &body, std::string &out) noex
     };
     StringSink sink(out);
     fiber::json::Generator gen(sink);
-    return fiber::script::json::encode_js_value(gen, body) == fiber::json::Generator::Result::OK ||
-           fiber::script::json::encode_js_value(gen, body) == fiber::json::Generator::Result::GenerateComplete;
+    const auto result = fiber::script::json::encode_js_value(gen, body);
+    return result == fiber::json::Generator::Result::OK || result == fiber::json::Generator::Result::GenerateComplete;
 }
 
 // Resolves options.body to bytes + sets content-type when unset. Returns the body framing;
@@ -518,6 +519,10 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
     fiber::http::ClientHttp1Exchange upstream(*ac.conn, ctx->exchange().pool());
     fiber::http::HttpHeaders req_headers(ctx->exchange().pool());
     apply_options_headers(*heap, options, req_headers);
+    if (req_headers.get("host", fiber::http::http_header_name_hash("host")).empty() &&
+        !ac.holder->authority().empty()) {
+        req_headers.set("Host", ac.holder->authority());
+    }
 
     std::string body_bytes;
     bool end_stream = true;
@@ -610,6 +615,165 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
     }
 
     co_return AbiResult::success(*obj_root);
+}
+
+namespace {
+
+enum class JsonRequestKind : std::uint8_t {
+    PostJson,
+    PostForm,
+    GetJson,
+};
+
+bool icase_contains(std::string_view text, std::string_view expected) noexcept {
+    if (text.size() < expected.size()) {
+        return false;
+    }
+    for (std::size_t offset = 0; offset + expected.size() <= text.size(); ++offset) {
+        bool equal = true;
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            char left = text[offset + i];
+            char right = expected[i];
+            if (left >= 'A' && left <= 'Z') {
+                left = static_cast<char>(left - 'A' + 'a');
+            }
+            if (right >= 'A' && right <= 'Z') {
+                right = static_cast<char>(right - 'A' + 'a');
+            }
+            if (left != right) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) {
+            return true;
+        }
+    }
+    return false;
+}
+
+AsyncTask http_json_call(void *userdata, const Library::HostCallFrame &frame, Library::Arguments args,
+                         JsonRequestKind kind) noexcept {
+    auto *ctx = ctx_of(frame);
+    GcHeap *heap = &frame.runtime;
+    if (ctx == nullptr || ctx->services() == nullptr) {
+        co_return AbiResult::abort(ScriptAbortReason::InvalidState);
+    }
+    const bool get = kind == JsonRequestKind::GetJson;
+    const std::size_t minimum_args = get ? 1 : 2;
+    const std::size_t maximum_args = get ? 2 : 3;
+    if (args.args == nullptr || args.argc < minimum_args || args.argc > maximum_args) {
+        co_return error_exn(*heap, "service JSON call: invalid argument count");
+    }
+    std::string_view path;
+    if (!string_utf8_view(args.args[0], path) || path.empty()) {
+        co_return error_exn(*heap, "service JSON call: path is required");
+    }
+    const JsValue options = args.argc == maximum_args ? args.args[maximum_args - 1] : JsValue::make_undefined();
+    const std::chrono::milliseconds timeout = resolve_timeout(*heap, options);
+    auto target_opt = resolve_target(userdata);
+    if (!target_opt) {
+        co_return error_exn(*heap, "service JSON call: missing directive-bound target");
+    }
+    auto acquired = co_await acquire_and_connect(*ctx->services(), *target_opt, timeout);
+    if (!acquired) {
+        co_return error_exn(*heap, "service JSON call: acquire upstream connection failed");
+    }
+    AcquiredConnection &connection = *acquired;
+    fiber::http::HttpHeaders headers(ctx->exchange().pool());
+    apply_options_headers(*heap, options, headers);
+    if (headers.get("accept", fiber::http::http_header_name_hash("accept")).empty()) {
+        headers.set("Accept", "application/json");
+    }
+    if (headers.get("host", fiber::http::http_header_name_hash("host")).empty() &&
+        !connection.holder->authority().empty()) {
+        headers.set("Host", connection.holder->authority());
+    }
+
+    std::string body;
+    if (!get) {
+        if (kind == JsonRequestKind::PostJson) {
+            if (!json_encode_value(*heap, args.args[1], body)) {
+                co_return error_exn(*heap, "service.postJson: failed to encode request body");
+            }
+            headers.set("Content-Type", "application/json;charset=utf-8");
+        } else {
+            object_pairs_to_form(*heap, args.args[1], body);
+            if (!body.empty()) {
+                headers.set("Content-Type", "application/x-www-form-urlencoded");
+            }
+        }
+    }
+    const bool end_stream = body.empty();
+    fiber::http::Http1RequestHead head;
+    head.method = get ? fiber::http::HttpMethod::Get : fiber::http::HttpMethod::Post;
+    const std::string target = build_request_target(*heap, options, path);
+    head.target = target;
+    head.headers = &headers;
+    head.body = end_stream ? fiber::http::HttpBodySpec::None() : fiber::http::HttpBodySpec::ContentLength(body.size());
+
+    fiber::http::ClientHttp1Exchange upstream(*connection.conn, ctx->exchange().pool());
+    auto sent = co_await upstream.send_header(head, end_stream, timeout);
+    if (!sent) {
+        co_return error_exn(*heap, "service JSON call: send header failed");
+    }
+    if (!end_stream) {
+        auto written = co_await upstream.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(),
+                                                   true, timeout);
+        if (!written) {
+            co_return error_exn(*heap, "service JSON call: write body failed");
+        }
+    }
+    const fiber::http::Http1ResponseHead *response = nullptr;
+    for (;;) {
+        auto read = co_await upstream.read_header(timeout);
+        if (!read) {
+            co_return error_exn(*heap, "service JSON call: read header failed");
+        }
+        if (!(*read)->is_informational()) {
+            response = *read;
+            break;
+        }
+    }
+    if (response->status_code != 200) {
+        (void) co_await upstream.discard_response_body(timeout);
+        co_return error_exn(*heap, "service JSON call: response status is not 200");
+    }
+    const std::string_view content_type = response->headers.get("content-type", kContentTypeHash);
+    if (!icase_contains(content_type, "application/json")) {
+        (void) co_await upstream.discard_response_body(timeout);
+        co_return error_exn(*heap, "service JSON call: response content-type is not application/json");
+    }
+    std::string response_body;
+    auto body_read = co_await read_full_response_body(upstream, response_body, timeout);
+    if (!body_read) {
+        co_return error_exn(*heap, "service JSON call: read body failed");
+    }
+    GcHeap::LocalMark mark(*heap);
+    ValueHandle output = heap->local_value();
+    if (!output) {
+        co_return AbiResult::abort(ScriptAbortReason::OutOfMemory);
+    }
+    fiber::json::ParseError parse_error;
+    if (fiber::script::json::decode_js_value(*heap, response_body.data(), response_body.size(), output, &parse_error) !=
+        fiber::json::DecodeStatus::Complete) {
+        co_return error_exn(*heap, "service JSON call: cannot parse JSON response");
+    }
+    co_return AbiResult::success(*output);
+}
+
+} // namespace
+
+AsyncTask http_post_json_fn(void *userdata, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+    return http_json_call(userdata, frame, args, JsonRequestKind::PostJson);
+}
+
+AsyncTask http_post_form_fn(void *userdata, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+    return http_json_call(userdata, frame, args, JsonRequestKind::PostForm);
+}
+
+AsyncTask http_get_json_fn(void *userdata, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
+    return http_json_call(userdata, frame, args, JsonRequestKind::GetJson);
 }
 
 // ---- http.proxyPass(options) -> upstream status int ----
@@ -859,6 +1023,18 @@ HttpDirectiveDef::HttpDirectiveDef(HttpTargetSpec target) noexcept : target_(std
     request_callable_.async_function = &http_request_fn;
     request_callable_.userdata = this;
     request_callable_.debug_name = "http.request";
+    post_json_callable_.kind = Library::HostCallable::Kind::AsyncFunction;
+    post_json_callable_.async_function = &http_post_json_fn;
+    post_json_callable_.userdata = this;
+    post_json_callable_.debug_name = "service.postJson";
+    post_form_callable_.kind = Library::HostCallable::Kind::AsyncFunction;
+    post_form_callable_.async_function = &http_post_form_fn;
+    post_form_callable_.userdata = this;
+    post_form_callable_.debug_name = "service.postForm";
+    get_json_callable_.kind = Library::HostCallable::Kind::AsyncFunction;
+    get_json_callable_.async_function = &http_get_json_fn;
+    get_json_callable_.userdata = this;
+    get_json_callable_.debug_name = "service.getJson";
     proxy_pass_callable_.kind = Library::HostCallable::Kind::AsyncFunction;
     proxy_pass_callable_.async_function = &http_proxy_pass_fn;
     proxy_pass_callable_.userdata = this;
@@ -879,12 +1055,27 @@ Library::FunctionMatchResult HttpDirectiveDef::resolve_async_func(std::string_vi
     const Library::HostCallable *callable = nullptr;
     if (function == "request") {
         callable = &request_callable_;
+    } else if (function == "postJson") {
+        if (request.has_spread || request.known_argc < 2 || request.known_argc > 3) {
+            return Library::FunctionMatchResult::arity_mismatch();
+        }
+        callable = &post_json_callable_;
+    } else if (function == "postForm") {
+        if (request.has_spread || request.known_argc < 2 || request.known_argc > 3) {
+            return Library::FunctionMatchResult::arity_mismatch();
+        }
+        callable = &post_form_callable_;
+    } else if (function == "getJson") {
+        if (request.has_spread || request.known_argc < 1 || request.known_argc > 2) {
+            return Library::FunctionMatchResult::arity_mismatch();
+        }
+        callable = &get_json_callable_;
     } else if (function == "proxyPass") {
         callable = &proxy_pass_callable_;
     } else {
         return Library::FunctionMatchResult::not_found();
     }
-    if (request.has_spread || request.known_argc > 1) {
+    if ((function == "request" || function == "proxyPass") && (request.has_spread || request.known_argc > 1)) {
         return Library::FunctionMatchResult::arity_mismatch();
     }
     Library::FunctionSignature sig{};

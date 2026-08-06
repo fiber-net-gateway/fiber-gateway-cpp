@@ -5,6 +5,8 @@
 #include "AiServerConfig.h"
 #include "config/LlmConfigManager.h"
 #include "limit/RateLimitClusterMembership.h"
+#include "mcp/McpConfigManager.h"
+#include "mcp/McpScriptServices.h"
 
 #include <chrono>
 #include <cstddef>
@@ -100,9 +102,9 @@ private:
                     event::EventLoopGroup &http_workers, net::SocketAddress listen_address,
                     net::ListenOptions listen_options, std::chrono::milliseconds initial_config_timeout,
                     net::IpAddress advertise_address, std::string service_name, std::string service_group,
-                    std::string nacos_cluster, std::unique_ptr<cat::CatClient> cat_client,
-                    std::size_t audit_max_record_bytes, log::AppenderId audit_appender_id,
-                    std::unique_ptr<nacos::NacosClient> nacos_client,
+                    std::string local_zone, std::string nacos_cluster, std::string mcp_cache_directory,
+                    std::unique_ptr<cat::CatClient> cat_client, std::size_t audit_max_record_bytes,
+                    log::AppenderId audit_appender_id, std::unique_ptr<nacos::NacosClient> nacos_client,
                     std::unique_ptr<nacos::ConfigService> config_service,
                     std::unique_ptr<nacos::NamingService> naming_service) noexcept;
 
@@ -126,7 +128,9 @@ private:
     std::unique_ptr<nacos::NacosClient> nacos_client_;
     std::unique_ptr<nacos::ConfigService> config_service_;
     std::unique_ptr<nacos::NamingService> naming_service_;
+    McpScriptServices mcp_script_services_;
     LlmConfigManager config_manager_;
+    McpConfigManager mcp_config_manager_;
     AiServer server_;
     RateLimitClusterMembership rate_limit_membership_;
     async::WaitGroup nacos_start_tasks_;

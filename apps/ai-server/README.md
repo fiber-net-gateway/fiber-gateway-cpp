@@ -1,6 +1,6 @@
 # AI Server
 
-`ai-server` 是基于本仓库 C++23 fiber runtime 的完整 LLM 代理。业务语义以 Java
+`ai-server` 是基于本仓库 C++23 fiber runtime 的 LLM 代理和 MCP 服务。LLM 业务语义以 Java
 `ploto-llm` 及
 [`docs/java-ploto-llm-business-flow-and-config.md`](../../docs/java-ploto-llm-business-flow-and-config.md)
 为基线，并适配本项目的 EventLoop、HTTP client、Nacos、CAT 和 Prometheus
@@ -17,13 +17,17 @@
 - 单次遍历 JSONPath 抽取、任意已存在字段的原始区间改写，以及 ai-server
   `model`/`stream` 重试快路径；
 - 集群 token 限流、内部 check/settle 协议和 Nacos 成员环；
+- Java `ploto-ai` 兼容的 MCP Streamable HTTP、旧版 SSE、动态工具配置、脚本执行和
+  跨实例 session 转发；
 - 固定 schema Prometheus 指标、专用对话审计日志和可选 CAT transaction；
 - 延迟绑定、请求排空和跨 EventLoop 有序关闭。
 
 完整设计见 [`docs/architecture.md`](docs/architecture.md)，JSON 字段能力见
 [`docs/json-field-transform.md`](docs/json-field-transform.md)。配置控制台的前端需求、
 交互、配置后台接口和发布模型见
-[`docs/config-console-requirements.md`](docs/config-console-requirements.md)。
+[`docs/config-console-requirements.md`](docs/config-console-requirements.md)。MCP 的 Java 行为基线、
+迁移边界和所有权设计见
+[`docs/ploto-ai-mcp-migration-plan.md`](docs/ploto-ai-mcp-migration-plan.md)。
 
 ## 路由
 
@@ -34,6 +38,9 @@
 | `POST /v1/message` | Anthropic 兼容别名 | BT1 |
 | `POST /internal/llm/rate-limit/check` | owner 节点限流检查 | 无，必须网络隔离 |
 | `POST /internal/llm/rate-limit/settle` | owner 节点用量结算 | 无，必须网络隔离 |
+| `POST\|GET\|DELETE /<project>/mcp` | MCP Streamable HTTP | 无 |
+| `GET /<project>/sse` | 旧版 MCP SSE 会话 | 无 |
+| `POST /<project>/message?sessionId=...` | 旧版 MCP 消息入口 | 无 |
 | `GET /health` | 进程存活探针 | 无 |
 | `GET /ready` | 配置和限流成员就绪探针 | 无 |
 | `GET /metrics` | Prometheus 文本指标 | 无 |
@@ -79,6 +86,8 @@ HTTP 和集群成员：
 - `AI_SERVER_CLUSTER`：默认 `dev`，与 `AI_SERVER_ZONE` 组合成实例注册的 Nacos
   cluster（默认 `daily1-dev`）；
 - `AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS`：默认 `60000`，`0` 表示无限等待。
+- `AI_SERVER_MCP_CACHE_DIR`：默认 `cache/ai`，保存 Java 兼容的 `<script-id>.dat` 工具缓存；
+  相对路径以 dotenv 文件所在目录为基准。
 
 HTTP worker 数不通过 dotenv 配置；进程在启动时根据 CPU affinity 和 cgroup v1/v2
 CPU quota 自动确定。
@@ -230,6 +239,23 @@ Provider 重试会排除本次请求已经失败的实例。
 值；完成前不启动对外服务。运行期非法或缺失更新会被拒绝，并继续使用最后一个完整
 快照。每个请求 pin 住进入时的深不可变快照，因此配置刷新不会改变执行中的认证、
 授权或 Provider 计划。
+
+MCP 配置使用 group `AI-SERVER`：
+
+- `ploto.ai.project.lists`：版本化项目名集合；
+- `ploto.ai.tools.<project>`：版本化工具 script id 集合。
+
+工具缓存缺失或无效时，ai-server 从 `DEFAULT_GROUP` 的 Nacos 服务
+`ploto-admin-app` 请求 `GET /ploto-admin-app/aiMcp/getTool/<script-id>`，校验工具描述和
+脚本后再原子替换项目快照。任一工具加载或编译失败都保留上一次完整项目 runtime，不会
+发布半成品。工具脚本支持 `service`、`address` directive，以及 `request`、`postJson`、
+`postForm`、`getJson`；`service "foo/default"` 发现 `foo.app` 的 default 逻辑 cluster。
+服务选择优先使用 `AI_SERVER_ZONE` 内的正权重健康实例；本 zone 无实例时才回退到其他
+zone。
+
+MCP session id 的前 12 个十六进制字符与 ai-server Nacos 实例 node id 相同。请求命中
+其他实例时会根据现有成员快照转发到 session owner，SSE 正文保持流式中继。MCP 路由当前
+不做 BT1，生产部署应在入口网关或网络边界实施调用方认证和授权。
 
 ## 请求行为
 

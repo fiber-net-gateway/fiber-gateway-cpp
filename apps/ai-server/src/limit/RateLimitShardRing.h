@@ -59,6 +59,7 @@ public:
 
     [[nodiscard]] std::shared_ptr<const RateLimitRingSnapshot> snapshot() const noexcept;
     [[nodiscard]] std::optional<RateLimitNode> locate(std::string_view user_id, std::string_view model_name) const;
+    [[nodiscard]] std::optional<RateLimitNode> find_node(std::string_view node_id) const;
 
 private:
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L

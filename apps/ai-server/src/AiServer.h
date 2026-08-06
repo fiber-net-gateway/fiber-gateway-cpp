@@ -6,6 +6,10 @@
 #include "limit/TokenRateLimitCoordinator.h"
 #include "limit/TokenRateLimitRemoteClient.h"
 #include "limit/TokenRateLimitService.h"
+#include "mcp/McpConfigSnapshot.h"
+#include "mcp/McpScriptServices.h"
+#include "mcp/McpSessionForwarder.h"
+#include "mcp/McpSessionManager.h"
 #include "observability/AiServerMetrics.h"
 #include "provider/ProviderConnectionManager.h"
 #include "provider/ProviderHttpClient.h"
@@ -37,10 +41,13 @@ class CatClient;
 
 namespace fiber::ai_server {
 
+class McpHttpHandler;
+
 class AiServer final : public common::NonCopyable, public common::NonMovable {
 public:
     AiServer(event::EventLoop &accept_loop, event::EventLoopGroup &worker_group, cat::CatClient *cat_client = nullptr,
-             std::size_t audit_max_record_bytes = 0, log::AppenderId audit_appender_id = log::kInvalidAppenderId);
+             std::size_t audit_max_record_bytes = 0, log::AppenderId audit_appender_id = log::kInvalidAppenderId,
+             McpConfigStore *mcp_config = nullptr, McpScriptServices *mcp_script_services = nullptr);
     ~AiServer();
 
     [[nodiscard]] async::Task<bool> start_config_workers(LlmConfigManager &config_manager) noexcept;
@@ -50,6 +57,8 @@ public:
     [[nodiscard]] async::Task<void> shutdown_and_wait();
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] RateLimitShardRing &rate_limit_ring() noexcept { return rate_limit_ring_; }
+    [[nodiscard]] bool start_mcp(std::string node_prefix);
+    [[nodiscard]] McpSessionManager *mcp_session_manager() noexcept { return mcp_sessions_.get(); }
 
 private:
     struct WorkerState {
@@ -61,6 +70,7 @@ private:
     [[nodiscard]] async::DetachedTask watch_config(std::size_t worker_index,
                                                    LlmConfigManager::SnapshotSubscriber subscription) noexcept;
     [[nodiscard]] async::DetachedTask sweep_rate_limits() noexcept;
+    [[nodiscard]] async::DetachedTask sweep_mcp_sessions() noexcept;
     [[nodiscard]] async::DetachedTask detach_cat_worker() noexcept;
     [[nodiscard]] async::Task<void> detach_cat_workers() noexcept;
     [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange);
@@ -76,6 +86,7 @@ private:
     async::WaitGroup initial_installs_;
     async::WaitGroup config_tasks_;
     async::WaitGroup sweep_tasks_;
+    async::WaitGroup mcp_tasks_;
     async::WaitGroup cat_detach_tasks_;
     async::Watch<bool> config_stop_{false};
     std::optional<async::Watch<bool>::Publisher> config_stop_publisher_;
@@ -84,11 +95,16 @@ private:
     bool config_workers_stopping_ = false;
     TokenRateLimitService rate_limiters_;
     RateLimitShardRing rate_limit_ring_;
+    McpSessionForwarder mcp_forwarder_;
     TokenRateLimitRemoteClient rate_limit_remote_client_;
     TokenRateLimitCoordinator rate_limit_coordinator_;
     ProviderConnectionManager provider_connections_;
     ProviderHttpClient provider_client_;
     AiServerMetrics metrics_;
+    McpConfigStore *mcp_config_ = nullptr;
+    McpScriptServices *mcp_script_services_ = nullptr;
+    std::unique_ptr<McpSessionManager> mcp_sessions_;
+    std::unique_ptr<McpHttpHandler> mcp_handler_;
     http::Http1Server server_;
 };
 

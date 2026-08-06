@@ -97,8 +97,9 @@ AiServerRuntime::create(event::EventLoop &accept_loop, event::EventLoop &nacos_l
     auto runtime = std::unique_ptr<AiServerRuntime>(new (std::nothrow) AiServerRuntime(
             accept_loop, nacos_loop, cat_loop, http_workers, config.listen_address(), listen_options,
             config.initial_config_timeout(), config.advertise_address(), std::string(config.service_name()),
-            std::string(config.service_group()), config.nacos_cluster(), std::move(cat_client), audit_max_record_bytes,
-            audit_appender_id, std::move(*client), std::move(*service), std::move(*naming)));
+            std::string(config.service_group()), std::string(config.zone()), config.nacos_cluster(),
+            std::string(config.mcp_cache_directory()), std::move(cat_client), audit_max_record_bytes, audit_appender_id,
+            std::move(*client), std::move(*service), std::move(*naming)));
     if (!runtime) {
         return std::unexpected(AiServerRuntimeError{
                 .code = AiServerRuntimeErrorCode::AllocateRuntime,
@@ -112,7 +113,8 @@ AiServerRuntime::AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop
                                  event::EventLoop &cat_loop, event::EventLoopGroup &http_workers,
                                  net::SocketAddress listen_address, net::ListenOptions listen_options,
                                  std::chrono::milliseconds initial_config_timeout, net::IpAddress advertise_address,
-                                 std::string service_name, std::string service_group, std::string nacos_cluster,
+                                 std::string service_name, std::string service_group, std::string local_zone,
+                                 std::string nacos_cluster, std::string mcp_cache_directory,
                                  std::unique_ptr<cat::CatClient> cat_client, std::size_t audit_max_record_bytes,
                                  log::AppenderId audit_appender_id, std::unique_ptr<nacos::NacosClient> nacos_client,
                                  std::unique_ptr<nacos::ConfigService> config_service,
@@ -122,8 +124,12 @@ AiServerRuntime::AiServerRuntime(event::EventLoop &accept_loop, event::EventLoop
     initial_config_timeout_(initial_config_timeout), advertise_address_(std::move(advertise_address)),
     cat_client_(std::move(cat_client)), nacos_client_(std::move(nacos_client)),
     config_service_(std::move(config_service)), naming_service_(std::move(naming_service)),
+    mcp_script_services_(nacos_loop, *naming_service_, http_workers, std::move(local_zone)),
     config_manager_(nacos_loop, *config_service_, *naming_service_),
-    server_(accept_loop, http_workers, cat_client_.get(), audit_max_record_bytes, audit_appender_id),
+    mcp_config_manager_(nacos_loop, *config_service_, *naming_service_, std::move(mcp_cache_directory),
+                        &mcp_script_services_),
+    server_(accept_loop, http_workers, cat_client_.get(), audit_max_record_bytes, audit_appender_id,
+            &mcp_config_manager_.store(), &mcp_script_services_),
     rate_limit_membership_(nacos_loop, *naming_service_, server_.rate_limit_ring(), std::move(service_name),
                            std::move(service_group), std::move(nacos_cluster)) {
     FIBER_ASSERT(nacos_client_ != nullptr);
@@ -202,13 +208,28 @@ async::DetachedTask AiServerRuntime::start_nacos() noexcept {
         co_return;
     }
     LOG(LOG_LIFECYCLE, DEBUG) << "Nacos naming service started";
+    mcp_script_services_.start_nacos();
     auto manager_started = config_manager_.start();
     if (!manager_started) {
+        co_await mcp_script_services_.shutdown_nacos();
         co_await naming_service_->shutdown();
         co_await config_service_->shutdown();
         co_await nacos_client_->shutdown();
         nacos_start_publisher_->publish(NacosStartStatus{
                 .error = config_error(std::move(manager_started.error())),
+        });
+        nacos_start_tasks_.done();
+        co_return;
+    }
+    auto mcp_started = mcp_config_manager_.start();
+    if (!mcp_started) {
+        co_await config_manager_.shutdown();
+        co_await mcp_script_services_.shutdown_nacos();
+        co_await naming_service_->shutdown();
+        co_await config_service_->shutdown();
+        co_await nacos_client_->shutdown();
+        nacos_start_publisher_->publish(NacosStartStatus{
+                .error = config_error(std::move(mcp_started.error())),
         });
         nacos_start_tasks_.done();
         co_return;
@@ -237,7 +258,9 @@ async::DetachedTask AiServerRuntime::shutdown_nacos() noexcept {
     co_await nacos_start_tasks_.join();
     co_await cluster_start_tasks_.join();
     co_await rate_limit_membership_.shutdown();
+    co_await mcp_config_manager_.shutdown();
     co_await config_manager_.shutdown();
+    co_await mcp_script_services_.shutdown_nacos();
     co_await naming_service_->shutdown();
     co_await config_service_->shutdown();
     co_await nacos_client_->shutdown();
@@ -286,6 +309,7 @@ async::Task<void> AiServerRuntime::fail_start() noexcept {
     FIBER_ASSERT(accept_loop_->in_loop());
     state_ = AiServerRuntimeState::Stopping;
     co_await server_.shutdown_and_wait();
+    mcp_config_manager_.set_session_manager(nullptr);
     co_await stop_cat();
     co_await stop_nacos();
     state_ = AiServerRuntimeState::Stopped;
@@ -379,6 +403,15 @@ async::Task<std::expected<void, AiServerRuntimeError>> AiServerRuntime::start() 
         co_await fail_start();
         co_return std::unexpected(std::move(error));
     }
+    if (!server_.start_mcp(std::string(rate_limit_membership_.self_node_id()))) {
+        co_await fail_start();
+        co_return std::unexpected(AiServerRuntimeError{
+                .code = AiServerRuntimeErrorCode::AllocateRuntime,
+                .io_error = common::IoErr::NoMem,
+                .message = "failed to initialize MCP runtime",
+        });
+    }
+    mcp_config_manager_.set_session_manager(server_.mcp_session_manager());
     state_ = AiServerRuntimeState::Running;
     async::spawn([this]() { return server_.serve(); });
     co_return std::expected<void, AiServerRuntimeError>{};
@@ -401,6 +434,7 @@ async::Task<void> AiServerRuntime::shutdown() noexcept {
 
     state_ = AiServerRuntimeState::Stopping;
     co_await server_.shutdown_and_wait();
+    mcp_config_manager_.set_session_manager(nullptr);
     co_await stop_cat();
     co_await stop_nacos();
     state_ = AiServerRuntimeState::Stopped;

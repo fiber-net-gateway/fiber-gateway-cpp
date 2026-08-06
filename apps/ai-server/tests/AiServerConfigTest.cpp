@@ -54,6 +54,7 @@ CAT_IP=127.0.0.3
 CAT_ROUTER_ADDRESSES=127.0.0.10:8080,[2001:db8::10]:8081
 CAT_COLLECTOR_ADDRESSES=127.0.0.11:2280
 AI_SERVER_LOG_CONFIG_PATH=/tmp/custom-ai-server.logging.json
+AI_SERVER_MCP_CACHE_DIR=/tmp/custom-mcp-cache
 AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
 )";
 
@@ -89,6 +90,7 @@ AI_SERVER_INITIAL_CONFIG_TIMEOUT_MS=15000
     ASSERT_EQ(result->cat_config()->bootstrap_collectors().size(), 1u);
     EXPECT_EQ(result->cat_config()->bootstrap_collectors()[0].to_string(), "127.0.0.11:2280");
     EXPECT_EQ(result->logging_config_path(), "/tmp/custom-ai-server.logging.json");
+    EXPECT_EQ(result->mcp_cache_directory(), "/tmp/custom-mcp-cache");
 }
 
 TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
@@ -115,6 +117,7 @@ TEST(AiServerConfigTest, AppliesDefaultsForOptionalSettings) {
     EXPECT_EQ(result->nacos_cluster(), "daily1-dev");
     EXPECT_FALSE(result->cat_config());
     EXPECT_EQ(result->logging_config_path(), "ai-server.logging.json");
+    EXPECT_EQ(result->mcp_cache_directory(), "cache/ai");
 }
 
 TEST(AiServerConfigTest, UsesResolvedHostIpv4ForNacosAndCatDefaults) {
@@ -289,6 +292,9 @@ TEST(AiServerConfigTest, LoadsExampleFile) {
             (std::filesystem::path(FIBER_AI_SERVER_TEST_ENV_PATH).parent_path() / "ai-server.logging.json")
                     .lexically_normal();
     EXPECT_EQ(result->logging_config_path(), expected_logging_path.string());
+    const auto expected_mcp_cache =
+            (std::filesystem::path(FIBER_AI_SERVER_TEST_ENV_PATH).parent_path() / "cache/ai").lexically_normal();
+    EXPECT_EQ(result->mcp_cache_directory(), expected_mcp_cache.string());
 }
 
 TEST(AiServerRuntimeTest, CreateDoesNotBindListener) {

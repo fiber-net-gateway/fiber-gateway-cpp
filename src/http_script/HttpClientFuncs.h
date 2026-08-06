@@ -23,6 +23,12 @@ namespace fiber::http_script {
 // holds the async host call until the bidirectional tunnel closes.
 fiber::script::AsyncTask http_request_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
                                          fiber::script::Library::Arguments args) noexcept;
+fiber::script::AsyncTask http_post_json_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
+                                           fiber::script::Library::Arguments args) noexcept;
+fiber::script::AsyncTask http_post_form_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
+                                           fiber::script::Library::Arguments args) noexcept;
+fiber::script::AsyncTask http_get_json_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
+                                          fiber::script::Library::Arguments args) noexcept;
 fiber::script::AsyncTask http_proxy_pass_fn(void *userdata, const fiber::script::Library::HostCallFrame &frame,
                                             fiber::script::Library::Arguments args) noexcept;
 
@@ -47,6 +53,9 @@ public:
 private:
     HttpTargetSpec target_;
     fiber::script::Library::HostCallable request_callable_{};
+    fiber::script::Library::HostCallable post_json_callable_{};
+    fiber::script::Library::HostCallable post_form_callable_{};
+    fiber::script::Library::HostCallable get_json_callable_{};
     fiber::script::Library::HostCallable proxy_pass_callable_{};
 };
 

@@ -37,8 +37,9 @@ constexpr std::string_view kCatIpKey = "CAT_IP";
 constexpr std::string_view kCatRouterAddressesKey = "CAT_ROUTER_ADDRESSES";
 constexpr std::string_view kCatCollectorAddressesKey = "CAT_COLLECTOR_ADDRESSES";
 constexpr std::string_view kLogConfigPathKey = "AI_SERVER_LOG_CONFIG_PATH";
+constexpr std::string_view kMcpCacheDirectoryKey = "AI_SERVER_MCP_CACHE_DIR";
 
-constexpr std::array<std::string_view, 22> kKnownKeys = {
+constexpr std::array<std::string_view, 23> kKnownKeys = {
         kListenAddressKey,
         kListenPortKey,
         kInitialConfigTimeoutKey,
@@ -61,6 +62,7 @@ constexpr std::array<std::string_view, 22> kKnownKeys = {
         kCatRouterAddressesKey,
         kCatCollectorAddressesKey,
         kLogConfigPathKey,
+        kMcpCacheDirectoryKey,
 };
 
 struct EnvEntry {
@@ -89,8 +91,8 @@ AiServerConfigError make_error(AiServerConfigErrorCode code, std::size_t line, s
     return {.code = code, .line = line, .key = std::string(key), .detail = std::move(detail)};
 }
 
-std::expected<std::string, AiServerConfigError> resolve_config_reference(std::string_view source_path,
-                                                                         std::string_view reference) {
+std::expected<std::string, AiServerConfigError>
+resolve_config_reference(std::string_view source_path, std::string_view reference, std::string_view key) {
     namespace fs = std::filesystem;
     fs::path target(reference);
     if (!target.is_absolute() && !source_path.empty()) {
@@ -99,8 +101,8 @@ std::expected<std::string, AiServerConfigError> resolve_config_reference(std::st
     std::error_code error;
     fs::path absolute = fs::absolute(target, error);
     if (error) {
-        return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, 0, kLogConfigPathKey,
-                                          "failed to resolve logging configuration path: " + error.message()));
+        return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, 0, key,
+                                          "failed to resolve configuration path: " + error.message()));
     }
     return absolute.lexically_normal().string();
 }
@@ -389,7 +391,8 @@ apply_entry(const EnvEntry &entry, net::IpAddress &listen_ip, std::uint16_t &lis
             std::chrono::milliseconds &initial_config_timeout, std::optional<net::IpAddress> &advertise_address,
             std::string &service_name, std::string &service_group, std::string &zone, std::string &cluster,
             cat::CatClientConfigParams &cat_params, bool &cat_setting_present,
-            nacos::NacosClientConfigParams &nacos_params, FieldLines &field_lines, std::string &logging_config_path) {
+            nacos::NacosClientConfigParams &nacos_params, FieldLines &field_lines, std::string &logging_config_path,
+            std::string &mcp_cache_directory) {
     if (entry.key == kListenAddressKey) {
         if (!net::IpAddress::parse(entry.value, listen_ip)) {
             return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
@@ -540,6 +543,14 @@ apply_entry(const EnvEntry &entry, net::IpAddress &listen_ip, std::uint16_t &lis
         logging_config_path = entry.value;
         return {};
     }
+    if (entry.key == kMcpCacheDirectoryKey) {
+        if (entry.value.empty() || entry.value.size() > 4096 || entry.value.find('\0') != std::string::npos) {
+            return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, entry.line, entry.key,
+                                              "expected a non-empty NUL-free path of at most 4096 bytes"));
+        }
+        mcp_cache_directory = entry.value;
+        return {};
+    }
 
     return std::unexpected(
             make_error(AiServerConfigErrorCode::UnknownKey, entry.line, entry.key, "unknown ai-server setting"));
@@ -618,13 +629,14 @@ AiServerConfig::AiServerConfig(net::SocketAddress listen_address, nacos::NacosCl
                                std::chrono::milliseconds initial_config_timeout, net::IpAddress advertise_address,
                                std::optional<net::LocalIpv4Selection> detected_local_ipv4, std::string service_name,
                                std::string service_group, std::string zone, std::string cluster,
-                               std::optional<cat::CatClientConfig> cat_config, std::string logging_config_path) noexcept
-    :
+                               std::optional<cat::CatClientConfig> cat_config, std::string logging_config_path,
+                               std::string mcp_cache_directory) noexcept :
     listen_address_(std::move(listen_address)), nacos_config_(std::move(nacos_config)),
     initial_config_timeout_(initial_config_timeout), advertise_address_(advertise_address),
     detected_local_ipv4_(std::move(detected_local_ipv4)), service_name_(std::move(service_name)),
     service_group_(std::move(service_group)), zone_(std::move(zone)), cluster_(std::move(cluster)),
-    cat_config_(std::move(cat_config)), logging_config_path_(std::move(logging_config_path)) {}
+    cat_config_(std::move(cat_config)), logging_config_path_(std::move(logging_config_path)),
+    mcp_cache_directory_(std::move(mcp_cache_directory)) {}
 
 std::string AiServerConfig::nacos_cluster() const {
     std::string result;
@@ -652,7 +664,7 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_fil
     if (!config) {
         return config;
     }
-    auto logging_config_path = resolve_config_reference(path, config->logging_config_path_);
+    auto logging_config_path = resolve_config_reference(path, config->logging_config_path_, kLogConfigPathKey);
     if (!logging_config_path) {
         return std::unexpected(std::move(logging_config_path.error()));
     }
@@ -661,6 +673,15 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_fil
                                           "resolved logging configuration path exceeds 4096 bytes"));
     }
     config->logging_config_path_ = std::move(*logging_config_path);
+    auto mcp_cache_directory = resolve_config_reference(path, config->mcp_cache_directory_, kMcpCacheDirectoryKey);
+    if (!mcp_cache_directory) {
+        return std::unexpected(std::move(mcp_cache_directory.error()));
+    }
+    if (mcp_cache_directory->size() > 4096) {
+        return std::unexpected(make_error(AiServerConfigErrorCode::InvalidValue, 0, kMcpCacheDirectoryKey,
+                                          "resolved MCP cache directory exceeds 4096 bytes"));
+    }
+    config->mcp_cache_directory_ = std::move(*mcp_cache_directory);
     return config;
 }
 
@@ -689,10 +710,11 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     nacos_params.namespace_id = "public";
     FieldLines field_lines;
     std::string logging_config_path;
+    std::string mcp_cache_directory = "cache/ai";
     for (const EnvEntry &entry: *entries) {
         auto result = apply_entry(entry, listen_ip, listen_port, initial_config_timeout, advertise_address,
                                   service_name, service_group, zone, cluster, cat_params, cat_setting_present,
-                                  nacos_params, field_lines, logging_config_path);
+                                  nacos_params, field_lines, logging_config_path, mcp_cache_directory);
         if (!result) {
             return std::unexpected(std::move(result.error()));
         }
@@ -743,7 +765,7 @@ std::expected<AiServerConfig, AiServerConfigError> AiServerConfig::load_from_str
     return AiServerConfig(net::SocketAddress(listen_ip, listen_port), std::move(*nacos_config), initial_config_timeout,
                           *advertise_address, std::move(detected_local_ipv4), std::move(service_name),
                           std::move(service_group), std::move(zone), std::move(cluster), std::move(cat_config),
-                          std::move(logging_config_path));
+                          std::move(logging_config_path), std::move(mcp_cache_directory));
 }
 
 } // namespace fiber::ai_server
