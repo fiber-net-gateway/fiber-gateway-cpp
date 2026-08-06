@@ -32,6 +32,7 @@
 #include "net/SocketAddress.h"
 
 #include "common/util/RoutePathMatcher.h"
+#include "http_script/ExchangeConstExtension.h"
 #include "http_script/HttpScriptLib.h"
 #include "http_script/RouteScriptExtension.h"
 #include "http_script/ScriptExchangeCtx.h"
@@ -277,6 +278,7 @@ struct CompiledRouteScript {
     std::shared_ptr<fiber::script::Script> script; // nullptr on compile failure
     std::shared_ptr<const fiber::http_script::ConstPackage> const_package;
     std::shared_ptr<fiber::script::std_lib::StdLibrary> shared_lib;
+    std::shared_ptr<fiber::http_script::ExchangeConstExtension> exchange_extension;
     std::shared_ptr<fiber::http_script::RouteScriptExtension> route_extension;
     bool ok = false;
     std::string error;
@@ -286,7 +288,9 @@ CompiledRouteScript compile_route_script(std::string_view source, const std::vec
     CompiledRouteScript out;
     out.shared_lib = std::make_shared<fiber::script::std_lib::StdLibrary>();
     fiber::http_script::register_http_functions_to_lib(*out.shared_lib);
+    out.exchange_extension = std::make_shared<fiber::http_script::ExchangeConstExtension>();
     out.route_extension = std::make_shared<fiber::http_script::RouteScriptExtension>();
+    out.shared_lib->add_ext_ops(out.exchange_extension.get(), fiber::http_script::ExchangeConstExtension::ops());
     out.shared_lib->add_ext_ops(out.route_extension.get(), fiber::http_script::RouteScriptExtension::ops());
     fiber::http_script::ConstPackage::Builder constants;
     fiber::http_script::RouteScriptExtension::CompileScope compile_scope(*out.route_extension, constants,
@@ -334,9 +338,10 @@ fiber::http::HttpHandler make_route_script_handler(CompiledRouteScript compiled,
     *matcher = builder.build();
     auto script = compiled.script;
     auto const_package = compiled.const_package;
+    auto exchange_extension = compiled.exchange_extension;
     auto route_extension = compiled.route_extension;
     auto shared_lib = compiled.shared_lib;
-    return [script, const_package, matcher, route_extension,
+    return [script, const_package, matcher, exchange_extension, route_extension,
             shared_lib](fiber::http::HttpExchange &exchange) -> Task<void> {
         fiber::script::GcHeap heap;
         fiber::http_script::ScriptExchangeCtx ctx{
@@ -535,6 +540,22 @@ TEST(RouteVarTest, ReqFieldCompileTimeExistence) {
     EXPECT_NE(bad.error.find("constant not found"), std::string::npos) << bad.error;
 }
 
+TEST(RouteVarTest, ExchangeFieldsCompileWithoutRouteScopeOrPackageSlots) {
+    fiber::script::std_lib::StdLibrary library;
+    fiber::http_script::ExchangeConstExtension exchange_extension;
+    library.add_ext_ops(&exchange_extension, fiber::http_script::ExchangeConstExtension::ops());
+
+    auto compiled = fiber::script::compile_script(
+            library, "return [$req.uri, $req.method, $req.path, $req.query, $conn.scheme, $conn.http_version];");
+    ASSERT_TRUE(compiled.has_value()) << compiled.error().message;
+
+    auto route_compiled = compile_route_script(
+            "return [$req.uri, $req.method, $req.path, $req.query, $conn.scheme, $conn.http_version];", {});
+    ASSERT_TRUE(route_compiled.ok) << route_compiled.error;
+    ASSERT_NE(route_compiled.const_package, nullptr);
+    EXPECT_TRUE(route_compiled.const_package->empty());
+}
+
 TEST(RouteVarTest, ConnectionFieldCompileTimeExistence) {
     for (std::string_view field: {"remote_addr", "remote_port", "http_version", "scheme", "tls"}) {
         std::string src = "resp.sendJson(200, $conn.";
@@ -570,6 +591,68 @@ TEST(RouteVarTest, ConnectionFieldsDescribeDownstreamConnection) {
     s.stop();
 }
 
+TEST(RouteVarTest, ExchangeStringsBorrowRequestMemoryAndCacheRemoteAddress) {
+    fiber::script::std_lib::StdLibrary library;
+    fiber::http_script::ExchangeConstExtension exchange_extension;
+    library.add_ext_ops(&exchange_extension, fiber::http_script::ExchangeConstExtension::ops());
+    const auto *path_constant = library.resolve_constant("$req", "path");
+    const auto *remote_addr_constant = library.resolve_constant("$conn", "remote_addr");
+    ASSERT_NE(path_constant, nullptr);
+    ASSERT_NE(remote_addr_constant, nullptr);
+
+    ServerFixture s;
+    s.start([path_constant, remote_addr_constant](fiber::http::HttpExchange &exchange) -> Task<void> {
+        fiber::script::GcHeap heap;
+        fiber::http_script::ScriptExchangeCtx context{
+                exchange, heap, fiber::http_script::ScriptConnectionInfo{.scheme = "http", .tls = false}};
+        fiber::script::Library::HostCallFrame frame(heap, fiber::script::JsValue::make_undefined(), &context);
+
+        auto path = path_constant->constant(path_constant->userdata, frame);
+        EXPECT_TRUE(path.is_success());
+        if (!path.is_success()) {
+            (void) co_await context.write_empty(500);
+            co_return;
+        }
+        EXPECT_TRUE(fiber::script::js_value_is_borrowed_string(path.value()));
+        if (!fiber::script::js_value_is_borrowed_string(path.value())) {
+            (void) co_await context.write_empty(500);
+            co_return;
+        }
+        const fiber::script::NativeStr path_string = fiber::script::js_value_native_string(path.value());
+        EXPECT_EQ(path_string.data, exchange.uri().path.data());
+        EXPECT_EQ(path_string.len, exchange.uri().path.size());
+
+        auto first_remote = remote_addr_constant->constant(remote_addr_constant->userdata, frame);
+        auto second_remote = remote_addr_constant->constant(remote_addr_constant->userdata, frame);
+        EXPECT_TRUE(first_remote.is_success());
+        EXPECT_TRUE(second_remote.is_success());
+        if (!first_remote.is_success() || !second_remote.is_success()) {
+            (void) co_await context.write_empty(500);
+            co_return;
+        }
+        EXPECT_TRUE(fiber::script::js_value_is_borrowed_string(first_remote.value()));
+        EXPECT_TRUE(fiber::script::js_value_is_borrowed_string(second_remote.value()));
+        if (!fiber::script::js_value_is_borrowed_string(first_remote.value()) ||
+            !fiber::script::js_value_is_borrowed_string(second_remote.value())) {
+            (void) co_await context.write_empty(500);
+            co_return;
+        }
+        const fiber::script::NativeStr first_string = fiber::script::js_value_native_string(first_remote.value());
+        const fiber::script::NativeStr second_string = fiber::script::js_value_native_string(second_remote.value());
+        EXPECT_EQ(first_string.data, second_string.data);
+        EXPECT_EQ(first_string.len, second_string.len);
+
+        (void) co_await context.write_empty(204);
+    });
+
+    ClientRequest req;
+    req.method = fiber::http::HttpMethod::Get;
+    req.target = "/native";
+    ClientResult result = s.request(std::move(req));
+    EXPECT_EQ(result.status_code, 204);
+    s.stop();
+}
+
 TEST(RouteVarTest, DynamicNamespacesAlwaysResolve) {
     // $query/$header/$cookie always compile (slot exists; value resolved at request time).
     auto compiled = compile_route_script(
@@ -579,10 +662,12 @@ TEST(RouteVarTest, DynamicNamespacesAlwaysResolve) {
 
 TEST(RouteVarTest, RejectsExecutionAgainstAnotherConstantPackage) {
     ServerFixture s;
-    auto compiled = compile_route_script("resp.sendJson(200, $req.path);", {});
-    auto other = compile_route_script("resp.sendJson(200, $req.method);", {});
+    auto compiled = compile_route_script("resp.sendJson(200, $header.first);", {});
+    auto other = compile_route_script("resp.sendJson(200, $header.second);", {});
     ASSERT_TRUE(compiled.ok) << compiled.error;
     ASSERT_TRUE(other.ok) << other.error;
+    // Keep the script's userdata owner alive while preparing slots from another package.
+    auto userdata_package = compiled.const_package;
     compiled.const_package = std::move(other.const_package);
     s.start(make_route_script_handler(std::move(compiled), "/*"));
 
@@ -593,6 +678,7 @@ TEST(RouteVarTest, RejectsExecutionAgainstAnotherConstantPackage) {
 
     EXPECT_EQ(result.status_code, 500);
     s.stop();
+    userdata_package.reset();
 }
 
 TEST(RouteVarTest, PathVarResolvesCapturedValue) {

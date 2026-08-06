@@ -47,7 +47,7 @@ TEST(ConstPackageTest, NormalizesAndDeduplicatesNamesWithinEachType) {
 
 TEST(ConstPackageTest, BuildsTypeContiguousImmutableIndices) {
     ConstPackage::Builder builder;
-    ASSERT_NE(builder.add_constant(ConstType::Connection, "scheme"), nullptr);
+    ASSERT_NE(builder.add_constant(ConstType::Context, "cluster"), nullptr);
     ASSERT_NE(builder.add_constant(ConstType::Path, "id"), nullptr);
     ASSERT_NE(builder.add_constant(ConstType::Header, "host"), nullptr);
     ASSERT_NE(builder.add_constant(ConstType::Path, "tail"), nullptr);
@@ -56,11 +56,11 @@ TEST(ConstPackageTest, BuildsTypeContiguousImmutableIndices) {
     ASSERT_NE(package, nullptr);
     ASSERT_EQ(package->entries(ConstType::Path).size(), 2U);
     ASSERT_EQ(package->entries(ConstType::Header).size(), 1U);
-    ASSERT_EQ(package->entries(ConstType::Connection).size(), 1U);
+    ASSERT_EQ(package->entries(ConstType::Context).size(), 1U);
     EXPECT_EQ(package->entries(ConstType::Path)[0].index, 0U);
     EXPECT_EQ(package->entries(ConstType::Path)[1].index, 1U);
     EXPECT_EQ(package->entries(ConstType::Header)[0].index, 2U);
-    EXPECT_EQ(package->entries(ConstType::Connection)[0].index, 3U);
+    EXPECT_EQ(package->entries(ConstType::Context)[0].index, 3U);
 
     EXPECT_EQ(builder.add_constant(ConstType::Query, "late"), nullptr);
     EXPECT_EQ(builder.build(), nullptr);

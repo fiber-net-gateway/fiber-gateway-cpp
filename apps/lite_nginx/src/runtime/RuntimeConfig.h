@@ -22,6 +22,7 @@
 
 namespace fiber::http_script {
 class ConstPackage;
+class ExchangeConstExtension;
 class RouteScriptExtension;
 } // namespace fiber::http_script
 
@@ -176,9 +177,11 @@ struct RuntimeConfig {
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;
     ConnectionPoolRuntime connection_pool;
-    // Shared across serial script compilation in this runtime. Compiled constant userdata is
-    // owned by the immutable package attached to each script-bearing runtime object.
+    // Shared across serial script compilation in this runtime. Dynamic constant userdata is
+    // owned by the immutable package attached to each script-bearing runtime object; fixed
+    // exchange constant userdata has static storage.
     std::shared_ptr<fiber::script::std_lib::StdLibrary> script_library;
+    std::shared_ptr<fiber::http_script::ExchangeConstExtension> exchange_const_extension;
     std::shared_ptr<fiber::http_script::RouteScriptExtension> route_script_extension;
     std::shared_ptr<fiber::lite_nginx::logging::AccessLogScriptExtension> access_log_script_extension;
 };

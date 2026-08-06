@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include <http_script/ExchangeConstExtension.h>
 #include <http_script/RouteScriptExtension.h>
 #include <script/std/StdLibrary.h>
 
@@ -34,6 +35,7 @@ private:
                                                         std::string &output) noexcept;
 
     script::std_lib::StdLibrary library_;
+    http_script::ExchangeConstExtension exchange_const_extension_;
     http_script::RouteScriptExtension route_extension_;
 };
 

@@ -74,10 +74,6 @@ const char *debug_name(ConstType type) noexcept {
             return "$cookie";
         case ConstType::Context:
             return "$context";
-        case ConstType::Request:
-            return "$req";
-        case ConstType::Connection:
-            return "$conn";
         case ConstType::Count:
             break;
     }

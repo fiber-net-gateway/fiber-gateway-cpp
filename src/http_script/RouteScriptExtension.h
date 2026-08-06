@@ -15,25 +15,23 @@
 
 namespace fiber::http_script {
 
-// Compile-time extension that resolves route-scoped "$namespace.key" constants and HTTP
-// directives through StdLibrary callbacks. A CompileScope supplies the current route metadata
-// and the builder that owns all constant callables for the enclosing immutable snapshot.
+// Compile-time extension that resolves configuration-dependent "$namespace.key" constants
+// and HTTP directives through StdLibrary callbacks. A CompileScope supplies the current route
+// metadata and the builder that owns constant callables for the enclosing immutable snapshot.
 //
 // Compile-time existence rules (the parser turns a nullptr from resolve_constant into a
 // "constant not found" parse error):
 //   $path.<name>   - <name> must be one of the location's route path variables, else
 //                    compile fails. This is the headline compile-time check.
-//   $req.<field>   - <field> must be one of {uri, method, path, query}, else compile fails.
 //   $query.<key>   - always resolvable (slot exists); value looked up at request time.
 //   $header.<key>  - always resolvable; matched case-insensitively with '-' == '_'.
 //   $cookie.<key>  - always resolvable; matched case-insensitively with '-' == '_'.
-//   $conn.<field>  - <field> must be one of {remote_addr, remote_port, http_version,
-//                    scheme, tls}, else compile fails.
 //
 // Compilation copies each HostCallable into the script. Constant userdata is transferred from
 // the builder into ConstPackage and is independent of this extension after compilation. HTTP
 // directive definitions remain owned here, so directive-bearing scripts still require this
-// extension to outlive them.
+// extension to outlive them. The closed $req/$conn field sets are provided separately by
+// ExchangeConstExtension and do not consume package indices.
 class RouteScriptExtension {
 public:
     using Library = fiber::script::Library;

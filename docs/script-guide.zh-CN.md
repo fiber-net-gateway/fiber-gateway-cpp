@@ -582,11 +582,11 @@ resp.sendJson(200, {
 解析规则：
 
 - `$path.<name>` 必须是宿主创建 `RouteScriptExtension::CompileScope` 时声明的路径变量，否则脚本编译失败。运行时找不到时返回 `null`。
-- `$req` 只允许 `uri`、`method`、`path`、`query`，`$conn` 只允许上面列出的五个字段；未知字段是编译错误。
+- `$req` 只允许 `uri`、`method`、`path`、`query`，`$conn` 只允许上面列出的五个字段；它们由 `ExchangeConstExtension` 直接从当前 exchange 读取，未知字段是编译错误。
 - `$query.<key>` 和 `$context.<key>` 可按任意合法标识符编译，不存在返回 `null`。
 - `$header`/`$cookie` 的 key 在匹配时转成 ASCII 小写并把 `-` 折叠为 `_`，所以 `$header.x_forwarded_for` 可以读取 `X-Forwarded-For`。
 - 点号后的 key 必须是脚本标识符。含其他特殊字符的 query/cookie key 应使用 `req.getQuery("...")` 或 `req.getCookie("...")`。
-- 编译单元中的常量名由 `ConstPackage::Builder` 归一化、去重并分配连续 index；运行期先通过不可变 `ConstPackage` 准备槽位，再按 index 绑定 `$path`/`$context` 等宿主值。
+- 编译单元中的动态常量名由 `ConstPackage::Builder` 归一化、去重并分配连续 index；运行期先通过不可变 `ConstPackage` 准备槽位，再按 index 绑定 `$path`/`$context` 等宿主值。固定的 `$req`/`$conn` 不进入 package。
 
 ### 6.4 上游 HTTP 指令
 
@@ -1007,18 +1007,22 @@ return {environment: $env.name};
 #include <string_view>
 #include <vector>
 
-#include "http_script/HttpScriptLib.h"
 #include "http_script/ConstPackage.h"
+#include "http_script/ExchangeConstExtension.h"
+#include "http_script/HttpScriptLib.h"
 #include "http_script/RouteScriptExtension.h"
 #include "script/ScriptCompiler.h"
 #include "script/std/StdLibrary.h"
 
 struct ScriptRuntime {
     fiber::script::std_lib::StdLibrary library;
+    fiber::http_script::ExchangeConstExtension exchange_constants;
     fiber::http_script::RouteScriptExtension route_extension;
 
     ScriptRuntime() {
         fiber::http_script::register_http_functions_to_lib(library);
+        library.add_ext_ops(&exchange_constants,
+                            fiber::http_script::ExchangeConstExtension::ops());
         library.add_ext_ops(&route_extension,
                             fiber::http_script::RouteScriptExtension::ops());
     }
@@ -1042,12 +1046,13 @@ compile_route_script(ScriptRuntime &runtime,
 生命周期要求：
 
 - `ConstPackage::Builder` 只在编译期可变；`build()` 后不可再添加常量。
-- `ConstPackage` 拥有常量 HostCallable 的 userdata，必须与使用它编译出的脚本一起存入快照并至少同寿命。
+- `ConstPackage` 拥有动态常量 HostCallable 的 userdata，必须与使用它编译出的脚本一起存入快照并至少同寿命。
 - `build()` 生成按 type 分区的紧凑 Entry/桶数组；每个分区使用不超过 50% 装载率的二次探测哈希。编译期的去重表、顺序表和 `HostCallable` 不进入不可变 package，package 只保留脚本 userdata 所需的稳定引用与归一化名称。
+- `ExchangeConstExtension` 的固定 userdata 使用静态存储；`$req`/`$conn` 执行时直接构造 native value，不依赖 package identity。
 - `StdLibrary` 只参与编译；含 HTTP directive 的脚本仍要求 `RouteScriptExtension` 持有的 directive 定义比脚本活得更久，因为编译结果中的上游函数 userdata 指向这些定义。
 - `CompileScope` 修改扩展的临时编译上下文，因此共享扩展时必须串行编译；脚本执行不读取这份可变状态。
 - 只编译同步模板时应把 HTTP directives 关闭，并在编译后拒绝 `contains_async()`。
-- 运行期绑定进常量槽的借用文本，以及 `ScriptConnectionInfo::scheme` 指向的文本，都必须持续到该次脚本执行结束；query 解码结果由 `prepare_constants()` 自动复制进请求池。
+- 运行期绑定进常量槽的借用文本，以及 `$req` 借用的 exchange 文本和 `ScriptConnectionInfo::scheme`，都必须持续到该次脚本执行结束；query 解码结果由 `prepare_constants()` 自动复制进请求池，`$conn.remote_addr` 首次访问时格式化并缓存在请求池。
 
 ### 8.2 每请求执行
 
@@ -1140,7 +1145,7 @@ if (index != fiber::http_script::kInvalidConstIndex) {
 }
 ```
 
-也可以把一组 `IndexedConstValue` 传给 `prepare_constants()` 或 `bind_constants()`。未设置的槽保持 `null`；脚本执行时 HostCallable 只校验 package identity 和 index，然后直接返回槽值，不再按名称扫描请求数据。
+也可以把一组 `IndexedConstValue` 传给 `prepare_constants()` 或 `bind_constants()`。未设置的动态槽保持 `null`；动态常量 HostCallable 只校验 package identity 和 index，然后直接返回槽值，不再按名称扫描请求数据。`$req`/`$conn` 由 `ExchangeConstExtension` 直接读取，不占用这些槽。
 
 ### 8.3 提供上游连接服务
 
@@ -1207,7 +1212,7 @@ lite-nginx 已提供基于 `UpstreamRegistry + ConnectionPool + DnsService` 的�
 - 执行入口：`src/script/Script.h`、`src/script/ScriptResult.h`
 - C++ 值/GC API：`src/script/JsValue.h`、`src/script/JsGc.h`
 - 标准库注册：`src/script/std/StdLibrary.cpp`
-- HTTP 函数：`src/http_script/RequestFuncs.cpp`、`ResponseFuncs.cpp`
+- HTTP 函数与固定常量：`src/http_script/RequestFuncs.cpp`、`ResponseFuncs.cpp`、`ExchangeConstExtension.cpp`
 - 上游 HTTP：`src/http_script/HttpClientFuncs.cpp`
 - HTTP 执行上下文：`src/http_script/ScriptExchangeCtx.h`
 - lite-nginx 脚本示例：`apps/lite_nginx/conf/scripts/`

@@ -19,6 +19,8 @@
 
 namespace fiber::http_script {
 
+class ExchangeConstExtension;
+
 struct ScriptConnectionInfo {
     std::string_view scheme;
     bool tls = false;
@@ -39,7 +41,7 @@ struct IndexedConstValue {
 //   1. Lazy, cached JsValue views of the request query/headers/cookies, held across calls
 //      in persistent GC root slots (GcHeap::global_value), mirroring Java ReqFunc.Ctx
 //      stored via HttpExchange.Attr.
-//   2. An indexed constant frame prepared from an immutable ConstPackage before scripts run.
+//   2. An indexed dynamic-constant frame prepared from an immutable ConstPackage before scripts run.
 //   3. A response state machine: response headers accumulate in pending_headers_ until a
 //      send/write flushes them via HttpExchange::send_header + write_all (header_sent_
 //      guards against post-send mutation).
@@ -69,10 +71,11 @@ public:
     [[nodiscard]] fiber::script::JsValue headers() noexcept;
     [[nodiscard]] fiber::script::JsValue cookies() noexcept;
 
-    // Prepares the request-wide constant slots used by every compiled script bound to
-    // package. The slot array contains only immediate or borrowed JsValues; decoded query
+    // Prepares the request-wide dynamic constant slots used by every compiled script bound
+    // to package. The slot array contains only immediate or borrowed JsValues; decoded query
     // values are copied into the request pool before they are stored. Path variables are
-    // bound separately once the route matcher has selected a candidate.
+    // bound separately once the route matcher has selected a candidate. Fixed $req/$conn
+    // fields are read directly by ExchangeConstExtension and do not consume slots.
     [[nodiscard]] fiber::common::IoResult<void>
     prepare_constants(const ConstPackage &package, std::span<const IndexedConstValue> external_values = {}) noexcept;
     [[nodiscard]] bool bind_constant(ConstIndex index, std::string_view value) noexcept;
@@ -118,12 +121,15 @@ public:
                                                                        std::string_view error_name) noexcept;
 
 private:
+    friend class ExchangeConstExtension;
+
     // Builds the cached object into its root slot on first access. Returns the cached
     // JsValue (or Undefined on failure). Idempotent: a failed build leaves the slot empty
     // so the next call retries.
     fiber::script::JsValue build_query() noexcept;
     fiber::script::JsValue build_headers() noexcept;
     fiber::script::JsValue build_cookies() noexcept;
+    fiber::script::AbiResult remote_address_constant() noexcept;
 
     fiber::async::Task<fiber::common::IoResult<void>> send_final_with_body(int status, std::size_t content_length,
                                                                            const std::uint8_t *data) noexcept;
@@ -138,6 +144,9 @@ private:
     fiber::script::ValueHandle query_root_{};
     fiber::script::ValueHandle headers_root_{};
     fiber::script::ValueHandle cookies_root_{};
+    // Undefined until first use. A successful conversion is a native string backed by
+    // exchange.pool(); conversion failure is cached as Null, while OOM remains retryable.
+    fiber::script::JsValue remote_addr_constant_{};
 
     const void *const_package_identity_ = nullptr;
     fiber::script::JsValue *constant_slots_ = nullptr;

@@ -67,22 +67,6 @@ std::string_view copy_to_pool(fiber::mem::BufPool &pool, std::string_view value)
     return {data, value.size()};
 }
 
-std::string_view http_version_text(fiber::http::HttpVersion version) noexcept {
-    switch (version) {
-        case fiber::http::HttpVersion::HTTP_0_9:
-            return "HTTP/0.9";
-        case fiber::http::HttpVersion::HTTP_1_0:
-            return "HTTP/1.0";
-        case fiber::http::HttpVersion::HTTP_1_1:
-            return "HTTP/1.1";
-        case fiber::http::HttpVersion::HTTP_2_0:
-            return "HTTP/2";
-        case fiber::http::HttpVersion::HTTP_3_0:
-            return "HTTP/3";
-    }
-    return {};
-}
-
 } // namespace
 
 ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap) noexcept :
@@ -95,6 +79,37 @@ ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber:
 ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap,
                                      ScriptConnectionInfo connection) noexcept :
     exchange_(exchange), heap_(heap), connection_(connection), pending_headers_(exchange.pool()) {}
+
+fiber::script::AbiResult ScriptExchangeCtx::remote_address_constant() noexcept {
+    if (!fiber::script::js_value_is_undefined(remote_addr_constant_)) {
+        return fiber::script::AbiResult::success(remote_addr_constant_);
+    }
+
+    std::array<char, INET6_ADDRSTRLEN> buffer{};
+    const auto &ip = exchange_.remote_addr().ip();
+    const void *source = nullptr;
+    int family = AF_INET;
+    std::array<std::uint8_t, fiber::net::IpAddress::kV4Size> v4{};
+    if (ip.is_v4()) {
+        v4 = ip.v4_bytes();
+        source = v4.data();
+    } else {
+        family = AF_INET6;
+        source = ip.v6_bytes().data();
+    }
+    const char *result = ::inet_ntop(family, source, buffer.data(), static_cast<socklen_t>(buffer.size()));
+    if (result == nullptr) {
+        remote_addr_constant_ = fiber::script::JsValue::make_null();
+        return fiber::script::AbiResult::success(remote_addr_constant_);
+    }
+
+    std::string_view value = copy_to_pool(exchange_.pool(), result);
+    if (value.data() == nullptr) {
+        return fiber::script::AbiResult::abort(fiber::script::ScriptAbortReason::OutOfMemory);
+    }
+    remote_addr_constant_ = fiber::script::JsValue::make_native_string(value.data(), value.size());
+    return fiber::script::AbiResult::success(remote_addr_constant_);
+}
 
 fiber::script::JsValue ScriptExchangeCtx::query() noexcept {
     if (query_root_ && fiber::script::js_value_type(*query_root_) == fiber::script::JsNodeType::Object) {
@@ -195,62 +210,6 @@ ScriptExchangeCtx::prepare_constants(const ConstPackage &package,
         constant_slots_[index] = fiber::script::JsValue::make_native_string(value.data(), value.size());
         return true;
     };
-
-    for (const ConstPackage::Entry &entry: package.entries(ConstType::Request)) {
-        const std::string_view name = entry.name();
-        std::string_view value;
-        if (name == "uri") {
-            value = exchange_.uri().unparsed_uri;
-        } else if (name == "method") {
-            value = exchange_.method_view();
-        } else if (name == "path") {
-            value = exchange_.uri().path;
-        } else if (name == "query") {
-            value = exchange_.uri().query;
-        } else {
-            continue;
-        }
-        if (!set_string(entry.index, value, false)) {
-            return std::unexpected(fiber::common::IoErr::NoMem);
-        }
-    }
-
-    for (const ConstPackage::Entry &entry: package.entries(ConstType::Connection)) {
-        const std::string_view name = entry.name();
-        if (entry.index >= constant_slot_count_) {
-            return std::unexpected(fiber::common::IoErr::Invalid);
-        }
-        if (name == "remote_port") {
-            constant_slots_[entry.index] = fiber::script::JsValue::make_integer(exchange_.remote_addr().port());
-        } else if (name == "tls") {
-            constant_slots_[entry.index] = fiber::script::JsValue::make_boolean(connection_.tls);
-        } else if (name == "scheme") {
-            if (!set_string(entry.index, connection_.scheme, false)) {
-                return std::unexpected(fiber::common::IoErr::NoMem);
-            }
-        } else if (name == "http_version") {
-            if (!set_string(entry.index, http_version_text(exchange_.version()), false)) {
-                return std::unexpected(fiber::common::IoErr::NoMem);
-            }
-        } else if (name == "remote_addr") {
-            std::array<char, INET6_ADDRSTRLEN> buffer{};
-            const auto &ip = exchange_.remote_addr().ip();
-            const void *source = nullptr;
-            int family = AF_INET;
-            std::array<std::uint8_t, fiber::net::IpAddress::kV4Size> v4{};
-            if (ip.is_v4()) {
-                v4 = ip.v4_bytes();
-                source = v4.data();
-            } else {
-                family = AF_INET6;
-                source = ip.v6_bytes().data();
-            }
-            const char *result = ::inet_ntop(family, source, buffer.data(), static_cast<socklen_t>(buffer.size()));
-            if (result != nullptr && !set_string(entry.index, result, true)) {
-                return std::unexpected(fiber::common::IoErr::NoMem);
-            }
-        }
-    }
 
     if (!package.entries(ConstType::Header).empty()) {
         for (const fiber::http::HttpHeaders::HeaderField &field: exchange_.request_headers()) {

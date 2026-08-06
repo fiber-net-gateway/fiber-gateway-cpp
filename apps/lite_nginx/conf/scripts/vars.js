@@ -1,7 +1,9 @@
-// Example: route-variable constants ($path/$query/$header/$cookie/$req).
+// Example: dynamic route constants ($path/$query/$header/$cookie) and fixed exchange
+// constants ($req/$conn).
 //
 // Unlike req.getHeader(name) etc. (function calls), the $namespace constants are resolved
-// at script compile time and read directly from the request at runtime:
+// at script compile time and read from the request at runtime. Dynamic names use a compact
+// per-location package; fixed exchange fields are read directly without package slots:
 //   $path.<name>   - a path variable captured by the location's route pattern (e.g. /api/:id
 //                    makes $path.id available). Referencing a name the route does not capture
 //                    is a *compile-time* error: the script fails to load.
@@ -10,6 +12,7 @@
 //                    $header.x_forwarded_for reads X-Forwarded-For.
 //   $cookie.<key>  - a request cookie (same normalization as $header).
 //   $req.<field>   - one of uri / method / path / query (fixed set; unknown = compile error).
+//   $conn.<field>  - one of remote_addr / remote_port / http_version / scheme / tls.
 //
 // Absent values resolve to null (not an error).
 //
