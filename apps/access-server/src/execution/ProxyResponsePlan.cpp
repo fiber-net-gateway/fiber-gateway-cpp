@@ -25,13 +25,13 @@ PreparedProxyResponseHeadersResult prepare_proxy_response_headers(const Compiled
     for (const CompiledHeaderTemplates::EntryView header: headers) {
         auto value = evaluate_template(header.value(), evaluator);
         if (!value) {
-            return std::unexpected(std::move(value.error()));
+            return std::unexpected(value.error());
         }
         if (value->empty() || is_java_filtered_response_header(header.name())) {
             continue;
         }
         if (!is_valid_http_header_name(header.name()) || !is_valid_http_header_value(*value)) {
-            return std::unexpected(AccessError::unknown("invalid proxy response header"));
+            return std::unexpected(Err::from_exception(Exception::unknown("invalid proxy response header")));
         }
         result.push_back(EvaluatedHeader{
                 .name = std::string(header.name()),

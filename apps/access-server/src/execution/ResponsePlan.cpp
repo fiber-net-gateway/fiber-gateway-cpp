@@ -2,8 +2,6 @@
 
 #include "../../../../src/http/HttpHeaderHash.h"
 
-#include <utility>
-
 namespace fiber::access_server {
 
 bool is_valid_http_header_name(std::string_view name) noexcept {
@@ -47,17 +45,6 @@ bool is_valid_http_header_value(std::string_view value) noexcept {
     return true;
 }
 
-namespace {
-
-ResponsePreparationError invalid_header(std::vector<EvaluatedHeader> inherited) {
-    return ResponsePreparationError{
-            .error = AccessError::unknown("invalid response header"),
-            .inherited_headers = std::move(inherited),
-    };
-}
-
-} // namespace
-
 bool is_java_filtered_response_header(std::string_view name) noexcept {
     return http::http_header_name_equals_ci(name, "connection") ||
            http::http_header_name_equals_ci(name, "content-length") ||
@@ -78,9 +65,7 @@ PreparedResponseResult prepare_response(const CompiledResponseRoute &response, T
     for (const CompiledTemplateEntry &header: response.response_headers) {
         auto value = evaluate_template(header.value, evaluator);
         if (!value) {
-            return std::unexpected(ResponsePreparationError{
-                    .error = std::move(value.error()),
-            });
+            return std::unexpected(value.error());
         }
         prepared.headers.push_back(EvaluatedHeader{
                 .name = header.name,
@@ -95,8 +80,7 @@ PreparedResponseResult prepare_response(const CompiledResponseRoute &response, T
             continue;
         }
         if (!is_valid_http_header_name(header.name) || !is_valid_http_header_value(header.value)) {
-            prepared.headers.resize(committed);
-            return std::unexpected(invalid_header(std::move(prepared.headers)));
+            return std::unexpected(Err::from_exception(Exception::unknown("invalid response header")));
         }
         if (committed != index) {
             prepared.headers[committed] = std::move(header);
@@ -107,17 +91,15 @@ PreparedResponseResult prepare_response(const CompiledResponseRoute &response, T
 
     if (response.body_kind == ResponseBodyKind::Template) {
         if (!response.body_template) {
-            return std::unexpected(ResponsePreparationError{
-                    .error = AccessError::template_script("invalid compiled template"),
-                    .inherited_headers = std::move(prepared.headers),
-            });
+            return std::unexpected(Err::from_exception(Exception{
+                    .name = "TEMPLATE_SCRIPT",
+                    .message = "error exec for template expression: invalid compiled template",
+                    .status = 500,
+            }));
         }
         auto body = evaluate_template(*response.body_template, evaluator);
         if (!body) {
-            return std::unexpected(ResponsePreparationError{
-                    .error = std::move(body.error()),
-                    .inherited_headers = std::move(prepared.headers),
-            });
+            return std::unexpected(body.error());
         }
         prepared.body = std::move(*body);
     } else {

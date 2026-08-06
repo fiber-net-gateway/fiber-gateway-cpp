@@ -95,21 +95,28 @@ struct TemplateEvaluationState {
     std::size_t count = 0;
 };
 
-bool evaluate_counted_template(void *context, fiber::http_script::ScriptExchangeCtx &,
-                               std::span<const fiber::access_server::PathVariable>, std::string_view,
-                               const fiber::script::Script &, std::string_view expression, std::string &output,
-                               fiber::access_server::AccessError &error) noexcept {
+fiber::access_server::Result<void> evaluate_counted_template(void *context, fiber::http_script::ScriptExchangeCtx &,
+                                                             std::span<const fiber::access_server::PathVariable>,
+                                                             std::string_view, const fiber::script::Script &,
+                                                             std::string_view expression,
+                                                             std::string &output) noexcept {
     ++static_cast<TemplateEvaluationState *>(context)->count;
     if (expression == "'attempt'") {
         output = "evaluated-once";
-        return true;
+        return {};
     }
     if (expression == "'fail'") {
-        error = fiber::access_server::AccessError::template_script("fixture failure");
-        return false;
+        return std::unexpected(fiber::access_server::Err::from_exception(fiber::access_server::Exception{
+                .name = "TEMPLATE_SCRIPT",
+                .message = "error exec for template expression: fixture failure",
+                .status = 500,
+        }));
     }
-    error = fiber::access_server::AccessError::template_script("unexpected test expression");
-    return false;
+    return std::unexpected(fiber::access_server::Err::from_exception(fiber::access_server::Exception{
+            .name = "TEMPLATE_SCRIPT",
+            .message = "error exec for template expression: unexpected test expression",
+            .status = 500,
+    }));
 }
 
 struct CatFrameCapture {

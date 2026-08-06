@@ -6,7 +6,8 @@
 #include <utility>
 #include <vector>
 
-#include "execution/AccessError.h"
+#include "common/mem/BufPool.h"
+#include "execution/AccessResult.h"
 #include "execution/ErrorResponder.h"
 #include "execution/ProxyResponsePlan.h"
 #include "execution/ResponsePlan.h"
@@ -14,18 +15,21 @@
 
 namespace {
 
-using fiber::access_server::AccessError;
 using fiber::access_server::CompiledHeaderTemplates;
 using fiber::access_server::CompiledResponseRoute;
 using fiber::access_server::CompiledTemplate;
 using fiber::access_server::CompiledTemplateEntry;
+using fiber::access_server::Err;
 using fiber::access_server::ErrorResponder;
 using fiber::access_server::evaluate_template;
+using fiber::access_server::Exception;
 using fiber::access_server::is_java_filtered_response_header;
+using fiber::access_server::make_url_not_matched_exception;
 using fiber::access_server::parse_template;
 using fiber::access_server::prepare_proxy_response_headers;
 using fiber::access_server::prepare_response;
 using fiber::access_server::ResponseBodyKind;
+using fiber::access_server::Result;
 using fiber::access_server::rewrite_java_proxy_location;
 using fiber::access_server::rewrite_java_proxy_refresh;
 using fiber::access_server::TemplateEvaluator;
@@ -35,13 +39,16 @@ struct EvaluatorState {
     std::optional<std::string> failing_expression;
 };
 
-bool evaluate_expression(void *context, const fiber::script::Script &, std::string_view expression, std::string &output,
-                         AccessError &error) noexcept {
+Result<void> evaluate_expression(void *context, const fiber::script::Script &, std::string_view expression,
+                                 std::string &output) noexcept {
     auto &state = *static_cast<EvaluatorState *>(context);
     state.expressions.emplace_back(expression);
     if (state.failing_expression && expression == *state.failing_expression) {
-        error = AccessError::template_script("fixture failure");
-        return false;
+        return std::unexpected(Err::from_exception(Exception{
+                .name = "TEMPLATE_SCRIPT",
+                .message = "error exec for template expression: fixture failure",
+                .status = 500,
+        }));
     }
     if (expression == "$path.id") {
         output = "42";
@@ -50,7 +57,7 @@ bool evaluate_expression(void *context, const fiber::script::Script &, std::stri
     } else {
         output.clear();
     }
-    return true;
+    return {};
 }
 
 TemplateEvaluator evaluator(EvaluatorState &state) {
@@ -81,33 +88,36 @@ CompiledHeaderTemplates compiled_headers(std::vector<CompiledTemplateEntry> entr
     return std::move(builder).build();
 }
 
-TEST(AccessErrorTest, UsesJavaCompatibleStableErrors) {
-    const AccessError router = AccessError::router_not_found();
+TEST(AccessResultTest, UsesJavaCompatibleStableExceptions) {
+    const Exception router = Exception::router_not_found();
     EXPECT_EQ(router.status, 404);
     EXPECT_EQ(router.name, "ROUTER_NOT_FOUND");
     EXPECT_EQ(router.message, "error find router");
 
-    const AccessError bad_request = AccessError::bad_request();
+    const Exception bad_request = Exception::bad_request();
     EXPECT_EQ(bad_request.status, 400);
     EXPECT_EQ(bad_request.name, "BAD_REQUEST");
     EXPECT_EQ(bad_request.message, "error find router");
 
-    const AccessError path = AccessError::url_not_matched("orders");
+    fiber::mem::BufPool pool;
+    const auto path_result = make_url_not_matched_exception(pool, "orders");
+    ASSERT_TRUE(path_result);
+    const Exception path = *path_result;
     EXPECT_EQ(path.status, 404);
     EXPECT_EQ(path.name, "URL_NOT_MATCHED");
     EXPECT_EQ(path.message, "url not matched is project:orders");
 
-    const AccessError entry = AccessError::entry_error();
+    const Exception entry = Exception::entry_error();
     EXPECT_EQ(entry.status, 403);
     EXPECT_EQ(entry.name, "ENTRY_ERROR");
     EXPECT_EQ(entry.message, "entry error");
 
-    const AccessError ip = AccessError::source_ip_not_allowed();
+    const Exception ip = Exception::source_ip_not_allowed();
     EXPECT_EQ(ip.status, 403);
     EXPECT_EQ(ip.name, "NOT_ALLOW_IP");
     EXPECT_EQ(ip.message, "source ip is not allowed");
 
-    const AccessError body = AccessError::request_body_too_large();
+    const Exception body = Exception::request_body_too_large();
     EXPECT_EQ(body.status, 413);
     EXPECT_EQ(body.name, "REQ_BODY_TOO_LARGE");
     EXPECT_EQ(body.message, "request body is too large");
@@ -128,9 +138,11 @@ TEST(TemplateEvaluatorTest, FailsClosedWithoutAdapter) {
     auto result = evaluate_template(value, {});
 
     ASSERT_FALSE(result);
-    EXPECT_EQ(result.error().status, 500);
-    EXPECT_EQ(result.error().name, "TEMPLATE_SCRIPT");
-    EXPECT_EQ(result.error().message, "error exec for template expression: template evaluator is not configured");
+    ASSERT_EQ(result.error().kind, Err::Kind::Exception);
+    EXPECT_EQ(result.error().exception.status, 500U);
+    EXPECT_EQ(result.error().exception.name, "TEMPLATE_SCRIPT");
+    EXPECT_EQ(result.error().exception.message,
+              "error exec for template expression: template evaluator is not configured");
 }
 
 TEST(ResponsePlanTest, EvaluatesEveryHeaderBeforeApplyingJavaHopHeaderFilter) {
@@ -215,11 +227,11 @@ TEST(ResponsePlanTest, DiscardsAllConfiguredHeadersWhenAHeaderTemplateFails) {
     auto result = prepare_response(response, evaluator(state));
 
     ASSERT_FALSE(result);
-    EXPECT_EQ(result.error().error.name, "TEMPLATE_SCRIPT");
-    EXPECT_TRUE(result.error().inherited_headers.empty());
+    ASSERT_EQ(result.error().kind, Err::Kind::Exception);
+    EXPECT_EQ(result.error().exception.name, "TEMPLATE_SCRIPT");
 }
 
-TEST(ResponsePlanTest, RetainsAllConfiguredHeadersWhenBodyTemplateFails) {
+TEST(ResponsePlanTest, DiscardsAllConfiguredHeadersWhenBodyTemplateFails) {
     CompiledResponseRoute response{
             .status = 200,
             .body_kind = ResponseBodyKind::Template,
@@ -235,15 +247,11 @@ TEST(ResponsePlanTest, RetainsAllConfiguredHeadersWhenBodyTemplateFails) {
     auto result = prepare_response(response, evaluator(state));
 
     ASSERT_FALSE(result);
-    EXPECT_EQ(result.error().error.name, "TEMPLATE_SCRIPT");
-    ASSERT_EQ(result.error().inherited_headers.size(), 2U);
-    EXPECT_EQ(result.error().inherited_headers[0].name, "X-First");
-    EXPECT_EQ(result.error().inherited_headers[0].value, "42");
-    EXPECT_EQ(result.error().inherited_headers[1].name, "Content-Type");
-    EXPECT_EQ(result.error().inherited_headers[1].value, "application/custom");
+    ASSERT_EQ(result.error().kind, Err::Kind::Exception);
+    EXPECT_EQ(result.error().exception.name, "TEMPLATE_SCRIPT");
 }
 
-TEST(ResponsePlanTest, RetainsOnlyHeadersCommittedBeforeAnInvalidHeader) {
+TEST(ResponsePlanTest, DiscardsAllHeadersWhenOneHeaderIsInvalid) {
     CompiledResponseRoute response{
             .status = 200,
             .body_kind = ResponseBodyKind::Text,
@@ -259,10 +267,9 @@ TEST(ResponsePlanTest, RetainsOnlyHeadersCommittedBeforeAnInvalidHeader) {
     auto result = prepare_response(response, {});
 
     ASSERT_FALSE(result);
-    EXPECT_EQ(result.error().error.status, 500);
-    EXPECT_EQ(result.error().error.name, "ACCESS_UNKNOWN_ERROR");
-    ASSERT_EQ(result.error().inherited_headers.size(), 1U);
-    EXPECT_EQ(result.error().inherited_headers[0].name, "X-First");
+    ASSERT_EQ(result.error().kind, Err::Kind::Exception);
+    EXPECT_EQ(result.error().exception.status, 500U);
+    EXPECT_EQ(result.error().exception.name, "ACCESS_UNKNOWN_ERROR");
 }
 
 TEST(ResponsePlanTest, FiltersTheSameProtectedResponseHeadersAsJava) {
@@ -340,7 +347,7 @@ TEST(ErrorResponderTest, NegotiatesHtmlOnlyFromTheAcceptPrefix) {
 }
 
 TEST(ErrorResponderTest, RendersExactJavaJsonErrorShape) {
-    const auto rendered = ErrorResponder::render(AccessError::entry_error(), "", "trace-1");
+    const auto rendered = ErrorResponder::render(Exception::entry_error(), "", "trace-1");
 
     EXPECT_EQ(rendered.status, 403);
     EXPECT_EQ(rendered.content_type, "application/json; charset=utf-8");
@@ -349,7 +356,7 @@ TEST(ErrorResponderTest, RendersExactJavaJsonErrorShape) {
 
 TEST(ErrorResponderTest, RendersExactJavaHtmlErrorPage) {
     const auto rendered =
-            ErrorResponder::render(AccessError::source_ip_not_allowed(), "text/html,application/json", "trace-1");
+            ErrorResponder::render(Exception::source_ip_not_allowed(), "text/html,application/json", "trace-1");
 
     EXPECT_EQ(rendered.status, 403);
     EXPECT_EQ(rendered.content_type, "text/html");

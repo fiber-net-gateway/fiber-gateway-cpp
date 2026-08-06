@@ -24,7 +24,8 @@
 - 已实现跨项目全局 Host 树、候选构建失败保旧、同 version 忽略、Host 为空卸载，
   以及请求对旧不可变快照的 pin；
 - 已实现 RESPONSE 的 TEXT/BASE64/TEMPLATE/空 body、受保护响应头过滤、header/body
-  模板分阶段提交和统一 JSON/HTML 错误结果；
+  原子准备和统一 JSON/HTML 错误结果；项目匹配后的 access-owned header、最终 route/proxy
+  header 和 trace header 由请求级 `AccessRequestTelemetry` 统一持有；
 - 已实现可直接交给本地 HTTP server 的请求 handler，完成快照 pin、Host/Path/条件
   路由、X-Entry、HTTPS redirect、CIDR、request body limit 和 RESPONSE 串联；
 - 已将 PROXY 接入同一 live handler；handler 将 pinned route 和轻量请求上下文直接交给

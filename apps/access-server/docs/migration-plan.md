@@ -239,9 +239,10 @@ listener；通用脚本兼容仍按范围决定排除。
 
 - [x] TEXT、BASE64、TEMPLATE 和空 body；
 - [x] status、response headers、request body discard；
-- [x] JSON/HTML 错误选择及稳定错误对象；
+- [x] JSON/HTML 错误选择及 request-pool/literal 生命周期稳定的 Exception；
 - [x] URL 未匹配、Host 未匹配、bad route、entry、CIDR 等稳定错误映射；
-- [x] 将 Host/Path/X-Entry/HTTPS/CIDR/body limit 失败分支接到 `ErrorResponder`；
+- [x] Host/Path/X-Entry/HTTPS/CIDR/body limit 失败返回统一 Result，由 handler 最外层接到
+  `ErrorResponder`；
 - [x] 提供可交给 HTTP listener 的 `AccessRequestHandler`，串联 snapshot pin、route
   selection 与 `ResponseExecutor`；
 - [x] 在 `main` 的 runtime 生命周期中创建并启动真实 listener。
@@ -251,7 +252,7 @@ listener；通用脚本兼容仍按范围决定排除。
 - [x] prepared response status/header/body 字节级比较；
 - [x] BASE64 配置成功/失败；
 - [x] header 模板全部成功后一次性提交，失败时不写部分 header；
-- [x] body 模板失败时保留已提交的完整配置 header 集；
+- [x] header/body 模板全部成功后原子提交；任一失败时丢弃全部 route header/body；
 - [x] Accept 为空、`text/html` 开头和其他值；
 - [x] JSON/HTML 错误 body 与 Content-Type 精确比较；
 - [x] live HTTP/1 exchange 的 response status/header/body；
@@ -270,8 +271,8 @@ listener；通用脚本兼容仍按范围决定排除。
 通过独立的 `ProxyUpstreamConnection` 使用本项目 HTTP/1 connection pool，完成静态地址/
 可注入 service 实例的连接、请求发送和完整响应处理，并通过真实 loopback upstream
 验证实际 wire 请求。
-最终 adapter 已在等待 response header/body 和 WebSocket tunnel 期间统一监视
-downstream close；NamingService/DNS runtime 适配留在阶段 6。
+最终请求 handler 已统一监视 RESPONSE、错误响应、PROXY response header/body 和
+WebSocket tunnel 期间的 downstream close；NamingService/DNS runtime 适配留在阶段 6。
 
 工作：
 
@@ -469,7 +470,7 @@ expected downstream status/headers/body
 | 本地 matcher 同名但边界不同 | Host/Path 组合差分，不依赖类型名 |
 | 配置更新产生 route/Host 混合版本 | 单候选快照、一次发布、请求 pin |
 | 模板执行中途写入部分 header | 先求值到临时结果，全部成功后提交 |
-| body 模板失败丢失 Java 已提交 header | header 与 body 分阶段准备，错误响应显式继承已提交 header |
+| body 模板失败继承未成功 route 的 header | header 与 body 原子准备；只在全部成功后写请求级最终 header 集，并登记 Java 差异 |
 | connection pool 生命周期泄漏到 exchange | 执行器显式拥有/移交 body 与 tunnel |
 | 观测接入扩大热路径分配 | 固定标签、预编译 route metadata |
 | 以脚本兼容问题阻塞整个迁移 | 限定真实配置回归，通用 VM 兼容明确排除 |

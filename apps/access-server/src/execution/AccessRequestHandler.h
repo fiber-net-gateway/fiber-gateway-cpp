@@ -2,14 +2,13 @@
 #define FIBER_ACCESS_SERVER_ACCESS_REQUEST_HANDLER_H
 
 #include "../../../../src/async/Task.h"
-#include "../../../../src/common/IoError.h"
 #include "../routing/ProjectRouteSnapshot.h"
 #include "../runtime/RouteConfigStore.h"
+#include "AccessResult.h"
 #include "ErrorResponder.h"
 #include "ResponseExecutor.h"
 #include "TemplateEvaluator.h"
 
-#include <array>
 #include <cstddef>
 #include <span>
 #include <string>
@@ -32,10 +31,10 @@ struct AccessRequestScriptAdapter {
                                        std::span<const PathVariable> path_variables,
                                        std::string_view request_context_cluster,
                                        const script::Script &program) noexcept;
-    using TemplateFunction = bool (*)(void *context, http_script::ScriptExchangeCtx &script_context,
-                                      std::span<const PathVariable> path_variables,
-                                      std::string_view request_context_cluster, const script::Script &program,
-                                      std::string_view expression, std::string &output, AccessError &error) noexcept;
+    using TemplateFunction = Result<void> (*)(void *context, http_script::ScriptExchangeCtx &script_context,
+                                              std::span<const PathVariable> path_variables,
+                                              std::string_view request_context_cluster, const script::Script &program,
+                                              std::string_view expression, std::string &output) noexcept;
 
     void *context = nullptr;
     ConditionFunction evaluate_condition = nullptr;
@@ -58,11 +57,9 @@ struct ProxyExecutionInput {
 };
 
 struct AccessProxyAdapter {
-    using ExecuteFunction = async::Task<common::IoResult<void>> (*)(void *context, http::HttpExchange &exchange,
-                                                                    const CompiledProxyRoute &proxy,
-                                                                    ProxyExecutionInput input,
-                                                                    std::span<const EvaluatedHeader> base_headers,
-                                                                    AccessRequestTelemetry *telemetry) noexcept;
+    using ExecuteFunction = async::Task<Result<void>> (*)(void *context, http::HttpExchange &exchange,
+                                                          const CompiledProxyRoute &proxy, ProxyExecutionInput input,
+                                                          AccessRequestTelemetry &telemetry) noexcept;
 
     void *context = nullptr;
     ExecuteFunction execute = nullptr;
@@ -77,14 +74,15 @@ public:
                                            AccessRequestTelemetry &telemetry) const noexcept;
 
 private:
-    [[nodiscard]] async::Task<common::IoResult<void>> handle_impl(http::HttpExchange &exchange,
-                                                                  AccessRequestTelemetry &telemetry) const noexcept;
+    [[nodiscard]] async::Task<common::IoResult<void>>
+    handle_and_finalize(http::HttpExchange &exchange, AccessRequestTelemetry &telemetry) const noexcept;
+    [[nodiscard]] async::Task<Result<void>> handle_impl(http::HttpExchange &exchange,
+                                                        AccessRequestTelemetry &telemetry) const noexcept;
 
     const RouteConfigStore &config_store_;
     AccessRequestScriptAdapter script_adapter_;
     AccessRequestHandlerOptions options_;
     AccessProxyAdapter proxy_adapter_;
-    std::array<EvaluatedHeader, 1> project_base_headers_;
     ResponseExecutor response_executor_;
     ErrorResponder error_responder_;
 };
