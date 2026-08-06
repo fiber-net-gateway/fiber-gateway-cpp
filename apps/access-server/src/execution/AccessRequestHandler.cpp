@@ -27,25 +27,87 @@ struct RequestHostContext {
 
 struct RequestEvaluationContext {
     AccessRequestScriptAdapter adapter;
-    http::HttpExchange *exchange = nullptr;
+    http::HttpExchange &exchange;
     std::span<const PathVariable> matched_path_variables;
     std::string_view request_context_cluster;
 };
-
-bool evaluate_condition(void *context, const void *program, std::string_view expression,
-                        std::span<const PathVariable> path_variables) noexcept {
-    auto &request = *static_cast<RequestEvaluationContext *>(context);
-    return request.adapter.evaluate_condition &&
-           request.adapter.evaluate_condition(request.adapter.context, *request.exchange, path_variables,
-                                              request.request_context_cluster, program, expression);
-}
 
 bool evaluate_template(void *context, const void *program, std::string_view expression, std::string &output,
                        AccessError &error) noexcept {
     auto &request = *static_cast<RequestEvaluationContext *>(context);
     return request.adapter.evaluate_template &&
-           request.adapter.evaluate_template(request.adapter.context, *request.exchange, request.matched_path_variables,
+           request.adapter.evaluate_template(request.adapter.context, request.exchange, request.matched_path_variables,
                                              request.request_context_cluster, program, expression, output, error);
+}
+
+struct RouteMatch {
+    const CompiledRoute *route = nullptr;
+    std::span<const PathVariable> path_variables;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return route != nullptr; }
+};
+
+class RouteMatchContext {
+public:
+    RouteMatchContext(const std::vector<CompiledRoute> &routes, std::span<PathVariable> path_variables,
+                      RequestEvaluationContext &request) noexcept :
+        routes_(routes), path_variables_(path_variables), request_(request) {}
+
+    bool matched(std::uint32_t, std::uint32_t route_index) noexcept {
+        const CompiledRoute &route = routes_[route_index];
+        if (route.condition &&
+            (!request_.adapter.evaluate_condition ||
+             !request_.adapter.evaluate_condition(
+                     request_.adapter.context, request_.exchange, path_variables_.first(path_variable_count_),
+                     request_.request_context_cluster, route.condition_program.get(), *route.condition))) {
+            return false;
+        }
+        matched_route_ = &route;
+        matched_path_variables_ = path_variables_.first(path_variable_count_);
+        return true;
+    }
+
+    void add_path_var(std::string_view name, std::string_view value) noexcept {
+        path_variables_[path_variable_count_++] = PathVariable{
+                .name = name,
+                .value = value,
+        };
+    }
+
+    void pop_path_var() noexcept { --path_variable_count_; }
+
+    [[nodiscard]] RouteMatch result() const noexcept {
+        return RouteMatch{
+                .route = matched_route_,
+                .path_variables = matched_path_variables_,
+        };
+    }
+
+private:
+    const std::vector<CompiledRoute> &routes_;
+    std::span<PathVariable> path_variables_;
+    RequestEvaluationContext &request_;
+    const CompiledRoute *matched_route_ = nullptr;
+    std::span<const PathVariable> matched_path_variables_;
+    std::size_t path_variable_count_ = 0;
+};
+
+common::IoResult<RouteMatch> match_route(const ProjectRouteSnapshot &project, http::HttpExchange &exchange,
+                                         RequestEvaluationContext &evaluation) noexcept {
+    const std::size_t variable_capacity = project.max_path_variable_count();
+    PathVariable *variable_data = nullptr;
+    if (variable_capacity != 0) {
+        variable_data = static_cast<PathVariable *>(
+                exchange.pool().alloc(variable_capacity * sizeof(PathVariable), alignof(PathVariable)));
+        if (!variable_data) {
+            return std::unexpected(common::IoErr::NoMem);
+        }
+    }
+
+    std::span<PathVariable> path_variables(variable_data, variable_capacity);
+    RouteMatchContext context(project.routes(), path_variables, evaluation);
+    (void) project.match_route_path(exchange.uri().path, context);
+    return context.result();
 }
 
 RequestHostContext resolve_request_host(const http::HttpExchange &exchange, bool test_mode) {
@@ -231,32 +293,16 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
                                          base_headers, options_.response.write_timeout, telemetry);
     }
 
-    const std::size_t variable_capacity = host_match.project->max_path_variable_count();
-    PathVariable *variable_data = nullptr;
-    if (variable_capacity != 0) {
-        variable_data = static_cast<PathVariable *>(
-                exchange.pool().alloc(variable_capacity * sizeof(PathVariable), alignof(PathVariable)));
-        if (!variable_data) {
-            co_return std::unexpected(common::IoErr::NoMem);
-        }
-    }
-    std::span<PathVariable> path_variables(variable_data, variable_capacity);
-
     RequestEvaluationContext evaluation{
             .adapter = script_adapter_,
-            .exchange = &exchange,
+            .exchange = exchange,
             .request_context_cluster = request_host.cluster,
     };
-    ConditionEvaluator condition_evaluator;
-    if (script_adapter_.evaluate_condition) {
-        condition_evaluator = ConditionEvaluator{
-                .context = &evaluation,
-                .evaluate = evaluate_condition,
-        };
+    auto route_match_result = match_route(*host_match.project, exchange, evaluation);
+    if (!route_match_result) {
+        co_return std::unexpected(route_match_result.error());
     }
-
-    const RouteMatch route_match =
-            host_match.project->match_route(exchange.uri().path, path_variables, condition_evaluator);
+    const RouteMatch route_match = *route_match_result;
     if (!route_match) {
         co_return co_await error_responder_.send(exchange, AccessError::url_not_matched(host_match.project->project()),
                                                  base_headers, {}, request_trace_id(telemetry), false, telemetry);
@@ -276,7 +322,7 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
         co_return co_await error_responder_.send(exchange, AccessError::source_ip_not_allowed(), base_headers, {},
                                                  request_trace_id(telemetry), false, telemetry);
     }
-    evaluation.matched_path_variables = path_variables.first(route_match.path_variable_count);
+    evaluation.matched_path_variables = route_match.path_variables;
     TemplateEvaluator template_evaluator;
     if (script_adapter_.evaluate_template) {
         template_evaluator = TemplateEvaluator{

@@ -25,7 +25,6 @@ using fiber::access_server::BodyType;
 using fiber::access_server::Cidr;
 using fiber::access_server::compile_project_config;
 using fiber::access_server::CompiledRoute;
-using fiber::access_server::ConditionEvaluator;
 using fiber::access_server::HostConfigEntry;
 using fiber::access_server::HostMatcher;
 using fiber::access_server::HostPattern;
@@ -100,6 +99,43 @@ const ProjectRouteSnapshot &require_snapshot(const fiber::access_server::Project
     EXPECT_TRUE(result && *result);
     return **result;
 }
+
+class TestRouteMatchContext {
+public:
+    TestRouteMatchContext(const std::vector<CompiledRoute> &routes, std::span<PathVariable> path_variables,
+                          std::string_view accepted_condition = {}) noexcept :
+        routes_(routes), path_variables_(path_variables), accepted_condition_(accepted_condition) {}
+
+    bool matched(std::uint32_t, std::uint32_t route_index) noexcept {
+        const CompiledRoute &route = routes_[route_index];
+        if (route.condition && *route.condition != accepted_condition_) {
+            return false;
+        }
+        matched_route_ = &route;
+        matched_path_variables_ = path_variables_.first(path_variable_count_);
+        return true;
+    }
+
+    void add_path_var(std::string_view name, std::string_view value) noexcept {
+        path_variables_[path_variable_count_++] = PathVariable{
+                .name = name,
+                .value = value,
+        };
+    }
+
+    void pop_path_var() noexcept { --path_variable_count_; }
+
+    [[nodiscard]] const CompiledRoute *route() const noexcept { return matched_route_; }
+    [[nodiscard]] std::span<const PathVariable> path_variables() const noexcept { return matched_path_variables_; }
+
+private:
+    const std::vector<CompiledRoute> &routes_;
+    std::span<PathVariable> path_variables_;
+    std::string_view accepted_condition_;
+    const CompiledRoute *matched_route_ = nullptr;
+    std::span<const PathVariable> matched_path_variables_;
+    std::size_t path_variable_count_ = 0;
+};
 
 std::vector<fiber::access_server::AccessUpstreamInstance>
 select_addresses(fiber::access_server::ProxyAddressSelector &selector, std::size_t count) {
@@ -443,20 +479,16 @@ TEST(ProjectRouteSnapshotTest, UsesJavaCrc32cRouteKeyAndConditionalOrder) {
     EXPECT_EQ(snapshot.routes()[1].key, "/same/:id@3829603e");
 
     std::array<PathVariable, 1> variables;
-    const auto only_second = [](void *, const void *, std::string_view condition,
-                                std::span<const PathVariable> path_variables) noexcept {
-        return condition == "123456789" && path_variables.size() == 1 && path_variables[0].value == "42";
-    };
-    auto match = snapshot.match_route("/same/42", variables, ConditionEvaluator{.evaluate = only_second});
-    ASSERT_TRUE(match);
-    EXPECT_EQ(match.route, &snapshot.routes()[1]);
-    ASSERT_EQ(match.path_variable_count, 1U);
-    EXPECT_EQ(variables[0].name, "id");
-    EXPECT_EQ(variables[0].value, "42");
+    TestRouteMatchContext context(snapshot.routes(), variables, "123456789");
+    ASSERT_TRUE(snapshot.match_route_path("/same/42", context));
+    EXPECT_EQ(context.route(), &snapshot.routes()[1]);
+    ASSERT_EQ(context.path_variables().size(), 1U);
+    EXPECT_EQ(context.path_variables()[0].name, "id");
+    EXPECT_EQ(context.path_variables()[0].value, "42");
 
-    auto no_script_adapter = snapshot.match_route("/same/43", variables);
-    ASSERT_TRUE(no_script_adapter);
-    EXPECT_EQ(no_script_adapter.route, &snapshot.routes()[2]);
+    TestRouteMatchContext no_script_context(snapshot.routes(), variables);
+    ASSERT_TRUE(snapshot.match_route_path("/same/43", no_script_context));
+    EXPECT_EQ(no_script_context.route(), &snapshot.routes()[2]);
 }
 
 TEST(ProjectRouteSnapshotTest, RejectsRouteAfterUnconditionalAtTheSameNode) {
@@ -481,15 +513,17 @@ TEST(ProjectRouteSnapshotTest, RejectsDuplicatePathVariableAndMiddleWildcard) {
     EXPECT_EQ(wildcard.error().field, "routes[0].path");
 }
 
-TEST(ProjectRouteSnapshotTest, ReportsPathVariableCapacityWithoutAllocating) {
+TEST(ProjectRouteSnapshotTest, ReportsMaximumPathVariableCount) {
     auto result = compile_project_config("demo", project_with_routes({proxy_route("/:a/:b")}));
     const ProjectRouteSnapshot &snapshot = require_snapshot(result);
 
-    std::array<PathVariable, 1> too_small;
-    const auto match = snapshot.match_route("/x/y", too_small);
-    EXPECT_FALSE(match);
-    EXPECT_TRUE(match.insufficient_variable_capacity);
     EXPECT_EQ(snapshot.max_path_variable_count(), 2U);
+    std::array<PathVariable, 2> variables;
+    TestRouteMatchContext context(snapshot.routes(), variables);
+    ASSERT_TRUE(snapshot.match_route_path("/x/y", context));
+    ASSERT_EQ(context.path_variables().size(), 2U);
+    EXPECT_EQ(context.path_variables()[0].value, "x");
+    EXPECT_EQ(context.path_variables()[1].value, "y");
 }
 
 TEST(ProjectRouteSnapshotTest, RejectsJavaBuildTimeInvalidCombinations) {

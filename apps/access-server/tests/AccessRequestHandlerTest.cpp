@@ -417,6 +417,22 @@ TEST(AccessRequestHandlerTest, WritesLiveResponseAndExposesPathVariablesToScript
     EXPECT_EQ(response_body(response), "item=42;method=POST");
 }
 
+TEST(AccessRequestHandlerTest, SkipsConditionalRouteWithoutScriptAdapter) {
+    RouteConfig conditional = response_route("/items/:id", "conditional");
+    conditional.condition = "true";
+    RouteConfig fallback = response_route("/items/:id", "fallback");
+
+    RouteConfigStore store;
+    publish(store, project({}, {std::move(conditional), std::move(fallback)}));
+
+    const std::string response = run_request(store, "GET /items/42 HTTP/1.1\r\n"
+                                                    "Host: api.example.com\r\n"
+                                                    "Connection: close\r\n\r\n");
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(response_body(response), "fallback");
+}
+
 TEST(AccessRequestHandlerTest, ExecutesPrecompiledLocalConditionAndTemplates) {
     AccessScriptRuntime scripts;
     RouteConfig conditional = response_route(

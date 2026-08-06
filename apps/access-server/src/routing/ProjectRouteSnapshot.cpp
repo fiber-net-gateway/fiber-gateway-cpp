@@ -566,45 +566,6 @@ private:
     std::uint32_t last_route_ = kNoRoute;
 };
 
-class RouteMatchContext {
-public:
-    RouteMatchContext(const std::vector<CompiledRoute> &routes, std::span<PathVariable> variables,
-                      ConditionEvaluator evaluator) noexcept :
-        routes_(routes), variables_(variables), evaluator_(evaluator) {}
-
-    bool matched(std::uint32_t, std::uint32_t route_index) noexcept {
-        const CompiledRoute &route = routes_[route_index];
-        if (route.condition &&
-            (!evaluator_.evaluate || !evaluator_.evaluate(evaluator_.context, route.condition_program.get(),
-                                                          *route.condition, variables_.first(variable_count_)))) {
-            return false;
-        }
-        matched_route_ = &route;
-        matched_variable_count_ = variable_count_;
-        return true;
-    }
-
-    void add_path_var(std::string_view name, std::string_view value) noexcept {
-        variables_[variable_count_++] = PathVariable{
-                .name = name,
-                .value = value,
-        };
-    }
-
-    void pop_path_var() noexcept { --variable_count_; }
-
-    [[nodiscard]] const CompiledRoute *route() const noexcept { return matched_route_; }
-    [[nodiscard]] std::size_t variable_count() const noexcept { return matched_variable_count_; }
-
-private:
-    const std::vector<CompiledRoute> &routes_;
-    std::span<PathVariable> variables_;
-    ConditionEvaluator evaluator_;
-    const CompiledRoute *matched_route_ = nullptr;
-    std::size_t variable_count_ = 0;
-    std::size_t matched_variable_count_ = 0;
-};
-
 } // namespace
 
 const CompiledHost *ProjectRouteSnapshot::match_host(std::string_view host) const noexcept {
@@ -613,20 +574,6 @@ const CompiledHost *ProjectRouteSnapshot::match_host(std::string_view host) cons
         return nullptr;
     }
     return &hosts_[*index];
-}
-
-RouteMatch ProjectRouteSnapshot::match_route(std::string_view path, std::span<PathVariable> path_variables,
-                                             ConditionEvaluator evaluator) const noexcept {
-    if (path_variables.size() < path_matcher_.max_path_var_count()) {
-        return RouteMatch{.insufficient_variable_capacity = true};
-    }
-
-    RouteMatchContext context(routes_, path_variables, evaluator);
-    (void) path_matcher_.match_path(path, context);
-    return RouteMatch{
-            .route = context.route(),
-            .path_variable_count = context.variable_count(),
-    };
 }
 
 async::Task<std::expected<void, ProxyAddressReadyError>> ProjectRouteSnapshot::wait_ready() const noexcept {
