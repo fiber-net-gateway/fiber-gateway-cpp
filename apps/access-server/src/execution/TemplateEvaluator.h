@@ -15,8 +15,8 @@ struct TemplateEvaluator {
     // On success, writes the Java JsonNode.asText("") compatible expression
     // result to `output`. The callback is an adapter boundary for this
     // repository's script engine and is not a Java VM compatibility promise.
-    using Function = bool (*)(void *context, const void *program, std::string_view expression, std::string &output,
-                              AccessError &error) noexcept;
+    using Function = bool (*)(void *context, const script::Script &program, std::string_view expression,
+                              std::string &output, AccessError &error) noexcept;
 
     void *context = nullptr;
     Function evaluate = nullptr;

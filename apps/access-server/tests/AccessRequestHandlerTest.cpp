@@ -20,6 +20,7 @@
 #include "http/Http1Connection.h"
 #include "http/HttpBodySpec.h"
 #include "http/HttpHeaderHash.h"
+#include "observability/AccessRequestTelemetry.h"
 #include "runtime/AccessScriptRuntime.h"
 
 namespace {
@@ -136,8 +137,10 @@ fiber::async::DetachedTask run_request_on_loop(fiber::event::EventLoop *loop, co
                                                std::string request, std::string *output, std::promise<void> *done) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output);
     AccessRequestHandler access_handler(*store, script_adapter, options, proxy_adapter);
-    fiber::http::HttpHandler handler = [&access_handler](fiber::http::HttpExchange &exchange) {
-        return access_handler.handle(exchange);
+    fiber::http::HttpHandler handler =
+            [&access_handler](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, nullptr);
+        co_await access_handler.handle(exchange, telemetry);
     };
     fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
     co_await connection.run();
@@ -253,20 +256,20 @@ void publish(RouteConfigStore &store, ProjectConfig config) {
     ASSERT_TRUE(result) << result.error().message;
 }
 
-bool evaluate_condition(void *, fiber::http::HttpExchange &, std::span<const PathVariable> path_variables,
-                        std::string_view, const void *, std::string_view expression) noexcept {
-    return expression == "id-is-42" && path_variables.size() == 1 && path_variables[0].value == "42";
+bool evaluate_condition(void *, fiber::http_script::ScriptExchangeCtx &, std::span<const PathVariable> path_variables,
+                        std::string_view, const fiber::script::Script &) noexcept {
+    return path_variables.size() == 1 && path_variables[0].value == "42";
 }
 
-bool evaluate_template(void *, fiber::http::HttpExchange &exchange, std::span<const PathVariable> path_variables,
-                       std::string_view, const void *, std::string_view expression, std::string &output,
-                       AccessError &error) noexcept {
-    if (expression == "fail") {
+bool evaluate_template(void *, fiber::http_script::ScriptExchangeCtx &script_context,
+                       std::span<const PathVariable> path_variables, std::string_view, const fiber::script::Script &,
+                       std::string_view expression, std::string &output, AccessError &error) noexcept {
+    if (expression == "'fail'") {
         error = AccessError::template_script("fixture failure");
         return false;
     }
-    if (expression == "$request.method") {
-        output.assign(exchange.method_view());
+    if (expression == "$req.method") {
+        output.assign(script_context.exchange().method_view());
         return true;
     }
     if (expression == "$path.id" && path_variables.size() == 1) {
@@ -282,6 +285,42 @@ AccessRequestScriptAdapter script_adapter() {
             .evaluate_condition = evaluate_condition,
             .evaluate_template = evaluate_template,
     };
+}
+
+struct SharedScriptContextState {
+    fiber::http_script::ScriptExchangeCtx *context = nullptr;
+    fiber::script::GcHeap *heap = nullptr;
+    std::size_t condition_calls = 0;
+    std::size_t template_calls = 0;
+    bool reused = true;
+};
+
+void record_script_context(SharedScriptContextState &state, fiber::http_script::ScriptExchangeCtx &context) noexcept {
+    if (!state.context) {
+        state.context = &context;
+        state.heap = &context.heap();
+        return;
+    }
+    state.reused = state.reused && state.context == &context && state.heap == &context.heap();
+}
+
+bool reject_with_shared_context(void *opaque, fiber::http_script::ScriptExchangeCtx &context,
+                                std::span<const PathVariable>, std::string_view,
+                                const fiber::script::Script &) noexcept {
+    auto &state = *static_cast<SharedScriptContextState *>(opaque);
+    record_script_context(state, context);
+    ++state.condition_calls;
+    return false;
+}
+
+bool evaluate_with_shared_context(void *opaque, fiber::http_script::ScriptExchangeCtx &context,
+                                  std::span<const PathVariable>, std::string_view, const fiber::script::Script &,
+                                  std::string_view, std::string &output, AccessError &) noexcept {
+    auto &state = *static_cast<SharedScriptContextState *>(opaque);
+    record_script_context(state, context);
+    ++state.template_calls;
+    output = "shared";
+    return true;
 }
 
 struct CapturedProxyRequest {
@@ -389,8 +428,9 @@ AccessProxyAdapter proxy_adapter(CapturedProxyRequest &capture) {
 }
 
 TEST(AccessRequestHandlerTest, WritesLiveResponseAndExposesPathVariablesToScripts) {
-    RouteConfig conditional = response_route("/items/:id", "item=${$path.id};method=${$request.method}", 201);
-    conditional.condition = "id-is-42";
+    AccessScriptRuntime scripts;
+    RouteConfig conditional = response_route("/items/:id", "item=${$path.id};method=${$req.method}", 201);
+    conditional.condition = "$path.id === '42'";
     conditional.response_headers = {
             StringConfigEntry{.name = "X-Item", .value = "${$path.id}"},
             StringConfigEntry{.name = "Content-Length", .value = "999"},
@@ -398,7 +438,7 @@ TEST(AccessRequestHandlerTest, WritesLiveResponseAndExposesPathVariablesToScript
     };
     RouteConfig fallback = response_route("/items/:id", "fallback");
 
-    RouteConfigStore store;
+    RouteConfigStore store(scripts.compiler_adapter());
     publish(store, project({}, {std::move(conditional), std::move(fallback)}));
 
     const std::string response = run_request(store,
@@ -418,11 +458,12 @@ TEST(AccessRequestHandlerTest, WritesLiveResponseAndExposesPathVariablesToScript
 }
 
 TEST(AccessRequestHandlerTest, SkipsConditionalRouteWithoutScriptAdapter) {
+    AccessScriptRuntime scripts;
     RouteConfig conditional = response_route("/items/:id", "conditional");
     conditional.condition = "true";
     RouteConfig fallback = response_route("/items/:id", "fallback");
 
-    RouteConfigStore store;
+    RouteConfigStore store(scripts.compiler_adapter());
     publish(store, project({}, {std::move(conditional), std::move(fallback)}));
 
     const std::string response = run_request(store, "GET /items/42 HTTP/1.1\r\n"
@@ -431,6 +472,32 @@ TEST(AccessRequestHandlerTest, SkipsConditionalRouteWithoutScriptAdapter) {
 
     EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
     EXPECT_EQ(response_body(response), "fallback");
+}
+
+TEST(AccessRequestHandlerTest, ReusesOneScriptContextAcrossConditionAndTemplateInvocations) {
+    AccessScriptRuntime scripts;
+    RouteConfig rejected = response_route("/shared", "rejected");
+    rejected.condition = "false";
+    RouteConfig fallback = response_route("/shared", "${'shared'}");
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(rejected), std::move(fallback)}));
+
+    SharedScriptContextState state;
+    const std::string response = run_request(store,
+                                             "GET /shared HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             AccessRequestScriptAdapter{
+                                                     .context = &state,
+                                                     .evaluate_condition = reject_with_shared_context,
+                                                     .evaluate_template = evaluate_with_shared_context,
+                                             });
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    EXPECT_EQ(response_body(response), "shared");
+    EXPECT_EQ(state.condition_calls, 1U);
+    EXPECT_EQ(state.template_calls, 1U);
+    EXPECT_TRUE(state.reused);
 }
 
 TEST(AccessRequestHandlerTest, ExecutesPrecompiledLocalConditionAndTemplates) {
@@ -562,16 +629,17 @@ TEST(AccessRequestHandlerTest, RedirectsBeforePathMatching) {
 }
 
 TEST(AccessRequestHandlerTest, PreservesJavaHeaderCommitBoundaryOnLiveErrors) {
+    AccessScriptRuntime scripts;
     RouteConfig header_failure = response_route("/header-failure", "unreached");
     header_failure.response_headers = {
             StringConfigEntry{.name = "X-First", .value = "one"},
-            StringConfigEntry{.name = "X-Fail", .value = "${fail}"},
+            StringConfigEntry{.name = "X-Fail", .value = "${'fail'}"},
     };
-    RouteConfig body_failure = response_route("/body-failure", "${fail}");
+    RouteConfig body_failure = response_route("/body-failure", "${'fail'}");
     body_failure.response_headers = {
             StringConfigEntry{.name = "X-First", .value = "one"},
     };
-    RouteConfigStore store;
+    RouteConfigStore store(scripts.compiler_adapter());
     publish(store, project({}, {std::move(header_failure), std::move(body_failure)}));
 
     const std::string header_response = run_request(store,
@@ -658,6 +726,7 @@ TEST(AccessRequestHandlerTest, DoesNotWriteAnErrorAfterResponseCommit) {
 }
 
 TEST(AccessRequestHandlerTest, PassesPinnedProxyRouteAndExecutionInputToAdapter) {
+    AccessScriptRuntime scripts;
     RouteConfig route = proxy_route("/v1/:id");
     route.cluster = "stable";
     route.timeout_millis = 123;
@@ -668,7 +737,7 @@ TEST(AccessRequestHandlerTest, PassesPinnedProxyRouteAndExecutionInputToAdapter)
     route.rewrite = "/items/${$path.id} /?#";
     route.proxy_headers = {
             StringConfigEntry{.name = "X-Item", .value = "${$path.id}"},
-            StringConfigEntry{.name = "X-Empty", .value = "${empty}"},
+            StringConfigEntry{.name = "X-Empty", .value = "${null}"},
             StringConfigEntry{.name = "Host", .value = "internal.example:8080"},
             StringConfigEntry{.name = "Connection", .value = "keep-alive"},
             StringConfigEntry{.name = "Content-Length", .value = "999"},
@@ -677,10 +746,10 @@ TEST(AccessRequestHandlerTest, PassesPinnedProxyRouteAndExecutionInputToAdapter)
     };
     route.context = {
             StringConfigEntry{.name = "cluster", .value = "${$path.id}"},
-            StringConfigEntry{.name = "remove-me", .value = "${empty}"},
+            StringConfigEntry{.name = "remove-me", .value = "${null}"},
     };
 
-    RouteConfigStore store;
+    RouteConfigStore store(scripts.compiler_adapter());
     publish(store, project({}, {std::move(route)}));
 
     CapturedProxyRequest capture;

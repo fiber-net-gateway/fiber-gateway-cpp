@@ -132,25 +132,30 @@ compile_header_templates(const StringConfigMap &input, std::size_t route_index, 
     return result;
 }
 
-struct PendingProxyHeaders {
+struct PendingRouteCompile {
+    std::optional<std::string> condition;
     CompiledHeaderTemplates::Builder proxy_headers;
     CompiledHeaderTemplates::Builder response_headers;
 };
 
 std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &route, std::size_t route_index,
-                                                             PendingProxyHeaders &pending_headers,
+                                                             PendingRouteCompile &pending,
                                                              ScriptCompilerAdapter compiler) {
-    if (!compiler.compile_expression) {
-        return {};
-    }
-
     auto compile_template = [&](CompiledTemplate &value,
                                 std::string_view field) -> std::expected<void, AccessConfigError> {
         for (CompiledTemplateExpression &expression: value.expressions) {
+            if (!compiler.compile_expression) {
+                return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, field,
+                                                   "script compiler is not configured"));
+            }
             auto program = compiler.compile_expression(compiler.context, expression.source, route.path_variable_names);
             if (!program) {
                 return std::unexpected(
                         route_error(AccessConfigErrorCode::InvalidField, route_index, field, program.error()));
+            }
+            if (!program->valid()) {
+                return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, field,
+                                                   "script compiler returned an invalid program"));
             }
             expression.program = std::move(*program);
         }
@@ -167,13 +172,21 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         return {};
     };
 
-    if (route.condition) {
-        auto program = compiler.compile_expression(compiler.context, *route.condition, route.path_variable_names);
+    if (pending.condition) {
+        if (!compiler.compile_expression) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "condition",
+                                               "script compiler is not configured"));
+        }
+        auto program = compiler.compile_expression(compiler.context, *pending.condition, route.path_variable_names);
         if (!program) {
             return std::unexpected(
                     route_error(AccessConfigErrorCode::InvalidField, route_index, "condition", program.error()));
         }
-        route.condition_program = std::move(*program);
+        if (!program->valid()) {
+            return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "condition",
+                                               "script compiler returned an invalid program"));
+        }
+        route.condition_program.emplace(std::move(*program));
     }
 
     if (route.response) {
@@ -190,11 +203,11 @@ std::expected<void, AccessConfigError> compile_route_scripts(CompiledRoute &rout
         return compile_entries(route.response->response_headers, "response_headers");
     }
 
-    auto proxy_headers = compile_entries(pending_headers.proxy_headers.entries(), "proxy_headers");
+    auto proxy_headers = compile_entries(pending.proxy_headers.entries(), "proxy_headers");
     if (!proxy_headers) {
         return proxy_headers;
     }
-    auto response_headers = compile_entries(pending_headers.response_headers.entries(), "response_headers");
+    auto response_headers = compile_entries(pending.response_headers.entries(), "response_headers");
     if (!response_headers) {
         return response_headers;
     }
@@ -344,7 +357,7 @@ std::expected<std::vector<Cidr>, AccessConfigError> compile_cidr_list(const std:
 }
 
 std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig &source, std::size_t route_index,
-                                                              PendingProxyHeaders &pending_headers,
+                                                              PendingRouteCompile &pending,
                                                               ProxyAddressSelectorFactory selector_factory) {
     if (!source.path || source.path->empty()) {
         return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, route_index, "path", "path is empty"));
@@ -362,8 +375,8 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
     route.type = *source.type;
     route.max_client_body_size = source.max_client_body_size;
     if (is_nonempty(source.condition)) {
-        route.condition = *source.condition;
-        route.key = conditional_route_key(route.path, *route.condition);
+        pending.condition = *source.condition;
+        route.key = conditional_route_key(route.path, *pending.condition);
     } else {
         route.key = route.path;
     }
@@ -463,13 +476,13 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
         if (!proxy_headers) {
             return std::unexpected(std::move(proxy_headers.error()));
         }
-        pending_headers.proxy_headers = std::move(*proxy_headers);
+        pending.proxy_headers = std::move(*proxy_headers);
 
         auto response_headers = compile_header_templates(source.response_headers, route_index, "response_headers");
         if (!response_headers) {
             return std::unexpected(std::move(response_headers.error()));
         }
-        pending_headers.response_headers = std::move(*response_headers);
+        pending.response_headers = std::move(*response_headers);
 
         auto context = compile_context(source.context, route_index);
         if (!context) {
@@ -527,7 +540,8 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
 
 class RouteDefiner {
 public:
-    explicit RouteDefiner(std::vector<CompiledRoute> &routes) : routes_(routes) {}
+    RouteDefiner(std::vector<CompiledRoute> &routes, std::span<const PendingRouteCompile> pending) :
+        routes_(routes), pending_(pending) {}
 
     void add_path_var_definer(std::uint32_t &route_index, std::string_view name, std::uint32_t index) {
         CompiledRoute &route = routes_[route_index];
@@ -541,7 +555,7 @@ public:
     }
 
     std::uint32_t on_route_mount(std::uint32_t node_id, std::string_view, std::uint32_t &route_index) {
-        if (last_node_id_ == node_id && last_route_ != kNoRoute && !routes_[last_route_].condition) {
+        if (last_node_id_ == node_id && last_route_ != kNoRoute && !pending_[last_route_].condition) {
             set_error(route_index, AccessConfigErrorCode::Conflict, "exists dead route");
         }
         last_node_id_ = node_id;
@@ -561,6 +575,7 @@ private:
     static constexpr std::uint32_t kNoRoute = std::numeric_limits<std::uint32_t>::max();
 
     std::vector<CompiledRoute> &routes_;
+    std::span<const PendingRouteCompile> pending_;
     std::optional<AccessConfigError> error_;
     std::uint32_t last_node_id_ = util::RoutePathMatcher<std::uint32_t>::kInvalidIndex;
     std::uint32_t last_route_ = kNoRoute;
@@ -624,22 +639,22 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
     snapshot.project_ = project;
     snapshot.version_ = config.version;
     snapshot.routes_.reserve(config.routes->size());
-    std::vector<PendingProxyHeaders> pending_headers;
-    pending_headers.reserve(config.routes->size());
+    std::vector<PendingRouteCompile> pending;
+    pending.reserve(config.routes->size());
     for (std::size_t i = 0; i < config.routes->size(); ++i) {
         const std::optional<RouteConfig> &source = (*config.routes)[i];
         if (!source) {
             return std::unexpected(route_error(AccessConfigErrorCode::InvalidField, i, {}, "route entry is null"));
         }
-        PendingProxyHeaders &pending = pending_headers.emplace_back();
-        auto route = compile_route(*source, i, pending, selector_factory);
+        PendingRouteCompile &route_pending = pending.emplace_back();
+        auto route = compile_route(*source, i, route_pending, selector_factory);
         if (!route) {
             return std::unexpected(std::move(route.error()));
         }
         snapshot.routes_.push_back(std::move(*route));
     }
 
-    RouteDefiner definer(snapshot.routes_);
+    RouteDefiner definer(snapshot.routes_, pending);
     util::RoutePathMatcher<std::uint32_t>::Builder<std::uint32_t, RouteDefiner> path_builder(definer);
     for (std::uint32_t i = 0; i < snapshot.routes_.size(); ++i) {
         path_builder.add_route(snapshot.routes_[i].path, i);
@@ -649,13 +664,13 @@ ProjectSnapshotResult compile_project_config(std::string_view project, const Pro
         return std::unexpected(*definer.error());
     }
     for (std::size_t i = 0; i < snapshot.routes_.size(); ++i) {
-        auto compiled = compile_route_scripts(snapshot.routes_[i], i, pending_headers[i], compiler);
+        auto compiled = compile_route_scripts(snapshot.routes_[i], i, pending[i], compiler);
         if (!compiled) {
             return std::unexpected(std::move(compiled.error()));
         }
         if (CompiledRoute &route = snapshot.routes_[i]; route.proxy) {
-            route.proxy->proxy_headers = std::move(pending_headers[i].proxy_headers).build();
-            route.proxy->response_headers = std::move(pending_headers[i].response_headers).build();
+            route.proxy->proxy_headers = std::move(pending[i].proxy_headers).build();
+            route.proxy->response_headers = std::move(pending[i].response_headers).build();
         }
     }
 

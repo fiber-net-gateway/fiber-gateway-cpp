@@ -4,19 +4,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
-namespace fiber::access_server {
+#include <script/Script.h>
 
-using CompiledScriptProgram = std::shared_ptr<const void>;
+namespace fiber::access_server {
 
 struct CompiledTemplateExpression {
     std::string leading_literal;
     std::string source;
-    CompiledScriptProgram program;
+    script::Script program;
 };
 
 struct CompiledTemplate {

@@ -27,17 +27,18 @@ struct RequestHostContext {
 
 struct RequestEvaluationContext {
     AccessRequestScriptAdapter adapter;
-    http::HttpExchange &exchange;
+    AccessRequestTelemetry &telemetry;
     std::span<const PathVariable> matched_path_variables;
     std::string_view request_context_cluster;
 };
 
-bool evaluate_template(void *context, const void *program, std::string_view expression, std::string &output,
+bool evaluate_template(void *context, const script::Script &program, std::string_view expression, std::string &output,
                        AccessError &error) noexcept {
     auto &request = *static_cast<RequestEvaluationContext *>(context);
     return request.adapter.evaluate_template &&
-           request.adapter.evaluate_template(request.adapter.context, request.exchange, request.matched_path_variables,
-                                             request.request_context_cluster, program, expression, output, error);
+           request.adapter.evaluate_template(request.adapter.context, request.telemetry.script_context(),
+                                             request.matched_path_variables, request.request_context_cluster, program,
+                                             expression, output, error);
 }
 
 struct RouteMatch {
@@ -55,11 +56,11 @@ public:
 
     bool matched(std::uint32_t, std::uint32_t route_index) noexcept {
         const CompiledRoute &route = routes_[route_index];
-        if (route.condition &&
+        if (route.condition_program &&
             (!request_.adapter.evaluate_condition ||
-             !request_.adapter.evaluate_condition(
-                     request_.adapter.context, request_.exchange, path_variables_.first(path_variable_count_),
-                     request_.request_context_cluster, route.condition_program.get(), *route.condition))) {
+             !request_.adapter.evaluate_condition(request_.adapter.context, request_.telemetry.script_context(),
+                                                  path_variables_.first(path_variable_count_),
+                                                  request_.request_context_cluster, *route.condition_program))) {
             return false;
         }
         matched_route_ = &route;
@@ -199,7 +200,7 @@ std::size_t request_body_limit(const CompiledRoute &route, std::size_t default_l
 async::Task<common::IoResult<void>> send_redirect(http::HttpExchange &exchange, int status, std::string_view host,
                                                   std::span<const EvaluatedHeader> base_headers,
                                                   std::chrono::milliseconds timeout,
-                                                  AccessRequestTelemetry *telemetry) noexcept {
+                                                  AccessRequestTelemetry &telemetry) noexcept {
     std::string location = "https://";
     location.append(host);
     location.append(exchange.uri().unparsed_uri);
@@ -210,7 +211,7 @@ async::Task<common::IoResult<void>> send_redirect(http::HttpExchange &exchange, 
             co_return std::unexpected(common::IoErr::NoMem);
         }
     }
-    if (!headers.set("Location", location) || (telemetry && !telemetry->inject_response_headers(headers))) {
+    if (!headers.set("Location", location) || !telemetry.inject_response_headers(headers)) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
 
@@ -228,11 +229,11 @@ async::Task<common::IoResult<void>> send_redirect(http::HttpExchange &exchange, 
 
 int redirect_status(HttpsStrategy strategy) noexcept { return static_cast<int>(strategy); }
 
-std::string_view request_trace_id(const AccessRequestTelemetry *telemetry) noexcept {
-    if (!telemetry || telemetry->trace_id().empty()) {
+std::string_view request_trace_id(const AccessRequestTelemetry &telemetry) noexcept {
+    if (telemetry.trace_id().empty()) {
         return kTraceId;
     }
-    return telemetry->trace_id();
+    return telemetry.trace_id();
 }
 
 } // namespace
@@ -254,7 +255,7 @@ AccessRequestHandler::AccessRequestHandler(const RouteConfigStore &config_store,
                                           }) {}
 
 async::Task<void> AccessRequestHandler::handle(http::HttpExchange &exchange,
-                                               AccessRequestTelemetry *telemetry) const noexcept {
+                                               AccessRequestTelemetry &telemetry) const noexcept {
     auto result = co_await handle_impl(exchange, telemetry);
     if (!result) {
         (void) exchange.abort(result.error());
@@ -263,30 +264,28 @@ async::Task<void> AccessRequestHandler::handle(http::HttpExchange &exchange,
 }
 
 async::Task<common::IoResult<void>>
-AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTelemetry *telemetry) const noexcept {
+AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTelemetry &telemetry) const noexcept {
     const std::shared_ptr<const AccessRouteSnapshot> snapshot = config_store_.pin();
     RequestHostContext request_host = resolve_request_host(exchange, options_.test_mode);
     const ProjectHostMatch host_match = snapshot->match_host(request_host.effective_host);
     if (!host_match) {
         co_return co_await error_responder_.send(exchange, AccessError::router_not_found(), {}, {},
-                                                 request_trace_id(telemetry), false, telemetry);
+                                                 request_trace_id(telemetry), false, &telemetry);
     }
-    if (telemetry) {
-        telemetry->set_project(host_match.project->project(), request_host.effective_host, request_host.cluster);
-    }
+    telemetry.set_project(host_match.project->project(), request_host.effective_host, request_host.cluster);
 
     const auto &base_headers = project_base_headers_;
     const HostStrategyConfig &strategy = host_match.host->strategy;
     if (strategy.net_mask != 0 && (strategy.net_mask & entry_bit(exchange.header("X-Entry"))) == 0) {
         co_return co_await error_responder_.send(exchange, AccessError::entry_error(), base_headers, {},
-                                                 request_trace_id(telemetry), false, telemetry);
+                                                 request_trace_id(telemetry), false, &telemetry);
     }
 
     const bool request_is_https = is_https(exchange);
     if (!strategy.https) {
         if (!request_is_https) {
             co_return co_await error_responder_.send(exchange, AccessError::unknown("invalid HTTPS strategy"),
-                                                     base_headers, {}, request_trace_id(telemetry), false, telemetry);
+                                                     base_headers, {}, request_trace_id(telemetry), false, &telemetry);
         }
     } else if (*strategy.https != HttpsStrategy::NotRequired && !request_is_https) {
         co_return co_await send_redirect(exchange, redirect_status(*strategy.https), request_host.effective_host,
@@ -295,7 +294,7 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
 
     RequestEvaluationContext evaluation{
             .adapter = script_adapter_,
-            .exchange = exchange,
+            .telemetry = telemetry,
             .request_context_cluster = request_host.cluster,
     };
     auto route_match_result = match_route(*host_match.project, exchange, evaluation);
@@ -305,22 +304,20 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
     const RouteMatch route_match = *route_match_result;
     if (!route_match) {
         co_return co_await error_responder_.send(exchange, AccessError::url_not_matched(host_match.project->project()),
-                                                 base_headers, {}, request_trace_id(telemetry), false, telemetry);
+                                                 base_headers, {}, request_trace_id(telemetry), false, &telemetry);
     }
 
     const CompiledRoute &route = *route_match.route;
-    if (telemetry) {
-        telemetry->set_route(route);
-    }
+    telemetry.set_route(route);
     const std::size_t body_limit = request_body_limit(route, options_.default_max_request_body_size);
     const http::HttpBodySpec body_spec = exchange.request_body_spec();
     if (body_limit != 0 && body_spec.is_content_length() && body_spec.content_length() > body_limit) {
         co_return co_await error_responder_.send(exchange, AccessError::request_body_too_large(), base_headers, {},
-                                                 request_trace_id(telemetry), true, telemetry);
+                                                 request_trace_id(telemetry), true, &telemetry);
     }
     if (!source_ip_allowed(route, exchange.header("X-Real-Ip"))) {
         co_return co_await error_responder_.send(exchange, AccessError::source_ip_not_allowed(), base_headers, {},
-                                                 request_trace_id(telemetry), false, telemetry);
+                                                 request_trace_id(telemetry), false, &telemetry);
     }
     evaluation.matched_path_variables = route_match.path_variables;
     TemplateEvaluator template_evaluator;
@@ -334,7 +331,7 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
     if (route.type == RouteType::Proxy) {
         if (!proxy_adapter_.execute) {
             co_return co_await error_responder_.send(exchange, AccessError::unknown("proxy executor is not configured"),
-                                                     base_headers, {}, request_trace_id(telemetry), false, telemetry);
+                                                     base_headers, {}, request_trace_id(telemetry), false, &telemetry);
         }
         const std::string_view origin_host =
                 request_host.extracted_cluster && !route.proxy->proxy_headers.contains(kOriginHostHeader)
@@ -348,11 +345,11 @@ AccessRequestHandler::handle_impl(http::HttpExchange &exchange, AccessRequestTel
                                                           .template_evaluator = template_evaluator,
                                                           .max_request_body_size = body_limit,
                                                   },
-                                                  base_headers, telemetry);
+                                                  base_headers, &telemetry);
     }
 
     co_return co_await response_executor_.execute(exchange, route, base_headers, template_evaluator, body_limit,
-                                                  request_trace_id(telemetry), telemetry);
+                                                  request_trace_id(telemetry), &telemetry);
 }
 
 } // namespace fiber::access_server

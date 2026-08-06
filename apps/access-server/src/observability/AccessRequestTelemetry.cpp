@@ -134,7 +134,8 @@ void AccessProviderTransaction::cancel_pending() noexcept {
 
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
                                                cat::CatClient *cat_client) noexcept :
-    exchange_(&exchange), metrics_(metrics), started_(event::EventLoop::current().now()) {
+    script_heap_(exchange.pool()), script_context_(exchange, script_heap_), metrics_(metrics),
+    started_(event::EventLoop::current().now()) {
     if (metrics_) {
         metrics_->request_started();
     }
@@ -155,13 +156,13 @@ AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, Acc
     if (!created) {
         return;
     }
-    root_.emplace(std::move(*created));
+    root_ = std::move(*created);
 
-    auto propagation = root_->message_trace().propagation_context();
+    auto propagation = root_.message_trace().propagation_context();
     if (propagation) {
         context_.emplace(std::move(*propagation));
     }
-    (void) root_->set_data_separator(' ');
+    (void) root_.set_data_separator(' ');
     add_root_data("method", exchange.method_view());
     add_root_data("host", exchange.header("Host"));
     add_root_data("path", exchange.uri().path);
@@ -180,7 +181,8 @@ AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, Acc
 AccessRequestTelemetry::~AccessRequestTelemetry() {
     const auto finished = event::EventLoop::current().now();
     const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(finished - started_);
-    const http::HttpResponseStats &response = exchange_->response_stats();
+    http::HttpExchange &exchange = script_context_.exchange();
+    const http::HttpResponseStats &response = exchange.response_stats();
     if (metrics_) {
         metrics_->request_finished(response, duration);
     }
@@ -197,21 +199,21 @@ AccessRequestTelemetry::~AccessRequestTelemetry() {
     if (response.terminal_error != common::IoErr::None) {
         add_root_data("io_error", common::io_err_name(response.terminal_error));
     }
-    if (root_ && root_->valid()) {
+    if (root_.valid()) {
         if (!error_.empty()) {
-            (void) root_->complete(error_);
+            (void) root_.complete(error_);
         } else {
             const bool success = response.completed && response.terminal_error == common::IoErr::None &&
                                  response.status_code >= 200 && response.status_code < 400;
-            (void) root_->complete(success ? cat::status::Success : cat::status::Fail);
+            (void) root_.complete(success ? cat::status::Success : cat::status::Fail);
         }
     }
 
     LOG(LOG_ACCESS, INFO) << "request completed"
                           << " trace_id=" << log::quoted(trace_id())
-                          << " method=" << log::quoted(exchange_->method_view())
-                          << " host=" << log::quoted(exchange_->header("Host"))
-                          << " path=" << log::quoted(exchange_->uri().unparsed_uri)
+                          << " method=" << log::quoted(exchange.method_view())
+                          << " host=" << log::quoted(exchange.header("Host"))
+                          << " path=" << log::quoted(exchange.uri().unparsed_uri)
                           << " project=" << log::quoted(project_) << " route=" << log::quoted(route_)
                           << " cluster=" << log::quoted(cluster_) << " upstream=" << log::quoted(upstream_)
                           << " status=" << response.status_code << " result=" << response_result(response)
@@ -225,7 +227,7 @@ std::string_view AccessRequestTelemetry::copy_to_request_pool(std::string_view v
     if (value.empty()) {
         return {};
     }
-    char *copy = exchange_->pool().alloc<char>(value.size());
+    char *copy = script_context_.exchange().pool().alloc<char>(value.size());
     if (!copy) {
         return {};
     }
@@ -257,8 +259,8 @@ void AccessRequestTelemetry::set_error(const AccessError &error) noexcept {
     }
     error_ = copy_to_request_pool(error.name);
     add_root_data("error", error.name);
-    if (root_ && root_->valid()) {
-        auto event = root_->start_event("FiberException", error.name);
+    if (root_.valid()) {
+        auto event = root_.start_event("FiberException", error.name);
         if (event) {
             (void) event->add_data(error.message);
             (void) event->complete(cat::status::Error);
@@ -272,10 +274,10 @@ void AccessRequestTelemetry::set_upstream(const ProxyUpstreamEndpoint &endpoint)
 }
 
 AccessProviderTransaction AccessRequestTelemetry::start_provider_transaction(std::string_view name) noexcept {
-    if (!root_ || !root_->valid()) {
+    if (!root_.valid()) {
         return {};
     }
-    auto transaction = root_->start_transaction("Access.Provider", name);
+    auto transaction = root_.start_transaction("Access.Provider", name);
     if (!transaction) {
         return {};
     }
@@ -297,11 +299,11 @@ bool AccessRequestTelemetry::inject_response_headers(http::HttpHeaders &headers)
 
 bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers,
                                                      AccessProviderTransaction &provider) noexcept {
-    if (!root_ || !root_->valid() || !context_ || context_->message_id.empty()) {
+    if (!root_.valid() || !context_ || context_->message_id.empty()) {
         return true;
     }
-    cat::Transaction &parent = provider.valid() ? provider.transaction_ : *root_;
-    auto remote = parent.message_trace().create_remote_context(exchange_->pool());
+    cat::Transaction &parent = provider.valid() ? provider.transaction_ : root_;
+    auto remote = parent.message_trace().create_remote_context(script_context_.exchange().pool());
     if (!remote) {
         return true;
     }
@@ -325,30 +327,30 @@ bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers,
 }
 
 void AccessRequestTelemetry::add_root_data(std::string_view key, std::string_view value) noexcept {
-    if (root_ && root_->valid() && !value.empty()) {
-        (void) root_->add_data(key, value);
+    if (root_.valid() && !value.empty()) {
+        (void) root_.add_data(key, value);
     }
 }
 
 void AccessRequestTelemetry::update_transaction_name() noexcept {
-    if (!root_ || !root_->valid() || project_.empty()) {
+    if (!root_.valid() || project_.empty()) {
         return;
     }
     if (route_.empty()) {
-        (void) root_->set_name(project_);
+        (void) root_.set_name(project_);
         return;
     }
     if (project_.size() > std::numeric_limits<std::size_t>::max() - route_.size()) {
         return;
     }
     const std::size_t size = project_.size() + route_.size();
-    char *name = exchange_->pool().alloc<char>(size);
+    char *name = script_context_.exchange().pool().alloc<char>(size);
     if (!name) {
         return;
     }
     std::memcpy(name, project_.data(), project_.size());
     std::memcpy(name + project_.size(), route_.data(), route_.size());
-    (void) root_->set_name(std::string_view(name, size));
+    (void) root_.set_name(std::string_view(name, size));
 }
 
 } // namespace fiber::access_server

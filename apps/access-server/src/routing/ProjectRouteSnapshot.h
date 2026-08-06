@@ -56,8 +56,7 @@ struct CompiledRoute {
     std::string path;
     std::string key;
     RouteType type = RouteType::Proxy;
-    std::optional<std::string> condition;
-    CompiledScriptProgram condition_program;
+    std::optional<script::Script> condition_program;
     std::vector<std::string> path_variable_names;
     std::optional<std::int64_t> max_client_body_size;
     std::vector<Cidr> allow_cidrs;
@@ -77,7 +76,7 @@ struct PathVariable {
 };
 
 struct ScriptCompilerAdapter {
-    using Result = std::expected<CompiledScriptProgram, std::string>;
+    using Result = std::expected<script::Script, std::string>;
     using Function = Result (*)(void *context, std::string_view expression,
                                 std::span<const std::string> path_variable_names);
 

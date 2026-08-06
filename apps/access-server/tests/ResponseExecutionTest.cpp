@@ -35,7 +35,7 @@ struct EvaluatorState {
     std::optional<std::string> failing_expression;
 };
 
-bool evaluate_expression(void *context, const void *, std::string_view expression, std::string &output,
+bool evaluate_expression(void *context, const fiber::script::Script &, std::string_view expression, std::string &output,
                          AccessError &error) noexcept {
     auto &state = *static_cast<EvaluatorState *>(context);
     state.expressions.emplace_back(expression);

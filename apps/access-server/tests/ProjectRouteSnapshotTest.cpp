@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -16,6 +17,7 @@
 #include "routing/Cidr.h"
 #include "routing/HostMatcher.h"
 #include "routing/ProjectRouteSnapshot.h"
+#include "runtime/AccessScriptRuntime.h"
 
 namespace {
 
@@ -41,6 +43,7 @@ using fiber::access_server::ScriptCompilerAdapter;
 using fiber::access_server::StringConfigEntry;
 
 struct ScriptCompilerCapture {
+    fiber::access_server::AccessScriptRuntime runtime;
     std::vector<std::string> expressions;
     std::vector<std::vector<std::string>> path_variable_names;
 };
@@ -50,7 +53,8 @@ ScriptCompilerAdapter::Result capture_expression(void *context, std::string_view
     auto &capture = *static_cast<ScriptCompilerCapture *>(context);
     capture.expressions.emplace_back(expression);
     capture.path_variable_names.emplace_back(path_variable_names.begin(), path_variable_names.end());
-    return std::static_pointer_cast<const void>(std::make_shared<const std::string>(expression));
+    ScriptCompilerAdapter delegate = capture.runtime.compiler_adapter();
+    return delegate.compile_expression(delegate.context, expression, path_variable_names);
 }
 
 ScriptCompilerAdapter compiler_adapter(ScriptCompilerCapture &capture) {
@@ -103,12 +107,12 @@ const ProjectRouteSnapshot &require_snapshot(const fiber::access_server::Project
 class TestRouteMatchContext {
 public:
     TestRouteMatchContext(const std::vector<CompiledRoute> &routes, std::span<PathVariable> path_variables,
-                          std::string_view accepted_condition = {}) noexcept :
-        routes_(routes), path_variables_(path_variables), accepted_condition_(accepted_condition) {}
+                          std::uint32_t accepted_conditional_route = std::numeric_limits<std::uint32_t>::max()) noexcept
+        : routes_(routes), path_variables_(path_variables), accepted_conditional_route_(accepted_conditional_route) {}
 
     bool matched(std::uint32_t, std::uint32_t route_index) noexcept {
         const CompiledRoute &route = routes_[route_index];
-        if (route.condition && *route.condition != accepted_condition_) {
+        if (route.condition_program && route_index != accepted_conditional_route_) {
             return false;
         }
         matched_route_ = &route;
@@ -131,7 +135,7 @@ public:
 private:
     const std::vector<CompiledRoute> &routes_;
     std::span<PathVariable> path_variables_;
-    std::string_view accepted_condition_;
+    std::uint32_t accepted_conditional_route_;
     const CompiledRoute *matched_route_ = nullptr;
     std::span<const PathVariable> matched_path_variables_;
     std::size_t path_variable_count_ = 0;
@@ -287,6 +291,7 @@ TEST(ProjectRouteSnapshotTest, RequiresRoutesOnlyForConfiguredHosts) {
 }
 
 TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
+    fiber::access_server::AccessScriptRuntime scripts;
     RouteConfig route = proxy_route("/v1/:id", "orders/gray");
     route.cluster = "stable";
     route.timeout_millis = 4'294'967'297LL;
@@ -304,7 +309,7 @@ TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
             std::optional<std::string>("!10.0.0.0/8"),
     };
 
-    auto result = compile_project_config("orders", project_with_routes({std::move(route)}));
+    auto result = compile_project_config("orders", project_with_routes({std::move(route)}), scripts.compiler_adapter());
     const ProjectRouteSnapshot &snapshot = require_snapshot(result);
     ASSERT_EQ(snapshot.routes().size(), 1U);
     const CompiledRoute &compiled = snapshot.routes()[0];
@@ -328,7 +333,7 @@ TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
     ASSERT_EQ(compiled.proxy->rewrite->expressions.size(), 1U);
     EXPECT_EQ(compiled.proxy->rewrite->expressions[0].leading_literal, "/items/");
     EXPECT_EQ(compiled.proxy->rewrite->expressions[0].source, "$path.id");
-    EXPECT_FALSE(compiled.proxy->rewrite->expressions[0].program);
+    EXPECT_TRUE(compiled.proxy->rewrite->expressions[0].program.valid());
     EXPECT_TRUE(compiled.proxy->rewrite->trailing_literal.empty());
 }
 
@@ -409,11 +414,11 @@ TEST(ProjectRouteSnapshotTest, BindsPreparsedTemplateExpressionsAfterDiscovering
     const auto &response = *snapshot.routes()[0].response;
     ASSERT_TRUE(response.body_template);
     ASSERT_EQ(response.body_template->expressions.size(), 2U);
-    EXPECT_TRUE(response.body_template->expressions[0].program);
-    EXPECT_TRUE(response.body_template->expressions[1].program);
+    EXPECT_TRUE(response.body_template->expressions[0].program.valid());
+    EXPECT_TRUE(response.body_template->expressions[1].program.valid());
     ASSERT_EQ(response.response_headers.size(), 2U);
     ASSERT_EQ(response.response_headers[0].value.expressions.size(), 1U);
-    EXPECT_TRUE(response.response_headers[0].value.expressions[0].program);
+    EXPECT_TRUE(response.response_headers[0].value.expressions[0].program.valid());
     EXPECT_FALSE(response.response_headers[1].value.dynamic());
 
     EXPECT_EQ(capture.expressions, (std::vector<std::string>{"$path.id", "$req.method", "$path.id"}));
@@ -438,13 +443,13 @@ TEST(ProjectRouteSnapshotTest, BindsProxyHeaderTemplatesBeforeFreezingThem) {
     const auto proxy_header = *proxy.proxy_headers.begin();
     EXPECT_EQ(proxy_header.name(), "X-Item");
     ASSERT_EQ(proxy_header.value().expressions.size(), 1U);
-    EXPECT_TRUE(proxy_header.value().expressions[0].program);
+    EXPECT_TRUE(proxy_header.value().expressions[0].program.valid());
 
     ASSERT_EQ(proxy.response_headers.size(), 1U);
     const auto response_header = *proxy.response_headers.begin();
     EXPECT_EQ(response_header.name(), "X-Reply");
     ASSERT_EQ(response_header.value().expressions.size(), 1U);
-    EXPECT_TRUE(response_header.value().expressions[0].program);
+    EXPECT_TRUE(response_header.value().expressions[0].program.valid());
 
     EXPECT_EQ(capture.expressions, (std::vector<std::string>{"$path.id", "$path.id"}));
     ASSERT_EQ(capture.path_variable_names.size(), 2U);
@@ -466,20 +471,27 @@ TEST(ProjectRouteSnapshotTest, RejectsCaseInsensitiveProxyHeaderDuplicates) {
 }
 
 TEST(ProjectRouteSnapshotTest, UsesJavaCrc32cRouteKeyAndConditionalOrder) {
+    fiber::access_server::AccessScriptRuntime scripts;
     RouteConfig first = proxy_route("/same/:id");
-    first.condition = "never";
+    first.condition = "false";
     RouteConfig second = proxy_route("/same/:id");
     second.condition = "123456789";
     RouteConfig fallback = proxy_route("/same/:id");
 
     auto result = compile_project_config(
-            "demo", project_with_routes({std::move(first), std::move(second), std::move(fallback)}));
+            "demo", project_with_routes({std::move(first), std::move(second), std::move(fallback)}),
+            scripts.compiler_adapter());
     const ProjectRouteSnapshot &snapshot = require_snapshot(result);
     ASSERT_EQ(snapshot.routes().size(), 3U);
+    ASSERT_TRUE(snapshot.routes()[0].condition_program);
+    EXPECT_TRUE(snapshot.routes()[0].condition_program->valid());
+    ASSERT_TRUE(snapshot.routes()[1].condition_program);
+    EXPECT_TRUE(snapshot.routes()[1].condition_program->valid());
+    EXPECT_FALSE(snapshot.routes()[2].condition_program);
     EXPECT_EQ(snapshot.routes()[1].key, "/same/:id@3829603e");
 
     std::array<PathVariable, 1> variables;
-    TestRouteMatchContext context(snapshot.routes(), variables, "123456789");
+    TestRouteMatchContext context(snapshot.routes(), variables, 1);
     ASSERT_TRUE(snapshot.match_route_path("/same/42", context));
     EXPECT_EQ(context.route(), &snapshot.routes()[1]);
     ASSERT_EQ(context.path_variables().size(), 1U);

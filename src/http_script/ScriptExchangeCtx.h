@@ -25,8 +25,8 @@ struct ScriptConnectionInfo {
 };
 
 // Per-request script attach payload. Bound to one HttpExchange and one script GcHeap for
-// the lifetime of a script invocation; the host constructs it and passes `&ctx` as the
-// `attach` argument to Script::exec_async/exec_sync, so req.*/resp.* host functions can
+// the request lifetime and reused by serial script invocations. The host passes `&ctx` as
+// the `attach` argument to Script::exec_async/exec_sync, so req.*/resp.* host functions can
 // recover it via `static_cast<ScriptExchangeCtx *>(frame.attach)`.
 //
 // It centralizes two concerns that the C++ HttpExchange does not expose directly (unlike
@@ -82,6 +82,13 @@ public:
     void set_context_var_lookup(void *context, VariableLookupFunction lookup) noexcept {
         context_var_lookup_context_ = context;
         context_var_lookup_ = lookup;
+    }
+    void clear_variable_lookups() noexcept {
+        path_vars_ = {};
+        path_var_lookup_context_ = nullptr;
+        path_var_lookup_ = nullptr;
+        context_var_lookup_context_ = nullptr;
+        context_var_lookup_ = nullptr;
     }
     [[nodiscard]] fiber::script::AbiResult path_var(fiber::script::GcHeap &heap, std::string_view name) const noexcept;
     [[nodiscard]] fiber::script::AbiResult query_var(fiber::script::GcHeap &heap, std::string_view name) noexcept;

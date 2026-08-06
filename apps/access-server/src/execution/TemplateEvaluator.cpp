@@ -16,8 +16,7 @@ std::expected<std::string, AccessError> evaluate_template(const CompiledTemplate
 
         std::string expression_output;
         AccessError error = AccessError::template_script("template evaluation failed");
-        if (!evaluator.evaluate(evaluator.context, expression.program.get(), expression.source, expression_output,
-                                error)) {
+        if (!evaluator.evaluate(evaluator.context, expression.program, expression.source, expression_output, error)) {
             return std::unexpected(std::move(error));
         }
         output.append(expression_output);
