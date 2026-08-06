@@ -30,10 +30,10 @@ TEST(CompiledTemplateTest, SplitsExpressionsAndKeepsTheirLeadingLiterals) {
     ASSERT_EQ(compiled->expressions.size(), 2U);
     EXPECT_EQ(compiled->expressions[0].leading_literal, "a=");
     EXPECT_EQ(compiled->expressions[0].source, "first");
-    EXPECT_FALSE(compiled->expressions[0].program);
+    EXPECT_FALSE(compiled->expressions[0].program.valid());
     EXPECT_EQ(compiled->expressions[1].leading_literal, ";b=");
     EXPECT_EQ(compiled->expressions[1].source, "second");
-    EXPECT_FALSE(compiled->expressions[1].program);
+    EXPECT_FALSE(compiled->expressions[1].program.valid());
     EXPECT_EQ(compiled->trailing_literal, ";tail");
     EXPECT_EQ(compiled->literal_size, 10U);
 }

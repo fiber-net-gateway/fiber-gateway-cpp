@@ -107,7 +107,7 @@ async::Task<void> AccessServer::shutdown_and_wait() noexcept {
 async::Task<void> AccessServer::handle(http::HttpExchange &exchange) noexcept {
     AccessServerMetrics::Worker &worker = metrics_.worker(event::EventLoop::current().group_index());
     AccessRequestTelemetry telemetry(exchange, &worker, cat_client_);
-    co_await handler_.handle(exchange, &telemetry);
+    co_await handler_.handle(exchange, telemetry);
 }
 
 async::Task<void> AccessServer::handle_metrics(http::HttpExchange &exchange) noexcept {

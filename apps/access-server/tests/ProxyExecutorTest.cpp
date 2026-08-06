@@ -28,6 +28,7 @@
 #include "net/TcpListener.h"
 #include "net/TcpStream.h"
 #include "observability/AccessRequestTelemetry.h"
+#include "runtime/AccessScriptRuntime.h"
 
 namespace {
 
@@ -94,16 +95,16 @@ struct TemplateEvaluationState {
     std::size_t count = 0;
 };
 
-bool evaluate_counted_template(void *context, fiber::http::HttpExchange &,
-                               std::span<const fiber::access_server::PathVariable>, std::string_view, const void *,
-                               std::string_view expression, std::string &output,
+bool evaluate_counted_template(void *context, fiber::http_script::ScriptExchangeCtx &,
+                               std::span<const fiber::access_server::PathVariable>, std::string_view,
+                               const fiber::script::Script &, std::string_view expression, std::string &output,
                                fiber::access_server::AccessError &error) noexcept {
     ++static_cast<TemplateEvaluationState *>(context)->count;
-    if (expression == "attempt") {
+    if (expression == "'attempt'") {
         output = "evaluated-once";
         return true;
     }
-    if (expression == "fail") {
+    if (expression == "'fail'") {
         error = fiber::access_server::AccessError::template_script("fixture failure");
         return false;
     }
@@ -471,12 +472,8 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
     fiber::access_server::AccessRequestHandler handler(*store, script_adapter, handler_options, proxy_adapter);
     fiber::http::HttpHandler http_handler =
             [&handler, cat_client](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        if (!cat_client) {
-            co_await handler.handle(exchange);
-            co_return;
-        }
         fiber::access_server::AccessRequestTelemetry telemetry(exchange, nullptr, cat_client);
-        co_await handler.handle(exchange, &telemetry);
+        co_await handler.handle(exchange, telemetry);
     };
     fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(http_handler), {});
     co_await connection.run();
@@ -835,13 +832,15 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
                     fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, 2}), port,
                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http),
     };
-    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
-                                                             .context = &selector_state,
-                                                             .create_service = make_test_service_selector,
-                                                     });
+    fiber::access_server::AccessScriptRuntime scripts;
+    fiber::access_server::RouteConfigStore store(scripts.compiler_adapter(),
+                                                 fiber::access_server::ProxyAddressSelectorFactory{
+                                                         .context = &selector_state,
+                                                         .create_service = make_test_service_selector,
+                                                 });
     auto config = service_project_config();
     (**config.routes->begin()).proxy_headers = {
-            {.name = "X-Attempt", .value = "${attempt}"},
+            {.name = "X-Attempt", .value = "${'attempt'}"},
     };
     (**config.routes->begin()).context = {
             {.name = "cluster", .value = "canary"},
@@ -913,13 +912,15 @@ TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparati
                     fiber::net::IpAddress::v4({127, 0, 0, 2}), kUnusedPort,
                     fiber::http::Http1ConnectionGroupKey::Scheme::Http),
     };
-    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
-                                                             .context = &selector_state,
-                                                             .create_service = make_test_service_selector,
-                                                     });
+    fiber::access_server::AccessScriptRuntime scripts;
+    fiber::access_server::RouteConfigStore store(scripts.compiler_adapter(),
+                                                 fiber::access_server::ProxyAddressSelectorFactory{
+                                                         .context = &selector_state,
+                                                         .create_service = make_test_service_selector,
+                                                 });
     auto config = service_project_config();
     (**config.routes->begin()).proxy_headers = {
-            {.name = "X-Failure", .value = "${fail}"},
+            {.name = "X-Failure", .value = "${'fail'}"},
     };
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
@@ -1540,9 +1541,10 @@ TEST(ProxyExecutorTest, AbortsUpgradeBeforeRenderingAResponseTemplateFailure) {
     auto &route = **config.routes->begin();
     route.websocket_timeout_millis = 1000;
     route.response_headers = {
-            {.name = "X-Fail", .value = "${missing}"},
+            {.name = "X-Fail", .value = "${null}"},
     };
-    fiber::access_server::RouteConfigStore store;
+    fiber::access_server::AccessScriptRuntime scripts;
+    fiber::access_server::RouteConfigStore store(scripts.compiler_adapter());
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
 

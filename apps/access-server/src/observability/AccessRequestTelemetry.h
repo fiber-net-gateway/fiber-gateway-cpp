@@ -15,6 +15,7 @@
 #include <common/NonMovable.h>
 #include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/Transaction.h>
+#include <http_script/ScriptExchangeCtx.h>
 
 namespace fiber::cat {
 class CatClient;
@@ -54,6 +55,7 @@ private:
     cat::Transaction transaction_;
 };
 
+// Request-lifetime owner for script execution state and optional observability sinks.
 class AccessRequestTelemetry final : public common::NonCopyable, public common::NonMovable {
 public:
     AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
@@ -68,6 +70,8 @@ public:
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
 
     [[nodiscard]] std::string_view trace_id() const noexcept;
+    [[nodiscard]] http_script::ScriptExchangeCtx &script_context() noexcept { return script_context_; }
+    [[nodiscard]] const http_script::ScriptExchangeCtx &script_context() const noexcept { return script_context_; }
     [[nodiscard]] bool inject_response_headers(http::HttpHeaders &headers) const noexcept;
     [[nodiscard]] bool inject_upstream_headers(http::HttpHeaders &headers,
                                                AccessProviderTransaction &provider) noexcept;
@@ -77,10 +81,11 @@ private:
     void add_root_data(std::string_view key, std::string_view value) noexcept;
     void update_transaction_name() noexcept;
 
-    http::HttpExchange *exchange_ = nullptr;
+    script::GcHeap script_heap_;
+    http_script::ScriptExchangeCtx script_context_;
     AccessServerMetrics::Worker *metrics_ = nullptr;
     std::chrono::steady_clock::time_point started_{};
-    std::optional<cat::Transaction> root_;
+    cat::Transaction root_;
     std::optional<cat::MessageTraceContext> context_;
     std::string_view project_;
     std::string_view route_;

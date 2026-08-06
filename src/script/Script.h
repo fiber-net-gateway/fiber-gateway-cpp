@@ -21,6 +21,7 @@ public:
 
     ScriptResult exec_sync(fiber::script::JsValue root, void *attach, fiber::script::GcHeap &heap) const;
 
+    [[nodiscard]] bool valid() const noexcept { return static_cast<bool>(compiled_); }
     [[nodiscard]] bool contains_async() const noexcept;
 
 private:

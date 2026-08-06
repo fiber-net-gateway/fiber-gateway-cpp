@@ -19,18 +19,22 @@ namespace fiber::http {
 class HttpExchange;
 }
 
+namespace fiber::http_script {
+class ScriptExchangeCtx;
+}
+
 namespace fiber::access_server {
 
 class AccessRequestTelemetry;
 
 struct AccessRequestScriptAdapter {
-    using ConditionFunction = bool (*)(void *context, http::HttpExchange &exchange,
+    using ConditionFunction = bool (*)(void *context, http_script::ScriptExchangeCtx &script_context,
                                        std::span<const PathVariable> path_variables,
-                                       std::string_view request_context_cluster, const void *program,
-                                       std::string_view expression) noexcept;
-    using TemplateFunction = bool (*)(void *context, http::HttpExchange &exchange,
+                                       std::string_view request_context_cluster,
+                                       const script::Script &program) noexcept;
+    using TemplateFunction = bool (*)(void *context, http_script::ScriptExchangeCtx &script_context,
                                       std::span<const PathVariable> path_variables,
-                                      std::string_view request_context_cluster, const void *program,
+                                      std::string_view request_context_cluster, const script::Script &program,
                                       std::string_view expression, std::string &output, AccessError &error) noexcept;
 
     void *context = nullptr;
@@ -70,11 +74,11 @@ public:
                          AccessRequestHandlerOptions options = {}, AccessProxyAdapter proxy_adapter = {}) noexcept;
 
     [[nodiscard]] async::Task<void> handle(http::HttpExchange &exchange,
-                                           AccessRequestTelemetry *telemetry = nullptr) const noexcept;
+                                           AccessRequestTelemetry &telemetry) const noexcept;
 
 private:
     [[nodiscard]] async::Task<common::IoResult<void>> handle_impl(http::HttpExchange &exchange,
-                                                                  AccessRequestTelemetry *telemetry) const noexcept;
+                                                                  AccessRequestTelemetry &telemetry) const noexcept;
 
     const RouteConfigStore &config_store_;
     AccessRequestScriptAdapter script_adapter_;

@@ -13,8 +13,9 @@
 
 namespace fiber::access_server {
 
-// Process-lifetime owner for the local C++ script library and the stable
-// extension userdata referenced by compiled route expressions.
+// Process-lifetime owner for the side-effect-free local expression library and the stable
+// extension userdata referenced by compiled route expressions. Invocation state lives in
+// AccessRequestTelemetry's request-scoped ScriptExchangeCtx.
 class AccessScriptRuntime {
 public:
     AccessScriptRuntime();
@@ -25,13 +26,13 @@ public:
 private:
     [[nodiscard]] static ScriptCompilerAdapter::Result
     compile_expression(void *context, std::string_view expression, std::span<const std::string> path_variable_names);
-    [[nodiscard]] static bool evaluate_condition(void *context, http::HttpExchange &exchange,
+    [[nodiscard]] static bool evaluate_condition(void *context, http_script::ScriptExchangeCtx &script_context,
                                                  std::span<const PathVariable> path_variables,
-                                                 std::string_view request_context_cluster, const void *program,
-                                                 std::string_view expression) noexcept;
-    [[nodiscard]] static bool evaluate_template(void *context, http::HttpExchange &exchange,
+                                                 std::string_view request_context_cluster,
+                                                 const script::Script &program) noexcept;
+    [[nodiscard]] static bool evaluate_template(void *context, http_script::ScriptExchangeCtx &script_context,
                                                 std::span<const PathVariable> path_variables,
-                                                std::string_view request_context_cluster, const void *program,
+                                                std::string_view request_context_cluster, const script::Script &program,
                                                 std::string_view expression, std::string &output,
                                                 AccessError &error) noexcept;
 

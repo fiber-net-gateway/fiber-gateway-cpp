@@ -109,6 +109,31 @@ TEST(RouteConfigStoreTest, RejectsInvalidLocalScriptWithoutReplacingPublishedSna
     EXPECT_FALSE(store.pin()->match_host("new.example.com"));
 }
 
+TEST(RouteConfigStoreTest, RejectsResponseSideEffectsInRouteExpressions) {
+    AccessScriptRuntime scripts;
+    RouteConfigStore store(scripts.compiler_adapter());
+    ProjectConfig invalid = project_config(1, "api.example.com", "/side-effect");
+    (*invalid.routes)[0]->condition = "resp.setHeader('X-Leak', 'true') == null";
+
+    auto rejected = store.apply("demo", invalid);
+
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().field, "routes[0].condition");
+    EXPECT_TRUE(store.pin()->projects().empty());
+}
+
+TEST(RouteConfigStoreTest, RejectsScriptedRouteWithoutCompiler) {
+    RouteConfigStore store;
+    ProjectConfig invalid = project_config(1, "api.example.com", "/scripted");
+    (*invalid.routes)[0]->condition = "true";
+
+    auto rejected = store.apply("demo", invalid);
+
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().field, "routes[0].condition");
+    EXPECT_TRUE(store.pin()->projects().empty());
+}
+
 TEST(RouteConfigStoreTest, UnloadRetainsLastSuccessfulVersionUntilProjectRemoval) {
     RouteConfigStore store;
     ASSERT_TRUE(store.apply("demo", project_config(7, "api.example.com", "/one")));

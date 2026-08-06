@@ -1,9 +1,8 @@
 #include "AccessScriptRuntime.h"
 
-#include <memory>
 #include <utility>
 
-#include <http_script/HttpScriptLib.h>
+#include <http_script/RequestFuncs.h>
 #include <http_script/ScriptExchangeCtx.h>
 #include <script/JsGc.h>
 #include <script/JsValue.h>
@@ -18,6 +17,23 @@ namespace {
 struct InvocationVariables {
     std::span<const PathVariable> path_variables;
     std::string_view context_cluster;
+};
+
+bool lookup_path_variable(void *context, std::string_view name, std::string_view &value) noexcept;
+bool lookup_context_variable(void *context, std::string_view name, std::string_view &value) noexcept;
+
+class InvocationBinding final : public common::NonCopyable, public common::NonMovable {
+public:
+    InvocationBinding(http_script::ScriptExchangeCtx &context, InvocationVariables &variables) noexcept :
+        context_(context) {
+        context_.set_path_var_lookup(&variables, lookup_path_variable);
+        context_.set_context_var_lookup(&variables, lookup_context_variable);
+    }
+
+    ~InvocationBinding() { context_.clear_variable_lookups(); }
+
+private:
+    http_script::ScriptExchangeCtx &context_;
 };
 
 bool lookup_path_variable(void *context, std::string_view name, std::string_view &value) noexcept {
@@ -77,7 +93,7 @@ std::string script_failure_message(const script::ScriptResult &result) {
 } // namespace
 
 AccessScriptRuntime::AccessScriptRuntime() {
-    http_script::register_http_functions_to_lib(library_);
+    http_script::register_request_funcs(library_);
     library_.add_ext_ops(&route_extension_, http_script::RouteScriptExtension::ops());
 }
 
@@ -118,26 +134,19 @@ AccessScriptRuntime::compile_expression(void *context, std::string_view expressi
     if (compiled->contains_async()) {
         return std::unexpected("asynchronous route expressions are not supported");
     }
-    return std::static_pointer_cast<const void>(std::make_shared<const script::Script>(std::move(*compiled)));
+    return std::move(*compiled);
 }
 
-bool AccessScriptRuntime::evaluate_condition(void *, http::HttpExchange &exchange,
+bool AccessScriptRuntime::evaluate_condition(void *, http_script::ScriptExchangeCtx &script_context,
                                              std::span<const PathVariable> path_variables,
-                                             std::string_view request_context_cluster, const void *program,
-                                             std::string_view) noexcept {
-    if (!program) {
-        return false;
-    }
-    const auto &script_program = *static_cast<const script::Script *>(program);
-    script::GcHeap heap(exchange.pool());
-    http_script::ScriptExchangeCtx script_context(exchange, heap);
+                                             std::string_view request_context_cluster,
+                                             const script::Script &program) noexcept {
     InvocationVariables variables{
             .path_variables = path_variables,
             .context_cluster = request_context_cluster,
     };
-    script_context.set_path_var_lookup(&variables, lookup_path_variable);
-    script_context.set_context_var_lookup(&variables, lookup_context_variable);
-    auto result = script_program.exec_sync(script::JsValue::make_null(), &script_context, heap);
+    InvocationBinding binding(script_context, variables);
+    auto result = program.exec_sync(script::JsValue::make_null(), &script_context, script_context.heap());
     if (!result.is_value()) {
         return false;
     }
@@ -145,24 +154,16 @@ bool AccessScriptRuntime::evaluate_condition(void *, http::HttpExchange &exchang
     return script::run::Compares::logic(script::ConstValueHandle(&value));
 }
 
-bool AccessScriptRuntime::evaluate_template(void *, http::HttpExchange &exchange,
+bool AccessScriptRuntime::evaluate_template(void *, http_script::ScriptExchangeCtx &script_context,
                                             std::span<const PathVariable> path_variables,
-                                            std::string_view request_context_cluster, const void *program,
+                                            std::string_view request_context_cluster, const script::Script &program,
                                             std::string_view, std::string &output, AccessError &error) noexcept {
-    if (!program) {
-        error = AccessError::template_script("compiled local script is missing");
-        return false;
-    }
-    const auto &script_program = *static_cast<const script::Script *>(program);
-    script::GcHeap heap(exchange.pool());
-    http_script::ScriptExchangeCtx script_context(exchange, heap);
     InvocationVariables variables{
             .path_variables = path_variables,
             .context_cluster = request_context_cluster,
     };
-    script_context.set_path_var_lookup(&variables, lookup_path_variable);
-    script_context.set_context_var_lookup(&variables, lookup_context_variable);
-    auto result = script_program.exec_sync(script::JsValue::make_null(), &script_context, heap);
+    InvocationBinding binding(script_context, variables);
+    auto result = program.exec_sync(script::JsValue::make_null(), &script_context, script_context.heap());
     if (!result.is_value()) {
         error = AccessError::template_script(script_failure_message(result));
         return false;
