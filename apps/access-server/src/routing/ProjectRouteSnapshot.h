@@ -76,14 +76,6 @@ struct PathVariable {
     std::string_view value;
 };
 
-struct ConditionEvaluator {
-    using Function = bool (*)(void *context, const void *program, std::string_view expression,
-                              std::span<const PathVariable> path_variables) noexcept;
-
-    void *context = nullptr;
-    Function evaluate = nullptr;
-};
-
 struct ScriptCompilerAdapter {
     using Result = std::expected<CompiledScriptProgram, std::string>;
     using Function = Result (*)(void *context, std::string_view expression,
@@ -91,14 +83,6 @@ struct ScriptCompilerAdapter {
 
     void *context = nullptr;
     Function compile_expression = nullptr;
-};
-
-struct RouteMatch {
-    const CompiledRoute *route = nullptr;
-    std::size_t path_variable_count = 0;
-    bool insufficient_variable_capacity = false;
-
-    [[nodiscard]] explicit operator bool() const noexcept { return route != nullptr; }
 };
 
 class ProjectRouteSnapshot {
@@ -110,8 +94,10 @@ public:
     [[nodiscard]] std::size_t max_path_variable_count() const noexcept { return path_matcher_.max_path_var_count(); }
 
     [[nodiscard]] const CompiledHost *match_host(std::string_view host) const noexcept;
-    [[nodiscard]] RouteMatch match_route(std::string_view path, std::span<PathVariable> path_variables,
-                                         ConditionEvaluator evaluator = {}) const noexcept;
+    template<typename Context>
+    [[nodiscard]] bool match_route_path(std::string_view path, Context &context) const noexcept {
+        return path_matcher_.match_path(path, context);
+    }
     [[nodiscard]] async::Task<std::expected<void, ProxyAddressReadyError>> wait_ready() const noexcept;
     [[nodiscard]] bool ready_for_publish() const noexcept;
 
