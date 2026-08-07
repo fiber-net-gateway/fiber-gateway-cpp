@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "async/ThreadGroup.h"
+#include <fiber/async/ThreadGroup.h>
 
 TEST(ThreadGroupTest, CurrentMatchesThread) {
     constexpr std::size_t kThreads = 4;

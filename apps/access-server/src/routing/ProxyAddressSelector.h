@@ -1,11 +1,11 @@
 #ifndef FIBER_ACCESS_SERVER_PROXY_ADDRESS_SELECTOR_H
 #define FIBER_ACCESS_SERVER_PROXY_ADDRESS_SELECTOR_H
 
-#include "../../../../src/http/Http1ConnectionGroupKey.h"
+#include <fiber/http/Http1ConnectionGroupKey.h>
 #include "../runtime/SmoothWeightedRoundRobin.h"
 
-#include <async/Task.h>
-#include <common/IoError.h>
+#include <fiber/async/Task.h>
+#include <fiber/common/IoError.h>
 
 #include <cstdint>
 #include <expected>

@@ -10,9 +10,9 @@
 #include <span>
 #include <string_view>
 
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <net/IpAddress.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/net/IpAddress.h>
 
 namespace fiber::nacos {
 struct ServiceInfo;

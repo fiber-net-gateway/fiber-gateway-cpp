@@ -1,4 +1,4 @@
-#include "StealableHttp1ConnectionPoolSet.h"
+#include <fiber/http/StealableHttp1ConnectionPoolSet.h>
 
 #include <atomic>
 #include <coroutine>
@@ -9,7 +9,7 @@
 #include <memory>
 #include <utility>
 
-#include "../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::http {
 

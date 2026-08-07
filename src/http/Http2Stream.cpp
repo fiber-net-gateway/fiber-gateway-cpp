@@ -1,7 +1,7 @@
-#include "Http2Stream.h"
+#include <fiber/http/Http2Stream.h>
 
-#include "../common/Assert.h"
-#include "Http2Connection.h"
+#include <fiber/common/Assert.h>
+#include <fiber/http/Http2Connection.h>
 
 namespace fiber::http {
 

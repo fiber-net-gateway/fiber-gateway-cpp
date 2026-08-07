@@ -34,8 +34,12 @@ add_library(fiber_lib STATIC ${CPP_SRC_LIST})
 add_library(fiber_allocator INTERFACE)
 add_library(fiber_stdlib INTERFACE)
 target_include_directories(fiber_lib
-    PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src
-    PRIVATE ${FIBER_GENERATED_INCLUDE_DIR})
+    PUBLIC
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>"
+        "$<INSTALL_INTERFACE:include>"
+    PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/src
+        ${FIBER_GENERATED_INCLUDE_DIR})
 target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto)
 target_compile_definitions(fiber_lib
     PUBLIC FIBER_ENABLE_BENCHMARK_TRACE=$<BOOL:${FIBER_ENABLE_BENCHMARK_TRACE}>

@@ -7,10 +7,10 @@
 #include <string_view>
 #include <vector>
 
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <dns/DnsCache2.h>
-#include <dns/DnsResolver.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/dns/DnsCache2.h>
+#include <fiber/dns/DnsResolver.h>
 
 namespace fiber::event {
 class EventLoop;

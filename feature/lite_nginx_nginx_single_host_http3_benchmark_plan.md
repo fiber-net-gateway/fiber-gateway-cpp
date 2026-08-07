@@ -65,10 +65,10 @@ loopback、内核 UDP 路径和宿主机调度都会影响绝对值，主要结�
   worker event loop，并自动启用 `SO_REUSEPORT`，见
   `src/http/Http3Server.cpp:130-171,245-249`；
 - 默认每 shard 最多 1024 个连接，默认双向/单向 stream 上限均为 128，stream 接收窗口
-  为 65536 字节，见 `src/http/HttpExchange.h:31-46` 和
-  `src/quic/QuicConnection.h:47-53,121-140`；
+  为 65536 字节，见 `include/fiber/http/HttpExchange.h:31-46` 和
+  `include/fiber/quic/QuicConnection.h:47-53,121-140`；
 - 默认 HTTP/3 SETTINGS 将 QPACK 动态表容量和 blocked streams 都设为 0，见
-  `src/http/Http3Protocol.h:31-36`；
+  `include/fiber/http/Http3Protocol.h:31-36`；
 - Retry、NEW_TOKEN 和 0-RTT 默认关闭；QUIC v1、peer 发起的 key update、旧密钥
   `3×PTO` 宽限、pacing、ECN、Retry/token、CID/path 和流控代码均已存在；
 - lite-nginx 配置目前只暴露 `http3` listener 开关，没有暴露 QUIC flow-control、Retry、

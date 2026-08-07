@@ -6,8 +6,8 @@
 #include <new>
 #include <utility>
 
-#include <event/EventLoop.h>
 #include <fiber/cat/CatClient.h>
+#include <fiber/event/EventLoop.h>
 
 #include "CatAggregation.h"
 #include "CatClientCore.h"

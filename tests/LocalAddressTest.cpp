@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "net/detail/LocalAddressSelector.h"
+#include <fiber/net/detail/LocalAddressSelector.h>
 
 namespace {
 

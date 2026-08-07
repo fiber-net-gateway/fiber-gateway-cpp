@@ -9,13 +9,13 @@
 #include <optional>
 #include <string>
 
-#include <async/Spawn.h>
-#include <async/Task.h>
-#include <async/WaitGroup.h>
-#include <async/Watch.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Task.h>
+#include <fiber/async/WaitGroup.h>
+#include <fiber/async/Watch.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/nacos/NamingService.h>
 
 namespace fiber::ai_server {

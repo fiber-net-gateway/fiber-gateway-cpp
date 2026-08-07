@@ -145,7 +145,7 @@ QPACK 和 request streams，不需要改动 UDP endpoint 或 QUIC 建连状态�
 
 新增文件：
 
-- `src/quic/QuicClient.h`
+- `include/fiber/quic/QuicClient.h`
 - `src/quic/QuicClient.cpp`
 
 ### 5.1 `QuicClient`
@@ -250,9 +250,9 @@ QuicConnectError>`。整个设计不使用 C++ exception。
 
 修改文件：
 
-- `src/quic/QuicUdpEndpoint.h`
+- `include/fiber/quic/QuicUdpEndpoint.h`
 - `src/quic/QuicUdpEndpoint.cpp`
-- `src/http/Http3Server.h`
+- `include/fiber/http/Http3Server.h`
 - `src/http/Http3Server.cpp`
 
 ### 6.1 拆分 endpoint 与服务端 admission 配置
@@ -366,9 +366,9 @@ remote CID slot 数量固定，可以把 intrusive index node 内嵌在 slot 中
 
 修改文件：
 
-- `src/quic/QuicConnection.h`
+- `include/fiber/quic/QuicConnection.h`
 - `src/quic/QuicConnection.cpp`
-- `src/quic/QuicConnectionId.h`
+- `include/fiber/quic/QuicConnectionId.h`
 - `src/quic/QuicConnectionId.cpp`
 
 ### 7.1 CID 状态必须分离
@@ -447,10 +447,10 @@ token 必须使用不同的状态/类型表达。
 
 修改文件：
 
-- `src/quic/QuicTlsSession.h`
+- `include/fiber/quic/QuicTlsSession.h`
 - `src/quic/QuicTlsSession.cpp`
-- `src/net/TlsOptions.h`
-- `src/net/TlsContext.h`
+- `include/fiber/net/TlsOptions.h`
+- `include/fiber/net/TlsContext.h`
 - `src/net/TlsContext.cpp`
 
 ### 8.1 `QuicTlsSession::init_client`
@@ -522,16 +522,16 @@ BoringSSL client session cache 使用 external cache：
 
 修改文件：
 
-- `src/quic/QuicPacketProcessor.h`
+- `include/fiber/quic/QuicPacketProcessor.h`
 - `src/quic/QuicPacketProcessor.cpp`
-- `src/quic/QuicPacketCodec.h`
+- `include/fiber/quic/QuicPacketCodec.h`
 - `src/quic/QuicPacketCodec.cpp`
-- `src/quic/QuicCrypto.h`
+- `include/fiber/quic/QuicCrypto.h`
 - `src/quic/QuicCrypto.cpp`
-- `src/quic/QuicLossRecovery.h`
+- `include/fiber/quic/QuicLossRecovery.h`
 - `src/quic/QuicLossRecovery.cpp`
-- `src/quic/QuicCongestion.h/.cpp`
-- `src/quic/QuicPacer.h/.cpp`
+- `include/fiber/quic/QuicCongestion.h + src/quic/QuicCongestion.cpp`
+- `include/fiber/quic/QuicPacer.h + src/quic/QuicPacer.cpp`
 
 ### 9.1 Retry 接受条件
 
@@ -623,7 +623,7 @@ Initial -> EarlyData -> Handshake -> Application
 
 修改文件：
 
-- `src/quic/QuicTransportParamsCodec.h`
+- `include/fiber/quic/QuicTransportParamsCodec.h`
 - `src/quic/QuicTransportParamsCodec.cpp`
 
 ### 12.1 角色与身份校验
@@ -732,8 +732,8 @@ session cache 保存服务器允许记忆的 transport parameters。以下参数
 
 修改文件：
 
-- `src/quic/QuicPath.h`
-- `src/quic/QuicPathManager.h`
+- `include/fiber/quic/QuicPath.h`
+- `include/fiber/quic/QuicPathManager.h`
 - `src/quic/QuicPathManager.cpp`
 
 ### 14.1 Client 不受服务端 anti-amplification 限制
@@ -805,22 +805,22 @@ create connection
 
 | 文件 | 计划改动 |
 |---|---|
-| `src/quic/QuicClient.h/.cpp` | 新增 connector、attempt、connect options/error、cache/0-RTT policy |
-| `src/quic/QuicUdpEndpoint.h/.cpp` | 配置拆分、outbound attach、client ingress、reset-token index、本地地址锁定 |
-| `src/quic/QuicConnection.h/.cpp` | client CID state、connect waiter、NEW_TOKEN、Retry/VN/0-RTT 协调 |
-| `src/quic/QuicConnectionId.h/.cpp` | preferred CID 和 endpoint reset-token index node |
-| `src/quic/QuicTlsSession.h/.cpp` | `init_client`、role-aware TP、peer verify、post-handshake/session callback |
-| `src/quic/QuicPacketProcessor.h/.cpp` | client unprotected control packets、Server Initial SCID 采纳、NEW_TOKEN |
-| `src/quic/QuicPacketCodec.h/.cpp` | VN version list、Retry decode context、Initial token/0-RTT metadata |
-| `src/quic/QuicCrypto.h/.cpp` | Retry integrity validation、只重派生 Initial keys |
-| `src/quic/QuicLossRecovery.h/.cpp` | `reset_after_retry`、0-RTT rejection cleanup |
-| `src/quic/QuicCongestion.h/.cpp` | Retry 后恢复到初始 congestion state |
-| `src/quic/QuicPacer.h/.cpp` | Retry 后按新 congestion/path 重置 pacing state |
-| `src/quic/QuicTransportParamsCodec.h/.cpp` | preferred address、角色约束、remembered TP snapshot |
-| `src/quic/QuicPath.h`, `QuicPathManager.*` | role-aware amplification、initial path reconcile、preferred validation |
-| `src/quic/QuicStream.h/.cpp` | early-data mode 和 rejection 所需 stream 标记 |
-| `src/net/TlsOptions.h`, `TlsContext.*` | peer verification、trust store、通用 client session trampoline |
-| `src/http/Http3Server.h/.cpp` | 适配 endpoint/server admission options 拆分，不增加 H3 client |
+| `include/fiber/quic/QuicClient.h + src/quic/QuicClient.cpp` | 新增 connector、attempt、connect options/error、cache/0-RTT policy |
+| `include/fiber/quic/QuicUdpEndpoint.h + src/quic/QuicUdpEndpoint.cpp` | 配置拆分、outbound attach、client ingress、reset-token index、本地地址锁定 |
+| `include/fiber/quic/QuicConnection.h + src/quic/QuicConnection.cpp` | client CID state、connect waiter、NEW_TOKEN、Retry/VN/0-RTT 协调 |
+| `include/fiber/quic/QuicConnectionId.h + src/quic/QuicConnectionId.cpp` | preferred CID 和 endpoint reset-token index node |
+| `include/fiber/quic/QuicTlsSession.h + src/quic/QuicTlsSession.cpp` | `init_client`、role-aware TP、peer verify、post-handshake/session callback |
+| `include/fiber/quic/QuicPacketProcessor.h + src/quic/QuicPacketProcessor.cpp` | client unprotected control packets、Server Initial SCID 采纳、NEW_TOKEN |
+| `include/fiber/quic/QuicPacketCodec.h + src/quic/QuicPacketCodec.cpp` | VN version list、Retry decode context、Initial token/0-RTT metadata |
+| `include/fiber/quic/QuicCrypto.h + src/quic/QuicCrypto.cpp` | Retry integrity validation、只重派生 Initial keys |
+| `include/fiber/quic/QuicLossRecovery.h + src/quic/QuicLossRecovery.cpp` | `reset_after_retry`、0-RTT rejection cleanup |
+| `include/fiber/quic/QuicCongestion.h + src/quic/QuicCongestion.cpp` | Retry 后恢复到初始 congestion state |
+| `include/fiber/quic/QuicPacer.h + src/quic/QuicPacer.cpp` | Retry 后按新 congestion/path 重置 pacing state |
+| `include/fiber/quic/QuicTransportParamsCodec.h + src/quic/QuicTransportParamsCodec.cpp` | preferred address、角色约束、remembered TP snapshot |
+| `include/fiber/quic/QuicPath.h`, `QuicPathManager.*` | role-aware amplification、initial path reconcile、preferred validation |
+| `include/fiber/quic/QuicStream.h + src/quic/QuicStream.cpp` | early-data mode 和 rejection 所需 stream 标记 |
+| `include/fiber/net/TlsOptions.h`, `TlsContext.*` | peer verification、trust store、通用 client session trampoline |
+| `include/fiber/http/Http3Server.h + src/http/Http3Server.cpp` | 适配 endpoint/server admission options 拆分，不增加 H3 client |
 | `tests/*` | 单元、loopback、TLS、Retry、0-RTT、path 测试 |
 
 构建系统当前递归收集 `src` 和 `tests` 下的对应源文件，新增 `QuicClient.cpp` 和测试文件

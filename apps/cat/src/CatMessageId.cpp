@@ -5,7 +5,7 @@
 #include <limits>
 #include <unistd.h>
 
-#include <net/IpAddress.h>
+#include <fiber/net/IpAddress.h>
 
 namespace fiber::cat::detail {
 

@@ -15,7 +15,7 @@
 #include <string_view>
 #include <vector>
 
-#include <http/HttpExchange.h>
+#include <fiber/http/HttpExchange.h>
 
 namespace fiber::access_server {
 

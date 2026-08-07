@@ -14,20 +14,20 @@
 #include <optional>
 #include <string>
 
-#include <async/Task.h>
-#include <async/WaitGroup.h>
-#include <async/Watch.h>
-#include <common/IoError.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <event/EventLoop.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Task.h>
+#include <fiber/async/WaitGroup.h>
+#include <fiber/async/Watch.h>
 #include <fiber/cat/CatClient.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosCreateError.h>
 #include <fiber/nacos/NamingService.h>
-#include <net/TcpListener.h>
+#include <fiber/net/TcpListener.h>
 
 namespace fiber::ai_server {
 

@@ -12,20 +12,20 @@
 #include <sys/socket.h>
 #include <vector>
 
-#include <async/Sleep.h>
-#include <async/Spawn.h>
-#include <async/Timeout.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/Http2Connection.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpTransport.h>
+#include <fiber/http/ServerRequestFactory.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/nacos/NamingService.h>
-#include <http/Http2Connection.h>
-#include <http/HttpBodySpec.h>
-#include <http/HttpExchange.h>
-#include <http/HttpHeaders.h>
-#include <http/HttpTransport.h>
-#include <http/ServerRequestFactory.h>
-#include <net/SocketAddress.h>
-#include <net/TcpListener.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/net/TcpListener.h>
 #include "rpc/grpc/GrpcFraming.h"
 #include "rpc/grpc/ProtoCodec.h"
 

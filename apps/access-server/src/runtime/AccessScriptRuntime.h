@@ -8,9 +8,9 @@
 #include <string>
 #include <string_view>
 
-#include <http_script/ExchangeConstExtension.h>
-#include <http_script/RouteScriptExtension.h>
-#include <script/std/StdLibrary.h>
+#include <fiber/http_script/ExchangeConstExtension.h>
+#include <fiber/http_script/RouteScriptExtension.h>
+#include <fiber/script/std/StdLibrary.h>
 
 namespace fiber::access_server {
 

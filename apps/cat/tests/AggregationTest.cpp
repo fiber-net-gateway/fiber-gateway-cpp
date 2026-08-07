@@ -7,12 +7,12 @@
 #include <utility>
 #include <vector>
 
-#include <async/Spawn.h>
-#include <common/mem/BufPool.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Spawn.h>
 #include <fiber/cat/CatClientConfig.h>
 #include <fiber/cat/Status.h>
-#include <net/IpAddress.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/net/IpAddress.h>
 
 #include "CatAggregation.h"
 #include "CatClientCore.h"

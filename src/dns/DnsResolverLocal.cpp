@@ -1,4 +1,4 @@
-#include "DnsResolverLocal.h"
+#include <fiber/dns/DnsResolverLocal.h>
 
 #include <algorithm>
 #include <array>
@@ -7,9 +7,9 @@
 #include <limits>
 #include <new>
 
-#include "../common/Assert.h"
-#include "../net/UdpSocket.h"
-#include "DnsName.h"
+#include <fiber/common/Assert.h>
+#include <fiber/dns/DnsName.h>
+#include <fiber/net/UdpSocket.h>
 
 namespace fiber::dns {
 

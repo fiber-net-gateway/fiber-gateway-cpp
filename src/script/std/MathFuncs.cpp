@@ -1,9 +1,9 @@
-#include "MathFuncs.h"
+#include <fiber/script/std/MathFuncs.h>
 
-#include "StdLibrary.h"
+#include <fiber/script/std/StdLibrary.h>
 
-#include "../JsValue.h"
-#include "../Library.h"
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
 
 #include <cmath>
 #include <cstdint>

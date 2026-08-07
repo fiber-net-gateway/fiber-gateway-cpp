@@ -8,15 +8,15 @@
 #include <string>
 #include <vector>
 
-#include "async/Sleep.h"
-#include "async/Spawn.h"
-#include "async/Timeout.h"
-#include "common/IoError.h"
-#include "dns/DnsCache2.h"
-#include "dns/DnsResolver.h"
-#include "dns/DnsResolverLocal.h"
-#include "event/EventLoopGroup.h"
-#include "net/UdpSocket.h"
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/common/IoError.h>
+#include <fiber/dns/DnsCache2.h>
+#include <fiber/dns/DnsResolver.h>
+#include <fiber/dns/DnsResolverLocal.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/net/UdpSocket.h>
 
 namespace {
 

@@ -1,7 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_COMPILED_HEADER_TEMPLATES_H
 #define FIBER_ACCESS_SERVER_COMPILED_HEADER_TEMPLATES_H
 
-#include "../../../../src/http/HeaderMap.h"
+#include <fiber/http/HeaderMap.h>
 #include "CompiledTemplate.h"
 
 #include <cstddef>

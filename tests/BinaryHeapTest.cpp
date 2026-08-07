@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "common/BinaryHeap.h"
+#include <fiber/common/BinaryHeap.h>
 
 namespace {
 

@@ -1,11 +1,11 @@
-#include "QuicSendScheduler.h"
+#include <fiber/quic/QuicSendScheduler.h>
 
 #include <array>
 #include <expected>
 #include <limits>
 
-#include "../common/Assert.h"
-#include "QuicUdpEndpoint.h"
+#include <fiber/common/Assert.h>
+#include <fiber/quic/QuicUdpEndpoint.h>
 
 namespace fiber::quic {
 

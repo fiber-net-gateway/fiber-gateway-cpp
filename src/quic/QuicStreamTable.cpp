@@ -1,9 +1,9 @@
-#include "QuicStreamTable.h"
+#include <fiber/quic/QuicStreamTable.h>
 
 #include <limits>
 #include <new>
 
-#include "../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::quic {
 

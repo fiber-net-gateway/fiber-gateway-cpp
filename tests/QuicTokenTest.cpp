@@ -4,10 +4,10 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "net/IpAddress.h"
-#include "net/SocketAddress.h"
-#include "quic/QuicConnectionId.h"
-#include "quic/QuicToken.h"
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/quic/QuicConnectionId.h>
+#include <fiber/quic/QuicToken.h>
 
 namespace {
 

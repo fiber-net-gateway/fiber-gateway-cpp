@@ -4,11 +4,11 @@
 #include <expected>
 #include <memory>
 
-#include <async/Task.h>
-#include <common/IoError.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Task.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/event/EventLoop.h>
 
 #include "NacosAuthAccess.h"
 #include "NacosClientConfig.h"

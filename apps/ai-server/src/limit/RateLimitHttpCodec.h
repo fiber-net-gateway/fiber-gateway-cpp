@@ -9,7 +9,7 @@
 #include <string>
 #include <string_view>
 
-#include <common/mem/BufPool.h>
+#include <fiber/common/mem/BufPool.h>
 
 namespace fiber::ai_server {
 

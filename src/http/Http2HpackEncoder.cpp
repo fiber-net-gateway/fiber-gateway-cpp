@@ -1,11 +1,11 @@
-#include "Http2HpackEncoder.h"
+#include <fiber/http/Http2HpackEncoder.h>
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 
-#include "Http2HpackStaticTable.h"
-#include "Huffman.h"
+#include <fiber/http/Http2HpackStaticTable.h>
+#include <fiber/http/Huffman.h>
 
 namespace fiber::http {
 

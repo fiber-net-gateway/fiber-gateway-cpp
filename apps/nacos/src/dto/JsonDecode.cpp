@@ -1,6 +1,6 @@
 #include "JsonCodec.h"
 
-#include <common/json/JsonStructDecode.h>
+#include <fiber/common/json/JsonStructDecode.h>
 
 FIBER_JSON_STRUCT(fiber::nacos::dto::RequestBase, FIBER_JSON_NAMED_OPTIONAL_FIELD(request_id, "requestId"));
 

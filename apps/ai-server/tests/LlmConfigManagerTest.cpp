@@ -8,11 +8,11 @@
 #include <string_view>
 #include <utility>
 
-#include <async/Spawn.h>
-#include <async/Watch.h>
-#include <async/Yield.h>
-#include <event/EventLoop.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Watch.h>
+#include <fiber/async/Yield.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NamingService.h>
 #include <fiber/nacos/Subscription.h>

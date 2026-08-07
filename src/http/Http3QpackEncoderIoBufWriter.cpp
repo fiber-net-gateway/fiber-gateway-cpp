@@ -1,10 +1,10 @@
-#include "Http3QpackEncoderIoBufWriter.h"
+#include <fiber/http/Http3QpackEncoderIoBufWriter.h>
 
 #include <algorithm>
 #include <limits>
 #include <utility>
 
-#include "../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::http {
 

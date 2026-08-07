@@ -9,8 +9,8 @@
 #include <sys/uio.h>
 #include <thread>
 
-#include "async/Spawn.h"
-#include "event/EventLoopGroup.h"
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
 #include "fiber/prometheus/MetricsRegistry.h"
 
 namespace {

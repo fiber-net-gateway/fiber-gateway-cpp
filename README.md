@@ -34,7 +34,8 @@ application, and optional application-layer libraries such as
 
 ```text
 .
-├── src/          # Core framework, built as fiber_lib
+├── include/fiber # Public fiber_lib headers
+├── src/          # Core fiber_lib implementations
 ├── example/      # Small runnable examples and benchmark helpers
 ├── apps/         # Applications and optional app-layer libraries
 ├── tests/        # Core GoogleTest suite
@@ -44,17 +45,18 @@ application, and optional application-layer libraries such as
 └── scripts/      # Build, interoperability, and benchmark tooling
 ```
 
-The main source modules are:
+The main core modules have public headers under `include/fiber/` and
+implementations under the corresponding `src/` directory:
 
-- `src/event/` — event loops, pollers, timers, and loop groups.
-- `src/async/` — coroutine tasks, scheduling, and synchronization primitives.
-- `src/net/` — socket, listener, stream, TLS, and address abstractions.
-- `src/quic/` — QUIC transport, crypto, recovery, congestion, and streams.
-- `src/http/` — HTTP/1.1, HTTP/2, HTTP/3, clients, servers, and pools.
-- `src/dns/` — DNS messages, clients, resolvers, and caches.
-- `src/common/` — errors, JSON, memory, containers, and shared utilities.
-- `src/script/` and `src/http_script/` — scripting runtime and HTTP bindings.
-- `src/log/` — logger hierarchy, formatting, and appenders.
+- `event/` — event loops, pollers, timers, and loop groups.
+- `async/` — coroutine tasks, scheduling, and synchronization primitives.
+- `net/` — socket, listener, stream, TLS, and address abstractions.
+- `quic/` — QUIC transport, crypto, recovery, congestion, and streams.
+- `http/` — HTTP/1.1, HTTP/2, HTTP/3, clients, servers, and pools.
+- `dns/` — DNS messages, clients, resolvers, and caches.
+- `common/` — errors, JSON, memory, containers, and shared utilities.
+- `script/` and `http_script/` — scripting runtime and HTTP bindings.
+- `log/` — logger hierarchy, formatting, and appenders.
 - `apps/nacos/` — Nacos client and its private gRPC/protobuf transport.
 
 ## Requirements

@@ -1,10 +1,10 @@
 #include "AccessRequestHandler.h"
 #include "../observability/AccessRequestTelemetry.h"
 
-#include "../../../../src/http/HttpBodySpec.h"
-#include "../../../../src/http/HttpExchange.h"
-#include "../../../../src/http/HttpHeaderHash.h"
-#include "../../../../src/http/HttpHeaders.h"
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
 
 #include <cstdint>
 #include <limits>

@@ -6,8 +6,8 @@
 #include <string_view>
 #include <utility>
 
-#include "script/ScriptCompiler.h"
-#include "script/std/StdLibrary.h"
+#include <fiber/script/ScriptCompiler.h>
+#include <fiber/script/std/StdLibrary.h>
 
 namespace fiber::test {
 

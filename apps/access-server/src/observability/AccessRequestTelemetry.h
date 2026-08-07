@@ -10,13 +10,13 @@
 #include <string_view>
 #include <utility>
 
-#include <common/IoError.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
 #include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/Transaction.h>
-#include <http/HttpHeaders.h>
-#include <http_script/ScriptExchangeCtx.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/http_script/ScriptExchangeCtx.h>
 
 namespace fiber::cat {
 class CatClient;

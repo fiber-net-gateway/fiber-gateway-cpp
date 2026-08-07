@@ -1,13 +1,13 @@
 #include "AccessServer.h"
 #include "../observability/AccessRequestTelemetry.h"
 
-#include <async/Spawn.h>
-#include <common/Assert.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Spawn.h>
 #include <fiber/cat/CatClient.h>
-#include <http/HttpBodySpec.h>
-#include <http/HttpExchange.h>
-#include <http/HttpHeaders.h>
+#include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpHeaders.h>
 
 namespace fiber::access_server {
 namespace {

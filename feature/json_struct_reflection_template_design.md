@@ -1644,9 +1644,9 @@ json::ParseStatus json::parse_value(
 
 代码位于：
 
-- `src/common/json/JsonStructMetadata.h`：字段 descriptor、基类字段展开、编译期字段名检查和声明宏；
-- `src/common/json/JsonStructDecode.h`：`parse_value<T>()`、类型静态分派、presence 和 object 策略；
-- `src/common/json/JsonParse.h`：object 完成后的事务式 finalizer 支持。
+- `include/fiber/common/json/JsonStructMetadata.h`：字段 descriptor、基类字段展开、编译期字段名检查和声明宏；
+- `include/fiber/common/json/JsonStructDecode.h`：`parse_value<T>()`、类型静态分派、presence 和 object 策略；
+- `include/fiber/common/json/JsonParse.h`：object 完成后的事务式 finalizer 支持。
 
 公开宏使用项目统一前缀：
 

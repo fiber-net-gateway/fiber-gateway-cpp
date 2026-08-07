@@ -14,7 +14,7 @@
 
 **Files:**
 - Modify: `tests/Http2ConnectionTest.cpp`
-- Modify: `src/http/ServerHttp2Request.h`
+- Modify: `include/fiber/http/ServerHttp2Request.h`
 - Modify: `src/http/ServerHttp2Request.cpp`
 
 - [ ] **Step 1: Write failing tests for buffered HTTP/2 request body reads**
@@ -32,7 +32,7 @@ Expected: FAIL in the new HTTP/2 request-body tests because `ServerHttp2Request:
 ### Task 2: Implement Minimal Buffered `read_body()` Support
 
 **Files:**
-- Modify: `src/http/ServerHttp2Request.h`
+- Modify: `include/fiber/http/ServerHttp2Request.h`
 - Modify: `src/http/ServerHttp2Request.cpp`
 - Test: `tests/Http2ConnectionTest.cpp`
 
@@ -55,9 +55,9 @@ Expected: PASS for the new body-read tests
 
 **Files:**
 - Modify: `tests/Http2ConnectionTest.cpp`
-- Modify: `src/http/Http2Connection.h`
+- Modify: `include/fiber/http/Http2Connection.h`
 - Modify: `src/http/Http2Connection.cpp`
-- Modify: `src/http/Http2Stream.h`
+- Modify: `include/fiber/http/Http2Stream.h`
 - Modify: `src/http/Http2Stream.cpp`
 
 - [ ] **Step 1: Write failing tests for receive-window behavior**
@@ -76,11 +76,11 @@ Expected: FAIL because receive-side flow-control accounting and replenishment ar
 ### Task 4: Implement Receive-Window Accounting And Threshold Replenishment
 
 **Files:**
-- Modify: `src/http/Http2Connection.h`
+- Modify: `include/fiber/http/Http2Connection.h`
 - Modify: `src/http/Http2Connection.cpp`
-- Modify: `src/http/Http2Stream.h`
+- Modify: `include/fiber/http/Http2Stream.h`
 - Modify: `src/http/Http2Stream.cpp`
-- Modify: `src/http/ServerHttp2Request.h`
+- Modify: `include/fiber/http/ServerHttp2Request.h`
 - Modify: `src/http/ServerHttp2Request.cpp`
 - Test: `tests/Http2ConnectionTest.cpp`
 

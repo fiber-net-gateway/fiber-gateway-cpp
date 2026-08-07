@@ -4,10 +4,10 @@
 #include <cmath>
 #include <string_view>
 
-#include <common/json/JsonParse.h>
-#include <common/json/JsonParser.h>
-#include <common/mem/BufPool.h>
-#include <net/IpAddress.h>
+#include <fiber/common/json/JsonParse.h>
+#include <fiber/common/json/JsonParser.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/net/IpAddress.h>
 
 namespace fiber::cat::detail {
 

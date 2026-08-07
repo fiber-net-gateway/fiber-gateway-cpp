@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-#include <common/json/JsonEncode.h>
+#include <fiber/common/json/JsonEncode.h>
 
 namespace fiber::ai_server {
 namespace {

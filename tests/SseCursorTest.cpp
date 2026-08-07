@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-#include "http/SseCursor.h"
+#include <fiber/http/SseCursor.h>
 
 namespace {
 

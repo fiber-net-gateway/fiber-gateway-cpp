@@ -8,8 +8,8 @@
 #include <utility>
 #include <vector>
 
-#include "common/IoError.h"
-#include "http_script/ScriptExchangeCtx.h"
+#include <fiber/common/IoError.h>
+#include <fiber/http_script/ScriptExchangeCtx.h>
 
 #include "../runtime/RuntimeConfig.h"
 

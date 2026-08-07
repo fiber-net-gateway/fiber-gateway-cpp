@@ -25,14 +25,14 @@
 - 每个 worker loop 有独立 resolver，共享一份 DNS cache；单次查询超时 2 秒、最多
   2 次尝试（`apps/lite_nginx/src/runtime/DnsService.cpp:62-100`）。
 - 正 TTL 被限制在 1～300 秒，负 TTL 被限制在 1～60 秒
-  （`src/dns/DnsResolverLocal.h:64-72`）。
+  （`include/fiber/dns/DnsResolverLocal.h:64-72`）。
 - 命中空闲连接池时不做 DNS 和建连；只有连接池 miss 才解析域名
   （`apps/lite_nginx/src/upstream/UpstreamConnection.cpp:16-38`）。
 - 解析结果按 IPv6 优先排序，连接失败时依次尝试后续地址
   （`apps/lite_nginx/src/upstream/UpstreamConnection.cpp:52-98`）。
 - HTTPS 上游会把域名作为 SNI，但当前上游客户端默认不校验证书
   （`apps/lite_nginx/src/upstream/UpstreamConnection.cpp:43-49`、
-  `src/net/TlsOptions.h:96-116`）。
+  `include/fiber/net/TlsOptions.h:96-116`）。
 
 这意味着“TTL 到期”不等于正在使用的池化连接会立即迁移。只要旧连接仍可复用，
 lite-nginx 就不会再次查询 DNS；地址切换必须单独测量“旧连接仍健康”和“旧地址下线”

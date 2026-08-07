@@ -1,6 +1,6 @@
-#include "Http1ConnectionPoolEntry.h"
+#include <fiber/http/Http1ConnectionPoolEntry.h>
 
-#include "Http1ConnectionPoolCore.h"
+#include <fiber/http/Http1ConnectionPoolCore.h>
 
 namespace fiber::http {
 

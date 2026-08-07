@@ -9,14 +9,14 @@
 
 #include <google/protobuf/message_lite.h>
 
-#include <async/Task.h>
-#include <common/IoError.h>
-#include <common/mem/BufPool.h>
-#include <http/ClientHttp2Exchange.h>
-#include <http/ClientHttp2Types.h>
-#include <http/Http2ClientConnection.h>
-#include <http/HttpCommon.h>
-#include <http/HttpHeaders.h>
+#include <fiber/async/Task.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/http/ClientHttp2Exchange.h>
+#include <fiber/http/ClientHttp2Types.h>
+#include <fiber/http/Http2ClientConnection.h>
+#include <fiber/http/HttpCommon.h>
+#include <fiber/http/HttpHeaders.h>
 #include "GrpcFraming.h"
 #include "GrpcStatus.h"
 #include "ProtoCodec.h"

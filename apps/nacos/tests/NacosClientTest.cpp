@@ -21,10 +21,10 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
-#include <async/Sleep.h>
-#include <async/Spawn.h>
-#include <async/Timeout.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NamingService.h>

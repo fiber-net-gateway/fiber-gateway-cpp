@@ -57,7 +57,7 @@ Callers choose a loop via `at(index)`.
   pointers; callbacks must observe canceled state and drop work if needed.
 
 ## BinaryHeap (Heap)
-`BinaryHeap` (in `fiber::common`, see `src/common/BinaryHeap.h`) is a C++
+`BinaryHeap` (in `fiber::common`, see `include/fiber/common/BinaryHeap.h`) is a C++
 translation of `libuv`'s `heap-inl.h`, generalised as an intrusive min-heap
 template. The comparison is a template parameter (`Compare`, invoked on owner
 pointers); the heap never owns nodes and never touches owner state beyond the
@@ -131,10 +131,10 @@ public:
 6) Drain local defer queue once (callbacks scheduled by IO).
 
 ## File Layout
-- `src/event/EventLoop.h|.cpp`
-- `src/event/Poller.h|.cpp`
-- `src/common/BinaryHeap.h` (header-only intrusive min-heap template; libuv heap translation)
-- `src/event/MpscQueue.h` (header-only)
+- `include/fiber/event/EventLoop.h + src/event/EventLoop.cpp`
+- `include/fiber/event/Poller.h + src/event/Poller.cpp`
+- `include/fiber/common/BinaryHeap.h` (header-only intrusive min-heap template; libuv heap translation)
+- `include/fiber/event/MpscQueue.h` (header-only)
 - `src/async/Scheduler.h`
 - `src/async/Coroutine.h|.cpp`
 

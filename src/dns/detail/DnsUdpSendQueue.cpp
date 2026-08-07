@@ -1,8 +1,8 @@
-#include "DnsUdpSendQueue.h"
+#include <fiber/dns/detail/DnsUdpSendQueue.h>
 
 #include <utility>
 
-#include "../../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::dns::detail {
 

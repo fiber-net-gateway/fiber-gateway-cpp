@@ -4,8 +4,8 @@
 
 #include <utility>
 
-#include <http/HttpHeaderHash.h>
-#include <http/HttpHeaders.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
 
 namespace fiber::ai_server {
 namespace {

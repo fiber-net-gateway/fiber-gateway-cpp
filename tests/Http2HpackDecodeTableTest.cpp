@@ -3,9 +3,9 @@
 #include <string>
 #include <string_view>
 
-#include "http/Http2HpackDecodeTable.h"
-#include "http/Http2HpackTableEntryView.h"
-#include "http/HttpHeaderHash.h"
+#include <fiber/http/Http2HpackDecodeTable.h>
+#include <fiber/http/Http2HpackTableEntryView.h>
+#include <fiber/http/HttpHeaderHash.h>
 
 namespace {
 

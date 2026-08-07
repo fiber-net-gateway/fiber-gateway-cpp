@@ -1,8 +1,8 @@
-#include "RouteScriptExtension.h"
+#include <fiber/http_script/RouteScriptExtension.h>
 
-#include "../script/JsValue.h"
-#include "../script/std/NodeText.h"
-#include "../script/std/StdLibrary.h"
+#include <fiber/script/JsValue.h>
+#include <fiber/script/std/NodeText.h>
+#include <fiber/script/std/StdLibrary.h>
 
 #include <cassert>
 #include <string>

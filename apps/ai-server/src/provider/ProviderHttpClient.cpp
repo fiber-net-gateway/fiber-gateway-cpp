@@ -11,14 +11,14 @@
 #include <new>
 #include <utility>
 
-#include <event/EventLoop.h>
 #include <fiber/cat/Status.h>
 #include <fiber/cat/Transaction.h>
-#include <http/ClientHttp1Exchange.h>
-#include <http/ClientHttp1Types.h>
-#include <http/HttpBodySpec.h>
-#include <http/HttpHeaderHash.h>
-#include <http/HttpHeaders.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/http/ClientHttp1Exchange.h>
+#include <fiber/http/ClientHttp1Types.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
 
 namespace fiber::ai_server {
 

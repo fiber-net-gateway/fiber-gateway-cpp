@@ -10,8 +10,8 @@
 #include <expected>
 #include <string_view>
 
-#include <common/json/JsonValue.h>
-#include <common/mem/BufPool.h>
+#include <fiber/common/json/JsonValue.h>
+#include <fiber/common/mem/BufPool.h>
 
 namespace fiber::ai_server {
 

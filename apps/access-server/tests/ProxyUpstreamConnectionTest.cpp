@@ -7,13 +7,13 @@
 #include <utility>
 #include <vector>
 
-#include "async/Spawn.h"
-#include "event/EventLoopGroup.h"
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/Http1ClientConnection.h>
+#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/net/TcpListener.h>
 #include "execution/ProxyUpstreamConnection.h"
-#include "http/Http1ClientConnection.h"
-#include "http/Http1ConnectionGroupKey.h"
-#include "net/SocketAddress.h"
-#include "net/TcpListener.h"
 
 namespace {
 

@@ -1,16 +1,16 @@
-#include "ScriptExchangeCtx.h"
+#include <fiber/http_script/ScriptExchangeCtx.h>
 
 #include <arpa/inet.h>
 
-#include "../common/json/JsonEncode.h"
-#include "../common/util/CookieCodec.h"
-#include "../common/util/UrlForm.h"
-#include "../http/HttpBodySpec.h"
-#include "../http/HttpExchangeIo.h"
-#include "../http/HttpHeaderHash.h"
-#include "../script/JsValue.h"
-#include "../script/gc/GcInternal.h"
-#include "../script/json/JsValueEncode.h"
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/common/util/CookieCodec.h>
+#include <fiber/common/util/UrlForm.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchangeIo.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/script/JsValue.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/json/JsValueEncode.h>
 
 #include <array>
 #include <cstring>

@@ -10,15 +10,15 @@
 #include <string>
 #include <vector>
 
+#include <fiber/common/util/RoutePathMatcher.h>
+#include <fiber/http/HeaderMap.h>
+#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpBodyPipe.h>
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/script/Script.h>
+#include <fiber/script/std/StdLibrary.h>
 #include "../config/Ast.h"
-#include "common/util/RoutePathMatcher.h"
-#include "http/HeaderMap.h"
-#include "http/Http1ConnectionGroupKey.h"
-#include "http/HttpBodyPipe.h"
-#include "net/IpAddress.h"
-#include "net/SocketAddress.h"
-#include "script/Script.h"
-#include "script/std/StdLibrary.h"
 
 namespace fiber::http_script {
 class ConstPackage;

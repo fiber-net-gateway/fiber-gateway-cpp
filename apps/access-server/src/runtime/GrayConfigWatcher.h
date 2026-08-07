@@ -8,10 +8,10 @@
 #include <optional>
 #include <string>
 
-#include <async/Task.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Task.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/nacos/ConfigService.h>
 
 namespace fiber::access_server {

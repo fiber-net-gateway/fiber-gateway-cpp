@@ -7,8 +7,8 @@
 
 #include <google/protobuf/message_lite.h>
 
-#include "common/mem/IoBuf.h"
-#include "common/mem/IoBufChain.h"
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBufChain.h>
 #include "helloworld.pb.h"
 #include "rpc/grpc/ProtoCodec.h"
 

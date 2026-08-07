@@ -3,7 +3,7 @@
 #include <cstring>
 #include <string>
 
-#include "script/gc/GcInternal.h"
+#include <fiber/script/gc/GcInternal.h>
 
 using fiber::script::GcArray;
 using fiber::script::GcHeap;

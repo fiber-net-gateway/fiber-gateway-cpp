@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "http/Http1ConnectionGroupHintTable.h"
+#include <fiber/http/Http1ConnectionGroupHintTable.h>
 
 namespace {
 

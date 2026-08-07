@@ -4,8 +4,8 @@
 #include <utility>
 
 #include <fiber/cat/CatClientConfig.h>
-#include <net/IpAddress.h>
-#include <net/SocketAddress.h>
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/SocketAddress.h>
 
 #include "CatRouter.h"
 

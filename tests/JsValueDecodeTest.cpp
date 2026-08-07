@@ -3,10 +3,10 @@
 #include <cstring>
 #include <string>
 
-#include "common/json/JsonEncode.h"
-#include "script/gc/GcInternal.h"
-#include "script/json/JsValueDecode.h"
-#include "script/json/JsValueEncode.h"
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/json/JsValueDecode.h>
+#include <fiber/script/json/JsValueEncode.h>
 
 using fiber::json::DecodeStatus;
 using fiber::json::Generator;

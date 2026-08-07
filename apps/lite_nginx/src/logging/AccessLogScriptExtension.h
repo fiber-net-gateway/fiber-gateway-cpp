@@ -6,9 +6,9 @@
 #include <cstdint>
 #include <string_view>
 
-#include "common/IoError.h"
-#include "http_script/ScriptExchangeCtx.h"
-#include "script/std/StdLibrary.h"
+#include <fiber/common/IoError.h>
+#include <fiber/http_script/ScriptExchangeCtx.h>
+#include <fiber/script/std/StdLibrary.h>
 
 namespace fiber::lite_nginx::logging {
 

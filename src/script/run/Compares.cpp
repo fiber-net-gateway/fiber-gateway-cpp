@@ -1,8 +1,8 @@
-#include "Compares.h"
+#include <fiber/script/run/Compares.h>
 
-#include "../../common/json/Utf.h"
-#include "../gc/GcInternal.h"
-#include "../gc/Wtf8.h"
+#include <fiber/common/json/Utf.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/gc/Wtf8.h>
 
 #include <cmath>
 #include <cstddef>

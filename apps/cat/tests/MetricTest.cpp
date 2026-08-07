@@ -6,12 +6,12 @@
 #include <type_traits>
 #include <utility>
 
-#include <async/Sleep.h>
-#include <async/Spawn.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
 #include <fiber/cat/Cat.h>
 #include <fiber/cat/Metric.h>
-#include <net/IpAddress.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/net/IpAddress.h>
 
 namespace {
 

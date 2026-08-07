@@ -2,7 +2,7 @@
 // Created by dear on 2025/12/30.
 //
 
-#include "GcRootSet.h"
+#include <fiber/script/GcRootSet.h>
 
 namespace fiber::script {
 

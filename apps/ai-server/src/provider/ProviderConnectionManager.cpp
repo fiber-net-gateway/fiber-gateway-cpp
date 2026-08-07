@@ -5,11 +5,11 @@
 #include <optional>
 #include <utility>
 
-#include <common/Assert.h>
-#include <event/EventLoop.h>
-#include <event/EventLoopGroup.h>
-#include <http/Http1ConnectionGroupKey.h>
-#include <net/SocketAddress.h>
+#include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/net/SocketAddress.h>
 
 namespace fiber::ai_server {
 namespace {

@@ -1,10 +1,10 @@
-#include "Http2HpackDecodeTable.h"
+#include <fiber/http/Http2HpackDecodeTable.h>
 
 #include <cstring>
 #include <limits>
 #include <new>
 
-#include "HttpHeaderHash.h"
+#include <fiber/http/HttpHeaderHash.h>
 
 namespace fiber::http {
 

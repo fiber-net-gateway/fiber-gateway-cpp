@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "common/json/JsonParser.h"
+#include <fiber/common/json/JsonParser.h>
 
 using fiber::json::JsonParser;
 using fiber::json::Token;

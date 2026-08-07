@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "quic/QuicPacketNumberSpace.h"
-#include "quic/QuicProtocol.h"
-#include "quic/QuicTransportCodec.h"
+#include <fiber/quic/QuicPacketNumberSpace.h>
+#include <fiber/quic/QuicProtocol.h>
+#include <fiber/quic/QuicTransportCodec.h>
 
 TEST(QuicPacketNumberSpaceTest, RecordsEcnCountersForReceivedPackets) {
     fiber::quic::QuicPacketNumberSpace space{};

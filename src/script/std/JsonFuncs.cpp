@@ -1,16 +1,16 @@
-#include "JsonFuncs.h"
+#include <fiber/script/std/JsonFuncs.h>
 
-#include "StdLibrary.h"
+#include <fiber/script/std/StdLibrary.h>
 
-#include "NodeText.h"
+#include <fiber/script/std/NodeText.h>
 
-#include "../../common/json/JsonDecode.h"
-#include "../../common/json/JsonEncode.h"
-#include "../JsValue.h"
-#include "../Library.h"
-#include "../gc/GcInternal.h"
-#include "../json/JsValueDecode.h"
-#include "../json/JsValueEncode.h"
+#include <fiber/common/json/JsonDecode.h>
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/json/JsValueDecode.h>
+#include <fiber/script/json/JsValueEncode.h>
 
 #include <cmath>
 #include <cstddef>

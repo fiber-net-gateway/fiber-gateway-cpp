@@ -1,8 +1,8 @@
 #ifndef FIBER_ACCESS_SERVER_PROXY_EXECUTOR_H
 #define FIBER_ACCESS_SERVER_PROXY_EXECUTOR_H
 
-#include "../../../../src/common/NonCopyable.h"
-#include "../../../../src/common/NonMovable.h"
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
 #include "../routing/ProxyAddressSelector.h"
 #include "AccessRequestHandler.h"
 #include "ProxyUpstreamConnection.h"

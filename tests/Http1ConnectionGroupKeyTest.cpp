@@ -3,7 +3,7 @@
 #include <functional>
 #include <string>
 
-#include "http/Http1ConnectionGroupKey.h"
+#include <fiber/http/Http1ConnectionGroupKey.h>
 
 namespace {
 

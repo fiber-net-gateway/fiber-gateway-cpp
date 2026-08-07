@@ -28,7 +28,7 @@
  #define UNREACHABLE __builtin_unreachable()
 #endif  /* _MSC_VER */
 
-#include "Http1HeaderLineParser.h"
+#include <fiber/http/generated/Http1HeaderLineParser.h>
 
 typedef int (*fiber_http1_header_line__span_cb)(
              fiber_http1_header_line_t*, const unsigned char*, const unsigned char*);

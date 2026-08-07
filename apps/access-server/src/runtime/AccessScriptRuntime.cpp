@@ -2,14 +2,14 @@
 
 #include <utility>
 
-#include <http_script/RequestFuncs.h>
-#include <http_script/ScriptExchangeCtx.h>
-#include <script/JsGc.h>
-#include <script/JsValue.h>
-#include <script/Script.h>
-#include <script/ScriptCompiler.h>
-#include <script/run/Compares.h>
-#include <script/std/NodeText.h>
+#include <fiber/http_script/RequestFuncs.h>
+#include <fiber/http_script/ScriptExchangeCtx.h>
+#include <fiber/script/JsGc.h>
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Script.h>
+#include <fiber/script/ScriptCompiler.h>
+#include <fiber/script/run/Compares.h>
+#include <fiber/script/std/NodeText.h>
 
 namespace fiber::access_server {
 namespace {

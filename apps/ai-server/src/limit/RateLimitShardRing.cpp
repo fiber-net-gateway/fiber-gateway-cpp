@@ -8,7 +8,7 @@
 #include <limits>
 #include <utility>
 
-#include <net/IpAddress.h>
+#include <fiber/net/IpAddress.h>
 
 namespace fiber::ai_server {
 namespace {

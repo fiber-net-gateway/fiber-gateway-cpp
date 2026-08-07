@@ -1,7 +1,7 @@
 #ifndef FIBER_TESTS_HTTP_TRANSPORT_STUB_H
 #define FIBER_TESTS_HTTP_TRANSPORT_STUB_H
 
-#include "http/HttpTransport.h"
+#include <fiber/http/HttpTransport.h>
 
 namespace fiber::test {
 

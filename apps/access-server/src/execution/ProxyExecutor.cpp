@@ -1,19 +1,19 @@
 #include "ProxyExecutor.h"
 #include "../observability/AccessRequestTelemetry.h"
 
-#include "../../../../src/async/TaskSelect.h"
-#include "../../../../src/async/WhenAny.h"
-#include "../../../../src/common/Assert.h"
-#include "../../../../src/event/EventLoop.h"
-#include "../../../../src/http/ClientHttp1Exchange.h"
-#include "../../../../src/http/Http1ClientConnection.h"
-#include "../../../../src/http/HttpBodyPipe.h"
-#include "../../../../src/http/HttpBodySpec.h"
-#include "../../../../src/http/HttpExchange.h"
-#include "../../../../src/http/HttpHeaderHash.h"
-#include "../../../../src/http/HttpHeaders.h"
-#include "../../../../src/http/HttpProxyCore.h"
-#include "../../../../src/http/HttpWebSocketProxy.h"
+#include <fiber/async/TaskSelect.h>
+#include <fiber/async/WhenAny.h>
+#include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/http/ClientHttp1Exchange.h>
+#include <fiber/http/Http1ClientConnection.h>
+#include <fiber/http/HttpBodyPipe.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpProxyCore.h>
+#include <fiber/http/HttpWebSocketProxy.h>
 #include "ProxyResponsePlan.h"
 
 #include <algorithm>

@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string_view>
 
-#include <common/json/JsonValue.h>
+#include <fiber/common/json/JsonValue.h>
 
 namespace fiber::nacos::dto {
 

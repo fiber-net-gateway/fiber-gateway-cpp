@@ -4,9 +4,9 @@
 
 #include <gtest/gtest.h>
 
-#include "common/mem/IoBufChain.h"
-#include "http/Http3ControlStreamEncoder.h"
-#include "http/Http3Protocol.h"
+#include <fiber/common/mem/IoBufChain.h>
+#include <fiber/http/Http3ControlStreamEncoder.h>
+#include <fiber/http/Http3Protocol.h>
 
 namespace {
 

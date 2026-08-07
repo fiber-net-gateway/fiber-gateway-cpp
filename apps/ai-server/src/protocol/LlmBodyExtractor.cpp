@@ -8,8 +8,8 @@
 #include <type_traits>
 #include <utility>
 
-#include <common/Assert.h>
-#include <common/json/JsonPath.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/json/JsonPath.h>
 
 namespace fiber::ai_server {
 namespace {

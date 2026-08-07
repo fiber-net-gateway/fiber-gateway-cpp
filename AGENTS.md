@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is not organized around a single default executable. Core framework code lives under `src/` and is built into the reusable static library `fiber_lib`, which is shared by examples, tests, and applications. Key source modules include `src/event/`, `src/async/`, `src/net/`, `src/dns/`, `src/http/`, `src/common/`, and `src/script/`; shared memory helpers live in `src/common/mem/`, common JSON codec helpers live in `src/common/json/`, and the script value/GC JSON model lives in `src/script/json/`. Single-file runnable examples live in `example/`. Multi-file applications live in `apps/`; the current application is `apps/lite_nginx`. Tests live in `tests/` and are wired through CTest/GoogleTest. Documentation and design notes live in `docs/` and `feature/`, with build support under `cmake/` and auxiliary tooling under `scripts/`. Headers and implementations stay together where practical (e.g., `IoBuf.h` + `IoBuf.cpp`).
+This repository is not organized around a single default executable. Core framework implementations live under `src/` and public headers live under `include/fiber/`; together they are built into the reusable static library `fiber_lib`, which is shared by examples, tests, and applications. Key modules include `event/`, `async/`, `net/`, `dns/`, `http/`, `common/`, and `script/` below both roots; shared memory headers live in `include/fiber/common/mem/`, common JSON codec headers live in `include/fiber/common/json/`, and the script value/GC JSON model lives in `include/fiber/script/json/`. Single-file runnable examples live in `example/`. Multi-file applications live in `apps/`; the current application is `apps/lite_nginx`. Tests live in `tests/` and are wired through CTest/GoogleTest. Documentation and design notes live in `docs/` and `feature/`, with build support under `cmake/` and auxiliary tooling under `scripts/`.
 
 ## Build, Test, and Development Commands
 This project uses CMake and targets C++23. Typical local workflow:
@@ -19,7 +19,7 @@ ctest --test-dir build
 ```
 
 ## Coding Style & Naming Conventions
-Follow existing C++23 style: 4-space indentation, braces on the same line, and namespaces under `fiber::...`. Class and type names use PascalCase (e.g., `Buffer`, `Generator`). Header guards follow `FIBER_<NAME>_H`. Keep includes local and explicit (e.g., `#include "../mem/Buffer.h"`). Prefer small, focused headers and keep implementations in `.cpp` files.
+Follow existing C++23 style: 4-space indentation, braces on the same line, and namespaces under `fiber::...`. Class and type names use PascalCase (e.g., `Buffer`, `Generator`). Header guards follow `FIBER_<NAME>_H`. Include public core headers through their namespaced path (for example, `#include <fiber/common/mem/Buffer.h>`); keep application-private includes local and explicit. Prefer small, focused headers and keep implementations in `.cpp` files.
 
 Do not spend time repeatedly formatting code while implementing a task. Once the task is complete, run `./format_code.sh` to apply the repository-wide formatting rules.
 

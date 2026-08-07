@@ -5,10 +5,10 @@
 #include <string_view>
 #include <vector>
 
-#include "common/IoError.h"
-#include "http/Http3QpackDecoder.h"
-#include "http/HttpHeaderHash.h"
-#include "http/Huffman.h"
+#include <fiber/common/IoError.h>
+#include <fiber/http/Http3QpackDecoder.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/Huffman.h>
 
 namespace {
 

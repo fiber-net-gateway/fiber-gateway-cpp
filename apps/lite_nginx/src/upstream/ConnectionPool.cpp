@@ -3,8 +3,8 @@
 #include <future>
 #include <utility>
 
-#include "async/Spawn.h"
-#include "event/EventLoopGroup.h"
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
 
 namespace fiber::lite_nginx::upstream {
 namespace {

@@ -4,8 +4,8 @@
 #include <cstdint>
 #include <cstring>
 
-#include "common/IoError.h"
-#include "dns/DnsMessage.h"
+#include <fiber/common/IoError.h>
+#include <fiber/dns/DnsMessage.h>
 
 namespace {
 

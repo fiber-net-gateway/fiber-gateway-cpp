@@ -6,8 +6,8 @@
 #include <utility>
 #include <vector>
 
-#include "http/HeaderMap.h"
-#include "http/HttpHeaderHash.h"
+#include <fiber/http/HeaderMap.h>
+#include <fiber/http/HttpHeaderHash.h>
 
 namespace {
 

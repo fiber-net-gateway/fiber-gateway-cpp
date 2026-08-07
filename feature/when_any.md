@@ -6,9 +6,9 @@
 
 实现位于：
 
-- `src/async/Awaitable.h`：通用 Awaiter 检测和 `SelectableAwaiter` 协议。
-- `src/async/TaskSelect.h`：拥有 Task coroutine frame 的 `TaskSelectAwaiter<T>`。
-- `src/async/WhenAny.h`：`WhenAnyAwaiter`、`WhenAnyResult` 和 `when_any()`。
+- `include/fiber/async/Awaitable.h`：通用 Awaiter 检测和 `SelectableAwaiter` 协议。
+- `include/fiber/async/TaskSelect.h`：拥有 Task coroutine frame 的 `TaskSelectAwaiter<T>`。
+- `include/fiber/async/WhenAny.h`：`WhenAnyAwaiter`、`WhenAnyResult` 和 `when_any()`。
 
 ## Public API
 
@@ -64,7 +64,7 @@ Factory 必须返回 prvalue `SelectableAwaiter`。每个 Factory 的调用结�
 `Task<T>` 通过右值限定的 `select()` 转换为可选择 Awaiter：
 
 ```cpp
-#include "async/TaskSelect.h"
+#include <fiber/async/TaskSelect.h>
 
 auto result = co_await fiber::async::when_any(
         []() { return request_task().select(); },

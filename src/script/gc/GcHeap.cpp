@@ -2,9 +2,9 @@
 // Created by dear on 2025/12/30.
 //
 
-#include "GcInternal.h"
+#include <fiber/script/gc/GcInternal.h>
 
-#include "../../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 #include <limits>
 #include <utility>

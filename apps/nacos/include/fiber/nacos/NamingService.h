@@ -10,11 +10,11 @@
 #include <string_view>
 #include <vector>
 
-#include <async/Task.h>
-#include <async/Watch.h>
-#include <common/IoError.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
+#include <fiber/async/Task.h>
+#include <fiber/async/Watch.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
 
 #include "NacosCreateError.h"
 #include "NacosRpcOptions.h"

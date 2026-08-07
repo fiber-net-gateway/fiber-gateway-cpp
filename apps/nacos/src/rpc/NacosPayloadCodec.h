@@ -6,8 +6,8 @@
 #include <optional>
 #include <string_view>
 
-#include <common/json/JsonParser.h>
-#include <common/mem/BufPool.h>
+#include <fiber/common/json/JsonParser.h>
+#include <fiber/common/mem/BufPool.h>
 #include <nacos_grpc_payload.pb.h>
 #include "../dto/JsonCodec.h"
 

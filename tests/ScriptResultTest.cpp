@@ -2,8 +2,8 @@
 
 #include <string_view>
 
-#include "script/JsValue.h"
-#include "script/ScriptResult.h"
+#include <fiber/script/JsValue.h>
+#include <fiber/script/ScriptResult.h>
 
 using fiber::script::ExceptionKind;
 using fiber::script::ScriptAbortReason;

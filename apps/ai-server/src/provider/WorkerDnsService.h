@@ -12,14 +12,14 @@
 #include <utility>
 #include <vector>
 
-#include <async/Task.h>
-#include <common/IoError.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <dns/DnsCache2.h>
-#include <dns/DnsResolver.h>
-#include <net/IpAddress.h>
-#include <net/SocketAddress.h>
+#include <fiber/async/Task.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/dns/DnsCache2.h>
+#include <fiber/dns/DnsResolver.h>
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/SocketAddress.h>
 
 namespace fiber::event {
 class EventLoop;

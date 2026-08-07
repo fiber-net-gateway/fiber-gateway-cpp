@@ -11,10 +11,10 @@
 #include <optional>
 #include <utility>
 
-#include <async/Spawn.h>
-#include <common/Assert.h>
+#include <fiber/async/Spawn.h>
 #include <fiber/cat/Status.h>
-#include <log/Log.h>
+#include <fiber/common/Assert.h>
+#include <fiber/log/Log.h>
 
 namespace fiber::ai_server {
 namespace {

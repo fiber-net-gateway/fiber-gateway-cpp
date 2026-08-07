@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <limits>
 
-#include "script/JsValue.h"
-#include "script/ScriptResult.h"
-#include "script/std/StdLibrary.h"
+#include <fiber/script/JsValue.h>
+#include <fiber/script/ScriptResult.h>
+#include <fiber/script/std/StdLibrary.h>
 
 namespace fiber::lite_nginx::logging {
 namespace {

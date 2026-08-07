@@ -8,8 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <fiber/http/HttpBodyPipe.h>
 #include "Ast.h"
-#include "http/HttpBodyPipe.h"
 
 namespace fiber::lite_nginx::config {
 

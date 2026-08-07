@@ -299,11 +299,11 @@ brainstorm; if the user prefers reset, §3.4 is replaced.
 | Area | File | Change |
 |------|------|--------|
 | TLS CTX | `src/net/TlsContext.cpp`, `TlsOptions.h` | `SSL_CTX_set_early_data_enabled`, `SSL_CTX_set_max_early_data`; `enable_0rtt`/`max_early_data` options |
-| Per-conn TLS | `src/quic/QuicTlsSession.cpp/.h` | `SSL_set_quic_early_data_context` (using `zero_rtt_len`), `SSL_set_early_data_enabled`; expose `early_data_accepted()` |
-| Receive/gate | `src/quic/QuicConnection.{h,cpp}`, `QuicPacketProcessor.cpp` | `EarlyDataStatus` tracker; accept/reject gate at handshake-confirm; post-verdict 0-RTT drop; 0-RTT ACK suppression |
-| Stream rollback | `src/quic/QuicStreamRecvQueue.{h,cpp}`, `QuicStream.h` | `rollback_early_data()`; `received_early_data_` flag |
+| Per-conn TLS | `src/quic/QuicTlsSession.cpp + include/fiber/quic/QuicTlsSession.h` | `SSL_set_quic_early_data_context` (using `zero_rtt_len`), `SSL_set_early_data_enabled`; expose `early_data_accepted()` |
+| Receive/gate | `include/fiber/quic/QuicConnection.h`, `src/quic/QuicConnection.cpp`, `QuicPacketProcessor.cpp` | `EarlyDataStatus` tracker; accept/reject gate at handshake-confirm; post-verdict 0-RTT drop; 0-RTT ACK suppression |
+| Stream rollback | `include/fiber/quic/QuicStreamRecvQueue.h`, `src/quic/QuicStreamRecvQueue.cpp`, `QuicStream.h` | `rollback_early_data()`; `received_early_data_` flag |
 | App accessors | `QuicConnection.h`, `QuicStream.h` | `early_data_status()`, `early_data_accepted()`, `received_early_data()` (no H3 behavior) |
-| Config | `src/quic/QuicUdpEndpoint.h` | forward `enable_0rtt`/`max_early_data` |
+| Config | `include/fiber/quic/QuicUdpEndpoint.h` | forward `enable_0rtt`/`max_early_data` |
 | Tests | `tests/Quic*Test.cpp` | unit tests §5.1 + manual e2e plan §5.2 |
 
 ---

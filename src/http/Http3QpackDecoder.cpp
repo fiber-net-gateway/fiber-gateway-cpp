@@ -1,10 +1,10 @@
-#include "Http3QpackDecoder.h"
+#include <fiber/http/Http3QpackDecoder.h>
 
 #include <cstring>
 #include <limits>
 #include <new>
 
-#include "../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::http {
 

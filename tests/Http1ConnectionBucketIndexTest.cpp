@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "http/Http1ConnectionBucketIndex.h"
+#include <fiber/http/Http1ConnectionBucketIndex.h>
 
 namespace {
 

@@ -1,11 +1,11 @@
-#include "LengthFunc.h"
+#include <fiber/script/std/LengthFunc.h>
 
-#include "StdLibrary.h"
+#include <fiber/script/std/StdLibrary.h>
 
-#include "../../common/json/Utf.h"
-#include "../JsValue.h"
-#include "../Library.h"
-#include "../gc/GcInternal.h"
+#include <fiber/common/json/Utf.h>
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
+#include <fiber/script/gc/GcInternal.h>
 
 #include <cstdint>
 

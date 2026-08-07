@@ -1,8 +1,8 @@
 #ifndef FIBER_TEST_QUIC_TEST_LOOP_H
 #define FIBER_TEST_QUIC_TEST_LOOP_H
 
-#include "event/EventLoop.h"
-#include "quic/QuicConnection.h"
+#include <fiber/event/EventLoop.h>
+#include <fiber/quic/QuicConnection.h>
 
 namespace fiber::test {
 

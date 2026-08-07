@@ -14,8 +14,8 @@
 #include <string_view>
 #include <utility>
 
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
 #include <fiber/nacos/discovery/ServiceDiscovery.h>
 
 namespace fiber::access_server {

@@ -1,6 +1,6 @@
-#include "Unaries.h"
+#include <fiber/script/run/Unaries.h>
 
-#include "../gc/GcInternal.h"
+#include <fiber/script/gc/GcInternal.h>
 
 #include <cmath>
 #include <cstring>

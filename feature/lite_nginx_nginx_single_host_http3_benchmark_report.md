@@ -81,7 +81,7 @@ ngtcp2，因此不满足计划要求的“第二套独立 QUIC 实现”。
   跟随并发 stream；客户端广告 0 后响应动态表被限制为 0。
 
 lite-nginx 的 `src/http/Http3Server.cpp:130-154,249-253` 确认每个 worker 创建一个
-reuseport UDP shard；`src/http/Http3Protocol.h:31-36` 的 QPACK table/blocked streams
+reuseport UDP shard；`include/fiber/http/Http3Protocol.h:31-36` 的 QPACK table/blocked streams
 默认均为 0。
 
 ## 3. 正确性和互操作

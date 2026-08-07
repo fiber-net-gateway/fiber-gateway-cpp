@@ -1,9 +1,9 @@
 #ifndef FIBER_PROMETHEUS_TEXT_ENCODER_H
 #define FIBER_PROMETHEUS_TEXT_ENCODER_H
 
-#include "common/IoError.h"
-#include "common/mem/IoBuf.h"
-#include "common/mem/IoBufChain.h"
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBufChain.h>
 #include "fiber/prometheus/MetricsRegistry.h"
 
 namespace fiber::prometheus::detail {

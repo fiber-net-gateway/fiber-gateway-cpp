@@ -1,7 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_CIDR_H
 #define FIBER_ACCESS_SERVER_CIDR_H
 
-#include "../../../../src/net/IpAddress.h"
+#include <fiber/net/IpAddress.h>
 #include "../config/AccessConfigError.h"
 
 #include <array>

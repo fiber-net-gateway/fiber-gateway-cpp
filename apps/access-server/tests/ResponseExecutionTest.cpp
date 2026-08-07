@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include "common/mem/BufPool.h"
+#include <fiber/common/mem/BufPool.h>
 #include "execution/AccessResult.h"
 #include "execution/ErrorResponder.h"
 #include "execution/ProxyResponsePlan.h"

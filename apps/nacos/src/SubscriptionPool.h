@@ -14,9 +14,9 @@
 #include <string_view>
 #include <utility>
 
-#include <common/Assert.h>
-#include <common/IntrusiveList.h>
-#include <common/IntrusiveRbTree.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/IntrusiveList.h>
+#include <fiber/common/IntrusiveRbTree.h>
 #include <fiber/nacos/Subscription.h>
 
 namespace fiber::nacos::detail {

@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-#include "script/gc/GcInternal.h"
+#include <fiber/script/gc/GcInternal.h>
 
 namespace {
 

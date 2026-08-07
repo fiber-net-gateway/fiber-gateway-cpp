@@ -2,7 +2,7 @@
 
 #include <string_view>
 
-#include "script/gc/Wtf8.h"
+#include <fiber/script/gc/Wtf8.h>
 
 namespace {
 

@@ -1,11 +1,11 @@
-#include "IncludesFunc.h"
+#include <fiber/script/std/IncludesFunc.h>
 
-#include "StdLibrary.h"
+#include <fiber/script/std/StdLibrary.h>
 
-#include "../JsValue.h"
-#include "../Library.h"
-#include "../gc/GcInternal.h"
-#include "../run/Compares.h"
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/run/Compares.h>
 
 #include <cstdint>
 #include <string>

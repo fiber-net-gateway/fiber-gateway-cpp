@@ -5,9 +5,9 @@
 #include <iterator>
 #include <string>
 
-#include "http_script/HttpScriptLib.h"
-#include "script/ScriptCompiler.h"
-#include "script/std/StdLibrary.h"
+#include <fiber/http_script/HttpScriptLib.h>
+#include <fiber/script/ScriptCompiler.h>
+#include <fiber/script/std/StdLibrary.h>
 
 namespace {
 

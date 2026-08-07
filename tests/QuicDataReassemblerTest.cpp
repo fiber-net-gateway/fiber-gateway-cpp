@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-#include "quic/QuicDataReassembler.h"
+#include <fiber/quic/QuicDataReassembler.h>
 
 namespace {
 

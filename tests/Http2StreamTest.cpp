@@ -8,15 +8,15 @@
 #include <string>
 #include <string_view>
 
-#include "async/Spawn.h"
-#include "event/EventLoopGroup.h"
-#include "http/HttpHeaderHash.h"
-#include "http/Huffman.h"
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/Huffman.h>
 
 #define private public
 #define protected public
-#include "http/Http2Connection.h"
-#include "http/Http2Stream.h"
+#include <fiber/http/Http2Connection.h>
+#include <fiber/http/Http2Stream.h>
 #undef private
 #undef protected
 

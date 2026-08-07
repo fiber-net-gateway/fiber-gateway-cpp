@@ -701,7 +701,7 @@ interface HttpService {
 
 ### 7.1 CMake 链接
 
-仓库内应用直接链接 `fiber_lib`；其 `src/` include 目录会以 PUBLIC 方式传递：
+仓库内应用直接链接 `fiber_lib`；其 `include/` 目录会以 PUBLIC 方式传递，核心头文件统一通过 `<fiber/...>` 引用：
 
 ```cmake
 add_executable(script_embed main.cpp)
@@ -715,10 +715,10 @@ target_link_libraries(script_embed PRIVATE fiber_lib)
 #include <string>
 #include <utility>
 
-#include "script/JsGc.h"
-#include "script/JsValue.h"
-#include "script/ScriptCompiler.h"
-#include "script/std/StdLibrary.h"
+#include <fiber/script/JsGc.h>
+#include <fiber/script/JsValue.h>
+#include <fiber/script/ScriptCompiler.h>
+#include <fiber/script/std/StdLibrary.h>
 
 int main() {
     using namespace fiber::script;
@@ -852,9 +852,9 @@ run(fiber::script::Script &script,
 ### 7.6 注册同步宿主函数
 
 ```cpp
-#include "script/Library.h"
-#include "script/ScriptResult.h"
-#include "script/std/StdLibrary.h"
+#include <fiber/script/Library.h>
+#include <fiber/script/ScriptResult.h>
+#include <fiber/script/std/StdLibrary.h>
 
 namespace {
 
@@ -1007,12 +1007,12 @@ return {environment: $env.name};
 #include <string_view>
 #include <vector>
 
-#include "http_script/ConstPackage.h"
-#include "http_script/ExchangeConstExtension.h"
-#include "http_script/HttpScriptLib.h"
-#include "http_script/RouteScriptExtension.h"
-#include "script/ScriptCompiler.h"
-#include "script/std/StdLibrary.h"
+#include <fiber/http_script/ConstPackage.h>
+#include <fiber/http_script/ExchangeConstExtension.h>
+#include <fiber/http_script/HttpScriptLib.h>
+#include <fiber/http_script/RouteScriptExtension.h>
+#include <fiber/script/ScriptCompiler.h>
+#include <fiber/script/std/StdLibrary.h>
 
 struct ScriptRuntime {
     fiber::script::std_lib::StdLibrary library;
@@ -1061,10 +1061,10 @@ compile_route_script(ScriptRuntime &runtime,
 #include <utility>
 #include <vector>
 
-#include "http_script/ScriptExchangeCtx.h"
-#include "script/JsGc.h"
-#include "script/Script.h"
-#include "script/ScriptResult.h"
+#include <fiber/http_script/ScriptExchangeCtx.h>
+#include <fiber/script/JsGc.h>
+#include <fiber/script/Script.h>
+#include <fiber/script/ScriptResult.h>
 
 fiber::async::Task<void>
 execute_http_script(
@@ -1208,13 +1208,13 @@ lite-nginx 已提供基于 `UpstreamRegistry + ConnectionPool + DnsService` 的�
 
 ## 10. 相关源码和示例
 
-- 编译入口：`src/script/ScriptCompiler.h`
-- 执行入口：`src/script/Script.h`、`src/script/ScriptResult.h`
-- C++ 值/GC API：`src/script/JsValue.h`、`src/script/JsGc.h`
+- 编译入口：`include/fiber/script/ScriptCompiler.h`
+- 执行入口：`include/fiber/script/Script.h`、`include/fiber/script/ScriptResult.h`
+- C++ 值/GC API：`include/fiber/script/JsValue.h`、`include/fiber/script/JsGc.h`
 - 标准库注册：`src/script/std/StdLibrary.cpp`
 - HTTP 函数与固定常量：`src/http_script/RequestFuncs.cpp`、`ResponseFuncs.cpp`、`ExchangeConstExtension.cpp`
 - 上游 HTTP：`src/http_script/HttpClientFuncs.cpp`
-- HTTP 执行上下文：`src/http_script/ScriptExchangeCtx.h`
+- HTTP 执行上下文：`include/fiber/http_script/ScriptExchangeCtx.h`
 - lite-nginx 脚本示例：`apps/lite_nginx/conf/scripts/`
 - 完整 HTTP 执行参考：`apps/lite_nginx/src/runtime/ServerLauncher.cpp`
 - 标准库行为测试：`tests/*FuncsTest.cpp`

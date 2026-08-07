@@ -7,9 +7,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include <fiber/http/HttpProxyCore.h>
+#include <fiber/log/LogConfig.h>
 #include "PathResolve.h"
-#include "http/HttpProxyCore.h"
-#include "log/LogConfig.h"
 
 namespace fiber::lite_nginx::config {
 namespace {

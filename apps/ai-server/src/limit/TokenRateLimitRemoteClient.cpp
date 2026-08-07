@@ -8,16 +8,16 @@
 #include <limits>
 #include <string_view>
 
-#include <common/Assert.h>
-#include <common/mem/BufPool.h>
-#include <event/EventLoop.h>
-#include <http/ClientHttp1Exchange.h>
-#include <http/ClientHttp1Types.h>
-#include <http/Http1ConnectionGroupKey.h>
-#include <http/HttpBodySpec.h>
-#include <http/HttpHeaders.h>
-#include <net/IpAddress.h>
-#include <net/SocketAddress.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/http/ClientHttp1Exchange.h>
+#include <fiber/http/ClientHttp1Types.h>
+#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/SocketAddress.h>
 
 namespace fiber::ai_server {
 namespace {

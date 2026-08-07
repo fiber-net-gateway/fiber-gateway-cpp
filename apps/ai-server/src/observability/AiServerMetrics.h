@@ -13,18 +13,18 @@
 #include <memory>
 #include <vector>
 
-#include <async/Task.h>
-#include <common/IoError.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <common/mem/IoBufChain.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Task.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/common/mem/IoBufChain.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/log/Appender.h>
 #include <fiber/prometheus/Counter.h>
 #include <fiber/prometheus/Gauge.h>
 #include <fiber/prometheus/Histogram.h>
 #include <fiber/prometheus/MetricsRegistry.h>
-#include <http/HttpExchange.h>
-#include <log/Appender.h>
 
 namespace fiber::ai_server {
 

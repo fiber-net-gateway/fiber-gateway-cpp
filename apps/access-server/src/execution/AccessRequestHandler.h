@@ -1,7 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_REQUEST_HANDLER_H
 #define FIBER_ACCESS_SERVER_ACCESS_REQUEST_HANDLER_H
 
-#include "../../../../src/async/Task.h"
+#include <fiber/async/Task.h>
 #include "../routing/ProjectRouteSnapshot.h"
 #include "../runtime/RouteConfigStore.h"
 #include "AccessResult.h"

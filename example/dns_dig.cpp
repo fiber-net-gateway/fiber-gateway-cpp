@@ -11,17 +11,17 @@
 #include <string>
 #include <string_view>
 
-#include "async/Spawn.h"
-#include "async/Timeout.h"
-#include "common/IoError.h"
-#include "dns/DnsClient.h"
-#include "dns/DnsMessage.h"
-#include "dns/DnsName.h"
-#include "event/EventLoop.h"
-#include "net/IpAddress.h"
-#include "net/SocketAddress.h"
-#include "net/TcpStream.h"
-#include "net/UdpSocket.h"
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/common/IoError.h>
+#include <fiber/dns/DnsClient.h>
+#include <fiber/dns/DnsMessage.h>
+#include <fiber/dns/DnsName.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/net/TcpStream.h>
+#include <fiber/net/UdpSocket.h>
 
 namespace {
 
