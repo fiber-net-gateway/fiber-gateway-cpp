@@ -18,7 +18,7 @@
 #include <common/NonCopyable.h>
 #include <common/NonMovable.h>
 #include <http/Http1ClientConnection.h>
-#include <http/LocalHttp1ConnectionPoolSet.h>
+#include <http/StealableHttp1ConnectionPoolSet.h>
 
 namespace fiber::event {
 class EventLoopGroup;
@@ -61,7 +61,7 @@ struct ProviderLoadBalanceLease {
 };
 
 struct ProviderConnectionLease {
-    http::LocalHttp1ConnectionPoolSet::Lease lease;
+    http::StealableHttp1ConnectionPoolSet::Lease lease;
     http::Http1ClientConnection *connection = nullptr;
     std::string host_header;
     std::string target;
@@ -86,7 +86,7 @@ public:
 private:
     event::EventLoopGroup *workers_ = nullptr;
     WorkerDnsService dns_;
-    http::LocalHttp1ConnectionPoolSet pool_;
+    http::StealableHttp1ConnectionPoolSet pool_;
     bool pool_initialized_ = false;
     bool initialized_ = false;
 };

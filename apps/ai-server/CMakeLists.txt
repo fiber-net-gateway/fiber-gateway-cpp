@@ -73,6 +73,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmProxyIntegrationTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmRateLimitTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LlmRoutingTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/ProviderConnectionManagerTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/WeightedRendezvousTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/WorkerDnsServiceTest.cpp")
     target_link_libraries(fiber_ai_server_tests PRIVATE ai_server_core GTest::gtest_main)
