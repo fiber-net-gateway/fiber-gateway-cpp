@@ -203,7 +203,7 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
 
     ProviderConnectionLease output;
     output.load_balance = std::move(dial.load_balance);
-    output.lease = pool_.acquire(*dial.key);
+    output.lease = co_await pool_.acquire(*dial.key);
     if (!output.lease.valid()) {
         co_return std::unexpected(error(ProviderConnectionErrorCode::PoolShutdown,
                                         "provider connection pool is shutting down", common::IoErr::Canceled));
@@ -227,7 +227,7 @@ ProviderConnectionManager::acquire(const ResolvedProviderAttempt &attempt, std::
     common::IoErr last_error = common::IoErr::NotFound;
     for (std::uint16_t i = 0; i < dial.addresses.size; ++i) {
         if (i > 0) {
-            output.lease = pool_.acquire(*dial.key);
+            output.lease = co_await pool_.acquire(*dial.key);
             if (!output.lease.valid()) {
                 co_return std::unexpected(error(ProviderConnectionErrorCode::PoolShutdown,
                                                 "provider connection pool is shutting down", common::IoErr::Canceled));
