@@ -32,7 +32,7 @@
   executor，由 executor 完成 service/cluster/addresses、method、URI/rewrite/query、Java
   固定 header 过滤、proxy/context/source header、body framing/limit、timeout、flush 和
   WebSocket 请求条件；
-- 已实现基于 `LocalHttp1ConnectionPoolSet`/`ClientHttp1Exchange` 的完整 `ProxyExecutor`
+- 已实现基于 `StealableHttp1ConnectionPoolSet`/`ClientHttp1Exchange` 的完整 `ProxyExecutor`
   状态机：先选择静态地址或 service endpoint，再构造实际 `Http1RequestHead`，随后查询
   connection pool，并在 miss 后完成 DNS/多地址连接；header/body 流式收发、动态 body
   limit、Java request timeout 和 request header 发送前的连接失败重选均已实现；pool

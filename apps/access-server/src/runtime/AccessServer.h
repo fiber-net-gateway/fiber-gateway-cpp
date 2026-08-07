@@ -17,7 +17,7 @@
 #include <event/EventLoop.h>
 #include <event/EventLoopGroup.h>
 #include <http/Http1Server.h>
-#include <http/LocalHttp1ConnectionPoolSet.h>
+#include <http/StealableHttp1ConnectionPoolSet.h>
 #include <net/SocketAddress.h>
 #include <net/TcpListener.h>
 
@@ -61,7 +61,7 @@ private:
     event::EventLoop *accept_loop_ = nullptr;
     event::EventLoopGroup *workers_ = nullptr;
     AccessDnsService dns_;
-    http::LocalHttp1ConnectionPoolSet pool_;
+    http::StealableHttp1ConnectionPoolSet pool_;
     ProxyExecutor executor_;
     AccessRequestHandler handler_;
     AccessServerMetrics metrics_;

@@ -473,7 +473,7 @@ bool response_limit_exceeded(const std::optional<std::uint64_t> &limit, std::siz
 
 } // namespace
 
-ProxyExecutor::ProxyExecutor(http::LocalHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher,
+ProxyExecutor::ProxyExecutor(http::StealableHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher,
                              ProxyDnsResolver dns_resolver, ProxyExecutorOptions options) noexcept :
     pool_(pool), cluster_matcher_(cluster_matcher), dns_resolver_(dns_resolver), options_(options) {
     if (options_.request_body_chunk_size == 0) {
