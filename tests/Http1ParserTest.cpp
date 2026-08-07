@@ -7,10 +7,10 @@
 #include <string>
 #include <string_view>
 
-#include "common/mem/IoBuf.h"
-#include "http/Http1HeaderParseBuffer.h"
-#include "http/Http1Parser.h"
-#include "http/generated/Http1HeaderLineParser.h"
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/http/Http1HeaderParseBuffer.h>
+#include <fiber/http/Http1Parser.h>
+#include <fiber/http/generated/Http1HeaderLineParser.h>
 
 namespace {
 

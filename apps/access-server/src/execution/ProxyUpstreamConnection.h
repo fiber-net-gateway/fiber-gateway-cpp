@@ -1,10 +1,10 @@
 #ifndef FIBER_ACCESS_SERVER_PROXY_UPSTREAM_CONNECTION_H
 #define FIBER_ACCESS_SERVER_PROXY_UPSTREAM_CONNECTION_H
 
-#include "../../../../src/async/Task.h"
-#include "../../../../src/common/IoError.h"
-#include "../../../../src/http/StealableHttp1ConnectionPoolSet.h"
-#include "../../../../src/net/IpAddress.h"
+#include <fiber/async/Task.h>
+#include <fiber/common/IoError.h>
+#include <fiber/http/StealableHttp1ConnectionPoolSet.h>
+#include <fiber/net/IpAddress.h>
 
 #include <chrono>
 #include <cstdint>

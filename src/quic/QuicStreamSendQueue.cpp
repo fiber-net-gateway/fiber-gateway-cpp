@@ -1,11 +1,11 @@
-#include "QuicStreamSendQueue.h"
+#include <fiber/quic/QuicStreamSendQueue.h>
 
 #include <algorithm>
 #include <expected>
 
-#include "../common/Assert.h"
-#include "QuicCursor.h"
-#include "QuicTransportCodec.h"
+#include <fiber/common/Assert.h>
+#include <fiber/quic/QuicCursor.h>
+#include <fiber/quic/QuicTransportCodec.h>
 
 namespace fiber::quic {
 

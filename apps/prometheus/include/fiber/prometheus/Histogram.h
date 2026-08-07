@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <span>
 
-#include "common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::prometheus {
 

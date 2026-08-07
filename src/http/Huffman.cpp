@@ -1,4 +1,4 @@
-#include "Huffman.h"
+#include <fiber/http/Huffman.h>
 
 #include <array>
 #include <cstddef>

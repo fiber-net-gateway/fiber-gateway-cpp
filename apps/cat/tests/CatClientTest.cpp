@@ -16,19 +16,19 @@
 #include <utility>
 #include <vector>
 
-#include <async/Sleep.h>
-#include <async/Spawn.h>
-#include <common/IoError.h>
-#include <common/mem/BufPool.h>
-#include <common/mem/IoBuf.h>
-#include <dns/DnsCache2.h>
-#include <dns/DnsResolver.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
 #include <fiber/cat/Cat.h>
-#include <net/IpAddress.h>
-#include <net/SocketAddress.h>
-#include <net/TcpListener.h>
-#include <net/TcpStream.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/dns/DnsCache2.h>
+#include <fiber/dns/DnsResolver.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/net/TcpListener.h>
+#include <fiber/net/TcpStream.h>
 
 #include "CatClientCore.h"
 

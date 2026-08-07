@@ -1,4 +1,4 @@
-#include "Compiler.h"
+#include <fiber/script/ir/Compiler.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -11,35 +11,35 @@
 #include <utility>
 #include <vector>
 
-#include "../../common/Assert.h"
-#include "../ast/Assign.h"
-#include "../ast/BinaryOperator.h"
-#include "../ast/Block.h"
-#include "../ast/BreakStatement.h"
-#include "../ast/ConstantVal.h"
-#include "../ast/ContinueStatement.h"
-#include "../ast/DirectiveStatement.h"
-#include "../ast/ExpandArrArg.h"
-#include "../ast/ExpressionStatement.h"
-#include "../ast/ForeachStatement.h"
-#include "../ast/FunctionCall.h"
-#include "../ast/Identifier.h"
-#include "../ast/IfStatement.h"
-#include "../ast/Indexer.h"
-#include "../ast/InlineList.h"
-#include "../ast/InlineObject.h"
-#include "../ast/Literal.h"
-#include "../ast/LogicRelationalExpression.h"
-#include "../ast/PropertyReference.h"
-#include "../ast/ReturnStatement.h"
-#include "../ast/Statement.h"
-#include "../ast/TemplateString.h"
-#include "../ast/Ternary.h"
-#include "../ast/ThrowStatement.h"
-#include "../ast/TryCatchStatement.h"
-#include "../ast/UnaryOperator.h"
-#include "../ast/VariableDeclareStatement.h"
-#include "../ast/VariableReference.h"
+#include <fiber/common/Assert.h>
+#include <fiber/script/ast/Assign.h>
+#include <fiber/script/ast/BinaryOperator.h>
+#include <fiber/script/ast/Block.h>
+#include <fiber/script/ast/BreakStatement.h>
+#include <fiber/script/ast/ConstantVal.h>
+#include <fiber/script/ast/ContinueStatement.h>
+#include <fiber/script/ast/DirectiveStatement.h>
+#include <fiber/script/ast/ExpandArrArg.h>
+#include <fiber/script/ast/ExpressionStatement.h>
+#include <fiber/script/ast/ForeachStatement.h>
+#include <fiber/script/ast/FunctionCall.h>
+#include <fiber/script/ast/Identifier.h>
+#include <fiber/script/ast/IfStatement.h>
+#include <fiber/script/ast/Indexer.h>
+#include <fiber/script/ast/InlineList.h>
+#include <fiber/script/ast/InlineObject.h>
+#include <fiber/script/ast/Literal.h>
+#include <fiber/script/ast/LogicRelationalExpression.h>
+#include <fiber/script/ast/PropertyReference.h>
+#include <fiber/script/ast/ReturnStatement.h>
+#include <fiber/script/ast/Statement.h>
+#include <fiber/script/ast/TemplateString.h>
+#include <fiber/script/ast/Ternary.h>
+#include <fiber/script/ast/ThrowStatement.h>
+#include <fiber/script/ast/TryCatchStatement.h>
+#include <fiber/script/ast/UnaryOperator.h>
+#include <fiber/script/ast/VariableDeclareStatement.h>
+#include <fiber/script/ast/VariableReference.h>
 
 namespace fiber::script::ir {
 

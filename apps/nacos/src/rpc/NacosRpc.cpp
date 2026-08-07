@@ -4,10 +4,10 @@
 #include <charconv>
 #include <utility>
 
-#include <async/Timeout.h>
-#include <common/Assert.h>
-#include <common/json/JsonValue.h>
-#include <net/SocketAddress.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/json/JsonValue.h>
+#include <fiber/net/SocketAddress.h>
 
 namespace fiber::nacos::detail {
 namespace {

@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <memory>
 
-#include <event/EventLoop.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/NacosClientConfig.h>
 

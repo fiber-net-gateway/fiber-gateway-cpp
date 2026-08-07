@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string>
 
-#include "common/json/JsonEncode.h"
+#include <fiber/common/json/JsonEncode.h>
 
 using fiber::json::CallbackSink;
 using fiber::json::Generator;

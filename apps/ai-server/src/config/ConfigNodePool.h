@@ -9,9 +9,9 @@
 #include <memory>
 #include <utility>
 
-#include <common/Assert.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
 
 namespace fiber::ai_server {
 

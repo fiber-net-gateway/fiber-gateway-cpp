@@ -1,8 +1,8 @@
-#include "Http3QpackStaticTable.h"
+#include <fiber/http/Http3QpackStaticTable.h>
 
 #include <string_view>
 
-#include "HttpHeaderHash.h"
+#include <fiber/http/HttpHeaderHash.h>
 
 namespace fiber::http {
 

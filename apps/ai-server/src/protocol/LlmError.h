@@ -7,7 +7,7 @@
 #include <expected>
 #include <string_view>
 
-#include <common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBuf.h>
 
 namespace fiber::ai_server {
 

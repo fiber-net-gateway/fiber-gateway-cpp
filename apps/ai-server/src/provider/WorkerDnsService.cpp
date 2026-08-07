@@ -7,13 +7,13 @@
 #include <string>
 #include <utility>
 
-#include <async/Spawn.h>
-#include <async/WaitGroup.h>
-#include <common/Assert.h>
-#include <dns/DnsClient.h>
-#include <event/EventLoop.h>
-#include <event/EventLoopGroup.h>
-#include <net/SocketAddress.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/WaitGroup.h>
+#include <fiber/common/Assert.h>
+#include <fiber/dns/DnsClient.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/net/SocketAddress.h>
 
 namespace fiber::ai_server {
 namespace {

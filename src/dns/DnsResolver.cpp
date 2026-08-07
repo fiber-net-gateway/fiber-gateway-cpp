@@ -1,12 +1,12 @@
-#include "DnsResolver.h"
+#include <fiber/dns/DnsResolver.h>
 
 #include <algorithm>
 #include <array>
 
-#include "../async/Spawn.h"
-#include "../async/WaitGroup.h"
-#include "../common/Assert.h"
-#include "../net/UdpSocket.h"
+#include <fiber/async/Spawn.h>
+#include <fiber/async/WaitGroup.h>
+#include <fiber/common/Assert.h>
+#include <fiber/net/UdpSocket.h>
 
 namespace fiber::dns {
 

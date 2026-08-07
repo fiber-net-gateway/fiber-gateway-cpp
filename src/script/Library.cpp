@@ -1,4 +1,4 @@
-#include "Library.h"
+#include <fiber/script/Library.h>
 
 namespace fiber::script {
 

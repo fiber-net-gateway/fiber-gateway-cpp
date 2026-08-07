@@ -2,11 +2,11 @@
 // Created by dear on 2025/12/30.
 //
 
-#include "GcInternal.h"
-#include "Wtf8.h"
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/gc/Wtf8.h>
 
-#include "../../common/Assert.h"
-#include "../../common/json/Utf.h"
+#include <fiber/common/Assert.h>
+#include <fiber/common/json/Utf.h>
 
 #include <cstring>
 #include <limits>

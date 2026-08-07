@@ -1,9 +1,9 @@
-#include "Http2HeaderDecodeUtil.h"
+#include <fiber/http/detail/Http2HeaderDecodeUtil.h>
 
 #include <cstring>
 
-#include "../HttpHeaderHash.h"
-#include "../Huffman.h"
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/Huffman.h>
 
 namespace fiber::http::detail {
 

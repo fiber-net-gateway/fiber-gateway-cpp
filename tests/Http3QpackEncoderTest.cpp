@@ -6,16 +6,16 @@
 #include <string_view>
 #include <vector>
 
-#include "common/IoError.h"
-#include "common/mem/IoBuf.h"
-#include "http/Http3Protocol.h"
-#include "http/Http3QpackDecoder.h"
-#include "http/Http3QpackEncoder.h"
-#include "http/Http3QpackEncoderIoBufWriter.h"
-#include "http/HttpHeaderHash.h"
-#include "http/Huffman.h"
-#include "quic/QuicCursor.h"
-#include "quic/QuicTransportCodec.h"
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/http/Http3Protocol.h>
+#include <fiber/http/Http3QpackDecoder.h>
+#include <fiber/http/Http3QpackEncoder.h>
+#include <fiber/http/Http3QpackEncoderIoBufWriter.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/Huffman.h>
+#include <fiber/quic/QuicCursor.h>
+#include <fiber/quic/QuicTransportCodec.h>
 
 namespace {
 

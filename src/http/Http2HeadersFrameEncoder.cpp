@@ -1,11 +1,11 @@
-#include "Http2HeadersFrameEncoder.h"
+#include <fiber/http/Http2HeadersFrameEncoder.h>
 
 #include <algorithm>
 #include <cstring>
 
-#include "../common/Assert.h"
-#include "Http2Outbound.h"
-#include "Http2Protocol.h"
+#include <fiber/common/Assert.h>
+#include <fiber/http/Http2Outbound.h>
+#include <fiber/http/Http2Protocol.h>
 
 namespace fiber::http {
 

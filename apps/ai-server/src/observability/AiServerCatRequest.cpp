@@ -8,9 +8,9 @@
 
 #include <fiber/cat/CatClient.h>
 #include <fiber/cat/Status.h>
-#include <http/HttpExchange.h>
-#include <http/HttpHeaderHash.h>
-#include <http/HttpHeaders.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
 
 namespace fiber::ai_server {
 

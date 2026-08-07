@@ -1,7 +1,7 @@
-#include "DnsClient.h"
+#include <fiber/dns/DnsClient.h>
 
-#include "DnsMessage.h"
-#include "detail/DnsQuerySecurity.h"
+#include <fiber/dns/DnsMessage.h>
+#include <fiber/dns/detail/DnsQuerySecurity.h>
 
 #include <algorithm>
 #include <array>
@@ -13,10 +13,10 @@
 
 #include <openssl/rand.h>
 
-#include "../async/Timeout.h"
-#include "../common/Assert.h"
-#include "../net/TcpStream.h"
-#include "../net/UdpSocket.h"
+#include <fiber/async/Timeout.h>
+#include <fiber/common/Assert.h>
+#include <fiber/net/TcpStream.h>
+#include <fiber/net/UdpSocket.h>
 
 namespace fiber::dns {
 

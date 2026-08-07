@@ -2,9 +2,9 @@
 // Created by dear on 2025/12/30.
 //
 
-#include "JsValue.h"
+#include <fiber/script/JsValue.h>
 
-#include "JsGc.h"
+#include <fiber/script/JsGc.h>
 
 #include <bit>
 #include <limits>

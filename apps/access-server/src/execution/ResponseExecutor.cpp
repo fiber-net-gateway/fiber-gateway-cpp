@@ -1,10 +1,10 @@
 #include "ResponseExecutor.h"
 #include "../observability/AccessRequestTelemetry.h"
 
-#include "../../../../src/http/HttpBodySpec.h"
-#include "../../../../src/http/HttpExchange.h"
-#include "../../../../src/http/HttpExchangeIo.h"
-#include "../../../../src/http/HttpHeaders.h"
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpExchangeIo.h>
+#include <fiber/http/HttpHeaders.h>
 
 namespace fiber::access_server {
 namespace {

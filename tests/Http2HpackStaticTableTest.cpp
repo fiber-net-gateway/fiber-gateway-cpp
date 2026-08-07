@@ -2,9 +2,9 @@
 
 #include <cstdint>
 
-#include "http/Http2HpackStaticTable.h"
-#include "http/Http2HpackTableEntryView.h"
-#include "http/HttpHeaderHash.h"
+#include <fiber/http/Http2HpackStaticTable.h>
+#include <fiber/http/Http2HpackTableEntryView.h>
+#include <fiber/http/HttpHeaderHash.h>
 
 namespace {
 

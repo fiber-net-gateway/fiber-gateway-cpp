@@ -1,16 +1,16 @@
-#include "InterpreterVm.h"
+#include <fiber/script/run/InterpreterVm.h>
 
 #include <new>
 #include <string>
 #include <utility>
 
-#include "../../common/Assert.h"
-#include "../Library.h"
-#include "../gc/GcInternal.h"
-#include "Access.h"
-#include "Binaries.h"
-#include "Compares.h"
-#include "Unaries.h"
+#include <fiber/common/Assert.h>
+#include <fiber/script/Library.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/run/Access.h>
+#include <fiber/script/run/Binaries.h>
+#include <fiber/script/run/Compares.h>
+#include <fiber/script/run/Unaries.h>
 
 namespace fiber::script::run {
 

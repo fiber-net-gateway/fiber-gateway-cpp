@@ -1,12 +1,12 @@
 #include "ErrorResponder.h"
 #include "../observability/AccessRequestTelemetry.h"
 
-#include "../../../../src/common/json/JsonEncode.h"
-#include "../../../../src/http/HttpBodySpec.h"
-#include "../../../../src/http/HttpExchange.h"
-#include "../../../../src/http/HttpExchangeIo.h"
-#include "../../../../src/http/HttpHeaderHash.h"
-#include "../../../../src/http/HttpHeaders.h"
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpExchangeIo.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
 
 #include <charconv>
 

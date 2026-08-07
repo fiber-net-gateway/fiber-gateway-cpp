@@ -1,11 +1,11 @@
-#include "DnsCache2.h"
+#include <fiber/dns/DnsCache2.h>
 
 #include <algorithm>
 #include <cstring>
 #include <limits>
 #include <new>
 
-#include "../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::dns {
 

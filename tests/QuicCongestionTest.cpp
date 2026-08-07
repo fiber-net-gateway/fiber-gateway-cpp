@@ -4,10 +4,10 @@
 #include <cstdint>
 #include <limits>
 
-#include "quic/QuicAckHandler.h"
-#include "quic/QuicCongestion.h"
-#include "quic/QuicConnection.h"
-#include "quic/QuicLossRecovery.h"
+#include <fiber/quic/QuicAckHandler.h>
+#include <fiber/quic/QuicCongestion.h>
+#include <fiber/quic/QuicConnection.h>
+#include <fiber/quic/QuicLossRecovery.h>
 
 #include "QuicTestLoop.h"
 

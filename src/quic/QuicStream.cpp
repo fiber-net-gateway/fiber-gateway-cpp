@@ -1,4 +1,4 @@
-#include "QuicStream.h"
+#include <fiber/quic/QuicStream.h>
 
 #include <algorithm>
 #include <coroutine>
@@ -8,9 +8,9 @@
 #include <limits>
 #include <utility>
 
-#include "../common/Assert.h"
-#include "../event/EventLoop.h"
-#include "QuicConnection.h"
+#include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/quic/QuicConnection.h>
 
 namespace fiber::quic {
 

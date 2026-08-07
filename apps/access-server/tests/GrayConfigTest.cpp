@@ -7,9 +7,9 @@
 #include <string>
 #include <string_view>
 
-#include <async/Spawn.h>
-#include <async/Yield.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Yield.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/Subscription.h>
 

@@ -1,8 +1,8 @@
-#include "ConstPackage.h"
+#include <fiber/http_script/ConstPackage.h>
 
-#include "ScriptExchangeCtx.h"
+#include <fiber/http_script/ScriptExchangeCtx.h>
 
-#include "../common/mem/BufPool.h"
+#include <fiber/common/mem/BufPool.h>
 
 #include <algorithm>
 #include <array>

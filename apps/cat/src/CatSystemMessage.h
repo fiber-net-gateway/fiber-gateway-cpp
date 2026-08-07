@@ -6,8 +6,8 @@
 #include <expected>
 #include <string_view>
 
-#include <common/mem/IoBuf.h>
 #include <fiber/cat/CatClient.h>
+#include <fiber/common/mem/IoBuf.h>
 
 #include "CatEncoder.h"
 #include "CatSystemStats.h"

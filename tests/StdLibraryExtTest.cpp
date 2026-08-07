@@ -4,8 +4,8 @@
 #include <string_view>
 #include <vector>
 
-#include "script/Library.h"
-#include "script/std/StdLibrary.h"
+#include <fiber/script/Library.h>
+#include <fiber/script/std/StdLibrary.h>
 
 namespace {
 

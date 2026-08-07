@@ -13,13 +13,13 @@
 #include <utility>
 #include <vector>
 
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/Http1Connection.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpHeaderHash.h>
 #include "../../../tests/HttpTransportStub.h"
-#include "async/Spawn.h"
-#include "event/EventLoopGroup.h"
 #include "execution/AccessRequestHandler.h"
-#include "http/Http1Connection.h"
-#include "http/HttpBodySpec.h"
-#include "http/HttpHeaderHash.h"
 #include "observability/AccessRequestTelemetry.h"
 #include "runtime/AccessScriptRuntime.h"
 

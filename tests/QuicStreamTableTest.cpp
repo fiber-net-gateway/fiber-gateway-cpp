@@ -5,7 +5,7 @@
 #include <cstdint>
 
 #define private public
-#include "quic/QuicStreamTable.h"
+#include <fiber/quic/QuicStreamTable.h>
 #undef private
 
 namespace {

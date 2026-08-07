@@ -1,10 +1,10 @@
-#include "Script.h"
+#include <fiber/script/Script.h>
 
 #include <coroutine>
 #include <utility>
 
-#include "../common/Assert.h"
-#include "run/InterpreterVm.h"
+#include <fiber/common/Assert.h>
+#include <fiber/script/run/InterpreterVm.h>
 
 namespace fiber::script {
 

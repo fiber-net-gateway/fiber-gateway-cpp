@@ -6,9 +6,9 @@
 #include <new>
 #include <utility>
 
+#include <fiber/common/Assert.h>
 #include "PrometheusInternal.h"
 #include "TextEncoder.h"
-#include "common/Assert.h"
 
 namespace fiber::prometheus {
 

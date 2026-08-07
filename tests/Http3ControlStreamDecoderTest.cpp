@@ -5,12 +5,12 @@
 
 #include <gtest/gtest.h>
 
-#include "common/mem/IoBuf.h"
-#include "common/mem/IoBufChain.h"
-#include "http/Http3ControlStreamDecoder.h"
-#include "http/Http3Protocol.h"
-#include "quic/QuicCursor.h"
-#include "quic/QuicTransportCodec.h"
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBufChain.h>
+#include <fiber/http/Http3ControlStreamDecoder.h>
+#include <fiber/http/Http3Protocol.h>
+#include <fiber/quic/QuicCursor.h>
+#include <fiber/quic/QuicTransportCodec.h>
 
 namespace {
 

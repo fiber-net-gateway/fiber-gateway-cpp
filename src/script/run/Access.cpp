@@ -1,7 +1,7 @@
-#include "Access.h"
+#include <fiber/script/run/Access.h>
 
-#include "../../common/json/Utf.h"
-#include "../gc/GcInternal.h"
+#include <fiber/common/json/Utf.h>
+#include <fiber/script/gc/GcInternal.h>
 
 #include <string>
 

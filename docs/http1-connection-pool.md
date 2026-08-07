@@ -8,10 +8,10 @@
 
 相关头文件：
 
-- `src/http/Http1ConnectionGroupKey.h`
-- `src/http/Http1ConnectionPoolCore.h`
-- `src/http/LocalHttp1ConnectionPoolSet.h`
-- `src/http/StealableHttp1ConnectionPoolSet.h`
+- `include/fiber/http/Http1ConnectionGroupKey.h`
+- `include/fiber/http/Http1ConnectionPoolCore.h`
+- `include/fiber/http/LocalHttp1ConnectionPoolSet.h`
+- `include/fiber/http/StealableHttp1ConnectionPoolSet.h`
 
 ## 1. 设计目标
 

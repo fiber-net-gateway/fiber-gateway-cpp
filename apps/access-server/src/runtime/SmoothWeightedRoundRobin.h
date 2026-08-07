@@ -10,8 +10,8 @@
 #include <span>
 #include <vector>
 
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
 
 namespace fiber::access_server {
 

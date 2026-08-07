@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include <net/IpAddress.h>
+#include <fiber/net/IpAddress.h>
 
 namespace fiber::nacos {
 

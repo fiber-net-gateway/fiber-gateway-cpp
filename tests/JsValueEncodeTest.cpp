@@ -4,9 +4,9 @@
 #include <string>
 #include <utility>
 
-#include "common/json/JsonEncode.h"
-#include "script/gc/GcInternal.h"
-#include "script/json/JsValueEncode.h"
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/json/JsValueEncode.h>
 
 using fiber::json::Generator;
 using fiber::json::OutputSink;

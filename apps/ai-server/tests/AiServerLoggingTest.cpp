@@ -12,8 +12,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <log/Log.h>
-#include <log/LoggerManager.h>
+#include <fiber/log/Log.h>
+#include <fiber/log/LoggerManager.h>
 
 #include "AiServerLogging.h"
 #include "observability/AiServerLogCategories.h"

@@ -4,8 +4,8 @@
 #include <string_view>
 #include <utility>
 
-#include <common/json/JsonEncode.h>
-#include <common/json/JsonValue.h>
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/common/json/JsonValue.h>
 
 namespace fiber::nacos::dto::detail {
 

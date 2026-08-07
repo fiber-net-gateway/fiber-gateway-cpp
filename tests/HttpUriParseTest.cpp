@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "common/IoError.h"
-#include "common/mem/BufPool.h"
-#include "http/HttpUriParse.h"
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/http/HttpUriParse.h>
 
 namespace {
 

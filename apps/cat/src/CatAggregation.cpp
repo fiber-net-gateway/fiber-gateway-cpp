@@ -8,8 +8,8 @@
 #include <new>
 #include <utility>
 
-#include <common/Assert.h>
 #include <fiber/cat/Status.h>
+#include <fiber/common/Assert.h>
 
 #include "CatClientCore.h"
 #include "CatEncoder.h"

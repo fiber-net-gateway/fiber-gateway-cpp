@@ -4,7 +4,7 @@
 #include <limits>
 #include <utility>
 
-#include <common/json/JsonEncode.h>
+#include <fiber/common/json/JsonEncode.h>
 
 namespace fiber::ai_server {
 namespace {

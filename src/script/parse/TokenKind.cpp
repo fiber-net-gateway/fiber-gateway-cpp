@@ -1,4 +1,4 @@
-#include "TokenKind.h"
+#include <fiber/script/parse/TokenKind.h>
 
 namespace fiber::script::parse {
 

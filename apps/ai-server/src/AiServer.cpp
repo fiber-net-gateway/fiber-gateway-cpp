@@ -9,14 +9,14 @@
 #include <string_view>
 #include <utility>
 
+#include <fiber/async/Sleep.h>
+#include <fiber/async/WhenAny.h>
 #include <fiber/cat/CatClient.h>
-#include "async/Sleep.h"
-#include "async/WhenAny.h"
-#include "common/Assert.h"
-#include "http/HttpExchange.h"
-#include "http/HttpExchangeIo.h"
-#include "http/HttpHeaders.h"
-#include "log/Log.h"
+#include <fiber/common/Assert.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpExchangeIo.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/log/Log.h>
 
 namespace fiber::ai_server {
 

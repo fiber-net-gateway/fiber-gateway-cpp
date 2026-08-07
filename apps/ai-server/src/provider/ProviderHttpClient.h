@@ -11,12 +11,12 @@
 #include <string>
 #include <string_view>
 
-#include <async/Task.h>
-#include <common/IoError.h>
-#include <common/mem/BufPool.h>
-#include <common/mem/IoBuf.h>
-#include <common/mem/IoBufChain.h>
-#include <http/ClientHttp1Exchange.h>
+#include <fiber/async/Task.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBufChain.h>
+#include <fiber/http/ClientHttp1Exchange.h>
 
 namespace fiber::cat {
 class Transaction;

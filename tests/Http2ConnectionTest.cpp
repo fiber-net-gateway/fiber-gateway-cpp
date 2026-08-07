@@ -17,25 +17,25 @@
 #include <utility>
 #include <vector>
 
-#include "async/Sleep.h"
-#include "async/Spawn.h"
-#include "async/Timeout.h"
-#include "common/IoError.h"
-#include "event/EventLoopGroup.h"
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/common/IoError.h>
+#include <fiber/event/EventLoopGroup.h>
 
 #define private public
-#include "http/Http2Connection.h"
+#include <fiber/http/Http2Connection.h>
 #undef private
 
+#include <fiber/http/ClientHttp2Exchange.h>
+#include <fiber/http/Http2HeadersFrameEncoder.h>
+#include <fiber/http/Http2HpackDecoder.h>
+#include <fiber/http/Http2HpackStaticTable.h>
+#include <fiber/http/Http2Stream.h>
+#include <fiber/http/Huffman.h>
+#include <fiber/http/ServerRequestFactory.h>
 #include "Http2TestSupport.h"
 #include "HttpTransportStub.h"
-#include "http/ClientHttp2Exchange.h"
-#include "http/Http2HeadersFrameEncoder.h"
-#include "http/Http2HpackDecoder.h"
-#include "http/Http2HpackStaticTable.h"
-#include "http/Http2Stream.h"
-#include "http/Huffman.h"
-#include "http/ServerRequestFactory.h"
 
 namespace {
 

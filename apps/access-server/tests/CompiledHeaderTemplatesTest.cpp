@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "http/HttpHeaderHash.h"
+#include <fiber/http/HttpHeaderHash.h>
 #include "routing/CompiledHeaderTemplates.h"
 
 namespace {

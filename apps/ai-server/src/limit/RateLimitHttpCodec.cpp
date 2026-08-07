@@ -1,8 +1,8 @@
 #include "RateLimitHttpCodec.h"
 
-#include <common/json/JsonEncode.h>
-#include <common/json/JsonParser.h>
-#include <common/json/JsonStructDecode.h>
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/common/json/JsonParser.h>
+#include <fiber/common/json/JsonStructDecode.h>
 
 FIBER_JSON_STRUCT(fiber::ai_server::RateLimitCheckRequest, FIBER_JSON_NAMED_FIELD(user_id, "userId"),
                   FIBER_JSON_NAMED_FIELD(model_name, "modelName"),

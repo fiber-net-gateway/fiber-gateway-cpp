@@ -5,10 +5,10 @@
 #include <new>
 #include <string>
 
-#include "http/Http2Connection.h"
-#include "http/Http2StreamFactory.h"
-#include "http/HttpHeaderHash.h"
-#include "http/Huffman.h"
+#include <fiber/http/Http2Connection.h>
+#include <fiber/http/Http2StreamFactory.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/Huffman.h>
 
 namespace {
 

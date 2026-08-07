@@ -1,8 +1,8 @@
-#include "ExchangeConstExtension.h"
+#include <fiber/http_script/ExchangeConstExtension.h>
 
-#include "ScriptExchangeCtx.h"
+#include <fiber/http_script/ScriptExchangeCtx.h>
 
-#include "../script/JsValue.h"
+#include <fiber/script/JsValue.h>
 
 #include <array>
 

@@ -15,7 +15,7 @@
 
 #include <fiber/cat/CatClientConfig.h>
 #include <fiber/nacos/NacosClientConfig.h>
-#include <net/SocketAddress.h>
+#include <fiber/net/SocketAddress.h>
 
 namespace fiber::access_server {
 

@@ -5,7 +5,7 @@
 #include <tuple>
 #include <utility>
 
-#include <common/Assert.h>
+#include <fiber/common/Assert.h>
 
 namespace fiber::ai_server {
 namespace {

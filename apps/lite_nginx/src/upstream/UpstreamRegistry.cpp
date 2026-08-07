@@ -3,7 +3,7 @@
 #include <limits>
 #include <utility>
 
-#include "event/EventLoopGroup.h"
+#include <fiber/event/EventLoopGroup.h>
 
 namespace fiber::lite_nginx::upstream {
 namespace {

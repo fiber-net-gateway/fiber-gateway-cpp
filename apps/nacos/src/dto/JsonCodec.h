@@ -1,8 +1,8 @@
 #ifndef FIBER_NACOS_DTO_JSON_CODEC_H
 #define FIBER_NACOS_DTO_JSON_CODEC_H
 
-#include <common/json/JsonEncode.h>
-#include <common/json/JsonParse.h>
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/common/json/JsonParse.h>
 
 #include "AuthTokenResponse.h"
 #include "Config.h"

@@ -2,7 +2,7 @@
 
 #include <type_traits>
 
-#include "net/IpAddress.h"
+#include <fiber/net/IpAddress.h>
 
 static_assert(std::is_trivially_default_constructible_v<fiber::net::IpAddress>);
 static_assert(std::is_trivially_copyable_v<fiber::net::IpAddress>);

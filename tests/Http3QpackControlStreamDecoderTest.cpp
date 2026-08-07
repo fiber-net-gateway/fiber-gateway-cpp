@@ -4,9 +4,9 @@
 
 #include <gtest/gtest.h>
 
-#include "common/mem/IoBuf.h"
-#include "common/mem/IoBufChain.h"
-#include "http/Http3QpackControlStreamDecoder.h"
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBufChain.h>
+#include <fiber/http/Http3QpackControlStreamDecoder.h>
 
 namespace {
 

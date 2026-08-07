@@ -1,12 +1,12 @@
-#include "QuicStreamRecvQueue.h"
+#include <fiber/quic/QuicStreamRecvQueue.h>
 
 #include <algorithm>
 #include <expected>
 #include <limits>
 #include <utility>
 
-#include "../common/Assert.h"
-#include "../event/EventLoop.h"
+#include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
 
 namespace fiber::quic {
 

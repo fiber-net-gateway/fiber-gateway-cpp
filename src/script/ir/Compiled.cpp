@@ -1,4 +1,4 @@
-#include "Compiled.h"
+#include <fiber/script/ir/Compiled.h>
 
 #include <algorithm>
 #include <cstring>
@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "../../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::script::ir {
 

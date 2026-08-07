@@ -8,12 +8,12 @@
 #include <string_view>
 #include <vector>
 
-#include "net/IpAddress.h"
-#include "quic/QuicCrypto.h"
-#include "quic/QuicPacketCodec.h"
-#include "quic/QuicPacketProcessor.h"
-#include "quic/QuicTransportCodec.h"
-#include "quic/QuicTransportParamsCodec.h"
+#include <fiber/net/IpAddress.h>
+#include <fiber/quic/QuicCrypto.h>
+#include <fiber/quic/QuicPacketCodec.h>
+#include <fiber/quic/QuicPacketProcessor.h>
+#include <fiber/quic/QuicTransportCodec.h>
+#include <fiber/quic/QuicTransportParamsCodec.h>
 
 #include "QuicTestLoop.h"
 

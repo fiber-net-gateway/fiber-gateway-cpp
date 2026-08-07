@@ -3,11 +3,11 @@
 #include <new>
 #include <utility>
 
-#include <async/Sleep.h>
-#include <async/Spawn.h>
-#include <async/TaskSelect.h>
-#include <async/WhenAny.h>
-#include <common/Assert.h>
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/TaskSelect.h>
+#include <fiber/async/WhenAny.h>
+#include <fiber/common/Assert.h>
 
 namespace fiber::access_server {
 

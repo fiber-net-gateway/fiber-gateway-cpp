@@ -3,8 +3,8 @@
 #include <chrono>
 #include <future>
 
-#include "async/Spawn.h"
-#include "event/EventLoopGroup.h"
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
 
 TEST(EventLoopTest, GroupIndexMatchesLoopOrder) {
     fiber::event::EventLoopGroup group(3);

@@ -1,13 +1,13 @@
-#include "StringsFuncs.h"
+#include <fiber/script/std/StringsFuncs.h>
 
-#include "StdLibrary.h"
+#include <fiber/script/std/StdLibrary.h>
 
-#include "NodeText.h"
+#include <fiber/script/std/NodeText.h>
 
-#include "../../common/json/Utf.h"
-#include "../JsValue.h"
-#include "../Library.h"
-#include "../gc/GcInternal.h"
+#include <fiber/common/json/Utf.h>
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
+#include <fiber/script/gc/GcInternal.h>
 
 #include <charconv>
 #include <cmath>

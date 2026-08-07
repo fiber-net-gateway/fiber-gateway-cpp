@@ -41,7 +41,7 @@ Nginx 版本、源码和二进制必须继续以 `scripts/build_nginx.sh` 为准
 - listener 和 accept 协程运行在额外的 accept event loop；
 - 接受后的连接按轮询方式分配给 worker loop；
 - lite-nginx 默认广告并限制每条 HTTP/2 连接最多 128 个对端并发流，见
-  `src/http/Http2Connection.h:67-77`。
+  `include/fiber/http/Http2Connection.h:67-77`。
 
 因此 `worker_processes=2` 时，lite-nginx 的稳定工作线程模型是一个 accept loop 加两个 worker loop，不能只按配置中的 worker 数与 Nginx 比较 CPU 占用。
 

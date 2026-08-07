@@ -51,7 +51,7 @@ Keep IP addresses separate; add a unix-domain address type.
 ## Minimal interface skeleton
 
 ```cpp
-// src/net/UnixAddress.h
+// include/fiber/net/UnixAddress.h
 namespace fiber::net {
 
 enum class UnixAddressKind {
@@ -79,7 +79,7 @@ public:
 ```
 
 ```cpp
-// src/net/UnixListener.h
+// include/fiber/net/UnixListener.h
 namespace fiber::net {
 
 struct UnixListenOptions {
@@ -112,7 +112,7 @@ public:
 ```
 
 ```cpp
-// src/net/detail/AcceptFd.h (internal)
+// include/fiber/net/detail/AcceptFd.h (internal)
 namespace fiber::net::detail {
 
 template <typename Traits, typename AcceptResult>

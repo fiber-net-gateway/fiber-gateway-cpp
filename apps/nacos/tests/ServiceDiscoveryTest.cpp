@@ -10,9 +10,9 @@
 #include <thread>
 #include <vector>
 
-#include <async/Spawn.h>
-#include <async/Yield.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Yield.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/nacos/NamingService.h>
 #include <fiber/nacos/Subscription.h>
 #include <fiber/nacos/discovery/ServiceDiscovery.h>

@@ -5,8 +5,8 @@
 #include <string>
 #include <string_view>
 
-#include "quic/QuicStreamSendQueue.h"
-#include "quic/QuicTransportCodec.h"
+#include <fiber/quic/QuicStreamSendQueue.h>
+#include <fiber/quic/QuicTransportCodec.h>
 
 namespace fiber::quic {
 

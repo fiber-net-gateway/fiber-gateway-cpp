@@ -10,17 +10,17 @@
 #include <unistd.h>
 #include <utility>
 
-#include <async/Sleep.h>
-#include <async/Timeout.h>
-#include <common/Assert.h>
-#include <common/mem/BufPool.h>
-#include <common/mem/IoBufChain.h>
-#include <common/util/UrlForm.h>
-#include <dns/DnsResolver.h>
-#include <http/ClientHttp1Exchange.h>
-#include <http/Http1ClientConnection.h>
-#include <http/HttpHeaders.h>
-#include <net/IpAddress.h>
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/common/mem/IoBufChain.h>
+#include <fiber/common/util/UrlForm.h>
+#include <fiber/dns/DnsResolver.h>
+#include <fiber/http/ClientHttp1Exchange.h>
+#include <fiber/http/Http1ClientConnection.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/net/IpAddress.h>
 
 #include "CatAggregation.h"
 #include "CatInternal.h"

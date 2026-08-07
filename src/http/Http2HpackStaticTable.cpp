@@ -1,9 +1,9 @@
-#include "Http2HpackStaticTable.h"
+#include <fiber/http/Http2HpackStaticTable.h>
 
 #include <array>
 #include <cstring>
 
-#include "HttpHeaderHash.h"
+#include <fiber/http/HttpHeaderHash.h>
 
 namespace fiber::http {
 

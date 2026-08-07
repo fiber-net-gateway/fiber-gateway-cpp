@@ -22,7 +22,8 @@ Fiber Gateway 是一个性能优先的 C++23 网关框架，面向反向代理�
 
 ```text
 .
-├── src/          # 核心框架，构建为 fiber_lib
+├── include/fiber # fiber_lib 公共头文件
+├── src/          # fiber_lib 核心实现
 ├── example/      # 小型可运行示例和 benchmark 工具
 ├── apps/         # 完整应用和可选应用层库
 ├── tests/        # 核心 GoogleTest 测试集
@@ -32,17 +33,17 @@ Fiber Gateway 是一个性能优先的 C++23 网关框架，面向反向代理�
 └── scripts/      # 构建、互操作和 benchmark 工具
 ```
 
-主要源码模块包括：
+核心模块的公共头文件位于 `include/fiber/`，实现位于对应的 `src/` 目录：
 
-- `src/event/`：事件循环、poller、定时器和 loop group。
-- `src/async/`：协程任务、调度和同步原语。
-- `src/net/`：socket、listener、stream、TLS 和地址抽象。
-- `src/quic/`：QUIC 传输、加密、恢复、拥塞控制和 stream。
-- `src/http/`：HTTP/1.1、HTTP/2、HTTP/3、客户端、服务端和连接池。
-- `src/dns/`：DNS 消息、客户端、resolver 和缓存。
-- `src/common/`：错误、JSON、内存、容器和通用工具。
-- `src/script/` 与 `src/http_script/`：脚本运行时和 HTTP 绑定。
-- `src/log/`：logger 层级、格式化和 appender。
+- `event/`：事件循环、poller、定时器和 loop group。
+- `async/`：协程任务、调度和同步原语。
+- `net/`：socket、listener、stream、TLS 和地址抽象。
+- `quic/`：QUIC 传输、加密、恢复、拥塞控制和 stream。
+- `http/`：HTTP/1.1、HTTP/2、HTTP/3、客户端、服务端和连接池。
+- `dns/`：DNS 消息、客户端、resolver 和缓存。
+- `common/`：错误、JSON、内存、容器和通用工具。
+- `script/` 与 `http_script/`：脚本运行时和 HTTP 绑定。
+- `log/`：logger 层级、格式化和 appender。
 - `apps/nacos/`：Nacos 客户端及其私有的 gRPC/protobuf 传输实现。
 
 ## 环境要求

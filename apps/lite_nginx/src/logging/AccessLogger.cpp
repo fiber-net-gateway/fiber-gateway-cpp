@@ -4,12 +4,12 @@
 #include <chrono>
 #include <string_view>
 
-#include "http/HttpExchange.h"
-#include "http_script/ConstPackage.h"
-#include "log/Log.h"
-#include "script/JsGc.h"
-#include "script/Script.h"
-#include "script/std/NodeText.h"
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http_script/ConstPackage.h>
+#include <fiber/log/Log.h>
+#include <fiber/script/JsGc.h>
+#include <fiber/script/Script.h>
+#include <fiber/script/std/NodeText.h>
 
 #include "AccessLogScriptExtension.h"
 

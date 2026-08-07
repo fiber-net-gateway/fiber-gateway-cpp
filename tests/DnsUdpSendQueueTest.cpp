@@ -4,10 +4,10 @@
 #include <chrono>
 #include <future>
 
-#include "async/Sleep.h"
-#include "async/Spawn.h"
-#include "dns/detail/DnsUdpSendQueue.h"
-#include "event/EventLoopGroup.h"
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/dns/detail/DnsUdpSendQueue.h>
+#include <fiber/event/EventLoopGroup.h>
 
 namespace {
 

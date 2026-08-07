@@ -32,17 +32,17 @@
 
 #include <openssl/sha.h>
 
-#include <common/Assert.h>
-#include <common/IoError.h>
-#include <common/json/JsonEncode.h>
-#include <common/json/JsonPath.h>
-#include <event/EventLoop.h>
 #include <fiber/cat/Status.h>
-#include <http/HttpBodySpec.h>
-#include <http/HttpExchange.h>
-#include <http/HttpExchangeIo.h>
-#include <http/HttpHeaders.h>
-#include <log/Log.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/json/JsonEncode.h>
+#include <fiber/common/json/JsonPath.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpExchangeIo.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/log/Log.h>
 
 namespace fiber::ai_server {
 namespace {

@@ -4,10 +4,10 @@
 #include <string>
 #include <string_view>
 
+#include <fiber/script/ScriptCompiler.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/std/StdLibrary.h>
 #include "ScriptTestHelpers.h"
-#include "script/ScriptCompiler.h"
-#include "script/gc/GcInternal.h"
-#include "script/std/StdLibrary.h"
 
 using fiber::script::AbiResult;
 using fiber::script::GcHeap;

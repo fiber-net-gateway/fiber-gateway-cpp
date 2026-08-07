@@ -8,10 +8,10 @@
 #include <string>
 #include <string_view>
 
-#include <async/Spawn.h>
-#include <common/IoError.h>
-#include <event/EventLoop.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/common/IoError.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
 
 #include "observability/AiServerMetrics.h"
 

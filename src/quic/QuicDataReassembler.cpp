@@ -1,4 +1,4 @@
-#include "QuicDataReassembler.h"
+#include <fiber/quic/QuicDataReassembler.h>
 
 #include <algorithm>
 #include <cstring>
@@ -6,7 +6,7 @@
 #include <limits>
 #include <utility>
 
-#include "../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::quic {
 

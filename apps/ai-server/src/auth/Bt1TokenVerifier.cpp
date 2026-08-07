@@ -11,7 +11,7 @@
 #include <openssl/hmac.h>
 #include <openssl/mem.h>
 
-#include <common/json/Utf.h>
+#include <fiber/common/json/Utf.h>
 
 namespace fiber::ai_server {
 namespace {

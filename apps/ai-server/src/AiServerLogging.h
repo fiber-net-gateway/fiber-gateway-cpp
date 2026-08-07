@@ -9,7 +9,7 @@
 #include <string>
 #include <string_view>
 
-#include <log/LogConfig.h>
+#include <fiber/log/LogConfig.h>
 
 namespace fiber::ai_server {
 

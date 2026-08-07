@@ -14,13 +14,13 @@
 #include <utility>
 #include <vector>
 
-#include <async/Spawn.h>
-#include <async/TaskSelect.h>
-#include <async/WaitGroup.h>
-#include <async/WhenAny.h>
-#include <common/Assert.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/TaskSelect.h>
+#include <fiber/async/WaitGroup.h>
+#include <fiber/async/WhenAny.h>
+#include <fiber/common/Assert.h>
+#include <fiber/log/Log.h>
 #include <fiber/nacos/discovery/ServiceDiscovery.h>
-#include <log/Log.h>
 
 namespace fiber::ai_server {
 namespace {

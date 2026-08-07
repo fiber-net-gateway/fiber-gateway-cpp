@@ -12,8 +12,8 @@
 #include <utility>
 #include <vector>
 
-#include <common/Assert.h>
-#include <event/EventLoop.h>
+#include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/nacos/NamingService.h>
 
 namespace fiber::ai_server {

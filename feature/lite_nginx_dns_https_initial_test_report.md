@@ -55,7 +55,7 @@ The code explains the observed wire behavior:
 - `apps/lite_nginx/src/upstream/UpstreamConnection.cpp:43-49` sets
   `opts.tls.server_name` for an HTTPS connection key but does not set
   `opts.tls.enabled`.
-- `src/net/TlsOptions.h:96-107` defaults `enabled` to `false`.
+- `include/fiber/net/TlsOptions.h:96-107` defaults `enabled` to `false`.
 - `src/http/Http1ClientConnection.cpp:53-78` creates and handshakes a TLS
   transport only when `options_.tls.enabled` is true.
 

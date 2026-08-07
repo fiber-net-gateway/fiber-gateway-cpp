@@ -1,7 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_PROJECT_ROUTE_SNAPSHOT_H
 #define FIBER_ACCESS_SERVER_PROJECT_ROUTE_SNAPSHOT_H
 
-#include "../../../../src/common/util/RoutePathMatcher.h"
+#include <fiber/common/util/RoutePathMatcher.h>
 #include "../config/AccessConfig.h"
 #include "../config/AccessConfigError.h"
 #include "Cidr.h"
@@ -19,8 +19,8 @@
 #include <string_view>
 #include <vector>
 
-#include <async/Task.h>
-#include <http_script/ConstPackage.h>
+#include <fiber/async/Task.h>
+#include <fiber/http_script/ConstPackage.h>
 
 namespace fiber::access_server {
 

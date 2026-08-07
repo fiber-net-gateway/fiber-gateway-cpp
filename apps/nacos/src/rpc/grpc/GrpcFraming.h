@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <limits>
 
-#include <common/IoError.h>
-#include <common/mem/IoBufChain.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/IoBufChain.h>
 
 namespace fiber::nacos::detail::grpc {
 

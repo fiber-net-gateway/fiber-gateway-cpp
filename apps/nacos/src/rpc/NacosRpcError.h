@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string>
 
-#include <common/IoError.h>
+#include <fiber/common/IoError.h>
 
 namespace fiber::nacos::detail {
 

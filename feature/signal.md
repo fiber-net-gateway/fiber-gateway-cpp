@@ -56,7 +56,7 @@ Coroutine awaiter for a single signal.
 
 ## Interface Skeleton (Aligned with Current Layout)
 ```cpp
-// src/async/Signal.h
+// include/fiber/async/Signal.h
 namespace fiber::async {
 
 struct SignalInfo {
@@ -97,7 +97,7 @@ SignalAwaiter wait_signal(int signum);
 ```
 
 ```cpp
-// src/event/SignalService.h
+// include/fiber/event/SignalService.h
 namespace fiber::event {
 
 class SignalService {
@@ -145,7 +145,7 @@ private:
 
 ### Waiter Shape (Matches EventLoop::NotifyEntry Pattern)
 ```cpp
-// src/async/Signal.h (internal detail)
+// include/fiber/async/Signal.h (internal detail)
 struct SignalWaiter {
     fiber::event::EventLoop::NotifyEntry notify_entry{};
     std::coroutine_handle<> handle{};
@@ -168,8 +168,8 @@ loop->post<SignalWaiter, &SignalWaiter::notify_entry,
 ```
 
 ## Suggested File Layout
-- `src/async/Signal.h|.cpp` (awaiter + public API)
-- `src/event/SignalService.h|.cpp` (signalfd + queues)
+- `include/fiber/async/Signal.h + src/async/Signal.cpp` (awaiter + public API)
+- `include/fiber/event/SignalService.h + src/event/SignalService.cpp` (signalfd + queues)
 - `feature/signal.md` (this doc)
 
 ## Test Notes (GoogleTest + CTest)

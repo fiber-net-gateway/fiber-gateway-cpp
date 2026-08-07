@@ -5,8 +5,8 @@
 #include <expected>
 #include <string_view>
 
-#include <common/mem/IoBuf.h>
 #include <fiber/cat/CatClientConfig.h>
+#include <fiber/common/mem/IoBuf.h>
 
 namespace fiber::cat::detail {
 

@@ -1,4 +1,4 @@
-#include "HttpWebSocketProxy.h"
+#include <fiber/http/HttpWebSocketProxy.h>
 
 #include <array>
 #include <string_view>
@@ -7,16 +7,16 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
-#include "../async/TaskSelect.h"
-#include "../async/WhenAny.h"
-#include "../common/IoError.h"
-#include "../common/util/Base64.h"
-#include "ClientHttp1Exchange.h"
-#include "ClientHttp1Types.h"
-#include "HttpExchange.h"
-#include "HttpHeaderHash.h"
-#include "HttpHeaders.h"
-#include "HttpProxyCore.h"
+#include <fiber/async/TaskSelect.h>
+#include <fiber/async/WhenAny.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/util/Base64.h>
+#include <fiber/http/ClientHttp1Exchange.h>
+#include <fiber/http/ClientHttp1Types.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpProxyCore.h>
 
 namespace fiber::http::proxy_core {
 namespace {

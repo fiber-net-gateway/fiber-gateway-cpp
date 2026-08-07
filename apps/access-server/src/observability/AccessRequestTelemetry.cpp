@@ -12,14 +12,14 @@
 #include <limits>
 #include <string_view>
 
-#include <common/IoError.h>
-#include <event/EventLoop.h>
 #include <fiber/cat/CatClient.h>
 #include <fiber/cat/Status.h>
-#include <http/HttpExchange.h>
-#include <http/HttpHeaderHash.h>
-#include <http/HttpHeaders.h>
-#include <log/Log.h>
+#include <fiber/common/IoError.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/log/Log.h>
 
 namespace fiber::access_server {
 namespace {

@@ -7,7 +7,7 @@
 #include <new>
 #include <utility>
 
-#include <common/Assert.h>
+#include <fiber/common/Assert.h>
 
 #include "CatClientCore.h"
 

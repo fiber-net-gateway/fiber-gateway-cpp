@@ -11,12 +11,12 @@
 #include <string_view>
 #include <utility>
 
-#include <async/Task.h>
-#include <common/Assert.h>
-#include <common/IoError.h>
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <common/mem/BufPool.h>
+#include <fiber/async/Task.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/common/mem/BufPool.h>
 #include <nacos_grpc_payload.pb.h>
 #include "../dto/Internal.h"
 

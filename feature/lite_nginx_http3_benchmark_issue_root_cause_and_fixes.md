@@ -55,7 +55,7 @@ Nginx 在这里作为实现对照，不代表规范要求项目复制其内部�
 
 ### 2.3 修复
 
-在 `src/http/HttpProxyCore.h` 增加无动态分配的 `RequestBodyForwardState`，并在
+在 `include/fiber/http/HttpProxyCore.h` 增加无动态分配的 `RequestBodyForwardState`，并在
 `apps/lite_nginx/src/proxy/ProxyHandler.cpp` 的请求体转发循环中使用：
 
 - 已知 `Content-Length` 时跟踪尚未转发的字节数；
@@ -238,12 +238,12 @@ assert、crash、hang、502 或 `already`。
 
 ```text
 apps/lite_nginx/src/proxy/ProxyHandler.cpp  请求体转发边界状态
-src/http/HttpProxyCore.h                   RequestBodyForwardState
+include/fiber/http/HttpProxyCore.h                   RequestBodyForwardState
 cmake/CompilerChecks.cmake                 epoll_pwait2 syscall 构建能力检测
 cmake/FiberPlatformConfig.h.in             Poller 平台能力配置
-src/event/EventLoop.{h,cpp}                传递 timer heap 最早绝对 deadline
-src/event/Poller.{h,cpp}                   epoll_pwait2 与 timerfd 兼容回退
-src/quic/QuicPacer.h                       100 us 默认粒度
+include/fiber/event/EventLoop.h + src/event/EventLoop.cpp  传递 timer heap 最早绝对 deadline
+include/fiber/event/Poller.h + src/event/Poller.cpp         epoll_pwait2 与 timerfd 兼容回退
+include/fiber/quic/QuicPacer.h                       100 us 默认粒度
 tests/HttpProxyCoreTest.cpp                POST 边界单元测试
 tests/PollerTest.cpp                       deadline 与 timerfd 重设/取消回归
 tests/QuicPacerTest.cpp                    亚毫秒 pacing 单元测试

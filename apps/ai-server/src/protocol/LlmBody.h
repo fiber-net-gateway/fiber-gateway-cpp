@@ -8,10 +8,10 @@
 #include <string_view>
 #include <utility>
 
-#include <common/json/JsonValue.h>
-#include <common/mem/BufPool.h>
-#include <common/mem/IoBuf.h>
-#include <common/mem/IoBufChain.h>
+#include <fiber/common/json/JsonValue.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBufChain.h>
 
 namespace fiber::ai_server {
 

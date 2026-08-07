@@ -17,14 +17,14 @@
 #include <utility>
 #include <vector>
 
-#include <async/Sleep.h>
-#include <async/Spawn.h>
-#include <async/TaskSelect.h>
-#include <async/WaitGroup.h>
-#include <async/Watch.h>
-#include <async/WhenAny.h>
-#include <common/Assert.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/TaskSelect.h>
+#include <fiber/async/WaitGroup.h>
+#include <fiber/async/Watch.h>
+#include <fiber/async/WhenAny.h>
+#include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>

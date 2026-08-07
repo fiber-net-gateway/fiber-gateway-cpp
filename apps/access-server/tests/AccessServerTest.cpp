@@ -15,11 +15,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <async/Spawn.h>
-#include <event/EventLoop.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Spawn.h>
 #include <fiber/cat/CatClient.h>
 #include <fiber/cat/CatClientConfig.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/event/EventLoopGroup.h>
 
 namespace fiber::access_server {
 namespace {

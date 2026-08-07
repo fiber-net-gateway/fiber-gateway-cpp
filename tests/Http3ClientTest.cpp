@@ -8,14 +8,14 @@
 
 #include <gtest/gtest.h>
 
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/ClientHttp3Exchange.h>
+#include <fiber/http/Http3Client.h>
+#include <fiber/http/Http3Server.h>
 #include "QuicTestTlsCertificate.h"
-#include "async/Sleep.h"
-#include "async/Spawn.h"
-#include "common/mem/BufPool.h"
-#include "event/EventLoopGroup.h"
-#include "http/ClientHttp3Exchange.h"
-#include "http/Http3Client.h"
-#include "http/Http3Server.h"
 
 namespace {
 

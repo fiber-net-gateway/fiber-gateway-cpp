@@ -14,8 +14,8 @@
 #include <unordered_map>
 #include <utility>
 
-#include <common/Assert.h>
-#include <common/mem/IoBuf.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/mem/IoBuf.h>
 
 namespace fiber::ai_server {
 namespace {

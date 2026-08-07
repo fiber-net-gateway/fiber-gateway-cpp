@@ -7,17 +7,17 @@
 #include <string>
 #include <vector>
 
-#include "async/Sleep.h"
-#include "async/Spawn.h"
-#include "async/Timeout.h"
-#include "common/IoError.h"
-#include "dns/DnsClient.h"
-#include "dns/DnsMessage.h"
-#include "dns/DnsName.h"
-#include "event/EventLoopGroup.h"
-#include "net/TcpListener.h"
-#include "net/TcpStream.h"
-#include "net/UdpSocket.h"
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/common/IoError.h>
+#include <fiber/dns/DnsClient.h>
+#include <fiber/dns/DnsMessage.h>
+#include <fiber/dns/DnsName.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/net/TcpListener.h>
+#include <fiber/net/TcpStream.h>
+#include <fiber/net/UdpSocket.h>
 
 namespace {
 

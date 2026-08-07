@@ -1,13 +1,13 @@
-#include "Http3QpackEncoder.h"
+#include <fiber/http/Http3QpackEncoder.h>
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 
-#include "../common/Assert.h"
-#include "Http3QpackStaticTable.h"
-#include "HttpHeaderHash.h"
-#include "Huffman.h"
+#include <fiber/common/Assert.h>
+#include <fiber/http/Http3QpackStaticTable.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/Huffman.h>
 
 namespace fiber::http {
 

@@ -1,7 +1,7 @@
 #ifndef FIBER_ACCESS_SERVER_ACCESS_RESULT_H
 #define FIBER_ACCESS_SERVER_ACCESS_RESULT_H
 
-#include "../../../../src/common/IoError.h"
+#include <fiber/common/IoError.h>
 
 #include <cstdint>
 #include <expected>

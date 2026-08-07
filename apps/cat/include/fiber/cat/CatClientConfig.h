@@ -9,8 +9,8 @@
 #include <utility>
 #include <vector>
 
-#include <net/SocketAddress.h>
-#include <net/TcpSocketOptions.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/net/TcpSocketOptions.h>
 
 namespace fiber::cat {
 

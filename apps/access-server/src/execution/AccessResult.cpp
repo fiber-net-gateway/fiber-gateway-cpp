@@ -1,6 +1,6 @@
 #include "AccessResult.h"
 
-#include "../../../../src/common/mem/BufPool.h"
+#include <fiber/common/mem/BufPool.h>
 
 #include <cstring>
 #include <limits>

@@ -8,12 +8,12 @@
 #include <new>
 #include <string_view>
 
-#include "async/Sleep.h"
-#include "async/Spawn.h"
-#include "event/EventLoopGroup.h"
-#include "quic/QuicConnection.h"
-#include "quic/QuicCrypto.h"
-#include "quic/QuicPacketProcessor.h"
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/quic/QuicConnection.h>
+#include <fiber/quic/QuicCrypto.h>
+#include <fiber/quic/QuicPacketProcessor.h>
 
 #include "QuicTestLoop.h"
 

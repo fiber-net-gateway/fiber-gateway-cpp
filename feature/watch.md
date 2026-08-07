@@ -22,7 +22,7 @@
 
 ## Public API
 
-实现位于 `src/async/Watch.h`，模板代码全部放在头文件中。
+实现位于 `include/fiber/async/Watch.h`，模板代码全部放在头文件中。
 
 ```cpp
 namespace fiber::async {

@@ -45,7 +45,7 @@
 
 #### 现状
 
-`src/quic/QuicConnection.h:157-207` 中，`QuicCryptoState` 内嵌 11 份 `QuicPacketProtectionKeys`：
+`include/fiber/quic/QuicConnection.h:157-207` 中，`QuicCryptoState` 内嵌 11 份 `QuicPacketProtectionKeys`：
 
 - Initial read/write；
 - Early read/write；
@@ -227,7 +227,7 @@ Nginx 按连接维护 `nframes/max_frames`，超过上限即作为 flood 拒绝�
 
 #### send 侧
 
-`src/quic/QuicStreamSendQueue.h:99-102` 使用四个布尔值表达终态：
+`include/fiber/quic/QuicStreamSendQueue.h:99-102` 使用四个布尔值表达终态：
 
 - `fin_appended_`
 - `fin_inflight_`
@@ -263,7 +263,7 @@ detach 增加明确的 `force_clear()`，与是否允许向 wire 发送 RESET_ST
 
 #### receive 侧
 
-`src/quic/QuicStreamRecvQueue.h:93-96` 使用：
+`include/fiber/quic/QuicStreamRecvQueue.h:93-96` 使用：
 
 - `has_final_size_`
 - `fin_received_`
@@ -364,14 +364,14 @@ detach 增加明确的 `force_clear()`，与是否允许向 wire 发送 RESET_ST
 
 ### 5.1 删除无效或重复状态
 
-- `QuicStream::recv_state_` 只由 `sync_recv_state_from_queue()` 写入，但 public `recv_state()` 直接从 `recv_queue_` 推导；删除字段、同步函数和调用点：`src/quic/QuicStream.h:103-114,175,189`。
-- `QuicPath::used` 只在 `record_received()` 中置 `true`，全模块无读取；删除或赋予明确指标语义：`src/quic/QuicPath.h:64`、`src/quic/QuicPathManager.cpp:218-223`。
+- `QuicStream::recv_state_` 只由 `sync_recv_state_from_queue()` 写入，但 public `recv_state()` 直接从 `recv_queue_` 推导；删除字段、同步函数和调用点：`include/fiber/quic/QuicStream.h:103-114,175,189`。
+- `QuicPath::used` 只在 `record_received()` 中置 `true`，全模块无读取；删除或赋予明确指标语义：`include/fiber/quic/QuicPath.h:64`、`src/quic/QuicPathManager.cpp:218-223`。
 - `attached_to_endpoint_` 和 `detached_from_endpoint_` 用两个 bool 表达三态，存在非法组合；改为 `NeverAttached/Attached/Detached` enum。
 - `QuicPath::tag` 与 `QuicPathManager::active_` 同时表达 active identity；应只保留一个事实来源，或在所有 transition 上断言一致。
 
 ### 5.2 重构 endpoint 布尔状态
 
-`src/quic/QuicUdpEndpoint.h:274-284` 有 11 个相关 bool。它们并非全部属于同一状态机，但可以分组：
+`include/fiber/quic/QuicUdpEndpoint.h:274-284` 有 11 个相关 bool。它们并非全部属于同一状态机，但可以分组：
 
 - `EndpointLifecycle { Empty, Initialized, Running, Closing }`
 - I/O interest bitmask

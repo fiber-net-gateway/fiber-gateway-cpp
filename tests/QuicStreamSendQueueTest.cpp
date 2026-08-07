@@ -4,7 +4,7 @@
 #include <cstring>
 #include <string_view>
 
-#include "quic/QuicStreamSendQueue.h"
+#include <fiber/quic/QuicStreamSendQueue.h>
 
 namespace fiber::quic {
 

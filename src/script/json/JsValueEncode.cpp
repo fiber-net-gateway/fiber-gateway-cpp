@@ -2,9 +2,9 @@
 // Created by dear on 2025/12/31.
 //
 
-#include "JsValueEncode.h"
+#include <fiber/script/json/JsValueEncode.h>
 
-#include "../gc/GcInternal.h"
+#include <fiber/script/gc/GcInternal.h>
 
 namespace fiber::script::json {
 namespace {

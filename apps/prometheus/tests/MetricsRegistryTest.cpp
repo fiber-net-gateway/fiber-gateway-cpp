@@ -3,7 +3,7 @@
 #include <array>
 #include <string_view>
 
-#include "event/EventLoopGroup.h"
+#include <fiber/event/EventLoopGroup.h>
 #include "fiber/prometheus/MetricsRegistry.h"
 
 namespace {

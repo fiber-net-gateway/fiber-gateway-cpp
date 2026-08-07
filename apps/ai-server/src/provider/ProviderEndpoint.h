@@ -5,7 +5,7 @@
 #include <expected>
 #include <string_view>
 
-#include <net/IpAddress.h>
+#include <fiber/net/IpAddress.h>
 
 namespace fiber::ai_server {
 

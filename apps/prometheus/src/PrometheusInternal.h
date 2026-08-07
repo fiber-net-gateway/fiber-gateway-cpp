@@ -8,8 +8,8 @@
 #include <string>
 #include <vector>
 
-#include "async/WaitGroup.h"
-#include "event/EventLoop.h"
+#include <fiber/async/WaitGroup.h>
+#include <fiber/event/EventLoop.h>
 #include "fiber/prometheus/MetricFamily.h"
 #include "fiber/prometheus/MetricsShard.h"
 

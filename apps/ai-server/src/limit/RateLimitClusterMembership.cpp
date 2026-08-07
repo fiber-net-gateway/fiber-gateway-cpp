@@ -5,10 +5,10 @@
 #include <utility>
 #include <vector>
 
-#include <async/WhenAny.h>
-#include <common/Assert.h>
-#include <log/Log.h>
-#include <net/IpAddress.h>
+#include <fiber/async/WhenAny.h>
+#include <fiber/common/Assert.h>
+#include <fiber/log/Log.h>
+#include <fiber/net/IpAddress.h>
 
 namespace fiber::ai_server {
 namespace {

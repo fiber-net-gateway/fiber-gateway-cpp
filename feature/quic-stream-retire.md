@@ -75,7 +75,7 @@ return close_reason_ != None || remote_rst_ || local_rst_ ||
 
 ### Step 1. `QuicStream` 删除 app flag 机制
 
-**文件**: `src/quic/QuicStream.h`, `src/quic/QuicStream.cpp`
+**文件**: `include/fiber/quic/QuicStream.h`, `src/quic/QuicStream.cpp`
 
 - 删字段 `bool app_released_ = true;`（`QuicStream.h:201`）
 - 删方法声明 `retain_app() / release_app() / mark_app_released()`（`QuicStream.h:149-151`）
@@ -84,7 +84,7 @@ return close_reason_ != None || remote_rst_ || local_rst_ ||
 
 ### Step 2. `QuicStream` 新增方向标记 `local_initiated_`
 
-**文件**: `src/quic/QuicStream.h`, `src/quic/QuicStream.cpp`
+**文件**: `include/fiber/quic/QuicStream.h`, `src/quic/QuicStream.cpp`
 
 `assign_conn_ctx` 增参 `bool local_initiated`，记录本端是否为发起方（决定 uni 流
 适用方向）：
@@ -104,7 +104,7 @@ local_initiated_ = local_initiated;
 
 ### Step 3. `QuicConnection::attach_stream` 透传方向
 
-**文件**: `src/quic/QuicConnection.h`, `src/quic/QuicConnection.cpp`
+**文件**: `include/fiber/quic/QuicConnection.h`, `src/quic/QuicConnection.cpp`
 
 `attach_stream`（`QuicConnection.cpp:1076`）是 peer/local 两路唯一汇聚点，加形参
 `bool local_initiated` 并透传给 `assign_conn_ctx`：
@@ -146,7 +146,7 @@ bool QuicStream::ready_for_connection_release() const noexcept {
 
 ### Step 5. `QuicConnection` 删除 app 转发层
 
-**文件**: `src/quic/QuicConnection.h`, `src/quic/QuicConnection.cpp`
+**文件**: `include/fiber/quic/QuicConnection.h`, `src/quic/QuicConnection.cpp`
 
 - 删声明 `retain_stream_app() / release_stream_app()`（`QuicConnection.h:419-420`）
 - 删定义（`QuicConnection.cpp:1541-1543`）
@@ -227,9 +227,9 @@ stream_data_blocked_reported_=false`。补充兜底：detach 时显式 `send_que
 
 | 文件 | 改动 |
 |---|---|
-| `src/quic/QuicStream.h` | 删 `app_released_` 字段及 4 个方法声明；加 `local_initiated_` 字段；`assign_conn_ctx` 加参 |
+| `include/fiber/quic/QuicStream.h` | 删 `app_released_` 字段及 4 个方法声明；加 `local_initiated_` 字段；`assign_conn_ctx` 加参 |
 | `src/quic/QuicStream.cpp` | 删 3 个 app 方法定义；`assign_conn_ctx` 加参设值；重写 `ready_for_connection_release`；`detach_from_connection` 补 `send_queue_.reset()` 兜底 |
-| `src/quic/QuicConnection.h` | 删 `retain_stream_app/release_stream_app` 声明；`attach_stream` 加 `bool local_initiated` 参 |
+| `include/fiber/quic/QuicConnection.h` | 删 `retain_stream_app/release_stream_app` 声明；`attach_stream` 加 `bool local_initiated` 参 |
 | `src/quic/QuicConnection.cpp` | 删 2 个 app 转发定义；`attach_stream` 透传；peer/local 两路调用传 `false`/`true` |
 | `src/http/Http3Connection.cpp` | 删 `:135` 的 `retain_stream_app` 调用 |
 | `src/http/ServerHttp3Request.cpp` | 删 `RequestScope` 及 `release_app`；`run_read_loop` 仅持 Lease |

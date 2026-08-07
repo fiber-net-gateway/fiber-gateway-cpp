@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "http/HttpProxyCore.h"
+#include <fiber/http/HttpProxyCore.h>
 
 TEST(HttpProxyCoreTest, ContentLengthSkipsDelayedEmptyCompletionMarker) {
     fiber::http::proxy_core::RequestBodyForwardState state(fiber::http::HttpBodySpec::ContentLength(65536));

@@ -3,7 +3,7 @@
 
 #include <expected>
 
-#include "log/LogConfig.h"
+#include <fiber/log/LogConfig.h>
 
 #include "../config/Config.h"
 #include "../runtime/RuntimeConfig.h"

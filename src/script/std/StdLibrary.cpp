@@ -1,18 +1,18 @@
-#include "StdLibrary.h"
+#include <fiber/script/std/StdLibrary.h>
 
-#include "ArrayFuncs.h"
-#include "BinaryFuncs.h"
-#include "HashFuncs.h"
-#include "IncludesFunc.h"
-#include "JsonFuncs.h"
-#include "LengthFunc.h"
-#include "MathFuncs.h"
-#include "ObjectsFuncs.h"
-#include "RandFuncs.h"
-#include "StringsFuncs.h"
-#include "UrlFuncs.h"
+#include <fiber/script/std/ArrayFuncs.h>
+#include <fiber/script/std/BinaryFuncs.h>
+#include <fiber/script/std/HashFuncs.h>
+#include <fiber/script/std/IncludesFunc.h>
+#include <fiber/script/std/JsonFuncs.h>
+#include <fiber/script/std/LengthFunc.h>
+#include <fiber/script/std/MathFuncs.h>
+#include <fiber/script/std/ObjectsFuncs.h>
+#include <fiber/script/std/RandFuncs.h>
+#include <fiber/script/std/StringsFuncs.h>
+#include <fiber/script/std/UrlFuncs.h>
 
-#include "../../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 #include <cstdint>
 #include <utility>

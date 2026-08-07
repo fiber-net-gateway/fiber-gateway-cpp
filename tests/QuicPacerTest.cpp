@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <limits>
 
-#include "quic/QuicPacer.h"
+#include <fiber/quic/QuicPacer.h>
 
 namespace {
 

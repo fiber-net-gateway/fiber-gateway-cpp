@@ -1,4 +1,4 @@
-#include "HttpTransport.h"
+#include <fiber/http/HttpTransport.h>
 
 #include <algorithm>
 #include <array>
@@ -11,9 +11,9 @@
 #include <openssl/tls1.h>
 #include <openssl/x509.h>
 
-#include "../async/Timeout.h"
-#include "../common/Assert.h"
-#include "../net/IpAddress.h"
+#include <fiber/async/Timeout.h>
+#include <fiber/common/Assert.h>
+#include <fiber/net/IpAddress.h>
 
 namespace fiber::http {
 

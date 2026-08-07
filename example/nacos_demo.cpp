@@ -37,12 +37,12 @@
 #include <string_view>
 #include <utility>
 
-#include "async/Sleep.h"
-#include "async/Spawn.h"
-#include "async/Timeout.h"
-#include "common/IoError.h"
-#include "event/EventLoop.h"
-#include "net/IpAddress.h"
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/common/IoError.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/net/IpAddress.h>
 
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>

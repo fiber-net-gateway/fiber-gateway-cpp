@@ -1,8 +1,8 @@
-#include "FormattedLogRecord.h"
+#include <fiber/log/FormattedLogRecord.h>
 
 #include <cstring>
 
-#include "../common/Assert.h"
+#include <fiber/common/Assert.h>
 
 namespace fiber::log {
 namespace {

@@ -14,19 +14,19 @@
 #include <utility>
 #include <vector>
 
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/Http1Connection.h>
+#include <fiber/http/HttpServer.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/net/TcpListener.h>
+#include <fiber/net/TcpStream.h>
 #include "../../../tests/HttpTransportStub.h"
-#include "async/Sleep.h"
-#include "async/Spawn.h"
-#include "event/EventLoopGroup.h"
 #include "execution/AccessRequestHandler.h"
 #include "execution/ProxyExecutor.h"
 #include "fiber/cat/CatClient.h"
 #include "fiber/cat/CatClientConfig.h"
-#include "http/Http1Connection.h"
-#include "http/HttpServer.h"
-#include "net/SocketAddress.h"
-#include "net/TcpListener.h"
-#include "net/TcpStream.h"
 #include "observability/AccessRequestTelemetry.h"
 #include "runtime/AccessScriptRuntime.h"
 

@@ -1,21 +1,21 @@
-#include "RequestFuncs.h"
+#include <fiber/http_script/RequestFuncs.h>
 
-#include "ScriptExchangeCtx.h"
+#include <fiber/http_script/ScriptExchangeCtx.h>
 
-#include "../async/Task.h"
-#include "../common/IoError.h"
-#include "../common/json/JsonDecode.h"
-#include "../common/mem/IoBufChain.h"
-#include "../http/HttpExchange.h"
-#include "../script/AsyncTask.h"
-#include "../script/JsGc.h"
-#include "../script/JsValue.h"
-#include "../script/Library.h"
-#include "../script/ScriptResult.h"
-#include "../script/gc/GcInternal.h"
-#include "../script/json/JsValueDecode.h"
-#include "../script/std/NodeText.h"
-#include "../script/std/StdLibrary.h"
+#include <fiber/async/Task.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/json/JsonDecode.h>
+#include <fiber/common/mem/IoBufChain.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/script/AsyncTask.h>
+#include <fiber/script/JsGc.h>
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
+#include <fiber/script/ScriptResult.h>
+#include <fiber/script/gc/GcInternal.h>
+#include <fiber/script/json/JsValueDecode.h>
+#include <fiber/script/std/NodeText.h>
+#include <fiber/script/std/StdLibrary.h>
 
 #include <cstring>
 #include <string>

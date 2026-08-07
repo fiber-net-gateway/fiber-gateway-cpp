@@ -1,13 +1,13 @@
-#include "ScriptCompiler.h"
+#include <fiber/script/ScriptCompiler.h>
 
 #include <exception>
 #include <new>
 #include <string>
 #include <utility>
 
-#include "ir/Compiler.h"
-#include "parse/Optimiser.h"
-#include "parse/Parser.h"
+#include <fiber/script/ir/Compiler.h>
+#include <fiber/script/parse/Optimiser.h>
+#include <fiber/script/parse/Parser.h>
 
 namespace fiber::script {
 

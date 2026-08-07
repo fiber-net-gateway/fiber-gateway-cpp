@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstring>
 
-#include <common/json/Utf.h>
+#include <fiber/common/json/Utf.h>
 
 namespace fiber::ai_server {
 namespace {

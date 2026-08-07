@@ -1,9 +1,9 @@
-#include "DnsQuerySecurity.h"
+#include <fiber/dns/detail/DnsQuerySecurity.h>
 
 #include <array>
 #include <string_view>
 
-#include "../DnsName.h"
+#include <fiber/dns/DnsName.h>
 
 namespace fiber::dns::detail {
 

@@ -6,10 +6,10 @@
 #include <utility>
 #include <vector>
 
-#include "script/Library.h"
-#include "script/ir/Code.h"
-#include "script/ir/Compiler.h"
-#include "script/parse/Parser.h"
+#include <fiber/script/Library.h>
+#include <fiber/script/ir/Code.h>
+#include <fiber/script/ir/Compiler.h>
+#include <fiber/script/parse/Parser.h>
 
 namespace {
 

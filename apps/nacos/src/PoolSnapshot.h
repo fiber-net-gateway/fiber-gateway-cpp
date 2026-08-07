@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <memory>
 
-#include <common/mem/BufPool.h>
+#include <fiber/common/mem/BufPool.h>
 
 namespace fiber::nacos::detail {
 

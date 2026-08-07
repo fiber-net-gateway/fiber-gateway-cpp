@@ -9,15 +9,15 @@
 #include <unordered_map>
 #include <utility>
 
-#include "common/util/RoutePathMatcher.h"
-#include "http/HeaderMap.h"
-#include "http/HttpHeaderHash.h"
-#include "http_script/ExchangeConstExtension.h"
-#include "http_script/HttpScriptLib.h"
-#include "http_script/RouteScriptExtension.h"
+#include <fiber/common/util/RoutePathMatcher.h>
+#include <fiber/http/HeaderMap.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http_script/ExchangeConstExtension.h>
+#include <fiber/http_script/HttpScriptLib.h>
+#include <fiber/http_script/RouteScriptExtension.h>
+#include <fiber/net/IpAddress.h>
+#include <fiber/script/ScriptCompiler.h>
 #include "logging/AccessLogScriptExtension.h"
-#include "net/IpAddress.h"
-#include "script/ScriptCompiler.h"
 
 namespace fiber::lite_nginx::runtime {
 namespace {

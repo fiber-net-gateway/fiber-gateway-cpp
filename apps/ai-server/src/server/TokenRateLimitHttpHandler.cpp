@@ -15,14 +15,14 @@
 #include <string>
 #include <string_view>
 
-#include <common/IoError.h>
-#include <common/mem/IoBuf.h>
-#include <event/EventLoop.h>
 #include <fiber/cat/Status.h>
-#include <http/HttpBodySpec.h>
-#include <http/HttpExchange.h>
-#include <http/HttpExchangeIo.h>
-#include <http/HttpHeaders.h>
+#include <fiber/common/IoError.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/http/HttpBodySpec.h>
+#include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpExchangeIo.h>
+#include <fiber/http/HttpHeaders.h>
 
 namespace fiber::ai_server {
 namespace {

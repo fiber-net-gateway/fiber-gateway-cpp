@@ -1,12 +1,12 @@
-#include "BinaryFuncs.h"
+#include <fiber/script/std/BinaryFuncs.h>
 
-#include "NodeText.h"
-#include "StdLibrary.h"
+#include <fiber/script/std/NodeText.h>
+#include <fiber/script/std/StdLibrary.h>
 
-#include "../../common/util/Base64.h"
-#include "../JsValue.h"
-#include "../Library.h"
-#include "../gc/GcInternal.h"
+#include <fiber/common/util/Base64.h>
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
+#include <fiber/script/gc/GcInternal.h>
 
 #include <cstdint>
 #include <string>

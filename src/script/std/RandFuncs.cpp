@@ -1,11 +1,11 @@
-#include "RandFuncs.h"
+#include <fiber/script/std/RandFuncs.h>
 
-#include "Crc32.h"
-#include "NodeText.h"
-#include "StdLibrary.h"
+#include <fiber/script/std/Crc32.h>
+#include <fiber/script/std/NodeText.h>
+#include <fiber/script/std/StdLibrary.h>
 
-#include "../JsValue.h"
-#include "../Library.h"
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
 
 #include <cmath>
 #include <cstdint>

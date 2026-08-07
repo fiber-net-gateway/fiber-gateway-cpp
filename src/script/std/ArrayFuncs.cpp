@@ -1,10 +1,10 @@
-#include "ArrayFuncs.h"
+#include <fiber/script/std/ArrayFuncs.h>
 
-#include "StdLibrary.h"
+#include <fiber/script/std/StdLibrary.h>
 
-#include "../JsValue.h"
-#include "../Library.h"
-#include "../gc/GcInternal.h"
+#include <fiber/script/JsValue.h>
+#include <fiber/script/Library.h>
+#include <fiber/script/gc/GcInternal.h>
 
 #include <charconv>
 #include <cmath>

@@ -39,14 +39,14 @@
 #include <utility>
 #include <vector>
 
-#include <async/Sleep.h>
-#include <async/Spawn.h>
-#include <common/mem/BufPool.h>
-#include <event/EventLoop.h>
+#include <fiber/async/Sleep.h>
+#include <fiber/async/Spawn.h>
 #include <fiber/cat/Cat.h>
-#include <net/IpAddress.h>
-#include <net/LocalAddress.h>
-#include <net/SocketAddress.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/event/EventLoop.h>
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/LocalAddress.h>
+#include <fiber/net/SocketAddress.h>
 
 namespace {
 

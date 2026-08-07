@@ -11,8 +11,8 @@
 
 #include <gtest/gtest.h>
 
-#include <async/Spawn.h>
-#include <event/EventLoopGroup.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/event/EventLoopGroup.h>
 
 namespace fiber::ai_server {
 namespace {

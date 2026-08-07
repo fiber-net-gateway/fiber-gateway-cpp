@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "script/gc/GcInternal.h"
+#include <fiber/script/gc/GcInternal.h>
 
 using fiber::script::GcArray;
 using fiber::script::GcHeap;

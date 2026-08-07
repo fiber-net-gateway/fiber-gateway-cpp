@@ -5,7 +5,7 @@
 #include <optional>
 #include <utility>
 
-#include <common/Assert.h>
+#include <fiber/common/Assert.h>
 #include <fiber/nacos/Subscription.h>
 
 namespace fiber::tests {

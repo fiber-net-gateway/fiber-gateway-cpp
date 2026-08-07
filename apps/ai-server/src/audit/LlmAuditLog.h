@@ -6,9 +6,9 @@
 #include <string>
 #include <string_view>
 
-#include <common/NonCopyable.h>
-#include <common/NonMovable.h>
-#include <common/mem/IoBuf.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/common/mem/IoBuf.h>
 
 namespace fiber::ai_server {
 

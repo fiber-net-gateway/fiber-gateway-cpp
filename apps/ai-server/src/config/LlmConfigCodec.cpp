@@ -10,11 +10,11 @@
 #include <unordered_set>
 #include <utility>
 
-#include <common/json/JsonParse.h>
-#include <common/json/JsonParser.h>
-#include <common/json/JsonValue.h>
-#include <common/mem/BufPool.h>
-#include <common/util/Base64.h>
+#include <fiber/common/json/JsonParse.h>
+#include <fiber/common/json/JsonParser.h>
+#include <fiber/common/json/JsonValue.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/common/util/Base64.h>
 
 namespace fiber::ai_server {
 namespace {

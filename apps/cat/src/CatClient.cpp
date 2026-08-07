@@ -5,8 +5,8 @@
 #include <new>
 #include <utility>
 
-#include <dns/DnsResolver.h>
-#include <net/IpAddress.h>
+#include <fiber/dns/DnsResolver.h>
+#include <fiber/net/IpAddress.h>
 
 #include "CatClientCore.h"
 

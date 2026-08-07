@@ -5,7 +5,7 @@
 #include <cstdint>
 
 #define private public
-#include "http/Http2StreamTable.h"
+#include <fiber/http/Http2StreamTable.h>
 #undef private
 #include "Http2TestSupport.h"
 

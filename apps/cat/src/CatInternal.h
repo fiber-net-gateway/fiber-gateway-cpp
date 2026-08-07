@@ -9,10 +9,10 @@
 #include <optional>
 #include <string_view>
 
-#include <common/mem/BufPool.h>
-#include <event/EventLoop.h>
 #include <fiber/cat/MessageTrace.h>
 #include <fiber/cat/Status.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/event/EventLoop.h>
 
 namespace fiber::cat {
 class Event;

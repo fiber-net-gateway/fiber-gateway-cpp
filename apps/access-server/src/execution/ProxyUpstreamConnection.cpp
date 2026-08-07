@@ -1,8 +1,8 @@
 #include "ProxyUpstreamConnection.h"
 
-#include "../../../../src/http/Http1ClientConnection.h"
-#include "../../../../src/http/Http1ConnectionGroupKey.h"
-#include "../../../../src/net/SocketAddress.h"
+#include <fiber/http/Http1ClientConnection.h>
+#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/net/SocketAddress.h>
 
 #include <span>
 #include <utility>

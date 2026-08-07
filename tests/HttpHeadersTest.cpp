@@ -6,9 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "common/mem/BufPool.h"
-#include "http/HttpHeaderHash.h"
-#include "http/HttpHeaders.h"
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpHeaders.h>
 
 namespace {
 

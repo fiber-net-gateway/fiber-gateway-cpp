@@ -5,16 +5,16 @@
 #include <limits>
 #include <utility>
 
-#include <async/Timeout.h>
-#include <common/Assert.h>
-#include <common/json/JsonParse.h>
-#include <common/json/JsonParser.h>
-#include <common/util/UrlForm.h>
-#include <http/ClientHttp1Exchange.h>
-#include <http/Http1ClientConnection.h>
-#include <http/HttpCommon.h>
-#include <http/HttpHeaders.h>
-#include <net/SocketAddress.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/common/Assert.h>
+#include <fiber/common/json/JsonParse.h>
+#include <fiber/common/json/JsonParser.h>
+#include <fiber/common/util/UrlForm.h>
+#include <fiber/http/ClientHttp1Exchange.h>
+#include <fiber/http/Http1ClientConnection.h>
+#include <fiber/http/HttpCommon.h>
+#include <fiber/http/HttpHeaders.h>
+#include <fiber/net/SocketAddress.h>
 #include "../dto/JsonCodec.h"
 
 namespace fiber::nacos::detail {

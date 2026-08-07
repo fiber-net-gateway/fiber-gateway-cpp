@@ -5,7 +5,7 @@
 #include <limits>
 #include <string_view>
 
-#include "dns/DnsCache2.h"
+#include <fiber/dns/DnsCache2.h>
 
 namespace {
 

@@ -2,8 +2,8 @@
 
 #include <string>
 
-#include <common/mem/BufPool.h>
-#include <http/HttpHeaders.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/http/HttpHeaders.h>
 
 #include "observability/AiServerCatRequest.h"
 

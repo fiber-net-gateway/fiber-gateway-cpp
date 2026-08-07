@@ -6,10 +6,10 @@
 #include <memory>
 #include <string_view>
 
-#include <common/mem/BufPool.h>
-#include <event/EventLoop.h>
 #include <fiber/cat/Message.h>
 #include <fiber/cat/Metric.h>
+#include <fiber/common/mem/BufPool.h>
+#include <fiber/event/EventLoop.h>
 
 namespace fiber::cat::detail {
 

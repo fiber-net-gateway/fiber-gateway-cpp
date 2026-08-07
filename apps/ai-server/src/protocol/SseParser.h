@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <string_view>
 
-#include <common/mem/IoBuf.h>
-#include <http/SseCursor.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/http/SseCursor.h>
 
 namespace fiber::ai_server {
 
