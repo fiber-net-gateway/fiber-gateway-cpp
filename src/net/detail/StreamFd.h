@@ -43,7 +43,6 @@ public:
     fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
-    void mark_terminal(fiber::common::IoErr error) noexcept { rwfd_.mark_terminal(error); }
 
     [[nodiscard]] IoTask read(void *buf, size_t len,
                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;

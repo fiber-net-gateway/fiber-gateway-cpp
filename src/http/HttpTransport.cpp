@@ -31,12 +31,18 @@ constexpr int kMaxIov = 16;
 // node's own pointer (zero copy), so large bodies never touch the scratch buffer.
 constexpr std::size_t kTlsCoalesceMax = 8192;
 
-common::IoResult<std::chrono::milliseconds> remaining_timeout(event::EventLoop &loop,
-                                                              std::chrono::steady_clock::time_point deadline) {
+std::chrono::steady_clock::time_point make_deadline(std::chrono::milliseconds timeout) noexcept {
+    if (timeout == std::chrono::milliseconds::max()) {
+        return std::chrono::steady_clock::time_point::max();
+    }
+    return event::EventLoop::current().now() + timeout;
+}
+
+common::IoResult<std::chrono::milliseconds> remaining_timeout(std::chrono::steady_clock::time_point deadline) noexcept {
     if (deadline == std::chrono::steady_clock::time_point::max()) {
         return std::chrono::milliseconds::max();
     }
-    auto now = loop.now();
+    auto now = event::EventLoop::current().now();
     if (deadline <= now) {
         return std::unexpected(common::IoErr::TimedOut);
     }
@@ -49,7 +55,7 @@ common::IoResult<std::chrono::milliseconds> remaining_timeout(event::EventLoop &
 
 fiber::async::Task<common::IoResult<void>> wait_tls_event(net::TlsTcpStream &stream, event::IoEvent io_event,
                                                           std::chrono::steady_clock::time_point deadline) {
-    auto timeout_result = remaining_timeout(stream.loop(), deadline);
+    auto timeout_result = remaining_timeout(deadline);
     if (!timeout_result) {
         co_return std::unexpected(timeout_result.error());
     }
@@ -574,8 +580,7 @@ void TlsTransport::clear_pending_write() noexcept {
 }
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(std::chrono::milliseconds timeout) {
-    auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
-                                                                  : stream_.loop().now() + timeout;
+    auto deadline = make_deadline(timeout);
     for (;;) {
         event::IoEvent wait_event = event::IoEvent::None;
         common::IoErr err = stream_.poll_handshake(wait_event);
@@ -593,8 +598,7 @@ fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(std::chrono::
 }
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::shutdown(std::chrono::milliseconds timeout) {
-    auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
-                                                                  : stream_.loop().now() + timeout;
+    auto deadline = make_deadline(timeout);
     for (;;) {
         event::IoEvent wait_event = event::IoEvent::None;
         common::IoErr err = stream_.poll_shutdown(wait_event);
@@ -614,8 +618,7 @@ fiber::async::Task<common::IoResult<void>> TlsTransport::shutdown(std::chrono::m
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::read(void *buf, size_t len,
                                                                 std::chrono::milliseconds timeout) {
     FIBER_ASSERT(handshake_done());
-    auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
-                                                                  : stream_.loop().now() + timeout;
+    auto deadline = make_deadline(timeout);
     for (;;) {
         size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
@@ -640,8 +643,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::read_into(mem::IoBuf 
         co_return static_cast<size_t>(0);
     }
     FIBER_ASSERT(handshake_done());
-    auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
-                                                                  : stream_.loop().now() + timeout;
+    auto deadline = make_deadline(timeout);
     for (;;) {
         size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
@@ -671,8 +673,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::readv_into(mem::IoBuf
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(const void *buf, size_t len,
                                                                  std::chrono::milliseconds timeout) {
     FIBER_ASSERT(handshake_done());
-    auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
-                                                                  : stream_.loop().now() + timeout;
+    auto deadline = make_deadline(timeout);
     for (;;) {
         size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
@@ -696,8 +697,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(mem::IoBuf &buf
         co_return static_cast<size_t>(0);
     }
     FIBER_ASSERT(handshake_done());
-    auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
-                                                                  : stream_.loop().now() + timeout;
+    auto deadline = make_deadline(timeout);
     for (;;) {
         size_t out = 0;
         event::IoEvent wait_event = event::IoEvent::None;
@@ -718,9 +718,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::write(mem::IoBuf &buf
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChain &buf,
                                                                   std::chrono::milliseconds timeout) {
     FIBER_ASSERT(handshake_done());
-
-    auto deadline = (timeout == std::chrono::milliseconds::max()) ? std::chrono::steady_clock::time_point::max()
-                                                                  : stream_.loop().now() + timeout;
+    auto deadline = make_deadline(timeout);
 
     for (;;) {
         if (buf.readable_bytes() == 0) {

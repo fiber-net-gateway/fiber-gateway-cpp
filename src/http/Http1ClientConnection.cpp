@@ -21,6 +21,123 @@ bool supports_http1_alpn(std::string_view alpn) noexcept { return alpn.empty() |
 
 } // namespace
 
+Http1ClientConnection::IoAwaiter::IoAwaiter(Http1ClientConnection &connection, IoAwaiter *&slot, IoTask task) noexcept :
+    connection_(&connection), slot_(&slot), loop_(connection.active_loop_), task_(std::move(task)),
+    task_awaiter_(task_.operator co_await()) {
+    FIBER_ASSERT(loop_ != nullptr);
+}
+
+Http1ClientConnection::IoAwaiter::~IoAwaiter() {
+    if (resume_entry_.is_in_queue()) {
+        FIBER_ASSERT(loop_ != nullptr);
+        FIBER_ASSERT(loop_->in_loop());
+        loop_->cancel<IoAwaiter, &IoAwaiter::resume_entry_>(*this);
+    }
+    if (state_ != State::Waiting) {
+        return;
+    }
+
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    state_ = State::Abandoned;
+    detach();
+    task_ = {};
+    Http1ClientConnection *connection = std::exchange(connection_, nullptr);
+    if (connection != nullptr) {
+        connection->on_io_awaiter_destroyed();
+    }
+}
+
+bool Http1ClientConnection::IoAwaiter::await_ready() noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(state_ == State::Created);
+    FIBER_ASSERT(slot_ != nullptr);
+    if (*slot_ == nullptr) {
+        return false;
+    }
+
+    state_ = State::ReadyError;
+    result_err_ = common::IoErr::Busy;
+    slot_ = nullptr;
+    task_ = {};
+    return true;
+}
+
+std::coroutine_handle<> Http1ClientConnection::IoAwaiter::await_suspend(std::coroutine_handle<> handle) noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(state_ == State::Created);
+    FIBER_ASSERT(slot_ != nullptr);
+    FIBER_ASSERT(*slot_ == nullptr);
+    state_ = State::Waiting;
+    handle_ = handle;
+    *slot_ = this;
+    return task_awaiter_.await_suspend(handle);
+}
+
+common::IoResult<std::size_t> Http1ClientConnection::IoAwaiter::await_resume() noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    if (state_ == State::Waiting) {
+        state_ = State::Completed;
+        detach();
+        Http1ClientConnection *connection = std::exchange(connection_, nullptr);
+        auto result = task_awaiter_.await_resume();
+        if (!result && connection != nullptr) {
+            connection->fail_active_exchange(result.error());
+        }
+        return result;
+    }
+
+    FIBER_ASSERT(state_ == State::ReadyError || state_ == State::CanceledReady);
+    state_ = State::Completed;
+    Http1ClientConnection *connection = std::exchange(connection_, nullptr);
+    if (connection != nullptr) {
+        connection->fail_active_exchange(result_err_);
+    }
+    return std::unexpected(result_err_);
+}
+
+void Http1ClientConnection::IoAwaiter::prepare_cancel(common::IoErr reason) noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(state_ == State::Waiting);
+    state_ = State::CancelPrepared;
+    result_err_ = reason == common::IoErr::None ? common::IoErr::Canceled : reason;
+    detach();
+    connection_ = nullptr;
+    task_ = {};
+}
+
+void Http1ClientConnection::IoAwaiter::schedule_cancel_resume() noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(state_ == State::CancelPrepared);
+    state_ = State::ResumeQueued;
+    loop_->post_local<IoAwaiter, &IoAwaiter::resume_entry_, &IoAwaiter::on_cancel_resume>(*this);
+}
+
+void Http1ClientConnection::IoAwaiter::detach() noexcept {
+    if (slot_ != nullptr && *slot_ == this) {
+        *slot_ = nullptr;
+    }
+    slot_ = nullptr;
+}
+
+void Http1ClientConnection::IoAwaiter::on_cancel_resume(IoAwaiter *awaiter) noexcept {
+    FIBER_ASSERT(awaiter != nullptr);
+    FIBER_ASSERT(awaiter->loop_ != nullptr);
+    FIBER_ASSERT(awaiter->loop_->in_loop());
+    FIBER_ASSERT(awaiter->state_ == State::ResumeQueued);
+    awaiter->state_ = State::CanceledReady;
+    auto handle = awaiter->handle_;
+    awaiter->handle_ = {};
+    if (handle) {
+        handle.resume();
+    }
+}
+
 Http1ClientConnectionOptions Http1ClientConnection::normalize_options(Http1ClientConnectionOptions options) noexcept {
     if (options.tls.enabled) {
         normalize_http1_alpn(options.tls);
@@ -32,14 +149,13 @@ Http1ClientConnection::Http1ClientConnection(event::EventLoop &loop, Http1Client
     loop_(&loop), options_(normalize_options(std::move(options))), tls_ctx_(options_.tls, false, false) {}
 
 Http1ClientConnection::~Http1ClientConnection() {
-    if (!transport_) {
-        return;
-    }
-    if (loop_ && loop_->in_loop()) {
-        close();
-        return;
-    }
-    FIBER_ASSERT(false);
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(active_exchange_ == nullptr);
+    FIBER_ASSERT(active_loop_ == nullptr);
+    FIBER_ASSERT(reader_ == nullptr);
+    FIBER_ASSERT(writer_ == nullptr);
+    close();
 }
 
 fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::chrono::milliseconds timeout) noexcept {
@@ -100,15 +216,25 @@ fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::c
     co_return common::IoResult<void>{};
 }
 
+void Http1ClientConnection::assert_active_loop() const noexcept {
+    FIBER_ASSERT(active_loop_ != nullptr);
+    FIBER_ASSERT(active_loop_->in_loop());
+}
+
 void Http1ClientConnection::mark_unusable() noexcept {
     keepalive_usable_ = false;
     active_exchange_ = nullptr;
+    active_loop_ = nullptr;
     state_ = State::Closed;
 }
 
 void Http1ClientConnection::close() noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(active_exchange_ == nullptr);
+    FIBER_ASSERT(active_loop_ == nullptr);
+    FIBER_ASSERT(reader_ == nullptr);
+    FIBER_ASSERT(writer_ == nullptr);
     mark_unusable();
     if (transport_) {
         transport_->close();
@@ -144,6 +270,7 @@ bool Http1ClientConnection::acquire_exchange(ClientHttp1Exchange *exchange) noex
         return false;
     }
     active_exchange_ = exchange;
+    active_loop_ = &event::EventLoop::current();
     state_ = State::Busy;
     return true;
 }
@@ -152,7 +279,11 @@ void Http1ClientConnection::release_exchange(ClientHttp1Exchange *exchange, bool
     if (active_exchange_ != exchange) {
         return;
     }
+    assert_active_loop();
+    FIBER_ASSERT(reader_ == nullptr);
+    FIBER_ASSERT(writer_ == nullptr);
     active_exchange_ = nullptr;
+    active_loop_ = nullptr;
     if (!keepalive || !valid()) {
         mark_unusable();
         return;
@@ -161,11 +292,74 @@ void Http1ClientConnection::release_exchange(ClientHttp1Exchange *exchange, bool
     state_ = State::ConnectedIdle;
 }
 
-void Http1ClientConnection::fail_exchange(ClientHttp1Exchange *exchange) noexcept {
-    if (active_exchange_ == exchange) {
-        active_exchange_ = nullptr;
+void Http1ClientConnection::fail_exchange(ClientHttp1Exchange *exchange, common::IoErr reason) noexcept {
+    if (active_exchange_ != exchange) {
+        return;
     }
+    assert_active_loop();
+    fail_active_exchange(reason);
+}
+
+common::IoResult<void> Http1ClientConnection::abort_exchange(ClientHttp1Exchange *exchange,
+                                                             common::IoErr reason) noexcept {
+    if (active_exchange_ != exchange || !transport_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    assert_active_loop();
+    fail_active_exchange(reason);
+    return {};
+}
+
+void Http1ClientConnection::fail_active_exchange(common::IoErr reason) noexcept {
+    assert_active_loop();
+    if (!active_exchange_) {
+        return;
+    }
+
+    ClientHttp1Exchange *exchange = active_exchange_;
+    IoAwaiter *reader = reader_;
+    IoAwaiter *writer = writer_;
+    HttpTransport *transport = transport_.get();
+    FIBER_ASSERT(transport != nullptr);
+
+    exchange->on_connection_failed(reason);
     mark_unusable();
+
+    // Destroy leaf I/O tasks first. A cross-loop RWFd waiter therefore queues
+    // its owner-loop cancellation before a stolen lease can be returned home.
+    if (reader != nullptr) {
+        reader->prepare_cancel(reason);
+    }
+    if (writer != nullptr) {
+        writer->prepare_cancel(reason);
+    }
+    transport->abandon_pending_io();
+
+    // Each awaiter owns its defer node and is fully detached from this
+    // connection, so the connection may be destroyed before the resume runs.
+    if (reader != nullptr) {
+        reader->schedule_cancel_resume();
+    }
+    if (writer != nullptr) {
+        writer->schedule_cancel_resume();
+    }
+}
+
+void Http1ClientConnection::on_io_awaiter_destroyed() noexcept {
+    assert_active_loop();
+    if (active_exchange_) {
+        fail_active_exchange(common::IoErr::Canceled);
+    }
+}
+
+Http1ClientConnection::IoAwaiter Http1ClientConnection::wait_transport_read(IoTask task) noexcept {
+    assert_active_loop();
+    return IoAwaiter(*this, reader_, std::move(task));
+}
+
+Http1ClientConnection::IoAwaiter Http1ClientConnection::wait_transport_write(IoTask task) noexcept {
+    assert_active_loop();
+    return IoAwaiter(*this, writer_, std::move(task));
 }
 
 } // namespace fiber::http

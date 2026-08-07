@@ -72,8 +72,6 @@ private:
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr write_once(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
-    fiber::common::IoErr fail_terminal(fiber::common::IoErr error) noexcept;
-
     StreamFd stream_fd_;
     SSL *ssl_ = nullptr;
     bool handshake_done_ = false;

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -200,6 +202,52 @@ DetachedTask run_tls_client(fiber::net::detail::TlsStreamFd *client_stream,
     co_return;
 }
 
+DetachedTask reset_tls_server_after_client_handshake(fiber::net::detail::TlsStreamFd *server_stream,
+                                                     std::atomic_bool *client_handshake_done,
+                                                     std::atomic_bool *server_closed,
+                                                     std::promise<fiber::common::IoErr> *done) {
+    auto handshake_result = co_await server_stream->handshake();
+    if (!handshake_result) {
+        server_closed->store(true, std::memory_order_release);
+        done->set_value(handshake_result.error());
+        co_return;
+    }
+
+    while (!client_handshake_done->load(std::memory_order_acquire)) {
+        co_await fiber::async::sleep(1ms);
+    }
+
+    linger reset_linger{1, 0};
+    if (::setsockopt(server_stream->fd(), SOL_SOCKET, SO_LINGER, &reset_linger, sizeof(reset_linger)) != 0) {
+        const fiber::common::IoErr err = fiber::common::io_err_from_errno(errno);
+        server_stream->close();
+        server_closed->store(true, std::memory_order_release);
+        done->set_value(err);
+        co_return;
+    }
+    server_stream->close();
+    server_closed->store(true, std::memory_order_release);
+    done->set_value(fiber::common::IoErr::None);
+}
+
+DetachedTask write_tls_after_server_reset(fiber::net::detail::TlsStreamFd *client_stream,
+                                          std::atomic_bool *client_handshake_done, std::atomic_bool *server_closed,
+                                          std::promise<fiber::common::IoErr> *done) {
+    auto handshake_result = co_await client_stream->handshake();
+    client_handshake_done->store(true, std::memory_order_release);
+    if (!handshake_result) {
+        done->set_value(handshake_result.error());
+        co_return;
+    }
+
+    while (!server_closed->load(std::memory_order_acquire)) {
+        co_await fiber::async::sleep(1ms);
+    }
+    const char payload[] = "ping";
+    auto write_result = co_await client_stream->write(payload, sizeof(payload) - 1U);
+    done->set_value(write_result ? fiber::common::IoErr::None : write_result.error());
+}
+
 TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
     SigpipeGuard sigpipe_guard;
     TempFile cert("cert", kSelfSignedCertPem);
@@ -245,6 +293,63 @@ TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
     ASSERT_TRUE(client_result);
     EXPECT_EQ(*server_result, "ping");
     EXPECT_EQ(*client_result, "pong");
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_tls_streams(server_stream, client_stream, &close_promise); });
+    ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+
+    group.stop();
+    group.join();
+}
+
+TEST(TlsStreamFdTest, CrossLoopWriteFailureDoesNotTouchOwnerPoller) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert_reset", kSelfSignedCertPem);
+    TempFile key("key_reset", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    fiber::net::TlsOptions server_options{};
+    server_options.cert_file = cert.path;
+    server_options.key_file = key.path;
+    fiber::net::TlsContext server_ctx(std::move(server_options), true);
+    ASSERT_TRUE(server_ctx.init());
+
+    fiber::net::TlsOptions client_options{};
+    fiber::net::TlsContext client_ctx(std::move(client_options), false);
+    ASSERT_TRUE(client_ctx.init());
+
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+
+    auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
+    auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
+    ASSERT_TRUE(server_stream->init(server_ctx.raw(), true));
+    ASSERT_TRUE(client_stream->init(client_ctx.raw(), false));
+
+    std::atomic_bool client_handshake_done = false;
+    std::atomic_bool server_closed = false;
+    std::promise<fiber::common::IoErr> server_promise;
+    std::promise<fiber::common::IoErr> client_promise;
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return reset_tls_server_after_client_handshake(server_stream, &client_handshake_done, &server_closed,
+                                                       &server_promise);
+    });
+    fiber::async::spawn(group.at(1), [&]() {
+        return write_tls_after_server_reset(client_stream, &client_handshake_done, &server_closed, &client_promise);
+    });
+
+    ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(client_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(server_future.get(), fiber::common::IoErr::None);
+    EXPECT_NE(client_future.get(), fiber::common::IoErr::None);
 
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();

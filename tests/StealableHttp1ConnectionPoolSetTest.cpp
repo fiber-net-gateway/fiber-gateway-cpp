@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <future>
@@ -12,6 +14,7 @@
 #include <vector>
 
 #include <signal.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "async/Sleep.h"
@@ -246,7 +249,7 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::size_t accept_c
     result_promise->set_value(fiber::common::IoErr::None);
 }
 
-DetachedTask run_close_after_accept_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+DetachedTask run_reset_after_accept_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
                                            std::promise<fiber::common::IoErr> *result_promise) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions options{};
@@ -274,6 +277,13 @@ DetachedTask run_close_after_accept_server(fiber::event::EventLoop *loop, std::p
 
     int client = accept_result->release_fd();
     listener.close();
+    linger reset_linger{1, 0};
+    if (::setsockopt(client, SOL_SOCKET, SO_LINGER, &reset_linger, sizeof(reset_linger)) != 0) {
+        const fiber::common::IoErr err = fiber::common::io_err_from_errno(errno);
+        ::close(client);
+        result_promise->set_value(err);
+        co_return;
+    }
     ::close(client);
     result_promise->set_value(fiber::common::IoErr::None);
 }
@@ -435,12 +445,21 @@ struct AbortBlockedReadOutcome {
     fiber::common::IoErr send_error = fiber::common::IoErr::Unknown;
     fiber::common::IoErr abort_error = fiber::common::IoErr::Unknown;
     fiber::common::IoErr read_error = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr write_error = fiber::common::IoErr::Unknown;
 };
 
 DetachedTask run_blocked_header_read(fiber::http::ClientHttp1Exchange *exchange, fiber::async::WaitGroup *done,
                                      AbortBlockedReadOutcome *outcome) {
     auto result = co_await exchange->read_header();
     outcome->read_error = result ? fiber::common::IoErr::None : result.error();
+    done->done();
+    co_return;
+}
+
+DetachedTask run_blocked_body_write(fiber::http::ClientHttp1Exchange *exchange, const std::vector<std::uint8_t> *body,
+                                    fiber::async::WaitGroup *done, AbortBlockedReadOutcome *outcome) {
+    auto result = co_await exchange->write_all(body->data(), body->size(), true);
+    outcome->write_error = result ? fiber::common::IoErr::None : result.error();
     done->done();
     co_return;
 }
@@ -1008,7 +1027,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
 
     server_group.start();
     fiber::async::spawn(server_group.at(0), [&]() {
-        return run_close_after_accept_server(&server_group.at(0), &server_port_promise, &server_result_promise);
+        return run_reset_after_accept_server(&server_group.at(0), &server_port_promise, &server_result_promise);
     });
 
     const std::uint16_t port = server_port_future.get();
@@ -1083,7 +1102,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
     server_group.join();
 }
 
-TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadBeforeReturningStolenConnection) {
+TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadAndWriteBeforeReturningStolenConnection) {
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -1132,25 +1151,28 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadBeforeReturningStolenC
             fiber::mem::BufPool pool;
             fiber::http::HttpHeaders headers(pool);
             headers.add_view("host", "example.com");
+            std::vector<std::uint8_t> body(32U * 1024U * 1024U, static_cast<std::uint8_t>('x'));
             fiber::http::ClientHttp1Exchange exchange(borrowed.connection(), pool);
             fiber::http::Http1RequestHead head;
-            head.method = fiber::http::HttpMethod::Get;
+            head.method = fiber::http::HttpMethod::Post;
             head.target = "/blocked";
             head.headers = &headers;
+            head.body = fiber::http::HttpBodySpec::ContentLength(body.size());
 
-            auto send_result = co_await exchange.send_header(head, true);
+            auto send_result = co_await exchange.send_header(head, false);
             outcome.send_error = send_result ? fiber::common::IoErr::None : send_result.error();
             if (send_result) {
-                fiber::async::WaitGroup read_done;
-                read_done.add();
-                fiber::async::spawn([&]() { return run_blocked_header_read(&exchange, &read_done, &outcome); });
-                co_await fiber::async::sleep(1ms);
+                fiber::async::WaitGroup io_done;
+                io_done.add(2);
+                fiber::async::spawn([&]() { return run_blocked_header_read(&exchange, &io_done, &outcome); });
+                fiber::async::spawn([&]() { return run_blocked_body_write(&exchange, &body, &io_done, &outcome); });
+                co_await fiber::async::sleep(10ms);
 
                 auto abort_result = exchange.abort(fiber::common::IoErr::ConnAborted);
                 outcome.abort_error = abort_result ? fiber::common::IoErr::None : abort_result.error();
                 outcome.reusable_after_abort = borrowed.connection().reusable();
                 borrowed.reset();
-                co_await read_done.join();
+                co_await io_done.join();
             }
         }
         borrowed.reset();
@@ -1164,6 +1186,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadBeforeReturningStolenC
     EXPECT_EQ(outcome.send_error, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.abort_error, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.read_error, fiber::common::IoErr::ConnAborted);
+    EXPECT_EQ(outcome.write_error, fiber::common::IoErr::ConnAborted);
     EXPECT_FALSE(outcome.reusable_after_abort);
 
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {

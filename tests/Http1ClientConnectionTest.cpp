@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <csignal>
 #include <future>
+#include <new>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "async/Spawn.h"
 #include "common/IoError.h"
@@ -13,6 +17,38 @@ namespace {
 
 using namespace std::chrono_literals;
 using fiber::async::DetachedTask;
+
+enum class WrongThreadOperation {
+    Close,
+    Destroy,
+};
+
+int run_wrong_thread_operation_child(WrongThreadOperation operation) {
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        fiber::event::EventLoopGroup group(1);
+        auto *connection = new (std::nothrow)
+                fiber::http::Http1ClientConnection(group.at(0), fiber::http::Http1ClientConnectionOptions{});
+        if (!connection) {
+            _exit(10);
+        }
+        if (operation == WrongThreadOperation::Close) {
+            connection->close();
+        } else {
+            delete connection;
+        }
+        _exit(11);
+    }
+
+    int status = 0;
+    if (::waitpid(pid, &status, 0) < 0) {
+        return -2;
+    }
+    return WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+}
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
@@ -90,6 +126,14 @@ TEST(Http1ClientConnectionTest, ConnectTransitionsToIdleReusableConnection) {
     server_done_future.get();
     group.stop();
     group.join();
+}
+
+TEST(Http1ClientConnectionTest, CloseOutsideOwnerLoopAborts) {
+    EXPECT_EQ(run_wrong_thread_operation_child(WrongThreadOperation::Close), SIGABRT);
+}
+
+TEST(Http1ClientConnectionTest, DestructionOutsideOwnerLoopAbortsEvenWhenNotConnected) {
+    EXPECT_EQ(run_wrong_thread_operation_child(WrongThreadOperation::Destroy), SIGABRT);
 }
 
 } // namespace
