@@ -21,6 +21,27 @@
 #include <http/HttpHeaders.h>
 
 namespace fiber::ai_server {
+
+ProviderHttpResponseStream &ProviderHttpResponseStream::operator=(ProviderHttpResponseStream &&other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+
+    // Keep the exchange alive only while its connection lease is held.
+    upstream_.reset();
+    connection_ = std::move(other.connection_);
+    upstream_ = std::move(other.upstream_);
+    status_code_ = other.status_code_;
+    content_type_ = std::move(other.content_type_);
+    retry_after_ = std::move(other.retry_after_);
+    request_id_ = std::move(other.request_id_);
+    request_send_started_ = other.request_send_started_;
+    first_body_observed_at_ = other.first_body_observed_at_;
+    timing_ = other.timing_;
+    first_body_observed_ = other.first_body_observed_;
+    return *this;
+}
+
 namespace {
 
 constexpr std::chrono::seconds kProviderTimeout{300};

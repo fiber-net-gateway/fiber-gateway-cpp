@@ -80,7 +80,7 @@ private:
         void detach() noexcept;
         static void on_cancel_resume(IoAwaiter *awaiter) noexcept;
 
-        Http1ClientConnection *connection_ = nullptr;
+        Http1ClientConnection &connection_;
         IoAwaiter **slot_ = nullptr;
         event::EventLoop *loop_ = nullptr;
         IoTask task_;
@@ -102,10 +102,10 @@ private:
     void assert_active_loop() const noexcept;
     void mark_unusable() noexcept;
     void record_request_started() noexcept;
-    [[nodiscard]] bool acquire_exchange(ClientHttp1Exchange *exchange) noexcept;
-    void release_exchange(ClientHttp1Exchange *exchange, bool keepalive) noexcept;
-    void fail_exchange(ClientHttp1Exchange *exchange, common::IoErr reason) noexcept;
-    common::IoResult<void> abort_exchange(ClientHttp1Exchange *exchange, common::IoErr reason) noexcept;
+    [[nodiscard]] bool acquire_exchange() noexcept;
+    [[nodiscard]] bool exchange_active() const noexcept;
+    void release_exchange(bool keepalive) noexcept;
+    void fail_exchange(common::IoErr reason) noexcept;
     void fail_active_exchange(common::IoErr reason) noexcept;
     void on_io_awaiter_destroyed() noexcept;
     IoAwaiter wait_transport_read(IoTask task) noexcept;
@@ -117,7 +117,6 @@ private:
     Http1ClientConnectionOptions options_{};
     net::TlsContext tls_ctx_;
     std::unique_ptr<HttpTransport> transport_;
-    ClientHttp1Exchange *active_exchange_ = nullptr;
     event::EventLoop *active_loop_ = nullptr;
     IoAwaiter *reader_ = nullptr;
     IoAwaiter *writer_ = nullptr;
