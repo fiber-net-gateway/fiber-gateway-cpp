@@ -343,6 +343,10 @@ async::Task<Result<void>> AccessRequestHandler::handle_impl(http::HttpExchange &
     if (!constants_ready) {
         co_return std::unexpected(Err::from_error(constants_ready.error()));
     }
+    auto trace_context_ready = telemetry.bind_trace_context(host_match.project->const_package());
+    if (!trace_context_ready) {
+        co_return std::unexpected(Err::from_error(trace_context_ready.error()));
+    }
     if (!request_host.cluster.empty()) {
         for (http_script::ConstIndex index: host_match.project->context_cluster_indices()) {
             if (!telemetry.script_context().bind_constant(index, request_host.cluster)) {

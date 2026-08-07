@@ -2,6 +2,7 @@
 #define FIBER_ACCESS_SERVER_ACCESS_REQUEST_TELEMETRY_H
 
 #include "AccessServerMetrics.h"
+#include "AccessTraceState.h"
 
 #include <chrono>
 #include <cstddef>
@@ -25,6 +26,10 @@ class CatClient;
 namespace fiber::http {
 class HttpExchange;
 } // namespace fiber::http
+
+namespace fiber::http_script {
+class ConstPackage;
+}
 
 namespace fiber::access_server {
 
@@ -74,6 +79,11 @@ public:
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
 
     [[nodiscard]] std::string_view trace_id() const noexcept;
+    [[nodiscard]] std::string_view trace_parent() const noexcept { return trace_parent_; }
+    [[nodiscard]] std::optional<std::string_view> trace_context(std::string_view key) const noexcept;
+    [[nodiscard]] common::IoResult<void> bind_trace_context(const http_script::ConstPackage &constants) noexcept;
+    [[nodiscard]] common::IoResult<void> put_trace_context(std::string_view key, std::string_view value) noexcept;
+    void remove_trace_context(std::string_view key) noexcept;
     [[nodiscard]] http_script::ScriptExchangeCtx &script_context() noexcept { return script_context_; }
     [[nodiscard]] const http_script::ScriptExchangeCtx &script_context() const noexcept { return script_context_; }
     [[nodiscard]] http::HttpHeaders &response_headers() noexcept { return response_headers_; }
@@ -91,10 +101,13 @@ private:
     script::GcHeap script_heap_;
     http_script::ScriptExchangeCtx script_context_;
     http::HttpHeaders response_headers_;
+    AccessTraceState trace_state_;
     AccessServerMetrics::Worker *metrics_ = nullptr;
     std::chrono::steady_clock::time_point started_{};
     cat::Transaction root_;
     std::optional<cat::MessageTraceContext> context_;
+    const http_script::ConstPackage *const_package_ = nullptr;
+    std::string_view trace_parent_;
     std::string_view project_;
     std::string_view route_;
     std::string_view cluster_;

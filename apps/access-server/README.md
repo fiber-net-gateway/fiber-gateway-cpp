@@ -72,6 +72,10 @@
   `HI-SPAN-ID`，响应写回 `Hi-Trace-Id`，代理调用生成下一 span；根事务采用 Java
   `URL` 类型和 `<project><route-pattern>` 名称，并记录 project、route、cluster、
   upstream、稳定错误名和最终响应状态；
+- 已实现 Java `traceparent`/`tracestate` 传播：缺少 `traceparent` 时生成 sampled W3C
+  header；解析 `tracestate` 的 `bnrc` GMP Base62 context 并绑定 `$context`，route
+  context 更新后在 upstream 发送前保留其他 vendor member 并重建 `bnrc`；CAT 不可用时
+  仍由请求级 telemetry 保持上述传播状态；
 - 已接入独立 Prometheus listener，默认 `0.0.0.0:16689`，请求完成计数、inflight
   和 duration 全部使用 worker 预绑定的固定 schema；动态 project/route/cluster
   不作为指标 label，避免测试 header 或热更新配置形成无限时序；

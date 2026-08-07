@@ -52,6 +52,8 @@ struct ObservedUpstreamRequest {
     std::string trace_id;
     std::string parent_span_id;
     std::string span_id;
+    std::string trace_parent;
+    std::string trace_state;
     std::string body;
     std::uint16_t remote_port = 0;
 };
@@ -384,6 +386,8 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     observed.trace_id.assign(exchange.header("HI-TRACE-ID"));
     observed.parent_span_id.assign(exchange.header("HI-SPAN-ID-PARENT"));
     observed.span_id.assign(exchange.header("HI-SPAN-ID"));
+    observed.trace_parent.assign(exchange.header("traceparent"));
+    observed.trace_state.assign(exchange.header("tracestate"));
     observed.remote_port = exchange.remote_addr().port();
 
     auto body = co_await read_body(exchange);
@@ -807,6 +811,9 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
             {.name = "X-Empty", .value = ""},
             {.name = "X-Ploto-Source-App", .value = "spoofed"},
     };
+    route.context = {
+            {.name = "tenant", .value = "blue"},
+    };
     fiber::access_server::RouteConfigStore store;
     auto published = store.apply("orders", std::move(config));
     ASSERT_TRUE(published) << published.error().message;
@@ -823,6 +830,8 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
                            "HI-TRACE-ID: access-root-1\r\n"
                            "HI-SPAN-ID-PARENT: access-parent-1\r\n"
                            "HI-SPAN-ID: access-span-1\r\n"
+                           "traceparent: 00-11111111111111111111111111111111-2222222222222222-01\r\n"
+                           "tracestate: vendor=opaque,bnrc=2F0tFt-1tSBej\r\n"
                            "Transfer-Encoding: chunked\r\n\r\n"
                            "3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n"
                            "POST /proxy?item=2 HTTP/1.1\r\n"
@@ -860,6 +869,8 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_EQ(first.parent_span_id, "access-span-1");
     EXPECT_FALSE(first.span_id.empty());
     EXPECT_NE(first.span_id, first.parent_span_id);
+    EXPECT_EQ(first.trace_parent, "00-11111111111111111111111111111111-2222222222222222-01");
+    EXPECT_EQ(first.trace_state, "vendor=opaque,bnrc=2F0tFt-1tSBej-2COt9SEFZWpzngwogq7x4c-1tSBej-aL8nZlUy-1nka5V");
     EXPECT_EQ(first.body, "hello");
 
     const ObservedUpstreamRequest &second = upstream_state.requests[1];
@@ -874,6 +885,10 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_FALSE(second.span_id.empty());
     EXPECT_NE(second.span_id, second.parent_span_id);
     EXPECT_NE(second.span_id, first.span_id);
+    EXPECT_EQ(second.trace_parent.size(), 55U);
+    EXPECT_TRUE(second.trace_parent.starts_with("00-"));
+    EXPECT_TRUE(second.trace_parent.ends_with("-01"));
+    EXPECT_EQ(second.trace_state, "bnrc=2COt9SEFZWpzngwogq7x4c-1tSBej-aL8nZlUy-1nka5V");
     EXPECT_EQ(second.body, "world");
     EXPECT_NE(first.remote_port, 0);
     EXPECT_EQ(second.remote_port, first.remote_port);
@@ -1106,6 +1121,10 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     EXPECT_EQ(upstream_state.requests[0].attempt_header, "evaluated-once");
     EXPECT_EQ(upstream_state.requests[0].transfer_encoding, "chunked");
     EXPECT_TRUE(upstream_state.requests[0].body.empty());
+    EXPECT_EQ(upstream_state.requests[0].trace_parent.size(), 55U);
+    EXPECT_TRUE(upstream_state.requests[0].trace_parent.starts_with("00-"));
+    EXPECT_TRUE(upstream_state.requests[0].trace_parent.ends_with("-01"));
+    EXPECT_EQ(upstream_state.requests[0].trace_state, "bnrc=2COt9SEFZWpzngwogq7x4c-V1lDmE8X");
     EXPECT_EQ(count_status(output, "HTTP/1.1 201 Created\r\n"), 1U);
     EXPECT_NE(output.find("upstream-1"), std::string::npos);
 

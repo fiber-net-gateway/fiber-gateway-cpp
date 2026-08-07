@@ -10,7 +10,10 @@
 #include <charconv>
 #include <cstring>
 #include <limits>
+#include <span>
 #include <string_view>
+
+#include <openssl/rand.h>
 
 #include <fiber/cat/CatClient.h>
 #include <fiber/cat/Status.h>
@@ -19,6 +22,7 @@
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaderHash.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http_script/ConstPackage.h>
 #include <fiber/log/Log.h>
 
 namespace fiber::access_server {
@@ -35,6 +39,11 @@ constexpr std::uint64_t kParentSpanIdHeaderHash = http::http_header_name_hash(kP
 constexpr std::string_view kSpanIdHeader = "HI-SPAN-ID";
 constexpr std::string_view kSpanIdLowcaseHeader = "hi-span-id";
 constexpr std::uint64_t kSpanIdHeaderHash = http::http_header_name_hash(kSpanIdLowcaseHeader);
+constexpr std::string_view kTraceParentHeader = "traceparent";
+constexpr std::uint64_t kTraceParentHeaderHash = http::http_header_name_hash(kTraceParentHeader);
+constexpr std::string_view kTraceStateHeader = "tracestate";
+constexpr std::uint64_t kTraceStateHeaderHash = http::http_header_name_hash(kTraceStateHeader);
+constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
 constexpr std::size_t kMaxUserAgentBytes = 1024;
 
 bool has_inbound_context(const cat::MessageTraceContext &context) noexcept {
@@ -57,6 +66,52 @@ cat::MessageTraceContext read_trace_context(const http::HttpHeaders &headers) no
             .root_message_id = headers.get(kTraceIdLowcaseHeader, kTraceIdHeaderHash),
             .parent_message_id = headers.get(kParentSpanIdLowcaseHeader, kParentSpanIdHeaderHash),
     };
+}
+
+bool all_zero(std::span<const unsigned char> value) noexcept {
+    return std::all_of(value.begin(), value.end(), [](unsigned char byte) { return byte == 0; });
+}
+
+std::string_view generate_trace_parent(mem::BufPool &pool) noexcept {
+    constexpr std::size_t kTraceParentSize = 55;
+    constexpr char kHex[] = "0123456789abcdef";
+    std::array<unsigned char, 24> random{};
+    bool generated = false;
+    for (std::uint8_t attempt = 0; attempt < 4; ++attempt) {
+        if (RAND_bytes(random.data(), random.size()) != 1) {
+            return {};
+        }
+        if (!all_zero(std::span<const unsigned char>(random.data(), 16)) &&
+            !all_zero(std::span<const unsigned char>(random.data() + 16, 8))) {
+            generated = true;
+            break;
+        }
+    }
+    if (!generated) {
+        return {};
+    }
+
+    char *storage = pool.alloc<char>(kTraceParentSize);
+    if (!storage) {
+        return {};
+    }
+    char *cursor = storage;
+    *cursor++ = '0';
+    *cursor++ = '0';
+    *cursor++ = '-';
+    for (std::size_t i = 0; i < 16; ++i) {
+        *cursor++ = kHex[random[i] >> 4U];
+        *cursor++ = kHex[random[i] & 0x0FU];
+    }
+    *cursor++ = '-';
+    for (std::size_t i = 16; i < random.size(); ++i) {
+        *cursor++ = kHex[random[i] >> 4U];
+        *cursor++ = kHex[random[i] & 0x0FU];
+    }
+    *cursor++ = '-';
+    *cursor++ = '0';
+    *cursor++ = '1';
+    return {storage, kTraceParentSize};
 }
 
 std::string_view response_result(const http::HttpResponseStats &response) noexcept {
@@ -154,15 +209,21 @@ void AccessProviderTransaction::cancel_pending() noexcept {
 AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, AccessServerMetrics::Worker *metrics,
                                                cat::CatClient *cat_client) noexcept :
     script_heap_(exchange.pool()), script_context_(exchange, script_heap_), response_headers_(exchange.pool()),
-    metrics_(metrics), started_(event::EventLoop::current().now()) {
+    trace_state_(exchange.pool()), metrics_(metrics), started_(event::EventLoop::current().now()) {
     if (metrics_) {
         metrics_->request_started();
     }
+    const http::HttpHeaders &request_headers = exchange.request_headers();
+    trace_parent_ = request_headers.get(kTraceParentHeader, kTraceParentHeaderHash);
+    if (trace_parent_.empty()) {
+        trace_parent_ = generate_trace_parent(exchange.pool());
+    }
+    trace_state_.parse(request_headers.get(kTraceStateHeader, kTraceStateHeaderHash));
     if (!cat_client) {
         return;
     }
 
-    const cat::MessageTraceContext inbound = read_trace_context(exchange.request_headers());
+    const cat::MessageTraceContext inbound = read_trace_context(request_headers);
     const bool inherited = has_inbound_context(inbound);
     bool invalid_fallback = false;
     auto created =
@@ -181,12 +242,20 @@ AccessRequestTelemetry::AccessRequestTelemetry(http::HttpExchange &exchange, Acc
     if (propagation) {
         context_.emplace(std::move(*propagation));
     }
+    cat::MessageTrace message_trace = root_.message_trace();
+    trace_state_.for_each_context([&message_trace](std::string_view key, std::string_view value) noexcept {
+        if (!key.empty()) {
+            (void) message_trace.put_context(key, value);
+        }
+        return true;
+    });
     (void) root_.set_data_separator(' ');
     add_root_data("method", exchange.method_view());
     add_root_data("host", exchange.header("Host"));
     add_root_data("path", exchange.uri().path);
     add_root_data("content_type", exchange.header("Content-Type"));
     add_root_data("realIp", exchange.header("X-Real-Ip"));
+    add_root_data("traceparent", trace_parent_);
     const std::string_view user_agent = exchange.header("User-Agent");
     if (!user_agent.empty()) {
         if (user_agent.size() > kMaxUserAgentBytes) {
@@ -256,6 +325,7 @@ void AccessRequestTelemetry::set_project(std::string_view project, std::string_v
     add_root_data("effectiveHost", effective_host);
     if (!context_cluster.empty()) {
         add_root_data("cluster", context_cluster);
+        (void) put_trace_context(kTraceCluster, context_cluster);
     }
     update_transaction_name();
 }
@@ -337,6 +407,67 @@ std::string_view AccessRequestTelemetry::trace_id() const noexcept {
     return context_->root_message_id.empty() ? context_->message_id : context_->root_message_id;
 }
 
+std::optional<std::string_view> AccessRequestTelemetry::trace_context(std::string_view key) const noexcept {
+    return trace_state_.get_context(key);
+}
+
+common::IoResult<void> AccessRequestTelemetry::bind_trace_context(const http_script::ConstPackage &constants) noexcept {
+    const_package_ = &constants;
+    bool bound = true;
+    trace_state_.for_each_context([&](std::string_view key, std::string_view value) noexcept {
+        const http_script::ConstIndex index = constants.find(http_script::ConstType::Context, key);
+        if (index != http_script::kInvalidConstIndex && !script_context_.bind_constant(index, value)) {
+            bound = false;
+            return false;
+        }
+        return true;
+    });
+    if (!bound) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const http_script::ConstIndex trace_parent_index =
+            constants.find(http_script::ConstType::Header, kTraceParentHeader);
+    if (trace_parent_index != http_script::kInvalidConstIndex && !trace_parent_.empty() &&
+        !script_context_.bind_constant(trace_parent_index, trace_parent_)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return {};
+}
+
+common::IoResult<void> AccessRequestTelemetry::put_trace_context(std::string_view key,
+                                                                 std::string_view value) noexcept {
+    auto stored = trace_state_.put_context(key, value);
+    if (!stored) {
+        return stored;
+    }
+    if (root_.valid() && !key.empty()) {
+        cat::MessageTrace message_trace = root_.message_trace();
+        (void) message_trace.put_context(key, value);
+    }
+    if (const_package_) {
+        const http_script::ConstIndex index = const_package_->find(http_script::ConstType::Context, key);
+        if (index != http_script::kInvalidConstIndex && !script_context_.bind_constant(index, value)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    return {};
+}
+
+void AccessRequestTelemetry::remove_trace_context(std::string_view key) noexcept {
+    if (!trace_state_.remove_context(key)) {
+        return;
+    }
+    if (root_.valid() && !key.empty()) {
+        cat::MessageTrace message_trace = root_.message_trace();
+        (void) message_trace.remove_context(key);
+    }
+    if (const_package_) {
+        const http_script::ConstIndex index = const_package_->find(http_script::ConstType::Context, key);
+        const std::array<http_script::ConstIndex, 1> indices{index};
+        script_context_.clear_constants(indices);
+    }
+}
+
 bool AccessRequestTelemetry::finalize_response_headers() noexcept {
     const std::string_view id = trace_id();
     return id.empty() ||
@@ -345,6 +476,13 @@ bool AccessRequestTelemetry::finalize_response_headers() noexcept {
 
 bool AccessRequestTelemetry::inject_upstream_headers(http::HttpHeaders &headers,
                                                      AccessProviderTransaction &provider) noexcept {
+    if (trace_state_.should_override_upstream()) {
+        auto trace_state = trace_state_.encode();
+        if (!trace_state ||
+            !headers.set_view(kTraceStateHeader, *trace_state, kTraceStateHeader.data(), kTraceStateHeaderHash)) {
+            return false;
+        }
+    }
     if (!root_.valid() || !context_ || context_->message_id.empty()) {
         return true;
     }
