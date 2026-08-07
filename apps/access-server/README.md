@@ -120,7 +120,7 @@ Java 兼容的进程默认值是：
 - 项目列表 `ploto.unified-access.projects`，route 前缀
   `ploto.unified-access.route.`，group `ACCESS-SERVER`；
 - gray data ID `ploto.unified-access.gray-match`；
-- Naming/gray group `DEFAULT_GROUP`，默认 cluster `default`。
+- Naming/gray group `DEFAULT_GROUP`；service 路由缺省 cluster 固定为 `default`。
 - 测试环境 Host cluster 模式默认关闭；仅在明确配置
   `ACCESS_SERVER_TEST_MODE=true` 时启用。
 

@@ -558,7 +558,7 @@ fiber::access_server::ProjectConfig service_project_config() {
 
 class TestServiceAddressSelector final : public fiber::access_server::ProxyAddressSelector {
 public:
-    TestServiceAddressSelector(ServiceSelectorState &state, std::string service, std::optional<std::string> cluster) :
+    TestServiceAddressSelector(ServiceSelectorState &state, std::string service, std::string cluster) :
         state_(&state), service_(std::move(service)), cluster_(std::move(cluster)) {}
 
     std::expected<fiber::access_server::ProxyUpstreamEndpoint, fiber::access_server::ProxyAddressSelectError>
@@ -568,7 +568,7 @@ public:
                 state_->expected_cluster_override
                         ? cluster_override && *cluster_override == *state_->expected_cluster_override
                         : !cluster_override;
-        if (service_ != "inventory" || !cluster_override_matches || cluster_ != std::optional<std::string>("stable")) {
+        if (service_ != "inventory" || !cluster_override_matches || cluster_ != "stable") {
             return std::unexpected(fiber::access_server::ProxyAddressSelectError{
                     .io_error = fiber::common::IoErr::Invalid,
                     .message = "unexpected service selector input",
@@ -616,18 +616,16 @@ public:
 
     [[nodiscard]] std::string_view service_name() const noexcept override { return service_; }
 
-    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override {
-        return cluster_ ? std::optional<std::string_view>(*cluster_) : std::nullopt;
-    }
+    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override { return cluster_; }
 
 private:
     ServiceSelectorState *state_ = nullptr;
     std::string service_;
-    std::optional<std::string> cluster_;
+    std::string cluster_;
 };
 
 std::shared_ptr<fiber::access_server::ProxyAddressSelector>
-make_test_service_selector(void *context, std::string service, std::optional<std::string> cluster) {
+make_test_service_selector(void *context, std::string service, std::string cluster) {
     return std::make_shared<TestServiceAddressSelector>(*static_cast<ServiceSelectorState *>(context),
                                                         std::move(service), std::move(cluster));
 }

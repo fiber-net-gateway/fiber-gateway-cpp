@@ -10,6 +10,8 @@
 namespace fiber::access_server {
 namespace {
 
+constexpr std::string_view kDefaultServiceCluster = "default";
+
 AccessConfigError route_error(AccessConfigErrorCode code, std::size_t route_index, std::string_view field,
                               std::string_view message) {
     std::string path = "routes[";
@@ -438,11 +440,14 @@ std::expected<CompiledRoute, AccessConfigError> compile_route(const RouteConfig 
         proxy.timeout_millis = source.timeout_millis ? java_int32_narrow(*source.timeout_millis) : 60000;
         if (is_nonempty(source.service)) {
             std::string service;
-            std::optional<std::string> cluster;
+            std::string cluster(kDefaultServiceCluster);
             const std::size_t slash = source.service->find('/');
             if (slash > 0 && slash != std::string::npos) {
                 service = source.service->substr(0, slash);
-                cluster = source.service->substr(slash + 1);
+                const std::string_view service_cluster(*source.service);
+                if (slash + 1 < service_cluster.size()) {
+                    cluster = service_cluster.substr(slash + 1);
+                }
             } else {
                 service = *source.service;
             }

@@ -350,11 +350,10 @@ namespace {
 
 class NacosProxyAddressSelector final : public ProxyAddressSelector {
 public:
-    NacosProxyAddressSelector(AccessServiceDiscovery::Lease lease, std::optional<std::string> configured_cluster,
-                              std::string default_cluster) :
-        lease_(std::move(lease)), configured_cluster_(std::move(configured_cluster)),
-        default_cluster_(std::move(default_cluster)) {
+    NacosProxyAddressSelector(AccessServiceDiscovery::Lease lease, std::string cluster) :
+        lease_(std::move(lease)), cluster_(std::move(cluster)) {
         FIBER_ASSERT(lease_);
+        FIBER_ASSERT(!cluster_.empty());
     }
 
     [[nodiscard]] async::Task<std::expected<void, ProxyAddressReadyError>> wait_ready() noexcept override {
@@ -378,10 +377,7 @@ public:
     std::expected<ProxyUpstreamEndpoint, ProxyAddressSelectError>
     select_address(std::optional<std::string_view> cluster_override,
                    std::span<const std::uint64_t> excluded_selection_tokens) noexcept override {
-        std::string_view cluster = default_cluster_;
-        if (configured_cluster_ && !configured_cluster_->empty()) {
-            cluster = *configured_cluster_;
-        }
+        std::string_view cluster = cluster_;
         if (cluster_override && !cluster_override->empty()) {
             cluster = *cluster_override;
         }
@@ -400,17 +396,11 @@ public:
 
     [[nodiscard]] std::string_view service_name() const noexcept override { return lease_.service_name(); }
 
-    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override {
-        if (!configured_cluster_) {
-            return std::nullopt;
-        }
-        return *configured_cluster_;
-    }
+    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override { return cluster_; }
 
 private:
     AccessServiceDiscovery::Lease lease_;
-    std::optional<std::string> configured_cluster_;
-    std::string default_cluster_;
+    std::string cluster_;
 };
 
 } // namespace
@@ -441,8 +431,7 @@ ProxyAddressSelectorFactory AccessServiceSelectorFactory::adapter() noexcept {
 }
 
 std::shared_ptr<ProxyAddressSelector>
-AccessServiceSelectorFactory::create_address_selector(void *context, std::string service,
-                                                      std::optional<std::string> cluster) {
+AccessServiceSelectorFactory::create_address_selector(void *context, std::string service, std::string cluster) {
     auto &self = *static_cast<AccessServiceSelectorFactory *>(context);
     FIBER_ASSERT(self.discovery_ != nullptr);
     auto acquired = self.discovery_->acquire(service, self.options_.group);
@@ -452,8 +441,7 @@ AccessServiceSelectorFactory::create_address_selector(void *context, std::string
         }
         return make_unavailable_service_address_selector(std::move(service), std::move(cluster));
     }
-    return std::make_shared<NacosProxyAddressSelector>(std::move(*acquired), std::move(cluster),
-                                                       self.options_.default_cluster);
+    return std::make_shared<NacosProxyAddressSelector>(std::move(*acquired), std::move(cluster));
 }
 
 } // namespace fiber::access_server
