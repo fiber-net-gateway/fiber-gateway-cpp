@@ -44,6 +44,7 @@ public:
     void add_upstream(std::string_view upstream, std::size_t attempt) noexcept;
     void add_connection_reuse(std::uint64_t reuse_count) noexcept;
     void fail(std::string_view phase, common::IoErr error) noexcept;
+    void call_error(const Exception &exception, std::string_view phase, common::IoErr error) noexcept;
     void complete(int status_code) noexcept;
 
 private:
@@ -65,7 +66,10 @@ public:
     void set_project(std::string_view project, std::string_view effective_host,
                      std::string_view context_cluster) noexcept;
     void set_route(const CompiledRoute &route) noexcept;
-    void set_error(const Exception &error) noexcept;
+    void record_exception(const Exception &exception) noexcept;
+    void record_upstream_exception(const Exception &exception) noexcept;
+    void record_response_error(common::IoErr error) noexcept;
+    void mark_io_error(common::IoErr error) noexcept;
     void set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept;
     [[nodiscard]] AccessProviderTransaction start_provider_transaction(std::string_view name) noexcept;
 
@@ -81,6 +85,7 @@ public:
 private:
     [[nodiscard]] std::string_view copy_to_request_pool(std::string_view value) noexcept;
     void add_root_data(std::string_view key, std::string_view value) noexcept;
+    void mark_failed(std::string_view error) noexcept;
     void update_transaction_name() noexcept;
 
     script::GcHeap script_heap_;
@@ -95,6 +100,10 @@ private:
     std::string_view cluster_;
     std::string_view upstream_;
     std::string_view error_;
+    bool execution_failed_ = false;
+    bool failure_recorded_ = false;
+    bool exception_recorded_ = false;
+    bool response_error_recorded_ = false;
 };
 
 } // namespace fiber::access_server

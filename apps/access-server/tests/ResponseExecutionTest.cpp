@@ -123,6 +123,15 @@ TEST(AccessResultTest, UsesJavaCompatibleStableExceptions) {
     EXPECT_EQ(body.message, "request body is too large");
 }
 
+TEST(AccessResultTest, DistinguishesUpstreamExceptionsFromLocalExceptions) {
+    const Exception exception = Exception::unknown("upstream failed");
+    const Err upstream = Err::from_upstream_exception(exception);
+
+    EXPECT_EQ(upstream.kind, Err::Kind::UpstreamException);
+    EXPECT_EQ(upstream.exception.name, exception.name);
+    EXPECT_EQ(upstream.exception.message, exception.message);
+}
+
 TEST(TemplateEvaluatorTest, EvaluatesSegmentsAndJavaEscapes) {
     EvaluatorState state;
     const CompiledTemplate value = compiled_template(R"(id=${$path.id};method=${$request.method};literal=\$\{\}\\)");

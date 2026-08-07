@@ -151,7 +151,6 @@ async::Task<common::IoResult<void>> ErrorResponder::send(http::HttpExchange &exc
     if (exchange.response_stats().header_sent) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    telemetry.set_error(error);
 
     const std::string_view trace_id =
             telemetry.trace_id().empty() ? std::string_view("unknown-trace-id") : telemetry.trace_id();
