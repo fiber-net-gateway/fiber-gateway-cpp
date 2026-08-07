@@ -118,6 +118,25 @@ void AccessProviderTransaction::fail(std::string_view phase, common::IoErr error
     (void) transaction_.complete(cat::status::Fail);
 }
 
+void AccessProviderTransaction::call_error(const Exception &exception, std::string_view phase,
+                                           common::IoErr error) noexcept {
+    if (!valid()) {
+        return;
+    }
+    auto event = transaction_.start_event("CALL_ERROR", exception.name);
+    if (event) {
+        (void) event->add_data(exception.message);
+        if (!phase.empty()) {
+            (void) event->add_data("phase", phase);
+        }
+        if (error != common::IoErr::None) {
+            (void) event->add_data("io_error", common::io_err_name(error));
+        }
+        (void) event->complete(cat::status::Error);
+    }
+    fail(phase, error);
+}
+
 void AccessProviderTransaction::complete(int status_code) noexcept {
     if (!valid()) {
         return;
@@ -195,18 +214,12 @@ AccessRequestTelemetry::~AccessRequestTelemetry() {
                                                         static_cast<std::size_t>(status.ptr - status_buffer.data()))
                                      : std::string_view("0");
     add_root_data("status", status_text);
-    add_root_data("result", response_result(response));
     if (response.terminal_error != common::IoErr::None) {
         add_root_data("io_error", common::io_err_name(response.terminal_error));
     }
     if (root_.valid()) {
-        if (!error_.empty()) {
-            (void) root_.complete(error_);
-        } else {
-            const bool success = response.completed && response.terminal_error == common::IoErr::None &&
-                                 response.status_code >= 200 && response.status_code < 400;
-            (void) root_.complete(success ? cat::status::Success : cat::status::Fail);
-        }
+        const bool success = !execution_failed_ && response.completed && response.terminal_error == common::IoErr::None;
+        (void) root_.complete(success ? cat::status::Success : cat::status::Error);
     }
 
     LOG(LOG_ACCESS, INFO) << "request completed"
@@ -253,20 +266,53 @@ void AccessRequestTelemetry::set_route(const CompiledRoute &route) noexcept {
     update_transaction_name();
 }
 
-void AccessRequestTelemetry::set_error(const Exception &error) noexcept {
-    if (!error_.empty()) {
+void AccessRequestTelemetry::mark_failed(std::string_view error) noexcept {
+    execution_failed_ = true;
+    if (failure_recorded_) {
         return;
     }
-    error_ = copy_to_request_pool(error.name);
-    add_root_data("error", error.name);
+    failure_recorded_ = true;
+    error_ = copy_to_request_pool(error);
+    add_root_data("error", error);
+}
+
+void AccessRequestTelemetry::record_exception(const Exception &exception) noexcept {
+    mark_failed(exception.name);
+    if (exception_recorded_) {
+        return;
+    }
+    exception_recorded_ = true;
     if (root_.valid()) {
-        auto event = root_.start_event("FiberException", error.name);
+        auto event = root_.start_event("FiberException", exception.name);
         if (event) {
-            (void) event->add_data(error.message);
+            (void) event->add_data(exception.message);
             (void) event->complete(cat::status::Error);
         }
     }
 }
+
+void AccessRequestTelemetry::record_upstream_exception(const Exception &exception) noexcept {
+    mark_failed(exception.name);
+}
+
+void AccessRequestTelemetry::record_response_error(common::IoErr error) noexcept {
+    mark_failed("RESPONSE_ERROR");
+    if (response_error_recorded_) {
+        return;
+    }
+    response_error_recorded_ = true;
+    if (!root_.valid()) {
+        return;
+    }
+    const std::string_view error_name = common::io_err_name(error);
+    auto event = root_.start_event("ResponseError", error_name);
+    if (event) {
+        (void) event->add_data("io_error", error_name);
+        (void) event->complete(cat::status::Error);
+    }
+}
+
+void AccessRequestTelemetry::mark_io_error(common::IoErr error) noexcept { mark_failed(common::io_err_name(error)); }
 
 void AccessRequestTelemetry::set_upstream(const ProxyUpstreamEndpoint &endpoint) noexcept {
     upstream_ = copy_to_request_pool(endpoint.host_header);

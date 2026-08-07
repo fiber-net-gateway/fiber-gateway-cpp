@@ -544,8 +544,16 @@ Host cluster 已装配。
 请求观测使用一个贯穿 handler、RESPONSE 和 PROXY 的上下文：
 
 - CAT 根事务类型为 `URL`，命中后名称为 `<project><route-pattern>`；
+- CAT 根事务只表达 access-server 是否完整执行：完整转发的 upstream 4xx/5xx 仍为成功，
+  路由、代理调用或 downstream 写入导致功能未完成时为 `ERROR`；HTTP status 仅作为 data，
+  根事务不再写 `result`；
 - 入站三段 CAT ID 被继续，无有效上下文时生成新 tree；响应写回 `Hi-Trace-Id`，
   upstream 写入新的 `HI-TRACE-ID`、`HI-SPAN-ID-PARENT`、`HI-SPAN-ID`；
+- 每次真实 upstream attempt 失败由对应 `Access.Provider` 记录 `CALL_ERROR`；最终错误返回
+  handler 时使用 `Err::UpstreamException`，只标记根事务失败，不再重复记录
+  `FiberException`。路由、模板、无可用地址和熔断等本地失败记录 `FiberException`；
+- 原始错误之后若错误响应本身写入失败，独立记录 `ResponseError`，不覆盖也不重复原始
+  `CALL_ERROR`/`FiberException`；
 - project、route、context cluster、实际 upstream、稳定 `Exception.name` 和最终
   response completion 同时进入 CAT 与 `access_server.access`；
 - Prometheus 在独立 listener 输出固定 `result` 标签的请求总数、inflight 和 duration。
@@ -594,13 +602,15 @@ tunnel，保留 upstream `Sec-WebSocket-Accept` 和非 hop-by-hop header，并�
 
 ## 12. 错误响应
 
-RESPONSE、PROXY、脚本和路由中间层只返回 `Result<T>`：`Err::Exception` 携带可渲染的
-业务错误，`Err::Error` 保留底层 IO/内存错误。只有请求 handler 最外层调用
+RESPONSE、PROXY、脚本和路由中间层只返回 `Result<T>`：`Err::Exception` 携带由 handler
+记录 `FiberException` 的可渲染业务错误，`Err::UpstreamException` 携带已经由 proxy
+记录 `CALL_ERROR` 的 HTTP client 错误，`Err::Error` 保留底层 IO/内存错误。只有请求 handler 最外层调用
 `ErrorResponder`：response header 尚未提交且 channel 可用时，Exception 按原错误发送，
 Error 统一映射为 `ACCESS_UNKNOWN_ERROR` 500；header 已提交或 channel 已关闭时不再写入
 第二份响应，只终止 exchange。
 
-`ErrorResponder` 不读取或 discard request body，而是立即发送可用的错误响应。handler
+`ErrorResponder` 只渲染和发送，不决定 CAT 错误事件类型；它不读取或 discard request body，
+而是立即发送可用的错误响应。handler
 返回后的未读请求体清理由 HTTP connection/stream 层负责；因此已知 Content-Length
 超限等前置错误不会等待慢速请求体上传完成。RESPONSE 路由正常执行前仍会按其业务语义
 读取并丢弃请求 body，这与错误响应职责无关。

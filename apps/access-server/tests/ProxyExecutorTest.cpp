@@ -140,8 +140,9 @@ struct CatFrameCapture {
 class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
     RecordingTransport(fiber::event::EventLoop &loop, std::string input, std::string &output,
-                       bool hold_open_after_input = false) :
-        loop_(loop), input_(std::move(input)), output_(output), hold_open_after_input_(hold_open_after_input) {}
+                       bool hold_open_after_input = false, bool fail_writes = false) :
+        loop_(loop), input_(std::move(input)), output_(output), hold_open_after_input_(hold_open_after_input),
+        fail_writes_(fail_writes) {}
 
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -187,12 +188,18 @@ public:
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> write(const void *buffer, std::size_t size,
                                                                    std::chrono::milliseconds) override {
+        if (fail_writes_) {
+            co_return std::unexpected(fiber::common::IoErr::ConnReset);
+        }
         output_.append(static_cast<const char *>(buffer), size);
         co_return size;
     }
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> write(fiber::mem::IoBuf &buffer,
                                                                    std::chrono::milliseconds) override {
+        if (fail_writes_) {
+            co_return std::unexpected(fiber::common::IoErr::ConnReset);
+        }
         const std::size_t size = buffer.readable();
         output_.append(reinterpret_cast<const char *>(buffer.readable_data()), size);
         buffer.consume(size);
@@ -201,6 +208,9 @@ public:
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> writev(fiber::mem::IoBufChain &buffers,
                                                                     std::chrono::milliseconds) override {
+        if (fail_writes_) {
+            co_return std::unexpected(fiber::common::IoErr::ConnReset);
+        }
         std::array<iovec, 16> iov{};
         const int count = buffers.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
         std::size_t size = 0;
@@ -233,6 +243,7 @@ private:
     bool input_consumed_ = false;
     bool closed_ = false;
     bool hold_open_after_input_ = false;
+    bool fail_writes_ = false;
 };
 
 fiber::common::IoResult<std::uint16_t> bound_port(int fd) {
@@ -470,8 +481,9 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
                std::promise<void> *done, std::promise<RecordingTransport *> *transport_ready = nullptr,
                bool hold_open_after_input = false, fiber::cat::CatClient *cat_client = nullptr,
                fiber::access_server::AccessRequestScriptAdapter script_adapter = {},
-               fiber::access_server::AccessRequestHandlerOptions handler_options = {}) {
-    auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, hold_open_after_input);
+               fiber::access_server::AccessRequestHandlerOptions handler_options = {}, bool fail_writes = false) {
+    auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, hold_open_after_input,
+                                                          fail_writes);
     if (transport_ready) {
         transport_ready->set_value(transport.get());
     }
@@ -484,6 +496,29 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
     fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(http_handler), {});
     co_await connection.run();
     done->set_value();
+}
+
+fiber::async::Task<fiber::access_server::Result<void>>
+recorded_upstream_failure(void *, fiber::http::HttpExchange &, const fiber::access_server::CompiledProxyRoute &,
+                          fiber::access_server::ProxyExecutionInput,
+                          fiber::access_server::AccessRequestTelemetry &telemetry) noexcept {
+    const fiber::access_server::Exception exception{
+            .name = "HTTP_CLIENT_CONNECT_ERROR",
+            .message = "cannot connect to upstream",
+            .status = 502,
+    };
+    auto provider = telemetry.start_provider_transaction("fixture-upstream");
+    provider.add_upstream("127.0.0.2:8080", 1);
+    provider.call_error(exception, "connect", fiber::common::IoErr::ConnRefused);
+    co_return std::unexpected(fiber::access_server::Err::from_upstream_exception(exception));
+}
+
+fiber::async::Task<fiber::access_server::Result<void>>
+local_execution_failure(void *, fiber::http::HttpExchange &, const fiber::access_server::CompiledProxyRoute &,
+                        fiber::access_server::ProxyExecutionInput,
+                        fiber::access_server::AccessRequestTelemetry &) noexcept {
+    co_return std::unexpected(
+            fiber::access_server::Err::from_exception(fiber::access_server::Exception::entry_error()));
 }
 
 fiber::async::DetachedTask disconnect_after(std::chrono::milliseconds delay, RecordingTransport *transport) {
@@ -801,6 +836,73 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     EXPECT_TRUE(wait_for_cat_frame(cat_capture, "Access.Provider", "RemoteCall"));
     EXPECT_FALSE(cat_capture.contains("connection_request_count="));
     EXPECT_FALSE(cat_capture.contains("connection_reuse_count="));
+
+    const auto run_additional_request = [&](fiber::access_server::AccessProxyAdapter adapter,
+                                            std::string &request_output, bool fail_writes = false) {
+        std::promise<void> done_promise;
+        auto done = done_promise.get_future();
+        std::string request = "GET /proxy HTTP/1.1\r\n"
+                              "Host: api.example.com\r\n"
+                              "Connection: close\r\n\r\n";
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_downstream(&group.at(0), &store, adapter, std::move(request), &request_output, &done_promise,
+                                  nullptr, false, cat_client.get(), {}, {}, fail_writes);
+        });
+        return done.wait_for(5s) == std::future_status::ready;
+    };
+
+    upstream_state.response.status = 503;
+    upstream_state.response.body = "upstream-unavailable";
+    std::string upstream_503_output;
+    ASSERT_TRUE(run_additional_request(executor.adapter(), upstream_503_output));
+    EXPECT_TRUE(upstream_503_output.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    const std::string root_success{'T', '\x01', '0'};
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "status=503", root_success));
+
+    auto failed_upstream_config = project_config(port);
+    (**failed_upstream_config.routes->begin()).addresses = {
+            std::optional<std::string>("127.0.0.2:" + std::to_string(port)),
+    };
+    fiber::access_server::RouteConfigStore failed_upstream_store;
+    auto failed_upstream_published = failed_upstream_store.apply("orders", std::move(failed_upstream_config));
+    ASSERT_TRUE(failed_upstream_published) << failed_upstream_published.error().message;
+    std::promise<void> upstream_failure_promise;
+    auto upstream_failure_done = upstream_failure_promise.get_future();
+    std::string upstream_failure_output;
+    std::string upstream_failure_request = "GET /proxy HTTP/1.1\r\n"
+                                           "Host: api.example.com\r\n"
+                                           "Connection: close\r\n\r\n";
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_downstream(&group.at(0), &failed_upstream_store, executor.adapter(),
+                              std::move(upstream_failure_request), &upstream_failure_output, &upstream_failure_promise,
+                              nullptr, false, cat_client.get());
+    });
+    ASSERT_EQ(upstream_failure_done.wait_for(5s), std::future_status::ready);
+    EXPECT_TRUE(upstream_failure_output.starts_with("HTTP/1.1 502 Bad Gateway\r\n"));
+    const std::string root_error{'T', '\x05', 'E', 'R', 'R', 'O', 'R'};
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "CALL_ERROR", root_error));
+    EXPECT_TRUE(cat_capture.contains("CALL_ERROR", "HTTP_CLIENT_CONNECT_ERROR"));
+    EXPECT_FALSE(cat_capture.contains("FiberException", "HTTP_CLIENT_CONNECT_ERROR"));
+
+    std::string response_failure_output;
+    ASSERT_TRUE(run_additional_request(
+            fiber::access_server::AccessProxyAdapter{
+                    .execute = recorded_upstream_failure,
+            },
+            response_failure_output, true));
+    EXPECT_TRUE(response_failure_output.empty());
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "ResponseError", "conn_reset"));
+    EXPECT_FALSE(cat_capture.contains("FiberException", "HTTP_CLIENT_CONNECT_ERROR"));
+
+    std::string local_failure_output;
+    ASSERT_TRUE(run_additional_request(
+            fiber::access_server::AccessProxyAdapter{
+                    .execute = local_execution_failure,
+            },
+            local_failure_output));
+    EXPECT_TRUE(local_failure_output.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+    EXPECT_TRUE(wait_for_cat_frame(cat_capture, "FiberException", "ENTRY_ERROR"));
+    EXPECT_FALSE(cat_capture.contains("result="));
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();

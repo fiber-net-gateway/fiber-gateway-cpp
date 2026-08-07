@@ -70,8 +70,9 @@ struct Exception {
 
 struct Err {
     enum class Kind : std::uint8_t {
-        Error,
-        Exception,
+        Error, // Raw IO/memory failure without a public Exception payload.
+        Exception, // AccessRequestHandler owns the FiberException event.
+        UpstreamException, // Proxy attempt already owns the CALL_ERROR event.
     };
 
     [[nodiscard]] static constexpr Err from_error(common::IoErr error) noexcept {
@@ -84,6 +85,13 @@ struct Err {
     [[nodiscard]] static constexpr Err from_exception(Exception exception) noexcept {
         return Err{
                 .kind = Kind::Exception,
+                .exception = exception,
+        };
+    }
+
+    [[nodiscard]] static constexpr Err from_upstream_exception(Exception exception) noexcept {
+        return Err{
+                .kind = Kind::UpstreamException,
                 .exception = exception,
         };
     }
