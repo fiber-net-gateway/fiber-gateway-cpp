@@ -8,8 +8,9 @@
 namespace fiber::access_server {
 namespace {
 
-ProxyAddressSelectError unavailable_error(const char *message) noexcept {
+ProxyAddressSelectError unavailable_error(ProxyAddressSelectErrorCode code, const char *message) noexcept {
     return ProxyAddressSelectError{
+            .code = code,
             .io_error = common::IoErr::NotFound,
             .message = message,
     };
@@ -37,7 +38,13 @@ public:
                    std::span<const std::uint64_t> excluded_selection_tokens) noexcept override {
         auto selected = swrr_.select(excluded_selection_tokens);
         if (!selected) {
-            return std::unexpected(unavailable_error("no available static upstream address"));
+            const ProxyAddressSelectErrorCode code = selected.error() == SwrrSelectError::NoConfiguredInstance
+                                                             ? ProxyAddressSelectErrorCode::NoHosts
+                                                             : ProxyAddressSelectErrorCode::CircuitOpen;
+            const char *message = code == ProxyAddressSelectErrorCode::NoHosts
+                                          ? "no available static upstream address"
+                                          : "static upstream circuit breaker is open";
+            return std::unexpected(unavailable_error(code, message));
         }
         const std::string_view provider_name = selected->instance().authority;
         return make_proxy_upstream_endpoint(std::move(*selected), provider_name);
@@ -54,7 +61,8 @@ public:
 
     std::expected<ProxyUpstreamEndpoint, ProxyAddressSelectError>
     select_address(std::optional<std::string_view>, std::span<const std::uint64_t>) noexcept override {
-        return std::unexpected(unavailable_error("service upstream selector is unavailable"));
+        return std::unexpected(
+                unavailable_error(ProxyAddressSelectErrorCode::NoHosts, "service upstream selector is unavailable"));
     }
 
     [[nodiscard]] std::string_view service_name() const noexcept override { return service_; }

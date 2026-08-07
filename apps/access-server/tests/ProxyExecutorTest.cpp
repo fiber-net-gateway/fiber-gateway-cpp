@@ -83,6 +83,7 @@ struct ServiceSelectorState {
     std::size_t select_count = 0;
     std::size_t cluster_match_count = 0;
     std::optional<std::string> expected_cluster_override;
+    std::optional<fiber::access_server::ProxyAddressSelectErrorCode> select_error;
     std::vector<std::pair<std::uint64_t, bool>> reports;
 };
 
@@ -574,6 +575,18 @@ public:
             });
         }
 
+        if (state_->select_error) {
+            ++state_->select_count;
+            const bool circuit_open =
+                    *state_->select_error == fiber::access_server::ProxyAddressSelectErrorCode::CircuitOpen;
+            return std::unexpected(fiber::access_server::ProxyAddressSelectError{
+                    .code = *state_->select_error,
+                    .io_error = fiber::common::IoErr::NotFound,
+                    .message =
+                            circuit_open ? "service upstream circuit breaker is open" : "no available service instance",
+            });
+        }
+
         const bool first = state_->select_count++ == 0;
         if (first) {
             if (!excluded_selection_tokens.empty()) {
@@ -897,6 +910,65 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     group.stop();
     group.join();
     delete server;
+}
+
+TEST(ProxyExecutorTest, PreservesPreConnectSelectionFailureKinds) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    ServiceSelectorState selector_state{
+            .select_error = fiber::access_server::ProxyAddressSelectErrorCode::NoHosts,
+    };
+    fiber::access_server::RouteConfigStore store({}, fiber::access_server::ProxyAddressSelectorFactory{
+                                                             .context = &selector_state,
+                                                             .create_service = make_test_service_selector,
+                                                     });
+    auto published = store.apply("orders", service_project_config());
+    ASSERT_TRUE(published) << published.error().message;
+
+    fiber::access_server::ProxyExecutor executor(pool, fiber::access_server::ProxyClusterMatcher{
+                                                               .context = &selector_state,
+                                                               .matches = never_match_gray,
+                                                       });
+    const auto send_request = [&](fiber::access_server::ProxyAddressSelectErrorCode error_code, std::string &output) {
+        selector_state.select_error = error_code;
+        std::promise<void> request_promise;
+        auto request_future = request_promise.get_future();
+        std::string request = "GET /proxy HTTP/1.1\r\n"
+                              "Host: api.example.com\r\n"
+                              "Connection: close\r\n\r\n";
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output,
+                                  &request_promise);
+        });
+        return request_future.wait_for(2s) == std::future_status::ready;
+    };
+
+    std::string no_hosts_output;
+    ASSERT_TRUE(send_request(fiber::access_server::ProxyAddressSelectErrorCode::NoHosts, no_hosts_output));
+    EXPECT_NE(no_hosts_output.find("HTTP/1.1 503 Service Unavailable\r\n"), std::string::npos);
+    EXPECT_NE(no_hosts_output.find(R"("name":"UPSTREAM_NO_HOSTS")"), std::string::npos);
+    EXPECT_EQ(no_hosts_output.find("HTTP_CLIENT_CONNECT_ERROR"), std::string::npos);
+
+    std::string circuit_output;
+    ASSERT_TRUE(send_request(fiber::access_server::ProxyAddressSelectErrorCode::CircuitOpen, circuit_output));
+    EXPECT_NE(circuit_output.find("HTTP/1.1 503 Service Unavailable\r\n"), std::string::npos);
+    EXPECT_NE(circuit_output.find(R"("name":"UPSTREAM_CIRCUIT_BREAK")"), std::string::npos);
+    EXPECT_EQ(circuit_output.find("HTTP_CLIENT_CONNECT_ERROR"), std::string::npos);
+    EXPECT_EQ(selector_state.select_count, 2U);
+    EXPECT_TRUE(selector_state.reports.empty());
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        co_await pool.shutdown_async();
+        shutdown_promise.set_value();
+    });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
 }
 
 TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparationFails) {

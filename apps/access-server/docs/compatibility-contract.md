@@ -468,6 +468,11 @@ response body 未完整结束时 report 失败；`<500` 普通响应在 body 完
 成功，WebSocket 在 101 成功切换 raw stream 后 report 成功。downstream body 错误、
 本地 body limit、响应构造失败和 downstream 写入失败不归因给 upstream，不提交 report。
 
+Nacos 实例沿用 Java `HttpHost` 的协议推导：端口 443 使用 HTTPS，其他端口使用 HTTP；
+Host header 对 80/443 省略默认端口。没有配置/健康实例时返回 503
+`UPSTREAM_NO_HOSTS`，实例均处于熔断状态时返回 503 `UPSTREAM_CIRCUIT_BREAK`；这两类
+选择失败发生在连接池和 socket 建连之前，不得映射为 `HTTP_CLIENT_CONNECT_ERROR`。
+
 ### 10.3 Request header
 
 下列 hop-by-hop/header 不直接复制，名称比较大小写不敏感：
@@ -631,6 +636,8 @@ name 包含 Java class name，C++ 不伪造 Java 类型名，固定使用
 | X-Entry 不允许 | 403 | `ENTRY_ERROR` | `entry error` |
 | source IP 不允许 | 403 | `NOT_ALLOW_IP` | `source ip is not allowed` |
 | request body 超限 | 413 | `REQ_BODY_TOO_LARGE` | `request body is too large` |
+| upstream 无可用实例 | 503 | `UPSTREAM_NO_HOSTS` | `no available service instance` |
+| upstream 实例均熔断 | 503 | `UPSTREAM_CIRCUIT_BREAK` | `service upstream circuit breaker is open` |
 
 HTML Content-Type 为 `text/html`。当前实现按 Java 页面精确拼接 status、name、
 message、trace ID 和 null meta；Java 对 message 没有 HTML escaping，C++ 为保持当前

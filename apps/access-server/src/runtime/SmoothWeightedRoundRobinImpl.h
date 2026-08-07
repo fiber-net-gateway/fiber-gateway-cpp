@@ -357,7 +357,7 @@ SmoothWeightedRoundRobin<Instance>::select(std::span<const std::uint64_t> exclud
     std::lock_guard guard(state_->mutex);
     Weighted *weighted_instances = state_->weighted_instances.get();
     if (state_->weighted_instance_count == 0) {
-        return std::unexpected(SwrrSelectError::NoAvailableInstance);
+        return std::unexpected(SwrrSelectError::NoConfiguredInstance);
     }
 
     Weighted *best = nullptr;
