@@ -3,7 +3,7 @@
 
 #include "../../../../src/async/Task.h"
 #include "../../../../src/common/IoError.h"
-#include "../../../../src/http/LocalHttp1ConnectionPoolSet.h"
+#include "../../../../src/http/StealableHttp1ConnectionPoolSet.h"
 #include "../../../../src/net/IpAddress.h"
 
 #include <chrono>
@@ -39,12 +39,12 @@ struct ProxyConnectError {
 };
 
 struct ProxyUpstreamConnection {
-    http::LocalHttp1ConnectionPoolSet::Lease lease;
+    http::StealableHttp1ConnectionPoolSet::Lease lease;
     http::Http1ClientConnection *connection = nullptr;
 };
 
 [[nodiscard]] async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
-acquire_proxy_upstream_connection(http::LocalHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
+acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
                                   const http::Http1ConnectionGroupKey &key,
                                   std::chrono::milliseconds connect_timeout) noexcept;
 

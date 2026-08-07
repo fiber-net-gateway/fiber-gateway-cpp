@@ -526,7 +526,7 @@ fiber::async::DetachedTask disconnect_after(std::chrono::milliseconds delay, Rec
     transport->disconnect();
 }
 
-fiber::async::DetachedTask shutdown(fiber::http::LocalHttp1ConnectionPoolSet *pool, fiber::http::HttpServer *server,
+fiber::async::DetachedTask shutdown(fiber::http::StealableHttp1ConnectionPoolSet *pool, fiber::http::HttpServer *server,
                                     std::promise<void> *done) {
     server->close();
     co_await pool->shutdown_async();
@@ -687,7 +687,7 @@ std::size_t count_header(std::string_view response, std::string_view header) {
 
 TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnection) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
 
     fiber::net::TcpListener cat_collector(group.at(0));
@@ -921,9 +921,66 @@ TEST(ProxyExecutorTest, StreamsJavaCompatibleRequestsAndReusesTheUpstreamConnect
     delete server;
 }
 
+TEST(ProxyExecutorTest, ReusesAnUpstreamConnectionAcrossWorkers) {
+    fiber::event::EventLoopGroup group(2);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+
+    UpstreamState upstream_state;
+    std::promise<std::uint16_t> port_promise;
+    std::promise<fiber::http::HttpServer *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    fiber::http::HttpServer *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::access_server::RouteConfigStore store;
+    auto published = store.apply("orders", project_config(port));
+    ASSERT_TRUE(published) << published.error().message;
+    fiber::access_server::ProxyExecutor executor(pool);
+
+    const auto run_request = [&](std::size_t worker_index, std::string &output) {
+        std::promise<void> done_promise;
+        auto done = done_promise.get_future();
+        std::string request = "GET /proxy HTTP/1.1\r\n"
+                              "Host: api.example.com\r\n"
+                              "Connection: close\r\n\r\n";
+        fiber::async::spawn(group.at(worker_index), [&]() {
+            return run_downstream(&group.at(worker_index), &store, executor.adapter(), std::move(request), &output,
+                                  &done_promise);
+        });
+        return done.wait_for(5s) == std::future_status::ready;
+    };
+
+    std::string first_output;
+    ASSERT_TRUE(run_request(0, first_output));
+    std::string second_output;
+    ASSERT_TRUE(run_request(1, second_output));
+
+    ASSERT_EQ(upstream_state.requests.size(), 2U);
+    EXPECT_NE(upstream_state.requests[0].remote_port, 0);
+    EXPECT_EQ(upstream_state.requests[1].remote_port, upstream_state.requests[0].remote_port);
+    EXPECT_TRUE(first_output.starts_with("HTTP/1.1 201 Created\r\n"));
+    EXPECT_TRUE(second_output.starts_with("HTTP/1.1 201 Created\r\n"));
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+    delete server;
+}
+
 TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1014,7 +1071,7 @@ TEST(ProxyExecutorTest, RetriesAServiceSelectionBeforeSendingRequestHeaders) {
 
 TEST(ProxyExecutorTest, PreservesPreConnectSelectionFailureKinds) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1073,7 +1130,7 @@ TEST(ProxyExecutorTest, PreservesPreConnectSelectionFailureKinds) {
 
 TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparationFails) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1142,7 +1199,7 @@ TEST(ProxyExecutorTest, StopsBeforeConnectionAcquisitionWhenRequestHeadPreparati
 
 TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1211,7 +1268,7 @@ TEST(ProxyExecutorTest, DoesNotPenalizeUpstreamForDownstreamRequestBodyLimit) {
 
 TEST(ProxyExecutorTest, BridgesJavaCompatibleResponseHeadersAndBody) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1285,7 +1342,7 @@ TEST(ProxyExecutorTest, BridgesJavaCompatibleResponseHeadersAndBody) {
 
 TEST(ProxyExecutorTest, ForwardsFinalStatusAndHonorsNoBodyResponses) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1368,7 +1425,7 @@ TEST(ProxyExecutorTest, ForwardsFinalStatusAndHonorsNoBodyResponses) {
 
 TEST(ProxyExecutorTest, RejectsKnownOversizedResponseBeforeCommittingUpstreamStatus) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1423,7 +1480,7 @@ TEST(ProxyExecutorTest, RejectsKnownOversizedResponseBeforeCommittingUpstreamSta
 
 TEST(ProxyExecutorTest, AbortsCommittedChunkedResponseWhenDynamicLimitIsExceeded) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1478,7 +1535,7 @@ TEST(ProxyExecutorTest, AbortsCommittedChunkedResponseWhenDynamicLimitIsExceeded
 
 TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1554,7 +1611,7 @@ TEST(ProxyExecutorTest, AbortsDownstreamAfterAnUpstreamBodyEndsEarly) {
 
 TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1616,7 +1673,7 @@ TEST(ProxyExecutorTest, CancelsUpstreamWhenDownstreamClosesBeforeResponseHeaders
 
 TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1689,7 +1746,7 @@ TEST(ProxyExecutorTest, RelaysWebSocketUpgradeAndRawBytesInBothDirections) {
 
 TEST(ProxyExecutorTest, AbortsUpgradeBeforeRenderingAResponseTemplateFailure) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 
@@ -1757,7 +1814,7 @@ TEST(ProxyExecutorTest, AbortsUpgradeBeforeRenderingAResponseTemplateFailure) {
 
 TEST(ProxyExecutorTest, AppliesConfiguredWebSocketTunnelTimeout) {
     fiber::event::EventLoopGroup group(1);
-    fiber::http::LocalHttp1ConnectionPoolSet pool(group);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
     ASSERT_TRUE(pool.init());
     group.start();
 

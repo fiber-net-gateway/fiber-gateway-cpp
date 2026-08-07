@@ -362,7 +362,7 @@ shutdown barrier 已完成。
 - [x] 本地 DNS resolver 注入上游执行器；
 - [x] 启停、服务内部重连和关闭竞态。
 - [x] NacosClient、ConfigService、NamingService 和 watcher 的 owner-loop 装配；
-- [x] 每个 HTTP worker 的 DNS resolver、共享 DNS cache 与 local connection pool；
+- [x] 每个 HTTP worker 的 DNS resolver、共享 DNS cache 与跨 worker 可复用 connection pool；
 - [x] 项目列表首值到达前不绑定 listener，超时则失败退出；
 - [x] SIGINT/SIGTERM 下 listener -> pool/DNS -> watcher/service -> client 逆序关闭。
 

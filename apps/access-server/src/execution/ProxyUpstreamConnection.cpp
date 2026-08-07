@@ -37,11 +37,11 @@ http::Http1ClientConnectionOptions connection_options(const http::Http1Connectio
 } // namespace
 
 async::Task<std::expected<ProxyUpstreamConnection, ProxyConnectError>>
-acquire_proxy_upstream_connection(http::LocalHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
+acquire_proxy_upstream_connection(http::StealableHttp1ConnectionPoolSet &pool, ProxyDnsResolver dns_resolver,
                                   const http::Http1ConnectionGroupKey &key,
                                   std::chrono::milliseconds connect_timeout) noexcept {
     ProxyUpstreamConnection output;
-    output.lease = pool.acquire(key);
+    output.lease = co_await pool.acquire(key);
     if (!output.lease.valid()) {
         co_return std::unexpected(error(ProxyConnectErrorCode::PoolShutdown,
                                         "upstream connection pool is shutting down", common::IoErr::Canceled));
@@ -76,7 +76,7 @@ acquire_proxy_upstream_connection(http::LocalHttp1ConnectionPoolSet &pool, Proxy
     common::IoErr last_error = common::IoErr::NotFound;
     for (std::size_t i = 0; i < addresses.size(); ++i) {
         if (i > 0) {
-            output.lease = pool.acquire(key);
+            output.lease = co_await pool.acquire(key);
             if (!output.lease.valid()) {
                 co_return std::unexpected(error(ProxyConnectErrorCode::PoolShutdown,
                                                 "upstream connection pool is shutting down", common::IoErr::Canceled));

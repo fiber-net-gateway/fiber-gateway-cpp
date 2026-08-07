@@ -21,7 +21,7 @@ struct ProxyExecutorOptions {
 
 class ProxyExecutor final : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit ProxyExecutor(http::LocalHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher = {},
+    explicit ProxyExecutor(http::StealableHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher = {},
                            ProxyDnsResolver dns_resolver = {}, ProxyExecutorOptions options = {}) noexcept;
 
     [[nodiscard]] AccessProxyAdapter adapter() noexcept;
@@ -37,7 +37,7 @@ private:
                                                          ProxyExecutionInput input,
                                                          AccessRequestTelemetry &telemetry) noexcept;
 
-    http::LocalHttp1ConnectionPoolSet &pool_;
+    http::StealableHttp1ConnectionPoolSet &pool_;
     ProxyClusterMatcher cluster_matcher_{};
     ProxyDnsResolver dns_resolver_{};
     ProxyExecutorOptions options_{};
