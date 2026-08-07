@@ -508,9 +508,13 @@ Host
 
 context 模板先计算后更新 trace user data：
 
+- 入站 `tracestate` 的非 `bnrc` member 保存在请求级 telemetry，`bnrc` 使用 Java GMP
+  Base62 解码为 trace context；被当前项目脚本引用的 key 在 route 匹配前绑定到
+  `$context`；
 - 空值移除 key；
 - `cluster` 和 trace cluster key 归一到 cluster key；
 - 非空 cluster context 覆盖 route/service 中的默认 cluster；空值移除覆盖；
+- upstream 发送前保留非 `bnrc` member，并从更新后的完整 trace context 重建 `bnrc`；
 - 该步骤的业务 key/value 结果属于排障契约；
 - CAT 的底层 message 编码和线程行为不属于兼容范围。
 
@@ -549,6 +553,10 @@ Host cluster 已装配。
   根事务不再写 `result`；
 - 入站三段 CAT ID 被继续，无有效上下文时生成新 tree；响应写回 `Hi-Trace-Id`，
   upstream 写入新的 `HI-TRACE-ID`、`HI-SPAN-ID-PARENT`、`HI-SPAN-ID`；
+- 入站 `traceparent` 原样传播；缺失时生成 `00-<32hex>-<16hex>-01`。该 sampled flag
+  当前只属于 W3C header 契约，不覆盖 CAT router 的独立采样决策；
+- `tracestate` 的解码、route context 更新和 upstream 重建独立于 CAT client 可用性；
+  `MessageTrace context` 是同步的观测镜像，不是传播状态的唯一 owner；
 - 每次真实 upstream attempt 失败由对应 `Access.Provider` 记录 `CALL_ERROR`；最终错误返回
   handler 时使用 `Err::UpstreamException`，只标记根事务失败，不再重复记录
   `FiberException`。路由、模板、无可用地址和熔断等本地失败记录 `FiberException`；

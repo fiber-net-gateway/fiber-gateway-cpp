@@ -605,6 +605,33 @@ TEST(AccessRequestHandlerTest, MatchesProductionConditionAndTemplateCorpus) {
               "origin=https://origin.example.test;forwarded_for=192.0.2.20;remote_addr=192.0.2.10");
 }
 
+TEST(AccessRequestHandlerTest, BindsBnrcContextAndGeneratedTraceParentBeforeRouteScripts) {
+    AccessScriptRuntime scripts;
+    RouteConfig conditional =
+            response_route("/trace", "tenant=${$context.tenant};traceparent=${$header.traceparent}", 202);
+    conditional.condition = "$context.tenant == 'blue'";
+    RouteConfig fallback = response_route("/trace", "fallback");
+
+    RouteConfigStore store(scripts.compiler_adapter());
+    publish(store, project({}, {std::move(conditional), std::move(fallback)}));
+
+    const std::string response = run_request(store,
+                                             "GET /trace HTTP/1.1\r\n"
+                                             "Host: api.example.com\r\n"
+                                             "tracestate: bnrc=aL8nZlUy-1nka5V\r\n"
+                                             "Connection: close\r\n\r\n",
+                                             scripts.request_adapter());
+
+    EXPECT_TRUE(response.starts_with("HTTP/1.1 202 Accepted\r\n"));
+    const std::string_view body = response_body(response);
+    constexpr std::string_view prefix = "tenant=blue;traceparent=";
+    ASSERT_TRUE(body.starts_with(prefix));
+    const std::string_view trace_parent(body.data() + prefix.size(), body.size() - prefix.size());
+    EXPECT_EQ(trace_parent.size(), 55U);
+    EXPECT_TRUE(trace_parent.starts_with("00-"));
+    EXPECT_TRUE(trace_parent.ends_with("-01"));
+}
+
 TEST(AccessRequestHandlerTest, ReturnsJavaHostEntryPathAndCidrErrors) {
     HostStrategyConfig strategy;
     strategy.net_mask = fiber::access_server::kNetVdi;

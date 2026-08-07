@@ -28,6 +28,8 @@ namespace fiber::access_server {
 namespace {
 
 constexpr std::string_view kTraceCluster = "HI-TRACE-CLUSTER";
+constexpr std::string_view kTraceParentHeader = "traceparent";
+constexpr std::uint64_t kTraceParentHeaderHash = http::http_header_name_hash(kTraceParentHeader);
 constexpr std::string_view kCallSourceHeader = "x-ploto-source-app";
 constexpr std::string_view kOriginHostHeader = "ploto-origin-host";
 constexpr std::size_t kMaxJavaAttempts = 4;
@@ -275,11 +277,15 @@ Result<std::string> resolve_request_target(const http::HttpExchange &exchange, c
     return result;
 }
 
-Result<std::optional<std::string>> evaluate_context_cluster(std::span<const CompiledTemplateEntry> context,
-                                                            TemplateEvaluator evaluator,
-                                                            std::string_view initial_context_cluster) {
+Result<std::optional<std::string>> evaluate_proxy_context(std::span<const CompiledTemplateEntry> context,
+                                                          TemplateEvaluator evaluator,
+                                                          std::string_view initial_context_cluster,
+                                                          AccessRequestTelemetry &telemetry) {
     std::optional<std::string> cluster;
-    if (!initial_context_cluster.empty()) {
+    const std::optional<std::string_view> propagated_cluster = telemetry.trace_context(kTraceCluster);
+    if (propagated_cluster && !propagated_cluster->empty()) {
+        cluster.emplace(*propagated_cluster);
+    } else if (!initial_context_cluster.empty()) {
         cluster.emplace(initial_context_cluster);
     }
     for (const CompiledTemplateEntry &entry: context) {
@@ -287,13 +293,20 @@ Result<std::optional<std::string>> evaluate_context_cluster(std::span<const Comp
         if (!value) {
             return std::unexpected(value.error());
         }
-        if (entry.name != kTraceCluster) {
-            continue;
-        }
         if (value->empty()) {
-            cluster.reset();
+            telemetry.remove_trace_context(entry.name);
         } else {
-            cluster = std::move(*value);
+            auto stored = telemetry.put_trace_context(entry.name, *value);
+            if (!stored) {
+                return std::unexpected(Err::from_error(stored.error()));
+            }
+        }
+        if (entry.name == kTraceCluster) {
+            if (value->empty()) {
+                cluster.reset();
+            } else {
+                cluster = std::move(*value);
+            }
         }
     }
     return cluster;
@@ -332,7 +345,7 @@ Err request_head_build_error() noexcept { return Err::from_error(common::IoErr::
 Result<ProxyHostBinding> build_request_headers(const ProxyUpstreamEndpoint &endpoint,
                                                const http::HttpExchange &exchange, const CompiledProxyRoute &proxy,
                                                const ProxyExecutionInput &input, bool websocket,
-                                               http::HttpHeaders &headers) {
+                                               const AccessRequestTelemetry &telemetry, http::HttpHeaders &headers) {
     if (!headers.set("Host", endpoint.host_header)) {
         return std::unexpected(request_head_build_error());
     }
@@ -369,6 +382,13 @@ Result<ProxyHostBinding> build_request_headers(const ProxyUpstreamEndpoint &endp
         if (!headers.add_view(header.name_view(), header.value_view(), header.lowcase_name, header.name_hash)) {
             return std::unexpected(request_head_build_error());
         }
+    }
+    if (exchange.header(kTraceParentHeader).empty() &&
+        !proxy.proxy_headers.contains(kTraceParentHeader, kTraceParentHeaderHash) &&
+        !telemetry.trace_parent().empty() &&
+        !headers.set_view(kTraceParentHeader, telemetry.trace_parent(), kTraceParentHeader.data(),
+                          kTraceParentHeaderHash)) {
+        return std::unexpected(request_head_build_error());
     }
 
     std::string source(input.project);
@@ -563,7 +583,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     FIBER_ASSERT(proxy.address_selector != nullptr);
 
     auto context_cluster =
-            evaluate_context_cluster(proxy.context, input.template_evaluator, input.initial_context_cluster);
+            evaluate_proxy_context(proxy.context, input.template_evaluator, input.initial_context_cluster, telemetry);
     if (!context_cluster) {
         co_return std::unexpected(context_cluster.error());
     }
@@ -573,6 +593,10 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     }
     if (cluster_matcher_.matches && cluster_matcher_.matches(cluster_matcher_.context, exchange)) {
         cluster_override = std::string_view("gray");
+        auto stored = telemetry.put_trace_context(kTraceCluster, "gray");
+        if (!stored) {
+            co_return std::unexpected(Err::from_error(stored.error()));
+        }
     }
 
     const bool websocket_upgrade = is_websocket_request(exchange, proxy);
@@ -622,8 +646,8 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             }
             request_target.emplace(std::move(*resolved_target));
 
-            auto built_headers =
-                    build_request_headers(*selected, exchange, proxy, input, websocket_upgrade, request_headers);
+            auto built_headers = build_request_headers(*selected, exchange, proxy, input, websocket_upgrade, telemetry,
+                                                       request_headers);
             if (!built_headers) {
                 co_return std::unexpected(built_headers.error());
             }
