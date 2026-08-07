@@ -26,7 +26,6 @@ TEST(AccessServerConfigTest, LoadsJavaServerDefaultsAndNacosSettings) {
     EXPECT_EQ(config->watcher_options().project_route_group, kProjectRouteGroup);
     EXPECT_EQ(config->gray_watcher_options().data_id, kGrayConfigDataId);
     EXPECT_EQ(config->service_discovery_options().group, kDefaultNacosGroup);
-    EXPECT_EQ(config->service_discovery_options().default_cluster, "default");
 }
 
 TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
@@ -43,7 +42,6 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
         ACCESS_SERVER_ROUTE_GROUP=CUSTOM-ROUTE
         ACCESS_SERVER_GRAY_DATA_ID=custom.gray
         ACCESS_SERVER_NAMING_GROUP=CUSTOM-GROUP
-        ACCESS_SERVER_DEFAULT_CLUSTER=stable
         ACCESS_SERVER_ZONE=sh
         NACOS_SERVER_ADDRESSES=10.0.0.1
         NACOS_HTTP_PORT=18848
@@ -67,7 +65,6 @@ TEST(AccessServerConfigTest, LoadsExplicitRuntimeAndCompatibilityKeys) {
     EXPECT_EQ(config->gray_watcher_options().data_id, "custom.gray");
     EXPECT_EQ(config->gray_watcher_options().group, "CUSTOM-GROUP");
     EXPECT_EQ(config->service_discovery_options().group, "CUSTOM-GROUP");
-    EXPECT_EQ(config->service_discovery_options().default_cluster, "stable");
     EXPECT_EQ(config->service_discovery_options().zone, "sh");
     EXPECT_EQ(config->nacos_config().username(), "user");
     EXPECT_EQ(config->nacos_config().password(), "pass");
@@ -132,6 +129,15 @@ TEST(AccessServerConfigTest, RejectsRemovedHttpWorkerSetting) {
     ASSERT_FALSE(config);
     EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::UnknownKey);
     EXPECT_EQ(config.error().key, "ACCESS_SERVER_HTTP_WORKERS");
+}
+
+TEST(AccessServerConfigTest, RejectsRemovedDefaultUpstreamClusterSetting) {
+    auto config = AccessServerConfig::load_from_string("NACOS_SERVER_ADDRESSES=127.0.0.1\n"
+                                                       "ACCESS_SERVER_DEFAULT_CLUSTER=stable\n");
+
+    ASSERT_FALSE(config);
+    EXPECT_EQ(config.error().code, AccessServerConfigErrorCode::UnknownKey);
+    EXPECT_EQ(config.error().key, "ACCESS_SERVER_DEFAULT_CLUSTER");
 }
 
 TEST(AccessServerConfigTest, RequiresCompleteNacosCredentials) {

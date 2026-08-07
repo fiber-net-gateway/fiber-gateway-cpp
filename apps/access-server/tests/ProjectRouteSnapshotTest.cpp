@@ -338,6 +338,29 @@ TEST(ProjectRouteSnapshotTest, CompilesProxyFieldsAndJavaNarrowing) {
     EXPECT_TRUE(compiled.proxy->rewrite->trailing_literal.empty());
 }
 
+TEST(ProjectRouteSnapshotTest, ResolvesConcreteServiceClusterWhileCompilingRoutes) {
+    RouteConfig default_cluster = proxy_route("/default", "orders");
+    RouteConfig service_cluster = proxy_route("/service-cluster", "orders/gray");
+    RouteConfig empty_service_cluster = proxy_route("/empty-service-cluster", "orders/");
+    RouteConfig explicit_cluster = proxy_route("/explicit-cluster", "orders/gray");
+    explicit_cluster.cluster = "stable";
+
+    auto result = compile_project_config(
+            "orders", project_with_routes({std::move(default_cluster), std::move(service_cluster),
+                                           std::move(empty_service_cluster), std::move(explicit_cluster)}));
+    const ProjectRouteSnapshot &snapshot = require_snapshot(result);
+    ASSERT_EQ(snapshot.routes().size(), 4U);
+
+    const std::array<std::string_view, 4> expected_clusters = {"default", "gray", "default", "stable"};
+    for (std::size_t i = 0; i < expected_clusters.size(); ++i) {
+        ASSERT_TRUE(snapshot.routes()[i].proxy);
+        ASSERT_TRUE(snapshot.routes()[i].proxy->address_selector);
+        const auto cluster = snapshot.routes()[i].proxy->address_selector->configured_cluster();
+        ASSERT_TRUE(cluster);
+        EXPECT_EQ(*cluster, expected_clusters[i]);
+    }
+}
+
 TEST(ProjectRouteSnapshotTest, CompilesStaticAddressesWithJavaHttpHostRules) {
     RouteConfig route = proxy_route("/address", "");
     route.addresses = {

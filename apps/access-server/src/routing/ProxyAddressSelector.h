@@ -99,8 +99,7 @@ public:
 };
 
 struct ProxyAddressSelectorFactory {
-    using Function = std::shared_ptr<ProxyAddressSelector> (*)(void *context, std::string service,
-                                                               std::optional<std::string> cluster);
+    using Function = std::shared_ptr<ProxyAddressSelector> (*)(void *context, std::string service, std::string cluster);
 
     void *context = nullptr;
     Function create_service = nullptr;
@@ -116,8 +115,8 @@ struct ProxyClusterMatcher {
 [[nodiscard]] std::shared_ptr<ProxyAddressSelector>
 make_static_proxy_address_selector(std::vector<AccessUpstreamInstance> addresses);
 
-[[nodiscard]] std::shared_ptr<ProxyAddressSelector>
-make_unavailable_service_address_selector(std::string service, std::optional<std::string> cluster);
+[[nodiscard]] std::shared_ptr<ProxyAddressSelector> make_unavailable_service_address_selector(std::string service,
+                                                                                              std::string cluster);
 
 } // namespace fiber::access_server
 

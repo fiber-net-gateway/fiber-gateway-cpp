@@ -24,7 +24,6 @@ constexpr std::string_view kRouteDataIdPrefix = "ACCESS_SERVER_ROUTE_DATA_ID_PRE
 constexpr std::string_view kRouteGroup = "ACCESS_SERVER_ROUTE_GROUP";
 constexpr std::string_view kGrayDataId = "ACCESS_SERVER_GRAY_DATA_ID";
 constexpr std::string_view kNamingGroup = "ACCESS_SERVER_NAMING_GROUP";
-constexpr std::string_view kDefaultCluster = "ACCESS_SERVER_DEFAULT_CLUSTER";
 constexpr std::string_view kZone = "ACCESS_SERVER_ZONE";
 constexpr std::string_view kNacosServers = "NACOS_SERVER_ADDRESSES";
 constexpr std::string_view kNacosHttpPort = "NACOS_HTTP_PORT";
@@ -333,8 +332,6 @@ AccessServerConfig::load_from_string(std::string_view input) {
         } else if (entry.key == kNamingGroup) {
             service_discovery_options.group = entry.value;
             gray_options.group = entry.value;
-        } else if (entry.key == kDefaultCluster) {
-            service_discovery_options.default_cluster = entry.value;
         } else if (entry.key == kZone) {
             service_discovery_options.zone = entry.value;
         } else if (entry.key == kNacosServers) {
@@ -386,9 +383,9 @@ AccessServerConfig::load_from_string(std::string_view input) {
 
     if (watcher_options.project_list_data_id.empty() || watcher_options.project_route_data_id_prefix.empty() ||
         watcher_options.project_route_group.empty() || gray_options.data_id.empty() || gray_options.group.empty() ||
-        service_discovery_options.group.empty() || service_discovery_options.default_cluster.empty()) {
-        return std::unexpected(error(AccessServerConfigErrorCode::InvalidValue, 0, {},
-                                     "Nacos data IDs, groups, and default cluster must be non-empty"));
+        service_discovery_options.group.empty()) {
+        return std::unexpected(
+                error(AccessServerConfigErrorCode::InvalidValue, 0, {}, "Nacos data IDs and groups must be non-empty"));
     }
     auto nacos_config = nacos::NacosClientConfig::create(std::move(nacos_params));
     if (!nacos_config) {

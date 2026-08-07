@@ -124,7 +124,6 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
     FakeNamingService naming;
     fiber::access_server::AccessServiceDiscoveryOptions options{
             .group = "DEFAULT_GROUP",
-            .default_cluster = "default",
             .zone = "sh",
     };
     fiber::access_server::AccessServiceDiscovery discovery(

@@ -54,7 +54,6 @@ using AccessServiceDiscovery = nacos::ServiceDiscovery<AccessServiceOps>;
 
 struct AccessServiceDiscoveryOptions {
     std::string group = std::string(kDefaultNacosGroup);
-    std::string default_cluster = "default";
     std::string zone;
     AccessUpstreamSwrr::Options swrr_options{};
 };
@@ -75,7 +74,7 @@ public:
 
 private:
     [[nodiscard]] static std::shared_ptr<ProxyAddressSelector>
-    create_address_selector(void *context, std::string service, std::optional<std::string> cluster);
+    create_address_selector(void *context, std::string service, std::string cluster);
 
     AccessServiceDiscovery *discovery_ = nullptr;
     AccessServiceDiscoveryOptions options_;

@@ -56,8 +56,10 @@ private:
 
 class UnavailableServiceAddressSelector final : public ProxyAddressSelector {
 public:
-    UnavailableServiceAddressSelector(std::string service, std::optional<std::string> cluster) :
-        service_(std::move(service)), cluster_(std::move(cluster)) {}
+    UnavailableServiceAddressSelector(std::string service, std::string cluster) :
+        service_(std::move(service)), cluster_(std::move(cluster)) {
+        FIBER_ASSERT(!cluster_.empty());
+    }
 
     std::expected<ProxyUpstreamEndpoint, ProxyAddressSelectError>
     select_address(std::optional<std::string_view>, std::span<const std::uint64_t>) noexcept override {
@@ -67,16 +69,11 @@ public:
 
     [[nodiscard]] std::string_view service_name() const noexcept override { return service_; }
 
-    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override {
-        if (!cluster_) {
-            return std::nullopt;
-        }
-        return *cluster_;
-    }
+    [[nodiscard]] std::optional<std::string_view> configured_cluster() const noexcept override { return cluster_; }
 
 private:
     std::string service_;
-    std::optional<std::string> cluster_;
+    std::string cluster_;
 };
 
 } // namespace
@@ -87,7 +84,7 @@ make_static_proxy_address_selector(std::vector<AccessUpstreamInstance> addresses
 }
 
 std::shared_ptr<ProxyAddressSelector> make_unavailable_service_address_selector(std::string service,
-                                                                                std::optional<std::string> cluster) {
+                                                                                std::string cluster) {
     return std::make_shared<UnavailableServiceAddressSelector>(std::move(service), std::move(cluster));
 }
 
