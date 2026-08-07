@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <utility>
 
 namespace fiber::http {
@@ -57,6 +58,7 @@ async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBo
     mem::IoBufChain buffer(node_pool);
     mem::IoBufChain refill(node_pool);
     HttpBodyPipeStats stats;
+    std::optional<HttpBodyPipeError> pending_read_error;
     bool input_complete = false;
     bool write_started = false;
 
@@ -69,6 +71,10 @@ async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBo
         }
 
         const std::size_t buffered = buffer.readable_bytes() + refill.readable_bytes();
+        if (pending_read_error && buffered == 0 && !buffer.complete() && !refill.complete()) {
+            abort_guard.abort(pending_read_error->code);
+            co_return std::unexpected(*pending_read_error);
+        }
         if (input_complete && buffered == 0 && !buffer.complete() && !refill.complete()) {
             abort_guard.release();
             co_return stats;
@@ -82,8 +88,16 @@ async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBo
             auto read_result = co_await source.read(capacity, options.read_timeout);
             if (!read_result) {
                 const common::IoErr error = read_result.error();
-                abort_guard.abort(error);
-                co_return pipe_error(error, HttpBodyPipePhase::Read);
+                if (buffered == 0) {
+                    abort_guard.abort(error);
+                    co_return pipe_error(error, HttpBodyPipePhase::Read);
+                }
+                pending_read_error = HttpBodyPipeError{
+                        .code = error,
+                        .phase = HttpBodyPipePhase::Read,
+                };
+                input_complete = true;
+                continue;
             }
 
             const std::size_t bytes = read_result->readable_bytes();

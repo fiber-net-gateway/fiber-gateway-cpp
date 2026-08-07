@@ -4,8 +4,10 @@
 #include "../../../../src/async/TaskSelect.h"
 #include "../../../../src/async/WhenAny.h"
 #include "../../../../src/common/Assert.h"
+#include "../../../../src/event/EventLoop.h"
 #include "../../../../src/http/ClientHttp1Exchange.h"
 #include "../../../../src/http/Http1ClientConnection.h"
+#include "../../../../src/http/HttpBodyPipe.h"
 #include "../../../../src/http/HttpBodySpec.h"
 #include "../../../../src/http/HttpExchange.h"
 #include "../../../../src/http/HttpHeaderHash.h"
@@ -471,6 +473,43 @@ bool response_limit_exceeded(const std::optional<std::uint64_t> &limit, std::siz
     return limit && *limit > 0 && size > *limit;
 }
 
+class ProxyResponseBodyReader {
+public:
+    ProxyResponseBodyReader(http::ClientHttp1Exchange &upstream,
+                            std::optional<std::uint64_t> max_response_body_size) noexcept :
+        upstream_(upstream), max_response_body_size_(max_response_body_size) {}
+
+    async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes,
+                                                             std::chrono::milliseconds timeout) noexcept {
+        auto body = co_await upstream_.read_body(max_bytes, timeout);
+        if (!body) {
+            co_return std::unexpected(body.error());
+        }
+
+        const std::size_t body_size = body->readable_bytes();
+        if (body_size > std::numeric_limits<std::size_t>::max() - received_body_) {
+            response_limit_exceeded_ = true;
+            co_return std::unexpected(common::IoErr::MessageTooLarge);
+        }
+        received_body_ += body_size;
+        if (response_limit_exceeded(max_response_body_size_, received_body_)) {
+            response_limit_exceeded_ = true;
+            co_return std::unexpected(common::IoErr::MessageTooLarge);
+        }
+        co_return std::move(*body);
+    }
+
+    common::IoResult<void> abort(common::IoErr reason) noexcept { return upstream_.abort(reason); }
+
+    [[nodiscard]] bool limit_exceeded() const noexcept { return response_limit_exceeded_; }
+
+private:
+    http::ClientHttp1Exchange &upstream_;
+    std::optional<std::uint64_t> max_response_body_size_;
+    std::size_t received_body_ = 0;
+    bool response_limit_exceeded_ = false;
+};
+
 } // namespace
 
 ProxyExecutor::ProxyExecutor(http::StealableHttp1ConnectionPoolSet &pool, ProxyClusterMatcher cluster_matcher,
@@ -861,49 +900,39 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
             co_return Result<void>{};
         }
 
-        std::size_t received_body = 0;
-        for (;;) {
-            auto body = co_await upstream.read_body(options_.response_body_chunk_size);
-            if (!body) {
+        ProxyResponseBodyReader body_reader(upstream, max_response_body_size);
+        const http::HttpBodyPipeOptions pipe_options{
+                .buffer_size = options_.response_body_chunk_size,
+                .low_water = proxy.flush.value_or(false)
+                                     ? http::kUnbufferedBodyPipeLowWater
+                                     : std::min(options_.response_body_chunk_size, http::kDefaultBodyPipeLowWater),
+                .read_timeout = std::chrono::milliseconds::max(),
+                .write_timeout = options_.downstream_write_timeout,
+        };
+        auto piped = co_await http::pipe_http_body(http::make_http_body_pipe_reader(body_reader),
+                                                   http::make_http_body_pipe_writer(exchange),
+                                                   event::EventLoop::current().io_buf_node_pool(), pipe_options);
+        if (!piped) {
+            const http::HttpBodyPipeError pipe_error = piped.error();
+            if (body_reader.limit_exceeded()) {
+                provider_transaction.fail("aborted", pipe_error.code);
+            } else if (pipe_error.phase == http::HttpBodyPipePhase::Read) {
                 report_selection(false);
                 record_provider_failure(provider_transaction,
                                         failure(ProxyFailurePhase::ReadResponseBody,
-                                                "failed to read upstream response body", body.error()));
-                co_return std::unexpected(Err::from_error(body.error()));
+                                                "failed to read upstream response body", pipe_error.code));
+            } else {
+                provider_transaction.fail("aborted", pipe_error.code);
+                if (pipe_error.phase == http::HttpBodyPipePhase::Write) {
+                    telemetry.record_response_error(pipe_error.code);
+                }
             }
-            const bool complete = body->complete();
-            const std::size_t body_size = body->readable_bytes();
-            if (body_size > std::numeric_limits<std::size_t>::max() - received_body) {
-                (void) upstream.abort(common::IoErr::MessageTooLarge);
-                provider_transaction.fail("aborted", common::IoErr::MessageTooLarge);
-                co_return std::unexpected(Err::from_error(common::IoErr::MessageTooLarge));
-            }
-            received_body += body_size;
-            if (response_limit_exceeded(max_response_body_size, received_body)) {
-                (void) upstream.abort(common::IoErr::MessageTooLarge);
-                provider_transaction.fail("aborted", common::IoErr::MessageTooLarge);
-                co_return std::unexpected(Err::from_error(common::IoErr::MessageTooLarge));
-            }
-
-            auto written = co_await exchange.write_all(std::move(*body), options_.downstream_write_timeout);
-            if (!written) {
-                (void) upstream.abort(written.error());
-                provider_transaction.fail("aborted", written.error());
-                telemetry.record_response_error(written.error());
-                co_return std::unexpected(Err::from_error(written.error()));
-            }
-            if (*written != body_size) {
-                (void) upstream.abort(common::IoErr::Invalid);
-                provider_transaction.fail("aborted", common::IoErr::Invalid);
-                telemetry.record_response_error(common::IoErr::Invalid);
-                co_return std::unexpected(Err::from_error(common::IoErr::Invalid));
-            }
-            if (complete) {
-                report_selection(true);
-                provider_transaction.complete(upstream_head->status_code);
-                co_return Result<void>{};
-            }
+            co_return std::unexpected(Err::from_error(pipe_error.code));
         }
+
+        report_selection(true);
+        provider_transaction.complete(upstream_head->status_code);
+        co_return Result<void>{};
     }
 
     co_return proxy_failure_result(previous_failure.value_or(

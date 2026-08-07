@@ -249,6 +249,28 @@ TEST(HttpBodyPipeTest, ReadErrorAbortsBothEndpointsAndReportsPhase) {
     EXPECT_EQ(writer.abort_reason(), IoErr::TimedOut);
 }
 
+TEST(HttpBodyPipeTest, DrainsBufferedBytesBeforeReportingReadError) {
+    std::vector<char> operations;
+    FakeBodyReader reader(
+            {
+                    {.bytes = 10 * 1024},
+                    {.error = IoErr::ConnReset},
+            },
+            &operations);
+    FakeBodyWriter writer({}, &operations);
+
+    auto result = execute_pipe(reader, writer);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, IoErr::ConnReset);
+    EXPECT_EQ(result.error().phase, HttpBodyPipePhase::Read);
+    EXPECT_EQ(operations, (std::vector<char>{'R', 'R', 'W'}));
+    EXPECT_EQ(writer.buffered_before_write(), (std::vector<std::size_t>{10 * 1024}));
+    EXPECT_EQ(reader.abort_calls(), 1u);
+    EXPECT_EQ(writer.abort_calls(), 1u);
+    EXPECT_EQ(writer.abort_reason(), IoErr::ConnReset);
+}
+
 TEST(HttpBodyPipeTest, WriteErrorAbortsBothEndpointsAndReportsPhase) {
     FakeBodyReader reader({
             {.bytes = 48 * 1024},
