@@ -24,6 +24,7 @@ class HttpTransport;
 
 class ClientHttp1Exchange : public common::NonCopyable, public common::NonMovable {
 public:
+    // conn and pool must outlive this exchange and every Task returned by it.
     ClientHttp1Exchange(Http1ClientConnection &conn, mem::BufPool &pool,
                         Http1ClientExchangeOptions options = {}) noexcept;
     ~ClientHttp1Exchange();
@@ -62,7 +63,7 @@ public:
 
     [[nodiscard]] const HttpHeaders &response_trailers() const noexcept { return response_trailers_; }
     [[nodiscard]] const Http1ClientExchangeOptions &options() const noexcept { return options_; }
-    [[nodiscard]] bool valid() const noexcept { return active_; }
+    [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool raw_stream_active() const noexcept { return raw_stream_active_; }
     [[nodiscard]] bool request_complete() const noexcept { return request_state_ == RequestState::RequestDone; }
     [[nodiscard]] bool response_complete() const noexcept { return response_complete_; }
@@ -91,9 +92,9 @@ private:
     };
 
     void clear_response_header_nodes() noexcept;
+    [[nodiscard]] bool ensure_active() noexcept;
     void fail_active_exchange(common::IoErr reason) noexcept;
     void record_request_write_error(common::IoErr error) noexcept;
-    void on_connection_failed(common::IoErr reason) noexcept;
     fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *transport, const void *buf,
                                                                    std::size_t len,
                                                                    std::chrono::milliseconds timeout) noexcept;
@@ -114,10 +115,8 @@ private:
     fiber::async::Task<common::IoResult<void>> read_response_trailers(mem::IoBuf &read_buf,
                                                                       std::chrono::milliseconds timeout) noexcept;
 
-    friend class Http1ClientConnection;
-
-    Http1ClientConnection *conn_ = nullptr;
-    mem::BufPool *pool_ = nullptr;
+    Http1ClientConnection &conn_;
+    mem::BufPool &pool_;
     Http1ClientExchangeOptions options_{};
     HttpHeaders response_trailers_;
     mem::IoBuf pending_buf_;

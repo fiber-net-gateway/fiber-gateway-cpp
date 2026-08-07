@@ -448,6 +448,14 @@ struct AbortBlockedReadOutcome {
     fiber::common::IoErr write_error = fiber::common::IoErr::Unknown;
 };
 
+struct AbandonedReadOutcome {
+    bool borrowed_hit = false;
+    bool timeout_won = false;
+    bool exchange_valid_after_cancel = true;
+    bool reusable_after_cancel = true;
+    fiber::common::IoErr send_error = fiber::common::IoErr::Unknown;
+};
+
 DetachedTask run_blocked_header_read(fiber::http::ClientHttp1Exchange *exchange, fiber::async::WaitGroup *done,
                                      AbortBlockedReadOutcome *outcome) {
     auto result = co_await exchange->read_header();
@@ -1171,7 +1179,6 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadAndWriteBeforeReturnin
                 auto abort_result = exchange.abort(fiber::common::IoErr::ConnAborted);
                 outcome.abort_error = abort_result ? fiber::common::IoErr::None : abort_result.error();
                 outcome.reusable_after_abort = borrowed.connection().reusable();
-                borrowed.reset();
                 co_await io_done.join();
             }
         }
@@ -1193,6 +1200,105 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadAndWriteBeforeReturnin
         co_await fiber::async::sleep(10ms);
         auto after_abort = co_await set.acquire(key);
         dropped_promise.set_value(after_abort.valid() && !after_abort.hit() && !after_abort.has_connection());
+        co_return;
+    });
+
+    ASSERT_EQ(dropped_future.wait_for(10s), std::future_status::ready);
+    EXPECT_TRUE(dropped_future.get());
+
+    server_state->stop.store(true, std::memory_order_release);
+    ASSERT_EQ(server_result_future.wait_for(10s), std::future_status::ready);
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+    group.stop();
+    group.join();
+    server_group.stop();
+    server_group.join();
+}
+
+TEST(StealableHttp1ConnectionPoolSetTest, AbandonedReadTaskInvalidatesExchangeBeforeReturningStolenConnection) {
+    fiber::event::EventLoopGroup server_group(1);
+    auto server_state = std::make_shared<HoldServerState>();
+    std::promise<std::uint16_t> server_port_promise;
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_port_future = server_port_promise.get_future();
+    auto server_result_future = server_result_promise.get_future();
+
+    server_group.start();
+    fiber::async::spawn(server_group.at(0), [&]() {
+        return run_hold_server(&server_group.at(0), 1, &server_port_promise, &server_result_promise, server_state);
+    });
+
+    const std::uint16_t port = server_port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::event::EventLoopGroup group(2);
+    fiber::http::StealableHttp1ConnectionPoolSet set(group);
+    ASSERT_TRUE(set.init());
+    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+
+    std::promise<bool> home_ready_promise;
+    std::promise<AbandonedReadOutcome> borrower_promise;
+    std::promise<bool> dropped_promise;
+    auto home_ready_future = home_ready_promise.get_future();
+    auto borrower_future = borrower_promise.get_future();
+    auto dropped_future = dropped_promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        auto lease = co_await set.acquire(key);
+        auto conn_result = co_await ensure_connected(lease, port);
+        const bool connected = conn_result.has_value();
+        lease.reset();
+        home_ready_promise.set_value(connected);
+        co_return;
+    });
+
+    ASSERT_TRUE(home_ready_future.get());
+
+    fiber::async::spawn(group.at(1), [&]() -> DetachedTask {
+        AbandonedReadOutcome outcome;
+        auto borrowed = co_await set.acquire(key);
+        outcome.borrowed_hit = borrowed.valid() && borrowed.hit() && borrowed.has_connection();
+        if (outcome.borrowed_hit) {
+            {
+                fiber::mem::BufPool pool;
+                fiber::http::HttpHeaders headers(pool);
+                headers.add_view("host", "example.com");
+                fiber::http::ClientHttp1Exchange exchange(borrowed.connection(), pool);
+                fiber::http::Http1RequestHead head;
+                head.method = fiber::http::HttpMethod::Get;
+                head.target = "/abandoned-read";
+                head.headers = &headers;
+
+                auto send_result = co_await exchange.send_header(head, true);
+                outcome.send_error = send_result ? fiber::common::IoErr::None : send_result.error();
+                if (send_result) {
+                    auto completed = co_await fiber::async::when_any([&]() { return exchange.read_header().select(); },
+                                                                     []() { return fiber::async::sleep(10ms); });
+                    outcome.timeout_won = completed.is<1>();
+                    outcome.exchange_valid_after_cancel = exchange.valid();
+                    outcome.reusable_after_cancel = borrowed.connection().reusable();
+                }
+            }
+            borrowed.reset();
+        }
+        borrower_promise.set_value(outcome);
+        co_return;
+    });
+
+    ASSERT_EQ(borrower_future.wait_for(10s), std::future_status::ready);
+    const auto outcome = borrower_future.get();
+    EXPECT_TRUE(outcome.borrowed_hit);
+    EXPECT_EQ(outcome.send_error, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.timeout_won);
+    EXPECT_FALSE(outcome.exchange_valid_after_cancel);
+    EXPECT_FALSE(outcome.reusable_after_cancel);
+
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        co_await fiber::async::sleep(10ms);
+        auto after_cancel = co_await set.acquire(key);
+        dropped_promise.set_value(after_cancel.valid() && !after_cancel.hit() && !after_cancel.has_connection());
         co_return;
     });
 

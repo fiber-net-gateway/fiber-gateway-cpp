@@ -403,7 +403,7 @@ ClientHttp1Exchange::transport_write_all(HttpTransport *transport, const void *b
     std::size_t remaining = len;
     while (remaining > 0) {
         auto write_result =
-                co_await conn_->wait_transport_write(transport->write(ptr, remaining, remaining_timeout(deadline)));
+                co_await conn_.wait_transport_write(transport->write(ptr, remaining, remaining_timeout(deadline)));
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
@@ -421,7 +421,7 @@ ClientHttp1Exchange::transport_write_all(HttpTransport *transport, mem::IoBufCha
                                          std::chrono::milliseconds timeout) noexcept {
     const TimePoint deadline = deadline_after(timeout);
     while (chain.readable_bytes() > 0) {
-        auto write_result = co_await conn_->wait_transport_write(transport->writev(chain, remaining_timeout(deadline)));
+        auto write_result = co_await conn_.wait_transport_write(transport->writev(chain, remaining_timeout(deadline)));
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
@@ -441,22 +441,27 @@ ClientHttp1Exchange::write_chunk_suffix(HttpTransport *transport, bool end_strea
 
 ClientHttp1Exchange::ClientHttp1Exchange(Http1ClientConnection &conn, mem::BufPool &pool,
                                          Http1ClientExchangeOptions options) noexcept :
-    conn_(&conn), pool_(&pool), options_(std::move(options)), response_trailers_(pool) {
-    active_ = conn.acquire_exchange(this);
+    conn_(conn), pool_(pool), options_(std::move(options)), response_trailers_(pool) {
+    active_ = conn.acquire_exchange();
 }
 
 ClientHttp1Exchange::~ClientHttp1Exchange() {
-    if (!conn_ || !active_) {
+    if (!active_) {
         clear_response_header_nodes();
         return;
     }
-    if (done()) {
-        conn_->release_exchange(this, keepalive_on_release_);
-    } else {
-        conn_->fail_exchange(this, common::IoErr::Canceled);
+    active_ = false;
+    if (conn_.exchange_active()) {
+        if (done()) {
+            conn_.release_exchange(keepalive_on_release_);
+        } else {
+            conn_.fail_exchange(common::IoErr::Canceled);
+        }
     }
     clear_response_header_nodes();
 }
+
+bool ClientHttp1Exchange::valid() const noexcept { return active_ && conn_.exchange_active(); }
 
 void ClientHttp1Exchange::clear_response_header_nodes() noexcept {
     ResponseHeaderNode *node = response_headers_head_;
@@ -469,13 +474,24 @@ void ClientHttp1Exchange::clear_response_header_nodes() noexcept {
     response_headers_head_ = nullptr;
 }
 
+bool ClientHttp1Exchange::ensure_active() noexcept {
+    if (!active_) {
+        return false;
+    }
+    if (conn_.exchange_active()) {
+        return true;
+    }
+    active_ = false;
+    request_state_ = RequestState::Failed;
+    return false;
+}
+
 void ClientHttp1Exchange::fail_active_exchange(common::IoErr reason) noexcept {
     request_state_ = RequestState::Failed;
-    if (conn_) {
-        conn_->fail_exchange(this, reason);
-    } else {
-        active_ = false;
+    if (!std::exchange(active_, false)) {
+        return;
     }
+    conn_.fail_exchange(reason);
 }
 
 void ClientHttp1Exchange::record_request_write_error(common::IoErr error) noexcept {
@@ -484,12 +500,6 @@ void ClientHttp1Exchange::record_request_write_error(common::IoErr error) noexce
     }
     request_write_error_ = error;
     fail_active_exchange(error);
-}
-
-void ClientHttp1Exchange::on_connection_failed(common::IoErr) noexcept {
-    request_state_ = RequestState::Failed;
-    active_ = false;
-    conn_ = nullptr;
 }
 
 common::IoResult<void> ClientHttp1Exchange::ensure_body_read_buf_writable(mem::IoBuf &read_buf,
@@ -568,7 +578,7 @@ common::IoResult<void> ClientHttp1Exchange::stash_pending_buf(mem::IoBuf &read_b
 fiber::async::Task<common::IoResult<std::size_t>>
 ClientHttp1Exchange::read_more(mem::IoBuf &read_buf, std::size_t max_bytes, bool &read_call_used_io,
                                std::chrono::milliseconds timeout) noexcept {
-    if (!conn_ || !conn_->transport_) {
+    if (!conn_.transport_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -583,7 +593,7 @@ ClientHttp1Exchange::read_more(mem::IoBuf &read_buf, std::size_t max_bytes, bool
     }
 
     auto read_result =
-            co_await conn_->wait_transport_read(conn_->transport_->read(read_buf.writable_data(), read_size, timeout));
+            co_await conn_.wait_transport_read(conn_.transport_->read(read_buf.writable_data(), read_size, timeout));
     if (!read_result) {
         co_return std::unexpected(read_result.error());
     }
@@ -633,10 +643,10 @@ ClientHttp1Exchange::advance_chunked_body(mem::IoBuf &read_buf, std::size_t max_
 
 fiber::async::Task<common::IoResult<void>>
 ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::milliseconds timeout) noexcept {
-    if (!conn_ || !conn_->transport_ || pool_ == nullptr) {
+    if (!conn_.transport_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    HttpTransport *transport = conn_->transport_.get();
+    HttpTransport *transport = conn_.transport_.get();
 
     Http1HeaderParseBuffer header_buffer(response_header_buffer_options(options_));
     auto init_result = header_buffer.ensure_init();
@@ -679,7 +689,7 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
             }
             if (read_buf.readable() == 0) {
                 auto read_result =
-                        co_await conn_->wait_transport_read(transport->read_into(header_buffer.buf(), timeout));
+                        co_await conn_.wait_transport_read(transport->read_into(header_buffer.buf(), timeout));
                 if (!read_result) {
                     co_return std::unexpected(read_result.error());
                 }
@@ -740,16 +750,16 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
     if (request_write_error_ != common::IoErr::None) {
         co_return std::unexpected(request_write_error_);
     }
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (conn_ != nullptr && conn_->writer_ != nullptr) {
+    if (conn_.writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+    if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    HttpTransport *transport = conn_->transport_.get();
+    HttpTransport *transport = conn_.transport_.get();
     if (request_state_ != RequestState::Init) {
         co_return std::unexpected(common::IoErr::Already);
     }
@@ -776,7 +786,7 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
         co_return std::unexpected(encode_result.error());
     }
 
-    conn_->record_request_started();
+    conn_.record_request_started();
     const TimePoint deadline = deadline_after(timeout);
     auto write_result = co_await transport_write_all(transport, header_buf.readable_data(), header_buf.readable(),
                                                      remaining_timeout(deadline));
@@ -823,16 +833,16 @@ ClientHttp1Exchange::write_all(mem::IoBufChain chunk, std::chrono::milliseconds 
     if (request_write_error_ != common::IoErr::None) {
         co_return std::unexpected(request_write_error_);
     }
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (conn_ != nullptr && conn_->writer_ != nullptr) {
+    if (conn_.writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+    if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    HttpTransport *transport = conn_->transport_.get();
+    HttpTransport *transport = conn_.transport_.get();
     const std::size_t body_bytes = chunk.readable_bytes();
     const bool end_stream = chunk.complete();
     const TimePoint deadline = deadline_after(timeout);
@@ -975,16 +985,16 @@ ClientHttp1Exchange::write_all(const std::uint8_t *buf, std::size_t len, bool en
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (conn_ != nullptr && conn_->writer_ != nullptr) {
+    if (conn_.writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+    if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    HttpTransport *transport = conn_->transport_.get();
+    HttpTransport *transport = conn_.transport_.get();
     const TimePoint deadline = deadline_after(timeout);
     if (raw_stream_active_) {
         if (raw_stream_write_complete_) {
@@ -1109,16 +1119,16 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
     if (request_write_error_ != common::IoErr::None) {
         co_return std::unexpected(request_write_error_);
     }
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (conn_ != nullptr && conn_->writer_ != nullptr) {
+    if (conn_.writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+    if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    HttpTransport *transport = conn_->transport_.get();
+    HttpTransport *transport = conn_.transport_.get();
     const std::size_t body_bytes = chunk.readable_bytes();
     const bool end_stream = chunk.complete();
     const TimePoint deadline = deadline_after(timeout);
@@ -1133,7 +1143,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
             }
             co_return 0;
         }
-        auto written = co_await conn_->wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
+        auto written = co_await conn_.wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
         if (!written || *written == 0) {
             const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
             record_request_write_error(error);
@@ -1182,7 +1192,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
                 }
                 co_return 0;
             }
-            auto written = co_await conn_->wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
+            auto written = co_await conn_.wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
             if (!written || *written == 0) {
                 const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
                 record_request_write_error(error);
@@ -1244,7 +1254,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
         chunk_write_end_ = end_stream;
         std::size_t prefix_remaining = prefix_len;
         while (prefix_remaining != 0) {
-            auto written = co_await conn_->wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
+            auto written = co_await conn_.wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
             if (!written || *written == 0) {
                 const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
                 record_request_write_error(error);
@@ -1279,7 +1289,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
         }
     }
 
-    auto written = co_await conn_->wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
+    auto written = co_await conn_.wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
     if (!written || *written == 0) {
         const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
         record_request_write_error(error);
@@ -1313,16 +1323,16 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
     if (len != 0 && buf == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (conn_ != nullptr && conn_->writer_ != nullptr) {
+    if (conn_.writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+    if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    HttpTransport *transport = conn_->transport_.get();
+    HttpTransport *transport = conn_.transport_.get();
     const TimePoint deadline = deadline_after(timeout);
     if (raw_stream_active_) {
         if (raw_stream_write_complete_) {
@@ -1334,7 +1344,7 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
             }
             co_return 0;
         }
-        auto written = co_await conn_->wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
+        auto written = co_await conn_.wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
         if (!written || *written == 0) {
             const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
             record_request_write_error(error);
@@ -1376,8 +1386,7 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
                 }
                 co_return 0;
             }
-            auto written =
-                    co_await conn_->wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
+            auto written = co_await conn_.wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
             if (!written || *written == 0) {
                 const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
                 record_request_write_error(error);
@@ -1431,7 +1440,7 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
         chunk_write_end_ = end_stream;
     }
 
-    auto written = co_await conn_->wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
+    auto written = co_await conn_.wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
     if (!written || *written == 0) {
         const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
         record_request_write_error(error);
@@ -1467,16 +1476,16 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
     if (request_write_error_ != common::IoErr::None) {
         co_return std::unexpected(request_write_error_);
     }
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (conn_ != nullptr && conn_->writer_ != nullptr) {
+    if (conn_.writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+    if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    HttpTransport *transport = conn_->transport_.get();
+    HttpTransport *transport = conn_.transport_.get();
     if (raw_stream_active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1522,16 +1531,16 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
 
 fiber::async::Task<common::IoResult<const Http1ResponseHead *>>
 ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (raw_stream_active_) {
         co_return std::unexpected(common::IoErr::Already);
     }
-    if (!conn_ || !conn_->transport_ || !conn_->valid() || pool_ == nullptr) {
+    if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    HttpTransport *transport = conn_->transport_.get();
+    HttpTransport *transport = conn_.transport_.get();
     if (request_state_ == RequestState::Init || request_state_ == RequestState::Failed) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1548,7 +1557,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     saw_connection_keep_alive_ = false;
     response_eof_delimited_ = false;
 
-    auto *header_node = new (*pool_) ResponseHeaderNode(*pool_, event::EventLoop::current().io_buf_node_pool());
+    auto *header_node = new (pool_) ResponseHeaderNode(pool_, event::EventLoop::current().io_buf_node_pool());
     if (!header_node) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
@@ -1609,7 +1618,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
 
     auto read_more = [&]() -> fiber::async::Task<common::IoResult<void>> {
         auto read_result =
-                co_await conn_->wait_transport_read(transport->read_into(response_header_buffer.buf(), timeout));
+                co_await conn_.wait_transport_read(transport->read_into(response_header_buffer.buf(), timeout));
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -1672,7 +1681,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
                                          static_cast<std::size_t>(line.header_end - line.header_start));
             }
 
-            char *lowercase = static_cast<char *>(pool_->alloc(name_len));
+            char *lowercase = static_cast<char *>(pool_.alloc(name_len));
             if (name_len != 0 && lowercase == nullptr) {
                 co_return fail_exchange(common::IoErr::NoMem);
             }
@@ -1775,10 +1784,10 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
 
 fiber::async::Task<common::IoResult<mem::IoBufChain>>
 ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept {
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (!conn_ || !conn_->transport_ || !conn_->valid()) {
+    if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     mem::IoBufChain out(event::EventLoop::current().io_buf_node_pool());
@@ -1934,7 +1943,7 @@ ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
 
 fiber::async::Task<common::IoResult<void>>
 ClientHttp1Exchange::discard_response_body(std::chrono::milliseconds timeout) noexcept {
-    if (!active_) {
+    if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (raw_stream_active_) {
@@ -1953,15 +1962,18 @@ ClientHttp1Exchange::discard_response_body(std::chrono::milliseconds timeout) no
 }
 
 common::IoResult<void> ClientHttp1Exchange::abort(common::IoErr reason) noexcept {
-    if (!active_ || !conn_ || !conn_->transport_) {
+    if (!ensure_active() || !conn_.transport_) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    return conn_->abort_exchange(this, reason);
+    request_state_ = RequestState::Failed;
+    active_ = false;
+    conn_.fail_exchange(reason);
+    return {};
 }
 
 common::IoResult<void> ClientHttp1Exchange::switch_to_raw_stream() noexcept {
-    if (!active_ || !conn_ || !conn_->transport_ || !conn_->valid()) {
+    if (!ensure_active() || !conn_.transport_ || !conn_.valid()) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (raw_stream_active_) {

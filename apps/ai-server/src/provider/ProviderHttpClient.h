@@ -77,7 +77,7 @@ public:
     ProviderHttpResponseStream(const ProviderHttpResponseStream &) = delete;
     ProviderHttpResponseStream &operator=(const ProviderHttpResponseStream &) = delete;
     ProviderHttpResponseStream(ProviderHttpResponseStream &&) noexcept = default;
-    ProviderHttpResponseStream &operator=(ProviderHttpResponseStream &&) noexcept = default;
+    ProviderHttpResponseStream &operator=(ProviderHttpResponseStream &&other) noexcept;
 
     [[nodiscard]] int status_code() const noexcept { return status_code_; }
     [[nodiscard]] std::string_view content_type() const noexcept { return content_type_; }
