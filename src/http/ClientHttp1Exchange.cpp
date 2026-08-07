@@ -395,159 +395,6 @@ common::IoResult<void> encode_chunked_trailer(mem::IoBuf &buf, const HttpHeaders
 
 } // namespace
 
-class ClientHttp1Exchange::NotifyAwaiter {
-public:
-    using IoTask = fiber::async::Task<common::IoResult<std::size_t>>;
-
-    NotifyAwaiter(ClientHttp1Exchange &owner, NotifyAwaiter *&slot, IoTask task) noexcept :
-        owner_(&owner), slot_(&slot), loop_(owner.exchange_loop_), task_(std::move(task)),
-        task_awaiter_(task_.operator co_await()) {
-        FIBER_ASSERT(loop_ != nullptr);
-    }
-
-    NotifyAwaiter(const NotifyAwaiter &) = delete;
-    NotifyAwaiter &operator=(const NotifyAwaiter &) = delete;
-    NotifyAwaiter(NotifyAwaiter &&) = delete;
-    NotifyAwaiter &operator=(NotifyAwaiter &&) = delete;
-
-    ~NotifyAwaiter() {
-        if (resume_entry_.is_in_queue()) {
-            FIBER_ASSERT(loop_ != nullptr);
-            FIBER_ASSERT(loop_->in_loop());
-            loop_->cancel<NotifyAwaiter, &NotifyAwaiter::resume_entry_>(*this);
-        }
-        if (state_ != State::Waiting) {
-            return;
-        }
-
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        state_ = State::Abandoned;
-        detach();
-        task_ = {};
-        ClientHttp1Exchange *owner = owner_;
-        owner_ = nullptr;
-        if (owner != nullptr) {
-            owner->on_io_awaiter_destroyed();
-        }
-    }
-
-    bool await_ready() noexcept {
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        FIBER_ASSERT(state_ == State::Created);
-        FIBER_ASSERT(slot_ != nullptr);
-        if (*slot_ == nullptr) {
-            return false;
-        }
-
-        state_ = State::ReadyError;
-        result_err_ = common::IoErr::Busy;
-        slot_ = nullptr;
-        owner_ = nullptr;
-        task_ = {};
-        return true;
-    }
-
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle) noexcept {
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        FIBER_ASSERT(state_ == State::Created);
-        FIBER_ASSERT(slot_ != nullptr);
-        FIBER_ASSERT(*slot_ == nullptr);
-        state_ = State::Waiting;
-        handle_ = handle;
-        *slot_ = this;
-        return task_awaiter_.await_suspend(handle);
-    }
-
-    common::IoResult<std::size_t> await_resume() noexcept {
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        if (state_ == State::Waiting) {
-            state_ = State::Completed;
-            detach();
-            owner_ = nullptr;
-            return task_awaiter_.await_resume();
-        }
-        FIBER_ASSERT(state_ == State::ReadyError || state_ == State::CanceledReady);
-        state_ = State::Completed;
-        owner_ = nullptr;
-        return std::unexpected(result_err_);
-    }
-
-    void prepare_cancel(common::IoErr reason) noexcept {
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        FIBER_ASSERT(state_ == State::Waiting);
-        state_ = State::CancelPrepared;
-        result_err_ = reason == common::IoErr::None ? common::IoErr::Canceled : reason;
-        detach();
-        owner_ = nullptr;
-        task_ = {};
-    }
-
-    void schedule_cancel_resume() noexcept {
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        FIBER_ASSERT(state_ == State::CancelPrepared);
-        state_ = State::ResumeQueued;
-        loop_->post_local<NotifyAwaiter, &NotifyAwaiter::resume_entry_, &NotifyAwaiter::on_cancel_resume>(*this);
-    }
-
-private:
-    enum class State : std::uint8_t {
-        Created,
-        Waiting,
-        ReadyError,
-        CancelPrepared,
-        ResumeQueued,
-        CanceledReady,
-        Completed,
-        Abandoned,
-    };
-
-    void detach() noexcept {
-        if (slot_ != nullptr && *slot_ == this) {
-            *slot_ = nullptr;
-        }
-        slot_ = nullptr;
-    }
-
-    static void on_cancel_resume(NotifyAwaiter *awaiter) noexcept {
-        FIBER_ASSERT(awaiter != nullptr);
-        FIBER_ASSERT(awaiter->loop_ != nullptr);
-        FIBER_ASSERT(awaiter->loop_->in_loop());
-        FIBER_ASSERT(awaiter->state_ == State::ResumeQueued);
-        awaiter->state_ = State::CanceledReady;
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    ClientHttp1Exchange *owner_ = nullptr;
-    NotifyAwaiter **slot_ = nullptr;
-    event::EventLoop *loop_ = nullptr;
-    IoTask task_;
-    IoTask::Awaiter task_awaiter_;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::DeferEntry resume_entry_{};
-    common::IoErr result_err_ = common::IoErr::None;
-    State state_ = State::Created;
-};
-
-ClientHttp1Exchange::NotifyAwaiter
-ClientHttp1Exchange::wait_transport_read(fiber::async::Task<common::IoResult<std::size_t>> task) noexcept {
-    return NotifyAwaiter(*this, reader_, std::move(task));
-}
-
-ClientHttp1Exchange::NotifyAwaiter
-ClientHttp1Exchange::wait_transport_write(fiber::async::Task<common::IoResult<std::size_t>> task) noexcept {
-    return NotifyAwaiter(*this, writer_, std::move(task));
-}
-
 fiber::async::Task<common::IoResult<void>>
 ClientHttp1Exchange::transport_write_all(HttpTransport *transport, const void *buf, std::size_t len,
                                          std::chrono::milliseconds timeout) noexcept {
@@ -556,7 +403,7 @@ ClientHttp1Exchange::transport_write_all(HttpTransport *transport, const void *b
     std::size_t remaining = len;
     while (remaining > 0) {
         auto write_result =
-                co_await wait_transport_write(transport->write(ptr, remaining, remaining_timeout(deadline)));
+                co_await conn_->wait_transport_write(transport->write(ptr, remaining, remaining_timeout(deadline)));
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
@@ -574,7 +421,7 @@ ClientHttp1Exchange::transport_write_all(HttpTransport *transport, mem::IoBufCha
                                          std::chrono::milliseconds timeout) noexcept {
     const TimePoint deadline = deadline_after(timeout);
     while (chain.readable_bytes() > 0) {
-        auto write_result = co_await wait_transport_write(transport->writev(chain, remaining_timeout(deadline)));
+        auto write_result = co_await conn_->wait_transport_write(transport->writev(chain, remaining_timeout(deadline)));
         if (!write_result) {
             co_return std::unexpected(write_result.error());
         }
@@ -594,9 +441,7 @@ ClientHttp1Exchange::write_chunk_suffix(HttpTransport *transport, bool end_strea
 
 ClientHttp1Exchange::ClientHttp1Exchange(Http1ClientConnection &conn, mem::BufPool &pool,
                                          Http1ClientExchangeOptions options) noexcept :
-    conn_(&conn), pool_(&pool), exchange_loop_(event::EventLoop::current_or_null()), options_(std::move(options)),
-    response_trailers_(pool) {
-    FIBER_ASSERT(exchange_loop_ != nullptr);
+    conn_(&conn), pool_(&pool), options_(std::move(options)), response_trailers_(pool) {
     active_ = conn.acquire_exchange(this);
 }
 
@@ -608,7 +453,7 @@ ClientHttp1Exchange::~ClientHttp1Exchange() {
     if (done()) {
         conn_->release_exchange(this, keepalive_on_release_);
     } else {
-        conn_->fail_exchange(this);
+        conn_->fail_exchange(this, common::IoErr::Canceled);
     }
     clear_response_header_nodes();
 }
@@ -624,12 +469,12 @@ void ClientHttp1Exchange::clear_response_header_nodes() noexcept {
     response_headers_head_ = nullptr;
 }
 
-void ClientHttp1Exchange::fail_active_exchange() noexcept {
+void ClientHttp1Exchange::fail_active_exchange(common::IoErr reason) noexcept {
     request_state_ = RequestState::Failed;
-    active_ = false;
     if (conn_) {
-        conn_->fail_exchange(this);
-        conn_ = nullptr;
+        conn_->fail_exchange(this, reason);
+    } else {
+        active_ = false;
     }
 }
 
@@ -638,45 +483,13 @@ void ClientHttp1Exchange::record_request_write_error(common::IoErr error) noexce
         return;
     }
     request_write_error_ = error;
-    fail_active_exchange();
+    fail_active_exchange(error);
 }
 
-void ClientHttp1Exchange::on_io_awaiter_destroyed() noexcept {
-    FIBER_ASSERT(exchange_loop_ != nullptr);
-    FIBER_ASSERT(exchange_loop_->in_loop());
-    if (!active_ || !conn_ || !conn_->transport_) {
-        return;
-    }
-
-    cancel_active_io(common::IoErr::Canceled);
-}
-
-void ClientHttp1Exchange::cancel_active_io(common::IoErr reason) noexcept {
-    FIBER_ASSERT(exchange_loop_ != nullptr);
-    FIBER_ASSERT(exchange_loop_->in_loop());
-    FIBER_ASSERT(active_ && conn_ && conn_->transport_);
-
-    HttpTransport *transport = conn_->transport_.get();
-    NotifyAwaiter *reader = reader_;
-    NotifyAwaiter *writer = writer_;
-    fail_active_exchange();
-
-    // Destroy the leaf I/O tasks before releasing any transport-owned buffer reference.
-    if (reader != nullptr) {
-        reader->prepare_cancel(reason);
-    }
-    if (writer != nullptr) {
-        writer->prepare_cancel(reason);
-    }
-    transport->abandon_pending_io();
-
-    // Resume after abort() returns so cancellation cannot re-enter its caller.
-    if (reader != nullptr) {
-        reader->schedule_cancel_resume();
-    }
-    if (writer != nullptr) {
-        writer->schedule_cancel_resume();
-    }
+void ClientHttp1Exchange::on_connection_failed(common::IoErr) noexcept {
+    request_state_ = RequestState::Failed;
+    active_ = false;
+    conn_ = nullptr;
 }
 
 common::IoResult<void> ClientHttp1Exchange::ensure_body_read_buf_writable(mem::IoBuf &read_buf,
@@ -770,7 +583,7 @@ ClientHttp1Exchange::read_more(mem::IoBuf &read_buf, std::size_t max_bytes, bool
     }
 
     auto read_result =
-            co_await wait_transport_read(conn_->transport_->read(read_buf.writable_data(), read_size, timeout));
+            co_await conn_->wait_transport_read(conn_->transport_->read(read_buf.writable_data(), read_size, timeout));
     if (!read_result) {
         co_return std::unexpected(read_result.error());
     }
@@ -865,7 +678,8 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
                 co_return std::unexpected(copied_result.error());
             }
             if (read_buf.readable() == 0) {
-                auto read_result = co_await wait_transport_read(transport->read_into(header_buffer.buf(), timeout));
+                auto read_result =
+                        co_await conn_->wait_transport_read(transport->read_into(header_buffer.buf(), timeout));
                 if (!read_result) {
                     co_return std::unexpected(read_result.error());
                 }
@@ -929,7 +743,7 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (writer_ != nullptr) {
+    if (conn_ != nullptr && conn_->writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
@@ -1012,7 +826,7 @@ ClientHttp1Exchange::write_all(mem::IoBufChain chunk, std::chrono::milliseconds 
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (writer_ != nullptr) {
+    if (conn_ != nullptr && conn_->writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
@@ -1164,7 +978,7 @@ ClientHttp1Exchange::write_all(const std::uint8_t *buf, std::size_t len, bool en
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (writer_ != nullptr) {
+    if (conn_ != nullptr && conn_->writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
@@ -1298,7 +1112,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (writer_ != nullptr) {
+    if (conn_ != nullptr && conn_->writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
@@ -1319,7 +1133,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
             }
             co_return 0;
         }
-        auto written = co_await wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
+        auto written = co_await conn_->wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
         if (!written || *written == 0) {
             const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
             record_request_write_error(error);
@@ -1368,7 +1182,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
                 }
                 co_return 0;
             }
-            auto written = co_await wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
+            auto written = co_await conn_->wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
             if (!written || *written == 0) {
                 const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
                 record_request_write_error(error);
@@ -1430,7 +1244,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
         chunk_write_end_ = end_stream;
         std::size_t prefix_remaining = prefix_len;
         while (prefix_remaining != 0) {
-            auto written = co_await wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
+            auto written = co_await conn_->wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
             if (!written || *written == 0) {
                 const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
                 record_request_write_error(error);
@@ -1465,7 +1279,7 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
         }
     }
 
-    auto written = co_await wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
+    auto written = co_await conn_->wait_transport_write(transport->writev(chunk, remaining_timeout(deadline)));
     if (!written || *written == 0) {
         const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
         record_request_write_error(error);
@@ -1502,7 +1316,7 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (writer_ != nullptr) {
+    if (conn_ != nullptr && conn_->writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
@@ -1520,7 +1334,7 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
             }
             co_return 0;
         }
-        auto written = co_await wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
+        auto written = co_await conn_->wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
         if (!written || *written == 0) {
             const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
             record_request_write_error(error);
@@ -1562,7 +1376,8 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
                 }
                 co_return 0;
             }
-            auto written = co_await wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
+            auto written =
+                    co_await conn_->wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
             if (!written || *written == 0) {
                 const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
                 record_request_write_error(error);
@@ -1616,7 +1431,7 @@ ClientHttp1Exchange::write(const std::uint8_t *buf, std::size_t len, bool end_st
         chunk_write_end_ = end_stream;
     }
 
-    auto written = co_await wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
+    auto written = co_await conn_->wait_transport_write(transport->write(buf, len, remaining_timeout(deadline)));
     if (!written || *written == 0) {
         const common::IoErr error = written ? common::IoErr::ConnReset : written.error();
         record_request_write_error(error);
@@ -1655,7 +1470,7 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
     if (!active_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    if (writer_ != nullptr) {
+    if (conn_ != nullptr && conn_->writer_ != nullptr) {
         co_return std::unexpected(common::IoErr::Busy);
     }
     if (!conn_ || !conn_->transport_ || !conn_->valid()) {
@@ -1747,7 +1562,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     auto fail_exchange = [&](common::IoErr err) -> common::IoResult<const Http1ResponseHead *> {
         header_node->~ResponseHeaderNode();
         ResponseHeaderNode::operator delete(header_node);
-        fail_active_exchange();
+        fail_active_exchange(err);
         return std::unexpected(err);
     };
 
@@ -1793,7 +1608,8 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     }
 
     auto read_more = [&]() -> fiber::async::Task<common::IoResult<void>> {
-        auto read_result = co_await wait_transport_read(transport->read_into(response_header_buffer.buf(), timeout));
+        auto read_result =
+                co_await conn_->wait_transport_read(transport->read_into(response_header_buffer.buf(), timeout));
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -1983,7 +1799,7 @@ ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
     pending_buf_ = {};
     bool read_call_used_io = false;
     auto fail_exchange = [&](common::IoErr err) -> common::IoResult<mem::IoBufChain> {
-        fail_active_exchange();
+        fail_active_exchange(err);
         return std::unexpected(err);
     };
 
@@ -2137,14 +1953,11 @@ ClientHttp1Exchange::discard_response_body(std::chrono::milliseconds timeout) no
 }
 
 common::IoResult<void> ClientHttp1Exchange::abort(common::IoErr reason) noexcept {
-    FIBER_ASSERT(exchange_loop_ != nullptr);
-    FIBER_ASSERT(exchange_loop_->in_loop());
     if (!active_ || !conn_ || !conn_->transport_) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    cancel_active_io(reason);
-    return {};
+    return conn_->abort_exchange(this, reason);
 }
 
 common::IoResult<void> ClientHttp1Exchange::switch_to_raw_stream() noexcept {

@@ -85,8 +85,70 @@ int run_broken_pipe_child(bool use_writev) {
     return 13;
 }
 
+int run_cross_loop_broken_pipe_child() {
+    int fds[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) != 0) {
+        return 30;
+    }
+    ::close(fds[1]);
+    fds[1] = -1;
+
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(fds[0]);
+        return 31;
+    }
+    if (pid == 0) {
+        fiber::event::EventLoopGroup group(2);
+        group.start();
+        (void) ::signal(SIGPIPE, SIG_DFL);
+
+        auto *stream = new fiber::net::detail::StreamFd(group.at(0), fds[0]);
+        std::promise<fiber::common::IoErr> result_promise;
+        auto result_future = result_promise.get_future();
+        fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
+            const char payload[] = "ping";
+            auto result = stream->try_write(payload, sizeof(payload) - 1U);
+            result_promise.set_value(result ? fiber::common::IoErr::None : result.error());
+            co_return;
+        });
+
+        const fiber::common::IoErr err = result_future.get();
+        std::promise<bool> close_promise;
+        auto close_future = close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+            const bool terminal = stream->terminal();
+            stream->close();
+            delete stream;
+            close_promise.set_value(terminal);
+            co_return;
+        });
+        const bool terminal = close_future.get();
+        group.stop();
+        group.join();
+        _exit(err == fiber::common::IoErr::BrokenPipe && !terminal ? 0 : 32);
+    }
+
+    ::close(fds[0]);
+    int status = 0;
+    if (::waitpid(pid, &status, 0) < 0) {
+        return 33;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return 34;
+}
+
 } // namespace
 
 TEST(StreamFdTest, TryWriteReturnsBrokenPipeInsteadOfSigpipe) { EXPECT_EQ(run_broken_pipe_child(false), 0); }
 
 TEST(StreamFdTest, TryWritevReturnsBrokenPipeInsteadOfSigpipe) { EXPECT_EQ(run_broken_pipe_child(true), 0); }
+
+TEST(StreamFdTest, CrossLoopTryWriteReturnsBrokenPipeWithoutTouchingOwnerPoller) {
+    EXPECT_EQ(run_cross_loop_broken_pipe_child(), 0);
+}

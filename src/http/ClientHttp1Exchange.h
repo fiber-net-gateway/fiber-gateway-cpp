@@ -17,12 +17,6 @@
 #include "Http1Parser.h"
 #include "HttpExchange.h"
 
-namespace fiber::event {
-
-class EventLoop;
-
-} // namespace fiber::event
-
 namespace fiber::http {
 
 class Http1ClientConnection;
@@ -75,8 +69,6 @@ public:
     [[nodiscard]] bool done() const noexcept { return request_complete() && response_complete_; }
 
 private:
-    class NotifyAwaiter;
-
     enum class RequestState : std::uint8_t {
         Init,
         SendingBody,
@@ -99,12 +91,9 @@ private:
     };
 
     void clear_response_header_nodes() noexcept;
-    void fail_active_exchange() noexcept;
+    void fail_active_exchange(common::IoErr reason) noexcept;
     void record_request_write_error(common::IoErr error) noexcept;
-    void cancel_active_io(common::IoErr reason) noexcept;
-    void on_io_awaiter_destroyed() noexcept;
-    NotifyAwaiter wait_transport_read(fiber::async::Task<common::IoResult<std::size_t>> task) noexcept;
-    NotifyAwaiter wait_transport_write(fiber::async::Task<common::IoResult<std::size_t>> task) noexcept;
+    void on_connection_failed(common::IoErr reason) noexcept;
     fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *transport, const void *buf,
                                                                    std::size_t len,
                                                                    std::chrono::milliseconds timeout) noexcept;
@@ -125,11 +114,10 @@ private:
     fiber::async::Task<common::IoResult<void>> read_response_trailers(mem::IoBuf &read_buf,
                                                                       std::chrono::milliseconds timeout) noexcept;
 
+    friend class Http1ClientConnection;
+
     Http1ClientConnection *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;
-    event::EventLoop *exchange_loop_ = nullptr;
-    NotifyAwaiter *reader_ = nullptr;
-    NotifyAwaiter *writer_ = nullptr;
     Http1ClientExchangeOptions options_{};
     HttpHeaders response_trailers_;
     mem::IoBuf pending_buf_;

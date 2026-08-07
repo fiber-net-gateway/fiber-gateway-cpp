@@ -468,11 +468,6 @@ fiber::common::IoErr TlsStreamFd::poll_write(const void *buf, size_t len, size_t
     return write_once(buf, len, out, event);
 }
 
-fiber::common::IoErr TlsStreamFd::fail_terminal(fiber::common::IoErr error) noexcept {
-    stream_fd_.mark_terminal(error);
-    return error;
-}
-
 fiber::common::IoErr TlsStreamFd::handshake_once(fiber::event::IoEvent &event) noexcept {
     if (!stream_fd_.valid() || !ssl_) {
         return fiber::common::IoErr::BadFd;
@@ -496,7 +491,7 @@ fiber::common::IoErr TlsStreamFd::handshake_once(fiber::event::IoEvent &event) n
             return fiber::common::IoErr::WouldBlock;
         }
         if (err == SSL_ERROR_ZERO_RETURN) {
-            return fail_terminal(fiber::common::IoErr::ConnReset);
+            return fiber::common::IoErr::ConnReset;
         }
         if (err == SSL_ERROR_SYSCALL) {
             int sys_err = errno;
@@ -504,11 +499,11 @@ fiber::common::IoErr TlsStreamFd::handshake_once(fiber::event::IoEvent &event) n
                 continue;
             }
             if (sys_err != 0) {
-                return fail_terminal(fiber::common::io_err_from_errno(sys_err));
+                return fiber::common::io_err_from_errno(sys_err);
             }
-            return fail_terminal(fiber::common::IoErr::ConnReset);
+            return fiber::common::IoErr::ConnReset;
         }
-        return fail_terminal(fiber::common::IoErr::Invalid);
+        return fiber::common::IoErr::Invalid;
     }
 }
 
@@ -542,11 +537,11 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
                 continue;
             }
             if (sys_err != 0) {
-                return fail_terminal(fiber::common::io_err_from_errno(sys_err));
+                return fiber::common::io_err_from_errno(sys_err);
             }
-            return fail_terminal(fiber::common::IoErr::Invalid);
+            return fiber::common::IoErr::Invalid;
         }
-        return fail_terminal(fiber::common::IoErr::Invalid);
+        return fiber::common::IoErr::Invalid;
     }
 }
 
@@ -579,11 +574,11 @@ fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out, 
                 continue;
             }
             if (sys_err != 0) {
-                return fail_terminal(fiber::common::io_err_from_errno(sys_err));
+                return fiber::common::io_err_from_errno(sys_err);
             }
-            return fail_terminal(fiber::common::IoErr::ConnReset);
+            return fiber::common::IoErr::ConnReset;
         }
-        return fail_terminal(fiber::common::IoErr::Invalid);
+        return fiber::common::IoErr::Invalid;
     }
 }
 
@@ -609,7 +604,7 @@ fiber::common::IoErr TlsStreamFd::write_once(const void *buf, size_t len, size_t
             return fiber::common::IoErr::WouldBlock;
         }
         if (err == SSL_ERROR_ZERO_RETURN) {
-            return fail_terminal(fiber::common::IoErr::BrokenPipe);
+            return fiber::common::IoErr::BrokenPipe;
         }
         if (err == SSL_ERROR_SYSCALL) {
             int sys_err = errno;
@@ -617,11 +612,11 @@ fiber::common::IoErr TlsStreamFd::write_once(const void *buf, size_t len, size_t
                 continue;
             }
             if (sys_err != 0) {
-                return fail_terminal(fiber::common::io_err_from_errno(sys_err));
+                return fiber::common::io_err_from_errno(sys_err);
             }
-            return fail_terminal(fiber::common::IoErr::BrokenPipe);
+            return fiber::common::IoErr::BrokenPipe;
         }
-        return fail_terminal(fiber::common::IoErr::Invalid);
+        return fiber::common::IoErr::Invalid;
     }
 }
 

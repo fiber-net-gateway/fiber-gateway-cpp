@@ -855,23 +855,25 @@ DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop, std::uint1
         co_return;
     }
 
-    fiber::mem::BufPool pool;
-    fiber::http::HttpHeaders headers(pool);
-    headers.add_view("host", "example.com");
+    HeaderCountOutcome outcome;
+    {
+        fiber::mem::BufPool pool;
+        fiber::http::HttpHeaders headers(pool);
+        headers.add_view("host", "example.com");
 
-    fiber::http::ClientHttp1Exchange exchange(connection, pool);
-    fiber::http::Http1RequestHead head;
-    head.method = fiber::http::HttpMethod::Post;
-    head.target = "/auto";
-    head.headers = &headers;
-    head.body = fiber::http::HttpBodySpec::Auto();
+        fiber::http::ClientHttp1Exchange exchange(connection, pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Post;
+        head.target = "/auto";
+        head.headers = &headers;
+        head.body = fiber::http::HttpBodySpec::Auto();
 
-    auto header_result = co_await exchange.send_header(head, false);
-    result_promise->set_value({
-            .error = header_result ? fiber::common::IoErr::None : header_result.error(),
-            .request_count = connection.request_count(),
-    });
+        auto header_result = co_await exchange.send_header(head, false);
+        outcome.error = header_result ? fiber::common::IoErr::None : header_result.error();
+        outcome.request_count = connection.request_count();
+    }
     connection.close();
+    result_promise->set_value(outcome);
 }
 
 DetachedTask run_read_header_client(fiber::event::EventLoop *loop, std::uint16_t port,
@@ -1815,12 +1817,17 @@ TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnecti
 
     fiber::http::Http1ClientConnectionOptions conn_options;
     conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    fiber::http::Http1ClientConnection connection(group.at(0), std::move(conn_options));
+    fiber::http::Http1ClientConnection *connection = nullptr;
 
     std::promise<fiber::common::IoErr> connect_promise;
     auto connect_future = connect_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        auto connect_result = co_await connection.connect(5s);
+        connection = new (std::nothrow) fiber::http::Http1ClientConnection(group.at(0), std::move(conn_options));
+        if (!connection) {
+            connect_promise.set_value(fiber::common::IoErr::NoMem);
+            co_return;
+        }
+        auto connect_result = co_await connection->connect(5s);
         connect_promise.set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());
     });
     ASSERT_EQ(connect_future.get(), fiber::common::IoErr::None);
@@ -1828,7 +1835,7 @@ TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnecti
     std::promise<ReadBodyOutcome> client_result_promise;
     auto client_result_future = client_result_promise.get_future();
     fiber::async::spawn(group.at(1), [&]() {
-        return run_read_content_length_body_on_borrowed_connection_client(&connection, &client_result_promise);
+        return run_read_content_length_body_on_borrowed_connection_client(connection, &client_result_promise);
     });
 
     ReadBodyOutcome outcome = client_result_future.get();
@@ -1845,7 +1852,8 @@ TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnecti
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        connection.close();
+        delete connection;
+        connection = nullptr;
         close_promise.set_value();
         co_return;
     });

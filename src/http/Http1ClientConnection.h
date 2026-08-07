@@ -2,6 +2,8 @@
 #define FIBER_HTTP_HTTP1_CLIENT_CONNECTION_H
 
 #include <chrono>
+#include <coroutine>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -45,6 +47,50 @@ public:
     [[nodiscard]] const Http1ClientConnectionOptions &options() const noexcept { return options_; }
 
 private:
+    using IoTask = fiber::async::Task<common::IoResult<std::size_t>>;
+
+    class IoAwaiter {
+    public:
+        IoAwaiter(Http1ClientConnection &connection, IoAwaiter *&slot, IoTask task) noexcept;
+        IoAwaiter(const IoAwaiter &) = delete;
+        IoAwaiter &operator=(const IoAwaiter &) = delete;
+        IoAwaiter(IoAwaiter &&) = delete;
+        IoAwaiter &operator=(IoAwaiter &&) = delete;
+        ~IoAwaiter();
+
+        bool await_ready() noexcept;
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle) noexcept;
+        common::IoResult<std::size_t> await_resume() noexcept;
+
+        void prepare_cancel(common::IoErr reason) noexcept;
+        void schedule_cancel_resume() noexcept;
+
+    private:
+        enum class State : std::uint8_t {
+            Created,
+            Waiting,
+            ReadyError,
+            CancelPrepared,
+            ResumeQueued,
+            CanceledReady,
+            Completed,
+            Abandoned,
+        };
+
+        void detach() noexcept;
+        static void on_cancel_resume(IoAwaiter *awaiter) noexcept;
+
+        Http1ClientConnection *connection_ = nullptr;
+        IoAwaiter **slot_ = nullptr;
+        event::EventLoop *loop_ = nullptr;
+        IoTask task_;
+        IoTask::Awaiter task_awaiter_;
+        std::coroutine_handle<> handle_{};
+        event::EventLoop::DeferEntry resume_entry_{};
+        common::IoErr result_err_ = common::IoErr::None;
+        State state_ = State::Created;
+    };
+
     enum class State : std::uint8_t {
         Init,
         ConnectedIdle,
@@ -53,11 +99,17 @@ private:
     };
 
     static Http1ClientConnectionOptions normalize_options(Http1ClientConnectionOptions options) noexcept;
+    void assert_active_loop() const noexcept;
     void mark_unusable() noexcept;
     void record_request_started() noexcept;
     [[nodiscard]] bool acquire_exchange(ClientHttp1Exchange *exchange) noexcept;
     void release_exchange(ClientHttp1Exchange *exchange, bool keepalive) noexcept;
-    void fail_exchange(ClientHttp1Exchange *exchange) noexcept;
+    void fail_exchange(ClientHttp1Exchange *exchange, common::IoErr reason) noexcept;
+    common::IoResult<void> abort_exchange(ClientHttp1Exchange *exchange, common::IoErr reason) noexcept;
+    void fail_active_exchange(common::IoErr reason) noexcept;
+    void on_io_awaiter_destroyed() noexcept;
+    IoAwaiter wait_transport_read(IoTask task) noexcept;
+    IoAwaiter wait_transport_write(IoTask task) noexcept;
 
     friend class ClientHttp1Exchange;
 
@@ -66,6 +118,9 @@ private:
     net::TlsContext tls_ctx_;
     std::unique_ptr<HttpTransport> transport_;
     ClientHttp1Exchange *active_exchange_ = nullptr;
+    event::EventLoop *active_loop_ = nullptr;
+    IoAwaiter *reader_ = nullptr;
+    IoAwaiter *writer_ = nullptr;
     std::uint64_t request_count_ = 0;
     State state_ = State::Init;
     bool keepalive_usable_ = false;
