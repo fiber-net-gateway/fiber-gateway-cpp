@@ -62,10 +62,14 @@ struct UpstreamState {
         std::optional<int> informational_status;
         std::vector<std::pair<std::string, std::string>> headers;
         std::optional<std::string> body;
+        std::vector<std::string> body_chunks;
         std::optional<std::size_t> advertised_content_length;
         std::chrono::milliseconds delay{};
+        std::chrono::milliseconds body_initial_delay{};
+        std::chrono::milliseconds body_chunk_delay{};
         bool chunked = false;
         bool websocket = false;
+        std::promise<void> *first_body_chunk_sent = nullptr;
         std::promise<void> *completion = nullptr;
     };
 
@@ -140,9 +144,10 @@ struct CatFrameCapture {
 class RecordingTransport final : public fiber::test::HttpTransportStub {
 public:
     RecordingTransport(fiber::event::EventLoop &loop, std::string input, std::string &output,
-                       bool hold_open_after_input = false, bool fail_writes = false) :
+                       bool hold_open_after_input = false, bool fail_writes = false,
+                       std::string_view observed_output = {}, std::promise<void> *output_observed = nullptr) :
         loop_(loop), input_(std::move(input)), output_(output), hold_open_after_input_(hold_open_after_input),
-        fail_writes_(fail_writes) {}
+        fail_writes_(fail_writes), observed_output_(observed_output), output_observed_(output_observed) {}
 
     fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
@@ -192,6 +197,7 @@ public:
             co_return std::unexpected(fiber::common::IoErr::ConnReset);
         }
         output_.append(static_cast<const char *>(buffer), size);
+        observe_output();
         co_return size;
     }
 
@@ -203,6 +209,7 @@ public:
         const std::size_t size = buffer.readable();
         output_.append(reinterpret_cast<const char *>(buffer.readable_data()), size);
         buffer.consume(size);
+        observe_output();
         co_return size;
     }
 
@@ -220,6 +227,7 @@ public:
             size += entry.iov_len;
         }
         buffers.consume_and_compact(size);
+        observe_output();
         co_return size;
     }
 
@@ -236,6 +244,15 @@ public:
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept override { return loop_; }
 
 private:
+    void observe_output() {
+        if (!output_observed_ || output_observed_notified_ || observed_output_.empty() ||
+            output_.find(observed_output_) == std::string::npos) {
+            return;
+        }
+        output_observed_notified_ = true;
+        output_observed_->set_value();
+    }
+
     fiber::event::EventLoop &loop_;
     std::string input_;
     std::string &output_;
@@ -244,6 +261,9 @@ private:
     bool closed_ = false;
     bool hold_open_after_input_ = false;
     bool fail_writes_ = false;
+    std::string observed_output_;
+    std::promise<void> *output_observed_ = nullptr;
+    bool output_observed_notified_ = false;
 };
 
 fiber::common::IoResult<std::uint16_t> bound_port(int fd) {
@@ -407,6 +427,13 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
 
     const std::string response_body =
             state->response.body.value_or("upstream-" + std::to_string(state->requests.size()));
+    std::size_t response_body_size = response_body.size();
+    if (!state->response.body_chunks.empty()) {
+        response_body_size = 0;
+        for (const std::string &chunk: state->response.body_chunks) {
+            response_body_size += chunk.size();
+        }
+    }
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
     for (const auto &[name, value]: state->response.headers) {
@@ -428,7 +455,7 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     const fiber::http::HttpBodySpec body_spec =
             state->response.chunked ? fiber::http::HttpBodySpec::Chunked()
                                     : fiber::http::HttpBodySpec::ContentLength(
-                                              state->response.advertised_content_length.value_or(response_body.size()));
+                                              state->response.advertised_content_length.value_or(response_body_size));
     auto sent = co_await exchange.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = state->response.status,
@@ -438,9 +465,30 @@ fiber::async::Task<void> serve_upstream(fiber::http::HttpExchange &exchange, Ups
     });
     if (sent) {
         const bool complete = !state->response.advertised_content_length ||
-                              *state->response.advertised_content_length == response_body.size();
-        (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(response_body.data()),
-                                           response_body.size(), complete);
+                              *state->response.advertised_content_length == response_body_size;
+        if (state->response.body_chunks.empty()) {
+            (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(response_body.data()),
+                                               response_body.size(), complete);
+        } else {
+            if (state->response.body_initial_delay > 0ms) {
+                co_await fiber::async::sleep(state->response.body_initial_delay);
+            }
+            for (std::size_t i = 0; i < state->response.body_chunks.size(); ++i) {
+                if (i > 0 && state->response.body_chunk_delay > 0ms) {
+                    co_await fiber::async::sleep(state->response.body_chunk_delay);
+                }
+                const std::string &chunk = state->response.body_chunks[i];
+                const bool end = complete && i + 1 == state->response.body_chunks.size();
+                auto written = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(chunk.data()),
+                                                           chunk.size(), end);
+                if (!written) {
+                    break;
+                }
+                if (i == 0 && state->response.first_body_chunk_sent) {
+                    state->response.first_body_chunk_sent->set_value();
+                }
+            }
+        }
         if (!complete) {
             (void) exchange.abort(fiber::common::IoErr::ConnReset);
         }
@@ -481,9 +529,10 @@ run_downstream(fiber::event::EventLoop *loop, const fiber::access_server::RouteC
                std::promise<void> *done, std::promise<RecordingTransport *> *transport_ready = nullptr,
                bool hold_open_after_input = false, fiber::cat::CatClient *cat_client = nullptr,
                fiber::access_server::AccessRequestScriptAdapter script_adapter = {},
-               fiber::access_server::AccessRequestHandlerOptions handler_options = {}, bool fail_writes = false) {
+               fiber::access_server::AccessRequestHandlerOptions handler_options = {}, bool fail_writes = false,
+               std::string_view observed_output = {}, std::promise<void> *output_observed = nullptr) {
     auto transport = std::make_unique<RecordingTransport>(*loop, std::move(request), *output, hold_open_after_input,
-                                                          fail_writes);
+                                                          fail_writes, observed_output, output_observed);
     if (transport_ready) {
         transport_ready->set_value(transport.get());
     }
@@ -1330,6 +1379,85 @@ TEST(ProxyExecutorTest, BridgesJavaCompatibleResponseHeadersAndBody) {
     EXPECT_EQ(output.find("X-Override: upstream\r\n"), std::string::npos);
     EXPECT_EQ(count_header(output, "X-Override:"), 1U);
     EXPECT_NE(output.find("bridge-body"), std::string::npos) << output;
+
+    std::promise<void> shutdown_promise;
+    auto shutdown_future = shutdown_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return shutdown(&pool, server, &shutdown_promise); });
+    ASSERT_EQ(shutdown_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+    delete server;
+}
+
+TEST(ProxyExecutorTest, FlushControlsCrossReadResponseBodyAggregation) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::http::StealableHttp1ConnectionPoolSet pool(group);
+    ASSERT_TRUE(pool.init());
+    group.start();
+
+    constexpr std::string_view first_chunk = "first-flush-chunk";
+    constexpr std::string_view second_chunk = "second-flush-chunk";
+    UpstreamState upstream_state{
+            .response =
+                    {
+                            .body_chunks = {std::string(first_chunk), std::string(second_chunk)},
+                            .body_initial_delay = 50ms,
+                            .body_chunk_delay = 500ms,
+                            .chunked = true,
+                    },
+    };
+    std::promise<std::uint16_t> port_promise;
+    std::promise<fiber::http::HttpServer *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return start_server(&group.at(0), &upstream_state, &port_promise, &server_promise); });
+
+    fiber::http::HttpServer *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::access_server::ProxyExecutor executor(pool);
+    for (const bool flush: {false, true}) {
+        fiber::access_server::RouteConfigStore store;
+        auto published = store.apply("orders", proxy_response_project_config(port, 64, flush));
+        ASSERT_TRUE(published) << published.error().message;
+
+        std::string output;
+        std::promise<void> first_chunk_sent_promise;
+        std::promise<void> output_observed_promise;
+        std::promise<void> request_promise;
+        auto first_chunk_sent = first_chunk_sent_promise.get_future();
+        auto output_observed = output_observed_promise.get_future();
+        auto request_done = request_promise.get_future();
+        upstream_state.response.first_body_chunk_sent = &first_chunk_sent_promise;
+        std::string request = "GET /proxy HTTP/1.1\r\n"
+                              "Host: api.example.com\r\n"
+                              "Connection: close\r\n\r\n";
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_downstream(&group.at(0), &store, executor.adapter(), std::move(request), &output,
+                                  &request_promise, nullptr, false, nullptr, {}, {}, false, first_chunk,
+                                  &output_observed_promise);
+        });
+
+        ASSERT_EQ(first_chunk_sent.wait_for(2s), std::future_status::ready);
+        if (flush) {
+            EXPECT_EQ(output_observed.wait_for(300ms), std::future_status::ready);
+        } else {
+            EXPECT_EQ(output_observed.wait_for(100ms), std::future_status::timeout);
+        }
+        ASSERT_EQ(request_done.wait_for(2s), std::future_status::ready);
+        upstream_state.response.first_body_chunk_sent = nullptr;
+        EXPECT_EQ(output_observed.wait_for(0ms), std::future_status::ready);
+        EXPECT_NE(output.find(first_chunk), std::string::npos);
+        EXPECT_NE(output.find(second_chunk), std::string::npos);
+        if (flush) {
+            EXPECT_NE(output.find("X-Accel-Buffering: no\r\n"), std::string::npos);
+        } else {
+            EXPECT_EQ(output.find("X-Accel-Buffering:"), std::string::npos);
+        }
+    }
 
     std::promise<void> shutdown_promise;
     auto shutdown_future = shutdown_promise.get_future();
