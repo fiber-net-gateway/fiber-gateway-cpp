@@ -201,7 +201,7 @@ TEST(SmoothWeightedRoundRobinTest, EmptyInstanceSetFailsClosed) {
     EXPECT_TRUE(state.update({}));
     auto selected = state.select({}, TestSwrr::TimePoint{});
     ASSERT_FALSE(selected);
-    EXPECT_EQ(selected.error(), SwrrSelectError::NoAvailableInstance);
+    EXPECT_EQ(selected.error(), SwrrSelectError::NoConfiguredInstance);
 }
 
 } // namespace

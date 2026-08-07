@@ -244,7 +244,7 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
         changed.hosts = {
                 fiber::nacos::Instance{
                         .ip = "orders.internal",
-                        .port = 9090,
+                        .port = 443,
                         .cluster_name = "default",
                 },
         };
@@ -258,10 +258,11 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
         EXPECT_TRUE(hostname);
         if (hostname) {
             EXPECT_EQ(selected_host(*hostname), "orders.internal");
-            EXPECT_EQ(hostname->host_header, "orders.internal:9090");
+            EXPECT_EQ(hostname->host_header, "orders.internal");
             EXPECT_NE(hostname->connection_key, nullptr);
             if (hostname->connection_key) {
                 EXPECT_TRUE(hostname->connection_key->is_name());
+                EXPECT_EQ(hostname->connection_key->scheme(), fiber::http::Http1ConnectionGroupKey::Scheme::Https);
             }
             if (stable) {
                 EXPECT_NE(hostname->selection_token, stable->selection_token);
@@ -270,6 +271,16 @@ TEST(AccessServiceDiscoveryTest, WaitsBeforePublishAndPinsDiscoveryGeneration) {
         EXPECT_TRUE(store.remove_project("demo"));
         EXPECT_EQ(discovery.size(), 1u);
         EXPECT_TRUE(address_selector->select_address(std::nullopt, {}));
+
+        fiber::tests::ServiceInfoTestData empty;
+        empty.name = "orders";
+        naming.push("orders", std::move(empty));
+        co_await yield_updates();
+        auto no_hosts = address_selector->select_address(std::nullopt, {});
+        EXPECT_FALSE(no_hosts);
+        if (!no_hosts) {
+            EXPECT_EQ(no_hosts.error().code, fiber::access_server::ProxyAddressSelectErrorCode::NoHosts);
+        }
 
         committed = std::unexpected(fiber::access_server::AccessConfigError{});
         route_snapshot.reset();

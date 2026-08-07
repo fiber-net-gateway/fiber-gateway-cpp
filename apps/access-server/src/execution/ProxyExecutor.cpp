@@ -36,7 +36,9 @@ enum class ProxyHostBinding : std::uint8_t {
 };
 
 enum class ProxyFailurePhase : std::uint8_t {
-    SelectUpstream,
+    NoUpstreamHosts,
+    UpstreamCircuitOpen,
+    InvalidSelection,
     ResolveUpstream,
     PoolShutdown,
     Connect,
@@ -78,10 +80,21 @@ ProxyFailure from_connect_error(const ProxyConnectError &connect_error) noexcept
     return failure(phase, connect_error.message, connect_error.io_error);
 }
 
+ProxyFailure from_select_error(const ProxyAddressSelectError &select_error) noexcept {
+    const ProxyFailurePhase phase = select_error.code == ProxyAddressSelectErrorCode::CircuitOpen
+                                            ? ProxyFailurePhase::UpstreamCircuitOpen
+                                            : ProxyFailurePhase::NoUpstreamHosts;
+    return failure(phase, select_error.message, select_error.io_error);
+}
+
 std::string_view proxy_failure_phase_name(ProxyFailurePhase phase) noexcept {
     switch (phase) {
-        case ProxyFailurePhase::SelectUpstream:
-            return "select_upstream";
+        case ProxyFailurePhase::NoUpstreamHosts:
+            return "no_upstream_hosts";
+        case ProxyFailurePhase::UpstreamCircuitOpen:
+            return "upstream_circuit_open";
+        case ProxyFailurePhase::InvalidSelection:
+            return "invalid_selection";
         case ProxyFailurePhase::ResolveUpstream:
             return "resolve_upstream";
         case ProxyFailurePhase::PoolShutdown:
@@ -114,9 +127,17 @@ Exception http_client_error(std::uint32_t status, std::string_view name, std::st
 
 Exception map_proxy_failure(const ProxyFailure &proxy_failure) noexcept {
     switch (proxy_failure.phase) {
+        case ProxyFailurePhase::NoUpstreamHosts:
+            return http_client_error(503, "UPSTREAM_NO_HOSTS",
+                                     proxy_failure.message ? proxy_failure.message : "no upstream hosts are available");
+        case ProxyFailurePhase::UpstreamCircuitOpen:
+            return http_client_error(503, "UPSTREAM_CIRCUIT_BREAK",
+                                     proxy_failure.message ? proxy_failure.message
+                                                           : "upstream circuit breaker is open");
+        case ProxyFailurePhase::InvalidSelection:
+            return Exception::unknown(proxy_failure.message ? proxy_failure.message : "invalid upstream selection");
         case ProxyFailurePhase::ResolveUpstream:
             return http_client_error(503, "HTTP_CLIENT_DNS_ERROR", "dns resolve error");
-        case ProxyFailurePhase::SelectUpstream:
         case ProxyFailurePhase::PoolShutdown:
         case ProxyFailurePhase::Connect:
             return http_client_error(502, "HTTP_CLIENT_CONNECT_ERROR", "cannot connect to upstream");
@@ -496,17 +517,16 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
                 cluster_override,
                 std::span<const std::uint64_t>(excluded_selection_tokens.data(), excluded_selection_token_count));
         if (!selected) {
-            ProxyFailure selected_failure = previous_failure.value_or(
-                    failure(ProxyFailurePhase::SelectUpstream, selected.error().message, selected.error().io_error));
+            ProxyFailure selected_failure = previous_failure.value_or(from_select_error(selected.error()));
             co_return proxy_failure_result(selected_failure);
         }
         if (selected->selection_token == 0) {
-            co_return proxy_failure_result(failure(ProxyFailurePhase::SelectUpstream,
+            co_return proxy_failure_result(failure(ProxyFailurePhase::InvalidSelection,
                                                    "upstream selector returned an invalid selection token",
                                                    common::IoErr::Invalid));
         }
         if (selected->connection_key == nullptr) {
-            co_return proxy_failure_result(failure(ProxyFailurePhase::Connect,
+            co_return proxy_failure_result(failure(ProxyFailurePhase::InvalidSelection,
                                                    "upstream cannot be used as a connection pool key",
                                                    common::IoErr::Invalid));
         }
@@ -829,7 +849,7 @@ async::Task<Result<void>> ProxyExecutor::execute_impl(http::HttpExchange &exchan
     }
 
     co_return proxy_failure_result(previous_failure.value_or(
-            failure(ProxyFailurePhase::SelectUpstream, "no usable upstream", common::IoErr::NotFound)));
+            failure(ProxyFailurePhase::NoUpstreamHosts, "no usable upstream", common::IoErr::NotFound)));
 }
 
 } // namespace fiber::access_server

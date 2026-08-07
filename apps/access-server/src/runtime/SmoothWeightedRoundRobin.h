@@ -16,6 +16,7 @@
 namespace fiber::access_server {
 
 enum class SwrrSelectError : std::uint8_t {
+    NoConfiguredInstance,
     NoAvailableInstance,
 };
 

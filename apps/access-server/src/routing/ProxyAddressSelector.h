@@ -23,7 +23,13 @@ class HttpExchange;
 
 namespace fiber::access_server {
 
+enum class ProxyAddressSelectErrorCode : std::uint8_t {
+    NoHosts,
+    CircuitOpen,
+};
+
 struct ProxyAddressSelectError {
+    ProxyAddressSelectErrorCode code = ProxyAddressSelectErrorCode::NoHosts;
     common::IoErr io_error = common::IoErr::None;
     const char *message = nullptr;
 };

@@ -15,8 +15,10 @@
 namespace fiber::access_server {
 namespace {
 
-ProxyAddressSelectError select_error(const char *message, common::IoErr io_error) noexcept {
+ProxyAddressSelectError select_error(ProxyAddressSelectErrorCode code, const char *message,
+                                     common::IoErr io_error) noexcept {
     return ProxyAddressSelectError{
+            .code = code,
             .io_error = io_error,
             .message = message,
     };
@@ -44,8 +46,10 @@ std::string make_authority(std::string_view host, std::uint16_t port, bool ipv6)
     } else {
         result.append(host);
     }
-    result.push_back(':');
-    result.append(port_text.data(), converted.ptr);
+    if (port != 80 && port != 443) {
+        result.push_back(':');
+        result.append(port_text.data(), converted.ptr);
+    }
     return result;
 }
 
@@ -143,11 +147,11 @@ public:
 
             net::IpAddress ip;
             const bool parsed_ip = net::IpAddress::parse(instance.ip, ip);
+            const auto scheme = instance.port == 443 ? http::Http1ConnectionGroupKey::Scheme::Https
+                                                     : http::Http1ConnectionGroupKey::Scheme::Http;
             std::optional<http::Http1ConnectionGroupKey> connection_key =
-                    parsed_ip ? std::optional(http::Http1ConnectionGroupKey::from_ip(
-                                        ip, instance.port, http::Http1ConnectionGroupKey::Scheme::Http))
-                              : http::Http1ConnectionGroupKey::from_name(instance.ip, instance.port,
-                                                                         http::Http1ConnectionGroupKey::Scheme::Http);
+                    parsed_ip ? std::optional(http::Http1ConnectionGroupKey::from_ip(ip, instance.port, scheme))
+                              : http::Http1ConnectionGroupKey::from_name(instance.ip, instance.port, scheme);
             if (!connection_key) {
                 continue;
             }
@@ -248,13 +252,21 @@ public:
         std::lock_guard guard(mutex_);
         const Cluster *selected_cluster = find_cluster(cluster);
         if (selected_cluster == nullptr) {
-            return std::unexpected(SwrrSelectError::NoAvailableInstance);
+            return std::unexpected(SwrrSelectError::NoConfiguredInstance);
         }
         auto preferred = selected_cluster->preferred->select(excluded_selection_tokens);
         if (preferred) {
             return preferred;
         }
-        return selected_cluster->fallback->select(excluded_selection_tokens);
+        auto fallback = selected_cluster->fallback->select(excluded_selection_tokens);
+        if (fallback) {
+            return fallback;
+        }
+        if (preferred.error() == SwrrSelectError::NoAvailableInstance ||
+            fallback.error() == SwrrSelectError::NoAvailableInstance) {
+            return std::unexpected(SwrrSelectError::NoAvailableInstance);
+        }
+        return std::unexpected(SwrrSelectError::NoConfiguredInstance);
     }
 
 private:
@@ -375,7 +387,13 @@ public:
         }
         auto selected = lease_.state().select(cluster, excluded_selection_tokens);
         if (!selected) {
-            return std::unexpected(select_error("no available service instance", common::IoErr::NotFound));
+            const ProxyAddressSelectErrorCode code = selected.error() == SwrrSelectError::NoConfiguredInstance
+                                                             ? ProxyAddressSelectErrorCode::NoHosts
+                                                             : ProxyAddressSelectErrorCode::CircuitOpen;
+            const char *message = code == ProxyAddressSelectErrorCode::NoHosts
+                                          ? "no available service instance"
+                                          : "service upstream circuit breaker is open";
+            return std::unexpected(select_error(code, message, common::IoErr::NotFound));
         }
         return make_proxy_upstream_endpoint(std::move(*selected), lease_.service_name());
     }
