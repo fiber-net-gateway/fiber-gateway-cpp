@@ -29,7 +29,7 @@ target_include_directories(fiber_nacos
 target_link_libraries(fiber_nacos
     PUBLIC fiber_lib
     PRIVATE fiber_proto_nacos_payload)
-set_target_properties(fiber_nacos PROPERTIES FOLDER "apps/nacos")
+set_target_properties(fiber_nacos PROPERTIES FOLDER "components/nacos")
 
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
     set_property(TARGET fiber_nacos PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -61,7 +61,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         fiber_proto_nacos_payload
         fiber_proto_nacos_grpc_test
         GTest::gtest_main)
-    set_target_properties(fiber_nacos_tests PROPERTIES FOLDER "apps/nacos")
+    set_target_properties(fiber_nacos_tests PROPERTIES FOLDER "components/nacos")
     fiber_link_runtime_allocator(fiber_nacos_tests)
 
     if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)

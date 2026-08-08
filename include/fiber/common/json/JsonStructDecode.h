@@ -114,7 +114,6 @@ template<typename Descriptor, typename Struct>
 
 template<JsonStruct T>
 [[nodiscard]] ParseStatus parse_struct(JsonParser &parser, mem::BufPool &pool, T &out) noexcept {
-    constexpr StructDecodeOptions Options = struct_decode_options<T>();
     std::bitset<struct_field_count<T>> present;
 
     auto field_parser = [&present](std::string_view name, JsonParser &field_value_parser, mem::BufPool &field_pool,
@@ -123,12 +122,12 @@ template<JsonStruct T>
         const bool found = visit_field_by_name<T>(name, [&](auto index, const auto &field) noexcept {
             const std::size_t field_index = decltype(index)::value;
             if (present[field_index]) {
-                if constexpr (Options.duplicate_fields == DuplicateFieldPolicy::Reject) {
+                if constexpr (struct_decode_options<T>().duplicate_fields == DuplicateFieldPolicy::Reject) {
                     (void) field_value_parser.fail("duplicate JSON field");
                     field_status = ObjectFieldStatus::Error;
                     return;
                 }
-                if constexpr (Options.duplicate_fields == DuplicateFieldPolicy::KeepFirst) {
+                if constexpr (struct_decode_options<T>().duplicate_fields == DuplicateFieldPolicy::KeepFirst) {
                     field_status = ObjectFieldStatus::Unknown;
                     return;
                 }
@@ -139,7 +138,7 @@ template<JsonStruct T>
             field_status = to_object_field_status(parse_field_value(field, field_value_parser, field_pool, value));
         });
 
-        if (!found && Options.unknown_fields == UnknownFieldPolicy::Reject) {
+        if (!found && struct_decode_options<T>().unknown_fields == UnknownFieldPolicy::Reject) {
             (void) field_value_parser.fail("unknown JSON field");
             return ObjectFieldStatus::Error;
         }

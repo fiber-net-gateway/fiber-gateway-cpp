@@ -4,7 +4,7 @@
 
 Fiber Gateway 是一个性能优先的 C++23 网关框架，面向反向代理、网关和异步网络服务。仓库以可复用的静态库 `fiber_lib` 为核心，`example/`、测试以及 `apps/` 下的模块共用同一套运行时与协议栈。
 
-这是一个框架仓库，而不是只生成单一可执行程序的项目。默认构建会生成核心库、可运行示例、测试、`lite_nginx` 应用，以及 `fiber::nacos`、`fiber::prometheus` 等可选应用层库。
+这是一个框架仓库，而不是只生成单一可执行程序的项目。默认构建会生成核心库、可运行示例、测试、`lite_nginx` 应用，以及 `fiber::nacos`、`fiber::cat`、`fiber::prometheus` 等可复用组件。
 
 ## 核心能力
 
@@ -99,7 +99,12 @@ build/apps/lite_nginx
 | --- | --- | --- |
 | `FIBER_BUILD_EXAMPLES` | `ON` | 构建 `example/` 下的程序。 |
 | `FIBER_BUILD_TESTS` | `ON` | 在 GoogleTest 可用时构建核心和应用测试。 |
-| `FIBER_BUILD_APPS` | `ON` | 构建从 `apps/` 自动发现的模块。 |
+| `FIBER_BUILD_APPS` | `ON` | 构建从 `apps/` 自动发现的可运行应用。 |
+| `FIBER_BUILD_NACOS` | `FIBER_BUILD_APPS` 的初始值 | 构建可复用的 `fiber::nacos` 组件。 |
+| `FIBER_BUILD_CAT` | `FIBER_BUILD_APPS` 的初始值 | 构建可复用的 `fiber::cat` 组件。 |
+| `FIBER_BUILD_PROMETHEUS` | `FIBER_BUILD_APPS` 的初始值 | 构建可复用的 `fiber::prometheus` 组件。 |
+| `FIBER_BUILD_CAT_DEMO` | `OFF` | 构建 CAT 客户端 demo。 |
+| `FIBER_BUILD_PROMETHEUS_BENCHMARK` | `OFF` | 构建 Prometheus 记录路径 benchmark。 |
 | `FIBER_FETCH_DEPS` | `ON` | 允许获取缺失的 GoogleTest、jemalloc 等可选依赖。 |
 | `FIBER_USE_JEMALLOC` | `OFF` | 最终可执行程序链接 jemalloc。 |
 | `FIBER_ENABLE_HTTP3` | `ON` | 已声明的 HTTP/3 开关；当前源码列表不受该值影响，仍会包含 HTTP/3。 |
@@ -112,6 +117,10 @@ build/apps/lite_nginx
 | `FIBER_STATIC_LIBCXX` | `ON` | `FIBER_USE_LIBCXX=ON` 时静态链接 libc++ runtime。 |
 
 `FIBER_FETCH_DEPS=OFF` 会关闭 GoogleTest 和 jemalloc 等可选依赖的 fallback 下载。BoringSSL、zlib 源码和 protobuf 仍由 `cmake/Deps.cmake` 填充；可以用 `FIBER_DEPS_DIR` 指向可复用或预先准备的源码缓存。
+
+所有下载的源码归档都会进行 SHA-256 校验。受限网络或下游构建可以通过
+`FIBER_<DEPENDENCY>_URL` 和 `FIBER_<DEPENDENCY>_SHA256` cache 变量覆盖
+BoringSSL、zlib、protobuf、GoogleTest 与 jemalloc 的下载地址和校验值，无需修改本仓库源码。
 
 使用 jemalloc 的典型 Release 构建：
 
@@ -131,10 +140,29 @@ ctest --test-dir build-release --output-on-failure
 
 ## 应用与可复用模块
 
-`apps/` 同时容纳完整应用和建立在 `fiber_lib` 之上的可选库：
+Nacos、CAT 和 Prometheus 的源码目前仍位于 `apps/`，但该目录不是下游 CMake API。FetchContent
+使用者通过顶层选项启用组件，并链接稳定目标；启用组件不会隐式添加 demo 或 benchmark：
 
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    fiber_gateway_cpp
+    GIT_REPOSITORY https://github.com/fiber-net-gateway/fiber-gateway-cpp.git
+    GIT_TAG <固定版本>)
+set(FIBER_BUILD_APPS OFF CACHE BOOL "" FORCE)
+set(FIBER_BUILD_NACOS ON CACHE BOOL "" FORCE)
+set(FIBER_BUILD_CAT ON CACHE BOOL "" FORCE)
+set(FIBER_BUILD_PROMETHEUS ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(fiber_gateway_cpp)
+target_link_libraries(my_gateway PRIVATE fiber::nacos fiber::cat fiber::prometheus)
+```
+
+应用与可复用组件包括：
+
+- [AI Gateway](https://github.com/fiber-net-gateway/ai-gateway)：`ai-server` 的权威开发仓库；本仓库已删除旧实现，仅保留[迁移说明](apps/ai-server/README.md)与 Git 历史。
 - [`apps/lite_nginx`](apps/lite_nginx/README.md)：使用 nginx 风格配置的轻量反向代理。它接受 HTTP/1.1、HTTP/2 和 HTTP/3，支持 TLS 与 WebSocket tunnel，并通过连接池代理到 HTTP/1.1 上游。
 - [`apps/nacos`](apps/nacos/README.md)：`fiber::nacos` 客户端库，包含认证、Nacos 2.x gRPC 传输、ConfigService、NamingService、订阅、重连和服务状态 replay。
+- [`apps/cat`](apps/cat/README.md)：面向 CAT 3.0 的 `fiber::cat` 原生客户端库。
 - [`apps/prometheus`](apps/prometheus/README.md)：`fiber::prometheus` 固定 schema 指标库，使用 EventLoop-owned shard 并导出 Prometheus 文本格式。
 
 模块目录约定和 CMake 用法见 [apps/README.md](apps/README.md)。

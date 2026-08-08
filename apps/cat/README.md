@@ -2,8 +2,8 @@
 
 ## Overview
 
-`apps/cat` is the reusable native CAT client library for applications under `apps/`. Consumers link the `fiber::cat`
-target and include headers from `fiber/cat/`.
+This is the reusable native CAT client component. Consumers enable `FIBER_BUILD_CAT`, link the stable `fiber::cat`
+target, and include headers from `fiber/cat/`; the component's repository source path is not part of its CMake API.
 
 The implementation provides owner-EventLoop-local recording, automatic CAT message IDs, explicit cross-service
 propagation, NT1/PT1 encoding, bounded sampling aggregates, Count/Duration Metric transport, startup/heartbeat system
@@ -13,10 +13,12 @@ Router-response, and outbound-frame state has explicit limits.
 ## Build and test
 
 ```bash
-cmake -S . -B build -DFIBER_BUILD_APPS=ON -DFIBER_BUILD_TESTS=ON
+cmake -S . -B build -DFIBER_BUILD_APPS=OFF -DFIBER_BUILD_CAT=ON -DFIBER_BUILD_TESTS=ON
 cmake --build build --target fiber_cat_tests
 ctest --test-dir build -R '^(Cat|CatClientConfig)'
 ```
+
+Set `FIBER_BUILD_CAT_DEMO=ON` to add the separate `cat_demo` target.
 
 ## Client and trace lifecycle
 

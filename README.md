@@ -10,7 +10,7 @@ reusable `fiber_lib` static library; examples, tests, and the modules under
 This is a framework repository rather than a single executable. A normal build
 produces the core library, runnable examples, tests, the `lite_nginx`
 application, and optional application-layer libraries such as
-`fiber::nacos` and `fiber::prometheus`.
+`fiber::nacos`, `fiber::cat`, and `fiber::prometheus`.
 
 ## Highlights
 
@@ -118,7 +118,12 @@ benchmark invocation.
 | --- | --- | --- |
 | `FIBER_BUILD_EXAMPLES` | `ON` | Build programs under `example/`. |
 | `FIBER_BUILD_TESTS` | `ON` | Build core and application tests when GoogleTest is available. |
-| `FIBER_BUILD_APPS` | `ON` | Build modules discovered under `apps/`. |
+| `FIBER_BUILD_APPS` | `ON` | Build runnable applications discovered under `apps/`. |
+| `FIBER_BUILD_NACOS` | initial value of `FIBER_BUILD_APPS` | Build the reusable `fiber::nacos` component. |
+| `FIBER_BUILD_CAT` | initial value of `FIBER_BUILD_APPS` | Build the reusable `fiber::cat` component. |
+| `FIBER_BUILD_PROMETHEUS` | initial value of `FIBER_BUILD_APPS` | Build the reusable `fiber::prometheus` component. |
+| `FIBER_BUILD_CAT_DEMO` | `OFF` | Build the CAT demo program. |
+| `FIBER_BUILD_PROMETHEUS_BENCHMARK` | `OFF` | Build the Prometheus record-path benchmark. |
 | `FIBER_FETCH_DEPS` | `ON` | Allow fetching missing optional dependencies such as GoogleTest and jemalloc. |
 | `FIBER_USE_JEMALLOC` | `OFF` | Link final executables against jemalloc. |
 | `FIBER_ENABLE_HTTP3` | `ON` | Declared HTTP/3 switch; the current source list includes HTTP/3 regardless of this value. |
@@ -134,6 +139,29 @@ benchmark invocation.
 jemalloc dependencies. BoringSSL, the zlib source, and protobuf are still
 populated by `cmake/Deps.cmake`; use `FIBER_DEPS_DIR` to point at a reusable or
 pre-populated source cache.
+
+All downloaded source archives are SHA-256 verified. Restricted-network and
+downstream builds can replace an archive URL and its expected digest without
+patching Fiber by setting the corresponding cache variables:
+
+| Dependency | URL variable | SHA-256 variable |
+| --- | --- | --- |
+| BoringSSL | `FIBER_BORINGSSL_URL` | `FIBER_BORINGSSL_SHA256` |
+| zlib | `FIBER_ZLIB_URL` | `FIBER_ZLIB_SHA256` |
+| protobuf | `FIBER_PROTOBUF_URL` | `FIBER_PROTOBUF_SHA256` |
+| GoogleTest | `FIBER_GOOGLETEST_URL` | `FIBER_GOOGLETEST_SHA256` |
+| jemalloc | `FIBER_JEMALLOC_URL` | `FIBER_JEMALLOC_SHA256` |
+
+For example, a FetchContent consumer can select an approved mirror while
+retaining verification:
+
+```cmake
+set(FIBER_PROTOBUF_URL "https://mirror.example/protobuf-v21.12.tar.gz"
+    CACHE STRING "" FORCE)
+set(FIBER_PROTOBUF_SHA256 "<mirror-archive-sha256>"
+    CACHE STRING "" FORCE)
+FetchContent_MakeAvailable(fiber_gateway_cpp)
+```
 
 A typical release build with jemalloc is:
 
@@ -156,9 +184,40 @@ Read [example/README.md](example/README.md) for details.
 
 ## Applications and Reusable Modules
 
-`apps/` contains complete applications as well as optional libraries layered
-on top of `fiber_lib`:
+The top-level build exposes three optional reusable components layered on
+`fiber_lib`. Their source currently lives under `apps/`, but that path is an
+internal repository detail: in-tree and FetchContent consumers select them
+with top-level options and link their stable aliases.
 
+```cmake
+include(FetchContent)
+
+FetchContent_Declare(
+    fiber_gateway_cpp
+    GIT_REPOSITORY https://github.com/fiber-net-gateway/fiber-gateway-cpp.git
+    GIT_TAG <pinned-revision>)
+set(FIBER_BUILD_APPS OFF CACHE BOOL "" FORCE)
+set(FIBER_BUILD_NACOS ON CACHE BOOL "" FORCE)
+set(FIBER_BUILD_CAT ON CACHE BOOL "" FORCE)
+set(FIBER_BUILD_PROMETHEUS ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(fiber_gateway_cpp)
+
+target_link_libraries(my_gateway PRIVATE
+    fiber::nacos
+    fiber::cat
+    fiber::prometheus)
+```
+
+Enabling a component does not add its demos or benchmarks. Tests continue to
+follow `FIBER_BUILD_TESTS`; use the dedicated opt-in options for the CAT demo
+and Prometheus benchmark.
+
+The reusable components and complete applications are:
+
+- [AI Gateway](https://github.com/fiber-net-gateway/ai-gateway) — the
+  repository-owned LLM gateway and the authoritative home of `ai-server`.
+  The legacy application code has been removed from this repository; see the
+  [migration pointer](apps/ai-server/README.md) for provenance.
 - [`apps/lite_nginx`](apps/lite_nginx/README.md) — a lightweight reverse proxy
   with nginx-style configuration. It accepts HTTP/1.1, HTTP/2, and HTTP/3,
   supports TLS and WebSocket tunnelling, and proxies to HTTP/1.1 upstreams with
@@ -166,6 +225,8 @@ on top of `fiber_lib`:
 - [`apps/nacos`](apps/nacos/README.md) — the `fiber::nacos` client library with
   authentication, Nacos 2.x gRPC transport, ConfigService, NamingService,
   subscriptions, reconnection, and service-state replay.
+- [`apps/cat`](apps/cat/README.md) — the `fiber::cat` native CAT 3.0 client
+  library.
 - [`apps/prometheus`](apps/prometheus/README.md) — the `fiber::prometheus`
   fixed-schema metrics library with EventLoop-owned shards and Prometheus text
   exposition.

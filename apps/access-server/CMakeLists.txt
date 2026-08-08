@@ -1,3 +1,8 @@
+if (NOT TARGET fiber::nacos OR NOT TARGET fiber::cat OR NOT TARGET fiber::prometheus)
+    message(STATUS "Skipping access-server because its Nacos, CAT, or Prometheus component is disabled")
+    return()
+endif()
+
 add_library(access_server_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/config/AccessConfigCodec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/execution/AccessResult.cpp"

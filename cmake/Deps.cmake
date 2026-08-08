@@ -3,6 +3,37 @@ include_guard()
 include(ExternalProject)
 include(FetchContent)
 
+set(FIBER_BORINGSSL_URL
+    "https://codeload.github.com/google/boringssl/tar.gz/refs/tags/0.20251124.0"
+    CACHE STRING "BoringSSL source archive URL")
+set(FIBER_BORINGSSL_SHA256
+    "d47f89b894bf534c82071d7426c5abf1e5bd044fee242def53cd5d3d0f656c09"
+    CACHE STRING "BoringSSL source archive SHA-256")
+set(FIBER_ZLIB_URL
+    "https://codeload.github.com/madler/zlib/tar.gz/refs/tags/v1.3.1"
+    CACHE STRING "zlib source archive URL")
+set(FIBER_ZLIB_SHA256
+    "17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c"
+    CACHE STRING "zlib source archive SHA-256")
+set(FIBER_PROTOBUF_URL
+    "https://codeload.github.com/protocolbuffers/protobuf/tar.gz/refs/tags/v21.12"
+    CACHE STRING "protobuf source archive URL")
+set(FIBER_PROTOBUF_SHA256
+    "22fdaf641b31655d4b2297f9981fa5203b2866f8332d3c6333f6b0107bb320de"
+    CACHE STRING "protobuf source archive SHA-256")
+set(FIBER_GOOGLETEST_URL
+    "https://codeload.github.com/google/googletest/zip/refs/tags/v1.14.0"
+    CACHE STRING "GoogleTest source archive URL")
+set(FIBER_GOOGLETEST_SHA256
+    "1f357c27ca988c3f7c6b4bf68a9395005ac6761f034046e9dde0896e3aba00e4"
+    CACHE STRING "GoogleTest source archive SHA-256")
+set(FIBER_JEMALLOC_URL
+    "https://github.com/jemalloc/jemalloc/releases/download/5.3.0/jemalloc-5.3.0.tar.bz2"
+    CACHE STRING "jemalloc source archive URL")
+set(FIBER_JEMALLOC_SHA256
+    "2db82d1e7119df3e71b7640219b6dfe84789bc0537983c3b7ac4f7189aecfeaa"
+    CACHE STRING "jemalloc source archive SHA-256")
+
 if (NOT DEFINED FETCHCONTENT_BASE_DIR)
     set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_LIST_DIR}/../temp/_deps" CACHE PATH "FetchContent base directory")
 endif()
@@ -43,14 +74,14 @@ function(fiber_prepare_jemalloc_target)
         return()
     endif()
 
-    set(FIBER_JEMALLOC_VERSION "5.3.0")
     set(FIBER_JEMALLOC_SOURCE_DIR "${FETCHCONTENT_BASE_DIR}/jemalloc-src")
     set(FIBER_JEMALLOC_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/jemalloc-build")
     set(FIBER_JEMALLOC_INSTALL_DIR "${CMAKE_BINARY_DIR}/_deps/jemalloc-install")
 
     ExternalProject_Add(
         fiber_jemalloc_ep
-        URL "https://github.com/jemalloc/jemalloc/releases/download/${FIBER_JEMALLOC_VERSION}/jemalloc-${FIBER_JEMALLOC_VERSION}.tar.bz2"
+        URL "${FIBER_JEMALLOC_URL}"
+        URL_HASH "SHA256=${FIBER_JEMALLOC_SHA256}"
         SOURCE_DIR "${FIBER_JEMALLOC_SOURCE_DIR}"
         BINARY_DIR "${FIBER_JEMALLOC_BINARY_DIR}"
         INSTALL_DIR "${FIBER_JEMALLOC_INSTALL_DIR}"
@@ -82,7 +113,8 @@ set(BORINGSSL_INSTALL OFF CACHE BOOL "" FORCE)
 fiber_use_cached_content(boringssl)
 FetchContent_Declare(
     boringssl
-    URL https://github.com/google/boringssl/archive/refs/tags/0.20251124.0.tar.gz
+    URL "${FIBER_BORINGSSL_URL}"
+    URL_HASH "SHA256=${FIBER_BORINGSSL_SHA256}"
 )
 FetchContent_MakeAvailable(boringssl)
 
@@ -102,7 +134,8 @@ set(BORINGSSL_ROOT_DIR "${boringssl_BINARY_DIR}" CACHE PATH "" FORCE)
 fiber_use_cached_content(zlib)
 FetchContent_Declare(
     zlib
-    URL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz
+    URL "${FIBER_ZLIB_URL}"
+    URL_HASH "SHA256=${FIBER_ZLIB_SHA256}"
     SOURCE_SUBDIR fiber_download_only
 )
 FetchContent_MakeAvailable(zlib)
@@ -135,7 +168,8 @@ function(fiber_prepare_protobuf_target)
     fiber_use_cached_content(protobuf)
     FetchContent_Declare(
         protobuf
-        URL https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.tar.gz
+        URL "${FIBER_PROTOBUF_URL}"
+        URL_HASH "SHA256=${FIBER_PROTOBUF_SHA256}"
     )
     FetchContent_MakeAvailable(protobuf)
 

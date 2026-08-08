@@ -8,17 +8,19 @@ target_include_directories(fiber_prometheus
     PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}/include")
 target_link_libraries(fiber_prometheus PUBLIC fiber_lib)
-set_target_properties(fiber_prometheus PROPERTIES FOLDER "apps/prometheus")
+set_target_properties(fiber_prometheus PROPERTIES FOLDER "components/prometheus")
 
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
     set_property(TARGET fiber_prometheus PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-add_executable(prometheus_record_benchmark EXCLUDE_FROM_ALL
-    "${CMAKE_CURRENT_LIST_DIR}/bench/RecordBenchmark.cpp")
-target_link_libraries(prometheus_record_benchmark PRIVATE fiber::prometheus)
-set_target_properties(prometheus_record_benchmark PROPERTIES FOLDER "apps/prometheus")
-fiber_link_runtime_allocator(prometheus_record_benchmark)
+if (FIBER_BUILD_PROMETHEUS_BENCHMARK)
+    add_executable(prometheus_record_benchmark
+        "${CMAKE_CURRENT_LIST_DIR}/bench/RecordBenchmark.cpp")
+    target_link_libraries(prometheus_record_benchmark PRIVATE fiber::prometheus)
+    set_target_properties(prometheus_record_benchmark PROPERTIES FOLDER "components/prometheus")
+    fiber_link_runtime_allocator(prometheus_record_benchmark)
+endif()
 
 if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
@@ -30,7 +32,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/TextEncoderTest.cpp")
     target_link_libraries(fiber_prometheus_tests PRIVATE fiber::prometheus GTest::gtest_main)
     target_include_directories(fiber_prometheus_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
-    set_target_properties(fiber_prometheus_tests PROPERTIES FOLDER "apps/prometheus")
+    set_target_properties(fiber_prometheus_tests PROPERTIES FOLDER "components/prometheus")
     fiber_link_runtime_allocator(fiber_prometheus_tests)
 
     if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)

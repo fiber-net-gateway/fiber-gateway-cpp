@@ -15,8 +15,8 @@ foreach(FIBER_EXAMPLE_NAME IN LISTS FIBER_SIMPLE_EXAMPLES)
         SOURCES "${CMAKE_CURRENT_LIST_DIR}/${FIBER_EXAMPLE_NAME}.cpp")
 endforeach()
 
-# nacos_demo links the nacos application library (fiber::nacos), which is defined under
-# apps/. The top-level CMake adds apps/ before example/ so the target is available here.
+# nacos_demo is a normal opt-in example that links the reusable Nacos component.
+# The top-level CMake adds components before examples so the target is available here.
 if(TARGET fiber::nacos)
     fiber_add_example(nacos_demo
         SOURCES "${CMAKE_CURRENT_LIST_DIR}/nacos_demo.cpp"

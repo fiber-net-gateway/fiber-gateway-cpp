@@ -19,7 +19,7 @@ target_include_directories(fiber_cat
     PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}/include")
 target_link_libraries(fiber_cat PUBLIC fiber_lib)
-set_target_properties(fiber_cat PROPERTIES FOLDER "apps/cat")
+set_target_properties(fiber_cat PROPERTIES FOLDER "components/cat")
 
 if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
     set_property(TARGET fiber_cat PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -39,7 +39,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/SystemStatsTest.cpp")
     target_include_directories(fiber_cat_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
     target_link_libraries(fiber_cat_tests PRIVATE fiber::cat GTest::gtest_main)
-    set_target_properties(fiber_cat_tests PROPERTIES FOLDER "apps/cat")
+    set_target_properties(fiber_cat_tests PROPERTIES FOLDER "components/cat")
     fiber_link_runtime_allocator(fiber_cat_tests)
 
     if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
@@ -49,4 +49,6 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     gtest_discover_tests(fiber_cat_tests)
 endif()
 
-add_subdirectory(demo)
+if (FIBER_BUILD_CAT_DEMO)
+    add_subdirectory(demo)
+endif()
