@@ -1,6 +1,8 @@
 # Java `ploto-llm` 业务流程与配置参考
 
-本文总结 Java 版本 `ploto-llm` 的实际业务行为，作为 C++ `ai-server` 设计、实现和联调时的业务基线。
+本文总结 Java 版本 `ploto-llm` 的实际业务行为，作为 C++ `ai-server` 设计、实现和联调时的历史业务基线。
+`ai-server` 已迁移到 [`fiber-net-gateway/ai-gateway`](https://github.com/fiber-net-gateway/ai-gateway)；
+应用实现、文档和问题跟踪均以该仓库为准。
 
 - 分析基线：`/home/dear/CLionProjects/ploto-gateway`，提交 `22c2bf543b96`
 - 分析日期：2026-07-23
@@ -12,7 +14,7 @@
 
 > **C++ 项目明确差异（2026-07-23）**
 >
-> `fiber-gateway-cpp/apps/ai-server` 不实现 OpenAI 与 Anthropic 之间的隐式协议桥接。各 Provider 供应商已经同时提供 `openai-chat-completions` 和 `anthropic-messages`，C++ 网关只调用与客户端入口完全一致的 Provider 协议。
+> `ai-gateway/native/ai-server` 不实现 OpenAI 与 Anthropic 之间的隐式协议桥接。各 Provider 供应商已经同时提供 `openai-chat-completions` 和 `anthropic-messages`，C++ 网关只调用与客户端入口完全一致的 Provider 协议。
 >
 > 本文仍保留 Java 桥接流程，用于准确记录 Java 参考实现；所有桥接请求转换、响应转换、桥接 SSE 状态机和 `protocol_bridge_*` 错误均不属于 C++ 实现范围。
 
