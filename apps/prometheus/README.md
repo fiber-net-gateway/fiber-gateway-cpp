@@ -15,10 +15,10 @@ response body and remains responsible for Content-Type and body-completion seman
 
 ## Build
 
-The library is included when applications are enabled:
+Select the component independently of runnable applications:
 
 ```bash
-cmake -S . -B build -DFIBER_BUILD_APPS=ON
+cmake -S . -B build -DFIBER_BUILD_APPS=OFF -DFIBER_BUILD_PROMETHEUS=ON
 cmake --build build --target fiber_prometheus_tests
 ctest --test-dir build -R '^(MetricValueTest|MetricsRegistryTest|TextEncoderTest|MultiLoopSnapshotTest)\.'
 ```
@@ -83,11 +83,12 @@ snapshot state and remains busy until all callbacks finish.
 
 ## Benchmark
 
-A small repeatable record-path benchmark is available but excluded from normal builds:
+A small repeatable record-path benchmark is available as an opt-in target:
 
 ```bash
+cmake -S . -B build -DFIBER_BUILD_PROMETHEUS=ON -DFIBER_BUILD_PROMETHEUS_BENCHMARK=ON
 cmake --build build --target prometheus_record_benchmark
-./build/apps-build/prometheus/prometheus_record_benchmark 100000000
+./build/components/prometheus/prometheus_record_benchmark 100000000
 ```
 
 Run it from a Release build when comparing changes. It reports Counter and Histogram operations per second and the

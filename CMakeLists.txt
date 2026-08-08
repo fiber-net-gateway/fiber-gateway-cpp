@@ -12,6 +12,12 @@ option(FIBER_ENABLE_HTTP3 "Build in-tree HTTP/3 support" ON)
 option(FIBER_ENABLE_UDP_GSO "Compile Linux UDP GSO support when available" ON)
 option(FIBER_FORCE_TIMERFD_POLLER "Force the Linux Poller to use timerfd timeouts" OFF)
 option(FIBER_ENABLE_BENCHMARK_TRACE "Enable benchmark-only hot-path trace counters" OFF)
+option(FIBER_BUILD_APPS "Build multi-file applications under apps/" ON)
+option(FIBER_BUILD_NACOS "Build the reusable fiber::nacos component" ${FIBER_BUILD_APPS})
+option(FIBER_BUILD_CAT "Build the reusable fiber::cat component" ${FIBER_BUILD_APPS})
+option(FIBER_BUILD_PROMETHEUS "Build the reusable fiber::prometheus component" ${FIBER_BUILD_APPS})
+option(FIBER_BUILD_CAT_DEMO "Build the CAT client demo" OFF)
+option(FIBER_BUILD_PROMETHEUS_BENCHMARK "Build the Prometheus record-path benchmark" OFF)
 
 include(cmake/Deps.cmake)
 include(cmake/CompilerChecks.cmake)
@@ -149,7 +155,8 @@ if(FIBER_BUILD_TESTS)
             fiber_use_cached_content(googletest)
             FetchContent_Declare(
                 googletest
-                URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+                URL "${FIBER_GOOGLETEST_URL}"
+                URL_HASH "SHA256=${FIBER_GOOGLETEST_SHA256}"
             )
             set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
             FetchContent_MakeAvailable(googletest)
@@ -186,13 +193,22 @@ if(FIBER_BUILD_TESTS)
     endif()
 endif()
 
-option(FIBER_BUILD_APPS "Build multi-file applications under apps/" ON)
+if (FIBER_BUILD_NACOS)
+    add_subdirectory(apps/nacos "${CMAKE_BINARY_DIR}/components/nacos")
+endif()
+if (FIBER_BUILD_CAT)
+    add_subdirectory(apps/cat "${CMAKE_BINARY_DIR}/components/cat")
+endif()
+if (FIBER_BUILD_PROMETHEUS)
+    add_subdirectory(apps/prometheus "${CMAKE_BINARY_DIR}/components/prometheus")
+endif()
+
 if (FIBER_BUILD_APPS AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/apps/CMakeLists.txt")
     add_subdirectory(apps)
 endif()
 
-# Examples are added after apps/ so that examples depending on an application library
-# (e.g. nacos_demo -> fiber::nacos) can resolve the target.
+# Examples are added after components and apps so that examples such as
+# nacos_demo can resolve their reusable library targets.
 if (FIBER_BUILD_EXAMPLES)
     add_subdirectory(example)
 endif()

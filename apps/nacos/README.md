@@ -1,7 +1,8 @@
 # Nacos Client Library
 
-`apps/nacos` is the reusable Nacos client library for applications under
-`apps/`. Consumers should link the `fiber::nacos` target.
+This is the reusable Nacos client component. Consumers enable
+`FIBER_BUILD_NACOS` and link the stable `fiber::nacos` target; the component's
+repository source path is not part of its CMake API.
 
 The current implementation covers authentication, the private Nacos gRPC
 transport, ConfigService, NamingService, and a generic client-side
@@ -352,7 +353,7 @@ client behavior.
 ## Build and Test
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DFIBER_BUILD_APPS=OFF -DFIBER_BUILD_NACOS=ON
 cmake --build build --target fiber_nacos_tests
 ctest --test-dir build -R '^(NacosClientTest|NacosClientConfigTest|NacosDtoJsonTest|NacosPayloadTest|NacosRpcTest|NacosConfigServiceTest|NacosNamingServiceTest)\.'
 ```

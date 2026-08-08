@@ -1,7 +1,8 @@
 # Apps Layout
 
-`apps/` is for runnable programs that are larger than the single-file demos in `example/`, and for optional
-application-layer static libraries such as `fiber::nacos` and `fiber::prometheus` that depend on `fiber_lib`.
+`apps/` is primarily for runnable programs that are larger than the single-file demos in `example/`. The source for
+the reusable `fiber::nacos`, `fiber::cat`, and `fiber::prometheus` components currently also lives here, but consumers
+enable those components through top-level CMake options and must not add these directories directly.
 
 Recommended layout:
 
@@ -41,7 +42,11 @@ Rules:
 
 Build behavior:
 
-- `cmake -S . -B build` will include `apps/` when `FIBER_BUILD_APPS=ON`.
+- `cmake -S . -B build` will include runnable applications when `FIBER_BUILD_APPS=ON`.
+- `FIBER_BUILD_NACOS`, `FIBER_BUILD_CAT`, and `FIBER_BUILD_PROMETHEUS` independently select the reusable components.
+- Component demos and benchmarks are opt-in and are not added merely by enabling their libraries.
+- `apps/ai-server/README.md` is a migration pointer only. The application is maintained in
+  [`fiber-net-gateway/ai-gateway`](https://github.com/fiber-net-gateway/ai-gateway) and no longer has a target here.
 - App binaries are emitted under `build/apps/`; library artifacts remain normal CMake target outputs.
 - Simple one-file demos remain under `example/` and build to the normal top-level binary directory.
 
