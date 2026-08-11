@@ -52,26 +52,11 @@ std::chrono::milliseconds remaining_until(std::chrono::steady_clock::time_point 
     return std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
 }
 
-std::string make_authority(const NacosRpcEndpoint &endpoint) {
-    std::string result;
-    if (endpoint.ip.is_v6()) {
-        result.push_back('[');
-        result.append(endpoint.ip.to_string());
-        result.push_back(']');
-    } else {
-        result = endpoint.ip.to_string();
-    }
-    result.push_back(':');
-    result.append(std::to_string(endpoint.port));
-    return result;
-}
-
-grpc::GrpcClient::Options make_client_options(const NacosRpcOptions &options, const NacosRpcEndpoint &endpoint,
-                                              std::string_view authority) {
+grpc::GrpcClient::Options make_client_options(const NacosRpcOptions &options, const NacosRpcEndpoint &endpoint) {
     grpc::GrpcClient::Options result;
     result.peer_addr = net::SocketAddress(endpoint.ip, endpoint.port);
     result.tcp = options.tcp;
-    result.authority = authority;
+    result.authority = endpoint.authority;
     result.scheme = "http";
     return result;
 }
@@ -98,10 +83,11 @@ NacosRpcCloseKind close_kind_for_error(const NacosRpcError &error) noexcept {
 NacosRpc::NacosRpc(NacosRpcDependencies dependencies, NacosRpcEndpoint endpoint, NacosRpcModule module) :
     loop_(&dependencies.loop), config_(&dependencies.config), options_(&dependencies.options),
     auth_subscriber_(&dependencies.auth), endpoint_(std::move(endpoint)), module_(module),
-    authority_(make_authority(endpoint_)), client_(*loop_, make_client_options(*options_, endpoint_, authority_)) {
+    client_(*loop_, make_client_options(*options_, endpoint_)) {
     FIBER_ASSERT(endpoint_.port != 0);
     FIBER_ASSERT(!endpoint_.ip.is_unspecified());
     FIBER_ASSERT(!endpoint_.ip.is_multicast());
+    FIBER_ASSERT(!endpoint_.authority.empty());
     stop_publisher_ = stop_watch_.acquire_publisher();
     FIBER_ASSERT(stop_publisher_.has_value());
     state_publisher_ = state_watch_.acquire_publisher();
@@ -437,8 +423,8 @@ void NacosRpc::save_redirect(const dto::req::ConnectResetRequest &request, Inbou
     if (!request.server_ip.is_present() || request.server_ip.value().empty()) {
         return;
     }
-    net::IpAddress ip;
-    if (!net::IpAddress::parse(request.server_ip.value(), ip) || ip.is_unspecified() || ip.is_multicast()) {
+    auto host = NacosServerHost::create(std::string(request.server_ip.value()));
+    if (!host) {
         return;
     }
     std::uint16_t port = config_->grpc_port();
@@ -451,10 +437,9 @@ void NacosRpc::save_redirect(const dto::req::ConnectResetRequest &request, Inbou
         }
         port = static_cast<std::uint16_t>(parsed);
     }
-    action.redirect = NacosRpcEndpoint{
-            .ip = ip,
+    action.redirect = NacosRpcRedirectTarget{
+            .host = std::move(*host),
             .port = port,
-            .server_index = std::nullopt,
     };
 }
 
@@ -631,7 +616,7 @@ async::DetachedTask NacosRpc::run_heartbeat() noexcept {
 }
 
 void NacosRpc::begin_stop(NacosRpcCloseKind kind, const NacosRpcError &error,
-                          std::optional<NacosRpcEndpoint> redirect) noexcept {
+                          std::optional<NacosRpcRedirectTarget> redirect) noexcept {
     if (close_result_.kind == NacosRpcCloseKind::None) {
         close_result_ = NacosRpcCloseResult{
                 .kind = kind,

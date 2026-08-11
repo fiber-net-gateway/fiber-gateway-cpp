@@ -19,6 +19,7 @@
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
+#include "NacosServerAddressResolver.h"
 #include "NacosServiceDependencies.h"
 
 namespace fiber::nacos::detail {
@@ -32,10 +33,12 @@ enum class NacosClientState : std::uint8_t {
 
 class NacosClientImpl {
 public:
-    NacosClientImpl(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options);
+    NacosClientImpl(event::EventLoop &loop, dns::AddressResolver *resolver, NacosClientConfig config,
+                    NacosClientOptions options);
     ~NacosClientImpl();
 
     [[nodiscard]] static bool valid_options(const NacosClientOptions &options) noexcept;
+    [[nodiscard]] bool init() noexcept;
 
     [[nodiscard]] common::IoResult<void> start() noexcept;
     [[nodiscard]] async::Task<void> shutdown() noexcept;
@@ -54,7 +57,8 @@ private:
 
     [[nodiscard]] async::DetachedTask run_auth() noexcept;
     [[nodiscard]] async::Task<std::expected<AuthLoginSuccess, common::IoErr>>
-    login(std::size_t server_index, std::string_view target, std::string_view auth_body) noexcept;
+    login(const net::SocketAddress &endpoint, std::string_view authority, std::string_view target,
+          std::string_view auth_body) noexcept;
 
     [[nodiscard]] async::Watch<bool>::Subscriber subscribe_shutdown();
     [[nodiscard]] bool running() const noexcept { return state_ == NacosClientState::Running; }
@@ -62,6 +66,7 @@ private:
     void publish_auth(NacosAuthAccess auth_access);
 
     event::EventLoop *loop_ = nullptr;
+    dns::AddressResolver *resolver_ = nullptr;
     std::shared_ptr<const NacosClientConfig> config_;
     NacosClientOptions options_;
     NacosClientState state_ = NacosClientState::Created;
@@ -70,6 +75,7 @@ private:
     std::optional<async::Watch<bool>::Publisher> shutdown_publisher_;
     async::Watch<NacosAuthAccess> auth_watch_;
     std::optional<async::Watch<NacosAuthAccess>::Publisher> auth_publisher_;
+    NacosServerAddressResolver server_resolver_;
 };
 
 } // namespace fiber::nacos::detail

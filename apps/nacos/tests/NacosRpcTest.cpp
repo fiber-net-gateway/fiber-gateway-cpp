@@ -166,6 +166,7 @@ public:
     [[nodiscard]] bool connect_reset_seen() const noexcept {
         return connect_reset_seen_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] bool authority_seen() const noexcept { return authority_seen_.load(std::memory_order_acquire); }
     [[nodiscard]] bool connect_reset_enabled() const noexcept { return send_connect_reset_; }
 
     DetachedTask serve(std::shared_ptr<std::promise<void>> finished) {
@@ -298,7 +299,7 @@ private:
             }
             dto::req::ConnectResetRequest reset;
             reset.request_id.set_present("reset-1");
-            reset.server_ip.set_present("127.0.0.1");
+            reset.server_ip.set_present("NACOS.TEST.");
             // server_port is Nullable<string_view> (non-owning); keep the text
             // alive across encode_payload, otherwise the std::to_string temporary
             // dangles and the encoded JSON contains garbage (use-after-free).
@@ -415,6 +416,10 @@ private:
     }
 
     fiber::async::Task<void> handle(fiber::http::HttpExchange &exchange) {
+        const auto *host = exchange.host_header();
+        if (host && host->value_view() == "nacos.test:" + std::to_string(port_)) {
+            authority_seen_.store(true, std::memory_order_release);
+        }
         if (exchange.uri().path == "/Request/request") {
             co_await handle_unary(exchange);
         } else if (exchange.uri().path == "/BiRequestStream/requestBiStream") {
@@ -438,6 +443,7 @@ private:
     std::atomic<bool> unknown_seen_{false};
     std::atomic<bool> refreshed_token_seen_{false};
     std::atomic<bool> connect_reset_seen_{false};
+    std::atomic<bool> authority_seen_{false};
 };
 
 struct HandlerContext {
@@ -474,6 +480,7 @@ struct RpcCaseResult {
     std::string connection_id;
     nacos_detail::NacosRpcCloseKind close_kind = nacos_detail::NacosRpcCloseKind::None;
     bool redirect_valid = false;
+    bool authority_seen = false;
 };
 
 DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer *server,
@@ -497,6 +504,7 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),
                     .port = server->port(),
+                    .authority = "nacos.test:" + std::to_string(server->port()),
                     .server_index = 0,
             },
             nacos_detail::NacosRpcModule::Config);
@@ -553,9 +561,10 @@ DetachedTask run_rpc_case(fiber::event::EventLoop *loop, ScriptedNacosRpcServer 
     co_await run_done.join();
     result.stopped = rpc.state() == nacos_detail::NacosRpcState::Stopped;
     result.close_kind = close_result.kind;
-    result.redirect_valid =
-            close_result.redirect && close_result.redirect->ip == fiber::net::IpAddress::loopback_v4() &&
-            close_result.redirect->port == server->port() && !close_result.redirect->server_index.has_value();
+    result.authority_seen = server->authority_seen();
+    result.redirect_valid = close_result.redirect && close_result.redirect->host.value() == "nacos.test" &&
+                            !close_result.redirect->host.is_ip_literal() &&
+                            close_result.redirect->port == server->port();
     finished->set_value(std::move(result));
 }
 
@@ -571,7 +580,7 @@ RpcCaseResult execute_rpc_case(bool support_ability_negotiation, bool send_conne
                         [server_ptr = server.get(), server_finished]() { return server_ptr->serve(server_finished); });
 
     fiber::nacos::NacosClientConfigParams params;
-    params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+    params.server_hosts.push_back("127.0.0.1");
     params.username = "nacos";
     params.password = "nacos";
     params.grpc_port = server->port();
@@ -639,6 +648,7 @@ TEST(NacosRpcTest, TypedHandlersUnaryRequestsAndSetupAckWork) {
     EXPECT_TRUE(result.handler_header_seen);
     EXPECT_TRUE(result.unary_response_valid);
     EXPECT_EQ(result.connection_id, "rpc-connection-1");
+    EXPECT_TRUE(result.authority_seen);
     EXPECT_EQ(result.close_kind, nacos_detail::NacosRpcCloseKind::Shutdown);
 }
 
@@ -648,6 +658,7 @@ TEST(NacosRpcTest, CompatibilityDelayStartsTheSameTypedDispatcher) {
     EXPECT_TRUE(result.stopped);
     EXPECT_TRUE(result.handler_called);
     EXPECT_TRUE(result.unary_response_valid);
+    EXPECT_TRUE(result.authority_seen);
 }
 
 TEST(NacosRpcTest, ConnectResetReturnsRedirectAfterResponseIsWritten) {
@@ -656,6 +667,7 @@ TEST(NacosRpcTest, ConnectResetReturnsRedirectAfterResponseIsWritten) {
     EXPECT_TRUE(result.stopped);
     EXPECT_EQ(result.close_kind, nacos_detail::NacosRpcCloseKind::Redirect);
     EXPECT_TRUE(result.redirect_valid);
+    EXPECT_TRUE(result.authority_seen);
 }
 
 struct PreRunShutdownResult {
@@ -681,6 +693,7 @@ DetachedTask run_pre_run_shutdown(fiber::event::EventLoop *loop, fiber::nacos::N
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),
                     .port = config.grpc_port(),
+                    .authority = "127.0.0.1:" + std::to_string(config.grpc_port()),
                     .server_index = 0,
             },
             nacos_detail::NacosRpcModule::Config);
@@ -698,7 +711,7 @@ DetachedTask run_pre_run_shutdown(fiber::event::EventLoop *loop, fiber::nacos::N
 
 TEST(NacosRpcTest, ShutdownBeforeRunCompletesWithoutConnecting) {
     fiber::nacos::NacosClientConfigParams params;
-    params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+    params.server_hosts.push_back("127.0.0.1");
     params.grpc_port = 1;
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(config.has_value());
@@ -739,6 +752,7 @@ DetachedTask run_rnacos_rpc(fiber::event::EventLoop *loop, fiber::nacos::NacosCl
             nacos_detail::NacosRpcEndpoint{
                     .ip = fiber::net::IpAddress::loopback_v4(),
                     .port = config.grpc_port(),
+                    .authority = "127.0.0.1:" + std::to_string(config.grpc_port()),
                     .server_index = 0,
             },
             nacos_detail::NacosRpcModule::Config);
@@ -779,7 +793,7 @@ TEST(NacosRpcTest, RnacosInteropWhenEnabled) {
     ASSERT_LE(port, 65535u);
 
     fiber::nacos::NacosClientConfigParams params;
-    params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+    params.server_hosts.push_back("127.0.0.1");
     params.grpc_port = static_cast<std::uint16_t>(port);
     auto config = fiber::nacos::NacosClientConfig::create(std::move(params));
     ASSERT_TRUE(config.has_value());

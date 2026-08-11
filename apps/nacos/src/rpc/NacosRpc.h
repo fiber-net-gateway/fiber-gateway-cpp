@@ -48,7 +48,13 @@ enum class NacosRpcModule : std::uint8_t {
 struct NacosRpcEndpoint {
     net::IpAddress ip;
     std::uint16_t port = 0;
+    std::string authority;
     std::optional<std::size_t> server_index;
+};
+
+struct NacosRpcRedirectTarget {
+    NacosServerHost host;
+    std::uint16_t port = 0;
 };
 
 enum class NacosRpcState : std::uint8_t {
@@ -75,7 +81,7 @@ enum class NacosRpcCloseKind : std::uint8_t {
 struct NacosRpcCloseResult {
     NacosRpcCloseKind kind = NacosRpcCloseKind::None;
     NacosRpcError error;
-    std::optional<NacosRpcEndpoint> redirect;
+    std::optional<NacosRpcRedirectTarget> redirect;
 };
 
 struct NacosRpcDependencies {
@@ -97,7 +103,7 @@ class NacosRpc : public common::NonCopyable, public common::NonMovable {
 
     struct InboundAction {
         proto::Payload response;
-        std::optional<NacosRpcEndpoint> redirect;
+        std::optional<NacosRpcRedirectTarget> redirect;
         bool has_response = false;
         bool setup_ack = false;
         bool close_after_response = false;
@@ -179,7 +185,7 @@ private:
     dispatch_inbound(const NacosBiRequestHandler &handlers, const proto::Payload &payload) noexcept;
     [[nodiscard]] std::expected<MetadataSnapshot, NacosRpcError> current_metadata() const noexcept;
     void begin_stop(NacosRpcCloseKind kind, const NacosRpcError &error,
-                    std::optional<NacosRpcEndpoint> redirect = std::nullopt) noexcept;
+                    std::optional<NacosRpcRedirectTarget> redirect = std::nullopt) noexcept;
     void save_redirect(const dto::req::ConnectResetRequest &request, InboundAction &action) const noexcept;
     void set_state(NacosRpcState state);
     void mark_stopped() noexcept;
@@ -192,7 +198,6 @@ private:
     const NacosAuthSubscriber *auth_subscriber_ = nullptr;
     NacosRpcEndpoint endpoint_;
     NacosRpcModule module_ = NacosRpcModule::Config;
-    std::string authority_;
     grpc::GrpcClient client_;
     mem::BufPool stream_pool_;
     grpc::GrpcStream stream_;

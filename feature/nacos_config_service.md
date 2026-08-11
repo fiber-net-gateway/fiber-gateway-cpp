@@ -177,7 +177,9 @@ endpoint。所有状态转换和实例替换只在客户端 EventLoop 上发生�
 ### 5.2 建连流程
 
 1. ConfigService 为本次 endpoint 创建 `NacosRpc`；RPC 借用服务持有的认证 subscriber，等待 `NotConfigured` 或 `Present`。
-2. 从 preferred server 开始遍历 `server_ips`，连接对应 gRPC 端口。
+2. 从 preferred server 开始遍历 `server_hosts`。IP literal 直接形成物理 endpoint；域名通过客户端借用的
+   同 EventLoop `AddressResolver` 解析，并按 resolver 返回顺序依次尝试全部 A/AAAA 地址。TCP 连接物理
+   endpoint，HTTP `Host` / gRPC `:authority` 始终保留逻辑 host 与端口。
 3. 构造 `ServerCheckRequest`，通过 unary `Request/request` 发送。
 4. 校验 gRPC status、响应 Payload 类型和 `ServerCheckResponse` JSON。
 5. 打开 `BiRequestStream/requestBiStream` 双向流。

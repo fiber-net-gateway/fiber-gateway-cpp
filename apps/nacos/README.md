@@ -8,7 +8,8 @@ The current implementation covers authentication, the private Nacos gRPC
 transport, ConfigService, NamingService, and a generic client-side
 service-discovery registry:
 
-- Immutable, validated client configuration with multiple server IPs.
+- Immutable, validated client configuration with multiple logical server hosts
+  (IPv4, IPv6, or DNS names).
 - Nacos 2.x authentication flow through its fixed
   `/nacos/v1/auth/users/login` endpoint; no v1/v3 client-version probing.
 - HTTP/1.1 short connections for username/password authentication.
@@ -47,8 +48,9 @@ service-discovery registry:
   NamingService subscriptions.
 - Application-defined shared state allocated on the first naming notification,
   updated by later pushes, and retired when the subscription is released.
-- IP and hostname interpretation and all selection policies remain owned by the
-  consuming application.
+- DNS resolution preserves logical-host identity while trying every resolved
+  physical address; address-family ordering remains owned by the supplied
+  resolver.
 
 ## Targets
 
@@ -104,6 +106,7 @@ The main headers are:
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NamingService.h>
+#include <fiber/dns/DnsResolver.h>
 ```
 
 Discovery consumers additionally include:
@@ -116,7 +119,7 @@ Configuration is created through a validation boundary:
 
 ```cpp
 fiber::nacos::NacosClientConfigParams params;
-params.server_ips = {primary_ip, secondary_ip};
+params.server_hosts = {"nacos-primary.internal", "10.0.0.12"};
 params.username = "nacos";
 params.password = "password";
 params.http_port = 8848;
@@ -127,7 +130,7 @@ if (!config) {
     // Handle NacosConfigError.
 }
 
-auto client = fiber::nacos::NacosClient::create(loop, std::move(*config));
+auto client = fiber::nacos::NacosClient::create(loop, address_resolver, std::move(*config));
 if (!client) {
     // Handle NacosCreateError.
 }
@@ -139,9 +142,24 @@ if (!configs || !naming) {
 }
 ```
 
-`server_ips` must contain at least one unicast address. Duplicate addresses are
-removed while preserving order. Username and password must either both be empty
-or both be non-empty. When both are empty, HTTP authentication is skipped.
+`server_hosts` must contain at least one host without a scheme, path, or port.
+IPv4/IPv6 literals must be unicast; DNS names and IP literals are normalized and
+duplicates are removed while preserving order. A trailing DNS root dot is
+accepted and removed. Username and password must either both be empty or both
+be non-empty. When both are empty, HTTP authentication is skipped.
+
+When any configured server is a DNS name, create the client with a valid
+`fiber::dns::AddressResolver` bound to the same EventLoop. The resolver is
+borrowed and must outlive the client and every ConfigService/NamingService made
+from it. Stop those objects before releasing the resolver. For an IP-only list,
+the overload without a resolver remains available.
+
+Each authentication or gRPC connection attempt resolves the logical host
+through the resolver and tries all returned addresses in resolver order. DNS
+cache and TTL behavior therefore come from the supplied resolver. TCP connects
+to the resolved address, while HTTP `Host` and gRPC `:authority` keep the
+configured logical host and port. Server-requested ConnectReset targets follow
+the same host parsing and resolution rules.
 
 `NacosClient` owns authentication state only. `ConfigService::create()` creates
 an independent service using the client's immutable configuration,
