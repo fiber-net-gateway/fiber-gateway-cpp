@@ -9,6 +9,8 @@ enum class NacosCreateErrorCode : std::uint8_t {
     InvalidOptions,
     InvalidState,
     NoMem,
+    DnsResolverRequired,
+    InvalidDnsResolver,
 };
 
 struct NacosCreateError {

@@ -23,12 +23,23 @@ struct NacosServiceDependencies;
 class ConfigService;
 class NamingService;
 
+} // namespace fiber::nacos
+
+namespace fiber::dns {
+class AddressResolver;
+}
+
+namespace fiber::nacos {
+
 class NacosClient : public common::NonCopyable, public common::NonMovable {
 public:
     using AuthSubscriber = NacosAuthSubscriber;
 
     [[nodiscard]] static std::expected<std::unique_ptr<NacosClient>, NacosCreateError>
     create(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options = {});
+    [[nodiscard]] static std::expected<std::unique_ptr<NacosClient>, NacosCreateError>
+    create(event::EventLoop &loop, dns::AddressResolver &resolver, NacosClientConfig config,
+           NacosClientOptions options = {});
 
     ~NacosClient();
 
@@ -43,6 +54,9 @@ private:
     friend class ConfigService;
     friend class NamingService;
 
+    [[nodiscard]] static std::expected<std::unique_ptr<NacosClient>, NacosCreateError>
+    create_impl(event::EventLoop &loop, dns::AddressResolver *resolver, NacosClientConfig config,
+                NacosClientOptions options);
     explicit NacosClient(std::unique_ptr<detail::NacosClientImpl> impl) noexcept;
     [[nodiscard]] std::expected<detail::NacosServiceDependencies, NacosCreateError> service_dependencies();
 

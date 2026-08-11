@@ -20,7 +20,7 @@
 // logs its outcome and the flow always reaches a clean shutdown.
 //
 // Usage:
-//   ./nacos_demo [--server 127.0.0.1] [--http-port 8848] [--grpc-port 9848] \
+//   ./nacos_demo [--server nacos.internal] [--http-port 8848] [--grpc-port 9848] \
 //                [--username nacos] [--password nacos] [--namespace ""] \
 //                [--data-id fiber-demo-config] [--group DEFAULT_GROUP] \
 //                [--service fiber-demo-service] [--ip 127.0.0.1] [--port 18080]
@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -41,8 +42,13 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Timeout.h>
 #include <fiber/common/IoError.h>
+#include <fiber/dns/DnsCache2.h>
+#include <fiber/dns/DnsClient.h>
+#include <fiber/dns/DnsResolver.h>
+#include <fiber/dns/DnsResolverLocal.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/net/IpAddress.h>
+#include <fiber/net/SocketAddress.h>
 
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>
@@ -59,7 +65,7 @@ namespace nacos = fiber::nacos;
 // --------------------------------------------------------------------------- //
 
 struct CliOptions {
-    fiber::net::IpAddress server_ip = fiber::net::IpAddress::loopback_v4();
+    std::string server_host = "127.0.0.1";
     std::uint16_t http_port = 8848;
     std::uint16_t grpc_port = 9848;
     std::string username = "nacos";
@@ -87,7 +93,7 @@ bool parse_u16(std::string_view text, std::uint16_t &out) {
 
 void print_usage() {
     std::cout << "Usage: nacos_demo [options]\n"
-              << "  --server <ip>          nacos server ip (default 127.0.0.1)\n"
+              << "  --server <host>        nacos server host or ip (default 127.0.0.1)\n"
               << "  --http-port <port>     http login port (default 8848)\n"
               << "  --grpc-port <port>     gRPC data-plane port (default 9848)\n"
               << "  --username <user>      login user (default nacos; empty = no-auth)\n"
@@ -117,10 +123,11 @@ std::optional<CliOptions> parse_args(int argc, char **argv) {
             return std::nullopt;
         } else if (arg == "--server") {
             val = take(i);
-            if (!val || !fiber::net::IpAddress::parse(val, cli.server_ip)) {
+            if (!val) {
                 std::cerr << "invalid --server: " << (val ? val : "(missing)") << "\n";
                 return std::nullopt;
             }
+            cli.server_host = val;
         } else if (arg == "--http-port") {
             val = take(i);
             if (!val || !parse_u16(val, cli.http_port)) {
@@ -189,6 +196,68 @@ std::optional<CliOptions> parse_args(int argc, char **argv) {
     }
     return cli;
 }
+
+fiber::net::SocketAddress read_nameserver() noexcept {
+    std::ifstream file("/etc/resolv.conf");
+    std::string line;
+    while (std::getline(file, line)) {
+        std::size_t pos = 0;
+        while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) {
+            ++pos;
+        }
+        if (pos >= line.size() || line[pos] == '#') {
+            continue;
+        }
+        constexpr std::string_view prefix = "nameserver";
+        if (line.size() - pos <= prefix.size() || line.compare(pos, prefix.size(), prefix) != 0 ||
+            (line[pos + prefix.size()] != ' ' && line[pos + prefix.size()] != '\t')) {
+            continue;
+        }
+        pos += prefix.size();
+        while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) {
+            ++pos;
+        }
+        const std::size_t start = pos;
+        while (pos < line.size() && line[pos] != ' ' && line[pos] != '\t' && line[pos] != '#') {
+            ++pos;
+        }
+        fiber::net::IpAddress ip;
+        if (fiber::net::IpAddress::parse(std::string_view(line).substr(start, pos - start), ip)) {
+            return fiber::net::SocketAddress(ip, 53);
+        }
+    }
+    return fiber::net::SocketAddress(fiber::net::IpAddress::v4({8, 8, 8, 8}), 53);
+}
+
+struct DnsRuntime {
+    fiber::dns::SharedDnsCache2 cache;
+    fiber::dns::DnsResolverLocal local;
+    fiber::dns::DnsResolver resolver;
+    fiber::dns::AddressResolver address_resolver;
+
+    [[nodiscard]] bool init(fiber::event::EventLoop &loop) noexcept {
+        fiber::dns::DnsClient::Options client_options;
+        client_options.server = read_nameserver();
+        if (!cache.init(loop)) {
+            return false;
+        }
+        cache_initialized = true;
+        return local.init(loop, cache, client_options) && resolver.init(local) && address_resolver.init(resolver);
+    }
+
+    void release() noexcept {
+        address_resolver.release();
+        resolver.release();
+        local.release();
+        if (cache_initialized) {
+            cache.shutdown();
+            cache_initialized = false;
+        }
+    }
+
+private:
+    bool cache_initialized = false;
+};
 
 // --------------------------------------------------------------------------- //
 // Pretty-printers
@@ -677,14 +746,15 @@ fiber::async::Task<void> naming_demo(nacos::NamingService &svc, const CliOptions
 // Driver
 // --------------------------------------------------------------------------- //
 
-fiber::async::DetachedTask run_demo(fiber::event::EventLoop *loop, nacos::NacosClient *client, const CliOptions &cli,
-                                    int *exit_code) {
+fiber::async::DetachedTask run_demo(fiber::event::EventLoop *loop, nacos::NacosClient *client, DnsRuntime *dns,
+                                    const CliOptions &cli, int *exit_code) {
     // Auth subscriber is acquired before start() so we never miss the initial publish.
     auto auth = client->subscribe_auth();
     auto started = client->start();
     if (!started) {
         std::cerr << "[client] start failed: " << fiber::common::io_err_name(started.error()) << "\n";
         *exit_code = 1;
+        dns->release();
         loop->stop();
         co_return;
     }
@@ -766,6 +836,7 @@ fiber::async::DetachedTask run_demo(fiber::event::EventLoop *loop, nacos::NacosC
     const auto final_kind = final_auth.value ? final_auth.value->kind : nacos::NacosAuthAccessKind::Stopped;
     std::cout << "[client] shutdown complete; final auth state: " << auth_kind_name(final_kind) << "\n";
     *exit_code = (config_ready && naming_ready) ? 0 : 1;
+    dns->release();
     loop->stop();
 }
 
@@ -778,7 +849,7 @@ int main(int argc, char **argv) {
     }
 
     nacos::NacosClientConfigParams params;
-    params.server_ips.push_back(cli->server_ip);
+    params.server_hosts.push_back(cli->server_host);
     params.username = cli->username;
     params.password = cli->password;
     params.http_port = cli->http_port;
@@ -791,20 +862,37 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    std::cout << "[client] nacos server " << cli->server_ip.to_string() << " http=" << cli->http_port
+    std::cout << "[client] nacos server " << cli->server_host << " http=" << cli->http_port
               << " grpc=" << cli->grpc_port << " namespace=\"" << cli->namespace_id << "\""
               << (cli->username.empty() ? " (no-auth)" : (" user=" + cli->username)) << "\n";
 
     fiber::event::EventLoop loop;
-    auto client_result = nacos::NacosClient::create(loop, std::move(*config_result));
+    DnsRuntime dns;
+    if (!dns.init(loop)) {
+        std::cerr << "failed to initialize DNS resolver\n";
+        fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+            dns.release();
+            loop.stop();
+            co_return;
+        });
+        loop.run();
+        return 1;
+    }
+    auto client_result = nacos::NacosClient::create(loop, dns.address_resolver, std::move(*config_result));
     if (!client_result) {
         std::cerr << "failed to create nacos client\n";
+        fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+            dns.release();
+            loop.stop();
+            co_return;
+        });
+        loop.run();
         return 1;
     }
     std::unique_ptr<nacos::NacosClient> client = std::move(*client_result);
 
     int exit_code = 0;
-    fiber::async::spawn(loop, [&]() { return run_demo(&loop, client.get(), *cli, &exit_code); });
+    fiber::async::spawn(loop, [&]() { return run_demo(&loop, client.get(), &dns, *cli, &exit_code); });
     loop.run();
     return exit_code;
 }

@@ -5,7 +5,9 @@
 #include <limits>
 #include <utility>
 
+#include <fiber/async/TaskSelect.h>
 #include <fiber/async/Timeout.h>
+#include <fiber/async/WhenAny.h>
 #include <fiber/common/Assert.h>
 #include <fiber/common/json/JsonParse.h>
 #include <fiber/common/json/JsonParser.h>
@@ -23,25 +25,10 @@ namespace {
 constexpr std::string_view kLoginTarget = "/nacos/v1/auth/users/login";
 constexpr std::chrono::seconds kRefreshFailureDelay{5};
 
-http::Http1ClientConnectionOptions make_connection_options(const NacosClientConfig &config, std::size_t server_index) {
+http::Http1ClientConnectionOptions make_connection_options(const net::SocketAddress &endpoint) {
     http::Http1ClientConnectionOptions result;
-    result.peer_addr = net::SocketAddress(config.server_ips()[server_index], config.http_port());
+    result.peer_addr = endpoint;
     return result;
-}
-
-std::string make_host_header(const NacosClientConfig &config, std::size_t server_index) {
-    const net::IpAddress &ip = config.server_ips()[server_index];
-    std::string host;
-    if (ip.is_v6()) {
-        host.push_back('[');
-        host.append(ip.to_string());
-        host.push_back(']');
-    } else {
-        host = ip.to_string();
-    }
-    host.push_back(':');
-    host.append(std::to_string(config.http_port()));
-    return host;
 }
 
 std::chrono::seconds refresh_delay(std::int64_t token_ttl) noexcept {
@@ -67,13 +54,17 @@ void append_chunk(mem::IoBufChain &chunk, std::string &out) {
 
 } // namespace
 
-NacosClientImpl::NacosClientImpl(event::EventLoop &loop, NacosClientConfig config, NacosClientOptions options) :
-    loop_(&loop), config_(std::make_shared<const NacosClientConfig>(std::move(config))), options_(std::move(options)) {
+NacosClientImpl::NacosClientImpl(event::EventLoop &loop, dns::AddressResolver *resolver, NacosClientConfig config,
+                                 NacosClientOptions options) :
+    loop_(&loop), resolver_(resolver), config_(std::make_shared<const NacosClientConfig>(std::move(config))),
+    options_(std::move(options)) {
     shutdown_publisher_ = shutdown_watch_.acquire_publisher();
     auth_publisher_ = auth_watch_.acquire_publisher();
     FIBER_ASSERT(shutdown_publisher_.has_value());
     FIBER_ASSERT(auth_publisher_.has_value());
 }
+
+bool NacosClientImpl::init() noexcept { return server_resolver_.init(*loop_, resolver_); }
 
 NacosClientImpl::~NacosClientImpl() {
     FIBER_ASSERT(state_ == NacosClientState::Created || state_ == NacosClientState::Stopped);
@@ -119,6 +110,9 @@ async::Task<void> NacosClientImpl::shutdown() noexcept {
 NacosAuthSubscriber NacosClientImpl::subscribe_auth() { return auth_watch_.subscribe(); }
 
 std::expected<NacosServiceDependencies, NacosCreateError> NacosClientImpl::service_dependencies() {
+    if (resolver_ != nullptr && (!resolver_->valid() || &resolver_->loop() != loop_)) {
+        return std::unexpected(NacosCreateError{.code = NacosCreateErrorCode::InvalidDnsResolver});
+    }
     auto auth = auth_watch_.subscribe();
     const auto snapshot = auth.current();
     if (snapshot.value && snapshot.value->kind == NacosAuthAccessKind::Stopped) {
@@ -126,6 +120,7 @@ std::expected<NacosServiceDependencies, NacosCreateError> NacosClientImpl::servi
     }
     return NacosServiceDependencies{
             .loop = loop_,
+            .resolver = resolver_,
             .config = config_,
             .auth = std::move(auth),
     };
@@ -191,17 +186,41 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
         std::size_t successful_server_index = 0;
         bool succeeded = false;
 
-        const std::size_t server_count = config_->server_ips().size();
+        const std::size_t server_count = config_->server_hosts().size();
         for (std::size_t offset = 0; offset < server_count && running(); ++offset) {
             const std::size_t server_index = (preferred_server_index + offset) % server_count;
-            auto result = co_await login(server_index, kLoginTarget, auth_body);
+            const NacosServerHost &host = config_->server_hosts()[server_index];
+            auto resolved_or_shutdown = co_await async::when_any(
+                    [this, &host]() { return server_resolver_.resolve(host, config_->http_port()).select(); },
+                    [&shutdown_subscriber, shutdown_version]() { return shutdown_subscriber.next(shutdown_version); });
+            if (resolved_or_shutdown.is<1>()) {
+                auto stopped = std::move(resolved_or_shutdown).get<1>();
+                shutdown_version = stopped.version;
+                FIBER_ASSERT(stopped.value != nullptr);
+                break;
+            }
+            auto resolved = std::move(resolved_or_shutdown).get<0>();
+            if (!resolved) {
+                continue;
+            }
+
+            const std::string authority = make_nacos_server_authority(host, config_->http_port());
+            for (const net::SocketAddress &endpoint: *resolved) {
+                auto result = co_await login(endpoint, authority, kLoginTarget, auth_body);
+                if (!running()) {
+                    break;
+                }
+                if (result) {
+                    success = std::move(*result);
+                    successful_server_index = server_index;
+                    succeeded = true;
+                    break;
+                }
+            }
             if (!running()) {
                 break;
             }
-            if (result) {
-                success = std::move(*result);
-                successful_server_index = server_index;
-                succeeded = true;
+            if (succeeded) {
                 break;
             }
         }
@@ -251,12 +270,13 @@ async::DetachedTask NacosClientImpl::run_auth() noexcept {
 }
 
 async::Task<std::expected<NacosClientImpl::AuthLoginSuccess, common::IoErr>>
-NacosClientImpl::login(std::size_t server_index, std::string_view target, std::string_view auth_body) noexcept {
+NacosClientImpl::login(const net::SocketAddress &endpoint, std::string_view authority, std::string_view target,
+                       std::string_view auth_body) noexcept {
     if (!running()) {
         co_return std::unexpected(common::IoErr::Canceled);
     }
 
-    http::Http1ClientConnection connection(*loop_, make_connection_options(*config_, server_index));
+    http::Http1ClientConnection connection(*loop_, make_connection_options(endpoint));
     auto connect_result = co_await connection.connect(options_.connect_timeout);
     if (!running()) {
         co_return std::unexpected(common::IoErr::Canceled);
@@ -268,8 +288,7 @@ NacosClientImpl::login(std::size_t server_index, std::string_view target, std::s
     mem::BufPool pool;
     http::ClientHttp1Exchange exchange(connection, pool);
     http::HttpHeaders headers(pool);
-    const std::string host_header = make_host_header(*config_, server_index);
-    if (!headers.add_view("host", host_header) ||
+    if (!headers.add_view("host", authority) ||
         !headers.add_view("content-type", "application/x-www-form-urlencoded") ||
         !headers.add_view("accept", "application/json") || !headers.add_view("connection", "close")) {
         co_return std::unexpected(common::IoErr::NoMem);

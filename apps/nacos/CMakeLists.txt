@@ -5,6 +5,7 @@ add_library(fiber_nacos STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/NacosClientConfig.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/NamingService.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/detail/NacosClientImpl.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/detail/NacosServerAddressResolver.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/ConfigServiceImpl.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/naming/NamingServiceImpl.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/dto/ConfigJson.cpp"

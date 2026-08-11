@@ -6,14 +6,46 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <fiber/net/IpAddress.h>
 
 namespace fiber::nacos {
 
+enum class NacosConfigErrorCode : std::uint8_t {
+    EmptyServerList,
+    InvalidServerHost,
+    InvalidHttpPort,
+    InvalidGrpcPort,
+    EmptyUsername,
+    EmptyPassword,
+};
+
+class NacosServerHost {
+public:
+    enum class Kind : std::uint8_t {
+        IpLiteral,
+        Hostname,
+    };
+
+    [[nodiscard]] static std::expected<NacosServerHost, NacosConfigErrorCode> create(std::string host);
+
+    [[nodiscard]] Kind kind() const noexcept { return kind_; }
+    [[nodiscard]] bool is_ip_literal() const noexcept { return kind_ == Kind::IpLiteral; }
+    [[nodiscard]] std::string_view value() const noexcept { return value_; }
+    [[nodiscard]] const net::IpAddress &literal_ip() const noexcept { return literal_ip_; }
+
+private:
+    NacosServerHost(std::string value, net::IpAddress literal_ip, Kind kind) noexcept;
+
+    std::string value_;
+    net::IpAddress literal_ip_{};
+    Kind kind_ = Kind::Hostname;
+};
+
 struct NacosClientConfigParams {
-    std::vector<net::IpAddress> server_ips;
+    std::vector<std::string> server_hosts;
     std::string username;
     std::string password;
     std::uint16_t http_port = 8848;
@@ -21,15 +53,6 @@ struct NacosClientConfigParams {
     std::string namespace_id;
     std::string tenant;
     std::string client_version = "fiber-nacos/1.0";
-};
-
-enum class NacosConfigErrorCode : std::uint8_t {
-    EmptyServerList,
-    InvalidServerAddress,
-    InvalidHttpPort,
-    InvalidGrpcPort,
-    EmptyUsername,
-    EmptyPassword,
 };
 
 struct NacosConfigError {
@@ -41,7 +64,8 @@ class NacosClientConfig {
 public:
     [[nodiscard]] static std::expected<NacosClientConfig, NacosConfigError> create(NacosClientConfigParams params);
 
-    [[nodiscard]] const std::vector<net::IpAddress> &server_ips() const noexcept { return server_ips_; }
+    [[nodiscard]] const std::vector<NacosServerHost> &server_hosts() const noexcept { return server_hosts_; }
+    [[nodiscard]] bool has_hostname_server() const noexcept { return has_hostname_server_; }
     [[nodiscard]] const std::string &username() const noexcept { return username_; }
     [[nodiscard]] const std::string &password() const noexcept { return password_; }
     [[nodiscard]] std::uint16_t http_port() const noexcept { return http_port_; }
@@ -51,9 +75,9 @@ public:
     [[nodiscard]] const std::string &client_version() const noexcept { return client_version_; }
 
 private:
-    explicit NacosClientConfig(NacosClientConfigParams params) noexcept;
+    NacosClientConfig(NacosClientConfigParams params, std::vector<NacosServerHost> server_hosts) noexcept;
 
-    std::vector<net::IpAddress> server_ips_;
+    std::vector<NacosServerHost> server_hosts_;
     std::string username_;
     std::string password_;
     std::uint16_t http_port_ = 8848;
@@ -61,6 +85,7 @@ private:
     std::string namespace_id_;
     std::string tenant_;
     std::string client_version_;
+    bool has_hostname_server_ = false;
 };
 
 struct NacosClientOptions {

@@ -24,6 +24,9 @@
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Timeout.h>
+#include <fiber/dns/DnsCache2.h>
+#include <fiber/dns/DnsResolver.h>
+#include <fiber/dns/DnsResolverLocal.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NacosClient.h>
@@ -281,11 +284,11 @@ private:
     bool finished_ = false;
 };
 
-fiber::nacos::NacosClientConfig make_config(std::uint16_t port, std::vector<fiber::net::IpAddress> ips = {}) {
+fiber::nacos::NacosClientConfig make_config(std::uint16_t port, std::vector<std::string> hosts = {}) {
     fiber::nacos::NacosClientConfigParams params;
-    params.server_ips = std::move(ips);
-    if (params.server_ips.empty()) {
-        params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+    params.server_hosts = std::move(hosts);
+    if (params.server_hosts.empty()) {
+        params.server_hosts.push_back("127.0.0.1");
     }
     params.username = "user name";
     params.password = "p@ ss&";
@@ -297,7 +300,7 @@ fiber::nacos::NacosClientConfig make_config(std::uint16_t port, std::vector<fibe
 
 fiber::nacos::NacosClientConfig make_config_without_auth(std::uint16_t port) {
     fiber::nacos::NacosClientConfigParams params;
-    params.server_ips.push_back(fiber::net::IpAddress::loopback_v4());
+    params.server_hosts.push_back("127.0.0.1");
     params.http_port = port;
     auto result = fiber::nacos::NacosClientConfig::create(std::move(params));
     EXPECT_TRUE(result.has_value());
@@ -357,6 +360,51 @@ DetachedTask collect_auth_and_shutdown(NacosClient *client, NacosClient::AuthSub
         outcome.events.push_back(*stopped->value);
         outcome.error = fiber::common::IoErr::None;
     }
+    promise->set_value(std::move(outcome));
+    fiber::event::EventLoop::current().stop();
+}
+
+DetachedTask collect_domain_auth_and_release_dns(NacosClient *client, NacosClient::AuthSubscriber *subscriber,
+                                                 fiber::dns::SharedDnsCache2 *cache,
+                                                 fiber::dns::DnsResolverLocal *local,
+                                                 fiber::dns::DnsResolver *dns_resolver,
+                                                 fiber::dns::AddressResolver *address_resolver,
+                                                 std::promise<AuthOutcome> *promise) {
+    AuthOutcome outcome;
+    constexpr std::string_view Host = "nacos.test";
+    fiber::net::IpAddress addresses[2];
+    if (!fiber::net::IpAddress::parse("127.0.0.2", addresses[0]) ||
+        !fiber::net::IpAddress::parse("127.0.0.1", addresses[1])) {
+        outcome.error = fiber::common::IoErr::Invalid;
+    } else {
+        const fiber::dns::DnsCacheKey key{Host, fiber::dns::dns_cache_hash(Host)};
+        const auto expire_at = fiber::event::EventLoop::current().now() + 60s;
+        const auto v4 = cache->upsert_address_set(key, fiber::net::IpFamily::V4, addresses, 2, expire_at);
+        const auto v6 = cache->upsert_address_set(key, fiber::net::IpFamily::V6, nullptr, 0, expire_at);
+        if (v4 != fiber::common::IoErr::None || v6 != fiber::common::IoErr::None) {
+            outcome.error = v4 != fiber::common::IoErr::None ? v4 : v6;
+        } else {
+            auto start = client->start();
+            if (!start) {
+                outcome.error = start.error();
+            } else {
+                auto next = co_await fiber::async::timeout_for([subscriber]() { return subscriber->next(0); }, 5s);
+                if (next && next->value && next->value->kind == NacosAuthAccessKind::Present) {
+                    outcome.events.push_back(*next->value);
+                    outcome.error = fiber::common::IoErr::None;
+                } else {
+                    outcome.error = next ? fiber::common::IoErr::Invalid : next.error();
+                }
+            }
+        }
+    }
+
+    co_await client->shutdown();
+    co_await fiber::async::sleep(1ms);
+    address_resolver->release();
+    dns_resolver->release();
+    local->release();
+    cache->shutdown();
     promise->set_value(std::move(outcome));
     fiber::event::EventLoop::current().stop();
 }
@@ -522,6 +570,67 @@ TEST(NacosClientTest, LogsInWithNacos2EndpointAndBroadcastsToken) {
     EXPECT_TRUE(requests[0].ends_with("username=user+name&password=p%40+ss%26"));
 }
 
+TEST(NacosClientTest, HostnameRequiresResolver) {
+    fiber::event::EventLoop loop;
+    auto client = NacosClient::create(loop, make_config(8848, {"nacos.test"}));
+    ASSERT_FALSE(client.has_value());
+    EXPECT_EQ(client.error().code, fiber::nacos::NacosCreateErrorCode::DnsResolverRequired);
+
+    fiber::dns::AddressResolver invalid_resolver;
+    client = NacosClient::create(loop, invalid_resolver, make_config(8848, {"nacos.test"}));
+    ASSERT_FALSE(client.has_value());
+    EXPECT_EQ(client.error().code, fiber::nacos::NacosCreateErrorCode::InvalidDnsResolver);
+}
+
+TEST(NacosClientTest, ResolvesHostnameTriesAllAddressesAndPreservesHostHeader) {
+    ScriptedHttpServer server({ServerStep{
+            .body = R"({"accessToken":"domain-token","tokenTtl":30})",
+    }});
+    ASSERT_TRUE(server.valid());
+
+    fiber::event::EventLoopGroup group(1);
+    fiber::dns::SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init(group.at(0)));
+    fiber::dns::DnsResolverLocal local;
+    fiber::dns::DnsClient::Options dns_client_options;
+    dns_client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053);
+    dns_client_options.timeout = 100ms;
+    dns_client_options.attempts = 1;
+    ASSERT_TRUE(local.init(group.at(0), cache, dns_client_options));
+    fiber::dns::DnsResolver dns_resolver;
+    ASSERT_TRUE(dns_resolver.init(local, fiber::dns::DnsResolver::Options{
+                                                 .default_policy = fiber::dns::AddressPolicy::V4First,
+                                         }));
+    fiber::dns::AddressResolver address_resolver;
+    ASSERT_TRUE(address_resolver.init(dns_resolver));
+
+    auto client_result =
+            NacosClient::create(group.at(0), address_resolver, make_config(server.port(), {"NACOS.TEST."}));
+    ASSERT_TRUE(client_result.has_value());
+    std::unique_ptr<NacosClient> client = std::move(*client_result);
+    auto subscriber = client->subscribe_auth();
+    std::promise<AuthOutcome> promise;
+    auto future = promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() {
+        return collect_domain_auth_and_release_dns(client.get(), &subscriber, &cache, &local, &dns_resolver,
+                                                   &address_resolver, &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    AuthOutcome outcome = future.get();
+    group.join();
+
+    ASSERT_EQ(outcome.error, fiber::common::IoErr::None);
+    ASSERT_EQ(outcome.events.size(), 1u);
+    EXPECT_EQ(outcome.events[0].access_token, "domain-token");
+    ASSERT_TRUE(server.wait_for_requests(1, 1s));
+    const auto requests = server.requests();
+    ASSERT_EQ(requests.size(), 1u);
+    EXPECT_NE(requests[0].find("host: nacos.test:" + std::to_string(server.port()) + "\r\n"), std::string::npos);
+}
+
 TEST(NacosClientTest, RetriesOnlyTheNacos2LoginEndpoint) {
     ScriptedHttpServer server({
             ServerStep{.status = 404, .body = "{}"},
@@ -668,16 +777,10 @@ TEST(NacosClientTest, FallsBackAcrossConfiguredIpAddresses) {
     });
     ASSERT_TRUE(server.valid());
 
-    std::vector<fiber::net::IpAddress> ips;
-    fiber::net::IpAddress first;
-    fiber::net::IpAddress second;
-    ASSERT_TRUE(fiber::net::IpAddress::parse("127.0.0.2", first));
-    ASSERT_TRUE(fiber::net::IpAddress::parse("127.0.0.1", second));
-    ips.push_back(first);
-    ips.push_back(second);
+    std::vector<std::string> hosts{"127.0.0.2", "127.0.0.1"};
 
     fiber::event::EventLoopGroup group(1);
-    auto client_result = NacosClient::create(group.at(0), make_config(server.port(), std::move(ips)));
+    auto client_result = NacosClient::create(group.at(0), make_config(server.port(), std::move(hosts)));
     ASSERT_TRUE(client_result.has_value());
     std::unique_ptr<NacosClient> client = std::move(*client_result);
     auto subscriber = client->subscribe_auth();

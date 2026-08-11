@@ -8,10 +8,15 @@
 #include <fiber/nacos/NacosAuthAccess.h>
 #include <fiber/nacos/NacosClientConfig.h>
 
+namespace fiber::dns {
+class AddressResolver;
+}
+
 namespace fiber::nacos::detail {
 
 struct NacosServiceDependencies {
     event::EventLoop *loop = nullptr;
+    dns::AddressResolver *resolver = nullptr;
     std::shared_ptr<const NacosClientConfig> config;
     NacosAuthSubscriber auth;
 };
