@@ -16,6 +16,7 @@ class GcRootVisitor {
 public:
     virtual ~GcRootVisitor() = default;
     virtual void visit(JsValue *value) noexcept = 0;
+    virtual void visit_heap_ref(GcHeader *header) noexcept = 0;
 
     void visit_range(JsValue *base, std::size_t count) noexcept {
         if (!base || count == 0) {
