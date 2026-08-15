@@ -1,6 +1,7 @@
 #ifndef FIBER_SCRIPT_SCRIPT_H
 #define FIBER_SCRIPT_SCRIPT_H
 
+#include <cstdint>
 #include <memory>
 
 #include "../async/Task.h"
@@ -32,6 +33,7 @@ public:
     [[nodiscard]] bool valid() const noexcept { return static_cast<bool>(compiled_); }
     [[nodiscard]] bool contains_async() const noexcept;
     [[nodiscard]] bool uses_jit() const noexcept { return static_cast<bool>(jit_code_); }
+    [[nodiscard]] std::uint32_t jit_inlined_operator_helper_count() const noexcept;
     [[nodiscard]] const jit::JitCompileError *jit_compile_error() const noexcept { return jit_error_.get(); }
 
 private:

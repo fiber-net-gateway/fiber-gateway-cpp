@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <array>
+#include <bit>
 #include <cmath>
 #include <coroutine>
 #include <cstdint>
@@ -273,6 +275,60 @@ ManualTask run_async_script(fiber::script::Script *script, fiber::script::GcHeap
     *done = true;
 }
 
+void expect_same_primitive_result(const fiber::script::ScriptResult &interpreter,
+                                  const fiber::script::ScriptResult &jit) {
+    ASSERT_EQ(interpreter.kind, jit.kind);
+    if (interpreter.is_exception()) {
+        EXPECT_EQ(fiber::script::js_value_exception_kind(interpreter.exception()),
+                  fiber::script::js_value_exception_kind(jit.exception()));
+        return;
+    }
+    ASSERT_TRUE(interpreter.has_value());
+    ASSERT_TRUE(jit.has_value());
+    fiber::script::JsNodeType type = fiber::script::js_value_type(interpreter.value());
+    ASSERT_EQ(type, fiber::script::js_value_type(jit.value()));
+    switch (type) {
+        case fiber::script::JsNodeType::Float: {
+            double interpreter_value = fiber::script::js_value_double(interpreter.value());
+            double jit_value = fiber::script::js_value_double(jit.value());
+            if (std::isnan(interpreter_value)) {
+                EXPECT_TRUE(std::isnan(jit_value));
+            } else {
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(interpreter_value), std::bit_cast<std::uint64_t>(jit_value));
+            }
+            break;
+        }
+        case fiber::script::JsNodeType::Integer:
+            EXPECT_EQ(fiber::script::js_value_int64(interpreter.value()), fiber::script::js_value_int64(jit.value()));
+            break;
+        case fiber::script::JsNodeType::Boolean:
+            EXPECT_EQ(fiber::script::js_value_bool(interpreter.value()), fiber::script::js_value_bool(jit.value()));
+            break;
+        case fiber::script::JsNodeType::String: {
+            fiber::script::JsValue interpreter_value = interpreter.value();
+            fiber::script::JsValue jit_value = jit.value();
+            std::string interpreter_text;
+            std::string jit_text;
+            auto encode = [](fiber::script::JsValue &value, std::string &text) {
+                if (fiber::script::js_value_is_borrowed_string(value)) {
+                    fiber::script::NativeStr native = fiber::script::js_value_native_string(value);
+                    text.assign(native.data, native.len);
+                    return true;
+                }
+                return fiber::script::gc_string_to_utf8(fiber::script::ConstValueHandle(&value), text);
+            };
+            ASSERT_TRUE(encode(interpreter_value, interpreter_text));
+            ASSERT_TRUE(encode(jit_value, jit_text));
+            EXPECT_EQ(interpreter_text, jit_text);
+            break;
+        }
+        default:
+            EXPECT_EQ(interpreter.value().tag, jit.value().tag);
+            EXPECT_EQ(interpreter.value().subtag, jit.value().subtag);
+            break;
+    }
+}
+
 TEST(ScriptJitExecutionTest, ExecutesArithmetic) {
     auto &library = fiber::script::std_lib::StdLibrary::instance();
     auto script = fiber::script::compile_script(library, "return 1 + 2 * 3;", require_jit());
@@ -316,6 +372,48 @@ TEST(ScriptJitExecutionTest, ExecutesNativeNumericPathsAndPolymorphicFallbacks) 
     ASSERT_TRUE(float_relation.has_value());
     EXPECT_TRUE(fiber::script::js_value_bool(integer_relation.value()));
     EXPECT_FALSE(fiber::script::js_value_bool(float_relation.value()));
+}
+
+TEST(ScriptJitExecutionTest, ImportedOperatorBitcodeMatchesInterpreterEdges) {
+    constexpr std::array<std::string_view, 6> sources{
+            "return (($ - 1.5) * 3.25) / 2.0;",
+            "return $ % 2.5;",
+            "return +$;",
+            "return -$;",
+            "return !$;",
+            "return typeof $;",
+    };
+    const std::array<fiber::script::JsValue, 8> inputs{
+            fiber::script::JsValue::make_float(4.5),
+            fiber::script::JsValue::make_float(-0.0),
+            fiber::script::JsValue::make_float(std::numeric_limits<double>::quiet_NaN()),
+            fiber::script::JsValue::make_integer(std::numeric_limits<std::int64_t>::max()),
+            fiber::script::JsValue::make_boolean(true),
+            fiber::script::JsValue::make_null(),
+            fiber::script::JsValue::make_undefined(),
+            fiber::script::JsValue::make_native_string("x", 1),
+    };
+
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    for (std::string_view source: sources) {
+        SCOPED_TRACE(source);
+        fiber::script::ScriptCompileOptions interpreter_options;
+        interpreter_options.backend = fiber::script::ScriptBackendMode::Interpreter;
+        auto interpreter = fiber::script::compile_script(library, source, interpreter_options);
+        auto jit = fiber::script::compile_script(library, source, require_jit());
+        ASSERT_TRUE(interpreter.has_value()) << interpreter.error().message;
+        ASSERT_TRUE(jit.has_value()) << jit.error().message;
+        EXPECT_GT(jit->jit_inlined_operator_helper_count(), 0u);
+
+        fiber::script::GcHeap interpreter_heap;
+        fiber::script::GcHeap jit_heap;
+        for (const fiber::script::JsValue &input: inputs) {
+            SCOPED_TRACE(static_cast<unsigned>(input.tag));
+            auto interpreter_result = interpreter->exec_sync(input, nullptr, interpreter_heap);
+            auto jit_result = jit->exec_sync(input, nullptr, jit_heap);
+            expect_same_primitive_result(interpreter_result, jit_result);
+        }
+    }
 }
 
 TEST(ScriptJitExecutionTest, PreservesIntegerOverflowAndModuloEdges) {

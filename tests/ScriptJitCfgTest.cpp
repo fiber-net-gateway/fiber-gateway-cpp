@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -12,6 +14,11 @@
 #include <fiber/script/ir/Compiler.h>
 #include <fiber/script/jit/Cfg.h>
 #include <fiber/script/parse/Parser.h>
+
+#if FIBER_ENABLE_SCRIPT_JIT
+#include <fiber/script/jit/JitCompiler.h>
+#include <fiber/script/run/JitCode.h>
+#endif
 
 namespace {
 
@@ -218,5 +225,41 @@ TEST(ScriptJitCfgTest, RetainsPreciseSsaValueTypesAcrossPhi) {
     EXPECT_TRUE(found_integer_phi);
     EXPECT_TRUE(found_boolean_result);
 }
+
+#if FIBER_ENABLE_SCRIPT_JIT
+
+TEST(ScriptJitCfgTest, ImportsAndInlinesAuditedNoGcOperatorBitcode) {
+    constexpr std::array<std::string_view, 8> sources{
+            "return $ - 1.5;", "return $ * 1.5;", "return $ / 1.5;", "return $ % 1.5;",
+            "return +$;",      "return -$;",      "return !$;",      "return typeof $;",
+    };
+
+    TestLibrary library;
+    for (std::string_view source: sources) {
+        SCOPED_TRACE(source);
+        auto compiled = std::make_shared<fiber::script::ir::Compiled>(compile_script(source, library));
+        auto code = fiber::script::jit::compile_jit(std::move(compiled));
+        ASSERT_TRUE(code.has_value()) << code.error().message;
+        EXPECT_EQ((*code)->inlined_operator_helper_count(), 1u);
+    }
+}
+
+TEST(ScriptJitCfgTest, KeepsMayGcAndUnauditedHelpersAsNativeLeaves) {
+    constexpr std::array<std::string_view, 2> sources{
+            "return $ + \"!\";",
+            "return $ < 1.5;",
+    };
+
+    TestLibrary library;
+    for (std::string_view source: sources) {
+        SCOPED_TRACE(source);
+        auto compiled = std::make_shared<fiber::script::ir::Compiled>(compile_script(source, library));
+        auto code = fiber::script::jit::compile_jit(std::move(compiled));
+        ASSERT_TRUE(code.has_value()) << code.error().message;
+        EXPECT_EQ((*code)->inlined_operator_helper_count(), 0u);
+    }
+}
+
+#endif
 
 } // namespace

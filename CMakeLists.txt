@@ -62,11 +62,93 @@ if (FIBER_ENABLE_SCRIPT_JIT)
     if (NOT LLVM_VERSION_MAJOR EQUAL 22)
         message(FATAL_ERROR "The script JIT requires LLVM 22; found ${LLVM_PACKAGE_VERSION}")
     endif()
+    if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
+        NOT CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 22 OR
+        NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 23)
+        message(FATAL_ERROR
+            "The script JIT helper bitcode requires Clang 22; found "
+            "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+    endif()
     if (NOT TARGET LLVM)
         message(FATAL_ERROR "LLVM 22 package does not provide the LLVM imported target")
     endif()
     target_include_directories(fiber_lib SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
     target_link_libraries(fiber_lib PRIVATE LLVM)
+
+    find_program(FIBER_LLVM_LINK_EXECUTABLE
+        NAMES llvm-link llvm-link-22
+        HINTS "${LLVM_TOOLS_BINARY_DIR}")
+    if (NOT FIBER_LLVM_LINK_EXECUTABLE)
+        message(FATAL_ERROR "The script JIT helper bitcode requires LLVM 22 llvm-link")
+    endif()
+    execute_process(
+        COMMAND "${FIBER_LLVM_LINK_EXECUTABLE}" --version
+        RESULT_VARIABLE FIBER_LLVM_LINK_VERSION_RESULT
+        OUTPUT_VARIABLE FIBER_LLVM_LINK_VERSION_OUTPUT
+        ERROR_VARIABLE FIBER_LLVM_LINK_VERSION_ERROR)
+    if (NOT FIBER_LLVM_LINK_VERSION_RESULT EQUAL 0 OR
+        NOT FIBER_LLVM_LINK_VERSION_OUTPUT MATCHES "LLVM version 22\\.")
+        message(FATAL_ERROR
+            "The script JIT helper bitcode requires LLVM 22 llvm-link; "
+            "${FIBER_LLVM_LINK_EXECUTABLE} reported: "
+            "${FIBER_LLVM_LINK_VERSION_OUTPUT}${FIBER_LLVM_LINK_VERSION_ERROR}")
+    endif()
+
+    set(FIBER_SCRIPT_JIT_HELPER_SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/src/script/JsValue.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/script/run/Binaries.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/script/run/JitOperatorHelpers.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/script/run/Unaries.cpp")
+    add_library(fiber_script_jit_helper_ir OBJECT EXCLUDE_FROM_ALL
+        ${FIBER_SCRIPT_JIT_HELPER_SOURCES})
+    target_include_directories(fiber_script_jit_helper_ir PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${FIBER_GENERATED_INCLUDE_DIR}")
+    target_compile_definitions(fiber_script_jit_helper_ir PRIVATE
+        _GNU_SOURCE
+        FIBER_ENABLE_BENCHMARK_TRACE=$<BOOL:${FIBER_ENABLE_BENCHMARK_TRACE}>
+        FIBER_ENABLE_SCRIPT_JIT=1
+        FIBER_HAVE_UDP_SEGMENT=$<BOOL:${FIBER_HAVE_UDP_SEGMENT}>)
+    target_compile_options(fiber_script_jit_helper_ir PRIVATE
+        -emit-llvm
+        -O2
+        -fno-exceptions
+        -fno-rtti
+        -fno-lto
+        -fno-stack-protector)
+    set_property(TARGET fiber_script_jit_helper_ir PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    set_target_properties(fiber_script_jit_helper_ir PROPERTIES FOLDER "internal")
+
+    set(FIBER_SCRIPT_JIT_HELPER_BITCODE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/fiber/script/jit/OperatorBitcode.bc")
+    set(FIBER_SCRIPT_JIT_HELPER_HEADER
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/fiber/script/jit/OperatorBitcode.h")
+    add_custom_command(
+        OUTPUT "${FIBER_SCRIPT_JIT_HELPER_HEADER}"
+        BYPRODUCTS "${FIBER_SCRIPT_JIT_HELPER_BITCODE}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/fiber/script/jit"
+        COMMAND "${FIBER_LLVM_LINK_EXECUTABLE}"
+            -o "${FIBER_SCRIPT_JIT_HELPER_BITCODE}"
+            $<TARGET_OBJECTS:fiber_script_jit_helper_ir>
+        COMMAND "${CMAKE_COMMAND}"
+            "-DINPUT_FILE=${FIBER_SCRIPT_JIT_HELPER_BITCODE}"
+            "-DOUTPUT_FILE=${FIBER_SCRIPT_JIT_HELPER_HEADER}"
+            -P "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedBinary.cmake"
+        DEPENDS
+            fiber_script_jit_helper_ir
+            $<TARGET_OBJECTS:fiber_script_jit_helper_ir>
+            "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedBinary.cmake"
+        COMMAND_EXPAND_LISTS
+        VERBATIM)
+    add_custom_target(fiber_script_jit_helper_bitcode
+        DEPENDS "${FIBER_SCRIPT_JIT_HELPER_HEADER}")
+    add_dependencies(fiber_lib fiber_script_jit_helper_bitcode)
+    set_source_files_properties("${FIBER_SCRIPT_JIT_HELPER_HEADER}" PROPERTIES
+        GENERATED TRUE
+        HEADER_FILE_ONLY TRUE)
+    target_sources(fiber_lib PRIVATE "${FIBER_SCRIPT_JIT_HELPER_HEADER}")
 endif()
 set(FIBER_CLANG_CONSTEXPR_STEPS "16777216" CACHE STRING
     "Clang constexpr evaluator step limit for compile-time generated tables")

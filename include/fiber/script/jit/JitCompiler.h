@@ -18,6 +18,7 @@ enum class JitCompileStage : std::uint8_t {
     Unavailable = 0,
     Cfg,
     LlvmIr,
+    HelperBitcode,
     Verify,
     Optimize,
     OrcAdd,
