@@ -60,7 +60,7 @@ struct BenchmarkCase {
     bool async = false;
 };
 
-constexpr std::array<BenchmarkCase, 7> kCases{{
+constexpr std::array<BenchmarkCase, 8> kCases{{
         {
                 "route_branch",
                 R"(
@@ -104,6 +104,19 @@ constexpr std::array<BenchmarkCase, 7> kCases{{
                         }
                     }
                     return acc;
+                )",
+                InputKind::NumberArray,
+                false,
+        },
+        {
+                "mixed_float_arithmetic",
+                R"(
+                    let acc = 1.25;
+                    for (let k, v of $) {
+                        acc = (acc * 1.000001 - v) / 1.0000001;
+                    }
+                    if (acc < 0) { return 1; }
+                    return 2;
                 )",
                 InputKind::NumberArray,
                 false,
@@ -650,14 +663,16 @@ CaseResult run_case(BenchmarkLibrary &library, const BenchmarkCase &benchmark_ca
     double interpreter_munits = static_cast<double>(work_units) * 1000.0 / interpreter_stats.median;
     double jit_munits = static_cast<double>(work_units) * 1000.0 / jit_stats.median;
 
-    std::printf("RESULT name=%.*s async=%u units=%u interp_compile_us=%.2f jit_compile_us=%.2f "
+    std::printf("RESULT name=%.*s async=%u units=%u jit_inlined_helpers=%u "
+                "interp_compile_us=%.2f jit_compile_us=%.2f "
                 "interp_ns_per_exec=%.2f jit_ns_per_exec=%.2f speedup=%.3f jit_delta_pct=%+.2f "
                 "interp_munits_per_s=%.3f jit_munits_per_s=%.3f interp_iqr_pct=%.2f jit_iqr_pct=%.2f "
                 "interp_batch=%llu jit_batch=%llu value=%lld\n",
                 static_cast<int>(benchmark_case.name.size()), benchmark_case.name.data(),
-                benchmark_case.async ? 1u : 0u, work_units, interpreter.compile_us, jit.compile_us,
-                interpreter_stats.median, jit_stats.median, speedup, jit_delta, interpreter_munits, jit_munits,
-                interpreter_iqr, jit_iqr, static_cast<unsigned long long>(interpreter_iterations),
+                benchmark_case.async ? 1u : 0u, work_units, jit_context.script().jit_inlined_operator_helper_count(),
+                interpreter.compile_us, jit.compile_us, interpreter_stats.median, jit_stats.median, speedup, jit_delta,
+                interpreter_munits, jit_munits, interpreter_iqr, jit_iqr,
+                static_cast<unsigned long long>(interpreter_iterations),
                 static_cast<unsigned long long>(jit_iterations), static_cast<long long>(interpreter_check.last_value));
     return CaseResult{.speedup = speedup, .ran = true};
 }

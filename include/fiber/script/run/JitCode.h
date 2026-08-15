@@ -34,17 +34,22 @@ private:
 class JitCode final {
 public:
     JitCode(JitEntry entry, std::shared_ptr<const ir::Compiled> compiled, std::uint32_t async_value_count,
-            std::shared_ptr<const NativeStackMapTable> stack_maps, std::shared_ptr<void> resources) noexcept;
+            std::uint32_t inlined_operator_helper_count, std::shared_ptr<const NativeStackMapTable> stack_maps,
+            std::shared_ptr<void> resources) noexcept;
 
     [[nodiscard]] JitEntry entry() const noexcept { return entry_; }
     [[nodiscard]] const std::shared_ptr<const ir::Compiled> &compiled() const noexcept { return compiled_; }
     [[nodiscard]] std::uint32_t async_value_count() const noexcept { return async_value_count_; }
+    [[nodiscard]] std::uint32_t inlined_operator_helper_count() const noexcept {
+        return inlined_operator_helper_count_;
+    }
     [[nodiscard]] const NativeStackMapTable &stack_maps() const noexcept { return *stack_maps_; }
 
 private:
     JitEntry entry_ = nullptr;
     std::shared_ptr<const ir::Compiled> compiled_;
     std::uint32_t async_value_count_ = 0;
+    std::uint32_t inlined_operator_helper_count_ = 0;
     std::shared_ptr<const NativeStackMapTable> stack_maps_;
     std::shared_ptr<void> resources_;
 };

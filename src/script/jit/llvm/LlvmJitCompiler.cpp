@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -20,6 +21,7 @@
 
 #include <llvm/ADT/APInt.h>
 #include <llvm/ADT/ArrayRef.h>
+#include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/Mangling.h>
@@ -29,6 +31,8 @@
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalAlias.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
@@ -36,15 +40,18 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Linker/Linker.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
 
 #include <fiber/script/JsValue.h>
 #include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/ir/Code.h>
 #include <fiber/script/jit/Cfg.h>
+#include <fiber/script/jit/OperatorBitcode.h>
 #include <fiber/script/run/JitCode.h>
 #include <fiber/script/run/JitRuntime.h>
 
@@ -89,6 +96,39 @@ constexpr std::array<const char *, kUnaryOpcodeCount> kUnaryHelperNames{
         "fiber_script_jit_unary_neg",
         "fiber_script_jit_unary_typeof",
 };
+
+constexpr std::array<const char *, 8> kImportedOperatorHelperNames{
+        "fiber_script_jit_bop_minus",  "fiber_script_jit_bop_multiply", "fiber_script_jit_bop_divide",
+        "fiber_script_jit_bop_modulo", "fiber_script_jit_unary_plus",   "fiber_script_jit_unary_minus",
+        "fiber_script_jit_unary_neg",  "fiber_script_jit_unary_typeof",
+};
+
+constexpr const char *kOperatorBitcodeVersionName = "fiber_script_jit_operator_bitcode_version";
+constexpr const char *kOperatorAbiVersionName = "fiber_script_jit_operator_abi_version";
+constexpr const char *kOperatorLayoutFingerprintName = "fiber_script_jit_operator_layout_fingerprint";
+
+bool name_in(llvm::StringRef name, llvm::ArrayRef<const char *> names) noexcept {
+    return std::ranges::any_of(names, [&](const char *candidate) { return name == candidate; });
+}
+
+bool known_runtime_symbol(llvm::StringRef name) noexcept {
+    return name == "fiber_script_jit_runtime_call" || name == "fiber_script_jit_logic" ||
+           name == "fiber_script_jit_iterate_next" || name == "fmod" || name_in(name, kBinaryHelperNames) ||
+           name_in(name, kUnaryHelperNames);
+}
+
+std::optional<std::uint64_t> global_integer_constant(const llvm::Module &module, llvm::StringRef name,
+                                                     unsigned bit_width) noexcept {
+    const llvm::GlobalVariable *global = module.getNamedGlobal(name);
+    if (!global || !global->hasInitializer()) {
+        return std::nullopt;
+    }
+    const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(global->getInitializer());
+    if (!constant || constant->getBitWidth() != bit_width) {
+        return std::nullopt;
+    }
+    return constant->getZExtValue();
+}
 
 std::atomic<std::uint64_t> g_module_id{1};
 
@@ -158,6 +198,7 @@ struct EngineHolder final {
         add_symbol("fiber_script_jit_unary_neg", &run::fiber_script_jit_unary_neg);
         add_symbol("fiber_script_jit_unary_typeof", &run::fiber_script_jit_unary_typeof);
         add_symbol("fiber_script_jit_iterate_next", &run::fiber_script_jit_iterate_next);
+        add_symbol("fmod", static_cast<double (*)(double, double)>(&std::fmod));
         if (llvm::Error define_error =
                     state->jit->getMainJITDylib().define(llvm::orc::absoluteSymbols(std::move(symbols)))) {
             error = llvm_error_string(std::move(define_error));
@@ -199,6 +240,7 @@ struct LoweredModule {
     std::string entry_name;
     std::uint32_t async_value_count = 0;
     std::uint32_t statepoint_count = 0;
+    std::uint32_t inlined_operator_helper_count = 0;
 };
 
 class ModuleLowerer final {
@@ -232,6 +274,9 @@ public:
             !emit_cfg_blocks() || !emit_resume_blocks() || !fill_cfg_phis()) {
             return std::unexpected(std::move(error_));
         }
+        if (!link_operator_helpers()) {
+            return std::unexpected(std::move(error_));
+        }
         if (llvm::verifyModule(*module_, &llvm::errs())) {
             return std::unexpected(make_error(JitCompileStage::Verify, "LLVM verifier rejected generated IR"));
         }
@@ -247,6 +292,9 @@ public:
         pass_builder.crossRegisterProxies(loop_analyses, function_analyses, cgscc_analyses, module_analyses);
         llvm::ModulePassManager pipeline = pass_builder.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
         pipeline.run(*module_, module_analyses);
+        if (!validate_optimized_helpers()) {
+            return std::unexpected(std::move(error_));
+        }
         if (llvm::verifyModule(*module_, &llvm::errs())) {
             return std::unexpected(make_error(JitCompileStage::Optimize, "LLVM verifier rejected optimized JIT IR"));
         }
@@ -265,6 +313,7 @@ public:
         result.entry_name = std::move(entry_name_);
         result.async_value_count = static_cast<std::uint32_t>(spill_.persistent_values().size());
         result.statepoint_count = statepoint_count_;
+        result.inlined_operator_helper_count = static_cast<std::uint32_t>(imported_operator_helpers_.size());
         return result;
     }
 
@@ -303,9 +352,10 @@ private:
     std::vector<LoweredEdge> lowered_edges_;
     std::uint32_t max_argument_count_ = 1;
     std::uint32_t statepoint_count_ = 0;
+    std::vector<std::string> imported_operator_helpers_;
 
-    bool fail(JitCompileStage stage, const char *message, std::uint32_t pc = ir::Compiled::kNoPc) {
-        error_ = make_error(stage, message, pc);
+    bool fail(JitCompileStage stage, std::string message, std::uint32_t pc = ir::Compiled::kNoPc) {
+        error_ = make_error(stage, std::move(message), pc);
         return false;
     }
 
@@ -402,6 +452,212 @@ private:
 
     void emit_return(IRBuilder<> &builder, run::JitStatus status) const {
         builder.CreateRet(constant_i32(static_cast<std::uint32_t>(status)));
+    }
+
+    bool validate_operator_bitcode(const llvm::Module &helper) {
+        auto bitcode_version = global_integer_constant(helper, kOperatorBitcodeVersionName, 32);
+        auto abi_version = global_integer_constant(helper, kOperatorAbiVersionName, 32);
+        auto layout = global_integer_constant(helper, kOperatorLayoutFingerprintName, 64);
+        if (!bitcode_version || *bitcode_version != run::kJitOperatorBitcodeVersion) {
+            return fail(JitCompileStage::HelperBitcode, "operator helper bitcode version mismatch");
+        }
+        if (!abi_version || *abi_version != run::kJitAbiVersion) {
+            return fail(JitCompileStage::HelperBitcode, "operator helper JIT ABI version mismatch");
+        }
+        if (!layout || *layout != run::kJitOperatorLayoutFingerprint) {
+            return fail(JitCompileStage::HelperBitcode, "operator helper JsValue layout mismatch");
+        }
+
+        llvm::Triple helper_triple(helper.getTargetTriple());
+        llvm::Triple module_triple(module_->getTargetTriple());
+        if (helper_triple.getArch() != module_triple.getArch()) {
+            return fail(JitCompileStage::HelperBitcode, "operator helper target architecture mismatch");
+        }
+        const llvm::DataLayout &helper_layout = helper.getDataLayout();
+        const llvm::DataLayout &module_layout = module_->getDataLayout();
+        if (helper_layout.getPointerSize(0) != module_layout.getPointerSize(0) ||
+            helper_layout.isLittleEndian() != module_layout.isLittleEndian()) {
+            return fail(JitCompileStage::HelperBitcode, "operator helper target data layout mismatch");
+        }
+
+        for (const char *name: {"llvm.global_ctors", "llvm.global_dtors"}) {
+            const llvm::GlobalVariable *initializers = helper.getNamedGlobal(name);
+            if (initializers && initializers->hasInitializer() && !initializers->getInitializer()->isNullValue()) {
+                return fail(JitCompileStage::HelperBitcode,
+                            "operator helper bitcode contains global constructors or destructors");
+            }
+        }
+        for (const llvm::GlobalVariable &global: helper.globals()) {
+            if (global.isThreadLocal()) {
+                return fail(JitCompileStage::HelperBitcode, "operator helper bitcode contains thread-local state");
+            }
+        }
+        for (const Function &function: helper) {
+            if (function.hasPersonalityFn()) {
+                return fail(JitCompileStage::HelperBitcode, "operator helper bitcode contains an EH personality");
+            }
+            for (const llvm::BasicBlock &block: function) {
+                for (const llvm::Instruction &instruction: block) {
+                    if (llvm::isa<llvm::InvokeInst, llvm::LandingPadInst, llvm::ResumeInst>(instruction)) {
+                        return fail(JitCompileStage::HelperBitcode, "operator helper bitcode contains EH control flow");
+                    }
+                    const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (!call) {
+                        continue;
+                    }
+                    llvm::Intrinsic::ID intrinsic = call->getIntrinsicID();
+                    if (intrinsic == llvm::Intrinsic::experimental_gc_statepoint ||
+                        intrinsic == llvm::Intrinsic::experimental_gc_relocate ||
+                        intrinsic == llvm::Intrinsic::experimental_gc_result) {
+                        return fail(JitCompileStage::HelperBitcode,
+                                    "operator helper bitcode contains a GC statepoint intrinsic");
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    bool link_operator_helpers() {
+        std::vector<std::string> requested;
+        requested.reserve(kImportedOperatorHelperNames.size());
+        for (const char *name: kImportedOperatorHelperNames) {
+            Function *function = module_->getFunction(name);
+            if (function && !function->use_empty()) {
+                requested.emplace_back(name);
+            }
+        }
+        if (requested.empty()) {
+            return true;
+        }
+
+        llvm::StringRef bytes(reinterpret_cast<const char *>(llvm_detail::kOperatorHelperBitcode),
+                              llvm_detail::kOperatorHelperBitcodeSize);
+        llvm::MemoryBufferRef buffer(bytes, "fiber-script-operator-helpers.bc");
+        auto parsed = llvm::parseBitcodeFile(buffer, *context_);
+        if (!parsed) {
+            return fail(JitCompileStage::HelperBitcode,
+                        "failed to parse operator helper bitcode: " + llvm_error_string(parsed.takeError()));
+        }
+        std::unique_ptr<llvm::Module> helper = std::move(*parsed);
+        if (!validate_operator_bitcode(*helper)) {
+            return false;
+        }
+
+        auto requested_name = [&](llvm::StringRef name) {
+            return std::ranges::any_of(requested, [&](const std::string &candidate) { return name == candidate; });
+        };
+        for (const char *name: kBinaryHelperNames) {
+            Function *function = helper->getFunction(name);
+            if (function && !requested_name(name) && !function->isDeclaration()) {
+                function->deleteBody();
+            }
+        }
+        for (const char *name: kUnaryHelperNames) {
+            Function *function = helper->getFunction(name);
+            if (function && !requested_name(name) && !function->isDeclaration()) {
+                function->deleteBody();
+            }
+        }
+        for (const std::string &name: requested) {
+            Function *function = helper->getFunction(name);
+            if (!function || function->isDeclaration()) {
+                return fail(JitCompileStage::HelperBitcode, "operator helper definition is missing: " + name);
+            }
+            function->addFnAttr(llvm::Attribute::AlwaysInline);
+            function->addFnAttr(llvm::Attribute::NoUnwind);
+        }
+
+        llvm::Linker linker(*module_);
+        if (linker.linkInModule(std::move(helper), llvm::Linker::Flags::LinkOnlyNeeded)) {
+            return fail(JitCompileStage::HelperBitcode, "failed to link operator helper bitcode");
+        }
+
+        for (const std::string &name: requested) {
+            Function *function = module_->getFunction(name);
+            if (!function || function->isDeclaration()) {
+                return fail(JitCompileStage::HelperBitcode, "linked operator helper definition is missing: " + name);
+            }
+            function->setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
+            function->setDSOLocal(false);
+            function->setComdat(nullptr);
+            function->addFnAttr(llvm::Attribute::AlwaysInline);
+            function->addFnAttr(llvm::Attribute::NoUnwind);
+        }
+
+        for (Function &function: *module_) {
+            if (function.isDeclaration() || &function == function_ || requested_name(function.getName())) {
+                continue;
+            }
+            function.setLinkage(llvm::GlobalValue::InternalLinkage);
+            function.setDSOLocal(true);
+            function.setComdat(nullptr);
+            function.addFnAttr(llvm::Attribute::AlwaysInline);
+            function.addFnAttr(llvm::Attribute::NoUnwind);
+        }
+        for (llvm::GlobalVariable &global: module_->globals()) {
+            if (global.isDeclaration() || global.hasAppendingLinkage() || global.getName().starts_with("llvm.")) {
+                continue;
+            }
+            global.setLinkage(llvm::GlobalValue::InternalLinkage);
+            global.setDSOLocal(true);
+            global.setComdat(nullptr);
+        }
+        for (llvm::GlobalAlias &alias: module_->aliases()) {
+            alias.setLinkage(llvm::GlobalValue::InternalLinkage);
+            alias.setDSOLocal(true);
+        }
+        imported_operator_helpers_ = std::move(requested);
+        return true;
+    }
+
+    bool validate_optimized_helpers() {
+        for (const std::string &name: imported_operator_helpers_) {
+            Function *function = module_->getFunction(name);
+            if (function && !function->use_empty()) {
+                return fail(JitCompileStage::Optimize, "operator helper was not inlined: " + name);
+            }
+        }
+        for (const Function &function: *module_) {
+            if (function.isDeclaration() && !function.use_empty() && !function.isIntrinsic() &&
+                !known_runtime_symbol(function.getName())) {
+                return fail(JitCompileStage::Optimize,
+                            "optimized JIT module references unknown external function: " + function.getName().str());
+            }
+            if (&function == function_) {
+                continue;
+            }
+            for (const llvm::BasicBlock &block: function) {
+                for (const llvm::Instruction &instruction: block) {
+                    const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (call && call->getIntrinsicID() == llvm::Intrinsic::experimental_gc_statepoint) {
+                        return fail(JitCompileStage::Optimize,
+                                    "imported operator helper retained a GC statepoint after optimization");
+                    }
+                }
+            }
+        }
+        for (const llvm::BasicBlock &block: *function_) {
+            for (const llvm::Instruction &instruction: block) {
+                const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                const Function *callee = call ? call->getCalledFunction() : nullptr;
+                if (call && !callee && !imported_operator_helpers_.empty()) {
+                    return fail(JitCompileStage::Optimize,
+                                "inlined operator helper retained an indirect call in the JIT entry");
+                }
+                if (callee && !callee->isDeclaration() && callee != function_) {
+                    return fail(JitCompileStage::Optimize,
+                                "operator helper dependency was not inlined: " + callee->getName().str());
+                }
+            }
+        }
+        for (const llvm::GlobalVariable &global: module_->globals()) {
+            if (global.isDeclaration() && !global.use_empty()) {
+                return fail(JitCompileStage::Optimize,
+                            "optimized JIT module references unknown external global: " + global.getName().str());
+            }
+        }
+        return true;
     }
 
     bool declare_runtime() {
@@ -1642,7 +1898,8 @@ compile_jit(std::shared_ptr<const ir::Compiled> compiled) {
     owner->tracker = std::move(tracker);
     run::JitEntry entry = symbol->toPtr<run::JitEntry>();
     auto code = std::make_shared<run::JitCode>(entry, std::move(compiled), lowered->async_value_count,
-                                               std::move(stack_maps), std::move(owner));
+                                               lowered->inlined_operator_helper_count, std::move(stack_maps),
+                                               std::move(owner));
     return std::static_pointer_cast<const run::JitCode>(std::move(code));
 }
 

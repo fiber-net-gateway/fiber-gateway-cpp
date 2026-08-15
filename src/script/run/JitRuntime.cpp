@@ -93,18 +93,6 @@ std::uint32_t exact_binary(JitFrameHeader *frame, const JsValue *arguments, JsVa
     return apply_call_result(*frame, status, result, out);
 }
 
-template<CallResult (*Operation)(GcHeap &, ConstValueHandle, ResultPayload &) noexcept>
-std::uint32_t exact_unary(JitFrameHeader *frame, const JsValue *argument, JsValue *out) noexcept {
-    if (!valid_exact_call(frame, argument, out)) {
-        return frame ? abort_with(*frame, ScriptAbortReason::InvalidState)
-                     : static_cast<std::uint32_t>(JitStatus::Abort);
-    }
-    auto &vm = *static_cast<JitVm *>(frame->vm_context);
-    ResultPayload result;
-    CallResult status = Operation(vm.host_frame().runtime, handle(argument), result);
-    return apply_call_result(*frame, status, result, out);
-}
-
 bool function_call(std::uint8_t opcode) noexcept {
     return opcode == ir::Code::CALL_FUNC || opcode == ir::Code::CALL_ASYNC_FUNC;
 }
@@ -315,40 +303,6 @@ extern "C" std::uint32_t fiber_script_jit_bop_plus(JitFrameHeader *frame, const 
     return fiber_script_jit_bop_plus_impl(frame, arguments, out);
 }
 #endif
-
-#define FIBER_JIT_BINARY_HELPER(symbol, operation)                                                                     \
-    extern "C" std::uint32_t symbol(JitFrameHeader *frame, const JsValue *arguments, JsValue *out) noexcept {          \
-        return exact_binary<&Binaries::operation>(frame, arguments, out);                                              \
-    }
-
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_minus, minus)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_multiply, multiply)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_divide, divide)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_modulo, modulo)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_matches, matches)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_lt, lt)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_lte, lte)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_gt, gt)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_gte, gte)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_eq, eq)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_seq, seq)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_ne, ne)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_sne, sne)
-FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_in, in)
-
-#undef FIBER_JIT_BINARY_HELPER
-
-#define FIBER_JIT_UNARY_HELPER(symbol, operation)                                                                      \
-    extern "C" std::uint32_t symbol(JitFrameHeader *frame, const JsValue *argument, JsValue *out) noexcept {           \
-        return exact_unary<&Unaries::operation>(frame, argument, out);                                                 \
-    }
-
-FIBER_JIT_UNARY_HELPER(fiber_script_jit_unary_plus, plus)
-FIBER_JIT_UNARY_HELPER(fiber_script_jit_unary_minus, minus)
-FIBER_JIT_UNARY_HELPER(fiber_script_jit_unary_neg, neg)
-FIBER_JIT_UNARY_HELPER(fiber_script_jit_unary_typeof, typeof_op)
-
-#undef FIBER_JIT_UNARY_HELPER
 
 extern "C" std::uint32_t fiber_script_jit_iterate_next(JitFrameHeader *frame, const JsValue *argument,
                                                        JsValue *out) noexcept {

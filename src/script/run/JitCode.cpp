@@ -36,8 +36,10 @@ bool NativeStackMapTable::visit(const void *return_pc, const void *stack_pointer
 }
 
 JitCode::JitCode(JitEntry entry, std::shared_ptr<const ir::Compiled> compiled, std::uint32_t async_value_count,
-                 std::shared_ptr<const NativeStackMapTable> stack_maps, std::shared_ptr<void> resources) noexcept :
+                 std::uint32_t inlined_operator_helper_count, std::shared_ptr<const NativeStackMapTable> stack_maps,
+                 std::shared_ptr<void> resources) noexcept :
     entry_(entry), compiled_(std::move(compiled)), async_value_count_(async_value_count),
-    stack_maps_(std::move(stack_maps)), resources_(std::move(resources)) {}
+    inlined_operator_helper_count_(inlined_operator_helper_count), stack_maps_(std::move(stack_maps)),
+    resources_(std::move(resources)) {}
 
 } // namespace fiber::script::run

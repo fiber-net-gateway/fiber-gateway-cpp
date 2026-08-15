@@ -97,4 +97,8 @@ ScriptResult Script::exec_sync(fiber::script::JsValue root, void *attach, fiber:
 
 bool Script::contains_async() const noexcept { return compiled_ && compiled_->contains_async(); }
 
+std::uint32_t Script::jit_inlined_operator_helper_count() const noexcept {
+    return jit_code_ ? jit_code_->inlined_operator_helper_count() : 0;
+}
+
 } // namespace fiber::script

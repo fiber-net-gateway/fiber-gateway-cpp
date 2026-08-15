@@ -16,6 +16,15 @@ class Compiled;
 namespace fiber::script::run {
 
 inline constexpr std::uint32_t kJitAbiVersion = 1;
+inline constexpr std::uint32_t kJitOperatorBitcodeVersion = 1;
+inline constexpr std::uint64_t kJitOperatorLayoutFingerprint =
+        static_cast<std::uint64_t>(sizeof(JsValue)) | (static_cast<std::uint64_t>(alignof(JsValue)) << 8u) |
+        (static_cast<std::uint64_t>(offsetof(JsValue, payload)) << 16u) |
+        (static_cast<std::uint64_t>(offsetof(JsValue, aux32)) << 24u) |
+        (static_cast<std::uint64_t>(offsetof(JsValue, aux16)) << 32u) |
+        (static_cast<std::uint64_t>(offsetof(JsValue, tag)) << 40u) |
+        (static_cast<std::uint64_t>(offsetof(JsValue, subtag)) << 48u) |
+        (static_cast<std::uint64_t>(JsTag::HeapRef) << 56u) | (static_cast<std::uint64_t>(JsTag::Exception) << 60u);
 
 enum class JitStatus : std::uint32_t {
     Success = 0,
@@ -63,6 +72,7 @@ struct alignas(16) JitFrameHeader {
 using JitEntry = std::uint32_t (*)(JitFrameHeader *frame) noexcept;
 
 static_assert(std::is_standard_layout_v<JitFrameHeader>);
+static_assert(std::is_standard_layout_v<JsValue>);
 static_assert(offsetof(JitFrameHeader, safepoint_return_pc) == 0);
 static_assert(offsetof(JitFrameHeader, safepoint_stack_pointer) == sizeof(void *));
 static_assert(alignof(JitFrameHeader) == 16);

@@ -1020,6 +1020,90 @@ enum class JitStatus : std::uint32_t {
 
 不要直接从 JIT entry 返回 `ScriptResult` 或 `AbiResult` 聚合体，以避免不同编译器/平台的 return ABI 差异。
 
+### 13.1 构建期 operator bitcode
+
+NoGC operator 的 native C ABI thunk 同时编译为一份 LLVM 22 bitcode。目的不是在 ORC 中先生成一个函数指针；
+函数一旦只剩机器码地址，脚本 module 就无法跨入函数体优化。正确的数据流是：
+
+```text
+CMake / build host
+  JitOperatorHelpers.cpp + Binaries.cpp + Unaries.cpp + JsValue.cpp
+    -> clang-22 -emit-llvm -O2 -fno-exceptions -fno-rtti
+    -> llvm-link
+    -> embedded operator-helper.bc
+
+script compile / target process
+  CFG + SSA -> script LLVM module
+  embedded operator-helper.bc -> parse in the same LLVMContext
+  script module <- LinkOnlyNeeded(used helper definitions)
+  internalize transitive definitions and mark the whole imported closure alwaysinline
+  mark public helper definitions available_externally
+  verify -> standard O2 -> verify helper calls disappeared -> ORC
+```
+
+helper 源文件仍按普通方式编译进 `fiber_lib`，作为未导入或未内联路径的 native fallback。这样解释器、native
+fallback 和 JIT 导入体共享同一份 C++ 运算实现，不复制另一套手写 LLVM 语义。bitcode blob 是受信任的构建
+产物，嵌入库中，不在运行时从可变外部路径读取。
+
+第一阶段只导入经过 effect 审计的纯 NoGC 数值和 unary helper：
+
+- `BOP_MINUS`、`BOP_MULTIPLY`、`BOP_DIVIDE`、`BOP_MODULO`；
+- `UNARY_PLUS`、`UNARY_MINUS`、`UNARY_NEG`、`UNARY_TYPEOF`。
+
+以下调用保留 native symbol，不向脚本 module 提供可内联定义：
+
+- 可能拼接字符串并收集的 `BOP_PLUS`；
+- string/object equality、relation、`in` 等尚有较大 transitive heap-read closure 的 helper；
+- iterator object fallback；
+- allocation、container mutation、property/index slow path；
+- sync/async host call 和 generic runtime thunk。
+
+这个边界不是只为控制代码尺寸。当前前端在 opcode call site 根据 SSA liveness 显式构造 statepoint，并把
+`gc.relocate` 后的新 boxed value 写回 caller 的版本表。若把 MayGC call 隐藏在普通 imported function 中，
+helper 不知道 caller 的其他 live root，LLVM 标准 O2 也不会根据项目的 `Effect::MayGC` 自动插入 statepoint。
+所以 MayGC 语义只能采用“内联 tag/coercion + call-site statepoint + 最小 native allocation leaf”，不能直接
+复用本节的 NoGC 导入机制。
+
+#### 构建和 ABI 约束
+
+- `FIBER_ENABLE_SCRIPT_JIT=ON` 时，C++ frontend 和加载 bitcode 的 LLVM library 必须同为 Clang/LLVM major
+  22；不能用 GCC object 或其他 LLVM major 生成该 blob；
+- bitcode 使用目标 toolchain 的 triple/sysroot，但不固化 `-march=native`，最终 CPU 指令仍由 LLJIT 的
+  target machine 选择；
+- helper build 强制 `-fno-exceptions -fno-rtti -fno-lto`，并拒绝 personality、`invoke`、global ctor/dtor、
+  TLS 和任何 statepoint；
+- blob 内包含 helper format version、`kJitAbiVersion` 和 `JsValue` layout fingerprint；解析后、链接前必须
+  与 native 常量匹配；
+- helper triple 的 architecture、endianness 和 pointer width 必须与脚本 module 相同；
+- 只允许已注册 runtime symbol、LLVM intrinsic 和显式审计过的 libc leaf 成为优化后仍有 use 的外部声明；
+  未知 C++ mangled symbol 使本次 JIT 编译失败并按既有策略回退解释器。
+
+#### 按需导入和 linkage
+
+每个脚本使用独立 `LLVMContext`，不能缓存另一个 context 中的 `llvm::Function *`。运行时缓存不可变 bitcode
+bytes；只有 module 实际调用白名单 helper 时才解析，并用 `LinkOnlyNeeded` 导入所需定义。公开 C helper 在
+链接后改为 `available_externally` 并添加 `alwaysinline`：优化器能读取函数体，但 codegen 不会再次导出与
+native fallback 冲突的 symbol。其依赖定义改为 internal linkage，并同样添加 `alwaysinline`；只消除 C
+wrapper 而保留 `Binaries::*`/`JsValue` 内部调用没有达到目标。未使用代码由 O2/GlobalDCE 删除。
+
+O2 后必须同时扫描所有第一阶段 helper 和 JIT entry：只要公开 helper 仍有 call use、entry 仍直接调用
+任意导入定义，或导入体留下间接调用，就把它作为 Optimize 阶段错误，而不是静默声称已经内联。成功导入
+数量记录进 `JitCode`，供结构测试和 benchmark 诊断。因为只导入 NoGC helper，导入前后显式 statepoint
+数量必须保持不变。
+
+#### CMake 产物
+
+CMake 建立独立 OBJECT target，以与 `fiber_lib` 相同的 include path、compile definitions、target triple 和
+C++23 模式再次编译 helper closure；OBJECT 输出必须是 LLVM bitcode，再由 LLVM 22 自带的 `llvm-link`
+合并。生成步骤把 `.bc` 转成只读 byte array header，作为 `fiber_lib` 的 generated input。非 JIT 构建不创建
+OBJECT target、bitcode、generated header，也不要求 Clang/LLVM。
+
+首轮验收同时看稳态与编译成本：mixed Float/Boolean/Null arithmetic 必须证明 helper call 和 ABI scratch
+在优化后消失；解释器/JIT 对 NaN、正负零、整数边界、除零、异常和 `typeof` 做 differential test；现有
+string `+` forced-GC stack-map 测试确保 MayGC 路径没有被误导入。若按需解析/链接使代表性脚本 JIT 编译时间
+显著恶化，再考虑 lazy bitcode materialization 或按 helper family 拆 blob，而不是共享一个不可内联的函数
+指针 module。
+
 ## 14. 异步状态机
 
 ### 14.1 Resume ID
