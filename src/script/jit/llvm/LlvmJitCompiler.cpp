@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <llvm/ADT/APInt.h>
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/Mangling.h>
@@ -41,6 +42,7 @@
 #include <llvm/Support/TargetSelect.h>
 
 #include <fiber/script/JsValue.h>
+#include <fiber/script/gc/GcInternal.h>
 #include <fiber/script/ir/Code.h>
 #include <fiber/script/jit/Cfg.h>
 #include <fiber/script/run/JitCode.h>
@@ -59,6 +61,9 @@ static_assert(sizeof(JsValue) == 16);
 static_assert(alignof(JsValue) == 16);
 static_assert(offsetof(JsValue, payload) == 0);
 static_assert(offsetof(JsValue, tag) == 14);
+static_assert(sizeof(std::size_t) == sizeof(std::uint64_t));
+static_assert(offsetof(GcIterator, current_key) % alignof(JsValue) == 0);
+static_assert(offsetof(GcIterator, current_value) % alignof(JsValue) == 0);
 
 constexpr std::uint32_t kInvalidSlot = UINT32_MAX;
 constexpr std::size_t kMaxJitCodeCount = 1u << 20u;
@@ -67,6 +72,23 @@ constexpr std::size_t kMaxJitEdgeCount = 1u << 20u;
 constexpr std::size_t kMaxJitValueCount = 1u << 20u;
 constexpr std::size_t kMaxJitAsyncSlots = 1u << 16u;
 constexpr std::size_t kMaxStatepointRoots = 4096u;
+constexpr std::size_t kBinaryOpcodeCount = ir::Code::BOP_IN - ir::Code::BOP_PLUS + 1u;
+constexpr std::size_t kUnaryOpcodeCount = ir::Code::UNARY_TYPEOF - ir::Code::UNARY_PLUS + 1u;
+
+constexpr std::array<const char *, kBinaryOpcodeCount> kBinaryHelperNames{
+        "fiber_script_jit_bop_plus",   "fiber_script_jit_bop_minus",  "fiber_script_jit_bop_multiply",
+        "fiber_script_jit_bop_divide", "fiber_script_jit_bop_modulo", "fiber_script_jit_bop_matches",
+        "fiber_script_jit_bop_lt",     "fiber_script_jit_bop_lte",    "fiber_script_jit_bop_gt",
+        "fiber_script_jit_bop_gte",    "fiber_script_jit_bop_eq",     "fiber_script_jit_bop_seq",
+        "fiber_script_jit_bop_ne",     "fiber_script_jit_bop_sne",    "fiber_script_jit_bop_in",
+};
+
+constexpr std::array<const char *, kUnaryOpcodeCount> kUnaryHelperNames{
+        "fiber_script_jit_unary_plus",
+        "fiber_script_jit_unary_minus",
+        "fiber_script_jit_unary_neg",
+        "fiber_script_jit_unary_typeof",
+};
 
 std::atomic<std::uint64_t> g_module_id{1};
 
@@ -116,7 +138,26 @@ struct EngineHolder final {
         };
         add_symbol("fiber_script_jit_runtime_call", &run::fiber_script_jit_runtime_call);
         add_symbol("fiber_script_jit_logic", &run::fiber_script_jit_logic);
-        add_symbol("fiber_script_jit_iterator_value", &run::fiber_script_jit_iterator_value);
+        add_symbol("fiber_script_jit_bop_plus", &run::fiber_script_jit_bop_plus);
+        add_symbol("fiber_script_jit_bop_minus", &run::fiber_script_jit_bop_minus);
+        add_symbol("fiber_script_jit_bop_multiply", &run::fiber_script_jit_bop_multiply);
+        add_symbol("fiber_script_jit_bop_divide", &run::fiber_script_jit_bop_divide);
+        add_symbol("fiber_script_jit_bop_modulo", &run::fiber_script_jit_bop_modulo);
+        add_symbol("fiber_script_jit_bop_matches", &run::fiber_script_jit_bop_matches);
+        add_symbol("fiber_script_jit_bop_lt", &run::fiber_script_jit_bop_lt);
+        add_symbol("fiber_script_jit_bop_lte", &run::fiber_script_jit_bop_lte);
+        add_symbol("fiber_script_jit_bop_gt", &run::fiber_script_jit_bop_gt);
+        add_symbol("fiber_script_jit_bop_gte", &run::fiber_script_jit_bop_gte);
+        add_symbol("fiber_script_jit_bop_eq", &run::fiber_script_jit_bop_eq);
+        add_symbol("fiber_script_jit_bop_seq", &run::fiber_script_jit_bop_seq);
+        add_symbol("fiber_script_jit_bop_ne", &run::fiber_script_jit_bop_ne);
+        add_symbol("fiber_script_jit_bop_sne", &run::fiber_script_jit_bop_sne);
+        add_symbol("fiber_script_jit_bop_in", &run::fiber_script_jit_bop_in);
+        add_symbol("fiber_script_jit_unary_plus", &run::fiber_script_jit_unary_plus);
+        add_symbol("fiber_script_jit_unary_minus", &run::fiber_script_jit_unary_minus);
+        add_symbol("fiber_script_jit_unary_neg", &run::fiber_script_jit_unary_neg);
+        add_symbol("fiber_script_jit_unary_typeof", &run::fiber_script_jit_unary_typeof);
+        add_symbol("fiber_script_jit_iterate_next", &run::fiber_script_jit_iterate_next);
         if (llvm::Error define_error =
                     state->jit->getMainJITDylib().define(llvm::orc::absoluteSymbols(std::move(symbols)))) {
             error = llvm_error_string(std::move(define_error));
@@ -149,6 +190,7 @@ struct LoweredEdge {
     BlockId successor = kInvalidBlock;
     EdgeKind kind = EdgeKind::Normal;
     llvm::BasicBlock *llvm_predecessor = nullptr;
+    std::vector<std::pair<ValueId, llvm::Value *>> value_overrides;
 };
 
 struct LoweredModule {
@@ -173,6 +215,7 @@ public:
         i32_ = Type::getInt32Ty(*context_);
         i64_ = Type::getInt64Ty(*context_);
         i128_ = Type::getInt128Ty(*context_);
+        double_ = Type::getDoubleTy(*context_);
         ptr_ = llvm::PointerType::get(*context_, 0);
         managed_ptr_ = llvm::PointerType::get(*context_, 1);
         base_values_.assign(cfg_.values().size(), nullptr);
@@ -240,6 +283,7 @@ private:
     Type *i32_ = nullptr;
     Type *i64_ = nullptr;
     Type *i128_ = nullptr;
+    Type *double_ = nullptr;
     llvm::PointerType *ptr_ = nullptr;
     llvm::PointerType *managed_ptr_ = nullptr;
     Function *function_ = nullptr;
@@ -248,7 +292,9 @@ private:
     llvm::AllocaInst *out_scratch_ = nullptr;
     llvm::FunctionCallee runtime_call_;
     llvm::FunctionCallee logic_call_;
-    llvm::FunctionCallee iterator_call_;
+    std::array<llvm::FunctionCallee, kBinaryOpcodeCount> binary_calls_;
+    std::array<llvm::FunctionCallee, kUnaryOpcodeCount> unary_calls_;
+    llvm::FunctionCallee iterate_next_call_;
     std::vector<llvm::BasicBlock *> llvm_blocks_;
     std::vector<llvm::BasicBlock *> resume_blocks_;
     std::vector<Value *> base_values_;
@@ -275,6 +321,34 @@ private:
         std::array<std::uint64_t, 2> words{};
         std::memcpy(words.data(), &value, sizeof(value));
         return llvm::ConstantInt::get(*context_, llvm::APInt(128, words));
+    }
+
+    llvm::ConstantInt *boxed_tag_bits(JsTag tag) const {
+        llvm::APInt bits(128, static_cast<std::uint8_t>(tag));
+        bits <<= 112u;
+        return llvm::ConstantInt::get(*context_, bits);
+    }
+
+    Value *boxed_tag(IRBuilder<> &builder, Value *boxed, const llvm::Twine &name = "") const {
+        Value *bits = builder.CreateLShr(boxed, llvm::ConstantInt::get(i128_, 112));
+        return builder.CreateTrunc(bits, i8_, name);
+    }
+
+    Value *boxed_payload(IRBuilder<> &builder, Value *boxed, const llvm::Twine &name = "") const {
+        return builder.CreateTrunc(boxed, i64_, name);
+    }
+
+    Value *box_payload(IRBuilder<> &builder, Value *payload, JsTag tag, const llvm::Twine &name = "") const {
+        Value *boxed = builder.CreateZExt(payload, i128_);
+        return builder.CreateOr(boxed, boxed_tag_bits(tag), name);
+    }
+
+    Value *box_boolean(IRBuilder<> &builder, Value *value, const llvm::Twine &name = "") const {
+        return box_payload(builder, builder.CreateZExt(value, i64_), JsTag::Boolean, name);
+    }
+
+    Value *box_double(IRBuilder<> &builder, Value *value, const llvm::Twine &name = "") const {
+        return box_payload(builder, builder.CreateBitCast(value, i64_), JsTag::Double, name);
     }
 
     Value *frame_field(IRBuilder<> &builder, std::size_t offset) const {
@@ -337,9 +411,17 @@ private:
         auto *logic_type = llvm::FunctionType::get(i32_, {ptr_}, false);
         logic_call_ = module_->getOrInsertFunction("fiber_script_jit_logic", logic_type);
         llvm::cast<Function>(logic_call_.getCallee())->addFnAttr(llvm::Attribute::NoUnwind);
-        auto *iterator_type = llvm::FunctionType::get(Type::getVoidTy(*context_), {ptr_, i32_, ptr_}, false);
-        iterator_call_ = module_->getOrInsertFunction("fiber_script_jit_iterator_value", iterator_type);
-        llvm::cast<Function>(iterator_call_.getCallee())->addFnAttr(llvm::Attribute::NoUnwind);
+        auto *exact_type = llvm::FunctionType::get(i32_, {ptr_, ptr_, ptr_}, false);
+        for (std::size_t i = 0; i < binary_calls_.size(); ++i) {
+            binary_calls_[i] = module_->getOrInsertFunction(kBinaryHelperNames[i], exact_type);
+            llvm::cast<Function>(binary_calls_[i].getCallee())->addFnAttr(llvm::Attribute::NoUnwind);
+        }
+        for (std::size_t i = 0; i < unary_calls_.size(); ++i) {
+            unary_calls_[i] = module_->getOrInsertFunction(kUnaryHelperNames[i], exact_type);
+            llvm::cast<Function>(unary_calls_[i].getCallee())->addFnAttr(llvm::Attribute::NoUnwind);
+        }
+        iterate_next_call_ = module_->getOrInsertFunction("fiber_script_jit_iterate_next", exact_type);
+        llvm::cast<Function>(iterate_next_call_.getCallee())->addFnAttr(llvm::Attribute::NoUnwind);
         return true;
     }
 
@@ -511,7 +593,8 @@ private:
     }
 
     Value *emit_statepoint_call(IRBuilder<> &builder, const BasicBlock &block, std::uint32_t instruction_index,
-                                const Instruction &instruction, std::vector<Value *> &versions) {
+                                const Instruction &instruction, llvm::FunctionCallee callee,
+                                llvm::ArrayRef<Value *> call_arguments, std::vector<Value *> &versions) {
         std::vector<ManagedRoot> roots = create_roots(builder, block, instruction_index, versions);
         if (!error_.message.empty()) {
             return nullptr;
@@ -521,14 +604,8 @@ private:
         for (const ManagedRoot &root: roots) {
             gc_arguments.push_back(root.pointer);
         }
-        std::vector<Value *> call_arguments{frame_,
-                                            constant_i32(instruction.opcode),
-                                            constant_i32(instruction.raw),
-                                            argument_scratch_,
-                                            constant_i32(static_cast<std::uint32_t>(instruction.operands.size())),
-                                            out_scratch_};
-        auto *statepoint = builder.CreateGCStatepointCall(++statepoint_count_, 0, runtime_call_, call_arguments,
-                                                          std::nullopt, gc_arguments, "statepoint");
+        auto *statepoint = builder.CreateGCStatepointCall(++statepoint_count_, 0, callee, call_arguments, std::nullopt,
+                                                          gc_arguments, "statepoint");
         Function *fake_use = llvm::Intrinsic::getOrInsertDeclaration(module_.get(), llvm::Intrinsic::fake_use);
         for (std::uint32_t i = 0; i < roots.size(); ++i) {
             Value *relocated = builder.CreateGCRelocate(statepoint, i, i, managed_ptr_, "relocated");
@@ -538,19 +615,602 @@ private:
         return builder.CreateGCResult(statepoint, i32_, "runtime.status");
     }
 
-    void record_edge(BlockId predecessor, BlockId successor, EdgeKind kind, llvm::BasicBlock *llvm_predecessor) {
-        lowered_edges_.push_back(LoweredEdge{predecessor, successor, kind, llvm_predecessor});
+    Value *emit_generic_statepoint_call(IRBuilder<> &builder, const BasicBlock &block, std::uint32_t instruction_index,
+                                        const Instruction &instruction, std::vector<Value *> &versions) {
+        std::array<Value *, 6> call_arguments{
+                frame_,
+                constant_i32(instruction.opcode),
+                constant_i32(instruction.raw),
+                argument_scratch_,
+                constant_i32(static_cast<std::uint32_t>(instruction.operands.size())),
+                out_scratch_,
+        };
+        return emit_statepoint_call(builder, block, instruction_index, instruction, runtime_call_, call_arguments,
+                                    versions);
+    }
+
+    void record_edge(BlockId predecessor, BlockId successor, EdgeKind kind, llvm::BasicBlock *llvm_predecessor,
+                     std::vector<std::pair<ValueId, Value *>> value_overrides = {}) {
+        lowered_edges_.push_back(
+                LoweredEdge{predecessor, successor, kind, llvm_predecessor, std::move(value_overrides)});
+    }
+
+    llvm::FunctionCallee binary_call(std::uint8_t opcode) const {
+        return binary_calls_[static_cast<std::size_t>(opcode - ir::Code::BOP_PLUS)];
+    }
+
+    llvm::FunctionCallee unary_call(std::uint8_t opcode) const {
+        return unary_calls_[static_cast<std::size_t>(opcode - ir::Code::UNARY_PLUS)];
+    }
+
+    bool emit_exact_status_paths(IRBuilder<> &builder, const BasicBlock &block, const Instruction &instruction,
+                                 Value *status, Value *out, llvm::BasicBlock *success_target, bool record_normal_edge,
+                                 std::vector<std::pair<ValueId, Value *>> exception_overrides = {},
+                                 llvm::BasicBlock **success_block_out = nullptr) {
+        llvm::BasicBlock *success = llvm::BasicBlock::Create(*context_, "exact.success", function_);
+        llvm::BasicBlock *exception = llvm::BasicBlock::Create(*context_, "exact.exception", function_);
+        llvm::BasicBlock *abort = llvm::BasicBlock::Create(*context_, "exact.abort", function_);
+        llvm::BasicBlock *invalid = llvm::BasicBlock::Create(*context_, "exact.invalid", function_);
+        auto *status_switch = builder.CreateSwitch(status, invalid, 3);
+        status_switch->addCase(constant_i32(static_cast<std::uint32_t>(run::JitStatus::Success)), success);
+        status_switch->addCase(constant_i32(static_cast<std::uint32_t>(run::JitStatus::Exception)), exception);
+        status_switch->addCase(constant_i32(static_cast<std::uint32_t>(run::JitStatus::Abort)), abort);
+
+        builder.SetInsertPoint(success);
+        builder.CreateBr(success_target);
+        if (record_normal_edge) {
+            record_edge(block.id, instruction.normal_target, EdgeKind::Normal, success);
+        }
+        if (success_block_out) {
+            *success_block_out = success;
+        }
+
+        builder.SetInsertPoint(exception);
+        if (instruction.exception_target != kInvalidBlock) {
+            builder.CreateBr(llvm_blocks_[instruction.exception_target]);
+            record_edge(block.id, instruction.exception_target, EdgeKind::Exception, exception,
+                        std::move(exception_overrides));
+        } else {
+            store_frame_boxed(builder, offsetof(run::JitFrameHeader, pending_exception), out);
+            emit_return(builder, run::JitStatus::Exception);
+        }
+
+        builder.SetInsertPoint(abort);
+        emit_return(builder, run::JitStatus::Abort);
+
+        builder.SetInsertPoint(invalid);
+        emit_abort(builder, ScriptAbortReason::Internal);
+        emit_return(builder, run::JitStatus::Abort);
+        return true;
+    }
+
+    bool has_integer_binary_fast_path(std::uint8_t opcode) const noexcept {
+        return (opcode >= ir::Code::BOP_PLUS && opcode <= ir::Code::BOP_MOD) ||
+               (opcode >= ir::Code::BOP_LT && opcode <= ir::Code::BOP_SNE);
+    }
+
+    Value *integer_binary_guard(IRBuilder<> &builder, std::uint8_t opcode, Value *lhs, Value *rhs) const {
+        Value *lhs_is_integer = builder.CreateICmpEQ(
+                boxed_tag(builder, lhs), llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(JsTag::Int64)));
+        Value *rhs_is_integer = builder.CreateICmpEQ(
+                boxed_tag(builder, rhs), llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(JsTag::Int64)));
+        Value *guard = builder.CreateAnd(lhs_is_integer, rhs_is_integer, "both.integer");
+        if (opcode == ir::Code::BOP_DIVIDE || opcode == ir::Code::BOP_MOD) {
+            Value *rhs_payload = boxed_payload(builder, rhs);
+            guard = builder.CreateAnd(guard, builder.CreateICmpNE(rhs_payload, constant_i64(0)), "nonzero.rhs");
+            if (opcode == ir::Code::BOP_MOD) {
+                Value *lhs_is_min =
+                        builder.CreateICmpEQ(boxed_payload(builder, lhs), constant_i64(std::uint64_t{1} << 63u));
+                Value *rhs_is_minus_one = builder.CreateICmpEQ(rhs_payload, constant_i64(UINT64_MAX));
+                guard = builder.CreateAnd(guard, builder.CreateNot(builder.CreateAnd(lhs_is_min, rhs_is_minus_one)),
+                                          "safe.srem");
+            }
+        }
+        return guard;
+    }
+
+    Value *emit_integer_binary_result(IRBuilder<> &builder, std::uint8_t opcode, Value *lhs_boxed, Value *rhs_boxed) {
+        Value *lhs = boxed_payload(builder, lhs_boxed, "lhs.integer");
+        Value *rhs = boxed_payload(builder, rhs_boxed, "rhs.integer");
+        if (opcode == ir::Code::BOP_PLUS || opcode == ir::Code::BOP_MINUS || opcode == ir::Code::BOP_MULTIPLY) {
+            llvm::Intrinsic::ID intrinsic_id = llvm::Intrinsic::sadd_with_overflow;
+            if (opcode == ir::Code::BOP_MINUS) {
+                intrinsic_id = llvm::Intrinsic::ssub_with_overflow;
+            } else if (opcode == ir::Code::BOP_MULTIPLY) {
+                intrinsic_id = llvm::Intrinsic::smul_with_overflow;
+            }
+            Function *intrinsic = llvm::Intrinsic::getOrInsertDeclaration(module_.get(), intrinsic_id, {i64_});
+            Value *pair = builder.CreateCall(intrinsic, {lhs, rhs}, "integer.operation");
+            Value *integer_result = builder.CreateExtractValue(pair, 0);
+            Value *overflow = builder.CreateExtractValue(pair, 1);
+            Value *boxed_integer = box_payload(builder, integer_result, JsTag::Int64);
+            Value *lhs_float = builder.CreateSIToFP(lhs, double_);
+            Value *rhs_float = builder.CreateSIToFP(rhs, double_);
+            Value *float_result = nullptr;
+            if (opcode == ir::Code::BOP_PLUS) {
+                float_result = builder.CreateFAdd(lhs_float, rhs_float);
+            } else if (opcode == ir::Code::BOP_MINUS) {
+                float_result = builder.CreateFSub(lhs_float, rhs_float);
+            } else {
+                float_result = builder.CreateFMul(lhs_float, rhs_float);
+            }
+            return builder.CreateSelect(overflow, box_double(builder, float_result), boxed_integer, "boxed.number");
+        }
+        if (opcode == ir::Code::BOP_DIVIDE) {
+            Value *result = builder.CreateFDiv(builder.CreateSIToFP(lhs, double_), builder.CreateSIToFP(rhs, double_));
+            return box_double(builder, result, "boxed.divide");
+        }
+        if (opcode == ir::Code::BOP_MOD) {
+            return box_payload(builder, builder.CreateSRem(lhs, rhs), JsTag::Int64, "boxed.modulo");
+        }
+
+        Value *lhs_float = builder.CreateSIToFP(lhs, double_);
+        Value *rhs_float = builder.CreateSIToFP(rhs, double_);
+        Value *comparison = nullptr;
+        switch (opcode) {
+            case ir::Code::BOP_LT:
+                comparison = builder.CreateFCmpOLT(lhs_float, rhs_float);
+                break;
+            case ir::Code::BOP_LTE:
+                comparison = builder.CreateFCmpOLE(lhs_float, rhs_float);
+                break;
+            case ir::Code::BOP_GT:
+                comparison = builder.CreateFCmpOGT(lhs_float, rhs_float);
+                break;
+            case ir::Code::BOP_GTE:
+                comparison = builder.CreateFCmpOGE(lhs_float, rhs_float);
+                break;
+            case ir::Code::BOP_EQ:
+            case ir::Code::BOP_SEQ:
+                comparison = builder.CreateFCmpOEQ(lhs_float, rhs_float);
+                break;
+            case ir::Code::BOP_NE:
+            case ir::Code::BOP_SNE:
+                comparison = builder.CreateFCmpUNE(lhs_float, rhs_float);
+                break;
+            default:
+                return nullptr;
+        }
+        return box_boolean(builder, comparison, "boxed.comparison");
+    }
+
+    bool emit_binary_instruction(IRBuilder<> &builder, const BasicBlock &block, std::uint32_t instruction_index,
+                                 const Instruction &instruction, std::vector<Value *> &versions) {
+        Value *lhs = version_for(versions, instruction.operands[0], instruction.pc);
+        Value *rhs = version_for(versions, instruction.operands[1], instruction.pc);
+        if (!lhs || !rhs) {
+            return false;
+        }
+        if (!has_integer_binary_fast_path(instruction.opcode)) {
+            store_arguments(builder, instruction, versions);
+            store_frame_i32(builder, offsetof(run::JitFrameHeader, active_pc), instruction.pc);
+            Value *status = builder.CreateCall(binary_call(instruction.opcode),
+                                               {frame_, argument_scratch_, out_scratch_}, "exact.status");
+            Value *out = builder.CreateAlignedLoad(i128_, out_scratch_, llvm::Align(16), "exact.out");
+            if (instruction.result != kInvalidValue) {
+                versions[instruction.result] = out;
+                base_values_[instruction.result] = out;
+            }
+            if (instruction.exception != kInvalidValue) {
+                versions[instruction.exception] = out;
+                base_values_[instruction.exception] = out;
+            }
+            if (instruction.normal_target == kInvalidBlock) {
+                return fail(JitCompileStage::LlvmIr, "binary instruction has no continuation", instruction.pc);
+            }
+            return emit_exact_status_paths(builder, block, instruction, status, out,
+                                           llvm_blocks_[instruction.normal_target], true);
+        }
+
+        llvm::BasicBlock *fast = llvm::BasicBlock::Create(*context_, "binary.integer", function_);
+        llvm::BasicBlock *slow = llvm::BasicBlock::Create(*context_, "binary.slow", function_);
+        llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context_, "binary.merge", function_);
+        Value *guard = integer_binary_guard(builder, instruction.opcode, lhs, rhs);
+        builder.CreateCondBr(guard, fast, slow);
+
+        builder.SetInsertPoint(fast);
+        Value *fast_result = emit_integer_binary_result(builder, instruction.opcode, lhs, rhs);
+        if (!fast_result) {
+            return fail(JitCompileStage::LlvmIr, "invalid native binary opcode", instruction.pc);
+        }
+        builder.CreateBr(merge);
+        llvm::BasicBlock *fast_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(slow);
+        store_arguments(builder, instruction, versions);
+        store_frame_i32(builder, offsetof(run::JitFrameHeader, active_pc), instruction.pc);
+        std::vector<Value *> fast_versions = versions;
+        Value *status = nullptr;
+        if (has_effect(instruction.effects, Effect::MayGC)) {
+            std::array<Value *, 3> call_arguments{frame_, argument_scratch_, out_scratch_};
+            status = emit_statepoint_call(builder, block, instruction_index, instruction,
+                                          binary_call(instruction.opcode), call_arguments, versions);
+        } else {
+            status = builder.CreateCall(binary_call(instruction.opcode), {frame_, argument_scratch_, out_scratch_},
+                                        "exact.status");
+        }
+        if (!status) {
+            return false;
+        }
+        std::vector<std::pair<ValueId, Value *>> relocated_values;
+        for (ValueId id = 0; id < versions.size(); ++id) {
+            if (versions[id] != fast_versions[id] && versions[id]) {
+                relocated_values.emplace_back(id, versions[id]);
+            }
+        }
+        Value *slow_result = builder.CreateAlignedLoad(i128_, out_scratch_, llvm::Align(16), "exact.out");
+        if (instruction.exception != kInvalidValue) {
+            versions[instruction.exception] = slow_result;
+            base_values_[instruction.exception] = slow_result;
+        }
+        llvm::BasicBlock *slow_success = nullptr;
+        if (!emit_exact_status_paths(builder, block, instruction, status, slow_result, merge, false, relocated_values,
+                                     &slow_success)) {
+            return false;
+        }
+
+        builder.SetInsertPoint(merge);
+        for (const auto &[id, slow_value]: relocated_values) {
+            Value *fast_value = fast_versions[id] ? fast_versions[id] : base_values_[id];
+            if (!fast_value) {
+                return fail(JitCompileStage::LlvmIr, "relocated value has no fast-path version", instruction.pc);
+            }
+            auto *phi = builder.CreatePHI(i128_, 2, "relocated.merge");
+            phi->addIncoming(fast_value, fast_predecessor);
+            phi->addIncoming(slow_value, slow_success);
+            versions[id] = phi;
+        }
+        auto *result = builder.CreatePHI(i128_, 2, "binary.result");
+        result->addIncoming(fast_result, fast_predecessor);
+        result->addIncoming(slow_result, slow_success);
+        versions[instruction.result] = result;
+        base_values_[instruction.result] = result;
+        if (instruction.normal_target == kInvalidBlock) {
+            return fail(JitCompileStage::LlvmIr, "binary instruction has no continuation", instruction.pc);
+        }
+        builder.CreateBr(llvm_blocks_[instruction.normal_target]);
+        record_edge(block.id, instruction.normal_target, EdgeKind::Normal, merge);
+        return true;
+    }
+
+    bool has_integer_unary_fast_path(std::uint8_t opcode) const noexcept {
+        return opcode == ir::Code::UNARY_PLUS || opcode == ir::Code::UNARY_MINUS || opcode == ir::Code::UNARY_NEG;
+    }
+
+    Value *emit_integer_unary_result(IRBuilder<> &builder, std::uint8_t opcode, Value *boxed) {
+        Value *payload = boxed_payload(builder, boxed, "unary.integer");
+        if (opcode == ir::Code::UNARY_PLUS) {
+            return boxed;
+        }
+        if (opcode == ir::Code::UNARY_NEG) {
+            return box_boolean(builder, builder.CreateICmpEQ(payload, constant_i64(0)), "boxed.not");
+        }
+        Function *intrinsic =
+                llvm::Intrinsic::getOrInsertDeclaration(module_.get(), llvm::Intrinsic::ssub_with_overflow, {i64_});
+        Value *pair = builder.CreateCall(intrinsic, {constant_i64(0), payload}, "integer.negate");
+        Value *integer_result = builder.CreateExtractValue(pair, 0);
+        Value *overflow = builder.CreateExtractValue(pair, 1);
+        Value *float_result = builder.CreateFNeg(builder.CreateSIToFP(payload, double_));
+        return builder.CreateSelect(overflow, box_double(builder, float_result),
+                                    box_payload(builder, integer_result, JsTag::Int64), "boxed.negate");
+    }
+
+    bool emit_unary_instruction(IRBuilder<> &builder, const BasicBlock &block, const Instruction &instruction,
+                                std::vector<Value *> &versions) {
+        Value *operand = version_for(versions, instruction.operands[0], instruction.pc);
+        if (!operand) {
+            return false;
+        }
+        if (!has_integer_unary_fast_path(instruction.opcode)) {
+            store_arguments(builder, instruction, versions);
+            store_frame_i32(builder, offsetof(run::JitFrameHeader, active_pc), instruction.pc);
+            Value *status = builder.CreateCall(unary_call(instruction.opcode),
+                                               {frame_, argument_scratch_, out_scratch_}, "exact.status");
+            Value *out = builder.CreateAlignedLoad(i128_, out_scratch_, llvm::Align(16), "exact.out");
+            versions[instruction.result] = out;
+            base_values_[instruction.result] = out;
+            if (instruction.exception != kInvalidValue) {
+                versions[instruction.exception] = out;
+                base_values_[instruction.exception] = out;
+            }
+            return emit_exact_status_paths(builder, block, instruction, status, out,
+                                           llvm_blocks_[instruction.normal_target], true);
+        }
+
+        llvm::BasicBlock *fast = llvm::BasicBlock::Create(*context_, "unary.integer", function_);
+        llvm::BasicBlock *slow = llvm::BasicBlock::Create(*context_, "unary.slow", function_);
+        llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context_, "unary.merge", function_);
+        Value *is_integer = builder.CreateICmpEQ(boxed_tag(builder, operand),
+                                                 llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(JsTag::Int64)));
+        builder.CreateCondBr(is_integer, fast, slow);
+
+        builder.SetInsertPoint(fast);
+        Value *fast_result = emit_integer_unary_result(builder, instruction.opcode, operand);
+        builder.CreateBr(merge);
+        llvm::BasicBlock *fast_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(slow);
+        store_arguments(builder, instruction, versions);
+        store_frame_i32(builder, offsetof(run::JitFrameHeader, active_pc), instruction.pc);
+        Value *status = builder.CreateCall(unary_call(instruction.opcode), {frame_, argument_scratch_, out_scratch_},
+                                           "exact.status");
+        Value *slow_result = builder.CreateAlignedLoad(i128_, out_scratch_, llvm::Align(16), "exact.out");
+        if (instruction.exception != kInvalidValue) {
+            versions[instruction.exception] = slow_result;
+            base_values_[instruction.exception] = slow_result;
+        }
+        llvm::BasicBlock *slow_success = nullptr;
+        if (!emit_exact_status_paths(builder, block, instruction, status, slow_result, merge, false, {},
+                                     &slow_success)) {
+            return false;
+        }
+
+        builder.SetInsertPoint(merge);
+        auto *result = builder.CreatePHI(i128_, 2, "unary.result");
+        result->addIncoming(fast_result, fast_predecessor);
+        result->addIncoming(slow_result, slow_success);
+        versions[instruction.result] = result;
+        base_values_[instruction.result] = result;
+        builder.CreateBr(llvm_blocks_[instruction.normal_target]);
+        record_edge(block.id, instruction.normal_target, EdgeKind::Normal, merge);
+        return true;
+    }
+
+    bool emit_iterate_next_instruction(IRBuilder<> &builder, const BasicBlock &block, const Instruction &instruction,
+                                       std::vector<Value *> &versions) {
+        Value *iterator_boxed = version_for(versions, instruction.operands[0], instruction.pc);
+        if (!iterator_boxed) {
+            return false;
+        }
+        Value *tag = boxed_tag(builder, iterator_boxed, "iterator.tag");
+        Value *subtag_bits = builder.CreateLShr(iterator_boxed, llvm::ConstantInt::get(i128_, 120));
+        Value *subtag = builder.CreateTrunc(subtag_bits, i8_, "iterator.subtag");
+        Value *payload = boxed_payload(builder, iterator_boxed, "iterator.payload");
+        Value *is_heap =
+                builder.CreateICmpEQ(tag, llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(JsTag::HeapRef)));
+        Value *is_iterator = builder.CreateICmpEQ(
+                subtag, llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(GcHeapKind::Iterator)));
+        Value *has_pointer = builder.CreateICmpNE(payload, constant_i64(0));
+        Value *valid = builder.CreateAnd(builder.CreateAnd(is_heap, is_iterator), has_pointer);
+
+        llvm::BasicBlock *check_kind = llvm::BasicBlock::Create(*context_, "iterate.kind", function_);
+        llvm::BasicBlock *array_path = llvm::BasicBlock::Create(*context_, "iterate.array", function_);
+        llvm::BasicBlock *array_nonnull = llvm::BasicBlock::Create(*context_, "iterate.array.nonnull", function_);
+        llvm::BasicBlock *array_version_ok = llvm::BasicBlock::Create(*context_, "iterate.array.version", function_);
+        llvm::BasicBlock *array_item = llvm::BasicBlock::Create(*context_, "iterate.array.item", function_);
+        llvm::BasicBlock *array_done = llvm::BasicBlock::Create(*context_, "iterate.array.done", function_);
+        llvm::BasicBlock *array_merge = llvm::BasicBlock::Create(*context_, "iterate.array.merge", function_);
+        llvm::BasicBlock *mutated = llvm::BasicBlock::Create(*context_, "iterate.mutated", function_);
+        llvm::BasicBlock *slow = llvm::BasicBlock::Create(*context_, "iterate.slow", function_);
+        llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context_, "iterate.merge", function_);
+        builder.CreateCondBr(valid, check_kind, slow);
+
+        builder.SetInsertPoint(check_kind);
+        Value *iterator_pointer = builder.CreateIntToPtr(payload, ptr_, "iterator.ptr");
+        Value *kind = builder.CreateAlignedLoad(
+                i8_, builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, kind)), llvm::Align(1),
+                "iterator.kind");
+        Value *is_array = builder.CreateICmpEQ(
+                kind, llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(GcIteratorKind::Array)));
+        builder.CreateCondBr(is_array, array_path, slow);
+
+        builder.SetInsertPoint(array_path);
+        builder.CreateAlignedStore(llvm::ConstantInt::getFalse(*context_),
+                                   builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, has_current)),
+                                   llvm::Align(1));
+        builder.CreateAlignedStore(boxed_constant(JsValue::make_undefined()),
+                                   builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, current_key)),
+                                   llvm::Align(16));
+        builder.CreateAlignedStore(
+                boxed_constant(JsValue::make_undefined()),
+                builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, current_value)),
+                llvm::Align(16));
+        Value *array_pointer = builder.CreateAlignedLoad(
+                ptr_, builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, array)), llvm::Align(8),
+                "iterator.array");
+        builder.CreateCondBr(builder.CreateIsNotNull(array_pointer), array_nonnull, array_done);
+
+        builder.SetInsertPoint(array_nonnull);
+        Value *array_version = builder.CreateAlignedLoad(
+                i64_, builder.CreateConstGEP1_64(i8_, array_pointer, offsetof(GcArray, version)), llvm::Align(8),
+                "array.version");
+        Value *expected_version = builder.CreateAlignedLoad(
+                i64_, builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, expected_version)),
+                llvm::Align(8), "iterator.version");
+        builder.CreateCondBr(builder.CreateICmpEQ(array_version, expected_version), array_version_ok, mutated);
+
+        builder.SetInsertPoint(array_version_ok);
+        Value *index = builder.CreateAlignedLoad(
+                i64_, builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, index)), llvm::Align(8),
+                "iterator.index");
+        Value *size =
+                builder.CreateAlignedLoad(i64_, builder.CreateConstGEP1_64(i8_, array_pointer, offsetof(GcArray, size)),
+                                          llvm::Align(8), "array.size");
+        builder.CreateCondBr(builder.CreateICmpULT(index, size), array_item, array_done);
+
+        builder.SetInsertPoint(array_item);
+        Value *elements = builder.CreateAlignedLoad(
+                ptr_, builder.CreateConstGEP1_64(i8_, array_pointer, offsetof(GcArray, elems)), llvm::Align(8),
+                "array.elements");
+        Value *element_pointer = builder.CreateGEP(i128_, elements, index);
+        Value *element = builder.CreateAlignedLoad(i128_, element_pointer, llvm::Align(16), "iterator.value");
+        builder.CreateAlignedStore(
+                element, builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, current_value)),
+                llvm::Align(16));
+        builder.CreateAlignedStore(box_payload(builder, index, JsTag::Int64),
+                                   builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, current_key)),
+                                   llvm::Align(16));
+        builder.CreateAlignedStore(llvm::ConstantInt::getTrue(*context_),
+                                   builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, has_current)),
+                                   llvm::Align(1));
+        builder.CreateAlignedStore(builder.CreateAdd(index, constant_i64(1)),
+                                   builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, index)),
+                                   llvm::Align(8));
+        builder.CreateBr(array_merge);
+        llvm::BasicBlock *item_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(array_done);
+        builder.CreateBr(array_merge);
+        llvm::BasicBlock *done_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(array_merge);
+        auto *array_has_item = builder.CreatePHI(i1_, 2, "iterator.has_item");
+        array_has_item->addIncoming(llvm::ConstantInt::getTrue(*context_), item_predecessor);
+        array_has_item->addIncoming(llvm::ConstantInt::getFalse(*context_), done_predecessor);
+        Value *array_result = box_boolean(builder, array_has_item, "iterator.result");
+        builder.CreateBr(merge);
+        llvm::BasicBlock *array_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(mutated);
+        Value *mutation_exception = boxed_constant(JsValue::make_exception(ExceptionKind::IterationError));
+        if (instruction.exception_target != kInvalidBlock) {
+            builder.CreateBr(llvm_blocks_[instruction.exception_target]);
+            record_edge(block.id, instruction.exception_target, EdgeKind::Exception, mutated,
+                        {{instruction.exception, mutation_exception}});
+        } else {
+            store_frame_boxed(builder, offsetof(run::JitFrameHeader, pending_exception), mutation_exception);
+            emit_return(builder, run::JitStatus::Exception);
+        }
+
+        builder.SetInsertPoint(slow);
+        builder.CreateAlignedStore(iterator_boxed, argument_pointer(builder, 0), llvm::Align(16));
+        store_frame_i32(builder, offsetof(run::JitFrameHeader, active_pc), instruction.pc);
+        Value *status =
+                builder.CreateCall(iterate_next_call_, {frame_, argument_scratch_, out_scratch_}, "iterate.status");
+        Value *slow_result = builder.CreateAlignedLoad(i128_, out_scratch_, llvm::Align(16), "iterate.out");
+        if (instruction.exception != kInvalidValue) {
+            versions[instruction.exception] = slow_result;
+            base_values_[instruction.exception] = slow_result;
+        }
+        llvm::BasicBlock *slow_success = nullptr;
+        if (!emit_exact_status_paths(builder, block, instruction, status, slow_result, merge, false, {},
+                                     &slow_success)) {
+            return false;
+        }
+
+        builder.SetInsertPoint(merge);
+        auto *result = builder.CreatePHI(i128_, 2, "iterate.result");
+        result->addIncoming(array_result, array_predecessor);
+        result->addIncoming(slow_result, slow_success);
+        versions[instruction.result] = result;
+        base_values_[instruction.result] = result;
+        builder.CreateBr(llvm_blocks_[instruction.normal_target]);
+        record_edge(block.id, instruction.normal_target, EdgeKind::Normal, merge);
+        return true;
+    }
+
+    Value *emit_iterator_value(IRBuilder<> &builder, Value *iterator_boxed, bool key) {
+        Value *tag = boxed_tag(builder, iterator_boxed);
+        Value *subtag_bits = builder.CreateLShr(iterator_boxed, llvm::ConstantInt::get(i128_, 120));
+        Value *subtag = builder.CreateTrunc(subtag_bits, i8_);
+        Value *payload = boxed_payload(builder, iterator_boxed);
+        Value *valid = builder.CreateAnd(
+                builder.CreateAnd(
+                        builder.CreateICmpEQ(tag,
+                                             llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(JsTag::HeapRef))),
+                        builder.CreateICmpEQ(
+                                subtag, llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(GcHeapKind::Iterator)))),
+                builder.CreateICmpNE(payload, constant_i64(0)));
+
+        llvm::BasicBlock *check_current = llvm::BasicBlock::Create(*context_, "iterator.current", function_);
+        llvm::BasicBlock *load_current = llvm::BasicBlock::Create(*context_, "iterator.load", function_);
+        llvm::BasicBlock *missing = llvm::BasicBlock::Create(*context_, "iterator.missing", function_);
+        llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context_, "iterator.value.merge", function_);
+        builder.CreateCondBr(valid, check_current, missing);
+
+        builder.SetInsertPoint(check_current);
+        Value *iterator_pointer = builder.CreateIntToPtr(payload, ptr_);
+        Value *has_current = builder.CreateAlignedLoad(
+                i8_, builder.CreateConstGEP1_64(i8_, iterator_pointer, offsetof(GcIterator, has_current)),
+                llvm::Align(1));
+        builder.CreateCondBr(builder.CreateICmpNE(has_current, llvm::ConstantInt::get(i8_, 0)), load_current, missing);
+
+        builder.SetInsertPoint(load_current);
+        std::size_t offset = key ? offsetof(GcIterator, current_key) : offsetof(GcIterator, current_value);
+        Value *current = builder.CreateAlignedLoad(i128_, builder.CreateConstGEP1_64(i8_, iterator_pointer, offset),
+                                                   llvm::Align(16), key ? "iterator.key" : "iterator.value");
+        builder.CreateBr(merge);
+        llvm::BasicBlock *current_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(missing);
+        builder.CreateBr(merge);
+        llvm::BasicBlock *missing_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(merge);
+        auto *result = builder.CreatePHI(i128_, 2, key ? "iterator.key.result" : "iterator.value.result");
+        result->addIncoming(current, current_predecessor);
+        result->addIncoming(boxed_constant(JsValue::make_undefined()), missing_predecessor);
+        return result;
+    }
+
+    Value *emit_truth(IRBuilder<> &builder, Value *boxed, std::uint16_t type_mask) {
+        Value *payload = boxed_payload(builder, boxed, "truth.payload");
+        if (type_mask == TypeUndefined || type_mask == TypeNull) {
+            return llvm::ConstantInt::getFalse(*context_);
+        }
+        if (type_mask == TypeBoolean || type_mask == TypeInteger) {
+            return builder.CreateICmpNE(payload, constant_i64(0), "truth.immediate");
+        }
+        if (type_mask == TypeFloat) {
+            Value *number = builder.CreateBitCast(payload, double_);
+            return builder.CreateFCmpONE(number, llvm::ConstantFP::get(double_, 0.0), "truth.float");
+        }
+        if (type_mask == TypeBorrowedBinary || type_mask == TypeException) {
+            return llvm::ConstantInt::getTrue(*context_);
+        }
+        if (type_mask == TypeBorrowedString) {
+            Value *length_bits = builder.CreateLShr(boxed, llvm::ConstantInt::get(i128_, 64));
+            Value *length = builder.CreateTrunc(length_bits, i32_);
+            return builder.CreateICmpNE(length, constant_i32(0), "truth.string");
+        }
+
+        llvm::BasicBlock *simple = llvm::BasicBlock::Create(*context_, "truth.simple", function_);
+        llvm::BasicBlock *fallback = llvm::BasicBlock::Create(*context_, "truth.slow", function_);
+        llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context_, "truth.merge", function_);
+        Value *tag = boxed_tag(builder, boxed, "truth.tag");
+        Value *is_simple =
+                builder.CreateICmpULE(tag, llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(JsTag::Double)));
+        builder.CreateCondBr(is_simple, simple, fallback);
+
+        builder.SetInsertPoint(simple);
+        Value *number = builder.CreateBitCast(payload, double_);
+        Value *float_truth = builder.CreateFCmpONE(number, llvm::ConstantFP::get(double_, 0.0));
+        Value *payload_truth = builder.CreateICmpNE(payload, constant_i64(0));
+        Value *is_double =
+                builder.CreateICmpEQ(tag, llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(JsTag::Double)));
+        Value *numeric_truth = builder.CreateSelect(is_double, float_truth, payload_truth);
+        Value *has_value =
+                builder.CreateICmpUGT(tag, llvm::ConstantInt::get(i8_, static_cast<std::uint8_t>(JsTag::Null)));
+        Value *simple_truth = builder.CreateAnd(has_value, numeric_truth);
+        builder.CreateBr(merge);
+        llvm::BasicBlock *simple_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(fallback);
+        builder.CreateAlignedStore(boxed, argument_pointer(builder, 0), llvm::Align(16));
+        Value *slow_truth =
+                builder.CreateICmpNE(builder.CreateCall(logic_call_, {argument_pointer(builder, 0)}), constant_i32(0));
+        builder.CreateBr(merge);
+        llvm::BasicBlock *fallback_predecessor = builder.GetInsertBlock();
+
+        builder.SetInsertPoint(merge);
+        auto *truth = builder.CreatePHI(i1_, 2, "truth");
+        truth->addIncoming(simple_truth, simple_predecessor);
+        truth->addIncoming(slow_truth, fallback_predecessor);
+        return truth;
     }
 
     bool emit_runtime_instruction(IRBuilder<> &builder, const BasicBlock &block, std::uint32_t instruction_index,
                                   const Instruction &instruction, std::vector<Value *> &versions) {
+        if (!has_effect(instruction.effects, Effect::MayGC)) {
+            return fail(JitCompileStage::LlvmIr, "NoGC opcode reached generic statepoint lowering", instruction.pc);
+        }
         store_arguments(builder, instruction, versions);
         if (!error_.message.empty()) {
             return false;
         }
         store_frame_i32(builder, offsetof(run::JitFrameHeader, active_pc), instruction.pc);
         const AsyncSiteSpill *async_site = spill_.site(block.id, instruction_index);
-        if (instruction.is_async) {
+        if (has_effect(instruction.effects, Effect::MaySuspend)) {
             if (!async_site) {
                 return fail(JitCompileStage::LlvmIr, "async instruction has no resume descriptor", instruction.pc);
             }
@@ -565,7 +1225,7 @@ private:
             store_frame_i32(builder, offsetof(run::JitFrameHeader, resume_id), async_site->resume_id);
         }
 
-        Value *status = emit_statepoint_call(builder, block, instruction_index, instruction, versions);
+        Value *status = emit_generic_statepoint_call(builder, block, instruction_index, instruction, versions);
         if (!status) {
             return false;
         }
@@ -593,7 +1253,7 @@ private:
         status_switch->addCase(constant_i32(static_cast<std::uint32_t>(run::JitStatus::Suspend)), suspend);
 
         builder.SetInsertPoint(success);
-        if (instruction.is_async) {
+        if (has_effect(instruction.effects, Effect::MaySuspend)) {
             store_frame_i32(builder, offsetof(run::JitFrameHeader, resume_id), 0);
         }
         if (instruction.normal_target == kInvalidBlock) {
@@ -603,7 +1263,7 @@ private:
         record_edge(block.id, instruction.normal_target, EdgeKind::Normal, success);
 
         builder.SetInsertPoint(exception);
-        if (instruction.is_async) {
+        if (has_effect(instruction.effects, Effect::MaySuspend)) {
             store_frame_i32(builder, offsetof(run::JitFrameHeader, resume_id), 0);
         }
         if (instruction.exception_target != kInvalidBlock) {
@@ -618,7 +1278,7 @@ private:
         emit_return(builder, run::JitStatus::Abort);
 
         builder.SetInsertPoint(suspend);
-        if (instruction.is_async) {
+        if (has_effect(instruction.effects, Effect::MaySuspend)) {
             emit_return(builder, run::JitStatus::Suspend);
         } else {
             emit_abort(builder, ScriptAbortReason::Internal);
@@ -648,10 +1308,7 @@ private:
                 const Instruction &instruction = block.instructions[instruction_index];
                 std::uint8_t opcode = instruction.opcode;
                 if (opcode == ir::Code::LOAD_CONST) {
-                    const JsValue *constant = &compiled_.constant(instruction.raw >> 8u);
-                    Value *address =
-                            builder.CreateIntToPtr(constant_i64(reinterpret_cast<std::uintptr_t>(constant)), ptr_);
-                    Value *value = builder.CreateAlignedLoad(i128_, address, llvm::Align(16), "constant");
+                    Value *value = boxed_constant(compiled_.constant(instruction.raw >> 8u));
                     versions[instruction.result] = value;
                     base_values_[instruction.result] = value;
                 } else if (opcode == ir::Code::LOAD_ROOT) {
@@ -666,21 +1323,30 @@ private:
                     if (!iterator) {
                         return false;
                     }
-                    builder.CreateAlignedStore(iterator, argument_pointer(builder, 0), llvm::Align(16));
-                    builder.CreateCall(iterator_call_,
-                                       {argument_pointer(builder, 0),
-                                        constant_i32(opcode == ir::Code::ITERATE_KEY ? 1u : 0u), out_scratch_});
-                    Value *value = builder.CreateAlignedLoad(i128_, out_scratch_, llvm::Align(16), "iterator.value");
+                    Value *value = emit_iterator_value(builder, iterator, opcode == ir::Code::ITERATE_KEY);
                     versions[instruction.result] = value;
                     base_values_[instruction.result] = value;
+                } else if (opcode >= ir::Code::BOP_PLUS && opcode <= ir::Code::BOP_IN) {
+                    if (!emit_binary_instruction(builder, block, instruction_index, instruction, versions)) {
+                        return false;
+                    }
+                    terminated = true;
+                } else if (opcode >= ir::Code::UNARY_PLUS && opcode <= ir::Code::UNARY_TYPEOF) {
+                    if (!emit_unary_instruction(builder, block, instruction, versions)) {
+                        return false;
+                    }
+                    terminated = true;
+                } else if (opcode == ir::Code::ITERATE_NEXT) {
+                    if (!emit_iterate_next_instruction(builder, block, instruction, versions)) {
+                        return false;
+                    }
+                    terminated = true;
                 } else if (opcode == ir::Code::JUMP_IF_FALSE || opcode == ir::Code::JUMP_IF_TRUE) {
                     Value *condition = version_for(versions, instruction.operands[0], instruction.pc);
                     if (!condition || instruction.branch_target == kInvalidBlock) {
                         return fail(JitCompileStage::LlvmIr, "invalid conditional branch", instruction.pc);
                     }
-                    builder.CreateAlignedStore(condition, argument_pointer(builder, 0), llvm::Align(16));
-                    Value *truth = builder.CreateICmpNE(builder.CreateCall(logic_call_, {argument_pointer(builder, 0)}),
-                                                        constant_i32(0));
+                    Value *truth = emit_truth(builder, condition, cfg_.values()[instruction.operands[0]].type_mask);
                     BlockId fallthrough = kInvalidBlock;
                     for (const Edge &edge: block.successors) {
                         if (edge.kind == EdgeKind::Normal && edge.successor != instruction.branch_target) {
@@ -877,7 +1543,14 @@ private:
                 if (!incoming) {
                     return fail(JitCompileStage::LlvmIr, "CFG edge has no phi input", successor.start_pc);
                 }
-                Value *value = exit_versions_[edge.predecessor][incoming->value];
+                Value *value = nullptr;
+                auto override = std::ranges::find_if(edge.value_overrides,
+                                                     [&](const auto &item) { return item.first == incoming->value; });
+                if (override != edge.value_overrides.end()) {
+                    value = override->second;
+                } else {
+                    value = exit_versions_[edge.predecessor][incoming->value];
+                }
                 if (!value) {
                     value = base_values_[incoming->value];
                 }

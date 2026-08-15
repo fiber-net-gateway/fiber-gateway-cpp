@@ -16,9 +16,6 @@ namespace fiber::script::run {
 
 namespace {
 
-using RuntimeBinary = CallResult (*)(GcHeap &, ConstValueHandle, ConstValueHandle, ResultPayload &) noexcept;
-using RuntimeUnary = CallResult (*)(GcHeap &, ConstValueHandle, ResultPayload &) noexcept;
-
 class AnchorReset final {
 public:
     explicit AnchorReset(JitFrameHeader *frame) noexcept : frame_(frame) {}
@@ -80,66 +77,32 @@ std::uint32_t apply_abi_result(JitFrameHeader &frame, const AbiResult &result, J
     return static_cast<std::uint32_t>(JitStatus::Abort);
 }
 
-RuntimeBinary binary_for(std::uint8_t opcode) noexcept {
-    switch (opcode) {
-        case ir::Code::BOP_PLUS:
-            return &Binaries::plus;
-        case ir::Code::BOP_MINUS:
-            return &Binaries::minus;
-        case ir::Code::BOP_MULTIPLY:
-            return &Binaries::multiply;
-        case ir::Code::BOP_DIVIDE:
-            return &Binaries::divide;
-        case ir::Code::BOP_MOD:
-            return &Binaries::modulo;
-        case ir::Code::BOP_MATCH:
-            return &Binaries::matches;
-        case ir::Code::BOP_LT:
-            return &Binaries::lt;
-        case ir::Code::BOP_LTE:
-            return &Binaries::lte;
-        case ir::Code::BOP_GT:
-            return &Binaries::gt;
-        case ir::Code::BOP_GTE:
-            return &Binaries::gte;
-        case ir::Code::BOP_EQ:
-            return &Binaries::eq;
-        case ir::Code::BOP_SEQ:
-            return &Binaries::seq;
-        case ir::Code::BOP_NE:
-            return &Binaries::ne;
-        case ir::Code::BOP_SNE:
-            return &Binaries::sne;
-        case ir::Code::BOP_IN:
-            return &Binaries::in;
-        case ir::Code::EXP_OBJECT:
-            return &Access::expand_object;
-        case ir::Code::EXP_ARRAY:
-            return &Access::expand_array;
-        case ir::Code::PUSH_ARRAY:
-            return &Access::push_array;
-        case ir::Code::IDX_GET:
-            return &Access::index_get;
-        default:
-            return nullptr;
-    }
+bool valid_exact_call(const JitFrameHeader *frame, const JsValue *arguments, const JsValue *out) noexcept {
+    return frame && frame->compiled && frame->vm_context && arguments && out && frame->abi_version == kJitAbiVersion;
 }
 
-RuntimeUnary unary_for(std::uint8_t opcode) noexcept {
-    switch (opcode) {
-        case ir::Code::UNARY_PLUS:
-            return &Unaries::plus;
-        case ir::Code::UNARY_MINUS:
-            return &Unaries::minus;
-        case ir::Code::UNARY_NEG:
-            return &Unaries::neg;
-        case ir::Code::UNARY_TYPEOF:
-            return &Unaries::typeof_op;
-        case ir::Code::ITERATE_INTO:
-            return &Unaries::iterate;
-        default:
-            return nullptr;
+template<CallResult (*Operation)(GcHeap &, ConstValueHandle, ConstValueHandle, ResultPayload &) noexcept>
+std::uint32_t exact_binary(JitFrameHeader *frame, const JsValue *arguments, JsValue *out) noexcept {
+    if (!valid_exact_call(frame, arguments, out)) {
+        return frame ? abort_with(*frame, ScriptAbortReason::InvalidState)
+                     : static_cast<std::uint32_t>(JitStatus::Abort);
     }
+    auto &vm = *static_cast<JitVm *>(frame->vm_context);
+    ResultPayload result;
+    CallResult status = Operation(vm.host_frame().runtime, handle(arguments), handle(arguments + 1), result);
+    return apply_call_result(*frame, status, result, out);
+}
+
+template<CallResult (*Operation)(GcHeap &, ConstValueHandle, ResultPayload &) noexcept>
+std::uint32_t exact_unary(JitFrameHeader *frame, const JsValue *argument, JsValue *out) noexcept {
+    if (!valid_exact_call(frame, argument, out)) {
+        return frame ? abort_with(*frame, ScriptAbortReason::InvalidState)
+                     : static_cast<std::uint32_t>(JitStatus::Abort);
+    }
+    auto &vm = *static_cast<JitVm *>(frame->vm_context);
+    ResultPayload result;
+    CallResult status = Operation(vm.host_frame().runtime, handle(argument), result);
+    return apply_call_result(*frame, status, result, out);
 }
 
 bool function_call(std::uint8_t opcode) noexcept {
@@ -216,9 +179,12 @@ std::uint32_t dispatch_host_call(JitFrameHeader &frame, JitVm &vm, std::uint8_t 
 
 } // namespace
 
-extern "C" std::uint32_t fiber_script_jit_runtime_call_impl(JitFrameHeader *frame, std::uint32_t opcode_value,
-                                                            std::uint32_t raw, const JsValue *arguments,
-                                                            std::uint32_t argc, JsValue *out) noexcept {
+// The architecture trampolines reference this symbol from inline assembly. Keep
+// it visible to whole-program DCE because LTO cannot infer that textual symbol
+// reference from the C++ call graph.
+extern "C" __attribute__((used)) std::uint32_t
+fiber_script_jit_runtime_call_impl(JitFrameHeader *frame, std::uint32_t opcode_value, std::uint32_t raw,
+                                   const JsValue *arguments, std::uint32_t argc, JsValue *out) noexcept {
     AnchorReset reset(frame);
     if (!frame || !frame->compiled || !frame->vm_context || !out || frame->abi_version != kJitAbiVersion ||
         static_cast<std::uint8_t>(raw & 0xFFu) != static_cast<std::uint8_t>(opcode_value)) {
@@ -232,19 +198,6 @@ extern "C" std::uint32_t fiber_script_jit_runtime_call_impl(JitFrameHeader *fram
     GcHeap &heap = vm.host_frame().runtime;
     ResultPayload result;
 
-    if (RuntimeBinary binary = binary_for(opcode)) {
-        if (!arguments || argc != 2) {
-            return abort_with(*frame, ScriptAbortReason::InvalidState);
-        }
-        return apply_call_result(*frame, binary(heap, handle(arguments), handle(arguments + 1), result), result, out);
-    }
-    if (RuntimeUnary unary = unary_for(opcode)) {
-        if (!arguments || argc != 1) {
-            return abort_with(*frame, ScriptAbortReason::InvalidState);
-        }
-        return apply_call_result(*frame, unary(heap, handle(arguments), result), result, out);
-    }
-
     switch (opcode) {
         case ir::Code::NEW_OBJECT:
             *out = JsValue::make_object(heap.heap(), 0);
@@ -252,6 +205,32 @@ extern "C" std::uint32_t fiber_script_jit_runtime_call_impl(JitFrameHeader *fram
                 return abort_with(*frame, ScriptAbortReason::OutOfMemory);
             }
             return static_cast<std::uint32_t>(JitStatus::Success);
+        case ir::Code::EXP_OBJECT:
+        case ir::Code::EXP_ARRAY:
+        case ir::Code::PUSH_ARRAY:
+        case ir::Code::IDX_GET: {
+            if (!arguments || argc != 2) {
+                return abort_with(*frame, ScriptAbortReason::InvalidState);
+            }
+            CallResult status = CallResult::Abort;
+            switch (opcode) {
+                case ir::Code::EXP_OBJECT:
+                    status = Access::expand_object(heap, handle(arguments), handle(arguments + 1), result);
+                    break;
+                case ir::Code::EXP_ARRAY:
+                    status = Access::expand_array(heap, handle(arguments), handle(arguments + 1), result);
+                    break;
+                case ir::Code::PUSH_ARRAY:
+                    status = Access::push_array(heap, handle(arguments), handle(arguments + 1), result);
+                    break;
+                case ir::Code::IDX_GET:
+                    status = Access::index_get(heap, handle(arguments), handle(arguments + 1), result);
+                    break;
+                default:
+                    break;
+            }
+            return apply_call_result(*frame, status, result, out);
+        }
         case ir::Code::NEW_ARRAY:
             *out = JsValue::make_array(heap.heap(), 0);
             if (js_value_type(*out) != JsNodeType::Array) {
@@ -289,17 +268,11 @@ extern "C" std::uint32_t fiber_script_jit_runtime_call_impl(JitFrameHeader *fram
                             : Access::prop_set1(heap, handle(arguments), handle(arguments + 1), key, result);
             return apply_call_result(*frame, status, result, out);
         }
-        case ir::Code::ITERATE_NEXT: {
+        case ir::Code::ITERATE_INTO: {
             if (!arguments || argc != 1) {
                 return abort_with(*frame, ScriptAbortReason::InvalidState);
             }
-            GcIterStep step = gc_iterator_next(&heap.heap(), ValueHandle(const_cast<JsValue *>(arguments)));
-            if (step == GcIterStep::Mutated) {
-                *out = JsValue::make_exception(ExceptionKind::IterationError);
-                return static_cast<std::uint32_t>(JitStatus::Exception);
-            }
-            *out = JsValue::make_boolean(step == GcIterStep::Item);
-            return static_cast<std::uint32_t>(JitStatus::Success);
+            return apply_call_result(*frame, Unaries::iterate(heap, handle(arguments), result), result, out);
         }
         case ir::Code::CALL_FUNC:
         case ir::Code::CALL_FUNC_SPREAD:
@@ -311,6 +284,86 @@ extern "C" std::uint32_t fiber_script_jit_runtime_call_impl(JitFrameHeader *fram
         default:
             return abort_with(*frame, ScriptAbortReason::InvalidOpcode);
     }
+}
+
+extern "C" __attribute__((used)) std::uint32_t
+fiber_script_jit_bop_plus_impl(JitFrameHeader *frame, const JsValue *arguments, JsValue *out) noexcept {
+    AnchorReset reset(frame);
+    return exact_binary<&Binaries::plus>(frame, arguments, out);
+}
+
+#if defined(__x86_64__)
+extern "C" __attribute__((naked)) std::uint32_t fiber_script_jit_bop_plus(JitFrameHeader *, const JsValue *,
+                                                                          JsValue *) noexcept {
+    __asm__ volatile("movq (%rsp), %rax\n\t"
+                     "movq %rax, 0(%rdi)\n\t"
+                     "leaq 8(%rsp), %rax\n\t"
+                     "movq %rax, 8(%rdi)\n\t"
+                     "jmp fiber_script_jit_bop_plus_impl\n\t");
+}
+#elif defined(__aarch64__)
+extern "C" __attribute__((naked)) std::uint32_t fiber_script_jit_bop_plus(JitFrameHeader *, const JsValue *,
+                                                                          JsValue *) noexcept {
+    __asm__ volatile("str x30, [x0, #0]\n\t"
+                     "mov x9, sp\n\t"
+                     "str x9, [x0, #8]\n\t"
+                     "b fiber_script_jit_bop_plus_impl\n\t");
+}
+#else
+extern "C" std::uint32_t fiber_script_jit_bop_plus(JitFrameHeader *frame, const JsValue *arguments,
+                                                   JsValue *out) noexcept {
+    return fiber_script_jit_bop_plus_impl(frame, arguments, out);
+}
+#endif
+
+#define FIBER_JIT_BINARY_HELPER(symbol, operation)                                                                     \
+    extern "C" std::uint32_t symbol(JitFrameHeader *frame, const JsValue *arguments, JsValue *out) noexcept {          \
+        return exact_binary<&Binaries::operation>(frame, arguments, out);                                              \
+    }
+
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_minus, minus)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_multiply, multiply)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_divide, divide)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_modulo, modulo)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_matches, matches)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_lt, lt)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_lte, lte)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_gt, gt)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_gte, gte)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_eq, eq)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_seq, seq)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_ne, ne)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_sne, sne)
+FIBER_JIT_BINARY_HELPER(fiber_script_jit_bop_in, in)
+
+#undef FIBER_JIT_BINARY_HELPER
+
+#define FIBER_JIT_UNARY_HELPER(symbol, operation)                                                                      \
+    extern "C" std::uint32_t symbol(JitFrameHeader *frame, const JsValue *argument, JsValue *out) noexcept {           \
+        return exact_unary<&Unaries::operation>(frame, argument, out);                                                 \
+    }
+
+FIBER_JIT_UNARY_HELPER(fiber_script_jit_unary_plus, plus)
+FIBER_JIT_UNARY_HELPER(fiber_script_jit_unary_minus, minus)
+FIBER_JIT_UNARY_HELPER(fiber_script_jit_unary_neg, neg)
+FIBER_JIT_UNARY_HELPER(fiber_script_jit_unary_typeof, typeof_op)
+
+#undef FIBER_JIT_UNARY_HELPER
+
+extern "C" std::uint32_t fiber_script_jit_iterate_next(JitFrameHeader *frame, const JsValue *argument,
+                                                       JsValue *out) noexcept {
+    if (!valid_exact_call(frame, argument, out)) {
+        return frame ? abort_with(*frame, ScriptAbortReason::InvalidState)
+                     : static_cast<std::uint32_t>(JitStatus::Abort);
+    }
+    auto &vm = *static_cast<JitVm *>(frame->vm_context);
+    GcIterStep step = gc_iterator_next(&vm.host_frame().runtime.heap(), ValueHandle(const_cast<JsValue *>(argument)));
+    if (step == GcIterStep::Mutated) {
+        *out = JsValue::make_exception(ExceptionKind::IterationError);
+        return static_cast<std::uint32_t>(JitStatus::Exception);
+    }
+    *out = JsValue::make_boolean(step == GcIterStep::Item);
+    return static_cast<std::uint32_t>(JitStatus::Success);
 }
 
 #if defined(__x86_64__)
@@ -342,21 +395,6 @@ extern "C" std::uint32_t fiber_script_jit_runtime_call(JitFrameHeader *frame, st
 
 extern "C" std::uint32_t fiber_script_jit_logic(const JsValue *value) noexcept {
     return value && Compares::logic(handle(value)) ? 1u : 0u;
-}
-
-extern "C" void fiber_script_jit_iterator_value(const JsValue *iterator_value, std::uint32_t key,
-                                                JsValue *out) noexcept {
-    if (!out) {
-        return;
-    }
-    *out = JsValue::make_undefined();
-    if (!iterator_value) {
-        return;
-    }
-    auto *iterator = js_value_heap_ptr<const GcIterator>(*iterator_value);
-    if (iterator && iterator->has_current) {
-        *out = key ? iterator->current_key : iterator->current_value;
-    }
 }
 
 } // namespace fiber::script::run

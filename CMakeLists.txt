@@ -19,6 +19,7 @@ option(FIBER_BUILD_PROMETHEUS "Build the reusable fiber::prometheus component" $
 option(FIBER_BUILD_CAT_DEMO "Build the CAT client demo" OFF)
 option(FIBER_BUILD_PROMETHEUS_BENCHMARK "Build the Prometheus record-path benchmark" OFF)
 option(FIBER_ENABLE_SCRIPT_JIT "Build the LLVM 22 script JIT backend" OFF)
+option(FIBER_BUILD_SCRIPT_BENCHMARK "Build the interpreter/LLVM JIT script benchmark" OFF)
 
 include(cmake/Deps.cmake)
 include(cmake/CompilerChecks.cmake)
@@ -155,6 +156,23 @@ if (FIBER_ENABLE_LTO)
         else()
             message(STATUS "IPO/LTO not supported: ${FIBER_IPO_ERROR}")
         endif()
+    endif()
+endif()
+
+if (FIBER_BUILD_SCRIPT_BENCHMARK)
+    if (NOT FIBER_ENABLE_SCRIPT_JIT)
+        message(FATAL_ERROR
+            "FIBER_BUILD_SCRIPT_BENCHMARK requires FIBER_ENABLE_SCRIPT_JIT=ON")
+    endif()
+    add_executable(script_jit_benchmark
+        "${CMAKE_CURRENT_LIST_DIR}/benchmark/script/ScriptJitBenchmark.cpp")
+    target_link_libraries(script_jit_benchmark PRIVATE fiber_lib)
+    target_compile_definitions(script_jit_benchmark PRIVATE
+        FIBER_SCRIPT_BENCHMARK_BUILD_TYPE="$<CONFIG>")
+    set_target_properties(script_jit_benchmark PROPERTIES FOLDER "benchmarks")
+    fiber_link_runtime_allocator(script_jit_benchmark)
+    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
+        set_property(TARGET script_jit_benchmark PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
     endif()
 endif()
 

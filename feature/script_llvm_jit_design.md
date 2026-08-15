@@ -20,14 +20,15 @@ fallback。
 
 第一版已经落到以下代码：
 
-- `include/fiber/script/jit/Cfg.h`、`src/script/jit/Cfg.cpp`：CFG、SSA/Phi、异常边、指令级
-  liveness 和 async spill；
-- `src/script/jit/llvm/LlvmJitCompiler.cpp`：boxed `JsValue` LLVM IR、O2 pipeline、显式
-  `gc.statepoint/gc.relocate`、异步入口 switch 和 ORC 装载；
+- `include/fiber/script/jit/Cfg.h`、`src/script/jit/Cfg.cpp`：CFG、SSA/Phi、精确 tag type mask、
+  effect、异常边、指令级 liveness 和 async spill；
+- `src/script/jit/llvm/LlvmJitCompiler.cpp`：boxed `JsValue` LLVM IR、整数算术/比较/truth/array iterator
+  native fast path、O2 pipeline、MayGC slow path 的显式 `gc.statepoint/gc.relocate`、异步入口 switch 和
+  ORC 装载；
 - `src/script/jit/llvm/StackMapPlugin.cpp`：JITLink prune 前保活 `.llvm_stackmaps`，fixup 后严格解析并
   校验 return PC/SP-relative roots；
 - `include/fiber/script/run/JitRuntime.h`、`src/script/run/JitRuntime.cpp`：固定 C ABI、x86-64/AArch64
-  safepoint trampoline 和现有全部 opcode 的 runtime 语义；
+  safepoint trampoline、按运算拆分的精确 NoGC slow helper 和现有全部 opcode 的 runtime 语义；
 - `include/fiber/script/run/JitVm.h`、`src/script/run/JitVm.cpp`：同步执行、异步 persistent storage、
   参数所有权、completion 和 GC root source；
 - `include/fiber/script/run/JitCode.h`、`src/script/run/JitCode.cpp`：机器码、stack map、Compiled 与
@@ -129,8 +130,8 @@ JIT 必须以当前 C++ 行为为基线，而不是机械复制 Java AOT 的行�
 - GC heap ref：string、binary、array、object、exception、iterator；
 - tagged exception。
 
-JIT 第一版始终把脚本值建模为完整 `JsValue`。`TypeMask` 仅用于证明某个值不可能是 heap ref、减少
-不必要的 managed roots，以及为后续 tag fast path 提供信息；它不能改变语言语义。
+JIT 始终把可观察的脚本值建模为完整 `JsValue`。`TypeMask` 用于证明某个值不可能是 heap ref、减少
+不必要的 managed roots，并驱动当前 tag fast path；它不能改变语言语义。
 
 ### 4.2 GC 模型
 
@@ -363,14 +364,14 @@ liveness 使用 `ValueId` bit set。若后续需要语言级 rewrite，再增加
 
 ```cpp
 enum class Effect : std::uint16_t {
-    None         = 0,
-    ReadsHeap    = 1u << 0,
-    WritesHeap   = 1u << 1,
-    CallsHost    = 1u << 2,
-    MayAllocate  = 1u << 3,
-    MayException = 1u << 4,
-    MayAbort     = 1u << 5,
-    Async        = 1u << 6,
+    None       = 0,
+    ReadsHeap  = 1u << 0,
+    WritesHeap = 1u << 1,
+    CallsHost  = 1u << 2,
+    MayGC      = 1u << 3,
+    MayThrow   = 1u << 4,
+    MayAbort   = 1u << 5,
+    MaySuspend = 1u << 6,
 };
 
 struct Instruction {
@@ -385,11 +386,11 @@ struct Instruction {
 
 effect 是正确性信息，不只是 optimizer hint：
 
-- `MayAllocate` 和 `CallsHost` 默认是 GC safepoint；
-- `MayException` 需要 exception edge；
+- `MayGC` 和 `CallsHost` 默认是 GC safepoint；
+- `MayThrow` 需要 exception edge；
 - `MayAbort` 需要 terminal abort path；
 - `WritesHeap` 阻止跨调用错误地缓存 heap read；
-- host call 默认同时具有 `ReadsHeap | WritesHeap | CallsHost | MayAllocate | MayException | MayAbort`；
+- host call 默认同时具有 `ReadsHeap | WritesHeap | CallsHost | MayGC | MayThrow | MayAbort`；
 - 只有经过代码审计的 runtime helper 才能缩窄 effect。
 
 不能照搬 Java `Instruction.Throw` 表。C++ 的 `NEW_OBJECT`、`NEW_ARRAY` 等操作会因为 OOM 返回 abort，
@@ -434,7 +435,7 @@ block 末尾，以便精确表达 continuation 和 catch edge。
 - branch 后的下一条指令；
 - `END_RETURN`、`THROW_EXP` 后的下一条指令（若存在）；
 - 每个 catch entry；
-- 每个具有 `MayException`、`MayAbort` 或 `Async` effect 的指令之后；
+- 每个具有 `MayThrow`、`MayAbort` 或 `MaySuspend` effect 的指令之后；
 - async call 指令自身所在 block 的结束边界。
 
 对不可达的尾部 block 可以先建立，完成 edge 构造后再从 entry 做 reachability 标记并删除。
@@ -451,7 +452,7 @@ block 末尾，以便精确表达 continuation 和 catch edge。
 
 ### 8.3 构造异常边
 
-对于 `MayException` instruction：
+对于 `MayThrow` instruction：
 
 1. 使用该 instruction 的原始 `pc` 调用 `Compiled::find_catch(pc)`；
 2. 有 catch 时增加 `Exception` edge；
@@ -768,7 +769,7 @@ void JitVm::visit_roots(GcRootVisitor &visitor) noexcept {
 
 以下 instruction 默认是 safepoint：
 
-- 所有 `MayAllocate` runtime operation；
+- 所有 `MayGC` runtime operation；
 - 所有同步/异步 host calls；
 - 任何可能直接或间接调用 `GcHeap::collect()` 的 helper；
 - borrowed materialization；
@@ -1140,7 +1141,13 @@ alloca 集中在 entry block，显式 align 16。LLVM 的 SROA/mem2reg 负责删
 
 ### 15.5 Runtime call
 
-boxed 第一版中，大部分语义操作仍调用 runtime thunk：
+当前 boxed lowering 按 effect 和 tag guard 分成三类：
+
+1. tag 命中的整数算术、比较、truth 和 array iterator 直接生成 LLVM IR；
+2. 审计确认 NoGC 的多态 miss 调用 opcode 专属 helper，使用普通 `call`；
+3. 字符串 `+`、分配、heap mutation 和 host call 等 MayGC 路径才生成 statepoint。
+
+MayGC 路径为：
 
 ```text
 extract/deduplicate live GcHeader pointers
@@ -1152,12 +1159,13 @@ switch status:
   abort     -> terminal abort
 ```
 
-这已经可以消除解释器 dispatch、动态 pc/sp 更新和绝大部分虚拟 stack traffic，但 LLVM 看不到 opaque helper
-内部语义，因此不能期待它自动将所有脚本算术变成 native arithmetic。
+generic runtime 只处理仍需动态对象/数组/host 语义的 opcode。binary/unary 不再通过
+`binary_for(opcode)`/函数指针分派；每个运算都有静态确定的 slow symbol。NoGC helper 不建立 safepoint，也不产生
+root spill/reload。
 
-### 15.6 后续 tag fast path
+### 15.6 已实现的 tag fast path
 
-第二阶段可为热点运算生成：
+热点运算当前生成：
 
 ```text
 if lhs.tag == Int64 && rhs.tag == Int64:
@@ -1166,14 +1174,14 @@ else:
     runtime slow helper
 ```
 
-适合优先内联：
+已经内联：
 
-- boolean logic；
-- strict tag equality 的简单分支；
-- int/double 比较；
-- 无溢出或带明确溢出语义的整数算术；
-- `typeof`；
-- array length 等经过审计的只读 fast path。
+- Boolean/Integer/Float 的常见 truth 分支；
+- Int64 算术，使用 LLVM overflow intrinsic 保留溢出转 Float 语义；
+- Int64 关系与相等比较；
+- 除零、`INT64_MIN % -1` 等边界进入精确 slow path；
+- array iterator 的 `next/key/value`，包括版本检查和 mutation exception；
+- 常量直接成为 boxed LLVM constant，使 O2 能消除已知 tag guard。
 
 必须保留：
 
@@ -1182,7 +1190,8 @@ else:
 - heap mutation 的版本号和 iterator mutation 规则；
 - slow path 的 position attribution。
 
-第一版不要实现 speculative unboxing 和 deopt。tag guard 失败直接进入 slow helper 即可。
+当前仍不实现 speculative unboxing 和 deopt。tag guard 失败直接进入 opcode 专属 slow helper；slow path 若为
+MayGC，则与 fast path 在 LLVM PHI 中合并 relocated SSA roots，不引入 frame root slots。
 
 ## 16. LLVM 优化流水线
 
@@ -1554,7 +1563,17 @@ collection 时校验 active return PC 能精确命中 stack map，不能回退�
 
 ## 22. Benchmark 方案
 
+独立、可执行的脚本 benchmark 方案与本机结果记录在
+[`feature/script_jit_benchmark.md`](script_jit_benchmark.md)，对应程序为
+`benchmark/script/ScriptJitBenchmark.cpp`。该 benchmark 不接入 HTTP，分别测量编译延迟和预热后的
+Interpreter/JIT Script 执行差异。
+
 性能结论必须来自当前 C++ 运行时，不能直接使用 Java 文档中“AOT 约 10 倍”的数字。
+
+2026-08-15 的 Release/LTO 三次独立进程结果中，七项 workload geometric mean 为
+`2.530x–2.558x`；`foreach_arithmetic` 为 `4.483x–4.620x`，`branch_heavy` 为
+`12.499x–12.670x`。这组结果来自当前 tag/native lowering；此前全部 opcode 进入 boxed runtime helper 的
+基线只有约 `1.01x`。编译延迟仍为约 10–46 ms，因此缓存、hot threshold 或后台编译仍是生产接入前提。
 
 至少建立以下 workload：
 
@@ -1671,12 +1690,18 @@ collection 时校验 active return PC 能精确命中 stack map，不能回退�
 
 ### Phase 6：性能优化
 
-内容按 benchmark 决定：
+当前已完成第一轮：
 
 - tag fast path；
-- statepoint root 去重和 TypeMask 精化；
+- TypeMask 精化和 MayGC/NoGC effect 分流；
+- binary/unary exact slow helper；
+- array iterator fast path；
+
+后续内容按 benchmark 决定：
+
+- statepoint root 去重；
 - async storage pool/coloring；
-- runtime helper 拆分和 attribute；
+- property/index/host-call 专用路径；
 - module/object cache；
 - CPU-specific codegen。
 

@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <coroutine>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -284,6 +286,103 @@ TEST(ScriptJitExecutionTest, ExecutesArithmetic) {
     EXPECT_EQ(js_value_int64(result.value()), 7);
 }
 
+TEST(ScriptJitExecutionTest, ExecutesNativeNumericPathsAndPolymorphicFallbacks) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    auto arithmetic =
+            fiber::script::compile_script(library, "let a = $; return ((a + 5) * 3 - 2) % 97;", require_jit());
+    ASSERT_TRUE(arithmetic.has_value()) << arithmetic.error().message;
+
+    fiber::script::GcHeap heap;
+    auto integer = arithmetic->exec_sync(fiber::script::JsValue::make_integer(11), nullptr, heap);
+    ASSERT_TRUE(integer.has_value());
+    EXPECT_EQ(fiber::script::js_value_type(integer.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(integer.value()), 46);
+
+    auto boolean = arithmetic->exec_sync(fiber::script::JsValue::make_boolean(true), nullptr, heap);
+    ASSERT_TRUE(boolean.has_value());
+    EXPECT_EQ(fiber::script::js_value_type(boolean.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(js_value_int64(boolean.value()), 16);
+
+    auto floating = arithmetic->exec_sync(fiber::script::JsValue::make_float(1.5), nullptr, heap);
+    ASSERT_TRUE(floating.has_value());
+    EXPECT_EQ(fiber::script::js_value_type(floating.value()), fiber::script::JsNodeType::Float);
+    EXPECT_DOUBLE_EQ(fiber::script::js_value_double(floating.value()), 17.5);
+
+    auto relation = fiber::script::compile_script(library, "return $ < 10;", require_jit());
+    ASSERT_TRUE(relation.has_value()) << relation.error().message;
+    auto integer_relation = relation->exec_sync(fiber::script::JsValue::make_integer(9), nullptr, heap);
+    auto float_relation = relation->exec_sync(fiber::script::JsValue::make_float(10.5), nullptr, heap);
+    ASSERT_TRUE(integer_relation.has_value());
+    ASSERT_TRUE(float_relation.has_value());
+    EXPECT_TRUE(fiber::script::js_value_bool(integer_relation.value()));
+    EXPECT_FALSE(fiber::script::js_value_bool(float_relation.value()));
+}
+
+TEST(ScriptJitExecutionTest, PreservesIntegerOverflowAndModuloEdges) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    auto add = fiber::script::compile_script(library, "return $ + 1;", require_jit());
+    auto negate = fiber::script::compile_script(library, "return -$;", require_jit());
+    auto modulo = fiber::script::compile_script(library, "return $ % -1;", require_jit());
+    ASSERT_TRUE(add.has_value()) << add.error().message;
+    ASSERT_TRUE(negate.has_value()) << negate.error().message;
+    ASSERT_TRUE(modulo.has_value()) << modulo.error().message;
+
+    fiber::script::GcHeap heap;
+    auto add_result = add->exec_sync(fiber::script::JsValue::make_integer(std::numeric_limits<std::int64_t>::max()),
+                                     nullptr, heap);
+    ASSERT_TRUE(add_result.has_value());
+    EXPECT_EQ(fiber::script::js_value_type(add_result.value()), fiber::script::JsNodeType::Float);
+    EXPECT_EQ(fiber::script::js_value_double(add_result.value()),
+              static_cast<double>(std::numeric_limits<std::int64_t>::max()) + 1.0);
+
+    auto negate_result = negate->exec_sync(
+            fiber::script::JsValue::make_integer(std::numeric_limits<std::int64_t>::min()), nullptr, heap);
+    ASSERT_TRUE(negate_result.has_value());
+    EXPECT_EQ(fiber::script::js_value_type(negate_result.value()), fiber::script::JsNodeType::Float);
+    EXPECT_EQ(fiber::script::js_value_double(negate_result.value()),
+              -static_cast<double>(std::numeric_limits<std::int64_t>::min()));
+
+    auto modulo_result = modulo->exec_sync(
+            fiber::script::JsValue::make_integer(std::numeric_limits<std::int64_t>::min()), nullptr, heap);
+    ASSERT_TRUE(modulo_result.has_value());
+    EXPECT_EQ(fiber::script::js_value_type(modulo_result.value()), fiber::script::JsNodeType::Integer);
+    EXPECT_EQ(fiber::script::js_value_int64(modulo_result.value()), 0);
+}
+
+TEST(ScriptJitExecutionTest, ExecutesInlineTruthAndStringPlusSlowPath) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    auto truth = fiber::script::compile_script(library, "if ($) { return 1; } return 0;", require_jit());
+    auto concat = fiber::script::compile_script(library, "return $ + \"!\";", require_jit());
+    ASSERT_TRUE(truth.has_value()) << truth.error().message;
+    ASSERT_TRUE(concat.has_value()) << concat.error().message;
+
+    fiber::script::GcHeap heap;
+    auto false_boolean = truth->exec_sync(fiber::script::JsValue::make_boolean(false), nullptr, heap);
+    auto true_integer = truth->exec_sync(fiber::script::JsValue::make_integer(3), nullptr, heap);
+    auto nan = truth->exec_sync(fiber::script::JsValue::make_float(std::numeric_limits<double>::quiet_NaN()), nullptr,
+                                heap);
+    auto empty_string = truth->exec_sync(fiber::script::JsValue::make_native_string("", 0), nullptr, heap);
+    auto text = truth->exec_sync(fiber::script::JsValue::make_native_string("x", 1), nullptr, heap);
+    ASSERT_TRUE(false_boolean.has_value());
+    ASSERT_TRUE(true_integer.has_value());
+    ASSERT_TRUE(nan.has_value());
+    ASSERT_TRUE(empty_string.has_value());
+    ASSERT_TRUE(text.has_value());
+    EXPECT_EQ(fiber::script::js_value_int64(false_boolean.value()), 0);
+    EXPECT_EQ(fiber::script::js_value_int64(true_integer.value()), 1);
+    EXPECT_EQ(fiber::script::js_value_int64(nan.value()), 0);
+    EXPECT_EQ(fiber::script::js_value_int64(empty_string.value()), 0);
+    EXPECT_EQ(fiber::script::js_value_int64(text.value()), 1);
+
+    auto concatenated = concat->exec_sync(fiber::script::JsValue::make_native_string("jit", 3), nullptr, heap);
+    ASSERT_TRUE(concatenated.has_value());
+    ASSERT_EQ(fiber::script::js_value_type(concatenated.value()), fiber::script::JsNodeType::String);
+    fiber::script::JsValue concatenated_value = concatenated.value();
+    std::string encoded;
+    ASSERT_TRUE(fiber::script::gc_string_to_utf8(fiber::script::ConstValueHandle(&concatenated_value), encoded));
+    EXPECT_EQ(encoded, "jit!");
+}
+
 TEST(ScriptJitExecutionTest, PreservesVoidAndUndefinedReturnKinds) {
     auto &library = fiber::script::std_lib::StdLibrary::instance();
     auto void_script = fiber::script::compile_script(library, "return;", require_jit());
@@ -374,6 +473,21 @@ TEST(ScriptJitExecutionTest, CatchesIteratorMutationException) {
     EXPECT_EQ(fiber::script::js_value_exception_kind(result.value()), fiber::script::ExceptionKind::IterationError);
 }
 
+TEST(ScriptJitExecutionTest, CatchesArrayIteratorMutationOnNativePath) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    auto script = fiber::script::compile_script(
+            library,
+            "let a = [1, 2]; try { for (let k, v of a) { array.push(a, 9); } return 0; } catch (e) { return e; }",
+            require_jit());
+    ASSERT_TRUE(script.has_value()) << script.error().message;
+
+    fiber::script::GcHeap heap;
+    auto result = script->exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(fiber::script::js_value_type(result.value()), fiber::script::JsNodeType::Exception);
+    EXPECT_EQ(fiber::script::js_value_exception_kind(result.value()), fiber::script::ExceptionKind::IterationError);
+}
+
 TEST(ScriptJitExecutionTest, StackMapKeepsSsaHeapValueAlive) {
     GcLibrary library;
     auto script = fiber::script::compile_script(library, "let x = {a: 7}; collect(); return x.a;", require_jit());
@@ -383,6 +497,19 @@ TEST(ScriptJitExecutionTest, StackMapKeepsSsaHeapValueAlive) {
     auto result = script->exec_sync(fiber::script::JsValue::make_undefined(), nullptr, heap);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(js_value_int64(result.value()), 7);
+}
+
+TEST(ScriptJitExecutionTest, StackMapKeepsHeapValueAcrossStringPlusSlowPath) {
+    auto &library = fiber::script::std_lib::StdLibrary::instance();
+    auto script =
+            fiber::script::compile_script(library, "let x = {a: 19}; let text = $ + \"!\"; return x.a;", require_jit());
+    ASSERT_TRUE(script.has_value()) << script.error().message;
+
+    fiber::script::GcHeap heap;
+    heap.threshold = 0;
+    auto result = script->exec_sync(fiber::script::JsValue::make_native_string("slow", 4), nullptr, heap);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(js_value_int64(result.value()), 19);
 }
 
 TEST(ScriptJitExecutionTest, StackMapKeepsCallOnlyArgumentAlive) {

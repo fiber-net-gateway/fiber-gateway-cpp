@@ -175,4 +175,48 @@ TEST(ScriptJitCfgTest, PromotesOnlyValuesLiveAcrossAsyncCall) {
     EXPECT_EQ(spill.persistent_values(), spill.sites()[0].values);
 }
 
+TEST(ScriptJitCfgTest, ClassifiesGcAndControlEffectsPrecisely) {
+    using fiber::script::ir::Code;
+    using fiber::script::jit::Effect;
+    using fiber::script::jit::has_effect;
+    using fiber::script::jit::opcode_effects;
+
+    EXPECT_TRUE(has_effect(opcode_effects(Code::BOP_PLUS), Effect::MayGC));
+    EXPECT_TRUE(has_effect(opcode_effects(Code::BOP_PLUS), Effect::MayThrow));
+    EXPECT_FALSE(has_effect(opcode_effects(Code::BOP_MINUS), Effect::MayGC));
+    EXPECT_TRUE(has_effect(opcode_effects(Code::BOP_MINUS), Effect::MayThrow));
+    EXPECT_FALSE(has_effect(opcode_effects(Code::BOP_EQ), Effect::MayGC));
+    EXPECT_FALSE(has_effect(opcode_effects(Code::BOP_EQ), Effect::MayThrow));
+    EXPECT_FALSE(has_effect(opcode_effects(Code::UNARY_NEG), Effect::MayGC));
+    EXPECT_FALSE(has_effect(opcode_effects(Code::ITERATE_NEXT), Effect::MayGC));
+    EXPECT_TRUE(has_effect(opcode_effects(Code::ITERATE_NEXT), Effect::MayThrow));
+    EXPECT_TRUE(has_effect(opcode_effects(Code::NEW_ARRAY), Effect::MayGC));
+    EXPECT_TRUE(has_effect(opcode_effects(Code::CALL_ASYNC_FUNC), Effect::CallsHost));
+    EXPECT_TRUE(has_effect(opcode_effects(Code::CALL_ASYNC_FUNC), Effect::MayGC));
+    EXPECT_TRUE(has_effect(opcode_effects(Code::CALL_ASYNC_FUNC), Effect::MaySuspend));
+}
+
+TEST(ScriptJitCfgTest, RetainsPreciseSsaValueTypesAcrossPhi) {
+    TestLibrary library;
+    auto compiled = compile_script("let x = 1; if (a) { x = 2; } else { x = 3; } return x < 4;", library);
+    auto cfg = Cfg::build(compiled);
+    ASSERT_TRUE(cfg.has_value()) << cfg.error().message;
+
+    bool found_integer_phi = false;
+    bool found_boolean_result = false;
+    for (const auto &block: cfg->blocks()) {
+        for (const auto &phi: block.phis) {
+            found_integer_phi |= cfg->values()[phi.result].type_mask == fiber::script::jit::TypeInteger;
+        }
+        for (const auto &instruction: block.instructions) {
+            if (instruction.opcode == fiber::script::ir::Code::BOP_LT) {
+                ASSERT_NE(instruction.result, fiber::script::jit::kInvalidValue);
+                found_boolean_result |= cfg->values()[instruction.result].type_mask == fiber::script::jit::TypeBoolean;
+            }
+        }
+    }
+    EXPECT_TRUE(found_integer_phi);
+    EXPECT_TRUE(found_boolean_result);
+}
+
 } // namespace

@@ -19,11 +19,44 @@ inline constexpr ValueId kInvalidValue = UINT32_MAX;
 
 enum ValueTypeMask : std::uint16_t {
     TypeNone = 0,
-    TypeImmediate = 1u << 0u,
-    TypeBorrowed = 1u << 1u,
-    TypeHeapRef = 1u << 2u,
+    TypeUndefined = 1u << 0u,
+    TypeNull = 1u << 1u,
+    TypeBoolean = 1u << 2u,
+    TypeInteger = 1u << 3u,
+    TypeFloat = 1u << 4u,
+    TypeException = 1u << 5u,
+    TypeBorrowedString = 1u << 6u,
+    TypeBorrowedBinary = 1u << 7u,
+    TypeHeapRef = 1u << 8u,
+    TypeImmediate = TypeUndefined | TypeNull | TypeBoolean | TypeInteger | TypeFloat | TypeException,
+    TypeBorrowed = TypeBorrowedString | TypeBorrowedBinary,
+    TypeNumber = TypeInteger | TypeFloat,
     TypeAny = TypeImmediate | TypeBorrowed | TypeHeapRef,
 };
+
+enum class Effect : std::uint16_t {
+    None = 0,
+    ReadsHeap = 1u << 0u,
+    WritesHeap = 1u << 1u,
+    CallsHost = 1u << 2u,
+    MayGC = 1u << 3u,
+    MayThrow = 1u << 4u,
+    MayAbort = 1u << 5u,
+    MaySuspend = 1u << 6u,
+};
+
+[[nodiscard]] constexpr Effect operator|(Effect lhs, Effect rhs) noexcept {
+    return static_cast<Effect>(static_cast<std::uint16_t>(lhs) | static_cast<std::uint16_t>(rhs));
+}
+
+constexpr Effect &operator|=(Effect &lhs, Effect rhs) noexcept {
+    lhs = lhs | rhs;
+    return lhs;
+}
+
+[[nodiscard]] constexpr bool has_effect(Effect effects, Effect expected) noexcept {
+    return (static_cast<std::uint16_t>(effects) & static_cast<std::uint16_t>(expected)) != 0;
+}
 
 enum class ValueOrigin : std::uint8_t {
     Undefined,
@@ -78,8 +111,7 @@ struct Instruction {
     BlockId normal_target = kInvalidBlock;
     BlockId branch_target = kInvalidBlock;
     BlockId exception_target = kInvalidBlock;
-    bool may_abort = false;
-    bool is_async = false;
+    Effect effects = Effect::None;
 };
 
 struct BasicBlock {
@@ -187,6 +219,8 @@ private:
 [[nodiscard]] bool opcode_is_async(std::uint8_t opcode) noexcept;
 [[nodiscard]] bool opcode_may_exception(std::uint8_t opcode) noexcept;
 [[nodiscard]] bool opcode_may_abort(std::uint8_t opcode) noexcept;
+[[nodiscard]] bool opcode_may_gc(std::uint8_t opcode) noexcept;
+[[nodiscard]] Effect opcode_effects(std::uint8_t opcode) noexcept;
 
 } // namespace fiber::script::jit
 

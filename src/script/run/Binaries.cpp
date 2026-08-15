@@ -391,6 +391,9 @@ CallResult Binaries::modulo(GcHeap &runtime, ConstValueHandle a, ConstValueHandl
     if (rhs == 0) {
         return set_exception(result, fiber::script::ExceptionKind::RangeError);
     }
+    if (lhs == std::numeric_limits<std::int64_t>::min() && rhs == -1) {
+        return set_value(result, fiber::script::JsValue::make_integer(0));
+    }
     return set_value(result, fiber::script::JsValue::make_integer(lhs % rhs));
 }
 

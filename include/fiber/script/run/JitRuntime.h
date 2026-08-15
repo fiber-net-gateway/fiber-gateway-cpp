@@ -77,7 +77,53 @@ extern "C" std::uint32_t fiber_script_jit_runtime_call_impl(JitFrameHeader *fram
 
 extern "C" std::uint32_t fiber_script_jit_logic(const JsValue *value) noexcept;
 
-extern "C" void fiber_script_jit_iterator_value(const JsValue *iterator, std::uint32_t key, JsValue *out) noexcept;
+// Exact operator entry points used by generated code. Only BOP_PLUS may collect
+// and therefore has an architecture trampoline plus a separate implementation.
+// The remaining helpers are NoGC slow paths for values that miss native IR tag
+// guards.
+extern "C" std::uint32_t fiber_script_jit_bop_plus(JitFrameHeader *frame, const JsValue *arguments,
+                                                   JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_plus_impl(JitFrameHeader *frame, const JsValue *arguments,
+                                                        JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_minus(JitFrameHeader *frame, const JsValue *arguments,
+                                                    JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_multiply(JitFrameHeader *frame, const JsValue *arguments,
+                                                       JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_divide(JitFrameHeader *frame, const JsValue *arguments,
+                                                     JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_modulo(JitFrameHeader *frame, const JsValue *arguments,
+                                                     JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_matches(JitFrameHeader *frame, const JsValue *arguments,
+                                                      JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_lt(JitFrameHeader *frame, const JsValue *arguments,
+                                                 JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_lte(JitFrameHeader *frame, const JsValue *arguments,
+                                                  JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_gt(JitFrameHeader *frame, const JsValue *arguments,
+                                                 JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_gte(JitFrameHeader *frame, const JsValue *arguments,
+                                                  JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_eq(JitFrameHeader *frame, const JsValue *arguments,
+                                                 JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_seq(JitFrameHeader *frame, const JsValue *arguments,
+                                                  JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_ne(JitFrameHeader *frame, const JsValue *arguments,
+                                                 JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_sne(JitFrameHeader *frame, const JsValue *arguments,
+                                                  JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_bop_in(JitFrameHeader *frame, const JsValue *arguments,
+                                                 JsValue *out) noexcept;
+
+extern "C" std::uint32_t fiber_script_jit_unary_plus(JitFrameHeader *frame, const JsValue *argument,
+                                                     JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_unary_minus(JitFrameHeader *frame, const JsValue *argument,
+                                                      JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_unary_neg(JitFrameHeader *frame, const JsValue *argument,
+                                                    JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_unary_typeof(JitFrameHeader *frame, const JsValue *argument,
+                                                       JsValue *out) noexcept;
+extern "C" std::uint32_t fiber_script_jit_iterate_next(JitFrameHeader *frame, const JsValue *argument,
+                                                       JsValue *out) noexcept;
 
 } // namespace fiber::script::run
 
