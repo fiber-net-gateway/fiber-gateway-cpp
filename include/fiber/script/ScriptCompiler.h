@@ -2,6 +2,7 @@
 #define FIBER_SCRIPT_SCRIPT_COMPILER_H
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <string_view>
@@ -12,6 +13,21 @@
 #include "parse/ParseError.h"
 
 namespace fiber::script {
+
+enum class ScriptBackendMode : std::uint8_t {
+    Interpreter = 0,
+    PreferJit,
+    RequireJit,
+};
+
+struct ScriptCompileOptions {
+    bool allow_assign = true;
+    std::size_t max_depth = kDefaultScriptMaxDepth;
+    ScriptBackendMode backend = ScriptBackendMode::Interpreter;
+};
+
+std::expected<Script, parse::ParseError> compile_script(Library &library, std::string_view script,
+                                                        const ScriptCompileOptions &options);
 
 std::expected<Script, parse::ParseError> compile_script(Library &library, std::string_view script,
                                                         bool allow_assign = true,
@@ -31,6 +47,9 @@ std::expected<Script, parse::ParseError> compile_script(Library &library, std::s
 std::expected<Script, parse::ParseError>
 compile_template_string(Library &library, std::string_view template_string, bool allow_assign = false,
                         std::size_t max_depth = kDefaultScriptMaxDepth) noexcept;
+
+std::expected<Script, parse::ParseError> compile_template_string(Library &library, std::string_view template_string,
+                                                                 const ScriptCompileOptions &options);
 
 } // namespace fiber::script
 

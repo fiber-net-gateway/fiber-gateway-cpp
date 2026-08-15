@@ -18,6 +18,7 @@ option(FIBER_BUILD_CAT "Build the reusable fiber::cat component" ${FIBER_BUILD_A
 option(FIBER_BUILD_PROMETHEUS "Build the reusable fiber::prometheus component" ${FIBER_BUILD_APPS})
 option(FIBER_BUILD_CAT_DEMO "Build the CAT client demo" OFF)
 option(FIBER_BUILD_PROMETHEUS_BENCHMARK "Build the Prometheus record-path benchmark" OFF)
+option(FIBER_ENABLE_SCRIPT_JIT "Build the LLVM 22 script JIT backend" OFF)
 
 include(cmake/Deps.cmake)
 include(cmake/CompilerChecks.cmake)
@@ -48,10 +49,24 @@ target_include_directories(fiber_lib
         ${FIBER_GENERATED_INCLUDE_DIR})
 target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto)
 target_compile_definitions(fiber_lib
-    PUBLIC FIBER_ENABLE_BENCHMARK_TRACE=$<BOOL:${FIBER_ENABLE_BENCHMARK_TRACE}>
+    PUBLIC
+        FIBER_ENABLE_BENCHMARK_TRACE=$<BOOL:${FIBER_ENABLE_BENCHMARK_TRACE}>
+        FIBER_ENABLE_SCRIPT_JIT=$<BOOL:${FIBER_ENABLE_SCRIPT_JIT}>
     PRIVATE
         _GNU_SOURCE
         FIBER_HAVE_UDP_SEGMENT=$<BOOL:${FIBER_HAVE_UDP_SEGMENT}>)
+
+if (FIBER_ENABLE_SCRIPT_JIT)
+    find_package(LLVM REQUIRED CONFIG)
+    if (NOT LLVM_VERSION_MAJOR EQUAL 22)
+        message(FATAL_ERROR "The script JIT requires LLVM 22; found ${LLVM_PACKAGE_VERSION}")
+    endif()
+    if (NOT TARGET LLVM)
+        message(FATAL_ERROR "LLVM 22 package does not provide the LLVM imported target")
+    endif()
+    target_include_directories(fiber_lib SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_link_libraries(fiber_lib PRIVATE LLVM)
+endif()
 set(FIBER_CLANG_CONSTEXPR_STEPS "16777216" CACHE STRING
     "Clang constexpr evaluator step limit for compile-time generated tables")
 target_compile_options(fiber_lib PRIVATE

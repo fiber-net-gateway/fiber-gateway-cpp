@@ -98,6 +98,12 @@ public:
         }
     }
 
+    void visit_heap_ref(GcHeader *header) noexcept override {
+        if (header) {
+            gc_mark_obj(heap_, header);
+        }
+    }
+
 private:
     GcHeap *heap_ = nullptr;
 };
