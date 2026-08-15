@@ -90,16 +90,22 @@ std::uint16_t constant_type_mask(const JsValue &value) noexcept {
     switch (js_value_tag(value)) {
         case JsTag::HeapRef:
             return TypeHeapRef;
-        case JsTag::BorrowedString:
-        case JsTag::BorrowedBinary:
-            return TypeBorrowed;
         case JsTag::Undefined:
+            return TypeUndefined;
         case JsTag::Null:
+            return TypeNull;
         case JsTag::Boolean:
+            return TypeBoolean;
         case JsTag::Int64:
+            return TypeInteger;
         case JsTag::Double:
+            return TypeFloat;
+        case JsTag::BorrowedString:
+            return TypeBorrowedString;
+        case JsTag::BorrowedBinary:
+            return TypeBorrowedBinary;
         case JsTag::Exception:
-            return TypeImmediate;
+            return TypeException;
     }
     return TypeAny;
 }
@@ -108,8 +114,21 @@ std::uint16_t result_type_mask(std::uint8_t op) noexcept {
     if (op == ir::Code::NEW_OBJECT || op == ir::Code::NEW_ARRAY || op == ir::Code::ITERATE_INTO) {
         return TypeHeapRef;
     }
-    if ((op >= ir::Code::BOP_LT && op <= ir::Code::BOP_IN) || op == ir::Code::ITERATE_NEXT) {
-        return TypeImmediate;
+    if (op == ir::Code::BOP_PLUS || op == ir::Code::BOP_MINUS || op == ir::Code::BOP_MULTIPLY) {
+        return TypeNumber | (op == ir::Code::BOP_PLUS ? TypeHeapRef : TypeNone);
+    }
+    if (op == ir::Code::BOP_DIVIDE) {
+        return TypeFloat;
+    }
+    if (op == ir::Code::BOP_MOD || op == ir::Code::UNARY_PLUS || op == ir::Code::UNARY_MINUS) {
+        return TypeNumber;
+    }
+    if ((op >= ir::Code::BOP_MATCH && op <= ir::Code::BOP_IN) || op == ir::Code::UNARY_NEG ||
+        op == ir::Code::ITERATE_NEXT) {
+        return TypeBoolean;
+    }
+    if (op == ir::Code::UNARY_TYPEOF) {
+        return TypeBorrowedString;
     }
     return TypeAny;
 }
@@ -199,7 +218,7 @@ private:
             start = end;
         }
         cfg_.entry_block_ = 0;
-        cfg_.undefined_value_ = add_value(ValueOrigin::Undefined, kInvalidBlock, 0, TypeImmediate);
+        cfg_.undefined_value_ = add_value(ValueOrigin::Undefined, kInvalidBlock, 0, TypeUndefined);
         return true;
     }
 
@@ -361,8 +380,7 @@ private:
                 instruction.pc = pc;
                 instruction.raw = raw;
                 instruction.opcode = op;
-                instruction.may_abort = opcode_may_abort(op);
-                instruction.is_async = opcode_is_async(op);
+                instruction.effects = opcode_effects(op);
                 if (opcode_may_exception(op)) {
                     block.exception_variables = vars;
                 }
@@ -480,7 +498,7 @@ private:
                     }
                     instruction.operands = {vars[index]};
                     add_exception();
-                    make_result(TypeImmediate);
+                    make_result(TypeBoolean);
                 } else if (op == ir::Code::ITERATE_KEY || op == ir::Code::ITERATE_VALUE) {
                     std::uint32_t var_index = (raw >> kInstrumentLen) & kMaxIteratorVar;
                     std::uint32_t iter_index = raw >> kIteratorOff;
@@ -651,19 +669,65 @@ ValueBitSet edge_live_in(const Cfg &cfg, const std::vector<BlockLiveness> &liven
 
 } // namespace
 
-bool opcode_is_async(std::uint8_t opcode) noexcept {
-    return opcode == ir::Code::CALL_ASYNC_FUNC || opcode == ir::Code::CALL_ASYNC_FUNC_SPREAD ||
-           opcode == ir::Code::CALL_ASYNC_CONST;
-}
+bool opcode_is_async(std::uint8_t opcode) noexcept { return has_effect(opcode_effects(opcode), Effect::MaySuspend); }
 
-bool opcode_may_exception(std::uint8_t opcode) noexcept {
-    return is_binary(opcode) || is_unary(opcode) ||
-           (opcode >= ir::Code::EXP_OBJECT && opcode <= ir::Code::PROP_SET_1) || is_call(opcode) ||
-           opcode == ir::Code::ITERATE_INTO || opcode == ir::Code::ITERATE_NEXT || opcode == ir::Code::THROW_EXP;
-}
+bool opcode_may_exception(std::uint8_t opcode) noexcept { return has_effect(opcode_effects(opcode), Effect::MayThrow); }
 
-bool opcode_may_abort(std::uint8_t opcode) noexcept {
-    return is_runtime_operation(opcode) || opcode == ir::Code::THROW_EXP;
+bool opcode_may_abort(std::uint8_t opcode) noexcept { return has_effect(opcode_effects(opcode), Effect::MayAbort); }
+
+bool opcode_may_gc(std::uint8_t opcode) noexcept { return has_effect(opcode_effects(opcode), Effect::MayGC); }
+
+Effect opcode_effects(std::uint8_t opcode) noexcept {
+    if (opcode == ir::Code::BOP_PLUS) {
+        return Effect::ReadsHeap | Effect::MayGC | Effect::MayThrow | Effect::MayAbort;
+    }
+    if (opcode >= ir::Code::BOP_MINUS && opcode <= ir::Code::BOP_MOD) {
+        return Effect::MayThrow;
+    }
+    if (opcode >= ir::Code::BOP_MATCH && opcode <= ir::Code::BOP_IN) {
+        return Effect::ReadsHeap;
+    }
+    if (opcode == ir::Code::UNARY_PLUS || opcode == ir::Code::UNARY_MINUS) {
+        return Effect::MayThrow;
+    }
+    if (opcode == ir::Code::UNARY_NEG || opcode == ir::Code::UNARY_TYPEOF) {
+        return Effect::ReadsHeap;
+    }
+    if (opcode == ir::Code::NEW_OBJECT || opcode == ir::Code::NEW_ARRAY) {
+        return Effect::WritesHeap | Effect::MayGC | Effect::MayAbort;
+    }
+    if (opcode >= ir::Code::EXP_OBJECT && opcode <= ir::Code::PUSH_ARRAY) {
+        return Effect::ReadsHeap | Effect::WritesHeap | Effect::MayGC | Effect::MayThrow | Effect::MayAbort;
+    }
+    if (opcode == ir::Code::IDX_GET || opcode == ir::Code::PROP_GET) {
+        return Effect::ReadsHeap | Effect::MayGC | Effect::MayAbort;
+    }
+    if ((opcode >= ir::Code::IDX_SET && opcode <= ir::Code::IDX_SET_1) ||
+        (opcode >= ir::Code::PROP_SET && opcode <= ir::Code::PROP_SET_1)) {
+        return Effect::ReadsHeap | Effect::WritesHeap | Effect::MayGC | Effect::MayThrow | Effect::MayAbort;
+    }
+    if (is_call(opcode)) {
+        Effect effects = Effect::ReadsHeap | Effect::WritesHeap | Effect::CallsHost | Effect::MayGC | Effect::MayThrow |
+                         Effect::MayAbort;
+        if (opcode == ir::Code::CALL_ASYNC_FUNC || opcode == ir::Code::CALL_ASYNC_FUNC_SPREAD ||
+            opcode == ir::Code::CALL_ASYNC_CONST) {
+            effects |= Effect::MaySuspend;
+        }
+        return effects;
+    }
+    if (opcode == ir::Code::ITERATE_INTO) {
+        return Effect::ReadsHeap | Effect::WritesHeap | Effect::MayGC | Effect::MayAbort;
+    }
+    if (opcode == ir::Code::ITERATE_NEXT) {
+        return Effect::ReadsHeap | Effect::WritesHeap | Effect::MayThrow;
+    }
+    if (opcode == ir::Code::ITERATE_KEY || opcode == ir::Code::ITERATE_VALUE) {
+        return Effect::ReadsHeap;
+    }
+    if (opcode == ir::Code::THROW_EXP) {
+        return Effect::MayThrow;
+    }
+    return Effect::None;
 }
 
 BlockId Cfg::block_at_pc(std::uint32_t pc) const noexcept {
@@ -813,7 +877,7 @@ AsyncSpill AsyncSpill::analyze(const Cfg &cfg, const Liveness &liveness) {
     for (const BasicBlock &block: cfg.blocks()) {
         for (std::uint32_t i = 0; i < block.instructions.size(); ++i) {
             const Instruction &instruction = block.instructions[i];
-            if (!instruction.is_async) {
+            if (!has_effect(instruction.effects, Effect::MaySuspend)) {
                 continue;
             }
             ValueBitSet spill = liveness.block(block.id).live_after[i];
