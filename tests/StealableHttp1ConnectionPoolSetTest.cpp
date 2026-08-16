@@ -548,6 +548,76 @@ TEST(StealableHttp1ConnectionPoolSetTest, StealsIdleConnectionFromOtherLoopAndRe
     server_group.join();
 }
 
+TEST(StealableHttp1ConnectionPoolSetTest, DifferentPoolAffinityDoesNotStealIdentityConnection) {
+    fiber::event::EventLoopGroup server_group(1);
+    auto server_state = std::make_shared<HoldServerState>();
+    std::promise<std::uint16_t> server_port_promise;
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_port_future = server_port_promise.get_future();
+    auto server_result_future = server_result_promise.get_future();
+
+    server_group.start();
+    fiber::async::spawn(server_group.at(0), [&]() {
+        return run_hold_server(&server_group.at(0), 1, &server_port_promise, &server_result_promise, server_state);
+    });
+
+    const std::uint16_t port = server_port_future.get();
+    ASSERT_NE(port, 0);
+
+    fiber::event::EventLoopGroup group(2);
+    fiber::http::StealableHttp1ConnectionPoolSet set(group);
+    ASSERT_TRUE(set.init());
+    const auto first_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+            fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Https,
+            fiber::http::Http1ConnectionPoolAffinity{71});
+    const auto second_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+            fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Https,
+            fiber::http::Http1ConnectionPoolAffinity{72});
+
+    std::promise<fiber::http::Http1ClientConnection *> home_ready_promise;
+    auto home_ready_future = home_ready_promise.get_future();
+    std::promise<bool> final_promise;
+    auto final_future = final_promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        auto lease = co_await set.acquire(first_key);
+        auto connection_result = co_await ensure_connected(lease, port);
+        auto *connection = connection_result ? *connection_result : nullptr;
+        lease.reset();
+        home_ready_promise.set_value(connection);
+    });
+
+    auto *home_connection = home_ready_future.get();
+    ASSERT_NE(home_connection, nullptr);
+
+    fiber::async::spawn(group.at(1), [&, home_connection]() -> DetachedTask {
+        auto different_identity = co_await set.acquire(second_key);
+        const bool isolated =
+                different_identity.valid() && !different_identity.hit() && !different_identity.has_connection();
+        different_identity.reset();
+
+        fiber::async::spawn(group.at(0), [&, isolated, home_connection]() -> DetachedTask {
+            auto original_identity = co_await set.acquire(first_key);
+            const bool original_reused = original_identity.hit() && original_identity.get() == home_connection;
+            if (original_identity.has_connection()) {
+                original_identity.connection().close();
+            }
+            original_identity.reset();
+            final_promise.set_value(isolated && original_reused);
+        });
+    });
+
+    EXPECT_TRUE(final_future.get());
+
+    server_state->stop.store(true, std::memory_order_release);
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+    group.stop();
+    group.join();
+    server_group.stop();
+    server_group.join();
+}
+
 TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireStateAliveUntilDrained) {
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();

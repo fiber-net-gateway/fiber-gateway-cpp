@@ -72,6 +72,7 @@
 - host identity
 - port
 - scheme
+- pool affinity
 
 其中 `scheme` 只有：
 
@@ -92,6 +93,12 @@ auto ip_key = Http1ConnectionGroupKey::from_ip(
     fiber::net::IpAddress::loopback_v4(),
     8080,
     Http1ConnectionGroupKey::Scheme::Http);
+
+auto mtls_key = Http1ConnectionGroupKey::from_name(
+    "example.com",
+    443,
+    Http1ConnectionGroupKey::Scheme::Https,
+    fiber::http::Http1ConnectionPoolAffinity{tls_profile_generation});
 ```
 
 注意：
@@ -100,12 +107,19 @@ auto ip_key = Http1ConnectionGroupKey::from_ip(
 - 域名和 IP 是不同的 host kind，不会混用
 - `http` 和 `https` 永远不会共用连接
 - `example.com:443 + https` 与 `1.2.3.4:443 + https` 不是同组
+- affinity 默认为 `0`，因此不传该参数时保持原有分组语义
+- 同一 endpoint 的 affinity 不同，本地复用和跨 loop steal 都不会共享连接
 
 建议：
 
 - 如果上层请求目标是域名，就用域名建 key
 - 如果上层是按 IP 直连，就用 IP 建 key
 - 对 HTTPS，不要把不同域名压成同一个 IP key
+- 当同一 endpoint 可能使用不同的客户端证书或其它连接级 TLS 配置时，为每个有效 TLS profile 分配不同的非零 affinity
+- affinity 是固定宽度的非敏感标识，不要放证书路径、私钥内容，也不要从私钥内容计算它
+- 凭据轮换时，先创建并初始化新的 `TlsContext`，再发布新的 profile generation/affinity；旧 idle 连接会因 key 不同而无法命中，可等待超时淘汰或显式清池
+
+连接池不会从 `TlsOptions` 自动推导 affinity。配置控制层必须保证 `TlsContext` 与建 key 时使用的 affinity 属于同一个不可变 TLS profile。除客户端身份外，信任根、peer verification、SNI、`verify_name`、ALPN 等会固化在已建立连接上的选项也应纳入 profile generation。正在使用旧连接的 lease 可以自然完成；销毁旧 `TlsContext` 前必须确保所有由它创建的连接都已释放。
 
 ## 4. `Lease` 语义
 

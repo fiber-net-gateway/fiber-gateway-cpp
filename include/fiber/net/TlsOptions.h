@@ -95,9 +95,16 @@ struct TlsIdentityOptions {
 
 struct TlsOptions {
     bool enabled = false;
+    // PEM leaf certificate followed by optional intermediate certificates.
+    // This identity is loaded for both client and server contexts. cert_file
+    // and key_file must either both be empty or both be set.
     std::string cert_file;
+    // PEM private key matching the leaf certificate in cert_file.
     std::string key_file;
+    // Server trust roots when verify_client is enabled, or client trust roots
+    // when verify_peer is enabled. An empty client value uses system roots.
     std::string ca_file;
+    // Server-only: require and verify a client certificate.
     bool verify_client = false;
     // Client contexts remain backward-compatible by default. Protocol clients
     // which require authenticated peers (for example QuicClient) reject a
@@ -109,11 +116,13 @@ struct TlsOptions {
     int max_version = 0x0304; // TLS 1.3
     std::vector<std::string> alpn{"http/1.1"};
     // SNI name sent to the peer. When verify_name is empty this is also the
-    // authenticated certificate name.
+    // authenticated certificate name. Client identity selection is independent
+    // of this value.
     std::string server_name;
     // Optional certificate identity separate from SNI. This supports HTTPS
     // connections to IP literals without emitting an IP-valued SNI extension.
     std::string verify_name;
+    // Server-only named certificate identities and selection callback.
     std::vector<TlsIdentityOptions> identities;
     TlsIdentitySelectorOps identity_selector_ops{};
 };

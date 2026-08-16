@@ -27,6 +27,10 @@ public:
     explicit TlsContext(TlsOptions options, bool is_server = true, bool require_server_identity = true);
     ~TlsContext();
 
+    // Loads trust and identity files into an SSL_CTX. Client contexts may omit
+    // both identity files; when configured, the certificate chain and matching
+    // private key are validated before raw() is published. Identity and trust
+    // stay fixed after init(), and the context must outlive its TLS connections.
     common::IoResult<void> init();
 
     [[nodiscard]] SSL_CTX *raw() const noexcept { return ctx_; }
