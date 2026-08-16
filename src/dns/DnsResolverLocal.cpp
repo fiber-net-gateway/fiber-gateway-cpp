@@ -645,12 +645,28 @@ DnsResolverLocal::query_upstream(std::string_view qname, std::uint16_t qtype, st
     question.type = qtype;
     question.dns_class = qclass;
 
-    auto query_result = co_await client_.query_raw(question, pending.packet_buf, options_.max_packet_size);
+    const DnsClient::ResponseValidator validator{.context = this, .validate = &validate_upstream_response};
+    auto query_result = co_await client_.query_raw(question, pending.packet_buf, options_.max_packet_size, validator);
     if (!query_result) {
         co_return std::unexpected(query_result.error());
     }
 
     co_return handle_response(qname, qtype, qclass, pending.packet_buf, *query_result);
+}
+
+DnsClient::ResponseDisposition DnsResolverLocal::validate_upstream_response(void *context, const std::uint8_t *packet,
+                                                                            std::size_t packet_len) noexcept {
+    FIBER_ASSERT(context != nullptr);
+    auto &resolver = *static_cast<DnsResolverLocal *>(context);
+    auto parsed = resolver.parser_.parse(packet, packet_len);
+    if (!parsed) {
+        return parsed.error() == common::IoErr::Invalid ? DnsClient::ResponseDisposition::RetryServer
+                                                        : DnsClient::ResponseDisposition::Accept;
+    }
+    if (!parsed->header.is_response() || parsed->question_count != 1 || parsed->questions == nullptr) {
+        return DnsClient::ResponseDisposition::RetryServer;
+    }
+    return DnsClient::ResponseDisposition::Accept;
 }
 
 common::IoResult<DnsResolverLocal::PendingOutcome>

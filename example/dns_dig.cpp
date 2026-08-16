@@ -623,7 +623,9 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> query_via_client(fiber:
                                                                           std::uint8_t *dst, std::size_t cap) {
     fiber::dns::DnsClient client;
     fiber::dns::DnsClient::Options client_options{};
-    client_options.server = options.server;
+    if (!client_options.nameservers.add(options.server)) {
+        co_return std::unexpected(IoErr::Invalid);
+    }
 
     if (!client.init(loop, client_options)) {
         co_return std::unexpected(IoErr::Invalid);

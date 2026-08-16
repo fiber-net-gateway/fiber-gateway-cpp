@@ -24,7 +24,7 @@ public:
         cache_initialized_ = true;
 
         dns::DnsClient::Options client_options;
-        client_options.server = net::SocketAddress(net::IpAddress::loopback_v4(), 65053);
+        (void) client_options.nameservers.add(net::SocketAddress(net::IpAddress::loopback_v4(), 65053));
         client_options.timeout = std::chrono::milliseconds(100);
         client_options.attempts = 1;
         if (!local_.init(loop, cache_, client_options) ||

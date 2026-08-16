@@ -671,7 +671,7 @@ fiber::async::DetachedTask run_dns_router_client(fiber::event::EventLoop *loop, 
     const auto v6 = cache.upsert_address_set(key, fiber::net::IpFamily::V6, nullptr, 0, expires);
 
     fiber::dns::DnsClient::Options dns_options;
-    dns_options.server = {fiber::net::IpAddress::loopback_v4(), 1};
+    (void) dns_options.nameservers.add({fiber::net::IpAddress::loopback_v4(), 1});
     const bool resolver_ready = v4 == fiber::common::IoErr::None && v6 == fiber::common::IoErr::None &&
                                 local.init(*loop, cache, dns_options, {}) && resolver.init(local, {}) &&
                                 address_resolver.init(resolver, {});

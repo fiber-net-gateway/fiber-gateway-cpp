@@ -1,13 +1,8 @@
 #include "DnsService.h"
 
 #include <atomic>
-#include <cerrno>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
 #include <future>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -15,55 +10,18 @@
 #include <fiber/async/Task.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/net/IpAddress.h>
-#include <fiber/net/SocketAddress.h>
 
 namespace fiber::lite_nginx::runtime {
-namespace {
-
-// Reads the first "nameserver <ip>" from /etc/resolv.conf. Falls back to 8.8.8.8 when absent.
-fiber::net::SocketAddress read_nameserver() noexcept {
-    std::ifstream file("/etc/resolv.conf");
-    std::string line;
-    while (std::getline(file, line)) {
-        // skip comments / whitespace
-        std::size_t pos = 0;
-        while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) {
-            ++pos;
-        }
-        if (pos >= line.size() || line[pos] == '#') {
-            continue;
-        }
-        constexpr std::string_view kNs = "nameserver";
-        if (line.size() - pos < kNs.size() || line.compare(pos, kNs.size(), kNs) != 0) {
-            continue;
-        }
-        pos += kNs.size();
-        while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) {
-            ++pos;
-        }
-        std::size_t start = pos;
-        while (pos < line.size() && line[pos] != ' ' && line[pos] != '\t' && line[pos] != '#') {
-            ++pos;
-        }
-        const std::string ip_text = line.substr(start, pos - start);
-        fiber::net::IpAddress ip;
-        if (!ip_text.empty() && fiber::net::IpAddress::parse(ip_text, ip)) {
-            return fiber::net::SocketAddress(ip, 53);
-        }
-    }
-    return fiber::net::SocketAddress(fiber::net::IpAddress::v4({8, 8, 8, 8}), 53);
-}
-
-} // namespace
 
 DnsService::~DnsService() { shutdown(); }
 
-bool DnsService::init(fiber::event::EventLoopGroup &group) noexcept {
+bool DnsService::init(fiber::event::EventLoopGroup &group,
+                      const fiber::dns::SystemResolverConfig &resolver_config) noexcept {
     if (initialized_) {
         return true;
     }
-    if (group.size() == 0) {
+    if (group.size() == 0 || !group.running() || resolver_config.nameservers.empty() ||
+        fiber::event::EventLoop::current_or_null() != nullptr) {
         return false;
     }
     cache_loop_ = &group.at(0);
@@ -73,33 +31,42 @@ bool DnsService::init(fiber::event::EventLoopGroup &group) noexcept {
     }
     initialized_ = true;
 
-    const fiber::net::SocketAddress nameserver = read_nameserver();
     const std::size_t n = group.size();
     entries_.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
         LoopEntry entry;
         entry.loop = &group.at(i);
-
         entry.local = std::make_unique<fiber::dns::DnsResolverLocal>();
-        fiber::dns::DnsClient::Options client_options{};
-        client_options.server = nameserver;
-        client_options.timeout = std::chrono::milliseconds(2000);
-        client_options.attempts = 2;
-        if (!entry.local->init(*entry.loop, cache_, client_options)) {
-            shutdown();
-            return false;
-        }
-
         entry.resolver = std::make_unique<fiber::dns::DnsResolver>();
-        if (!entry.resolver->init(*entry.local)) {
-            entries_.push_back(std::move(entry));
-            shutdown();
-            return false;
-        }
-
         entries_.push_back(std::move(entry));
     }
-    if (entries_.empty()) {
+
+    fiber::dns::DnsClient::Options client_options{};
+    client_options.nameservers = resolver_config.nameservers;
+    client_options.timeout = resolver_config.timeout;
+    client_options.attempts = resolver_config.attempts;
+    client_options.rotate_nameservers = resolver_config.rotate;
+
+    auto done = std::make_shared<std::promise<void>>();
+    auto future = done->get_future();
+    auto remaining = std::make_shared<std::atomic<std::size_t>>(entries_.size());
+    auto success = std::make_shared<std::atomic<bool>>(true);
+    for (LoopEntry &entry: entries_) {
+        fiber::async::spawn(*entry.loop,
+                            [this, &entry, client_options, remaining, success, done]() -> fiber::async::DetachedTask {
+                                const bool initialized = entry.local->init(*entry.loop, cache_, client_options) &&
+                                                         entry.resolver->init(*entry.local);
+                                if (!initialized) {
+                                    success->store(false, std::memory_order_release);
+                                }
+                                if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                                    done->set_value();
+                                }
+                                co_return;
+                            });
+    }
+    future.wait();
+    if (!success->load(std::memory_order_acquire)) {
         shutdown();
         return false;
     }

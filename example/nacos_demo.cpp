@@ -31,7 +31,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -45,6 +44,7 @@
 #include <fiber/dns/DnsCache2.h>
 #include <fiber/dns/DnsClient.h>
 #include <fiber/dns/DnsResolver.h>
+#include <fiber/dns/DnsResolverConfig.h>
 #include <fiber/dns/DnsResolverLocal.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/net/IpAddress.h>
@@ -197,47 +197,19 @@ std::optional<CliOptions> parse_args(int argc, char **argv) {
     return cli;
 }
 
-fiber::net::SocketAddress read_nameserver() noexcept {
-    std::ifstream file("/etc/resolv.conf");
-    std::string line;
-    while (std::getline(file, line)) {
-        std::size_t pos = 0;
-        while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) {
-            ++pos;
-        }
-        if (pos >= line.size() || line[pos] == '#') {
-            continue;
-        }
-        constexpr std::string_view prefix = "nameserver";
-        if (line.size() - pos <= prefix.size() || line.compare(pos, prefix.size(), prefix) != 0 ||
-            (line[pos + prefix.size()] != ' ' && line[pos + prefix.size()] != '\t')) {
-            continue;
-        }
-        pos += prefix.size();
-        while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) {
-            ++pos;
-        }
-        const std::size_t start = pos;
-        while (pos < line.size() && line[pos] != ' ' && line[pos] != '\t' && line[pos] != '#') {
-            ++pos;
-        }
-        fiber::net::IpAddress ip;
-        if (fiber::net::IpAddress::parse(std::string_view(line).substr(start, pos - start), ip)) {
-            return fiber::net::SocketAddress(ip, 53);
-        }
-    }
-    return fiber::net::SocketAddress(fiber::net::IpAddress::v4({8, 8, 8, 8}), 53);
-}
-
 struct DnsRuntime {
     fiber::dns::SharedDnsCache2 cache;
     fiber::dns::DnsResolverLocal local;
     fiber::dns::DnsResolver resolver;
     fiber::dns::AddressResolver address_resolver;
 
-    [[nodiscard]] bool init(fiber::event::EventLoop &loop) noexcept {
+    [[nodiscard]] bool init(fiber::event::EventLoop &loop,
+                            const fiber::dns::SystemResolverConfig &resolver_config) noexcept {
         fiber::dns::DnsClient::Options client_options;
-        client_options.server = read_nameserver();
+        client_options.nameservers = resolver_config.nameservers;
+        client_options.timeout = resolver_config.timeout;
+        client_options.attempts = resolver_config.attempts;
+        client_options.rotate_nameservers = resolver_config.rotate;
         if (!cache.init(loop)) {
             return false;
         }
@@ -866,9 +838,16 @@ int main(int argc, char **argv) {
               << " grpc=" << cli->grpc_port << " namespace=\"" << cli->namespace_id << "\""
               << (cli->username.empty() ? " (no-auth)" : (" user=" + cli->username)) << "\n";
 
+    auto resolver_config = fiber::dns::load_system_resolver_config();
+    if (!resolver_config) {
+        std::cerr << "failed to load system resolver configuration: "
+                  << fiber::dns::resolver_config_error_name(resolver_config.error().code) << "\n";
+        return 1;
+    }
+
     fiber::event::EventLoop loop;
     DnsRuntime dns;
-    if (!dns.init(loop)) {
+    if (!dns.init(loop, *resolver_config)) {
         std::cerr << "failed to initialize DNS resolver\n";
         fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
             dns.release();
