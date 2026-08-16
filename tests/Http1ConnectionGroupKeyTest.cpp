@@ -8,6 +8,7 @@
 namespace {
 
 using fiber::http::Http1ConnectionGroupKey;
+using fiber::http::Http1ConnectionPoolAffinity;
 
 TEST(Http1ConnectionGroupKeyTest, NameKeyNormalizesCaseAndCachesHash) {
     auto left = Http1ConnectionGroupKey::from_name("Example.COM", 443, Http1ConnectionGroupKey::Scheme::Https);
@@ -57,6 +58,38 @@ TEST(Http1ConnectionGroupKeyTest, NameFactoryRejectsInvalidHostLength) {
     constexpr std::size_t too_long_size = Http1ConnectionGroupKey::kMaxHostNameSize + 1;
     std::string host(too_long_size, 'a');
     EXPECT_FALSE(Http1ConnectionGroupKey::from_name(host, 80, Http1ConnectionGroupKey::Scheme::Http).has_value());
+}
+
+TEST(Http1ConnectionGroupKeyTest, PoolAffinityPartitionsOtherwiseIdenticalEndpoints) {
+    constexpr Http1ConnectionPoolAffinity first_identity{101};
+    constexpr Http1ConnectionPoolAffinity second_identity{202};
+    auto first = Http1ConnectionGroupKey::from_name("example.com", 443, Http1ConnectionGroupKey::Scheme::Https,
+                                                    first_identity);
+    auto same = Http1ConnectionGroupKey::from_name("EXAMPLE.COM", 443, Http1ConnectionGroupKey::Scheme::Https,
+                                                   first_identity);
+    auto second = Http1ConnectionGroupKey::from_name("example.com", 443, Http1ConnectionGroupKey::Scheme::Https,
+                                                     second_identity);
+
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(same.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(first->pool_affinity(), first_identity);
+    EXPECT_EQ(*first, *same);
+    EXPECT_EQ(first->hash(), same->hash());
+    EXPECT_NE(*first, *second);
+    EXPECT_NE(first->hash(), second->hash());
+}
+
+TEST(Http1ConnectionGroupKeyTest, DefaultAffinityPreservesLegacyGrouping) {
+    const auto implicit = Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), 443,
+                                                           Http1ConnectionGroupKey::Scheme::Https);
+    const auto explicit_zero =
+            Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), 443,
+                                             Http1ConnectionGroupKey::Scheme::Https, Http1ConnectionPoolAffinity{0});
+
+    EXPECT_EQ(implicit.pool_affinity(), Http1ConnectionPoolAffinity{});
+    EXPECT_EQ(implicit, explicit_zero);
+    EXPECT_EQ(implicit.hash(), explicit_zero.hash());
 }
 
 } // namespace

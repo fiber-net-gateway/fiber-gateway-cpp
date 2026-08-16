@@ -239,6 +239,7 @@ See [apps/README.md](apps/README.md) for module layout and CMake conventions.
 - [Applications](apps/README.md)
 - [Script module guide](docs/script-guide.md) ([简体中文](docs/script-guide.zh-CN.md))
 - [HTTP/1 connection pool](docs/http1-connection-pool.md)
+- [TLS client certificate identity](docs/tls-client-identity.md)
 - [Script function signature ABI](docs/script-function-signature-abi.md)
 - [HTTP/3 client design](feature/http3_client.md)
 - [QUIC client design](feature/quic_client.md)
