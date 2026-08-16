@@ -11,12 +11,14 @@
 #include <string_view>
 
 #include <fiber/async/Task.h>
+#include <fiber/async/Watch.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 
 #include "NacosCreateError.h"
 #include "NacosRpcOptions.h"
+#include "NacosServiceStatus.h"
 #include "Subscription.h"
 
 namespace fiber::nacos {
@@ -84,6 +86,8 @@ struct ConfigServiceError {
 
 class ConfigService : public common::NonCopyable, public common::NonMovable {
 public:
+    using StatusSubscriber = async::Watch<ConfigServiceStatus>::Subscriber;
+
     [[nodiscard]] static std::expected<std::unique_ptr<ConfigService>, NacosCreateError>
     create(NacosClient &client, ConfigServiceOptions options = {});
 
@@ -91,6 +95,10 @@ public:
 
     [[nodiscard]] virtual common::IoResult<void> start() noexcept = 0;
     [[nodiscard]] virtual async::Task<void> shutdown() noexcept = 0;
+
+    // Status is published on the client EventLoop. The bounded snapshot owns
+    // no implementation pointers, identifiers, addresses, or error text.
+    [[nodiscard]] virtual StatusSubscriber subscribe_status() = 0;
 
     // A successful query always returns a non-null snapshot. A missing config
     // is represented by ConfigState::NotFound, matching subscription results.
