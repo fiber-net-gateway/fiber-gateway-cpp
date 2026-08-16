@@ -83,10 +83,11 @@ In-tree QUIC transport implementation: `QuicConnection`, `QuicStream`, `QuicStre
 
 ### DNS (`src/dns/`)
 
-- **DnsClient**: Async DNS wire-protocol client (UDP/TCP)
+- **DnsClient**: Async multi-upstream DNS wire-protocol client (UDP/TCP)
 - **DnsResolver**: High-level resolver with caching
 - **DnsCache**: Shared cache with TTL
-- **DnsResolverLocal**: Reads `/etc/resolv.conf`
+- **DnsResolverConfig**: Bounded `/etc/resolv.conf` parser and startup loader
+- **DnsResolverLocal**: Cache-aware A/AAAA resolver over `DnsClient`
 - **DnsMessage/DnsName**: DNS wire-format encoding/decoding
 
 ### Scripting (`src/script/`)

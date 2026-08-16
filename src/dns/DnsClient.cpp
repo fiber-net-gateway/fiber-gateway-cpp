@@ -24,6 +24,10 @@ namespace {
 
 constexpr std::size_t kDnsHeaderSize = 12;
 
+constexpr std::size_t udp_transport_index(net::IpFamily family) noexcept {
+    return family == net::IpFamily::V4 ? 0U : 1U;
+}
+
 std::uint16_t read_be16(const std::uint8_t *data) noexcept {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8U) | data[1]);
 }
@@ -51,6 +55,46 @@ bool is_generic_unspecified(const net::SocketAddress &addr) noexcept {
     return addr.port() == 0 && addr.ip().is_unspecified();
 }
 
+bool is_terminal_local_error(common::IoErr err) noexcept {
+    switch (err) {
+        case common::IoErr::Canceled:
+        case common::IoErr::Invalid:
+        case common::IoErr::BadFd:
+        case common::IoErr::Busy:
+        case common::IoErr::Permission:
+        case common::IoErr::NoMem:
+        case common::IoErr::MessageTooLarge:
+        case common::IoErr::NotSupported:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::chrono::steady_clock::time_point make_deadline(event::EventLoop &loop,
+                                                    std::chrono::milliseconds timeout) noexcept {
+    if (timeout == std::chrono::milliseconds::max()) {
+        return std::chrono::steady_clock::time_point::max();
+    }
+    return loop.now() + timeout;
+}
+
+std::chrono::milliseconds remaining_timeout(event::EventLoop &loop,
+                                            std::chrono::steady_clock::time_point deadline) noexcept {
+    if (deadline == std::chrono::steady_clock::time_point::max()) {
+        return std::chrono::milliseconds::max();
+    }
+    const auto now = loop.now();
+    if (now >= deadline) {
+        return std::chrono::milliseconds::zero();
+    }
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    if (remaining == std::chrono::milliseconds::zero()) {
+        remaining = std::chrono::milliseconds(1);
+    }
+    return remaining;
+}
+
 common::IoResult<std::size_t> consume_stream_read(fiber::common::IoResult<std::size_t> result) noexcept {
     if (!result) {
         return std::unexpected(result.error());
@@ -76,6 +120,10 @@ void cancel_tcp_stream(void *context) noexcept {
 } // namespace
 
 DnsClient::DnsClient() noexcept = default;
+
+DnsClient::UdpTransport::UdpTransport() noexcept = default;
+
+DnsClient::UdpTransport::~UdpTransport() = default;
 
 DnsClient::UdpReadDispatchGuard::UdpReadDispatchGuard(DnsClient &owner) noexcept : owner_(&owner) {
     FIBER_ASSERT_MSG(owner.udp_read_dispatch_invalidated_observer_ == nullptr,
@@ -121,7 +169,7 @@ common::IoResult<std::size_t> DnsClient::ResponseAwaiter::await_resume() noexcep
 
 DnsClient::~DnsClient() {
     invalidate_udp_read_dispatch();
-    if (socket_ && socket_->valid()) {
+    if (has_open_udp_transport()) {
         FIBER_ASSERT(loop_ != nullptr);
         FIBER_ASSERT(loop_->in_loop());
         close();
@@ -130,17 +178,36 @@ DnsClient::~DnsClient() {
 
 bool DnsClient::init(event::EventLoop &loop, Options options) noexcept {
     release();
-    if (options.server.ip().is_unspecified() || options.server.port() == 0 || options.max_inflight == 0 ||
-        options.max_udp_packet_size < kDnsHeaderSize || options.attempts == 0) {
+    if (options.nameservers.empty() || options.max_inflight == 0 || options.max_udp_packet_size < kDnsHeaderSize ||
+        options.attempts == 0) {
         return false;
     }
 
-    if (is_generic_unspecified(options.bind_addr)) {
-        options.bind_addr = options.server.family() == net::IpFamily::V4 ? net::SocketAddress::any_v4()
-                                                                         : net::SocketAddress::any_v6();
+    bool need_v4 = false;
+    bool need_v6 = false;
+    for (const net::SocketAddress &server: options.nameservers.view()) {
+        if (server.ip().is_unspecified() || server.port() == 0) {
+            return false;
+        }
+        need_v4 = need_v4 || server.family() == net::IpFamily::V4;
+        need_v6 = need_v6 || server.family() == net::IpFamily::V6;
     }
-    if (options.bind_addr.family() != options.server.family()) {
-        return false;
+
+    net::SocketAddress bind_v4 = net::SocketAddress::any_v4();
+    net::SocketAddress bind_v6 = net::SocketAddress::any_v6();
+    if (!is_generic_unspecified(options.bind_addr)) {
+        if (need_v4 && need_v6) {
+            return false;
+        }
+        if ((need_v4 && options.bind_addr.family() != net::IpFamily::V4) ||
+            (need_v6 && options.bind_addr.family() != net::IpFamily::V6)) {
+            return false;
+        }
+        if (need_v4) {
+            bind_v4 = options.bind_addr;
+        } else {
+            bind_v6 = options.bind_addr;
+        }
     }
     if (options.query_options.use_edns) {
         options.query_options.max_udp_payload_size = options.max_udp_packet_size;
@@ -149,17 +216,10 @@ bool DnsClient::init(event::EventLoop &loop, Options options) noexcept {
     options_ = options;
     loop_ = &loop;
     closing_ = false;
-    udp_send_queue_.init(loop);
+    next_server_ = 0;
 
-    socket_ = std::make_unique<net::UdpSocket>(loop);
-    if (!socket_) {
-        release();
-        return false;
-    }
-    net::UdpBindOptions bind_options{};
-    bind_options.v6_only = options.server.family() == net::IpFamily::V6;
-    auto bind_result = socket_->bind(options.bind_addr, bind_options);
-    if (!bind_result) {
+    if ((need_v4 && !init_udp_transport(net::IpFamily::V4, bind_v4)) ||
+        (need_v6 && !init_udp_transport(net::IpFamily::V6, bind_v6))) {
         release();
         return false;
     }
@@ -181,41 +241,66 @@ void DnsClient::close() noexcept {
         return;
     }
     closing_ = true;
-    udp_read_callback_registered_ = false;
-    udp_send_queue_.close();
-    if (socket_ && socket_->valid()) {
-        socket_->close();
+    for (UdpTransport &transport: udp_transports_) {
+        if (!transport.active) {
+            continue;
+        }
+        transport.read_callback_registered = false;
+        transport.send_queue.close();
+        if (transport.socket && transport.socket->valid()) {
+            transport.socket->close();
+        }
     }
     cancel_all_inflight(common::IoErr::Canceled);
 }
 
 void DnsClient::release() noexcept {
     invalidate_udp_read_dispatch();
-    if (socket_ && socket_->valid()) {
+    if (has_open_udp_transport()) {
         FIBER_ASSERT(loop_ != nullptr);
         FIBER_ASSERT(loop_->in_loop());
         close();
     }
-    socket_.reset();
+    for (UdpTransport &transport: udp_transports_) {
+        transport.socket.reset();
+        transport.send_queue.reset();
+        transport.owner = nullptr;
+        transport.active = false;
+        transport.read_callback_registered = false;
+    }
     recv_buffer_.reset();
     request_buffers_.reset();
     id_to_slot_.reset();
     slots_.reset();
-    udp_send_queue_.reset();
     reset_state();
 }
 
-bool DnsClient::valid() const noexcept { return socket_ && socket_->valid(); }
+bool DnsClient::valid() const noexcept {
+    if (loop_ == nullptr || options_.nameservers.empty() || !slots_ || !id_to_slot_ || !request_buffers_ ||
+        !recv_buffer_) {
+        return false;
+    }
+    for (const net::SocketAddress &server: options_.nameservers.view()) {
+        const UdpTransport &transport = udp_transport(server.family());
+        if (!transport.active || !transport.socket || !transport.socket->valid()) {
+            return false;
+        }
+    }
+    return true;
+}
 
 event::EventLoop &DnsClient::loop() const noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     return *loop_;
 }
 
-const net::SocketAddress &DnsClient::server() const noexcept { return options_.server; }
-
 async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSpec &question, std::uint8_t *dst,
                                                                 std::size_t cap) noexcept {
+    return query_raw(question, dst, cap, ResponseValidator{});
+}
+
+async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSpec &question, std::uint8_t *dst,
+                                                                std::size_t cap, ResponseValidator validator) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
     if (!valid() || closing_) {
@@ -224,7 +309,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSp
     if ((dst == nullptr && cap != 0) || cap < kDnsHeaderSize) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    const common::IoErr read_callback_err = ensure_udp_read_callback();
+    const common::IoErr read_callback_err = ensure_udp_read_callbacks();
     if (read_callback_err != common::IoErr::None) {
         co_return std::unexpected(read_callback_err);
     }
@@ -238,111 +323,179 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_raw(const QuestionSp
     slot.active = true;
     slot.response_dst = dst;
     slot.response_cap = cap;
+    slot.validator = validator;
 
     common::IoErr final_err = common::IoErr::TimedOut;
-    for (std::uint8_t attempt = 0; attempt < options_.attempts; ++attempt) {
-        slot.request_size = 0;
-        slot.response_size = 0;
-        slot.completion_err = common::IoErr::None;
-        slot.completed = false;
-        slot.need_tcp_fallback = false;
-        slot.waiter = {};
-
-        auto prepared = prepare_request(slot, question);
-        if (!prepared) {
-            final_err = prepared.error();
-            break;
-        }
-        slot.request_size = *prepared;
-        id_to_slot_[slot.id] = slot_index;
-
-        common::IoResult<std::size_t> send_result = std::unexpected(common::IoErr::Unknown);
-        detail::DnsUdpSendQueue::Owner send_owner;
-        if (udp_send_queue_.fast_path_available()) {
-            send_result = socket_->try_send_to(slot.request_buf, slot.request_size, options_.server);
-            if (!send_result && send_result.error() == common::IoErr::WouldBlock) {
-                send_owner = udp_send_queue_.take_ownership_after_would_block();
-            }
-        } else {
-            auto owner_result = co_await udp_send_queue_.acquire();
-            if (owner_result) {
-                send_owner = std::move(*owner_result);
-            } else {
-                send_result = std::unexpected(owner_result.error());
-            }
-        }
-
-        if (send_owner.owns()) {
-            if (!valid() || closing_) {
-                send_result = std::unexpected(common::IoErr::Canceled);
-            } else {
-                send_result = co_await socket_->send_to(slot.request_buf, slot.request_size, options_.server);
-            }
-            send_owner.release();
-        }
-        if (!send_result) {
-            final_err = send_result.error();
-            clear_query_id(slot.id, slot_index);
-            break;
-        }
-
-        auto wait_result = co_await async::timeout_for(ResponseAwaiter(*this, slot_index), options_.timeout);
-        clear_query_id(slot.id, slot_index);
-
-        if (!wait_result) {
-            final_err = wait_result.error();
-            slot.waiter = {};
-            slot.completed = false;
-            slot.need_tcp_fallback = false;
-            if (final_err == common::IoErr::TimedOut && !closing_ && attempt + 1 < options_.attempts) {
-                continue;
-            }
-            break;
-        }
-
-        if (slot.need_tcp_fallback) {
-            auto tcp_result = co_await query_tcp(slot_index);
-            release_slot(slot_index);
-            co_return tcp_result;
-        }
-
-        if (slot.completion_err != common::IoErr::None) {
-            final_err = slot.completion_err;
-            break;
-        }
-
-        const std::size_t response_size = slot.response_size;
-        release_slot(slot_index);
-        co_return response_size;
+    std::size_t last_server_error_response_size = 0;
+    const std::uint8_t server_count = options_.nameservers.size();
+    const std::uint8_t start_server = options_.rotate_nameservers ? next_server_ : 0;
+    if (options_.rotate_nameservers) {
+        next_server_ = static_cast<std::uint8_t>((next_server_ + 1U) % server_count);
     }
 
+    bool stop = false;
+    for (std::uint8_t round = 0; round < options_.attempts && !stop; ++round) {
+        for (std::uint8_t offset = 0; offset < server_count; ++offset) {
+            const std::uint8_t server_index = static_cast<std::uint8_t>((start_server + offset) % server_count);
+            const net::SocketAddress &selected_server = options_.nameservers[server_index];
+            UdpTransport &transport = udp_transport(selected_server.family());
+            const auto attempt_deadline = make_deadline(*loop_, options_.timeout);
+
+            slot.request_size = 0;
+            slot.response_size = 0;
+            slot.completion_err = common::IoErr::None;
+            slot.completed = false;
+            slot.need_tcp_fallback = false;
+            slot.retry_server = false;
+            slot.server_index = server_index;
+            slot.waiter = {};
+
+            auto prepared = prepare_request(slot, question);
+            if (!prepared) {
+                final_err = prepared.error();
+                stop = true;
+                break;
+            }
+            slot.request_size = *prepared;
+            id_to_slot_[slot.id] = slot_index;
+
+            common::IoResult<std::size_t> send_result = std::unexpected(common::IoErr::Unknown);
+            detail::DnsUdpSendQueue::Owner send_owner;
+            if (transport.send_queue.fast_path_available()) {
+                send_result = transport.socket->try_send_to(slot.request_buf, slot.request_size, selected_server);
+                if (!send_result && send_result.error() == common::IoErr::WouldBlock) {
+                    send_owner = transport.send_queue.take_ownership_after_would_block();
+                }
+            } else {
+                auto owner_result =
+                        co_await async::timeout_for([&transport]() noexcept { return transport.send_queue.acquire(); },
+                                                    remaining_timeout(*loop_, attempt_deadline));
+                if (owner_result) {
+                    send_owner = std::move(*owner_result);
+                } else {
+                    send_result = std::unexpected(owner_result.error());
+                }
+            }
+
+            if (send_owner.owns()) {
+                if (!valid() || closing_) {
+                    send_result = std::unexpected(common::IoErr::Canceled);
+                } else {
+                    send_result =
+                            co_await transport.socket->send_to(slot.request_buf, slot.request_size, selected_server,
+                                                               remaining_timeout(*loop_, attempt_deadline));
+                }
+                send_owner.release();
+            }
+            if (!send_result) {
+                final_err = send_result.error();
+                clear_query_id(slot.id, slot_index);
+                if (closing_ || is_terminal_local_error(final_err)) {
+                    stop = true;
+                    break;
+                }
+                continue;
+            }
+
+            auto wait_result = co_await async::timeout_for(ResponseAwaiter(*this, slot_index),
+                                                           remaining_timeout(*loop_, attempt_deadline));
+            clear_query_id(slot.id, slot_index);
+
+            if (!wait_result) {
+                final_err = wait_result.error();
+                slot.waiter = {};
+                slot.completed = false;
+                slot.need_tcp_fallback = false;
+                slot.retry_server = false;
+                if (closing_ || is_terminal_local_error(final_err)) {
+                    stop = true;
+                    break;
+                }
+                continue;
+            }
+
+            if (slot.retry_server) {
+                final_err = common::IoErr::Invalid;
+                continue;
+            }
+
+            last_server_error_response_size = 0;
+            std::size_t response_size = slot.response_size;
+            if (slot.need_tcp_fallback) {
+                auto tcp_result = co_await query_tcp(slot_index, server_index);
+                if (!tcp_result) {
+                    final_err = tcp_result.error();
+                    if (closing_ || (is_terminal_local_error(final_err) && final_err != common::IoErr::Invalid)) {
+                        stop = true;
+                        break;
+                    }
+                    continue;
+                }
+                response_size = *tcp_result;
+            }
+
+            if (should_retry_server_error(slot.response_dst, response_size)) {
+                last_server_error_response_size = response_size;
+                continue;
+            }
+
+            release_slot(slot_index);
+            co_return response_size;
+        }
+    }
+
+    if (last_server_error_response_size != 0 && !stop && !closing_) {
+        release_slot(slot_index);
+        co_return last_server_error_response_size;
+    }
     release_slot(slot_index);
     co_return std::unexpected(final_err);
 }
 
-common::IoErr DnsClient::ensure_udp_read_callback() noexcept {
-    FIBER_ASSERT(loop_ != nullptr);
-    FIBER_ASSERT(loop_->in_loop());
-    FIBER_ASSERT(socket_ && socket_->valid());
-    if (udp_read_callback_registered_) {
-        return common::IoErr::None;
+bool DnsClient::init_udp_transport(net::IpFamily family, const net::SocketAddress &bind_addr) noexcept {
+    UdpTransport &transport = udp_transport(family);
+    FIBER_ASSERT(!transport.active);
+    FIBER_ASSERT(!transport.socket);
+    transport.owner = this;
+    transport.family = family;
+    transport.active = true;
+    transport.read_callback_registered = false;
+    transport.send_queue.init(*loop_);
+    transport.socket = std::make_unique<net::UdpSocket>(*loop_);
+    if (!transport.socket) {
+        return false;
     }
-
-    const common::IoErr err = socket_->set_read_callback(&DnsClient::on_udp_readable, this);
-    if (err == common::IoErr::None) {
-        udp_read_callback_registered_ = true;
-    }
-    return err;
+    net::UdpBindOptions bind_options{};
+    bind_options.v6_only = family == net::IpFamily::V6;
+    return transport.socket->bind(bind_addr, bind_options).has_value();
 }
 
-void DnsClient::drain_udp_reads() noexcept {
+common::IoErr DnsClient::ensure_udp_read_callbacks() noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
-    FIBER_ASSERT(socket_ && socket_->valid());
+    for (UdpTransport &transport: udp_transports_) {
+        if (!transport.active || transport.read_callback_registered) {
+            continue;
+        }
+        FIBER_ASSERT(transport.socket && transport.socket->valid());
+        const common::IoErr err = transport.socket->set_read_callback(&DnsClient::on_udp_readable, &transport);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        transport.read_callback_registered = true;
+    }
+    return common::IoErr::None;
+}
+
+void DnsClient::drain_udp_reads(UdpTransport &transport) noexcept {
+    FIBER_ASSERT(loop_ != nullptr);
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(transport.owner == this);
+    FIBER_ASSERT(transport.socket && transport.socket->valid());
     UdpReadDispatchGuard dispatch(*this);
 
     for (;;) {
-        auto recv_result = socket_->try_recv_from(recv_buffer_.get(), options_.max_udp_packet_size);
+        auto recv_result = transport.socket->try_recv_from(recv_buffer_.get(), options_.max_udp_packet_size);
         if (!recv_result) {
             return;
         }
@@ -365,17 +518,22 @@ void DnsClient::on_udp_readable(void *ctx, common::IoErr err) noexcept {
     if (err != common::IoErr::None) {
         return;
     }
-    auto *client = static_cast<DnsClient *>(ctx);
-    FIBER_ASSERT(client != nullptr);
-    client->drain_udp_reads();
+    auto *transport = static_cast<UdpTransport *>(ctx);
+    FIBER_ASSERT(transport != nullptr);
+    FIBER_ASSERT(transport->owner != nullptr);
+    transport->owner->drain_udp_reads(*transport);
 }
 
-async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t slot_index) noexcept {
+async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t slot_index,
+                                                                std::uint8_t server_index) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(slot_index < options_.max_inflight);
+    FIBER_ASSERT(server_index < options_.nameservers.size());
     InflightSlot &slot = slots_[slot_index];
+    const net::SocketAddress &selected_server = options_.nameservers[server_index];
+    const auto deadline = make_deadline(*loop_, options_.timeout);
 
-    auto connect_operation = net::TcpStream::connect(*loop_, options_.server, options_.timeout);
+    auto connect_operation = net::TcpStream::connect(*loop_, selected_server, remaining_timeout(*loop_, deadline));
     arm_inflight_cancel(slot_index, &connect_operation, &cancel_awaiter<decltype(connect_operation)>);
     auto connect_result = co_await connect_operation;
     disarm_inflight_cancel(slot_index, &connect_operation);
@@ -396,8 +554,9 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
 
     std::size_t prefix_written = 0;
     while (prefix_written < len_prefix.size()) {
-        auto write_prefix = co_await stream.write(len_prefix.data() + prefix_written,
-                                                  len_prefix.size() - prefix_written, options_.timeout);
+        auto write_prefix =
+                co_await stream.write(len_prefix.data() + prefix_written, len_prefix.size() - prefix_written,
+                                      remaining_timeout(*loop_, deadline));
         if (!write_prefix) {
             close_stream();
             co_return std::unexpected(write_prefix.error());
@@ -411,8 +570,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
 
     std::size_t written = 0;
     while (written < slot.request_size) {
-        auto write_result =
-                co_await stream.write(slot.request_buf + written, slot.request_size - written, options_.timeout);
+        auto write_result = co_await stream.write(slot.request_buf + written, slot.request_size - written,
+                                                  remaining_timeout(*loop_, deadline));
         if (!write_result) {
             close_stream();
             co_return std::unexpected(write_result.error());
@@ -424,7 +583,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
         written += *write_result;
     }
 
-    auto read_prefix = co_await stream.read(len_prefix.data(), len_prefix.size(), options_.timeout);
+    auto read_prefix = co_await stream.read(len_prefix.data(), len_prefix.size(), remaining_timeout(*loop_, deadline));
     auto prefix_result = consume_stream_read(read_prefix);
     if (!prefix_result) {
         close_stream();
@@ -433,7 +592,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
     std::size_t prefix_read = *prefix_result;
     while (prefix_read < len_prefix.size()) {
         auto more = co_await stream.read(len_prefix.data() + prefix_read, len_prefix.size() - prefix_read,
-                                         options_.timeout);
+                                         remaining_timeout(*loop_, deadline));
         auto more_result = consume_stream_read(more);
         if (!more_result) {
             close_stream();
@@ -450,8 +609,8 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
 
     std::size_t total_read = 0;
     while (total_read < response_len) {
-        auto read_result =
-                co_await stream.read(slot.response_dst + total_read, response_len - total_read, options_.timeout);
+        auto read_result = co_await stream.read(slot.response_dst + total_read, response_len - total_read,
+                                                remaining_timeout(*loop_, deadline));
         auto payload_result = consume_stream_read(read_result);
         if (!payload_result) {
             close_stream();
@@ -462,6 +621,10 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
 
     if (!detail::response_matches_query(slot.request_buf, slot.request_size, slot.response_dst, response_len,
                                         options_.enable_0x20)) {
+        close_stream();
+        co_return std::unexpected(common::IoErr::Invalid);
+    }
+    if (validate_response(slot, slot.response_dst, response_len) == ResponseDisposition::RetryServer) {
         close_stream();
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -530,8 +693,8 @@ void DnsClient::reset_state() noexcept {
     loop_ = nullptr;
     options_ = {};
     free_head_ = kInvalidSlot;
+    next_server_ = 0;
     closing_ = false;
-    udp_read_callback_registered_ = false;
 }
 
 void DnsClient::cancel_all_inflight(common::IoErr err) noexcept {
@@ -555,6 +718,7 @@ void DnsClient::cancel_all_inflight(common::IoErr err) noexcept {
         slot.completion_err = err;
         slot.response_size = 0;
         slot.need_tcp_fallback = false;
+        slot.retry_server = false;
         slot.completed = true;
         FIBER_ASSERT(slot.cancel == nullptr || !slot.waiter);
         if (slot.cancel) {
@@ -593,6 +757,8 @@ void DnsClient::release_slot(std::uint16_t slot_index) noexcept {
     slot.active = false;
     slot.completed = false;
     slot.need_tcp_fallback = false;
+    slot.retry_server = false;
+    slot.server_index = 0;
     slot.id = 0;
     slot.waiter = {};
     slot.request_size = 0;
@@ -600,6 +766,7 @@ void DnsClient::release_slot(std::uint16_t slot_index) noexcept {
     slot.response_cap = 0;
     slot.response_size = 0;
     slot.completion_err = common::IoErr::None;
+    slot.validator = {};
     slot.cancel_context = nullptr;
     slot.cancel = nullptr;
     slot.next_free = free_head_;
@@ -679,12 +846,13 @@ void DnsClient::disarm_inflight_cancel(std::uint16_t slot_index, void *context) 
 }
 
 void DnsClient::complete_slot(std::uint16_t slot_index, common::IoErr err, std::size_t response_size,
-                              bool need_tcp_fallback) noexcept {
+                              bool need_tcp_fallback, bool retry_server) noexcept {
     FIBER_ASSERT(slot_index < options_.max_inflight);
     InflightSlot &slot = slots_[slot_index];
     slot.completion_err = err;
     slot.response_size = response_size;
     slot.need_tcp_fallback = need_tcp_fallback;
+    slot.retry_server = retry_server;
     slot.completed = true;
     auto handle = slot.waiter;
     slot.waiter = {};
@@ -695,7 +863,7 @@ void DnsClient::complete_slot(std::uint16_t slot_index, common::IoErr err, std::
 
 void DnsClient::handle_udp_packet(const std::uint8_t *packet, std::size_t packet_len,
                                   const net::SocketAddress &peer) noexcept {
-    if (closing_ || packet_len < kDnsHeaderSize || !socket_address_equal(peer, options_.server)) {
+    if (closing_ || packet_len < kDnsHeaderSize) {
         return;
     }
 
@@ -706,7 +874,8 @@ void DnsClient::handle_udp_packet(const std::uint8_t *packet, std::size_t packet
     }
 
     InflightSlot &slot = slots_[slot_index];
-    if (!slot.active || slot.id != id) {
+    if (!slot.active || slot.id != id || slot.server_index >= options_.nameservers.size() ||
+        !socket_address_equal(peer, options_.nameservers[slot.server_index])) {
         return;
     }
     if (!detail::response_matches_query(slot.request_buf, slot.request_size, packet, packet_len,
@@ -718,10 +887,52 @@ void DnsClient::handle_udp_packet(const std::uint8_t *packet, std::size_t packet
         return;
     }
 
-    std::memcpy(slot.response_dst, packet, packet_len);
     const std::uint16_t flags = read_be16(packet + 2);
     const bool truncated = (flags & 0x0200U) != 0;
+    if (!truncated && validate_response(slot, packet, packet_len) == ResponseDisposition::RetryServer) {
+        complete_slot(slot_index, common::IoErr::None, 0, false, true);
+        return;
+    }
+
+    std::memcpy(slot.response_dst, packet, packet_len);
     complete_slot(slot_index, common::IoErr::None, packet_len, truncated && options_.enable_tcp_fallback);
+}
+
+DnsClient::ResponseDisposition DnsClient::validate_response(const InflightSlot &slot, const std::uint8_t *packet,
+                                                            std::size_t packet_len) const noexcept {
+    if (slot.validator.validate == nullptr) {
+        return ResponseDisposition::Accept;
+    }
+    return slot.validator.validate(slot.validator.context, packet, packet_len);
+}
+
+bool DnsClient::should_retry_server_error(const std::uint8_t *packet, std::size_t packet_len) const noexcept {
+    if (!options_.retry_server_errors || packet == nullptr || packet_len < kDnsHeaderSize) {
+        return false;
+    }
+    switch (read_be16(packet + 2) & 0x000fU) {
+        case 1: // FORMERR
+        case 2: // SERVFAIL
+        case 4: // NOTIMP
+        case 5: // REFUSED
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool DnsClient::has_open_udp_transport() const noexcept {
+    return std::ranges::any_of(udp_transports_, [](const UdpTransport &transport) noexcept {
+        return transport.socket && transport.socket->valid();
+    });
+}
+
+DnsClient::UdpTransport &DnsClient::udp_transport(net::IpFamily family) noexcept {
+    return udp_transports_[udp_transport_index(family)];
+}
+
+const DnsClient::UdpTransport &DnsClient::udp_transport(net::IpFamily family) const noexcept {
+    return udp_transports_[udp_transport_index(family)];
 }
 
 } // namespace fiber::dns

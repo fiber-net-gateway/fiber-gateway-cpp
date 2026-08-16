@@ -25,6 +25,7 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/util/Base64.h>
+#include <fiber/dns/DnsResolverConfig.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp2Exchange.h>
@@ -1150,7 +1151,12 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
 class RuntimeHarness {
 public:
     explicit RuntimeHarness(const fiber::lite_nginx::runtime::RuntimeConfig &runtime) : launcher_(loop_) {
-        auto start_result = launcher_.start(runtime);
+        auto resolver_config = fiber::dns::load_system_resolver_config();
+        if (!resolver_config) {
+            ADD_FAILURE() << fiber::dns::resolver_config_error_name(resolver_config.error().code);
+            return;
+        }
+        auto start_result = launcher_.start(runtime, *resolver_config);
         if (!start_result.has_value()) {
             ADD_FAILURE() << start_result.error().message;
             return;
