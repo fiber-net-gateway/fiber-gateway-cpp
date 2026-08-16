@@ -41,6 +41,7 @@ struct FakeConnectState {
     std::array<fiber::common::IoErr, fiber::net::kHappyEyeballsMaxAddresses> errors{};
     std::array<int, fiber::net::kHappyEyeballsMaxAddresses> peer_fds{};
     std::array<std::uint8_t, fiber::net::kHappyEyeballsMaxAddresses> launch_order{};
+    std::array<std::chrono::steady_clock::time_point, fiber::net::kHappyEyeballsMaxAddresses> launch_times{};
     std::promise<void> *first_launch = nullptr;
     std::uint8_t launch_count = 0;
 };
@@ -88,7 +89,9 @@ struct FakeConnectTraits {
         }
 
         address.state->peer_fds[address.id] = fds[1];
-        address.state->launch_order[address.state->launch_count++] = address.id;
+        const std::uint8_t launch_index = address.state->launch_count++;
+        address.state->launch_order[launch_index] = address.id;
+        address.state->launch_times[launch_index] = fiber::event::EventLoop::current().now();
         if (address.state->launch_count == 1 && address.state->first_launch != nullptr) {
             address.state->first_launch->set_value();
         }
@@ -142,6 +145,7 @@ void close_peers(FakeConnectState &state) noexcept {
 struct PolicyOutcome {
     fiber::net::HappyEyeballsConnectError error{};
     std::array<std::uint8_t, 4> launch_order{};
+    std::array<std::chrono::steady_clock::time_point, 4> launch_times{};
     std::uint8_t launch_count = 0;
 };
 
@@ -165,6 +169,7 @@ DetachedTask run_policy_case(FakeConnectState *state, fiber::net::HappyEyeballsA
     }
     outcome.launch_count = state->launch_count;
     std::copy_n(state->launch_order.begin(), outcome.launch_order.size(), outcome.launch_order.begin());
+    std::copy_n(state->launch_times.begin(), outcome.launch_times.size(), outcome.launch_times.begin());
     close_peers(*state);
     promise->set_value(outcome);
     fiber::event::EventLoop::current().stop();
@@ -206,6 +211,10 @@ TEST(TcpConnectorTest, InterleavesV6FirstAndSummarizesFailuresInCandidateOrder) 
     EXPECT_EQ(outcome.error.attempt_errors[1], fiber::common::IoErr::AddrNotAvailable);
     EXPECT_EQ(outcome.error.attempt_errors[2], fiber::common::IoErr::Permission);
     EXPECT_EQ(outcome.error.attempt_errors[3], fiber::common::IoErr::NotConnected);
+    for (std::size_t i = 1; i < outcome.launch_times.size(); ++i) {
+        EXPECT_GE(outcome.launch_times[i] - outcome.launch_times[i - 1],
+                  fiber::net::kHappyEyeballsMinimumConnectionAttemptDelay);
+    }
 }
 
 TEST(TcpConnectorTest, InterleavesV4FirstDeterministically) {
@@ -319,6 +328,64 @@ TEST(TcpConnectorTest, FirstSuccessWinsAndClosesPendingLoserBeforeReturning) {
     EXPECT_GE(outcome.elapsed, 10ms);
     EXPECT_LT(outcome.elapsed, 500ms);
     EXPECT_TRUE(outcome.first_peer_closed);
+}
+
+void drain_peer(int fd) noexcept {
+    std::array<char, 4096> bytes{};
+    for (;;) {
+        ssize_t received = ::recv(fd, bytes.data(), bytes.size(), 0);
+        if (received > 0 || (received < 0 && errno == EINTR)) {
+            continue;
+        }
+        return;
+    }
+}
+
+DetachedTask make_attempts_writable(FakeConnectState *state) {
+    co_await fiber::async::sleep(40ms);
+    drain_peer(state->peer_fds[0]);
+    drain_peer(state->peer_fds[1]);
+}
+
+DetachedTask run_simultaneous_ready_attempts(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
+    std::array<FakeAddress, 2> addresses{{
+            {state, fiber::net::IpFamily::V6, 0},
+            {state, fiber::net::IpFamily::V4, 1},
+    }};
+    fiber::net::HappyEyeballsOptions options;
+    options.connection_attempt_delay = 10ms;
+    options.total_timeout = 1s;
+    fiber::async::spawn([state]() { return make_attempts_writable(state); });
+
+    auto result = co_await FakeConnector::connect(fiber::event::EventLoop::current(), addresses, options);
+    ConnectorOutcome outcome;
+    outcome.error = result ? fiber::common::IoErr::None : result.error().code;
+    outcome.launch_count = state->launch_count;
+    if (result) {
+        const int winner_fd = result->release_fd();
+        ::close(winner_fd);
+    }
+    outcome.first_peer_closed = peer_closed(state->peer_fds[0]);
+    outcome.second_peer_closed = peer_closed(state->peer_fds[1]);
+    close_peers(*state);
+    promise->set_value(outcome);
+    fiber::event::EventLoop::current().stop();
+}
+
+TEST(TcpConnectorTest, SimultaneousReadyAttemptsKeepLoserCallbacksAliveThroughPollDispatch) {
+    FakeConnectState state;
+    fiber::event::EventLoopGroup group(1);
+    std::promise<ConnectorOutcome> promise;
+    auto future = promise.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() { return run_simultaneous_ready_attempts(&state, &promise); });
+    ConnectorOutcome outcome = future.get();
+    group.join();
+
+    EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.launch_count, 2);
+    EXPECT_TRUE(outcome.first_peer_closed);
+    EXPECT_TRUE(outcome.second_peer_closed);
 }
 
 DetachedTask run_deadline(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {

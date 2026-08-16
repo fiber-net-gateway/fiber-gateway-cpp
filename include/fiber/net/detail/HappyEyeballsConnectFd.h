@@ -53,6 +53,12 @@ public:
     ConnectAwaiter &operator=(ConnectAwaiter &&) = delete;
 
     ~ConnectAwaiter() {
+        if (resume_entry_.is_in_queue()) {
+            FIBER_ASSERT(loop_ != nullptr);
+            FIBER_ASSERT(loop_->in_loop());
+            loop_->cancel<ConnectAwaiter, &ConnectAwaiter::resume_entry_>(*this);
+            handle_ = {};
+        }
         if (!waiting_) {
             FIBER_ASSERT(!timer_entry_.is_in_heap());
             FIBER_ASSERT(!stop_entry_.is_registered());
@@ -158,7 +164,7 @@ private:
             return;
         }
         if (options_.total_timeout < std::chrono::milliseconds::zero() ||
-            options_.connection_attempt_delay < std::chrono::milliseconds(10) ||
+            options_.connection_attempt_delay < kHappyEyeballsMinimumConnectionAttemptDelay ||
             options_.max_concurrent_attempts == 0 ||
             options_.max_concurrent_attempts > kHappyEyeballsMaxConcurrentAttempts ||
             options_.first_address_family_count == 0 ||
@@ -259,7 +265,7 @@ private:
     }
 
     // Returns true only when the attempt remains pending. Immediate success completes the whole
-    // operation; immediate failure is recorded so the caller can launch the next candidate now.
+    // operation; immediate failure is recorded so the caller can accelerate the next candidate.
     bool launch_one(std::uint8_t candidate) noexcept {
         attempted_mask_ |= static_cast<std::uint16_t>(std::uint16_t{1} << candidate);
         ++attempted_count_;
@@ -306,31 +312,49 @@ private:
 
     bool deadline_reached() const noexcept { return deadline_ != TimePoint::max() && loop_->now() >= deadline_; }
 
-    // An attempt that fails before the stagger expires immediately advances to the next address.
-    // Once one remains pending, the normal stagger resumes from that launch time.
-    void launch_replacement() noexcept {
-        while (waiting_ && next_candidate_ < candidate_count_) {
-            if (attempted_count_ != 0 && deadline_reached()) {
-                complete_error(common::IoErr::TimedOut);
-                return;
-            }
-            const std::uint8_t candidate = next_candidate_++;
-            if (launch_one(candidate)) {
-                next_attempt_at_ = add_delay(loop_->now(), options_.connection_attempt_delay);
-                if (deadline_reached()) {
-                    complete_error(common::IoErr::TimedOut);
-                    return;
-                }
-                break;
-            }
+    void accelerate_next_attempt() noexcept {
+        if (attempted_count_ == 0 || next_candidate_ >= candidate_count_) {
+            return;
         }
+        const TimePoint earliest = add_delay(last_attempt_at_, kHappyEyeballsMinimumConnectionAttemptDelay);
+        next_attempt_at_ = std::min(next_attempt_at_, earliest);
+    }
 
+    // Launch at most one candidate per call. An early failure may shorten the configured stagger,
+    // but RFC 8305 still forbids starting a subsequent connection within 10 ms of the prior one.
+    void launch_replacement() noexcept {
         if (!waiting_) {
             return;
         }
+        if (attempted_count_ != 0 && deadline_reached()) {
+            complete_error(common::IoErr::TimedOut);
+            return;
+        }
+
+        if (next_candidate_ < candidate_count_ && active_count_ < options_.max_concurrent_attempts) {
+            if (attempted_count_ != 0 && loop_->now() < next_attempt_at_) {
+                schedule_timer();
+                return;
+            }
+            const std::uint8_t candidate = next_candidate_++;
+            last_attempt_at_ = loop_->now();
+            next_attempt_at_ = add_delay(last_attempt_at_, options_.connection_attempt_delay);
+            const bool pending = launch_one(candidate);
+            if (!waiting_) {
+                return;
+            }
+            if (!pending) {
+                accelerate_next_attempt();
+            }
+        }
+
         if (next_candidate_ == candidate_count_ && active_count_ == 0) {
             common::IoErr code = attempt_errors_[candidate_count_ - 1];
             complete_error(code == common::IoErr::None ? common::IoErr::Unknown : code);
+            return;
+        }
+        if (deadline_reached()) {
+            complete_error(common::IoErr::TimedOut);
             return;
         }
         schedule_timer();
@@ -392,6 +416,7 @@ private:
         FIBER_ASSERT(active_count_ > 0);
         --active_count_;
         record_failure(candidate, connect_error);
+        accelerate_next_attempt();
         launch_replacement();
     }
 
@@ -408,7 +433,9 @@ private:
         for (auto &attempt: attempts_) {
             if (attempt.has_value()) {
                 attempt->efd.close_fd();
-                attempt.reset();
+                // Poller events for other ready attempts may already be present in the current
+                // epoll batch. Keep their callback storage alive until the deferred resume point.
+                attempt->owner = nullptr;
             }
         }
         active_count_ = 0;
@@ -430,24 +457,32 @@ private:
         resume_waiter();
     }
 
-    void complete_error(common::IoErr code) noexcept {
+    void complete_error(common::IoErr code, bool defer_resume = true) noexcept {
         FIBER_ASSERT(waiting_);
         waiting_ = false;
         completed_ = true;
         cancel_registrations();
         result_ = std::unexpected(make_error(code));
         close_attempts();
-        resume_waiter();
+        resume_waiter(defer_resume);
     }
 
-    void resume_waiter() noexcept {
-        const bool should_resume = suspended_;
+    void resume_waiter(bool defer_resume = true) noexcept {
+        if (!suspended_) {
+            handle_ = {};
+            return;
+        }
         suspended_ = false;
+        if (!handle_) {
+            return;
+        }
+        if (defer_resume) {
+            loop_->post_local<ConnectAwaiter, &ConnectAwaiter::resume_entry_, &ConnectAwaiter::on_resume>(*this);
+            return;
+        }
         auto handle = handle_;
         handle_ = {};
-        if (should_resume && handle) {
-            handle.resume();
-        }
+        handle.resume();
     }
 
     void abandon() noexcept {
@@ -477,7 +512,22 @@ private:
 
     static void on_loop_stop(ConnectAwaiter *connect) noexcept {
         if (connect != nullptr && connect->waiting_) {
-            connect->complete_error(common::IoErr::Canceled);
+            // Stop callbacks run after the final poll batch and the loop does not drain deferred
+            // callbacks afterward, so resume inline at this safe point.
+            connect->complete_error(common::IoErr::Canceled, false);
+        }
+    }
+
+    static void on_resume(ConnectAwaiter *connect) noexcept {
+        if (connect == nullptr) {
+            return;
+        }
+        FIBER_ASSERT(!connect->waiting_);
+        FIBER_ASSERT(!connect->suspended_);
+        auto handle = connect->handle_;
+        connect->handle_ = {};
+        if (handle) {
+            handle.resume();
         }
     }
 
@@ -489,9 +539,11 @@ private:
     std::array<std::optional<Attempt>, kHappyEyeballsMaxConcurrentAttempts> attempts_{};
     std::coroutine_handle<> handle_{};
     event::EventLoop::TimerEntry timer_entry_{};
+    event::EventLoop::DeferEntry resume_entry_{};
     event::EventLoop::StopEntry stop_entry_{};
     ConnectResult result_{std::unexpected(HappyEyeballsConnectError{})};
     TimePoint deadline_ = TimePoint::max();
+    TimePoint last_attempt_at_ = TimePoint::max();
     TimePoint next_attempt_at_ = TimePoint::max();
     common::IoErr validation_error_ = common::IoErr::None;
     std::uint16_t attempted_mask_ = 0;

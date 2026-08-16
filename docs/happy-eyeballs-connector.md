@@ -20,7 +20,8 @@ IPv6-first transforms `v6-a, v6-b, v4-a, v4-b` into `v6-a, v4-a, v6-b, v4-b`.
 - The first candidate is attempted immediately.
 - A pending attempt remains active while the next candidate starts after
   `connection_attempt_delay` (250 ms by default). Delays below 10 ms are rejected.
-- An attempt that fails before the delay expires advances to the next candidate immediately.
+- An attempt that fails before the delay expires may advance the next candidate early, but never
+  sooner than the RFC 8305 lower bound of 10 ms after the previous attempt.
 - At most `max_concurrent_attempts` sockets are active (two by default, four maximum).
 - There is no per-attempt timeout. Every active and future attempt shares `total_timeout`; an
   infinite total timeout is supported. A zero timeout still permits the first nonblocking

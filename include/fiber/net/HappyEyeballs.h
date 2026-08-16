@@ -12,6 +12,7 @@ namespace fiber::net {
 
 inline constexpr std::size_t kHappyEyeballsMaxAddresses = 16;
 inline constexpr std::size_t kHappyEyeballsMaxConcurrentAttempts = 4;
+inline constexpr std::chrono::milliseconds kHappyEyeballsMinimumConnectionAttemptDelay{10};
 
 enum class HappyEyeballsAddressPolicy : std::uint8_t {
     V6First,
