@@ -119,12 +119,15 @@ wire codec（`DnsName`/`DnsMessage`）边界检查、指针压缩循环检测（
 
 **修复**：`temp_records` 改 `std::array<IpAddress, N>` 上栈；复用 `ResolveResult`（reset 而非 destroy/re-init）；用 `BufPool`。
 
-### 8. 双族解析总是并行查 A+AAAA，无 happy-eyeballs racing
+### 8. ✅ 已修复连接级 racing；双族解析仍并行查 A+AAAA
 `DnsResolver.cpp:373-377`(V6First/V4First 都 spawn 两个 + WaitGroup 等齐)
 
-V6First 也会同时发 A 查询并等齐两者才合并，上游查询量翻倍。对网关场景可接受，但浪费。
+V6First 仍会同时发 A 查询并等齐两者才合并，上游查询量更高，但不会因先查一个族而延迟另
+一个族的可用地址。
 
-**修复**：V6First 先发 AAAA，失败/超时再回退 A；或连接级 racing。
+**修复**：采用连接级方案。解析完成后由固定容量 `TcpConnector` 做稳定双族交错、延迟启动和
+有界并发；共享一个 TCP 总 deadline，并覆盖调用方取消、EventLoop 停机与析构清理。DNS 查询
+仍与连接阶段分离并保持并行，避免将 DNS 回退时间叠加到连接延迟。
 
 ---
 
@@ -156,7 +159,8 @@ V6First 也会同时发 A 查询并等齐两者才合并，上游查询量翻倍
 | P0 | ✅ 已修复 | HIGH #3（随机 ID + 0x20 + 客户端 UDP/TCP question 校验） | - |
 | P1 | ✅ 已修复/确认 | MEDIUM #4/#5/#6（缓存 LRU/清理/tombstone/NXDOMAIN 语义） | - |
 | P1 | ⏳ 待修复 | MEDIUM #7（堆分配 churn） | 中 |
-| P2 | ⏳ 待修复 | MEDIUM #8 + 其余未修复 LOW | 排期 |
+| P2 | ✅ 已修复 | MEDIUM #8（连接级 Happy Eyeballs racing） | - |
+| P2 | ⏳ 待修复 | 其余未修复 LOW | 排期 |
 
 ## 已验证为正确的部分
 
