@@ -27,8 +27,69 @@ application, and optional application-layer libraries such as
 - HPACK, QPACK, streaming request and response bodies, and WebSocket proxying
   through HTTP/1 Upgrade or HTTP/2/3 Extended CONNECT.
 - A Nacos client library with its own private gRPC/protobuf transport.
-- A scripting runtime, common JSON codecs, structured logging, and
-  allocation-conscious buffer and memory utilities.
+- A purpose-built JS-like bytecode engine with compile-time host bindings,
+  request-scoped GC, and native coroutine-aware HTTP APIs.
+- Common JSON codecs, structured logging, and allocation-conscious buffer and
+  memory utilities.
+
+## Purpose-Built Scripting Engine
+
+Gateway behavior often needs to change faster than the native data plane. A
+static configuration language is sufficient for wiring listeners and
+upstreams, but becomes awkward for conditional routing, request inspection,
+header and payload transformation, canary decisions, and multi-step upstream
+calls. Implementing every policy in C++ keeps the hot path fast, but turns each
+policy adjustment into a rebuild and deployment. Fiber's scripting engine is
+the deliberately narrow layer between those two extremes: configuration can
+select and compile a policy, while the request still runs inside the same C++
+gateway process.
+
+The runtime is an in-tree, JS-like bytecode interpreter rather than an
+ECMAScript implementation. It provides integers and floating-point numbers,
+strings, binary values, arrays, objects, templates, control flow, exceptions,
+and a gateway-oriented standard library. HTTP bindings expose request data,
+response construction, route and connection constants, and directive-bound
+upstream `request()` and streaming `proxyPass()` operations:
+
+```javascript
+directive backend = http "@api";
+
+if ($header.x_canary == "1") {
+    return backend.proxyPass({
+        headers: {"X-Route": "canary"}
+    });
+}
+
+resp.sendJson(200, {status: "ready", path: $req.path});
+```
+
+Scripts are compiled when configuration is loaded, so unknown functions,
+invalid argument counts, unavailable route constants, and invalid directives
+fail before serving traffic. The resulting read-only bytecode can be reused
+across requests; execution state and garbage-collected values belong to a
+request-local `GcHeap`. Host functions are registered explicitly through a
+`Library`, which keeps the script-visible capability surface small and makes
+the C++/script ABI explicit.
+
+A dedicated engine is important here because embedding a general-purpose
+JavaScript runtime would bring another garbage collector and object model, a
+larger dependency and ABI surface, and language features unrelated to gateway
+policy. It would also require either a second event-loop/asynchronous model or
+a substantial bridge to Fiber's scheduler. That integration would work against
+Fiber's coroutine ownership and allocation model. Instead, asynchronous host
+functions compile to dedicated opcodes: the VM suspends directly on
+`fiber::async::Task` and resumes without requiring `Promise` or `await` syntax.
+Execution results distinguish returned values, catchable script exceptions,
+and host/runtime aborts so the gateway can map failures deliberately.
+
+This engine is therefore not intended to compete with a browser or Node.js
+runtime. Its value is that its language surface, bytecode, memory ownership,
+and HTTP capabilities can evolve with this gateway's performance and lifecycle
+requirements. The explicit capability model reduces exposed machinery, but it
+is not by itself a security sandbox; hosts must still apply request-size,
+timeout, trust, and resource policies. See the
+[script module guide](docs/script-guide.md) for the complete language, standard
+library, HTTP API, and C++ embedding contract.
 
 ## Repository Layout
 
