@@ -1,5 +1,7 @@
 # Script 模块使用指南
 
+[English](script-guide.md) | 简体中文
+
 本文介绍 `fiber_lib` 内嵌脚本模块的实际用法，包括脚本语言、标准库、C++ 嵌入、HTTP 请求/响应函数、路由变量和脚本发起上游 HTTP 请求的 API。
 
 文中的 TypeScript 仅用于描述脚本 API 的参数和返回值；脚本运行时不是 TypeScript/JavaScript 引擎，也不读取 `.d.ts` 文件。本文以当前 `src/script/` 和 `src/http_script/` 实现为准。
@@ -84,80 +86,243 @@ type JsonValue = null | boolean | number | string | JsonValue[] | {
 - 数组和对象是可变引用值。标准库中的 `array.push()`、`array.pop()`、`Object.assign()` 和 `Object.deleteProperties()` 会原地修改传入值。
 - `typeof` 返回模块自己的类型名：`"undefined"`、`"null"`、`"boolean"`、`"number"`、`"string"`、`"binary"`、`"array"`、`"object"`、`"iterator"` 或 `"exception"`。
 
+### 3.1 真值规则
+
+`if`、`!`、`&&`、`||` 和条件表达式使用同一套真值规则：
+
+| 值 | 是否为真 |
+| --- | --- |
+| `undefined`、`null` | 否 |
+| `false` | 否 |
+| `true` | 是 |
+| 整数 `0`、浮点 `0.0`、`-0.0`、`NaN` | 否 |
+| 其他数字，包括正负无穷 | 是 |
+| 空字符串 | 否 |
+| 非空字符串 | 是 |
+| `Binary`、数组、对象、迭代器和异常值 | 是，即使容器为空 |
+
+脚本没有可直接调用的通用“转布尔”函数。需要布尔结果时可以使用 `!!value`。
+
 ## 4. 支持的脚本语法
 
-### 4.1 字面量、变量和访问
+本节描述当前解析器和 VM 的完整脚本语法。它看起来像 JavaScript，但不是 ECMAScript 的子集实现；不要依赖本节未列出的 JavaScript 行为。
+
+### 4.1 空白、注释、标识符和分号
+
+普通空格、制表符、CR 和 LF 会被忽略；源代码中的独立 U+2028/U+2029 不是通用空白。支持两种注释：
 
 ```javascript
-let count = 3;
-let ratio = 0.25;
-let enabled = true;
-let empty = null;
-let text = "fiber";
-let list = [1, 2, count];
-let object = {name: text, enabled, ["dynamic-key"]: 1};
-
-let first = list[0];
-let name = object.name;
-object.name = "gateway";
-object["new-key"] = 2;
+// 到行末的注释
+/* 可以跨行、但不能嵌套的块注释 */
 ```
 
-对象字面量支持简写属性、计算属性和展开，数组支持展开：
+建议标识符只使用 `[A-Za-z_$][A-Za-z0-9_$]*`。关键字 `let`、`if`、`else`、`for`、`of`、`continue`、`break`、`return`、`directive`、`try`、`catch` 和 `throw` 不能作为变量名。`true`、`false`、`null`、`typeof` 和 `in` 在对应语法位置也有特殊含义，因此同样不应作为变量名。
+
+分号规则不是 JavaScript ASI：
+
+- `let` 和 `directive` 声明必须以 `;` 结束。
+- 表达式、`return`、`throw`、`break` 和 `continue` 后的 `;` 可省略，但建议始终保留。
+- 多余的空语句 `;` 会被忽略。
+- 换行不会让 `return` 自动结束；`return\nvalue;` 仍会返回 `value`。
+- 空脚本是编译错误，空的 `{}` 块合法。
+
+### 4.2 标量字面量
+
+```javascript
+let decimal = 42;
+let longSuffix = 42L;
+let hexadecimal = 0x2a;
+let real = 3.5;
+let leadingDot = .5;
+let trailingDot = 1.;
+let exponent = 1.25e2;
+let floatSuffix = 1.5f;
+let doubleSuffix = 1d;
+let enabled = true;
+let disabled = false;
+let empty = null;
+```
+
+- 十进制和十六进制整数存为有符号 64 位整数；`L`/`l` 后缀只影响词法分类，不产生另一种运行时类型。
+- 小数、指数形式以及 `F`/`f`/`D`/`d` 后缀都存为 `double`。负数由一元 `-` 组成，不是字面量的一部分。
+- 不支持二进制字面量、数字分隔符、BigInt、`NaN`/`Infinity` 字面量或独立的 `undefined` 字面量。
+- 整数字面量越过 `int64_t`、或实数字面量超出解析范围，会在编译期报错。
+
+### 4.3 字符串和转义
+
+单引号和双引号字符串等价：
+
+```javascript
+let a = "line\ntext";
+let b = 'quote: \'';
+let c = "\x41\u4e2d";
+```
+
+支持 `\\`、`\'`、`\"`、`` \` ``、`\b`、`\f`、`\n`、`\r`、`\t`、`\v`、`\xHH`、`\uHHHH` 和 1 到 3 位八进制转义。反斜杠后紧跟行终止符表示续行且不写入字符。兼容转义 `\a` 当前写入普通字符 `a`，不是响铃字符。普通字符串不能包含未转义换行，也不支持 `\u{...}`。
+
+字符串位置采用 UTF-16 code unit：`"😀".length` 为 2，`"😀"[0]` 与 `"😀"[1]` 分别返回一个代理项字符串。内部 WTF-8 表示可以无损保存这些代理项。
+
+### 4.4 变量、作用域和根值
+
+```javascript
+let value;
+value = 1;
+
+{
+    let value = 2; // 遮蔽外层 value
+}
+
+return $.request.id;
+```
+
+- `let name;` 初始化为 `undefined`。
+- 作用域由脚本、显式块、`if`/`else` 块、循环和 `catch` 块建立。内层声明可以遮蔽外层变量。
+- 同一作用域重复 `let` 不报错，而是复用同一个槽；后一个声明会重新赋值。
+- 读取尚未声明的普通标识符会创建一个值为 `undefined` 的隐式槽，不会产生 `ReferenceError`；向它赋值也合法。为了可读性，生产脚本仍应显式声明变量。
+- C++ 传给 `exec_sync()`/`exec_async()` 的 `root` 参数通过特殊标识符 `$` 读取。`$.user.id` 是普通属性访问；`$query.name` 则是宿主注册的常量，两者不是一回事。
+
+### 4.5 数组和对象字面量
 
 ```javascript
 let name = "fiber";
 let base = {a: 1};
-let object = {name, ...base, ["b"]: 2};
+let list = [0, 1, 2,];
+let object = {
+    name,                    // 简写属性
+    "static-key": 1,        // 字符串键
+    ["dynamic-" + name]: 2, // 计算键
+    ...base,                 // 对象展开
+};
+```
+
+数组和对象都允许尾逗号，但不支持数组空洞。静态对象键必须是标识符或字符串；同一个对象字面量中的重复静态键是编译错误。计算键必须在运行时得到字符串，否则抛 `TypeError`；多个计算键可以覆盖同一属性。
+
+展开规则如下：
+
+```javascript
 let list = [0, ...[1, 2], 3];
+let values = [...{a: 1, b: 2}]; // [1, 2]，按属性插入顺序
+let object = {a: 1, ...{a: 2, b: 3}};
 ```
 
-`let` 声明必须以分号结束，其他语句也建议始终写分号。对象字面量中重复的静态键是编译错误。数组下标赋值只能修改已有下标；追加元素应使用 `array.push()`。
+- 数组展开接受数组或对象；对象展开时追加属性值，不追加键。其他类型抛 `TypeError`。
+- 对象展开只接受对象，按插入顺序复制属性；其他类型抛 `TypeError`。
+- 展开和字面量都创建新容器，但元素/属性值是浅复制。展开不会深拷贝嵌套数组和对象。
+- 后写入的属性覆盖先前值；覆盖已有键不会改变其插入位置。
 
-C++ 传给 `exec_sync()`/`exec_async()` 的 `root` 参数在脚本内以 `$` 访问，例如 `$.user.id`。`$query.name` 这类写法则是由宿主库解析的常量，不是根对象属性。
+### 4.6 成员访问、索引和赋值
 
-### 4.2 运算符
+```javascript
+let first = list[0];
+let name = object.name;
+let dynamic = object["dynamic-key"];
 
-支持以下运算符：
-
-```text
-一元：+  -  !  typeof
-算术：+  -  *  /  %
-比较：<  <=  >  >=  ==  !=  ===  !==
-逻辑：&&  ||
-成员：in
-条件：condition ? whenTrue : whenFalse
-赋值：=
+object.name = "gateway";
+object["new-key"] = 2;
+list[0] = 9;
 ```
 
-`&&` 和 `||` 短路执行并返回参与运算的值。`+` 在任一操作数是字符串时执行字符串拼接；对象、数组和二进制不能隐式拼接。数值运算接受数字、布尔值和 `null`，不支持普通 JavaScript 那样把任意字符串隐式转成数字。
+读取规则：
 
-`==`/`!=` 是宽松比较，`===`/`!==` 是严格比较。数组和对象的严格比较使用引用身份。
+- 对象的点访问等价于字符串键索引。缺少属性返回 `undefined`；对 `null`、`undefined` 或其他标量继续读取也返回 `undefined`，不会抛异常。
+- 数组索引必须是非负整数且在范围内，否则返回 `undefined`。浮点数 `0.0` 不是有效数组索引。
+- 字符串索引必须是整数，返回对应 UTF-16 code unit 的字符串；越界返回 `undefined`。
+- 数组和字符串的点属性读取返回其长度。规范用法是 `.length`；当前实现对任意点属性名都返回长度，不应依赖这一兼容细节。
 
-`key in object` 检查对象属性是否存在；`index in array` 检查整数下标是否落在数组范围内。其他类型组合返回 `false`。
+写入规则：
 
-`~` match 运算符虽然可被语法解析，但当前会在字节码编译阶段被拒绝；正则相关能力尚未提供。
+- 变量、对象属性和数组/对象索引可作为赋值左值。赋值表达式返回右值，并且右结合，因此 `a = b = 1` 合法。
+- 对象键必须是字符串。点赋值和字符串索引赋值可创建新属性；失败时抛 `TypeError`。
+- 数组写入只接受整数已有下标。负数或越界抛 `RangeError`，非整数键抛 `TypeError`；追加应使用 `array.push()`。
+- 不能给字符串、`null`、`undefined` 或其他标量写属性/索引；这会抛 `TypeError`。
+- `compile_script(..., allow_assign=false)` 会在解析时禁止所有赋值表达式。
 
-### 4.3 控制流
+### 4.7 函数调用和参数展开
+
+函数调用是编译期静态名称解析：
+
+```javascript
+array.push(items, 1, 2);
+array.push(items, ...moreItems);
+Object.assign(target, ...sources);
+```
+
+- `array.push(a, x)` 是完整注册名；`a.push(x)` 不是动态方法调用。
+- 函数不是脚本值，不能赋给变量、作为回调传递或动态调用。
+- 参数从左到右求值。参数展开接受数组或对象；对象按插入顺序展开属性值。其他类型抛 `TypeError`。
+- 含展开参数的调用在编译期被视为参数数量未知，因此只能匹配可变参数签名。固定参数函数即使运行时展开长度恰好匹配，也会编译失败。
+- 未知函数、参数数量不匹配、同步/异步重载冲突或重载歧义都在编译期报错。
+- 异步函数在源码中仍按普通调用书写。编译结果会记录异步 opcode，必须用 `exec_async()` 执行。
+
+### 4.8 运算符优先级
+
+从高到低：
+
+| 优先级 | 运算符 | 结合性 |
+| --- | --- | --- |
+| 1 | `()`、函数调用、`.`、`[]` | 从左到右 |
+| 2 | 一元 `+`、`-`、`!`、`typeof` | 从右到左 |
+| 3 | `*`、`/`、`%` | 从左到右 |
+| 4 | `+`、`-` | 从左到右 |
+| 5 | `<`、`<=`、`>`、`>=`、`==`、`!=`、`===`、`!==`、`in`、`~` | 从左到右 |
+| 6 | `&&` | 从左到右，短路 |
+| 7 | `||` | 从左到右，短路 |
+| 8 | `?:`、`=` | 从右到左 |
+
+所有比较与相等运算符处在同一级，这一点不同于 JavaScript。复杂比较请加括号。`~` 可被解析，但当前编译器明确拒绝它，见 4.17。
+
+### 4.9 算术和一元运算
+
+数字运算接受整数、浮点数、布尔值和 `null`；布尔值转为 0/1，`null` 转为 0。普通字符串不会隐式转数字。
+
+- 一元 `+` 返回数值化结果；一元 `-` 取负；非数值兼容类型抛 `TypeError`。对 `INT64_MIN` 取负会提升为浮点数。
+- `+` 在任一操作数是字符串时执行拼接。另一侧可为 `undefined`、`null`、布尔值、数字或字符串，分别使用兼容文本；数组、对象和 `Binary` 会导致 `TypeError`。
+- 没有字符串操作数时，`+`、`-`、`*` 执行数值运算。整数溢出时结果提升为 `double`；任一操作数是浮点数时结果也是浮点数。
+- `/` 总是返回浮点数。除数为整数或浮点 0 时抛 `RangeError`。
+- `%` 对整数返回整数余数，对含浮点操作数的表达式使用浮点余数；除数为 0 时抛 `RangeError`。
+- `!value` 总是返回布尔值，规则见 3.1；`typeof value` 总是返回第 3 节列出的类型字符串。
+
+这些运算除结果分配外没有副作用。
+
+### 4.10 比较、相等、逻辑和条件运算
+
+- `<`、`<=`、`>`、`>=`：两个字符串按 UTF-16 code unit 字典序比较；两个数值兼容值转换为 `double` 比较。其他组合（包括字符串与数字混合）直接返回 `false`，不抛异常。
+- `===`/`!==`：数字统一转成 `double` 后比较，因此整数/浮点表示可跨表示比较，但绝对值超过 `2^53` 的不同整数可能因精度折叠而相等；字符串按内容比较；数组、对象、二进制、迭代器和异常按身份比较；`NaN` 不等于自身。
+- `==`/`!=`：在严格比较之外，`null == undefined`；布尔值按 0/1 与数字或数值字符串比较；数字和字符串按完整数值文本转换后比较。该转换忽略两端 ASCII 空白，空文本为 0，并接受十进制/指数、`0x` 十六进制（含小数和 `p` 指数）以及大小写不敏感的 `NaN`、`Inf`/`Infinity`；其他尾随字符使比较不相等。对象、数组和二进制不做字符串或原始值转换。
+- `key in object` 只接受字符串键；`index in array` 只接受非负整数下标。类型不匹配或不存在时返回 `false`。
+- `left && right` 在 `left` 为假时返回 `left`，否则求值并返回 `right`。`left || right` 在 `left` 为真时返回 `left`，否则求值并返回 `right`。
+- `condition ? whenTrue : whenFalse` 只求值一个分支并返回该分支的值。
+
+### 4.11 `if`、块和表达式语句
+
+`if` 和 `else` 分支必须使用花括号；支持 `else if`：
+
+```javascript
+if ($.status >= 500) {
+    return "server-error";
+} else if ($.status >= 400) {
+    return "client-error";
+} else {
+    return "ok";
+}
+```
+
+条件使用 3.1 的真值规则。独立表达式可以作为语句，结果会被丢弃；函数副作用调用和赋值通常以这种形式出现。
+
+### 4.12 `for-of`、`break` 和 `continue`
 
 ```javascript
 let result = [];
 
-if ($.enabled) {
-    for (let key, value of $.items) {
-        if (value == null) {
-            continue;
-        }
-        array.push(result, value);
-        if (length(result) >= 10) {
-            break;
-        }
+for (let key, value of $.items) {
+    if (value == null) {
+        continue;
     }
-} else {
-    return [];
+    array.push(result, value);
+    if (length(result) >= 10) {
+        break;
+    }
 }
-
-return result;
 ```
 
 `for` 只支持以下双变量 `for-of` 形式：
@@ -170,11 +335,21 @@ for (let key, value of array) { /* ... */ }
 for (let key, value of object) { /* ... */ }
 ```
 
-迭代期间新增/删除数组元素或对象属性属于结构修改，会产生可捕获的 `IterationError`；更新已有对象属性的值不属于结构修改。
+- 集合表达式只求值一次。数组和对象之外的值被视为空集合，不抛异常。
+- 循环变量只在该循环体中可见，每次迭代覆盖其值。
+- `continue` 跳到下一次迭代，`break` 退出最内层循环。当前编译器会把循环外的 `break`/`continue` 编译为空操作，但这是实现兼容细节，不应使用。
+- 迭代期间新增/删除数组元素或对象属性属于结构修改，会抛可捕获的 `IterationError`；更新已有数组元素或对象属性的值不属于结构修改。
 
-当前不支持 `while`、传统三段式 `for`、函数/类声明、模块、Promise 或 `await`。
+### 4.13 `return`
 
-### 4.4 异常
+```javascript
+return expression; // ScriptResultKind::Value，包括 expression 为 undefined
+return;            // ScriptResultKind::Void
+```
+
+运行到脚本末尾也得到 `Void`。`return` 可以出现在嵌套块、循环或 `try/catch` 中，并立即结束整个脚本。
+
+### 4.14 `throw`、`try` 和 `catch`
 
 ```javascript
 try {
@@ -185,14 +360,18 @@ try {
 }
 ```
 
-脚本可用 `throw value;` 抛出任意值。标准库的类型、范围和解析错误也可以被 `try/catch` 捕获。
+`catch` 必须写绑定变量和花括号；不支持省略绑定或 `finally`。脚本可用 `throw value;` 抛出任意值。标准库的类型、范围和解析错误也可以被 `try/catch` 捕获，捕获变量就是原始异常值。
+
+内建的轻量异常包括 `TypeError`、`RangeError`、`ReferenceError` 和 `IterationError`。部分解析与 HTTP API 会产生带名称/消息的堆异常，例如 `SyntaxError` 或 `Error`。脚本当前没有读取异常名称、消息或位置的专用函数；宿主可通过 C++ GC API 检查堆异常。
 
 C++ 结果中的 `Exception` 和 `Abort` 必须区别处理：
 
 - `Exception` 是脚本语义错误，可被脚本内 `try/catch` 捕获；未捕获时成为 `ScriptResultKind::Exception`。
-- `Abort` 是运行时终止，例如 `OutOfMemory`、`InvalidState`、`Timeout`，不能被脚本捕获。
+- `Abort` 是运行时终止，例如 `OutOfMemory`、`InvalidState`、`InvalidOpcode`、`HostFault`、`Timeout`、`Cancelled` 或 `Internal`，不能被脚本捕获。
 
-### 4.5 模板字符串
+如果一个会原地修改容器的函数在中途因 `OutOfMemory` 中止，已经完成的修改不保证回滚。
+
+### 4.15 模板字符串
 
 脚本内支持反引号模板字符串：
 
@@ -200,6 +379,8 @@ C++ 结果中的 `Exception` 和 `Abort` 必须区别处理：
 let id = 42;
 return `item-${id}-${1 + 2}`;
 ```
+
+模板可跨行并支持普通字符串的大多数转义，另外 `\$` 写入字面 `$`。`${expression}` 中可以嵌套字符串、对象和模板；每个表达式按 `+` 的原始值转字符串规则拼接，因此插值数组、对象或二进制会抛 `TypeError`。空模板返回空字符串。
 
 C++ 还提供 `compile_template_string()`，输入是“不带外层反引号”的模板正文：
 
@@ -209,245 +390,474 @@ prefix-${$.name}-${length($.items)}
 
 模板始终返回字符串。`compile_template_string()` 默认禁止赋值，但不会自动禁止异步函数；准备通过 `exec_sync()` 执行模板时，宿主必须检查 `Script::contains_async()`。
 
-### 4.6 函数解析和参数数量
+### 4.16 `directive`
 
-所有函数都在编译期解析，调用未知函数、参数数量不匹配或重载歧义都会导致编译失败。可变参数和展开参数受签名约束：
+`directive` 是宿主扩展的编译期绑定，不是运行时变量声明：
 
 ```javascript
-array.push(items, 1, 2);
-array.push(items, ...moreItems);
-Object.assign(target, ...sources);
+directive backend = http "@api";
+// 等价的通用语法别名：directive backend from http "@api";
+
+return backend.request({path: "/health"});
 ```
 
-函数调用是静态名称查找。`array.push(a, x)` 是标准库函数；`a.push(x)` 不是动态对象方法，除非宿主显式注册了这个完整函数名。
+- 形式为 `directive name = type literal...;` 或 `directive name from type literal...;`。参数只能是 `null`、布尔、数字或字符串字面量，字面量之间不写逗号。
+- directive 名在整个编译单元中唯一，并且必须先声明、后调用。
+- 解析器把声明交给 `Library::resolve_directive_def()`；宿主不认识该类型、名称或字面量组合时编译失败。
+- 声明本身不生成运行时指令。directive 方法仍由宿主在编译期静态解析。
+- HTTP 扩展只接受一个字符串目标，具体见 6.4。
+
+### 4.17 明确不支持的语法
+
+当前不支持 `const`/`var`、`while`/`do`、传统三段式 `for`、单变量 `for-of`、`switch`、函数或箭头函数、类、`new`、可选链、空值合并、复合赋值、`++`/`--`、位运算、正则字面量、模块、Promise 或 `await`。
+
+词法器会识别 `++`、`--`、`~`、`#[` 和 `^[` 的部分 token，但解析器/编译器没有提供对应可执行语义；使用它们会编译失败。`strings.match` 和 `strings.findAll` 也尚未注册。
 
 ## 5. 标准库 API
 
-`fiber::script::std_lib::StdLibrary` 构造时会注册本节全部函数。除特别说明外，参数数量错误在编译阶段报错；下文所说的 `TypeError`、`RangeError`、`SyntaxError` 是执行阶段可捕获异常。
+`fiber::script::std_lib::StdLibrary` 构造时注册本节列出的 45 个调用名（共 46 个重载）。这里的“异常”指脚本可捕获的 `Exception`；“中止”指不可捕获的 `Abort`。
 
-当前完整函数名如下，便于按脚本中的实际调用名检索：
+所有函数共同遵循以下规则：
 
-```text
-length                         includes
-array.join                     array.pop                       array.push
-strings.hasPrefix              strings.hasSuffix               strings.toLower
-strings.toUpper                strings.trim                    strings.trimLeft
-strings.trimRight              strings.split                   strings.contains
-strings.contains_any           strings.index                   strings.indexAny
-strings.lastIndex              strings.lastIndexAny            strings.repeat
-strings.substring              strings.toString
-binary.base64Encode            binary.base64Decode             binary.hex
-binary.fromHex                 binary.getUtf8Bytes
-hash.crc32                     hash.md5                         hash.sha1
-hash.sha256
-math.floor                     math.abs
-rand.random                    rand.canary
-JSON.parse                     JSON.stringify
-Object.assign                  Object.keys                     Object.values
-Object.deleteProperties
-URL.encodeComponent            URL.decodeComponent             URL.parseQuery
-URL.buildQuery
-```
+- 名称、重载和参数数量在编译期解析；数量错误不会进入函数体。
+- 除明确写为原地修改外，函数不修改参数。返回的新字符串、二进制、数组或对象属于当前 `GcHeap`。
+- 任何需要分配结果的函数都可能因分配失败产生 `OutOfMemory` abort；内部状态缺失还可能产生 `InvalidState` abort。下面不在每一行重复这两个通用中止。
+- 可变参数函数发生中途 `OutOfMemory` 时不提供事务回滚保证。
 
 ### 5.1 通用函数
 
+#### `length(value?)`
+
 ```typescript
 function length(value?: ScriptValue): number;
+```
+
+- 参数：`value` 缺省为 `null`。
+- 返回：字符串的 UTF-16 code unit 数、`Binary` 的字节数、数组元素数或对象属性数；其他类型返回 `0`。宿主提供的借用字符串若不是合法 UTF-8，则长度回退为字节数。
+- 异常：无。
+- 副作用：无。
+
+#### `includes(container, ...items)`
+
+```typescript
 function includes(container: string | ScriptValue[], ...items: ScriptValue[]): boolean;
 ```
 
-`length(value)`：
-
-- 省略参数等同于传入 `null`。
-- 字符串返回 UTF-16 code unit 数；`"😀"` 的长度是 2。
-- `Binary` 返回字节数，数组返回元素数，对象返回属性数。
-- `null`、`undefined`、数字、布尔值及其他类型返回 0。
-
-`includes(container, ...items)`：
-
-- 字符串容器要求每个 `item` 都是其子串。
-- 数组容器要求每个 `item` 都能以严格相等 `===` 找到。
-- 其他容器返回 `false`。
-- 没有 `items` 时，合法的字符串或数组容器返回 `true`。
+- 参数：字符串容器要求每个 `item` 也是字符串；数组容器接受任意脚本值。
+- 返回：字符串中包含所有子串，或数组中按 `===` 分别找到所有元素时为 `true`。容器不是字符串/数组时为 `false`；没有 `items` 时，合法容器为 `true`。
+- 异常：无；类型不匹配返回 `false`。
+- 副作用：无。
 
 ### 5.2 数组函数
 
+#### `array.join(values, separator?)`
+
 ```typescript
-namespace array {
-    function join(values: ScriptValue[], separator?: ScriptValue): string;
-    function pop(values: ScriptValue[]): ScriptValue | null;
-    function push(values: ScriptValue[], ...items: ScriptValue[]): ScriptValue[];
-}
+function array.join(values: ScriptValue[], separator?: ScriptValue): string | undefined;
 ```
 
-- `array.join()` 的默认分隔符是空字符串，不是 JavaScript `Array.prototype.join()` 的逗号。字符串、数字和布尔值会转成文本；`null`、`undefined`、容器和二进制按空文本处理。非数组抛出 `TypeError`。
-- `array.pop()` 删除并返回最后一个元素；空数组返回 `null`。非数组抛出 `TypeError`。
-- `array.push()` 原地追加所有 `items`，返回数组自身而不是新长度。非数组抛出 `TypeError`。
+- 参数：`values` 必须是数组；`separator` 默认空字符串。字符串、数字和布尔值按文本表示；`null`、`undefined`、容器、迭代器、异常和二进制按空文本处理。
+- 返回：按转换后的分隔符连接元素的新字符串。默认分隔符不是 JavaScript 的逗号；当前实现若最后的 GC 字符串分配失败会返回 `undefined`。
+- 异常：`values` 非数组时抛 `TypeError`。
+- 副作用：无。
+
+#### `array.pop(values)`
+
+```typescript
+function array.pop(values: ScriptValue[]): ScriptValue | null;
+```
+
+- 参数：`values` 必须是数组。
+- 返回：被删除的最后一个元素；空数组返回 `null`。
+- 异常：非数组抛 `TypeError`。
+- 副作用：原地缩短数组，属于结构修改；迭代同一数组时调用会触发后续 `IterationError`。
+
+#### `array.push(values, ...items)`
+
+```typescript
+function array.push(values: ScriptValue[], ...items: ScriptValue[]): ScriptValue[];
+```
+
+- 参数：`values` 必须是数组；`items` 可以为空。
+- 返回：同一个 `values` 数组，不是新长度。
+- 异常：非数组抛 `TypeError`。
+- 副作用：按顺序原地追加元素，属于结构修改；分配中止前已经追加的元素不会回滚。
 
 ### 5.3 字符串函数
 
+字符串 API 的软失败是有意的：除非下文明确写出异常，文本参数类型错误时返回 `false` 或 `null`，不会抛 `TypeError`。这些函数要求能取得严格 UTF-8 view；含孤立 UTF-16 代理项的 WTF-8 字符串也按文本类型失败处理，但语言本身的索引、拼接和 `length()` 仍能处理它。
+
+#### `strings.hasPrefix(text, prefix)` / `strings.hasSuffix(text, suffix)`
+
 ```typescript
-namespace strings {
-    function hasPrefix(text: string, prefix: string): boolean;
-    function hasSuffix(text: string, suffix: string): boolean;
-    function toLower(text: string): string | null;
-    function toUpper(text: string): string | null;
-
-    function trim(text: string, cutset?: string | null): string | null;
-    function trimLeft(text: string, cutset?: string | null): string | null;
-    function trimRight(text: string, cutset?: string | null): string | null;
-    function split(text: string, separators?: string | null): string[] | null;
-
-    function contains(text: string, value: string): boolean | null;
-    function contains_any(text: string, chars: string): boolean | null;
-    function index(text: string, value: string): number | null;
-    function indexAny(text: string, chars: string): number | null;
-    function lastIndex(text: string, value: string): number | null;
-    function lastIndexAny(text: string, chars: string): number | null;
-
-    function repeat(text: string, count: number): string | null;
-    function substring(text: string, start?: number, end?: number): string | null;
-
-    function toString(): string;
-    function toString(value: ScriptValue): string;
-}
+function strings.hasPrefix(text: string, prefix: string): boolean;
+function strings.hasSuffix(text: string, suffix: string): boolean;
 ```
 
-共同规则：需要字符串的参数若类型错误，多数函数按兼容语义返回 `null`，`hasPrefix()`/`hasSuffix()` 返回 `false`，而不是抛异常。
+- 参数：两个参数都必须是字符串；空前缀/后缀合法。
+- 返回：按字节等价的 Unicode 文本前缀/后缀判断；任一参数非字符串时返回 `false`。
+- 异常：无。
+- 副作用：无。
 
-- `toLower()`/`toUpper()` 当前只转换 ASCII `A-Z`/`a-z`，非 ASCII 字符保持原字节不变。
-- `trim(text)` 删除两端值不大于 `0x20` 的字符。传入 `cutset` 时，`cutset` 被当作一个完整子串，从对应端反复删除，不是字符集合。
-- `trimLeft()`/`trimRight()` 未传 `cutset` 时删除当前实现支持的 ASCII Java whitespace；传入 `cutset` 时同样反复删除完整子串。
-- `split(text)` 未传分隔符时返回 `[text]`。传入 `separators` 后，它被当作 Unicode code point 集合，其中任一字符都可分隔；连续和尾部分隔符不产生空元素。
-- `contains_any()`/`indexAny()` 把 `chars` 当作 code point 集合。
-- `index()`、`indexAny()`、`lastIndex()` 返回 UTF-16 下标，找不到返回 `-1`。
-- `lastIndexAny()` 为兼容既有语义，会按 `chars` 中的字符顺序查找，返回“第一个在 `text` 中出现的候选字符”的最后位置，不是所有候选字符位置的全局最大值。
-- `repeat()` 接受整数或浮点数，浮点数向零截断；负数或非数值返回 `null`。单次结果限制为 16 MiB，超过限制会以 `OutOfMemory` 中止。
-- `substring()` 的 `start`/`end` 是 UTF-16 下标，默认分别为 0 和 `2147483647`；负的 `start` 会归零，`end <= start` 返回空字符串。
-- `toString()` 无参数返回空字符串；`null`/`undefined` 返回 `"null"`。对象、数组当前分别返回 `"<ObjectNode>"`、`"<ArrayNode>"`，它不是 JSON 序列化；需要 JSON 时使用 `JSON.stringify()`。
+#### `strings.toLower(text)` / `strings.toUpper(text)`
 
-正则函数 `strings.match` 和 `strings.findAll` 当前没有注册。
+```typescript
+function strings.toLower(text: string): string | null;
+function strings.toUpper(text: string): string | null;
+```
+
+- 参数：`text` 必须是字符串。
+- 返回：只转换 ASCII `A-Z`/`a-z` 的新字符串；非 ASCII 字符原样保留。非字符串返回 `null`。
+- 异常：无。
+- 副作用：无。
+
+#### `strings.trim(text, cutset?)`
+
+```typescript
+function strings.trim(text: string, cutset?: string | null): string | null;
+```
+
+- 参数：`text` 必须是字符串。省略 `cutset`，或传入非字符串/`null`，使用默认模式；字符串 `cutset` 被视为一个完整子串，不是字符集合。
+- 返回：默认模式删除两端字节值 `<= 0x20` 的字符；指定 `cutset` 时从两端反复删除完整的 `cutset`。空 `cutset` 不删除内容。`text` 非字符串返回 `null`。
+- 异常：无。
+- 副作用：无。
+
+#### `strings.trimLeft(text, cutset?)` / `strings.trimRight(text, cutset?)`
+
+```typescript
+function strings.trimLeft(text: string, cutset?: string | null): string | null;
+function strings.trimRight(text: string, cutset?: string | null): string | null;
+```
+
+- 参数：规则与 `trim()` 相同。
+- 返回：只处理对应一端。默认 whitespace 是 ASCII `0x09-0x0d`、`0x1c-0x20`；指定 `cutset` 时反复删除完整子串。`text` 非字符串返回 `null`。
+- 异常：无。
+- 副作用：无。
+
+#### `strings.split(text, separators?)`
+
+```typescript
+function strings.split(text: string, separators?: string | null): string[] | null;
+```
+
+- 参数：`text` 必须是字符串。省略 `separators`，或传入非字符串/`null`，表示不拆分；字符串 `separators` 是 Unicode code point 集合，其中任一字符都可作为分隔符。
+- 返回：未指定分隔符时返回只含原始 `text` 的新数组。指定分隔符时，连续、开头和结尾的分隔符不产生空元素；空文本返回空数组。`text` 非字符串返回 `null`。
+- 异常：无。
+- 副作用：无。
+
+#### `strings.contains(text, value)` / `strings.contains_any(text, chars)`
+
+```typescript
+function strings.contains(text: string, value: string): boolean | null;
+function strings.contains_any(text: string, chars: string): boolean | null;
+```
+
+- 参数：`contains` 把 `value` 当完整子串；`contains_any` 把 `chars` 当 code point 集合。
+- 返回：找到时为 `true`，否则为 `false`；任一参数非字符串时返回 `null`。空子串被所有字符串包含，空字符集合不匹配任何字符。
+- 异常：无。
+- 副作用：无。
+
+#### `strings.index(text, value)` / `strings.lastIndex(text, value)`
+
+```typescript
+function strings.index(text: string, value: string): number | null;
+function strings.lastIndex(text: string, value: string): number | null;
+```
+
+- 参数：两个参数都必须是字符串；`value` 是完整子串。
+- 返回：第一次/最后一次匹配的 UTF-16 起始下标，找不到为 `-1`；类型错误为 `null`。
+- 异常：无。
+- 副作用：无。
+
+#### `strings.indexAny(text, chars)` / `strings.lastIndexAny(text, chars)`
+
+```typescript
+function strings.indexAny(text: string, chars: string): number | null;
+function strings.lastIndexAny(text: string, chars: string): number | null;
+```
+
+- 参数：`chars` 是 Unicode code point 集合。
+- 返回：`indexAny` 返回 `text` 中任一候选字符的第一个 UTF-16 下标。`lastIndexAny` 按 `chars` 的字符顺序查找，返回“第一个确实出现的候选字符”在 `text` 中的最后位置，并非所有候选位置的全局最大值。找不到为 `-1`，类型错误为 `null`。
+- 异常：无。
+- 副作用：无。
+
+#### `strings.repeat(text, count)`
+
+```typescript
+function strings.repeat(text: string, count: number): string | null;
+```
+
+- 参数：`text` 必须是字符串；`count` 必须是整数或浮点数，浮点数向零截断后按 32 位计数使用。`NaN` 按 0；负数和非数字返回 `null`。
+- 返回：重复后的字符串；0 次或空输入返回空字符串，1 次可以返回原字符串值。
+- 异常/中止：无可捕获异常；结果超过 16 MiB 时产生 `OutOfMemory` abort。
+- 副作用：无。
+
+#### `strings.substring(text, start?, end?)`
+
+```typescript
+function strings.substring(text: string, start?: ScriptValue, end?: ScriptValue): string | null;
+```
+
+- 参数：`text` 必须是字符串。`start`/`end` 默认 0/`2147483647`，单位为 UTF-16 code unit。整数直接使用，浮点向零截断，布尔值按 0/1，`null`/`undefined`/不可转换值按 0；字符串解析其开头的十进制整数，失败按 0。
+- 返回：`start < 0` 时从 0 开始；`start >= length` 或 `end <= start` 时为空字符串；`end` 超过长度时截到末尾。边界若落在补充字符代理项对的中间，当前实现会回退到该 code point 的起始位置，不会像字符串索引那样生成孤立代理项。`text` 非字符串返回 `null`。
+- 异常：无。
+- 副作用：无。
+
+#### `strings.toString()` / `strings.toString(value)`
+
+```typescript
+function strings.toString(): string;
+function strings.toString(value: ScriptValue): string;
+```
+
+- 参数：0 或 1 个参数是两个独立重载。
+- 返回：无参数为空字符串；`null`/`undefined` 为 `"null"`；标量为兼容文本；数组/对象为 `"<ArrayNode>"`/`"<ObjectNode>"`；`Binary` 把原始字节作为文本内容。它不是 JSON 序列化。
+- 异常：无；无法形成结果时可能按通用规则中止。
+- 副作用：无。
+
+`strings.match` 和 `strings.findAll` 当前没有注册。
 
 ### 5.4 二进制函数
 
+#### `binary.base64Encode(value)`
+
 ```typescript
-namespace binary {
-    function base64Encode(value: Binary): string | undefined;
-    function base64Decode(value: string): Binary | undefined;
-    function hex(value: Binary): string;
-    function fromHex(value: string): Binary;
-    function getUtf8Bytes(value: ScriptValue): Binary;
-}
+function binary.base64Encode(value: Binary): string | undefined;
 ```
 
-- `base64Encode()` 只接受 `Binary`，其他类型返回 `undefined`。
-- `base64Decode()` 只接受字符串，其他类型返回 `undefined`；非法字符、非法填充、非 4 倍数长度或空白字符会抛 `RangeError`。
-- `hex()` 返回小写十六进制，非二进制抛 `TypeError`。
-- `fromHex()` 严格要求偶数长度和合法十六进制字符，非法输入抛 `RangeError`，非字符串抛 `TypeError`。
-- `getUtf8Bytes()` 把当前兼容文本表示编码为 UTF-8 字节。标量按文本编码；对象和数组分别编码字面文本 `<ObjectNode>`、`<ArrayNode>`。它不是 `JSON.stringify()` 的二进制版本。
+- 参数/返回：`Binary` 编码为标准 Base64 字符串；其他类型返回 `undefined`。空二进制返回空字符串。
+- 异常：无。
+- 副作用：无。
+
+#### `binary.base64Decode(value)`
+
+```typescript
+function binary.base64Decode(value: string): Binary | undefined;
+```
+
+- 参数/返回：字符串按严格标准 Base64 解码成新 `Binary`；非字符串返回 `undefined`。
+- 异常：非法字符、空白、错误填充或非 4 倍数长度抛 `RangeError`。
+- 副作用：无。
+
+#### `binary.hex(value)`
+
+```typescript
+function binary.hex(value: Binary): string;
+```
+
+- 参数/返回：把二进制编码为小写十六进制字符串；空二进制返回空字符串。
+- 异常：非二进制抛 `TypeError`。
+- 副作用：无。
+
+#### `binary.fromHex(value)`
+
+```typescript
+function binary.fromHex(value: string): Binary;
+```
+
+- 参数/返回：严格解码偶数长度、大小写均可的十六进制字符串，返回新 `Binary`。
+- 异常：非字符串抛 `TypeError`；奇数长度或非法字符抛 `RangeError`。
+- 副作用：无。
+
+#### `binary.getUtf8Bytes(value)`
+
+```typescript
+function binary.getUtf8Bytes(value: ScriptValue): Binary;
+```
+
+- 参数/返回：把兼容文本表示复制成二进制。字符串为 UTF-8 字节，标量为其文本，`null` 为 `null`，数组/对象为 `<ArrayNode>`/`<ObjectNode>`，`Binary` 为原始字节，`undefined`/迭代器/异常为空。
+- 异常：无。
+- 副作用：无；返回值始终是新的二进制值。
 
 ### 5.5 哈希函数
 
+#### `hash.crc32(value)`
+
 ```typescript
-namespace hash {
-    function crc32(value: ScriptValue): number;
-    function md5(value: string | Binary): string;
-    function sha1(value: string | Binary): string;
-    function sha256(value: string | Binary): string;
-}
+function hash.crc32(value: ScriptValue): number;
 ```
 
-- `crc32()` 对值的兼容文本表示计算 CRC-32，返回 0 到 `0xffffffff` 范围内的整数。容器和二进制的兼容文本为空。
-- `md5()`、`sha1()`、`sha256()` 接受 UTF-8 字符串或原始二进制，返回小写十六进制摘要；其他类型抛 `TypeError`。
+- 参数：使用兼容标量文本；`null` 是 `"null"`，数组、对象、二进制、`undefined`、迭代器和异常是空文本。
+- 返回：CRC-32，范围为 0 到 `0xffffffff`；空文本为 0。
+- 异常：无。
+- 副作用：无。
+
+#### `hash.md5(value)` / `hash.sha1(value)` / `hash.sha256(value)`
+
+```typescript
+function hash.md5(value: string | Binary): string;
+function hash.sha1(value: string | Binary): string;
+function hash.sha256(value: string | Binary): string;
+```
+
+- 参数：字符串使用 UTF-8 字节，`Binary` 使用原始字节。
+- 返回：分别为 32、40、64 个小写十六进制字符。
+- 异常/中止：其他类型抛 `TypeError`；底层摘要实现异常失败产生 `HostFault` abort。
+- 副作用：无。
 
 MD5/SHA-1 仅用于互操作，不应用于需要抗碰撞性的安全设计。
 
 ### 5.6 数学和随机函数
 
-```typescript
-namespace math {
-    function floor(value: number): number;
-    function abs(value: number): number;
-}
+#### `math.floor(value)`
 
-namespace rand {
-    function random(max?: number): number;
-    function canary(ratio: number, ...keys: ScriptValue[]): boolean;
-}
+```typescript
+function math.floor(value: number): number;
 ```
 
-- `math.floor()`：整数原样返回，浮点数向负无穷取整并返回整数；非数字抛 `TypeError`。
-- `math.abs()`：返回绝对值；为兼容 Java，`INT64_MIN` 保持原值；非数字抛 `TypeError`。
-- `rand.random(max)`：返回 `[0, max)` 内均匀整数，`max` 默认 1000。浮点上限向零截断，`max <= 0` 抛 `RangeError`，非数字抛 `TypeError`。
-- `rand.canary(ratio, ...keys)`：`ratio <= 0` 恒为 `false`，`ratio >= 100` 恒为 `true`。没有 key 时随机分桶；有 key 时按参数顺序计算累计 CRC-32，结果稳定地映射到 `[0, 100)`。非数值 ratio 按 0 处理。
+- 参数/返回：整数原样返回；可表示为 `int64_t` 的有限浮点数向负无穷取整并返回整数。当前实现没有为 `NaN`、无穷或超出 `int64_t` 范围的浮点输入定义可移植结果，调用方应先避免这些值。
+- 异常：非数字抛 `TypeError`。
+- 副作用：无。
+
+#### `math.abs(value)`
+
+```typescript
+function math.abs(value: number): number;
+```
+
+- 参数/返回：整数或浮点数的绝对值；浮点 `NaN` 仍是 `NaN`，正负无穷都返回正无穷；为兼容 Java，`INT64_MIN` 保持原负值。
+- 异常：非数字抛 `TypeError`。
+- 副作用：无。
+
+#### `rand.random(max?)`
+
+```typescript
+function rand.random(max?: number): number;
+```
+
+- 参数：`max` 默认 1000，必须是数字；浮点数向零截断并饱和到 64 位范围。
+- 返回：当前线程 PRNG 产生的均匀整数，范围 `[0, max)`；不提供密码学安全保证，也不能设置种子。
+- 异常：非数字抛 `TypeError`；截断后的 `max <= 0` 抛 `RangeError`。
+- 副作用：推进当前线程的伪随机状态，因此同一调用不会稳定复现。
+
+#### `rand.canary(ratio, ...keys)`
+
+```typescript
+function rand.canary(ratio: ScriptValue, ...keys: ScriptValue[]): boolean;
+```
+
+- 参数：数字 ratio 向零截断，布尔值按 0/1，其他类型按 0。`ratio <= 0` 恒假，`ratio >= 100` 恒真。
+- 返回：没有 key 时随机选择 `[0, 100)` 桶；有 key 时按参数顺序把非空兼容文本累计进 CRC-32，再用 `% 100` 得到稳定桶。`null` key 的文本是 `"null"`；容器、二进制和 `undefined` 为空并被跳过。key 顺序会影响结果。
+- 异常：无。
+- 副作用：只有没有 key 且 ratio 在 1..99 时推进随机状态；带 key 的调用是确定性的。
 
 ### 5.7 JSON 函数
 
+#### `JSON.parse(text)`
+
 ```typescript
-namespace JSON {
-    function parse(text: string): ScriptValue;
-    function stringify(value: ScriptValue): string | undefined;
-}
+function JSON.parse(text: string): ScriptValue;
 ```
 
-- `JSON.parse()` 只接受字符串。非法 JSON 抛带解析消息和字节偏移的 `SyntaxError`，非字符串抛 `TypeError`。
-- `JSON.stringify(undefined)` 返回 `undefined`；嵌套的 `undefined` 编码为 JSON `null`。
-- 顶层 `NaN` 和正负无穷编码为字符串 `"null"`；其他不合法数值或无法编码的值抛 `TypeError`。
-- `Binary` 编码为 Base64 JSON 字符串。
-- 对象属性按插入顺序输出。
+- 参数/返回：解析一个完整 JSON 文档并构造对应脚本值。JSON 数字根据表示和范围成为整数或浮点数；对象保留输入属性顺序，重复 key 以后值覆盖前值但保留第一次出现的位置。
+- 异常：非字符串抛 `TypeError`；非法 JSON 抛带 `name = "SyntaxError"`、消息和字节偏移的异常。
+- 副作用：无；会在当前堆分配整个结果树。
+
+#### `JSON.stringify(value)`
+
+```typescript
+function JSON.stringify(value: ScriptValue): string | undefined;
+```
+
+- 参数/返回：顶层 `undefined` 原样返回 `undefined`；顶层 `NaN`/正负无穷返回字符串 `"null"`；其他值返回紧凑 JSON。嵌套 `undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 字符串，异常值编码为含 `position`、`name`、`message`、`meta` 的对象，普通对象按插入顺序输出。
+- 异常：无效字符串、嵌套非有限数字、迭代器或其他无法编码的值抛 `TypeError`。
+- 副作用：无。
 
 ### 5.8 对象函数
 
+#### `Object.assign(target, source, ...sources)`
+
 ```typescript
-namespace Object {
-    function assign(
-        target: ScriptObject,
-        source: ScriptValue,
-        ...sources: ScriptValue[]
-    ): ScriptObject;
-
-    function keys(value: ScriptObject): string[];
-    function values(value: ScriptObject): ScriptValue[];
-
-    function deleteProperties(
-        target: ScriptObject,
-        key: ScriptValue,
-        ...keys: ScriptValue[]
-    ): ScriptObject;
-}
+function Object.assign(
+    target: ScriptObject,
+    source: ScriptValue,
+    ...sources: ScriptValue[]
+): ScriptObject;
 ```
 
-- `Object.assign()` 原地合并对象来源并返回 `target`。非对象来源静默跳过；非对象 `target` 抛 `TypeError`。覆盖属性不会改变其插入位置。
-- `Object.keys()`/`Object.values()` 按属性插入顺序返回新数组，非对象抛 `TypeError`。
-- `Object.deleteProperties()` 原地删除所有字符串 key 并返回 `target`。非字符串 key 和不存在的 key 静默跳过；非对象 `target` 抛 `TypeError`。
+- 参数：`target` 必须是对象；非对象 source 被静默跳过。来源按参数顺序、属性按插入顺序处理。
+- 返回：同一个 `target`。
+- 异常：target 非对象抛 `TypeError`。
+- 副作用：原地新增或覆盖属性；覆盖不改变位置。中途 OOM 时已复制字段不回滚。
+
+#### `Object.keys(value)` / `Object.values(value)`
+
+```typescript
+function Object.keys(value: ScriptObject): string[];
+function Object.values(value: ScriptObject): ScriptValue[];
+```
+
+- 参数/返回：对象按属性插入顺序生成新的键数组或值数组；值为浅复制。
+- 异常：非对象抛 `TypeError`。
+- 副作用：不修改输入对象。
+
+#### `Object.deleteProperties(target, key, ...keys)`
+
+```typescript
+function Object.deleteProperties(
+    target: ScriptObject,
+    key: ScriptValue,
+    ...keys: ScriptValue[]
+): ScriptObject;
+```
+
+- 参数：target 必须是对象；只有字符串 key 生效，非字符串和不存在的 key 被跳过。
+- 返回：同一个 `target`。
+- 异常：target 非对象抛 `TypeError`。
+- 副作用：原地删除属性，属于结构修改；当前底层删除失败会按无操作处理。
 
 ### 5.9 URL 表单函数
 
-这些函数实现 `application/x-www-form-urlencoded` 语义，不是 ECMAScript 全局 `encodeURIComponent`：空格编码为 `+`，`+` 解码为空格。
+这些函数实现 `application/x-www-form-urlencoded`，不是 ECMAScript `encodeURIComponent`：空格编码为 `+`，`+` 解码为空格。
+
+#### `URL.encodeComponent(value)`
 
 ```typescript
-namespace URL {
-    function encodeComponent(value: string): string;
-    function decodeComponent(value: string): string;
-
-    function parseQuery(value: string): {
-        [key: string]: string | string[];
-    };
-
-    function buildQuery(
-        value?: null | undefined | { [key: string]: ScriptValue | ScriptValue[] }
-    ): string | null | undefined;
-}
+function URL.encodeComponent(value: string): string;
 ```
 
-- `encodeComponent()` 保留字母、数字、`-`、`_`、`.`、`*`，空格变成 `+`，其余 UTF-8 字节用大写 `%HH` 编码。非字符串抛 `TypeError`。
-- `decodeComponent()` 解码 `+` 和 `%HH`，非法百分号转义抛 `RangeError`，非字符串抛 `TypeError`。
-- `parseQuery()` 返回对象。重复 key 会先由字符串提升为数组并继续追加；没有 `=` 的字段值为空字符串；空段被跳过。非法转义抛 `RangeError`。
-- `buildQuery()` 按对象属性插入顺序生成查询串。数组值展开为重复 key，空数组不产生字段；`null`/`undefined` 参数原样返回，其他非对象参数抛 `TypeError`。
+- 参数/返回：保留字母、数字、`-`、`_`、`.`、`*`；空格写成 `+`，其他 UTF-8 字节写成大写 `%HH`。
+- 异常：非字符串抛 `TypeError`。
+- 副作用：无。
+
+#### `URL.decodeComponent(value)`
+
+```typescript
+function URL.decodeComponent(value: string): string;
+```
+
+- 参数/返回：把 `+` 解码为空格并解码 `%HH`；解码后的非法 UTF-8 字节序列替换为 U+FFFD。
+- 异常：非字符串抛 `TypeError`；不完整或非法百分号转义抛 `RangeError`。
+- 副作用：无。
+
+#### `URL.parseQuery(value)`
+
+```typescript
+function URL.parseQuery(value: string): {
+    [key: string]: string | string[];
+};
+```
+
+- 参数/返回：解析不带 `?` 的查询串。空 `&` 段被跳过；没有 `=` 的字段值为空字符串；值中的后续 `=` 被保留。重复 key 第一次为字符串，第二次提升为数组，之后继续追加；解码后的非法 UTF-8 替换为 U+FFFD。
+- 异常：非字符串抛 `TypeError`；任一 key/value 中的非法百分号转义抛 `RangeError`。
+- 副作用：无；返回新对象和必要的新数组。
+
+#### `URL.buildQuery(value?)`
+
+```typescript
+function URL.buildQuery(
+    value?: null | undefined | { [key: string]: ScriptValue | ScriptValue[] }
+): string | null | undefined;
+```
+
+- 参数：缺省为 `undefined`。对象属性按插入顺序处理；数组值展开为重复 key，空数组不产生字段。值使用兼容文本：`null` 为 `null`，对象/数组为节点占位文本，二进制使用原始字节。
+- 返回：form-urlencoded 查询串；`null`/`undefined` 参数原样返回。
+- 异常：其他非对象参数抛 `TypeError`。
+- 副作用：无。
 
 ## 6. HTTP Script API
 
-HTTP API 不是 `StdLibrary` 的默认内容。C++ 宿主必须调用 `register_http_functions_to_lib()`，并在执行时把 `ScriptExchangeCtx*` 作为 `attach` 参数传入。
+HTTP API 不是 `StdLibrary` 的默认内容。C++ 宿主必须调用 `register_http_functions_to_lib()`，并在执行时把与当前请求和 `GcHeap` 绑定的 `ScriptExchangeCtx*` 作为 `attach` 参数传入。
 
 HTTP 函数的完整注册名为：
 
@@ -459,17 +869,24 @@ resp.setHeader     resp.addHeader     resp.addCookie      resp.sendJson
 resp.send
 ```
 
+这些函数共有以下约束：
+
+- 缺少有效 `ScriptExchangeCtx` 时产生不可捕获的 `InvalidState` abort；上游函数还要求 context 已配置 `HttpScriptServices`。
+- `req.readJson()`、`req.readBinary()`、`req.discardBody()`、`resp.sendJson()`、`resp.send()` 和 directive 的 `request()`/`proxyPass()` 是异步函数，包含它们的脚本必须通过 `exec_async()` 执行。
+- HTTP I/O、编码和配置错误通常抛出名为 `Error` 的可捕获异常；构造值或异常失败仍可能产生 `OutOfMemory` abort。
+- 网络、请求体和响应状态都不是事务。异常不会撤销已经读取的请求体、已发出的上游请求、已提交的响应头或已写出的响应体。
+
 ### 6.1 请求函数 `req.*`
 
 ```typescript
 declare namespace req {
-    function getHeader(): { [name: string]: string };
+    function getHeader(): { [name: string]: string } | undefined;
     function getHeader(name: string): string | undefined | null;
 
-    function getQuery(): { [name: string]: string };
+    function getQuery(): { [name: string]: string } | undefined;
     function getQuery(name: string): string | undefined;
 
-    function getCookie(): { [name: string]: string };
+    function getCookie(): { [name: string]: string } | undefined;
     function getCookie(name: string): string | undefined;
 
     function getUri(): string;
@@ -484,28 +901,65 @@ declare namespace req {
 }
 ```
 
-#### 请求元数据
+#### `req.getHeader()` / `req.getHeader(name)`
 
-- `getHeader()` 返回延迟构造并在本次执行内缓存的请求头对象。同名字段覆盖为最后一次写入的值。
-- `getHeader(name)` 按 HTTP 头名称规则查找。不存在返回 `undefined`；空名称或非字符串参数返回 `null`。
-- `getQuery()` 解析原始查询串并返回对象，重复 key 保留最后一个值。当前请求侧解析对错误百分号转义是宽松的：保留已经解析出的部分。
-- `getQuery(name)` 和 `getCookie(name)` 在不存在、空名称或非字符串参数时返回 `undefined`。
-- `getCookie()` 解析所有 `Cookie` 头并返回对象，同名 cookie 后值覆盖前值。
-- `getUri()` 返回原始请求目标 `path[?query]`，不含 scheme 和 host。
-- `getPath()` 返回解析后的 path；`getQueryStr()` 返回不含 `?` 的原始 query；`getMethod()` 返回方法名。
+- 参数：无参数重载读取全部请求头；单参数重载要求 `name` 是非空字符串，并按 HTTP 头名称规则进行不区分大小写查找。
+- 返回：无参数重载延迟构造并缓存一个对象，键沿用请求头字段名且区分大小写；完全相同的重复键以后值覆盖前值，不同大小写的名称可能同时存在；缓存对象分配失败时返回 `undefined`。单参数重载在命中时返回字段值，不存在时返回 `undefined`，名称为空或非字符串时返回 `null`。
+- 异常/中止：没有可捕获异常；缺少 context 为 `InvalidState`，结果分配失败为 `OutOfMemory`。
+- 副作用：无参数重载会在本次 `ScriptExchangeCtx` 中建立 GC 根并缓存对象；不消费请求体、不修改请求。
 
-#### 请求体
+#### `req.getQuery()` / `req.getQuery(name)`
 
-- `readJson()` 读取完整请求体并解析 JSON。空请求体、读取失败或非法 JSON 都抛出可捕获的 `Error`。
-- `readBinary()` 读取完整请求体并返回原始字节；空请求体返回长度为 0 的 `Binary`。
-- `discardBody()` 排空请求体并返回 `null`，底层排空错误当前被忽略。
-- 请求体是流式资源。`readJson()`、`readBinary()`、`discardBody()` 和 `svc.proxyPass()` 都会消费它，不应在同一请求中组合多次读取。
-- `readJson()`/`readBinary()` 会把完整 body 连续化到内存，函数自身不设置大小上限；公网服务应在 HTTP 层配置请求体限制。
+- 参数：无参数重载解析完整原始 query；单参数重载要求非空字符串 key，并按解码后的 key 精确、区分大小写查找。
+- 返回：无参数重载返回并缓存 form-urlencoded 解码对象，重复 key 保留最后一个值；分配失败时可能返回 `undefined`。单参数重载返回缓存对象中的值，key 不存在、为空或非字符串时返回 `undefined`。
+- 异常/中止：非法 `%HH` 当前不抛异常，而是停止解析并保留此前字段；缺少 context 或查找所需 GC 根失败分别为 `InvalidState`/`OutOfMemory` abort。
+- 副作用：首次调用会解析并缓存对象；`+` 解码为空格，非法 UTF-8 替换为 U+FFFD；不消费请求体。
+
+#### `req.getCookie()` / `req.getCookie(name)`
+
+- 参数：无参数重载解析所有 `Cookie` 请求头；字段按 `;` 分段、去掉两端空格/Tab，并用第一个 `=` 分开名称和值，没有 `=` 时值为空。它不做百分号解码或引号反转义。单参数重载要求非空字符串 cookie 名，并区分大小写精确查找。
+- 返回：无参数重载返回并缓存 cookie 对象，同名 cookie 后值覆盖前值；分配失败时可能返回 `undefined`。单参数重载在不存在、空名称或非字符串时返回 `undefined`。
+- 异常/中止：没有 cookie 语法异常；缺少 context 或查找所需 GC 根失败分别为 `InvalidState`/`OutOfMemory` abort。
+- 副作用：首次调用会解析并缓存对象，不消费请求体。
+
+#### `req.getUri()` / `req.getPath()` / `req.getQueryStr()` / `req.getMethod()`
+
+| 函数 | 返回值 |
+| --- | --- |
+| `req.getUri()` | 原始请求目标 `path[?query]`，不含 scheme 和 host |
+| `req.getPath()` | 解析后的 path |
+| `req.getQueryStr()` | 不含 `?` 的原始 query；没有 query 时为空字符串 |
+| `req.getMethod()` | 当前 HTTP 方法名 |
+
+四个函数都不接收参数，不抛可捕获异常，也不修改请求；缺少 context 或字符串分配失败分别产生 `InvalidState`/`OutOfMemory` abort。
+
+#### `req.readJson()`
+
+- 参数：无；异步函数。
+- 返回：读取完整请求体并构造对应 `ScriptValue`。
+- 异常：空请求体、body 读取失败或非法 JSON 分别抛出带固定消息的 `Error`；解析错误的具体 offset 不会暴露给脚本。
+- 副作用：消费请求体，并把完整 body 和解码结果置于内存；函数自身不限制大小。
+
+#### `req.readBinary()`
+
+- 参数：无；异步函数。
+- 返回：包含完整请求体的新 `Binary`；空 body 返回长度为 0 的 `Binary`。
+- 异常：读取失败抛 `Error`；分配失败为 `OutOfMemory` abort。
+- 副作用：消费请求体，并把完整 body 连续化到内存；函数自身不限制大小。
+
+#### `req.discardBody()`
+
+- 参数：无；异步函数。
+- 返回：始终为 `null`。
+- 异常：当前会忽略底层排空错误，不抛可捕获异常；缺少 context 为 `InvalidState` abort。
+- 副作用：消费并丢弃剩余请求体。
+
+请求体是一次性的流式资源。不要把这三个函数相互组合，也不要先读取 body 再调用会转发入站 body 的 `service.proxyPass()`。公网服务还应在 HTTP 层设置请求体大小限制。
 
 ### 6.2 响应函数 `resp.*`
 
 ```typescript
-type HeaderValue = string | number | boolean | null;
+type HeaderTextValue = string | number | boolean | null;
 
 interface ResponseCookie {
     name: string;
@@ -519,8 +973,8 @@ interface ResponseCookie {
 }
 
 declare namespace resp {
-    function setHeader(name: string, value: HeaderValue): null;
-    function addHeader(name: string, value: HeaderValue): null;
+    function setHeader(name: string, value: HeaderTextValue): null;
+    function addHeader(name: string, value: HeaderTextValue): null;
     function addCookie(cookie: ResponseCookie): boolean;
 
     // 异步宿主函数。
@@ -530,13 +984,50 @@ declare namespace resp {
 }
 ```
 
-- `setHeader()` 替换同名待发送响应头；`addHeader()` 追加一个同名响应头。名称或文本化后的值为空时抛 `Error`。响应头已经发出后，两者静默不再修改响应。
-- `addCookie()` 把对象编码成 `Set-Cookie` 并追加到响应头。`name` 必填，`maxAge` 只接受整数，布尔字段只接受布尔值，`sameSite` 大小写敏感。成功返回 `true`，对象或字段无效返回 `false`。
-- `sendJson()` JSON 编码 `body`，设置 `Content-Type: application/json`，发送固定长度响应。`status` 不是整数时回退为 200。
-- `sendJson()` 中的 `undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 JSON 字符串。
-- `send(status)` 发送空响应体。
-- `send(status, body)` 根据 body 类型选择编码：`Binary` 原样发送；字符串以 UTF-8 发送并设置 `text/plain;charset=utf-8`；其他值走 JSON 编码并设置 `application/json`。
-- 发送函数会提交响应头和结束响应流。正常脚本只应调用一次 `send*()`；发送后再修改头或再次发送没有可靠语义。
+三个发送重载都只识别整数 status，其他类型回退为 200；脚本绑定层不预先校验 HTTP 状态码范围，协议层拒绝时按发送 `Error` 处理。
+
+#### `resp.setHeader(name, value)`
+
+- 参数：`name` 必须是非空字符串；`value` 使用标量文本转换，字符串、整数、浮点数、布尔值和 `null` 分别得到自身文本。
+- 返回：成功为 `null`。
+- 异常：name 非字符串/空字符串，或 value 转换为空文本时抛 `Error`。因此空字符串、`undefined`、数组、对象、`Binary`、迭代器和异常值不能作为 header value。HTTP 名称/值最终不被协议层接受时，也可能在发送阶段抛 `Error`。
+- 副作用：响应头尚未发送时，替换所有同名 pending header；发送后静默不做修改，仍返回 `null`。
+
+#### `resp.addHeader(name, value)`
+
+- 参数、返回和异常：与 `resp.setHeader()` 相同。
+- 副作用：响应头尚未发送时追加字段，允许多个同名值；发送后静默不做修改。
+
+#### `resp.addCookie(cookie)`
+
+- 参数：必须是对象。`name` 必须是非空、合法 HTTP token 字符串；`value` 使用标量文本转换，缺省或不可转换值成为空字符串；`domain`/`path` 只有字符串才生效；`maxAge` 只有非负整数才输出；`secure`/`httpOnly` 只有布尔 `true` 才输出；`sameSite` 只有大小写完全匹配的 `"Lax"`、`"Strict"` 或 `"None"` 才输出。
+- 返回：编码成功为 `true`；参数非对象、name 缺失/类型错误/非法时为 `false`。其他字段类型不符时通常只是忽略该字段，不会让调用失败。
+- 异常：没有可捕获异常；缺少 context 为 `InvalidState` abort。
+- 副作用：成功时向 pending headers 追加一个 `Set-Cookie`。响应头已经发送后，header 写入会被忽略，但当前函数仍可能返回 `true`；返回值只表示 cookie 编码成功。
+
+#### `resp.sendJson(status, body)`
+
+- 参数：异步函数。`status` 只有整数才生效，其他类型回退为 200；`body` 接受任意可 JSON 编码的脚本值。
+- 返回：发送成功为 `null`。`undefined` 编码为 JSON `null`，`Binary` 编码为 Base64 字符串，异常值编码为包含 `position`、`name`、`message` 和 `meta` 的对象。
+- 异常：非法字符串、非有限浮点数、迭代器等编码失败，或 header/body I/O 失败时抛 `Error`。
+- 副作用：把 `Content-Type` 替换为 `application/json`，提交全部 pending headers，以固定 Content-Length 写出 body 并结束响应流。
+
+#### `resp.send(status)`
+
+- 参数：异步函数；非整数 status 回退为 200。
+- 返回：发送成功为 `null`。
+- 异常：header 或结束流失败时抛 `Error`。
+- 副作用：提交 pending headers，发送长度为 0 的响应体并结束响应流；不自动设置 Content-Type。
+
+#### `resp.send(status, body)`
+
+- 参数：异步函数；非整数 status 回退为 200。
+- 返回：发送成功为 `null`。
+- 编码：`Binary` 按原始字节发送且不自动设置 Content-Type；字符串设置 `text/plain;charset=utf-8` 并按 UTF-8 发送；其他值按 `resp.sendJson()` 的 JSON 规则编码并设置 `application/json`。
+- 异常：编码、header 或 body I/O 失败时抛 `Error`。
+- 副作用：提交 pending headers，写出 body 并结束响应流。
+
+正常脚本只应调用一次发送函数。header 成功提交后 context 会记录“响应已发送”；之后的 header 修改是无操作，再次 `send*()` 通常会成为 I/O 错误。若 body 写入在 header 提交后失败，异常仍可被 `catch`，但客户端已经收到的响应不能回滚。
 
 ### 6.3 路由和连接常量
 
@@ -581,12 +1072,14 @@ resp.sendJson(200, {
 
 解析规则：
 
-- `$path.<name>` 必须是宿主创建 `RouteScriptExtension::CompileScope` 时声明的路径变量，否则脚本编译失败。运行时找不到时返回 `null`。
-- `$req` 只允许 `uri`、`method`、`path`、`query`，`$conn` 只允许上面列出的五个字段；它们由 `ExchangeConstExtension` 直接从当前 exchange 读取，未知字段是编译错误。
-- `$query.<key>` 和 `$context.<key>` 可按任意合法标识符编译，不存在返回 `null`。
-- `$header`/`$cookie` 的 key 在匹配时转成 ASCII 小写并把 `-` 折叠为 `_`，所以 `$header.x_forwarded_for` 可以读取 `X-Forwarded-For`。
-- 点号后的 key 必须是脚本标识符。含其他特殊字符的 query/cookie key 应使用 `req.getQuery("...")` 或 `req.getCookie("...")`。
-- 编译单元中的动态常量名由 `ConstPackage::Builder` 归一化、去重并分配连续 index；运行期先通过不可变 `ConstPackage` 准备槽位，再按 index 绑定 `$path`/`$context` 等宿主值。固定的 `$req`/`$conn` 不进入 package。
+- `$path.<name>` 必须与宿主创建 `RouteScriptExtension::CompileScope` 时声明的路径变量名完全一致，否则编译失败。其余四个动态 namespace 接受任意合法标识符 key；`$req`/`$conn` 只接受类型声明中列出的固定字段，未知字段也是编译错误。
+- `$path`、`$query`、`$header`、`$cookie` 和 `$context` 的 package 名都会转成 ASCII 小写并把 `-` 转成 `_`，再进行匹配和去重。例如 `$header.x_forwarded_for` 匹配 `X-Forwarded-For`，`$query.foo_bar` 也可匹配 query key `Foo-Bar`。两个归一化后相同的名称共享一个槽。
+- 点号后的 key 必须是脚本标识符，不能写 `$query["a.b"]`。需要精确区分大小写、连字符/下划线，或包含其他特殊字符时，应使用 `req.getQuery("...")`、`req.getHeader("...")` 或 `req.getCookie("...")`。
+- 动态槽初始为 `null`：缺失的 path/query/header/cookie/context 都返回 `null`。重复 query 取最后一个匹配值；重复 header 和 cookie 取第一个匹配值；path/context 由宿主绑定。
+- `$req.uri` 与 `req.getUri()` 相同；`$req.query` 不含 `?`。`$conn.remote_addr` 在地址转换失败时为 `null`，其他 `$req`/`$conn` 值直接来自当前 exchange，不进入 `ConstPackage`。
+- 这些读取没有脚本副作用，也没有可捕获异常。宿主未调用 `prepare_constants()`、使用了不匹配的 package，或未传 context 时会产生 `InvalidState` abort；准备动态值时内存不足由宿主初始化流程报告，首次格式化 `$conn.remote_addr` 的请求池分配失败则产生 `OutOfMemory` abort。
+
+编译单元中的动态名称由 `ConstPackage::Builder` 去重并分配连续 index。运行期必须先用最终的不可变 `ConstPackage` 准备请求槽位，再绑定路由和 context 值；完整 C++ 顺序见 8.2。
 
 ### 6.4 上游 HTTP 指令
 
@@ -619,7 +1112,13 @@ directive c = http "http://127.0.0.1:8080";
 directive d = http "https://api.example.com";
 ```
 
-`http(s)://` 目标不能包含 path、query、fragment 或 userinfo。未写端口时 HTTP 使用 80、HTTPS 使用 443；当前方括号 IPv6 authority 必须显式携带端口，例如 `http://[::1]:8080`。`options.url` 始终是请求的 `path?query`，不是上游主机；把完整 `http://...` URL 放入 `options.url` 会抛出明确的运行时 `Error`。
+目标字符串在脚本编译时解析：
+
+- 以 `http://`/`https://` 开头时按固定 URL authority 处理，不能带 path、query 或 fragment；应只写 `host[:port]`。userinfo 没有专门语义，不应使用。未写端口时 HTTP 使用 80、HTTPS 使用 443。
+- 方括号 IPv6 authority 当前必须显式写端口，例如 `http://[::1]:8080`。端口必须是 0..65535 的十进制整数；0 表示使用 scheme 默认端口。
+- 其他非空字符串都按命名上游处理，开头的 `@` 可省略；名称是否存在会在请求期由 `HttpScriptServices` 决定。
+- 每个 directive 方法只接受 0 或 1 个 options 参数，并且不接受参数展开；options 不是对象时等同于空对象。
+- `options.url` 始终是请求的 `path?query`，不是主机。把完整 `http://...`/`https://...` URL 放入该字段会抛可捕获的 `Error`。
 
 #### `service.request()`
 
@@ -651,17 +1150,35 @@ interface HttpService {
 }
 ```
 
-行为说明：
+参数字段：
 
-- 默认方法为 GET，默认请求目标为 `/`。未知 method 当前回退为 GET。
-- `url` 非空时完全覆盖 `path` 和 `query`。否则 query 字符串直接追加，对象按 form-urlencoded 编码，数组属性展开为重复 key。
-- `headers` 中 `null`/`undefined` 删除字段，其他值按兼容文本表示设置字段。
-- `Binary` body 原样发送，默认 `application/octet-stream`；字符串默认 `text/plain;charset=utf-8`；其他值默认 JSON 和 `application/json;charset=utf-8`。
-- 当显式 `Content-Type` 包含 `application/x-www-form-urlencoded` 且 body 是对象时，body 按表单编码。
-- 空字符串、空二进制、`null`、`undefined` 作为无 body 发送。
-- 返回体总是完整缓冲成 `Binary`。只有 `includeHeaders: true` 时才返回 `headers`；重复响应头当前在对象中折叠为一个值。
-- `request()` 自身不设置上游响应体大小上限；大响应或纯转发场景优先使用流式的 `proxyPass()`，并由宿主设置协议层限制。
-- 连接、发送、读取或超时错误抛出可捕获的 `Error`。
+| 字段 | 规则 |
+| --- | --- |
+| `method` | 字符串且不区分大小写地匹配 GET、POST、PUT、DELETE、HEAD、OPTIONS、PATCH；缺省、非字符串或未知值回退为 GET |
+| `url` | 非空字符串时作为完整 `path?query`，优先于 `path`/`query`；完整 HTTP(S) URL 被拒绝 |
+| `path` | `url` 未生效时使用非空字符串；否则默认 `/` |
+| `query` | 非空字符串原样追加（不做转义）；对象按 form-urlencoded 编码，数组属性展开为重复 key；其他类型或空结果省略 query |
+| `headers` | 对象时逐项处理；`null`/`undefined` 删除字段，其他值用兼容文本设置；转换为空文本的值静默跳过 |
+| `body` | 规则见下；缺省、`null`、空字符串或空 `Binary` 表示无 body |
+| `timeout` | 只有正整数生效，单位毫秒；浮点数、非正数和其他类型使用 30000 |
+| `includeHeaders` | 只有布尔值生效，默认 `false` |
+
+对象 query/header 值使用 `node_json_to_string` 兼容文本：标量使用自身文本，`null` 为 `"null"`，数组/对象为节点占位文本，`Binary` 使用原始字节。query 数组的每个元素分别编码；空数组不产生字段。header 名和值是否符合 HTTP 语法最终由协议层验证。
+
+body 编码和自动 Content-Type：
+
+| body 类型 | 编码 | 未显式设置 Content-Type 时 |
+| --- | --- | --- |
+| `Binary` | 原始字节 | `application/octet-stream` |
+| 字符串 | UTF-8 字节 | `text/plain;charset=utf-8` |
+| 对象，且显式 Content-Type 值包含小写子串 `application/x-www-form-urlencoded` | form-urlencoded | 已有值保持不变 |
+| 其他对象、数组、数字或布尔值 | JSON | `application/json;charset=utf-8` |
+
+Content-Type 子串判断当前区分大小写。JSON/form 编码得到空 body 时按无 body 发送；当前实现的 JSON 编码失败也会退化成无 body，而不是抛异常，因此不要把迭代器、非法字符串或非有限数字作为 request body。
+
+- 返回：成功后返回新对象 `{status, body}`；`status` 是最终非 1xx 上游状态，`body` 是完整响应字节的 `Binary`。只有 `includeHeaders === true` 时才有 `headers` 对象；完全相同的重复响应头键以后值覆盖前值。
+- 异常/中止：完整 URL 写入 `options.url`，或连接池获取、DNS/连接、header/body 写入、响应读取/超时失败时抛 `Error`。缺少 services 为 `InvalidState` abort，结果分配失败为 `OutOfMemory` abort。
+- 副作用：获取或建立上游连接、发送一次上游请求并完整读取响应。请求/响应 body 都连续缓冲，函数本身不设大小上限；大响应和纯转发优先使用 `proxyPass()`。
 
 #### `service.proxyPass()`
 
@@ -683,19 +1200,41 @@ interface HttpService {
 }
 ```
 
-`proxyPass()` 把当前入站请求流式转发到已绑定上游，再把上游响应流式写回客户端：
+`proxyPass()` 把当前入站请求流式转发到已绑定上游，再把上游响应流式写回客户端。options 字段规则如下：
 
-- method、path、query 默认继承入站请求；`url` 非空时覆盖 path/query。
-- 入站请求头会复制到上游，但 framing 和 hop-by-hop 头会过滤；`headers` 随后执行覆盖或删除。
-- 请求体直接从入站流转发，`ProxyPassOptions` 没有独立 body 字段。
-- 上游响应头过滤 hop-by-hop 字段后写回；`responseHeaders` 可覆盖，`null`/`undefined` 可删除。
-- 响应体默认使用 64 KiB buffer 和 48 KiB low-water；不足 low-water 的数据会等待更多上游数据或 EOF。
-- `flush: true` 关闭跨读取聚合：每次最多读取 64 KiB，当前块完整写出后才读取下一块。SSE、流式 JSON
-  和其他低延迟分块响应应显式启用。该选项只影响本地 response body pipe，不会自动设置
-  `X-Accel-Buffering: no`，也不会关闭外层代理或协议栈自身的缓冲。
-- 成功返回上游状态码，但响应此时已经由函数发送。通常应 `return service.proxyPass({...});` 或让它成为脚本的最后一个有效动作，不要再调用 `resp.send*()`。
-- `websocket: true` 支持把入站 HTTP/1.1 WebSocket Upgrade 或 HTTP/2/3 Extended CONNECT 转成上游 HTTP/1.1 Upgrade，并一直等待双向隧道结束。此模式强制上游 GET，显式非 GET method 会报错。
-- WebSocket 模式会在自定义头覆盖之后重新确立握手必需字段，`timeout` 同时作为隧道单次读写超时。
+| 字段 | 规则 |
+| --- | --- |
+| `method` | 缺省/非字符串时继承入站方法；识别七种标准方法，未知字符串也回退为入站方法 |
+| `url` | 非空字符串时作为完整 `path?query` 并覆盖 `path`/`query`；完整 HTTP(S) URL 被拒绝 |
+| `path` | `url` 未生效时使用非空字符串；否则继承入站 path |
+| `query` | 非空字符串原样替换；对象按 form-urlencoded 替换（空对象会删除入站 query）；其他类型和空字符串继承入站 query |
+| `headers` | 对复制后的上游请求头执行设置/删除；值转换规则与 `request()` 相同。处理完后再次删除请求 framing headers |
+| `responseHeaders` | 对过滤后的下游响应头执行设置/删除；值转换规则与 `headers` 相同 |
+| `timeout` | 只有正整数生效，单位毫秒，默认 30000；用于上游获取、连接、读写和普通响应读取 |
+| `flush` | 只有布尔 `true` 启用低延迟 body pipe，默认 `false` |
+| `websocket` | 只有布尔 `true` 启用 WebSocket 代理，默认 `false` |
+
+普通 HTTP 转发行为：
+
+- 入站请求头复制到上游前会过滤 framing 和 hop-by-hop 字段；随后应用 `headers`。请求体从入站流直接写到上游，因此没有 `body` option，并且会消费当前请求体。
+- 上游 1xx 响应会被跳过，直到最终响应；上游响应头过滤 hop-by-hop 字段后应用 `responseHeaders`。HEAD 和不允许 body 的状态不会向下游发送 body，剩余上游 body 会尝试丢弃。
+- 已知 Content-Length 会保留固定长度 framing，否则使用自动 framing。响应体默认使用 64 KiB buffer 和 48 KiB low-water，不足 low-water 时等待更多数据或 EOF。
+- `flush: true` 把 low-water 设为 0，关闭跨读取聚合；每次最多读取 64 KiB，当前块写完后再读下一块。它不自动设置 `X-Accel-Buffering: no`，也不关闭外层代理或协议栈的缓冲。普通 body pipe 的下游写入不使用 `timeout` 截止时间。
+
+WebSocket 行为：
+
+- `websocket: true` 要求入站请求是有效的 HTTP/1.1 WebSocket Upgrade 或 HTTP/2/3 Extended CONNECT，否则在连接上游前抛 `Error`。
+- 上游方法被强制为 GET；任何非空且不能识别为 GET 的 method（包括未知方法）都抛 `Error`。函数建立上游 HTTP/1.1 Upgrade，把下游 HTTP/1.1 响应写成 101，把 Extended CONNECT 响应写成 200。
+- 自定义 header 覆盖之后会重新确立握手必需字段，不能用 options 删除它们。握手成功后函数一直等待双向隧道结束，`timeout` 用作隧道单次读写超时。
+- 返回值仍是上游 101，即使 Extended CONNECT 客户端看到的是 200。当前隧道 relay 的结束/错误不会转换成脚本异常，握手成功后直接返回 101。
+
+返回、异常和副作用：
+
+- 返回：普通模式成功返回最终上游状态码；WebSocket 模式返回上游 101。返回前，下游响应已经发送或隧道已经结束。
+- 异常/中止：URL、WebSocket 握手、连接、上游/下游 header、请求体或响应体 I/O 和超时错误抛 `Error`；缺少 services 为 `InvalidState` abort。
+- 副作用：消费入站请求体、发送上游请求、提交并写出下游响应。响应头提交后 context 立即标记为已发送；此后的流式错误仍可被脚本 `catch`，但响应可能已经部分到达客户端，不能改写成另一份响应。
+
+通常应让 `service.proxyPass()` 成为最后一个有效动作，例如 `return service.proxyPass({flush: true});`。成功后不要再调用 `resp.send*()`。
 
 ## 7. C++ 嵌入 Script
 
