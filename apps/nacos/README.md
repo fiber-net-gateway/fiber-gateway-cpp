@@ -33,6 +33,9 @@ service-discovery registry:
   authentication omits the `accessToken` metadata header.
 - NamingService-owned gRPC lifecycle with independent naming labels and the
   same dynamic access-token metadata behavior.
+- Bounded ConfigService and NamingService health watches with explicit
+  connection phases, failure categories, monotonic counters, and aggregate
+  subscription/registration state.
 - Coroutine-based get, publish, CAS publish, and remove operations with bounded
   owned results and structured errors.
 - Shared configuration subscriptions with Present/NotFound values, a null
@@ -104,6 +107,7 @@ The main headers are:
 #include <fiber/nacos/NacosClient.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/nacos/NacosAuthAccess.h>
+#include <fiber/nacos/NacosServiceStatus.h>
 #include <fiber/nacos/ConfigService.h>
 #include <fiber/nacos/NamingService.h>
 #include <fiber/dns/DnsResolver.h>
@@ -238,6 +242,59 @@ deregistration. Every new physical naming connection restores active
 subscriptions and re-registers the latest instance values. Creation, update,
 close, and destruction of these handles are owner-EventLoop operations.
 
+Both services expose a latest-value health watch:
+
+```cpp
+auto config_status = (*configs)->subscribe_status();
+auto naming_status = (*naming)->subscribe_status();
+
+auto snapshot = config_status.current();
+if (snapshot.value && snapshot.value->connection.rpc_available) {
+    // ConfigService currently owns a ready, usable physical RPC.
+}
+```
+
+`ConfigServiceStatus` and `NamingServiceStatus` contain only bounded enums,
+booleans, and fixed-width counters. `NacosConnectionStatus::phase` is one of
+Created, Connecting, Ready, ReconnectBackoff, Stopping, or Stopped.
+`failure` is the current transition category: None,
+AuthenticationUnavailable, Transport, GrpcStatus, Protocol, Server, or
+Shutdown. A successful ready transition resets it to None; an intentional
+server redirect also reconnects with None rather than reporting a transport
+failure. `rpc_available` becomes false before reconnect reconciliation or
+shutdown draining begins, so a previous Ready state never leaks into backoff.
+
+The connection counters are monotonic and saturate instead of wrapping:
+
+- `connection_ready_count` increments whenever a physical RPC reaches Ready;
+- `disconnect_count` increments when a previously ready RPC ends other than
+  through local shutdown;
+- `reconnect_attempt_count` increments for every resolved endpoint or failed
+  logical target attempted after the first, including server rotation,
+  redirect targets, and post-backoff retries.
+
+Subscription summaries count logical `(id, group)` keys, not callback handles.
+`registered_count` and `synchronized_count` are independent: a retained cached
+value may remain synchronized while a replacement connection still needs to
+register it. `pending_count` includes every active key that still needs current
+connection registration, an initial value, or in-flight reconciliation.
+Naming registration summaries similarly aggregate live registration handles,
+currently registered handles, and handles with pending update/deregister work.
+`active_count` drops as soon as a handle closes; `pending_count` may therefore
+temporarily exceed it while deregistration finishes.
+
+Status publishing and all service mutations happen on the client EventLoop.
+The returned `async::Watch` subscriber owns immutable snapshots;
+`Subscriber::current()` may be read from another thread and `next()` resumes on
+the EventLoop from which it is awaited. Acquire subscribers while the service
+object is alive, and preserve the normal service shutdown/destruction
+contract.
+
+Health snapshots never include a server address, namespace, tenant, Data ID,
+group, service name, token, credential, request body, arbitrary error text, or
+per-subscription key. Detailed operation failures remain available through the
+existing typed ConfigService/NamingService results.
+
 `ServiceDiscovery<StateOps>` uses an intrusive red-black tree keyed by a cached
 hash plus `(serviceName, group)`. Multiple move-only leases for the same key
 share one entry and one NamingService subscription. It does not contain a
@@ -307,6 +364,9 @@ The client and each service have their own lifecycle:
 ```text
 Created -> Running -> Stopping -> Stopped
 ```
+
+That internal task lifecycle is represented by the public health phase as
+Created, Connecting/Ready/ReconnectBackoff, Stopping, and Stopped.
 
 Each service start creates its own connection/reconnect task. ConfigService and
 NamingService each use one lifecycle Watch for stop notification and completion: connection-ready

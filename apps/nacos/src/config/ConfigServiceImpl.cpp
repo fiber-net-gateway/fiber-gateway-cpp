@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -51,6 +52,31 @@ ConfigServiceError shutdown_error() {
     return ConfigServiceError{.code = ConfigServiceErrorCode::Shutdown, .io_error = common::IoErr::Canceled};
 }
 
+void saturating_increment(std::uint64_t &value) noexcept {
+    if (value != std::numeric_limits<std::uint64_t>::max()) {
+        ++value;
+    }
+}
+
+void update_count(std::uint64_t &count, bool previous, bool next) noexcept {
+    if (previous == next) {
+        return;
+    }
+    if (next) {
+        saturating_increment(count);
+        return;
+    }
+    FIBER_ASSERT(count > 0);
+    --count;
+}
+
+struct SubscriptionStatusFlags {
+    bool active = false;
+    bool pending = false;
+    bool registered = false;
+    bool synchronized = false;
+};
+
 } // namespace
 
 struct ConfigProtocolState {
@@ -61,6 +87,7 @@ struct ConfigProtocolState {
     bool registration_in_flight = false;
     bool registration_dirty = false;
     bool draining = false;
+    SubscriptionStatusFlags status_flags;
 };
 
 using ConfigSubscriptionPool = SubscriptionPool<ConfigData, ConfigProtocolState>;
@@ -86,6 +113,7 @@ public:
 
     [[nodiscard]] common::IoResult<void> start() noexcept override;
     [[nodiscard]] async::Task<void> shutdown() noexcept override;
+    [[nodiscard]] StatusSubscriber subscribe_status() override;
 
     [[nodiscard]] async::Task<std::expected<std::shared_ptr<const ConfigData>, ConfigServiceError>>
     get_config(std::string data_id, std::string group) noexcept override;
@@ -133,6 +161,19 @@ private:
     void register_all();
     void process_changed(const dto::resp::ConfigChangeBatchListenResponse &response);
     void reset_connection_state();
+    [[nodiscard]] NacosSubscriptionSummary subscription_summary(bool rpc_available) const noexcept;
+    void update_subscription_counts(ConfigEntry &entry) noexcept;
+    void refresh_subscription_status(ConfigEntry &entry);
+    void clear_subscription_counts() noexcept;
+    [[nodiscard]] static NacosServiceFailureCategory failure_category(const NacosRpcError &error) noexcept;
+    [[nodiscard]] NacosServiceFailureCategory authentication_failure() const;
+    void publish_status(ConfigServiceStatus next);
+    void refresh_status();
+    void set_connection_status(NacosServicePhase phase, NacosServiceFailureCategory failure, bool rpc_available);
+    void begin_connection_attempt();
+    void connection_ready();
+    void connection_closed(const NacosRpcCloseResult &close, bool reached_ready);
+    void authentication_changed(const async::Watch<NacosAuthAccess>::Snapshot &auth);
     void request_shutdown() noexcept;
     [[nodiscard]] async::DetachedTask run() noexcept;
     [[nodiscard]] async::Task<void> run_connection() noexcept;
@@ -184,10 +225,15 @@ private:
     async::WaitGroup tasks_;
     async::Watch<NacosServiceState> lifecycle_{NacosServiceState::Created};
     std::optional<async::Watch<NacosServiceState>::Publisher> lifecycle_publisher_;
+    ConfigServiceStatus status_;
+    NacosSubscriptionSummary subscription_counts_;
+    async::Watch<ConfigServiceStatus> status_watch_{ConfigServiceStatus{}};
+    std::optional<async::Watch<ConfigServiceStatus>::Publisher> status_publisher_;
     NacosRpc *ready_rpc_ = nullptr;
     NacosServerAddressResolver server_resolver_;
     std::size_t preferred_server_index_ = 0;
     std::uint64_t random_state_ = 0x9e3779b97f4a7c15ull;
+    bool connection_attempt_started_ = false;
 };
 
 ConfigServiceImpl::ConfigServiceImpl(NacosServiceDependencies dependencies, ConfigServiceOptions options) :
@@ -200,7 +246,9 @@ ConfigServiceImpl::ConfigServiceImpl(NacosServiceDependencies dependencies, Conf
     FIBER_ASSERT(valid_options(options_));
     FIBER_ASSERT(!config_->has_hostname_server() || resolver_ != nullptr);
     lifecycle_publisher_ = lifecycle_.acquire_publisher();
+    status_publisher_ = status_watch_.acquire_publisher();
     FIBER_ASSERT(lifecycle_publisher_.has_value());
+    FIBER_ASSERT(status_publisher_.has_value());
 }
 
 bool ConfigServiceImpl::init() noexcept { return server_resolver_.init(*loop_, resolver_); }
@@ -219,8 +267,156 @@ common::IoResult<void> ConfigServiceImpl::start() noexcept {
         return std::unexpected(common::IoErr::Already);
     }
     lifecycle_publisher_->publish(NacosServiceState::Running);
+    set_connection_status(NacosServicePhase::Connecting, authentication_failure(), false);
     async::spawn([this]() { return run(); });
     return {};
+}
+
+ConfigService::StatusSubscriber ConfigServiceImpl::subscribe_status() { return status_watch_.subscribe(); }
+
+NacosSubscriptionSummary ConfigServiceImpl::subscription_summary(bool rpc_available) const noexcept {
+    NacosSubscriptionSummary summary = subscription_counts_;
+    if (!rpc_available) {
+        summary.registered_count = 0;
+        summary.pending_count = summary.active_count;
+    }
+    return summary;
+}
+
+void ConfigServiceImpl::update_subscription_counts(ConfigEntry &entry) noexcept {
+    const bool active = !entry.subscribers.empty() && !entry.proto.draining;
+    const SubscriptionStatusFlags next{
+            .active = active,
+            .pending = active &&
+                       (!entry.proto.registered || entry.latest == nullptr || entry.proto.query_in_flight ||
+                        entry.proto.dirty || entry.proto.registration_in_flight || entry.proto.registration_dirty),
+            .registered = active && entry.proto.registered,
+            .synchronized = active && entry.latest != nullptr,
+    };
+    SubscriptionStatusFlags &previous = entry.proto.status_flags;
+    update_count(subscription_counts_.active_count, previous.active, next.active);
+    update_count(subscription_counts_.pending_count, previous.pending, next.pending);
+    update_count(subscription_counts_.registered_count, previous.registered, next.registered);
+    update_count(subscription_counts_.synchronized_count, previous.synchronized, next.synchronized);
+    previous = next;
+}
+
+void ConfigServiceImpl::refresh_subscription_status(ConfigEntry &entry) {
+    update_subscription_counts(entry);
+    refresh_status();
+}
+
+void ConfigServiceImpl::clear_subscription_counts() noexcept {
+    pool_.for_each([](ConfigEntry &entry) { entry.proto.status_flags = {}; });
+    subscription_counts_ = {};
+}
+
+NacosServiceFailureCategory ConfigServiceImpl::failure_category(const NacosRpcError &error) noexcept {
+    switch (error.code) {
+        case NacosRpcErrorCode::InvalidState:
+        case NacosRpcErrorCode::Transport:
+            return NacosServiceFailureCategory::Transport;
+        case NacosRpcErrorCode::AuthenticationUnavailable:
+            return NacosServiceFailureCategory::AuthenticationUnavailable;
+        case NacosRpcErrorCode::GrpcStatus:
+            return NacosServiceFailureCategory::GrpcStatus;
+        case NacosRpcErrorCode::Protocol:
+            return NacosServiceFailureCategory::Protocol;
+        case NacosRpcErrorCode::Server:
+            return NacosServiceFailureCategory::Server;
+        case NacosRpcErrorCode::Shutdown:
+            return NacosServiceFailureCategory::Shutdown;
+    }
+    return NacosServiceFailureCategory::Protocol;
+}
+
+NacosServiceFailureCategory ConfigServiceImpl::authentication_failure() const {
+    const auto auth = auth_.current();
+    if (!auth.value) {
+        return NacosServiceFailureCategory::None;
+    }
+    if (auth.value->kind == NacosAuthAccessKind::InitialFailed) {
+        return NacosServiceFailureCategory::AuthenticationUnavailable;
+    }
+    if (auth.value->kind == NacosAuthAccessKind::Stopped) {
+        return NacosServiceFailureCategory::Shutdown;
+    }
+    return NacosServiceFailureCategory::None;
+}
+
+void ConfigServiceImpl::publish_status(ConfigServiceStatus next) {
+    next.subscriptions = subscription_summary(next.connection.rpc_available);
+    if (next == status_) {
+        return;
+    }
+    status_ = next;
+    status_publisher_->publish(status_);
+}
+
+void ConfigServiceImpl::refresh_status() { publish_status(status_); }
+
+void ConfigServiceImpl::set_connection_status(NacosServicePhase phase, NacosServiceFailureCategory failure,
+                                              bool rpc_available) {
+    ConfigServiceStatus next = status_;
+    next.connection.phase = phase;
+    next.connection.failure = failure;
+    next.connection.rpc_available = rpc_available;
+    publish_status(next);
+}
+
+void ConfigServiceImpl::begin_connection_attempt() {
+    ConfigServiceStatus next = status_;
+    if (connection_attempt_started_) {
+        saturating_increment(next.connection.reconnect_attempt_count);
+    } else {
+        connection_attempt_started_ = true;
+    }
+    next.connection.phase = NacosServicePhase::Connecting;
+    next.connection.rpc_available = false;
+    const NacosServiceFailureCategory auth_failure = authentication_failure();
+    if (auth_failure != NacosServiceFailureCategory::None ||
+        next.connection.failure == NacosServiceFailureCategory::AuthenticationUnavailable ||
+        next.connection.failure == NacosServiceFailureCategory::Shutdown) {
+        next.connection.failure = auth_failure;
+    }
+    publish_status(next);
+}
+
+void ConfigServiceImpl::connection_ready() {
+    ConfigServiceStatus next = status_;
+    next.connection.phase = NacosServicePhase::Ready;
+    next.connection.failure = NacosServiceFailureCategory::None;
+    next.connection.rpc_available = true;
+    saturating_increment(next.connection.connection_ready_count);
+    publish_status(next);
+}
+
+void ConfigServiceImpl::connection_closed(const NacosRpcCloseResult &close, bool reached_ready) {
+    ConfigServiceStatus next = status_;
+    next.connection.rpc_available = false;
+    if (reached_ready && close.kind != NacosRpcCloseKind::Shutdown) {
+        saturating_increment(next.connection.disconnect_count);
+    }
+    if (running()) {
+        next.connection.phase = NacosServicePhase::Connecting;
+        next.connection.failure = close.kind == NacosRpcCloseKind::Redirect ? NacosServiceFailureCategory::None
+                                                                            : failure_category(close.error);
+    }
+    publish_status(next);
+}
+
+void ConfigServiceImpl::authentication_changed(const async::Watch<NacosAuthAccess>::Snapshot &auth) {
+    if (!running() || status_.connection.phase != NacosServicePhase::Connecting || !auth.value) {
+        return;
+    }
+    if (auth.value->kind == NacosAuthAccessKind::InitialFailed) {
+        set_connection_status(NacosServicePhase::Connecting, NacosServiceFailureCategory::AuthenticationUnavailable,
+                              false);
+    } else if (auth.value->kind == NacosAuthAccessKind::Stopped) {
+        set_connection_status(NacosServicePhase::Connecting, NacosServiceFailureCategory::Shutdown, false);
+    } else if (status_.connection.failure == NacosServiceFailureCategory::AuthenticationUnavailable) {
+        set_connection_status(NacosServicePhase::Connecting, NacosServiceFailureCategory::None, false);
+    }
 }
 
 NacosRpcError ConfigServiceImpl::shutdown_rpc_error() {
@@ -466,12 +662,15 @@ void ConfigServiceImpl::on_subscription_add(EntryPtr entry) {
     entry->proto.draining = false;
     if (ready_rpc_) {
         schedule_registration({std::move(entry)}, true);
+    } else {
+        refresh_subscription_status(*entry);
     }
 }
 
 RemoveDecision ConfigServiceImpl::on_subscription_remove(EntryPtr entry) {
     FIBER_ASSERT(loop_->in_loop());
     entry->proto.draining = true;
+    refresh_subscription_status(*entry);
     if (!stopping() && ready_rpc_ && (entry->proto.registered || entry->proto.registration_in_flight)) {
         schedule_registration({std::move(entry)}, false);
         return RemoveDecision::KeepLinked;
@@ -482,6 +681,7 @@ RemoveDecision ConfigServiceImpl::on_subscription_remove(EntryPtr entry) {
 void ConfigServiceImpl::publish_value(ConfigEntry &entry, std::shared_ptr<const ConfigData> value) {
     FIBER_ASSERT(loop_->in_loop());
     pool_.publish(entry, std::move(value));
+    refresh_subscription_status(entry);
 }
 
 void ConfigServiceImpl::schedule_query(const EntryPtr &entry) {
@@ -491,11 +691,13 @@ void ConfigServiceImpl::schedule_query(const EntryPtr &entry) {
     }
     if (entry->proto.query_in_flight) {
         entry->proto.dirty = true;
+        refresh_subscription_status(*entry);
         return;
     }
     entry->proto.query_in_flight = true;
     entry->proto.dirty = false;
     const std::uint64_t sequence = ++entry->proto.query_sequence;
+    refresh_subscription_status(*entry);
     tasks_.add();
     async::spawn([this, entry, sequence]() { return query_and_sync(entry, sequence); });
 }
@@ -540,6 +742,7 @@ async::DetachedTask ConfigServiceImpl::query_and_sync(EntryPtr entry, std::uint6
         sequence = ++entry->proto.query_sequence;
     }
     entry->proto.query_in_flight = false;
+    refresh_subscription_status(*entry);
     task_done();
 }
 
@@ -553,11 +756,14 @@ void ConfigServiceImpl::schedule_registration(std::vector<EntryPtr> entries, boo
     for (EntryPtr &entry: entries) {
         if (entry->proto.registration_in_flight) {
             entry->proto.registration_dirty = true;
+            update_subscription_counts(*entry);
             continue;
         }
         entry->proto.registration_in_flight = true;
+        update_subscription_counts(*entry);
         scheduled.push_back(std::move(entry));
     }
+    refresh_status();
     if (scheduled.empty()) {
         return;
     }
@@ -578,6 +784,7 @@ void ConfigServiceImpl::complete_registration(const EntryPtr &entry, bool listen
         entry->proto.registered = false;
     }
     const bool dirty = std::exchange(entry->proto.registration_dirty, false);
+    refresh_subscription_status(*entry);
     if (stopping()) {
         return;
     }
@@ -719,8 +926,10 @@ async::DetachedTask ConfigServiceImpl::run() noexcept {
     co_await tasks_.join();
     pool_.disable();
     pool_.close_all();
+    refresh_status();
     FIBER_ASSERT(state() == NacosServiceState::Stopping);
     lifecycle_publisher_->publish(NacosServiceState::Stopped);
+    set_connection_status(NacosServicePhase::Stopped, NacosServiceFailureCategory::Shutdown, false);
 }
 
 async::Task<void> ConfigServiceImpl::shutdown() noexcept {
@@ -734,6 +943,7 @@ async::Task<void> ConfigServiceImpl::shutdown() noexcept {
     if (*snapshot.value == NacosServiceState::Created) {
         request_shutdown();
         lifecycle_publisher_->publish(NacosServiceState::Stopped);
+        set_connection_status(NacosServicePhase::Stopped, NacosServiceFailureCategory::Shutdown, false);
         co_return;
     }
     request_shutdown();
@@ -751,7 +961,10 @@ void ConfigServiceImpl::request_shutdown() noexcept {
     }
     FIBER_ASSERT(state() == NacosServiceState::Created || state() == NacosServiceState::Running);
     lifecycle_publisher_->publish(NacosServiceState::Stopping);
+    set_connection_status(NacosServicePhase::Stopping, NacosServiceFailureCategory::Shutdown, false);
     pool_.disable();
+    clear_subscription_counts();
+    refresh_status();
     pool_.close_all();
 }
 
@@ -759,13 +972,15 @@ void ConfigServiceImpl::reset_connection_state() {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(ready_rpc_ == nullptr);
     FIBER_ASSERT(tasks_.empty());
-    pool_.for_each([](ConfigEntry &entry) {
+    pool_.for_each([this](ConfigEntry &entry) {
         FIBER_ASSERT(!entry.proto.query_in_flight);
         FIBER_ASSERT(!entry.proto.registration_in_flight);
         entry.proto.registered = false;
         entry.proto.dirty = false;
         entry.proto.registration_dirty = false;
+        update_subscription_counts(entry);
     });
+    refresh_status();
 }
 
 async::Task<ConfigServiceImpl::AttemptResult>
@@ -786,19 +1001,33 @@ ConfigServiceImpl::run_attempt(NacosRpcEndpoint endpoint, const NacosBiRequestHa
     AttemptResult result;
     auto lifecycle = lifecycle_.subscribe();
     auto lifecycle_snapshot = lifecycle.current();
+    auto auth_snapshot = auth_.current();
     if (running()) {
-        auto ready_or_stopping = co_await async::when_any(
-                [&rpc]() { return rpc.wait_ready().select(); },
-                [&lifecycle, version = lifecycle_snapshot.version]() { return lifecycle.next(version); });
-        if (ready_or_stopping.is<0>()) {
-            auto ready = std::move(ready_or_stopping).get<0>();
-            if (ready && running()) {
-                result.reached_ready = true;
-                ready_rpc_ = &rpc;
-                register_all();
+        authentication_changed(auth_snapshot);
+        while (running()) {
+            auto ready_stopping_or_auth = co_await async::when_any(
+                    [&rpc]() { return rpc.wait_ready().select(); },
+                    [&lifecycle, version = lifecycle_snapshot.version]() { return lifecycle.next(version); },
+                    [this, version = auth_snapshot.version]() { return auth_.next(version); });
+            if (ready_stopping_or_auth.is<0>()) {
+                auto ready = std::move(ready_stopping_or_auth).get<0>();
+                if (ready && running()) {
+                    result.reached_ready = true;
+                    ready_rpc_ = &rpc;
+                    connection_ready();
+                    register_all();
+                } else if (!ready && running()) {
+                    set_connection_status(NacosServicePhase::Connecting, failure_category(ready.error()), false);
+                }
+                break;
             }
-        } else {
-            std::move(ready_or_stopping).get<1>();
+            if (ready_stopping_or_auth.is<1>()) {
+                std::move(ready_stopping_or_auth).get<1>();
+                break;
+            }
+            auth_snapshot = std::move(ready_stopping_or_auth).get<2>();
+            authentication_changed(auth_snapshot);
+            lifecycle_snapshot = lifecycle.current();
         }
     }
 
@@ -834,6 +1063,7 @@ ConfigServiceImpl::run_attempt(NacosRpcEndpoint endpoint, const NacosBiRequestHa
     FIBER_ASSERT(close.has_value());
     result.close = std::move(*close);
     ready_rpc_ = nullptr;
+    connection_closed(result.close, result.reached_ready);
     co_await tasks_.join();
     reset_connection_state();
     co_return result;
@@ -854,11 +1084,25 @@ ConfigServiceImpl::run_target(const NacosServerHost &host, std::uint16_t port, s
     }
 
     auto resolved = std::move(resolved_or_stopping).get<0>();
+    if (!running()) {
+        co_return target_result;
+    }
     if (!resolved) {
+        begin_connection_attempt();
+        set_connection_status(NacosServicePhase::Connecting, NacosServiceFailureCategory::Transport, false);
+        co_return target_result;
+    }
+    if (resolved->empty()) {
+        begin_connection_attempt();
+        set_connection_status(NacosServicePhase::Connecting, NacosServiceFailureCategory::Transport, false);
         co_return target_result;
     }
     const std::string authority = make_nacos_server_authority(host, port);
     for (const net::SocketAddress &address: *resolved) {
+        if (!running()) {
+            break;
+        }
+        begin_connection_attempt();
         NacosRpcEndpoint endpoint{
                 .ip = address.ip(),
                 .port = address.port(),
@@ -953,6 +1197,7 @@ async::Task<void> ConfigServiceImpl::run_connection() noexcept {
         auto lifecycle = lifecycle_.subscribe();
         const auto lifecycle_snapshot = lifecycle.current();
         const auto delay = jittered(retry_delay);
+        set_connection_status(NacosServicePhase::ReconnectBackoff, status_.connection.failure, false);
         auto backoff_or_stopping = co_await async::when_any(
                 [delay]() { return async::sleep(delay); },
                 [&lifecycle, version = lifecycle_snapshot.version]() { return lifecycle.next(version); });

@@ -18,6 +18,7 @@
 
 #include "NacosCreateError.h"
 #include "NacosRpcOptions.h"
+#include "NacosServiceStatus.h"
 #include "Subscription.h"
 
 namespace fiber::nacos {
@@ -157,6 +158,8 @@ private:
 
 class NamingService : public common::NonCopyable, public common::NonMovable {
 public:
+    using StatusSubscriber = async::Watch<NamingServiceStatus>::Subscriber;
+
     [[nodiscard]] static std::expected<std::unique_ptr<NamingService>, NacosCreateError>
     create(NacosClient &client, NamingServiceOptions options = {});
 
@@ -164,6 +167,10 @@ public:
 
     [[nodiscard]] virtual common::IoResult<void> start() noexcept = 0;
     [[nodiscard]] virtual async::Task<void> shutdown() noexcept = 0;
+
+    // Status is published on the client EventLoop. The bounded snapshot owns
+    // no implementation pointers, identifiers, addresses, or error text.
+    [[nodiscard]] virtual StatusSubscriber subscribe_status() = 0;
 
     [[nodiscard]] virtual async::Task<std::expected<std::shared_ptr<const ServiceInfo>, NamingServiceError>>
     get(std::string service_name, std::string group) noexcept = 0;
