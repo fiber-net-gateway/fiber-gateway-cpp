@@ -39,6 +39,12 @@ concept DeferEntryMember = std::is_object_v<Handle> && !std::is_const_v<Handle> 
                                { handle.*EntryMember } -> std::same_as<Entry &>;
                            };
 
+template<typename Handle, typename Entry, auto EntryMember>
+concept StopEntryMember = std::is_object_v<Handle> && !std::is_const_v<Handle> &&
+                          std::same_as<decltype(EntryMember), Entry Handle::*> && requires(Handle &handle) {
+                              { handle.*EntryMember } -> std::same_as<Entry &>;
+                          };
+
 template<typename Handle, auto Cb>
 concept TimerCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>;
 
@@ -47,6 +53,9 @@ concept NotifyCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>
 
 template<typename Handle, auto Cb>
 concept DeferCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>;
+
+template<typename Handle, auto Cb>
+concept StopCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>;
 
 struct Queue {
     struct Queue *next;
@@ -173,6 +182,23 @@ public:
         std::ptrdiff_t handle_offset_ = 0;
     };
 
+    // Intrusive, loop-thread-only callback used by pending operations that must be canceled
+    // before run() returns. The loop removes an entry before invoking it, so the callback may
+    // resume a coroutine that destroys the entry's owner.
+    struct StopEntry {
+    public:
+        friend class EventLoop;
+
+        using Callback = void (*)(StopEntry *) noexcept;
+        [[nodiscard]] bool is_registered() const noexcept { return registered_; }
+
+    private:
+        detail::Queue node_{};
+        Callback callback_ = nullptr;
+        bool registered_ = false;
+        std::ptrdiff_t handle_offset_ = 0;
+    };
+
     explicit EventLoop(EventLoopGroup *group = nullptr, std::size_t group_index = kInvalidGroupIndex);
     ~EventLoop();
 
@@ -244,6 +270,34 @@ public:
         cancel_quiesced(entry);
     }
 
+    template<typename Handle, auto EntryMember, auto Cb>
+        requires detail::StopEntryMember<Handle, StopEntry, EntryMember> && detail::StopCallback<Handle, Cb>
+    [[nodiscard]] bool register_stop(Handle &handle) noexcept {
+        FIBER_ASSERT(in_loop());
+        StopEntry &entry = handle.*EntryMember;
+        FIBER_ASSERT(!entry.registered_);
+        if (stop_requested_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        entry.handle_offset_ = reinterpret_cast<char *>(&entry) - reinterpret_cast<char *>(&handle);
+        entry.callback_ = &EventLoop::stop_trampoline<Handle, EntryMember, Cb>;
+        entry.registered_ = true;
+        detail::queue_insert_tail(&stop_queue_, &entry.node_);
+        return true;
+    }
+
+    template<typename Handle, auto EntryMember>
+        requires detail::StopEntryMember<Handle, StopEntry, EntryMember>
+    void unregister_stop(Handle &handle) noexcept {
+        FIBER_ASSERT(in_loop());
+        StopEntry &entry = handle.*EntryMember;
+        if (!entry.registered_) {
+            return;
+        }
+        detail::queue_remove(&entry.node_);
+        entry.registered_ = false;
+    }
+
     Poller &poller() noexcept { return poller_; }
     const Poller &poller() const noexcept { return poller_; }
     mem::IoBufNodePool &io_buf_node_pool() noexcept { return io_buf_node_pool_; }
@@ -295,6 +349,13 @@ private:
         Cb(handle);
     }
 
+    template<typename Handle, auto EntryMember, auto Cb>
+    static void stop_trampoline(StopEntry *entry) noexcept {
+        auto *bytes = reinterpret_cast<char *>(entry);
+        auto *handle = reinterpret_cast<Handle *>(bytes - entry->handle_offset_);
+        Cb(handle);
+    }
+
     void notify_wakeup();
     void enqueue_notify(NotifyNode *node);
     template<bool all>
@@ -338,6 +399,7 @@ private:
     }
 
     void drain_wakeup();
+    void drain_stop() noexcept;
     void run_due_timers(std::chrono::steady_clock::time_point now);
     std::chrono::steady_clock::time_point next_deadline() const;
     void post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry);
@@ -348,6 +410,7 @@ private:
     MpscQueue<NotifyEntry *> notify_queue_;
     // Loop-thread only: timer heap operations.
     detail::Queue local_queue_;
+    detail::Queue stop_queue_;
     common::BinaryHeap<TimerEntry, offsetof(TimerEntry, node), TimerEntryCompare> timers_;
     Poller poller_;
     int event_fd_ = -1;

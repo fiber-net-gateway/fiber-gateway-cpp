@@ -2,11 +2,13 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include <fiber/common/Assert.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/http/TlsAlpn.h>
+#include <fiber/net/TcpConnector.h>
 #include <fiber/net/TcpListener.h>
 #include <fiber/net/TcpStream.h>
 
@@ -144,28 +146,72 @@ Http1ClientConnection::~Http1ClientConnection() {
     close();
 }
 
-fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::chrono::milliseconds timeout) noexcept {
+Http1ClientConnection::ConnectStateGuard::~ConnectStateGuard() {
+    if (connection_.state_ == State::Connecting) {
+        connection_.state_ = State::Init;
+    }
+}
+
+common::IoErr Http1ClientConnection::begin_connect() noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     if (!loop_->in_loop()) {
-        co_return std::unexpected(common::IoErr::NotSupported);
+        return common::IoErr::NotSupported;
     }
     if (state_ != State::Init) {
-        co_return std::unexpected(common::IoErr::Busy);
+        return common::IoErr::Busy;
     }
+    state_ = State::Connecting;
 
     if (options_.tls.enabled) {
         auto init_result = tls_ctx_.init();
         if (!init_result) {
-            co_return std::unexpected(init_result.error());
+            state_ = State::Init;
+            return init_result.error();
         }
     }
+    return common::IoErr::None;
+}
 
-    auto connect_result = co_await net::TcpStream::connect(*loop_, options_.peer_addr, timeout);
-    if (!connect_result) {
-        co_return std::unexpected(connect_result.error());
+fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::chrono::milliseconds timeout) noexcept {
+    net::HappyEyeballsOptions options;
+    options.total_timeout = timeout;
+    return connect_impl({}, options, false);
+}
+
+fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::span<const net::SocketAddress> addresses,
+                                                                          net::HappyEyeballsOptions options) noexcept {
+    return connect_impl(addresses, options, true);
+}
+
+fiber::async::Task<common::IoResult<void>>
+Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresses, net::HappyEyeballsOptions options,
+                                    bool multiple_addresses) noexcept {
+    common::IoErr begin_error = begin_connect();
+    if (begin_error != common::IoErr::None) {
+        co_return std::unexpected(begin_error);
+    }
+    ConnectStateGuard state_guard(*this);
+
+    std::optional<net::TcpStream::ConnectInfant> infant;
+    if (multiple_addresses) {
+        auto connect_result = co_await net::TcpConnector::connect(*loop_, addresses, options);
+        if (!connect_result) {
+            co_return std::unexpected(connect_result.error().code);
+        }
+        infant.emplace(std::move(*connect_result));
+    } else {
+        auto connect_result = co_await net::TcpStream::connect(*loop_, options_.peer_addr, options.total_timeout);
+        if (!connect_result) {
+            co_return std::unexpected(connect_result.error());
+        }
+        infant.emplace(std::move(*connect_result));
     }
 
-    net::AcceptResult accept(connect_result->release_fd(), connect_result->take_peer());
+    FIBER_ASSERT(state_ == State::Connecting);
+    FIBER_ASSERT(infant.has_value());
+    net::SocketAddress connected_peer = infant->peer();
+
+    net::AcceptResult accept(infant->release_fd(), infant->take_peer());
     std::unique_ptr<HttpTransport> transport;
     if (options_.tls.enabled) {
         auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_ctx_, options_.tcp);
@@ -196,6 +242,7 @@ fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::c
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
+    options_.peer_addr = std::move(connected_peer);
     transport_ = std::move(transport);
     state_ = State::ConnectedIdle;
     keepalive_usable_ = true;
@@ -217,6 +264,7 @@ void Http1ClientConnection::close() noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(state_ != State::Busy);
+    FIBER_ASSERT(state_ != State::Connecting);
     FIBER_ASSERT(active_loop_ == nullptr);
     FIBER_ASSERT(reader_ == nullptr);
     FIBER_ASSERT(writer_ == nullptr);

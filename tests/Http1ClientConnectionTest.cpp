@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <future>
 #include <new>
+#include <span>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -99,6 +101,48 @@ DetachedTask run_client_connect(fiber::event::EventLoop *loop, std::uint16_t por
     connection.close();
 }
 
+DetachedTask run_client_multi_connect(fiber::event::EventLoop *loop, std::uint16_t port,
+                                      std::promise<fiber::common::IoErr> *result_promise,
+                                      std::promise<bool> *connected_promise) {
+    std::array<fiber::net::SocketAddress, 2> addresses{{
+            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v6(), port),
+            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port),
+    }};
+    fiber::http::Http1ClientConnectionOptions connection_options;
+    connection_options.peer_addr = addresses[0];
+    fiber::http::Http1ClientConnection connection(*loop, std::move(connection_options));
+
+    fiber::net::HappyEyeballsOptions connect_options;
+    connect_options.total_timeout = 5s;
+    auto connect_result = co_await connection.connect(addresses, connect_options);
+    connected_promise->set_value(connect_result.has_value() && connection.connected() && connection.idle() &&
+                                 connection.reusable() &&
+                                 connection.options().peer_addr.family() == fiber::net::IpFamily::V4);
+    result_promise->set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());
+    connection.close();
+}
+
+DetachedTask run_client_connect_after_failed_multi(fiber::event::EventLoop *loop, std::uint16_t port,
+                                                   std::promise<fiber::common::IoErr> *result_promise,
+                                                   std::promise<bool> *state_promise) {
+    fiber::http::Http1ClientConnectionOptions connection_options;
+    connection_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    fiber::http::Http1ClientConnection connection(*loop, std::move(connection_options));
+
+    fiber::net::HappyEyeballsOptions connect_options;
+    connect_options.total_timeout = 5s;
+    auto failed_result = co_await connection.connect(std::span<const fiber::net::SocketAddress>{}, connect_options);
+    const bool failure_left_no_partial_state =
+            !failed_result && failed_result.error() == fiber::common::IoErr::NotFound && !connection.valid() &&
+            !connection.connected() && !connection.idle() && !connection.reusable();
+
+    auto connect_result = co_await connection.connect(5s);
+    state_promise->set_value(failure_left_no_partial_state && connect_result.has_value() && connection.connected() &&
+                             connection.options().peer_addr.family() == fiber::net::IpFamily::V4);
+    result_promise->set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());
+    connection.close();
+}
+
 TEST(Http1ClientConnectionTest, ConnectTransitionsToIdleReusableConnection) {
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -121,6 +165,66 @@ TEST(Http1ClientConnectionTest, ConnectTransitionsToIdleReusableConnection) {
                         [&]() { return run_client_connect(&group.at(0), port, &result_promise, &connected_promise); });
 
     EXPECT_TRUE(connected_future.get());
+    EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
+
+    server_done_future.get();
+    group.stop();
+    group.join();
+}
+
+TEST(Http1ClientConnectionTest, MultiAddressConnectPublishesOnlyTheWinningPeer) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<void> server_done_promise;
+    auto server_done_future = server_done_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_hold_server(&group.at(0), &port_promise, &server_done_promise); });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<fiber::common::IoErr> result_promise;
+    std::promise<bool> connected_promise;
+    auto result_future = result_promise.get_future();
+    auto connected_future = connected_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_client_multi_connect(&group.at(0), port, &result_promise, &connected_promise);
+    });
+
+    EXPECT_TRUE(connected_future.get());
+    EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
+
+    server_done_future.get();
+    group.stop();
+    group.join();
+}
+
+TEST(Http1ClientConnectionTest, FailedMultiAddressConnectLeavesNoPartialStateAndCanRetry) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<void> server_done_promise;
+    auto server_done_future = server_done_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_hold_server(&group.at(0), &port_promise, &server_done_promise); });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<fiber::common::IoErr> result_promise;
+    std::promise<bool> state_promise;
+    auto result_future = result_promise.get_future();
+    auto state_future = state_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_client_connect_after_failed_multi(&group.at(0), port, &result_promise, &state_promise);
+    });
+
+    EXPECT_TRUE(state_future.get());
     EXPECT_EQ(result_future.get(), fiber::common::IoErr::None);
 
     server_done_future.get();

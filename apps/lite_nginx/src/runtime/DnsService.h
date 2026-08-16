@@ -38,8 +38,8 @@ public:
 
     // Resolves host to its A/AAAA addresses using the calling worker loop's resolver. Must be
     // called from a worker loop that was part of the EventLoopGroup passed to init(). Returns all
-    // records ordered by the resolver policy (V6First: AAAA then A); callers should dial them in
-    // order and fall back to the next on connect failure.
+    // records ordered by the resolver policy (V6First: AAAA then A). Connection callers may apply
+    // deterministic family interleaving after resolution.
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::vector<fiber::net::IpAddress>>>
     resolve(std::string_view host) noexcept;
 

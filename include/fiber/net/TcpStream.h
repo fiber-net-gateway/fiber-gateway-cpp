@@ -22,8 +22,8 @@ class TcpStream;
 struct TcpConnectTraits {
     using Address = SocketAddress;
 
-    static fiber::common::IoResult<int> create_socket(const Address &peer);
-    static fiber::common::IoErr connect_once(int fd, const Address &peer);
+    static fiber::common::IoResult<int> create_socket(const Address &peer) noexcept;
+    static fiber::common::IoErr connect_once(int fd, const Address &peer) noexcept;
 };
 
 class TcpStream : public common::NonCopyable, public common::NonMovable {

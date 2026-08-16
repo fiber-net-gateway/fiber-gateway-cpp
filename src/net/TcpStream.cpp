@@ -10,7 +10,7 @@ TcpStream::ConnectAwaiter TcpStream::connect(fiber::event::EventLoop &loop, cons
     return detail::ConnectFd<TcpConnectTraits>::connect(loop, peer, timeout);
 }
 
-fiber::common::IoResult<int> TcpConnectTraits::create_socket(const SocketAddress &peer) {
+fiber::common::IoResult<int> TcpConnectTraits::create_socket(const SocketAddress &peer) noexcept {
     int domain = peer.family() == IpFamily::V4 ? AF_INET : AF_INET6;
     int fd = ::socket(domain, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
@@ -19,7 +19,7 @@ fiber::common::IoResult<int> TcpConnectTraits::create_socket(const SocketAddress
     return fd;
 }
 
-fiber::common::IoErr TcpConnectTraits::connect_once(int fd, const SocketAddress &peer) {
+fiber::common::IoErr TcpConnectTraits::connect_once(int fd, const SocketAddress &peer) noexcept {
     sockaddr_storage storage{};
     socklen_t len = 0;
     if (!peer.to_sockaddr(storage, len)) {
