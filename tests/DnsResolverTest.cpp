@@ -287,7 +287,7 @@ DetachedTask run_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::Share
     AddressOutcome outcome;
     DnsResolverLocal local;
     DnsClient::Options client_options{};
-    client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    (void) client_options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
     client_options.timeout = 200ms;
     client_options.attempts = 1;
     DnsResolver dns_resolver;
@@ -332,7 +332,7 @@ DetachedTask run_dual_policy_resolve(fiber::event::EventLoop *loop, fiber::dns::
     DualAddressOutcome dual_outcome;
     DnsResolverLocal local;
     DnsClient::Options client_options{};
-    client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    (void) client_options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
     client_options.timeout = 200ms;
     client_options.attempts = 1;
     DnsResolver dns_resolver;
@@ -391,7 +391,7 @@ DetachedTask run_literal_endpoint_resolve(fiber::event::EventLoop *loop, fiber::
     EndpointOutcome outcome;
     DnsResolverLocal local;
     DnsClient::Options client_options{};
-    client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053);
+    (void) client_options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053));
     DnsResolver dns_resolver;
     AddressResolver address_resolver;
     if (!local.init(*loop, *cache, client_options, {})) {

@@ -45,6 +45,26 @@ struct ConcurrentClientOutcome {
     std::array<std::size_t, 2> packet_sizes{};
 };
 
+enum class MultiServerMode : std::uint8_t {
+    TimeoutFirst,
+    ServerFailureFirst,
+    MalformedFirst,
+    TruncatedFirst,
+    SecondTcpFallback,
+    Rotate,
+};
+
+struct MultiServerOutcome {
+    IoErr err = IoErr::Unknown;
+    std::array<std::size_t, 2> recv_counts{};
+};
+
+struct MultiClientOutcome {
+    std::array<IoErr, 2> errors{IoErr::Unknown, IoErr::Unknown};
+    std::size_t query_count = 0;
+    std::vector<std::uint8_t> packet;
+};
+
 enum class TcpResponseMode : std::uint8_t {
     Correct,
     WrongId,
@@ -171,6 +191,13 @@ std::vector<std::uint8_t> make_empty_response(std::uint16_t id, std::string_view
     packet.insert(packet.end(), qname_wire.begin(), qname_wire.end());
     push_be16(packet, type);
     push_be16(packet, dns_class);
+    return packet;
+}
+
+std::vector<std::uint8_t> make_server_failure_response(std::uint16_t id, const CapturedQuestion &question) {
+    auto packet = make_empty_response(id, question.name, question.type, question.dns_class);
+    packet[2] = 0x81U;
+    packet[3] = 0x82U;
     return packet;
 }
 
@@ -316,7 +343,7 @@ DetachedTask run_concurrent_client_queries(fiber::event::EventLoop *loop, std::u
     ConcurrentClientOutcome outcome;
     DnsClient client;
     DnsClient::Options options{};
-    options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    (void) options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
     options.timeout = 200ms;
     options.attempts = 1;
     if (!client.init(*loop, options)) {
@@ -400,6 +427,216 @@ DetachedTask run_udp_retry_server(fiber::event::EventLoop *loop, std::promise<st
 
     outcome.err = IoErr::Unknown;
     socket.close();
+    outcome_promise->set_value(std::move(outcome));
+}
+
+DnsClient::ResponseDisposition validate_complete_dns_message(void *context, const std::uint8_t *packet,
+                                                             std::size_t packet_len) noexcept {
+    auto *parser = static_cast<MessageParser *>(context);
+    return parser != nullptr && parser->parse(packet, packet_len).has_value()
+                   ? DnsClient::ResponseDisposition::Accept
+                   : DnsClient::ResponseDisposition::RetryServer;
+}
+
+DetachedTask run_multi_server(fiber::event::EventLoop *loop, MultiServerMode mode,
+                              std::promise<std::array<std::uint16_t, 2>> *ports_promise,
+                              std::promise<MultiServerOutcome> *outcome_promise) {
+    MultiServerOutcome outcome;
+    fiber::net::UdpSocket first(*loop);
+    fiber::net::UdpSocket second(*loop);
+    fiber::net::TcpListener second_tcp(*loop);
+    auto first_bind = first.bind(fiber::net::SocketAddress::any_v4(), {});
+    auto second_bind = second.bind(fiber::net::SocketAddress::any_v4(), {});
+    if (!first_bind || !second_bind) {
+        ports_promise->set_value({0, 0});
+        outcome.err = !first_bind ? first_bind.error() : second_bind.error();
+        outcome_promise->set_value(outcome);
+        co_return;
+    }
+
+    auto first_port = resolve_port(first.fd());
+    auto second_port = resolve_port(second.fd());
+    if (!first_port || !second_port) {
+        ports_promise->set_value({0, 0});
+        outcome.err = !first_port ? first_port.error() : second_port.error();
+        outcome_promise->set_value(outcome);
+        co_return;
+    }
+    if (mode == MultiServerMode::SecondTcpFallback) {
+        auto tcp_bind =
+                second_tcp.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), *second_port), {});
+        if (!tcp_bind) {
+            ports_promise->set_value({0, 0});
+            outcome.err = tcp_bind.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+    }
+    ports_promise->set_value({*first_port, *second_port});
+
+    std::array<std::uint8_t, 512> buf{};
+    auto first_recv = co_await first.recv_from(buf.data(), buf.size(), 2s);
+    if (!first_recv) {
+        outcome.err = first_recv.error();
+        outcome_promise->set_value(outcome);
+        co_return;
+    }
+    ++outcome.recv_counts[0];
+    auto first_question = parse_question(buf.data(), first_recv->size);
+    if (!first_question) {
+        outcome.err = first_question.error();
+        outcome_promise->set_value(outcome);
+        co_return;
+    }
+
+    std::vector<std::uint8_t> first_response;
+    switch (mode) {
+        case MultiServerMode::TimeoutFirst:
+            break;
+        case MultiServerMode::ServerFailureFirst:
+            first_response = make_server_failure_response(read_be16(buf.data()), *first_question);
+            break;
+        case MultiServerMode::MalformedFirst:
+            first_response = make_empty_response(read_be16(buf.data()), first_question->name, first_question->type,
+                                                 first_question->dns_class);
+            first_response[7] = 1;
+            break;
+        case MultiServerMode::TruncatedFirst:
+            first_response = make_truncated_response(read_be16(buf.data()), first_question->name);
+            break;
+        case MultiServerMode::SecondTcpFallback:
+            break;
+        case MultiServerMode::Rotate:
+            first_response = make_a_response(read_be16(buf.data()), first_question->name, {10, 0, 0, 1});
+            break;
+    }
+    if (!first_response.empty()) {
+        auto sent = co_await first.send_to(first_response.data(), first_response.size(), first_recv->peer, 2s);
+        if (!sent) {
+            outcome.err = sent.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+    }
+
+    auto second_recv = co_await second.recv_from(buf.data(), buf.size(), 2s);
+    if (!second_recv) {
+        outcome.err = second_recv.error();
+        outcome_promise->set_value(outcome);
+        co_return;
+    }
+    ++outcome.recv_counts[1];
+    auto second_question = parse_question(buf.data(), second_recv->size);
+    if (!second_question) {
+        outcome.err = second_question.error();
+        outcome_promise->set_value(outcome);
+        co_return;
+    }
+    auto second_response = mode == MultiServerMode::SecondTcpFallback
+                                   ? make_truncated_response(read_be16(buf.data()), second_question->name)
+                                   : make_a_response(read_be16(buf.data()), second_question->name, {20, 0, 0, 2});
+    auto sent = co_await second.send_to(second_response.data(), second_response.size(), second_recv->peer, 2s);
+    if (!sent) {
+        outcome.err = sent.error();
+        outcome_promise->set_value(outcome);
+        co_return;
+    }
+
+    if (mode == MultiServerMode::SecondTcpFallback) {
+        auto accepted = co_await fiber::async::timeout_for([&]() { return second_tcp.accept(); }, 2s);
+        if (!accepted) {
+            outcome.err = accepted.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        fiber::net::TcpStream stream(*loop, accepted->release_fd(), accepted->take_peer());
+        std::array<std::uint8_t, 2> prefix{};
+        auto prefix_read = co_await read_exact(stream, prefix.data(), prefix.size());
+        if (!prefix_read) {
+            outcome.err = prefix_read.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        std::vector<std::uint8_t> tcp_query(read_be16(prefix.data()));
+        auto query_read = co_await read_exact(stream, tcp_query.data(), tcp_query.size());
+        if (!query_read) {
+            outcome.err = query_read.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        auto tcp_question = parse_question(tcp_query.data(), tcp_query.size());
+        if (!tcp_question) {
+            outcome.err = tcp_question.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        auto tcp_response = make_a_response(read_be16(tcp_query.data()), tcp_question->name, {30, 0, 0, 3});
+        prefix[0] = static_cast<std::uint8_t>(tcp_response.size() >> 8U);
+        prefix[1] = static_cast<std::uint8_t>(tcp_response.size() & 0xffU);
+        auto prefix_written = co_await write_all(stream, prefix.data(), prefix.size());
+        if (!prefix_written) {
+            outcome.err = prefix_written.error();
+            outcome_promise->set_value(outcome);
+            co_return;
+        }
+        auto response_written = co_await write_all(stream, tcp_response.data(), tcp_response.size());
+        outcome.err = response_written ? IoErr::None : response_written.error();
+        stream.close();
+        second_tcp.close();
+    } else {
+        outcome.err = IoErr::None;
+    }
+    first.close();
+    second.close();
+    outcome_promise->set_value(outcome);
+}
+
+DetachedTask run_multi_server_client(fiber::event::EventLoop *loop, MultiServerMode mode,
+                                     std::array<std::uint16_t, 2> ports,
+                                     std::promise<MultiClientOutcome> *outcome_promise) {
+    MultiClientOutcome outcome;
+    DnsClient client;
+    DnsClient::Options options{};
+    (void) options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), ports[0]));
+    (void) options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), ports[1]));
+    options.timeout = 40ms;
+    options.attempts = 1;
+    options.rotate_nameservers = mode == MultiServerMode::Rotate;
+    if (!client.init(*loop, options)) {
+        outcome.errors[0] = IoErr::Invalid;
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    MessageParser parser;
+    if (!parser.init()) {
+        client.close();
+        client.release();
+        outcome.errors[0] = IoErr::NoMem;
+        outcome_promise->set_value(std::move(outcome));
+        co_return;
+    }
+    const DnsClient::ResponseValidator validator{.context = &parser, .validate = &validate_complete_dns_message};
+
+    const std::size_t query_count = mode == MultiServerMode::Rotate ? 2 : 1;
+    for (std::size_t i = 0; i < query_count; ++i) {
+        QuestionSpec question;
+        question.name = i == 0 ? "first.example" : "second.example";
+        question.type = static_cast<std::uint16_t>(RecordType::A);
+        question.dns_class = static_cast<std::uint16_t>(RecordClass::IN);
+
+        std::array<std::uint8_t, 512> packet{};
+        auto result = co_await client.query_raw(question, packet.data(), packet.size(), validator);
+        outcome.errors[i] = result ? IoErr::None : result.error();
+        ++outcome.query_count;
+        if (!result) {
+            break;
+        }
+        outcome.packet.assign(packet.begin(), packet.begin() + static_cast<std::ptrdiff_t>(*result));
+    }
+
+    client.close();
+    client.release();
     outcome_promise->set_value(std::move(outcome));
 }
 
@@ -686,7 +923,7 @@ DetachedTask run_client_query(fiber::event::EventLoop *loop, std::uint16_t port,
     ClientOutcome outcome;
     DnsClient client;
     DnsClient::Options options{};
-    options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    (void) options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
     options.timeout = timeout;
     options.attempts = attempts;
     options.enable_tcp_fallback = enable_tcp_fallback;
@@ -718,7 +955,7 @@ DetachedTask run_client_close_while_waiting(fiber::event::EventLoop *loop,
     ClientOutcome outcome;
     DnsClient client;
     DnsClient::Options options{};
-    options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053);
+    (void) options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053));
     options.timeout = 500ms;
     options.attempts = 1;
     if (!client.init(*loop, options)) {
@@ -748,7 +985,7 @@ DetachedTask run_client_query_until_canceled(fiber::event::EventLoop *loop, DnsC
                                              std::promise<ClientOutcome> *outcome_promise) {
     ClientOutcome outcome;
     DnsClient::Options options{};
-    options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    (void) options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
     options.timeout = 5s;
     options.attempts = 1;
     if (!client->init(*loop, options)) {
@@ -792,6 +1029,51 @@ void expect_tcp_response_rejected(TcpResponseMode response_mode) {
 
     EXPECT_EQ(server.err, IoErr::None);
     EXPECT_EQ(client.err, IoErr::Invalid);
+}
+
+void expect_multi_server_success(MultiServerMode mode) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<std::array<std::uint16_t, 2>> ports_promise;
+    std::promise<MultiServerOutcome> server_promise;
+    std::promise<MultiClientOutcome> client_promise;
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_multi_server(&group.at(0), mode, &ports_promise, &server_promise); });
+    const auto ports = ports_promise.get_future().get();
+    ASSERT_NE(ports[0], 0);
+    ASSERT_NE(ports[1], 0);
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_multi_server_client(&group.at(0), mode, ports, &client_promise); });
+
+    auto client_future = client_promise.get_future();
+    auto server_future = server_promise.get_future();
+    ASSERT_EQ(client_future.wait_for(3s), std::future_status::ready);
+    ASSERT_EQ(server_future.wait_for(3s), std::future_status::ready);
+    const auto client = client_future.get();
+    const auto server = server_future.get();
+    group.stop();
+    group.join();
+
+    EXPECT_EQ(server.err, IoErr::None);
+    EXPECT_EQ(server.recv_counts[0], 1u);
+    EXPECT_EQ(server.recv_counts[1], 1u);
+    EXPECT_EQ(client.query_count, mode == MultiServerMode::Rotate ? 2u : 1u);
+    EXPECT_EQ(client.errors[0], IoErr::None);
+    if (mode == MultiServerMode::Rotate) {
+        EXPECT_EQ(client.errors[1], IoErr::None);
+    }
+
+    MessageParser parser;
+    ASSERT_TRUE(parser.init());
+    auto parsed = parser.parse(client.packet.data(), client.packet.size());
+    ASSERT_TRUE(parsed.has_value()) << fiber::common::io_err_name(parsed.error());
+    ASSERT_EQ(parsed->answer_count, 1u);
+    ASSERT_EQ(parsed->answers[0].rdata_len, 4u);
+    const bool tcp_on_second = mode == MultiServerMode::SecondTcpFallback;
+    EXPECT_EQ(parsed->answers[0].rdata[0], tcp_on_second ? 30u : 20u);
+    EXPECT_EQ(parsed->answers[0].rdata[3], tcp_on_second ? 3u : 2u);
 }
 
 TEST(DnsClientTest, QueryRawReturnsUdpResponse) {
@@ -965,6 +1247,30 @@ TEST(DnsClientTest, QueryRawRetriesAfterTimeout) {
     EXPECT_EQ(server.err, IoErr::None);
     EXPECT_EQ(server.recv_count, 2u);
     EXPECT_EQ(client.err, IoErr::None);
+}
+
+TEST(DnsClientTest, QueryRawFailsOverToNextNameserverAfterTimeout) {
+    expect_multi_server_success(MultiServerMode::TimeoutFirst);
+}
+
+TEST(DnsClientTest, QueryRawFailsOverOnRetryableServerRcode) {
+    expect_multi_server_success(MultiServerMode::ServerFailureFirst);
+}
+
+TEST(DnsClientTest, ResponseValidatorCanRejectMalformedResponseAndFailOver) {
+    expect_multi_server_success(MultiServerMode::MalformedFirst);
+}
+
+TEST(DnsClientTest, TcpFallbackFailureContinuesWithNextNameserver) {
+    expect_multi_server_success(MultiServerMode::TruncatedFirst);
+}
+
+TEST(DnsClientTest, TcpFallbackUsesTheSelectedSecondNameserver) {
+    expect_multi_server_success(MultiServerMode::SecondTcpFallback);
+}
+
+TEST(DnsClientTest, RotateAdvancesInitialNameserverAcrossQueries) {
+    expect_multi_server_success(MultiServerMode::Rotate);
 }
 
 TEST(DnsClientTest, QueryRawFallsBackToTcpOnTruncatedUdpResponse) {

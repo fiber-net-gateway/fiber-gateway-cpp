@@ -11,6 +11,7 @@
 #include <fiber/common/NonMovable.h>
 #include <fiber/dns/DnsCache2.h>
 #include <fiber/dns/DnsResolver.h>
+#include <fiber/dns/DnsResolverConfig.h>
 #include <fiber/net/IpAddress.h>
 
 namespace fiber::event {
@@ -24,14 +25,15 @@ namespace fiber::lite_nginx::runtime {
 // gets its own DnsResolverLocal + DnsResolver (resolve_host asserts it runs on its own loop),
 // so a directive-bound http(s)://host target resolves host on the calling worker's resolver.
 //
-// The upstream nameserver is read from /etc/resolv.conf (first nameserver line), defaulting to
-// 8.8.8.8:53 when absent or unparseable.
+// System resolver configuration is loaded before worker loops start and injected here. Every
+// worker gets the same bounded nameserver list and retry policy.
 class DnsService : public fiber::common::NonCopyable, public fiber::common::NonMovable {
 public:
     DnsService() noexcept = default;
     ~DnsService();
 
-    [[nodiscard]] bool init(fiber::event::EventLoopGroup &group) noexcept;
+    [[nodiscard]] bool init(fiber::event::EventLoopGroup &group,
+                            const fiber::dns::SystemResolverConfig &resolver_config) noexcept;
     void shutdown() noexcept;
 
     // Resolves host to its A/AAAA addresses using the calling worker loop's resolver. Must be

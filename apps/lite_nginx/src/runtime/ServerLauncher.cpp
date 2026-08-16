@@ -340,7 +340,8 @@ ServerLauncher::ServerLauncher(fiber::event::EventLoop &accept_loop) : accept_lo
 
 ServerLauncher::~ServerLauncher() { close(); }
 
-std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &runtime) {
+std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &runtime,
+                                                        const fiber::dns::SystemResolverConfig &resolver_config) {
     if (started_) {
         return std::unexpected(make_error({}, "lite-nginx runtime already started"));
     }
@@ -369,7 +370,7 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
     }
 
     dns_ = std::make_unique<DnsService>();
-    if (!dns_->init(*worker_group_)) {
+    if (!dns_->init(*worker_group_, resolver_config)) {
         close();
         return std::unexpected(make_error({}, "failed to initialize DNS service"));
     }

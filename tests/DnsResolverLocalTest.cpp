@@ -298,7 +298,7 @@ DetachedTask run_cache_hit_resolve(fiber::event::EventLoop *loop, fiber::dns::Sh
     ResolveOutcome outcome;
     DnsResolverLocal resolver;
     DnsClient::Options client_options{};
-    client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053);
+    (void) client_options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053));
     DnsResolverLocal::Options resolver_options{};
     if (!resolver.init(*loop, *cache, client_options, resolver_options)) {
         outcome.err = IoErr::Invalid;
@@ -342,7 +342,7 @@ DetachedTask run_double_resolve(fiber::event::EventLoop *loop, fiber::dns::Share
     ResolveOutcome outcome;
     DnsResolverLocal resolver;
     DnsClient::Options client_options{};
-    client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    (void) client_options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
     client_options.timeout = 200ms;
     client_options.attempts = 1;
     DnsResolverLocal::Options resolver_options{};
@@ -387,7 +387,7 @@ DetachedTask run_single_resolve(fiber::event::EventLoop *loop, fiber::dns::Share
     ResolveOutcome outcome;
     DnsResolverLocal resolver;
     DnsClient::Options client_options{};
-    client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    (void) client_options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
     client_options.timeout = 200ms;
     client_options.attempts = 1;
     if (!resolver.init(*loop, *cache, client_options, resolver_options)) {
@@ -421,7 +421,7 @@ DetachedTask run_singleflight_resolve(fiber::event::EventLoop *loop, fiber::dns:
                                       std::string_view qname = "singleflight.example") {
     DnsResolverLocal resolver;
     DnsClient::Options client_options{};
-    client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    (void) client_options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port));
     client_options.timeout = 400ms;
     client_options.attempts = 1;
     DnsResolverLocal::Options resolver_options{};

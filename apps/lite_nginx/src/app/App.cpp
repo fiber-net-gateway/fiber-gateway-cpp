@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 
+#include <fiber/dns/DnsResolverConfig.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/log/Log.h>
 #include "config/Config.h"
@@ -109,6 +110,19 @@ std::string format_log_init_error(const fiber::log::LogConfigError &error) {
     return formatted;
 }
 
+std::string format_resolver_config_error(const fiber::dns::ResolverConfigError &error) {
+    std::string formatted(fiber::dns::resolver_config_error_name(error.code));
+    if (error.line != 0) {
+        formatted.append(" at /etc/resolv.conf:");
+        formatted.append(std::to_string(error.line));
+    }
+    if (error.system_error != 0) {
+        formatted.append(": ");
+        formatted.append(std::strerror(error.system_error));
+    }
+    return formatted;
+}
+
 class LoggingShutdownGuard {
 public:
     ~LoggingShutdownGuard() { fiber::log::LoggerManager::global().shutdown(); }
@@ -146,6 +160,13 @@ int LiteNginxApp::run(int argc, char **argv) {
         return 0;
     }
 
+    auto resolver_config_result = fiber::dns::load_system_resolver_config();
+    if (!resolver_config_result) {
+        std::cerr << "failed to load system resolver configuration: "
+                  << format_resolver_config_error(resolver_config_result.error()) << '\n';
+        return 1;
+    }
+
     auto log_init_result = fiber::log::LoggerManager::global().initialize(std::move(*log_config_result));
     if (!log_init_result) {
         std::cerr << "failed to initialize logging: " << format_log_init_error(log_init_result.error()) << '\n';
@@ -157,10 +178,14 @@ int LiteNginxApp::run(int argc, char **argv) {
                              << " listeners=" << config_result->http.listens.size()
                              << " upstreams=" << config_result->http.upstreams.size()
                              << " servers=" << config_result->http.servers.size();
+    if (resolver_config_result->unsupported != fiber::dns::ResolverUnsupportedFeature::None) {
+        LOG(LOG_LIFECYCLE, WARN) << "ignoring unsupported /etc/resolv.conf settings first_line="
+                                 << resolver_config_result->first_unsupported_line;
+    }
 
     fiber::event::EventLoop loop;
     runtime::ServerLauncher launcher(loop);
-    auto start_result = launcher.start(*runtime_result);
+    auto start_result = launcher.start(*runtime_result, *resolver_config_result);
     if (!start_result) {
         LOG(LOG_LIFECYCLE, ERROR) << format_runtime_error(start_result.error());
         return 1;

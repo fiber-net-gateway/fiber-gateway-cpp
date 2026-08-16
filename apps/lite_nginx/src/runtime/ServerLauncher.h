@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include <fiber/dns/DnsResolverConfig.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/HttpServer.h>
@@ -33,7 +34,8 @@ public:
     explicit ServerLauncher(fiber::event::EventLoop &accept_loop);
     ~ServerLauncher();
 
-    std::expected<void, RuntimeError> start(const RuntimeConfig &runtime);
+    std::expected<void, RuntimeError> start(const RuntimeConfig &runtime,
+                                            const fiber::dns::SystemResolverConfig &resolver_config);
     void close();
 
     [[nodiscard]] const std::vector<BoundListener> &bound_listeners() const noexcept { return bound_listeners_; }

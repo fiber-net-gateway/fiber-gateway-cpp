@@ -155,6 +155,9 @@ private:
     [[nodiscard]] async::Task<common::IoResult<PendingOutcome>>
     query_upstream(std::string_view qname, std::uint16_t qtype, std::uint16_t qclass, PendingEntry &pending) noexcept;
 
+    [[nodiscard]] static DnsClient::ResponseDisposition
+    validate_upstream_response(void *context, const std::uint8_t *packet, std::size_t packet_len) noexcept;
+
     [[nodiscard]] common::IoResult<PendingOutcome> handle_response(std::string_view qname, std::uint16_t qtype,
                                                                    std::uint16_t qclass, const std::uint8_t *packet,
                                                                    std::size_t packet_len) noexcept;

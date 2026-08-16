@@ -593,7 +593,7 @@ TEST(NacosClientTest, ResolvesHostnameTriesAllAddressesAndPreservesHostHeader) {
     ASSERT_TRUE(cache.init(group.at(0)));
     fiber::dns::DnsResolverLocal local;
     fiber::dns::DnsClient::Options dns_client_options;
-    dns_client_options.server = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053);
+    (void) dns_client_options.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 65053));
     dns_client_options.timeout = 100ms;
     dns_client_options.attempts = 1;
     ASSERT_TRUE(local.init(group.at(0), cache, dns_client_options));
