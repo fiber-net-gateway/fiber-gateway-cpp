@@ -387,6 +387,55 @@ DetachedTask run_closed_scenario(fiber::event::EventLoop *loop, std::uint16_t po
     promise->set_value(out);
 }
 
+struct AffinityScenarioResult {
+    fiber::common::IoErr err = fiber::common::IoErr::None;
+    bool different_identity_missed = false;
+    bool original_identity_reused = false;
+};
+
+DetachedTask run_affinity_scenario(fiber::event::EventLoop *loop, std::uint16_t port,
+                                   std::promise<AffinityScenarioResult> *promise) {
+    AffinityScenarioResult out;
+    fiber::http::Http1ConnectionPoolCore pool(*loop, {
+                                                             .max_idle_per_group = 2,
+                                                             .max_idle_total = 4,
+                                                             .idle_timeout = 30s,
+                                                             .initial_group_capacity = 2,
+                                                     });
+    if (!pool.init()) {
+        out.err = fiber::common::IoErr::NoMem;
+        promise->set_value(out);
+        co_return;
+    }
+
+    const auto first_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+            fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Https,
+            fiber::http::Http1ConnectionPoolAffinity{41});
+    const auto second_key = fiber::http::Http1ConnectionGroupKey::from_ip(
+            fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Https,
+            fiber::http::Http1ConnectionPoolAffinity{42});
+
+    auto first_lease = pool.acquire(first_key);
+    auto connection_result = co_await ensure_connected(first_lease, port);
+    if (!connection_result) {
+        out.err = connection_result.error();
+        promise->set_value(out);
+        co_return;
+    }
+    auto *first_connection = *connection_result;
+    first_lease.reset();
+
+    auto other_identity = pool.acquire(second_key);
+    out.different_identity_missed = other_identity.valid() && !other_identity.hit() && !other_identity.has_connection();
+
+    auto original_identity = pool.acquire(first_key);
+    out.original_identity_reused = original_identity.hit() && original_identity.get() == first_connection;
+    if (original_identity.has_connection()) {
+        original_identity.connection().close();
+    }
+    promise->set_value(out);
+}
+
 TEST(Http1ConnectionPoolTest, LeaseCanBuildNewConnectionAndReuseGroupInLifoOrder) {
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -418,6 +467,37 @@ TEST(Http1ConnectionPoolTest, LeaseCanBuildNewConnectionAndReuseGroupInLifoOrder
     EXPECT_EQ(result.groups_after_release, 1u);
     EXPECT_EQ(result.idle_while_leased, 0u);
     EXPECT_EQ(result.groups_while_leased, 0u);
+
+    state->stop.store(true, std::memory_order_release);
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+    group.stop();
+    group.join();
+}
+
+TEST(Http1ConnectionPoolTest, PoolAffinityPreventsIdentityCrossReuse) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    auto state = std::make_shared<HoldServerState>();
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_result_future = server_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_hold_server(&group.at(0), 1, &port_promise, &server_result_promise, state);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<AffinityScenarioResult> result_promise;
+    auto result_future = result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return run_affinity_scenario(&group.at(0), port, &result_promise); });
+
+    const auto result = result_future.get();
+    EXPECT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_TRUE(result.different_identity_missed);
+    EXPECT_TRUE(result.original_identity_reused);
 
     state->stop.store(true, std::memory_order_release);
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);

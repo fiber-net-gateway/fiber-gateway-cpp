@@ -8,6 +8,7 @@
 #include <mutex>
 #include <unistd.h>
 
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/tls1.h>
 
@@ -19,7 +20,16 @@ namespace {
 
 constexpr std::uint16_t kAlpnExtensionType = 16;
 
-common::IoResult<void> configure_common_context(SSL_CTX *ctx, const TlsOptions &options, bool is_server) {
+class OpenSslErrorQueueScope {
+public:
+    OpenSslErrorQueueScope() noexcept { ERR_clear_error(); }
+    ~OpenSslErrorQueueScope() noexcept { ERR_clear_error(); }
+
+    OpenSslErrorQueueScope(const OpenSslErrorQueueScope &) = delete;
+    OpenSslErrorQueueScope &operator=(const OpenSslErrorQueueScope &) = delete;
+};
+
+common::IoResult<void> configure_common_context(SSL_CTX *ctx, const TlsOptions &options, bool is_server) noexcept {
     if (!ctx) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -66,14 +76,14 @@ common::IoResult<void> configure_common_context(SSL_CTX *ctx, const TlsOptions &
     return {};
 }
 
-common::IoResult<void> load_server_identity(SSL_CTX *ctx, const TlsOptions &options) {
+common::IoResult<void> load_certificate_identity(SSL_CTX *ctx, const TlsOptions &options) noexcept {
     if (!ctx) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (options.cert_file.empty() || options.key_file.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (SSL_CTX_use_certificate_file(ctx, options.cert_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+    if (SSL_CTX_use_certificate_chain_file(ctx, options.cert_file.c_str()) != 1) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (SSL_CTX_use_PrivateKey_file(ctx, options.key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
@@ -210,7 +220,14 @@ common::IoResult<void> TlsContext::init() {
     if (ctx_) {
         return {};
     }
-    if (is_server_ && require_server_identity_ && (options_.cert_file.empty() || options_.key_file.empty())) {
+
+    OpenSslErrorQueueScope error_queue_scope;
+    const bool has_certificate = !options_.cert_file.empty();
+    const bool has_private_key = !options_.key_file.empty();
+    if (has_certificate != has_private_key) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (is_server_ && require_server_identity_ && !has_certificate) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -225,8 +242,8 @@ common::IoResult<void> TlsContext::init() {
         return std::unexpected(common_result.error());
     }
 
-    if (is_server_ && !options_.cert_file.empty()) {
-        auto identity_result = load_server_identity(ctx, options_);
+    if (has_certificate) {
+        auto identity_result = load_certificate_identity(ctx, options_);
         if (!identity_result) {
             SSL_CTX_free(ctx);
             return std::unexpected(identity_result.error());
