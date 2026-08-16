@@ -479,6 +479,8 @@ struct NamingCaseResult {
     bool status_auth_unavailable = false;
     bool status_ready = false;
     bool status_aggregates = false;
+    bool status_closing = false;
+    bool status_deregistered = false;
     bool status_reconnected = false;
     bool status_stopped = false;
     bool rejects_invalid_arguments = false;
@@ -648,7 +650,17 @@ DetachedTask run_case(fiber::event::EventLoop *loop, ScriptedNamingServer *serve
         result.unsubscribed_after_last =
                 not_yet_unsubscribed && co_await wait_until([server]() { return server->unsubscribe_count() == 1; });
         registered->close();
+        const auto closing_status = service_status.current();
+        result.status_closing = closing_status.value && closing_status.value->registrations.active_count == 0 &&
+                                closing_status.value->registrations.registered_count == 1 &&
+                                closing_status.value->registrations.pending_count == 1;
         result.deregistered = co_await wait_until([server]() { return server->deregister_count() == 1; });
+        result.status_deregistered = co_await wait_until([&service_status]() {
+            const auto current = service_status.current();
+            return current.value && current.value->registrations.active_count == 0 &&
+                   current.value->registrations.registered_count == 0 &&
+                   current.value->registrations.pending_count == 0;
+        });
     }
 
     co_await service->shutdown();
@@ -827,6 +839,8 @@ TEST(NacosNamingServiceTest, QuerySubscriptionRegistrationAndShutdown) {
     EXPECT_TRUE(result.status_auth_unavailable);
     EXPECT_TRUE(result.status_ready);
     EXPECT_TRUE(result.status_aggregates);
+    EXPECT_TRUE(result.status_closing);
+    EXPECT_TRUE(result.status_deregistered);
     EXPECT_TRUE(result.status_stopped);
     EXPECT_TRUE(result.rejects_invalid_arguments);
     EXPECT_TRUE(result.ready);

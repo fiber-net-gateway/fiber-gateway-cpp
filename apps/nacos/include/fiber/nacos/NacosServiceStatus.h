@@ -50,8 +50,9 @@ struct NacosSubscriptionSummary {
 };
 
 struct NacosRegistrationSummary {
-    // Counts live NamingService InstanceRegistration handles. pending_count
-    // includes register, update, and deregister reconciliation.
+    // active_count counts live NamingService InstanceRegistration handles and
+    // drops when close begins. pending_count also includes deregistration, so
+    // it may temporarily exceed active_count.
     std::uint64_t active_count = 0;
     std::uint64_t pending_count = 0;
     std::uint64_t registered_count = 0;

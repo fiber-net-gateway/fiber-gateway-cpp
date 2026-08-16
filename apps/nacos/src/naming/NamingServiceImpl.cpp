@@ -66,6 +66,32 @@ void saturating_increment(std::uint64_t &value) noexcept {
     }
 }
 
+void update_count(std::uint64_t &count, bool previous, bool next) noexcept {
+    if (previous == next) {
+        return;
+    }
+    if (next) {
+        saturating_increment(count);
+        return;
+    }
+    FIBER_ASSERT(count > 0);
+    --count;
+}
+
+struct SubscriptionStatusFlags {
+    bool active = false;
+    bool pending = false;
+    bool registered = false;
+    bool synchronized = false;
+};
+
+struct RegistrationStatusFlags {
+    bool owned = false;
+    bool active = false;
+    bool pending = false;
+    bool registered = false;
+};
+
 std::string_view nullable_text(const json::Nullable<std::string_view> &value) noexcept {
     return value.is_present() ? value.value() : std::string_view{};
 }
@@ -101,6 +127,7 @@ struct NamingProtocolState {
     bool registered = false;
     bool operation_in_flight = false;
     bool draining = false;
+    SubscriptionStatusFlags status_flags;
 };
 
 using NamingSubscriptionPool = SubscriptionPool<ServiceInfo, NamingProtocolState>;
@@ -122,6 +149,7 @@ class NamingServiceImpl final : public NamingService {
         bool operation_in_flight = false;
         bool registered = false;
         bool closing = false;
+        RegistrationStatusFlags service_status_flags;
     };
 
 public:
@@ -178,7 +206,8 @@ private:
                                                        std::uint64_t version, bool deregister) noexcept;
     void erase_registration(RegistrationEntry &entry) noexcept;
     void publish_registration(RegistrationEntry &entry, RegistrationState state,
-                              std::optional<NamingServiceError> error = std::nullopt);
+                              std::optional<NamingServiceError> error = std::nullopt,
+                              bool refresh_service_status = true);
 
     [[nodiscard]] NamingServiceError validate_key(std::string_view service_name, std::string_view group) const;
     [[nodiscard]] NamingServiceError validate_instance(const Instance &instance) const;
@@ -192,8 +221,13 @@ private:
 
     void restore_connection_state();
     void reset_connection_state();
-    [[nodiscard]] NacosSubscriptionSummary subscription_summary(bool rpc_available);
-    [[nodiscard]] NacosRegistrationSummary registration_summary(bool rpc_available) const;
+    [[nodiscard]] NacosSubscriptionSummary subscription_summary(bool rpc_available) const noexcept;
+    [[nodiscard]] NacosRegistrationSummary registration_summary(bool rpc_available) const noexcept;
+    void update_subscription_counts(NamingEntry &entry) noexcept;
+    void refresh_subscription_status(NamingEntry &entry);
+    void clear_subscription_counts() noexcept;
+    void update_registration_counts(RegistrationEntry &entry) noexcept;
+    void refresh_registration_status(RegistrationEntry &entry);
     [[nodiscard]] static NacosServiceFailureCategory failure_category(const NacosRpcError &error) noexcept;
     [[nodiscard]] NacosServiceFailureCategory authentication_failure() const;
     void publish_status(NamingServiceStatus next);
@@ -255,6 +289,9 @@ private:
     async::Watch<NacosServiceState> lifecycle_{NacosServiceState::Created};
     std::optional<async::Watch<NacosServiceState>::Publisher> lifecycle_publisher_;
     NamingServiceStatus status_;
+    NacosSubscriptionSummary subscription_counts_;
+    NacosRegistrationSummary registration_counts_;
+    std::uint64_t registration_owned_count_ = 0;
     async::Watch<NamingServiceStatus> status_watch_{NamingServiceStatus{}};
     std::optional<async::Watch<NamingServiceStatus>::Publisher> status_publisher_;
     NacosRpc *ready_rpc_ = nullptr;
@@ -310,42 +347,71 @@ common::IoResult<void> NamingServiceImpl::start() noexcept {
 
 NamingService::StatusSubscriber NamingServiceImpl::subscribe_status() { return status_watch_.subscribe(); }
 
-NacosSubscriptionSummary NamingServiceImpl::subscription_summary(bool rpc_available) {
-    NacosSubscriptionSummary summary;
-    pool_.for_each([&summary, rpc_available](NamingEntry &entry) {
-        if (entry.subscribers.empty() || entry.proto.draining) {
-            return;
-        }
-        saturating_increment(summary.active_count);
-        if (rpc_available && entry.proto.registered) {
-            saturating_increment(summary.registered_count);
-        }
-        if (entry.latest != nullptr) {
-            saturating_increment(summary.synchronized_count);
-        }
-        if (!rpc_available || !entry.proto.registered || entry.latest == nullptr || entry.proto.operation_in_flight) {
-            saturating_increment(summary.pending_count);
-        }
-    });
+NacosSubscriptionSummary NamingServiceImpl::subscription_summary(bool rpc_available) const noexcept {
+    NacosSubscriptionSummary summary = subscription_counts_;
+    if (!rpc_available) {
+        summary.registered_count = 0;
+        summary.pending_count = summary.active_count;
+    }
     return summary;
 }
 
-NacosRegistrationSummary NamingServiceImpl::registration_summary(bool rpc_available) const {
-    NacosRegistrationSummary summary;
-    for (const auto &entry: registrations_) {
-        if (!entry->owner) {
-            continue;
-        }
-        saturating_increment(summary.active_count);
-        if (rpc_available && entry->registered) {
-            saturating_increment(summary.registered_count);
-        }
-        if (!rpc_available || !entry->registered || entry->operation_in_flight || entry->closing ||
-            entry->completed_version != entry->desired_version) {
-            saturating_increment(summary.pending_count);
-        }
+NacosRegistrationSummary NamingServiceImpl::registration_summary(bool rpc_available) const noexcept {
+    NacosRegistrationSummary summary = registration_counts_;
+    if (!rpc_available) {
+        summary.registered_count = 0;
+        summary.pending_count = registration_owned_count_;
     }
     return summary;
+}
+
+void NamingServiceImpl::update_subscription_counts(NamingEntry &entry) noexcept {
+    const bool active = !entry.subscribers.empty() && !entry.proto.draining;
+    const SubscriptionStatusFlags next{
+            .active = active,
+            .pending =
+                    active && (!entry.proto.registered || entry.latest == nullptr || entry.proto.operation_in_flight),
+            .registered = active && entry.proto.registered,
+            .synchronized = active && entry.latest != nullptr,
+    };
+    SubscriptionStatusFlags &previous = entry.proto.status_flags;
+    update_count(subscription_counts_.active_count, previous.active, next.active);
+    update_count(subscription_counts_.pending_count, previous.pending, next.pending);
+    update_count(subscription_counts_.registered_count, previous.registered, next.registered);
+    update_count(subscription_counts_.synchronized_count, previous.synchronized, next.synchronized);
+    previous = next;
+}
+
+void NamingServiceImpl::refresh_subscription_status(NamingEntry &entry) {
+    update_subscription_counts(entry);
+    refresh_status();
+}
+
+void NamingServiceImpl::clear_subscription_counts() noexcept {
+    pool_.for_each([](NamingEntry &entry) { entry.proto.status_flags = {}; });
+    subscription_counts_ = {};
+}
+
+void NamingServiceImpl::update_registration_counts(RegistrationEntry &entry) noexcept {
+    const bool owned = entry.owner != nullptr;
+    const RegistrationStatusFlags next{
+            .owned = owned,
+            .active = owned && !entry.closing,
+            .pending = owned && (!entry.registered || entry.operation_in_flight || entry.closing ||
+                                 entry.completed_version != entry.desired_version),
+            .registered = owned && entry.registered,
+    };
+    RegistrationStatusFlags &previous = entry.service_status_flags;
+    update_count(registration_owned_count_, previous.owned, next.owned);
+    update_count(registration_counts_.active_count, previous.active, next.active);
+    update_count(registration_counts_.pending_count, previous.pending, next.pending);
+    update_count(registration_counts_.registered_count, previous.registered, next.registered);
+    previous = next;
+}
+
+void NamingServiceImpl::refresh_registration_status(RegistrationEntry &entry) {
+    update_registration_counts(entry);
+    refresh_status();
 }
 
 NacosServiceFailureCategory NamingServiceImpl::failure_category(const NacosRpcError &error) noexcept {
@@ -851,7 +917,7 @@ NamingServiceImpl::registry(std::string_view service_name, std::string_view grou
     auto entry = std::make_shared<RegistrationEntry>(*this, std::string(service_name), std::string(group),
                                                      std::move(instance));
     registrations_.push_back(entry);
-    refresh_status();
+    refresh_registration_status(*entry);
     if (ready_rpc_) {
         schedule_registration(entry);
     }
@@ -861,21 +927,20 @@ NamingServiceImpl::registry(std::string_view service_name, std::string_view grou
 
 void NamingServiceImpl::on_subscription_add(EntryPtr entry) {
     entry->proto.draining = false;
+    refresh_subscription_status(*entry);
     if (ready_rpc_) {
         schedule_subscription(std::move(entry), true);
     }
-    refresh_status();
 }
 
 RemoveDecision NamingServiceImpl::on_subscription_remove(EntryPtr entry) {
     FIBER_ASSERT(loop_->in_loop());
     entry->proto.draining = true;
+    refresh_subscription_status(*entry);
     if (!stopping() && ready_rpc_ && (entry->proto.registered || entry->proto.operation_in_flight)) {
         schedule_subscription(std::move(entry), false);
-        refresh_status();
         return RemoveDecision::KeepLinked;
     }
-    refresh_status();
     return RemoveDecision::RetireNow;
 }
 
@@ -891,7 +956,7 @@ void NamingServiceImpl::schedule_subscription(EntryPtr entry, bool subscribe_val
         return;
     }
     entry->proto.operation_in_flight = true;
-    refresh_status();
+    refresh_subscription_status(*entry);
     tasks_.add();
     async::spawn([this, entry = std::move(entry), subscribe_value]() mutable {
         return run_subscription(std::move(entry), subscribe_value);
@@ -929,13 +994,13 @@ async::DetachedTask NamingServiceImpl::run_subscription(EntryPtr entry, bool sub
             pool_.retire(*entry);
         }
     }
-    refresh_status();
+    refresh_subscription_status(*entry);
     tasks_.done();
 }
 
 void NamingServiceImpl::publish_value(NamingEntry &entry, std::shared_ptr<const ServiceInfo> value) {
     pool_.publish(entry, std::move(value));
-    refresh_status();
+    refresh_subscription_status(entry);
 }
 
 async::Task<common::IoResult<dto::resp::NotifySubscriberResponse>>
@@ -1013,7 +1078,7 @@ void NamingServiceImpl::close_registration(RegistrationEntry &entry) noexcept {
         return;
     }
     entry.closing = true;
-    refresh_status();
+    refresh_registration_status(entry);
     for (const auto &candidate: registrations_) {
         if (candidate.get() != &entry) {
             continue;
@@ -1048,7 +1113,7 @@ void NamingServiceImpl::schedule_registration(const std::shared_ptr<Registration
         return;
     }
     entry->operation_in_flight = true;
-    refresh_status();
+    refresh_registration_status(*entry);
     const std::uint64_t version = entry->desired_version;
     Instance instance = entry->instance;
     tasks_.add();
@@ -1139,19 +1204,23 @@ void NamingServiceImpl::erase_registration(RegistrationEntry &entry) noexcept {
     auto found = std::find_if(registrations_.begin(), registrations_.end(),
                               [&entry](const auto &candidate) { return candidate.get() == &entry; });
     if (found != registrations_.end()) {
+        update_registration_counts(entry);
         registrations_.erase(found);
         refresh_status();
     }
 }
 
 void NamingServiceImpl::publish_registration(RegistrationEntry &entry, RegistrationState state,
-                                             std::optional<NamingServiceError> error) {
+                                             std::optional<NamingServiceError> error, bool refresh_service_status) {
     RegistrationStatus status{.state = state};
     if (error) {
         status.error = std::make_shared<const NamingServiceError>(std::move(*error));
     }
     entry.status_publisher->publish(std::move(status));
-    refresh_status();
+    update_registration_counts(entry);
+    if (refresh_service_status) {
+        refresh_status();
+    }
 }
 
 async::DetachedTask NamingServiceImpl::run() noexcept {
@@ -1166,9 +1235,10 @@ async::DetachedTask NamingServiceImpl::run() noexcept {
     pool_.close_all();
     for (const auto &entry: registrations_) {
         if (entry->owner) {
-            publish_registration(*entry, RegistrationState::Closed);
+            publish_registration(*entry, RegistrationState::Closed, std::nullopt, false);
         }
         entry->owner = nullptr;
+        update_registration_counts(*entry);
     }
     registrations_.clear();
     refresh_status();
@@ -1210,10 +1280,13 @@ void NamingServiceImpl::request_shutdown() noexcept {
     lifecycle_publisher_->publish(NacosServiceState::Stopping);
     set_connection_status(NacosServicePhase::Stopping, NacosServiceFailureCategory::Shutdown, false);
     pool_.disable();
+    clear_subscription_counts();
+    refresh_status();
     pool_.close_all();
     for (const auto &entry: registrations_) {
-        publish_registration(*entry, RegistrationState::Closed);
+        publish_registration(*entry, RegistrationState::Closed, std::nullopt, false);
         entry->owner = nullptr;
+        update_registration_counts(*entry);
     }
     refresh_status();
 }
@@ -1222,15 +1295,18 @@ void NamingServiceImpl::reset_connection_state() {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(ready_rpc_ == nullptr);
     FIBER_ASSERT(tasks_.empty());
-    pool_.for_each([](NamingEntry &entry) {
+    pool_.for_each([this](NamingEntry &entry) {
         entry.proto.registered = false;
         entry.proto.operation_in_flight = false;
+        update_subscription_counts(entry);
     });
     for (const auto &entry: registrations_) {
         entry->registered = false;
         entry->operation_in_flight = false;
         if (!entry->closing) {
-            publish_registration(*entry, RegistrationState::Pending);
+            publish_registration(*entry, RegistrationState::Pending, std::nullopt, false);
+        } else {
+            update_registration_counts(*entry);
         }
     }
     refresh_status();
@@ -1326,11 +1402,12 @@ NamingServiceImpl::run_target(const NacosServerHost &host, std::uint16_t port, s
     }
 
     auto resolved = std::move(resolved_or_stopping).get<0>();
+    if (!running()) {
+        co_return target_result;
+    }
     if (!resolved) {
-        if (running()) {
-            begin_connection_attempt();
-            set_connection_status(NacosServicePhase::Connecting, NacosServiceFailureCategory::Transport, false);
-        }
+        begin_connection_attempt();
+        set_connection_status(NacosServicePhase::Connecting, NacosServiceFailureCategory::Transport, false);
         co_return target_result;
     }
     if (resolved->empty()) {
@@ -1340,6 +1417,9 @@ NamingServiceImpl::run_target(const NacosServerHost &host, std::uint16_t port, s
     }
     const std::string authority = make_nacos_server_authority(host, port);
     for (const net::SocketAddress &address: *resolved) {
+        if (!running()) {
+            break;
+        }
         begin_connection_attempt();
         NacosRpcEndpoint endpoint{
                 .ip = address.ip(),

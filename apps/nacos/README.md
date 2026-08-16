@@ -280,6 +280,8 @@ register it. `pending_count` includes every active key that still needs current
 connection registration, an initial value, or in-flight reconciliation.
 Naming registration summaries similarly aggregate live registration handles,
 currently registered handles, and handles with pending update/deregister work.
+`active_count` drops as soon as a handle closes; `pending_count` may therefore
+temporarily exceed it while deregistration finishes.
 
 Status publishing and all service mutations happen on the client EventLoop.
 The returned `async::Watch` subscriber owns immutable snapshots;
