@@ -28,6 +28,7 @@ public:
 
     fiber::common::IoResult<void> start() noexcept override { return {}; }
     fiber::async::Task<void> shutdown() noexcept override { co_return; }
+    StatusSubscriber subscribe_status() override { return status_.subscribe(); }
 
     fiber::async::Task<
             std::expected<std::shared_ptr<const fiber::nacos::ServiceInfo>, fiber::nacos::NamingServiceError>>
@@ -109,6 +110,8 @@ public:
     }
 
 private:
+    fiber::async::Watch<fiber::nacos::NamingServiceStatus> status_{fiber::nacos::NamingServiceStatus{}};
+
     struct Entry;
 
     struct Node {
