@@ -6,6 +6,7 @@
 #include <coroutine>
 #include <expected>
 #include <sys/socket.h>
+#include <type_traits>
 #include <unistd.h>
 #include <utility>
 
@@ -22,7 +23,9 @@ public:
     using Address = typename Traits::Address;
 
     StreamInfant() = delete;
-    StreamInfant(fiber::event::EventLoop *loop, int fd, Address peer) : loop_(loop), fd_(fd), peer_(std::move(peer)) {}
+    StreamInfant(fiber::event::EventLoop *loop, int fd,
+                 Address peer) noexcept(std::is_nothrow_move_constructible_v<Address>) :
+        loop_(loop), fd_(fd), peer_(std::move(peer)) {}
 
     StreamInfant(const StreamInfant &) = delete;
     StreamInfant &operator=(const StreamInfant &) = delete;

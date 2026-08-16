@@ -6,12 +6,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
+#include "../net/HappyEyeballs.h"
 #include "../net/SocketAddress.h"
 #include "../net/TcpSocketOptions.h"
 #include "../net/TlsContext.h"
@@ -34,6 +36,10 @@ public:
 
     // timeout applies to the TCP connect phase. TLS handshake timeout is configured separately.
     fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout) noexcept;
+    // Races an already-resolved address set during the TCP phase. The first TCP success proceeds
+    // through the same socket-option and optional TLS setup as the single-address overload.
+    fiber::async::Task<common::IoResult<void>> connect(std::span<const net::SocketAddress> addresses,
+                                                       net::HappyEyeballsOptions options) noexcept;
     void close() noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
@@ -93,12 +99,26 @@ private:
 
     enum class State : std::uint8_t {
         Init,
+        Connecting,
         ConnectedIdle,
         Busy,
         Closed,
     };
 
+    class ConnectStateGuard {
+    public:
+        explicit ConnectStateGuard(Http1ClientConnection &connection) noexcept : connection_(connection) {}
+        ~ConnectStateGuard();
+
+    private:
+        Http1ClientConnection &connection_;
+    };
+
     static Http1ClientConnectionOptions normalize_options(Http1ClientConnectionOptions options) noexcept;
+    common::IoErr begin_connect() noexcept;
+    fiber::async::Task<common::IoResult<void>> connect_impl(std::span<const net::SocketAddress> addresses,
+                                                            net::HappyEyeballsOptions options,
+                                                            bool multiple_addresses) noexcept;
     void assert_active_loop() const noexcept;
     void mark_unusable() noexcept;
     void record_request_started() noexcept;

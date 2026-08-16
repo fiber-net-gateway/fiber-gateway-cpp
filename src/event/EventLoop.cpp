@@ -36,6 +36,7 @@ EventLoop::NotifyEntry::NotifyEntry() : node(this) {}
 
 EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(group), group_index_(group_index) {
     detail::queue_init(&local_queue_);
+    detail::queue_init(&stop_queue_);
     wakeup_entry_.loop = this;
     wakeup_entry_.callback = &EventLoop::on_wakeup;
     event_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -54,6 +55,7 @@ EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(gr
 }
 
 EventLoop::~EventLoop() {
+    FIBER_ASSERT(detail::queue_empty(&stop_queue_));
     if (event_fd_ >= 0) {
         ::close(event_fd_);
     }
@@ -144,6 +146,7 @@ void EventLoop::run_prepared() {
     do {
         run_once();
     } while (!stop_requested_.load(std::memory_order_acquire));
+    drain_stop();
     current_ = prev;
     running_.store(false, std::memory_order_release);
 }
@@ -184,6 +187,20 @@ void EventLoop::run_once() {
 void EventLoop::stop() {
     stop_requested_.store(true, std::memory_order_release);
     notify_wakeup();
+}
+
+void EventLoop::drain_stop() noexcept {
+    FIBER_ASSERT(in_loop());
+    while (!detail::queue_empty(&stop_queue_)) {
+        detail::Queue *node = detail::queue_head(&stop_queue_);
+        detail::queue_remove(node);
+        auto *entry = queue_data(node, StopEntry, node_);
+        entry->registered_ = false;
+        StopEntry::Callback callback = entry->callback_;
+        if (callback != nullptr) {
+            callback(entry);
+        }
+    }
 }
 
 void EventLoop::post_at(std::chrono::steady_clock::time_point when, TimerEntry &entry) {

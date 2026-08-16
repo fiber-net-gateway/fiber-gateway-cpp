@@ -1,5 +1,7 @@
 #include "UpstreamConnection.h"
 
+#include <array>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -24,10 +26,7 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
         co_return out;
     }
 
-    // Resolve the dial target(s). IP-key peers dial the key's IP directly; name-key peers resolve
-    // via DnsService, which returns every A/AAAA record (ordered V6First). We dial each address in
-    // turn and fall back to the next on connect failure instead of failing the whole request after
-    // a single dead address.
+    // Resolve the dial target(s). DNS remains separate from the bounded TCP connection race.
     std::vector<fiber::net::IpAddress> addresses;
     if (key.is_ip()) {
         addresses.push_back(key.ip_address());
@@ -41,65 +40,54 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
     if (addresses.empty()) {
         co_return std::unexpected(fiber::common::IoErr::NotFound);
     }
+    if (addresses.size() > fiber::net::kHappyEyeballsMaxAddresses) {
+        co_return std::unexpected(fiber::common::IoErr::MessageTooLarge);
+    }
 
-    auto build_opts = [&](const fiber::net::IpAddress &ip) {
-        fiber::http::Http1ClientConnectionOptions opts;
-        opts.peer_addr = fiber::net::SocketAddress(ip, key.port());
-        if (key.scheme() == fiber::http::Http1ConnectionGroupKey::Scheme::Https) {
-            opts.tls.enabled = true;
-            opts.tls.server_name = std::string(tls_server_name);
-        }
-        return opts;
-    };
+    std::array<fiber::net::SocketAddress, fiber::net::kHappyEyeballsMaxAddresses> peers{};
+    for (std::size_t i = 0; i < addresses.size(); ++i) {
+        peers[i] = fiber::net::SocketAddress(addresses[i], key.port());
+    }
+    const std::span<const fiber::net::SocketAddress> peer_span(peers.data(), addresses.size());
 
-    fiber::common::IoErr last_err = fiber::common::IoErr::NotFound;
+    fiber::http::Http1ClientConnectionOptions connection_options;
+    connection_options.peer_addr = peers[0];
+    if (key.scheme() == fiber::http::Http1ConnectionGroupKey::Scheme::Https) {
+        connection_options.tls.enabled = true;
+        connection_options.tls.server_name = std::string(tls_server_name);
+    }
+
+    fiber::net::HappyEyeballsOptions connect_options;
+    connect_options.total_timeout = connect_timeout;
 
     if (!out.lease.valid()) {
-        // Pooling is globally disabled or bypassed for this request: open a transient connection
-        // per attempt.
-        for (std::size_t i = 0; i < addresses.size(); ++i) {
-            out.transient = std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current(),
-                                                                                 build_opts(addresses[i]));
-            auto connect_result = co_await out.transient->connect(connect_timeout);
-            if (connect_result) {
-                out.conn = out.transient.get();
-                co_return out;
-            }
-            last_err = connect_result.error();
-            out.transient.reset();
+        out.transient = std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current(),
+                                                                             std::move(connection_options));
+        auto connect_result = co_await out.transient->connect(peer_span, connect_options);
+        if (!connect_result) {
+            co_return std::unexpected(connect_result.error());
         }
-        co_return std::unexpected(last_err);
+        out.conn = out.transient.get();
+        co_return out;
     }
 
-    // Pooled lease on a miss. Try each address; on failure reset the lease (park_entry recycles the
-    // dead, non-reusable connection) and re-acquire a fresh slot for the next attempt.
-    for (std::size_t i = 0; i < addresses.size(); ++i) {
-        if (i > 0) {
-            out.lease = co_await pool.acquire(key);
-            if (!out.lease.valid()) {
-                co_return std::unexpected(fiber::common::IoErr::Invalid);
-            }
-            // A concurrent acquire may have populated the group: reuse it instead of redialing.
-            if (out.lease.has_connection()) {
-                out.conn = out.lease.get();
-                co_return out;
-            }
-        }
-        auto emplace = out.lease.emplace_connection(build_opts(addresses[i]));
-        if (!emplace) {
-            last_err = emplace.error();
-            out.lease.reset();
-            continue;
-        }
-        auto connect_result = co_await (*emplace)->connect(connect_timeout);
-        if (connect_result) {
-            out.conn = *emplace;
-            co_return out;
-        }
-        last_err = connect_result.error();
+    // A pool miss keeps one lease through the TCP race and optional TLS handshake. The connection
+    // is exposed only after the full connect path succeeds; reset recycles a failed, non-reusable
+    // entry.
+    auto emplace = out.lease.emplace_connection(std::move(connection_options));
+    if (!emplace) {
+        fiber::common::IoErr error = emplace.error();
         out.lease.reset();
+        co_return std::unexpected(error);
     }
-    co_return std::unexpected(last_err);
+    auto connect_result = co_await (*emplace)->connect(peer_span, connect_options);
+    if (!connect_result) {
+        fiber::common::IoErr error = connect_result.error();
+        out.lease.reset();
+        co_return std::unexpected(error);
+    }
+    out.conn = *emplace;
+    co_return out;
 }
 
 } // namespace fiber::lite_nginx::upstream
