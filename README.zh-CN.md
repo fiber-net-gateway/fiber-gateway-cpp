@@ -171,6 +171,7 @@ target_link_libraries(my_gateway PRIVATE fiber::nacos fiber::cat fiber::promethe
 
 - [示例](example/README.zh-CN.md)
 - [应用目录约定](apps/README.md)
+- [脚本模块使用指南](docs/script-guide.zh-CN.md)（[English](docs/script-guide.md)）
 - [HTTP/1 连接池](docs/http1-connection-pool.md)
 - [脚本函数签名 ABI](docs/script-function-signature-abi.md)
 - [HTTP/3 客户端设计](feature/http3_client.md)
