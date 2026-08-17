@@ -182,6 +182,8 @@ void Http2BodyRecvState::close_input() noexcept {
     notify_waiter();
 }
 
+void Http2BodyRecvState::discard_buffered() noexcept { queue_.clear(); }
+
 void Http2BodyRecvState::abort(common::IoErr reason) noexcept {
     if (abort_reason_ == common::IoErr::None) {
         abort_reason_ = reason;

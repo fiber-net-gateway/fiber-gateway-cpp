@@ -13,6 +13,7 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>
+#include <fiber/http/HttpBodyPipe.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpExchangeIo.h>
 #include <fiber/http/HttpHeaders.h>
@@ -32,11 +33,13 @@
 #include "../upstream/UpstreamRegistry.h"
 #include "DnsService.h"
 #include "HttpScriptServices.h"
+#include "RequestBodyLimiter.h"
 
 namespace fiber::lite_nginx::runtime {
 namespace {
 
 constexpr std::string_view kNotFoundBody = "404 Not Found\n";
+constexpr std::string_view kPayloadTooLargeBody = "413 Payload Too Large\n";
 
 DEFINE_LOGGER(LOG_SCRIPT, "lite_nginx.script");
 
@@ -47,8 +50,10 @@ RuntimeError make_error(const config::SourceLocation &location, std::string mess
     };
 }
 
-fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange, int status_code,
-                                             std::string_view body, const ListenerRuntime *listener = nullptr) {
+fiber::async::Task<void>
+send_plain_response(fiber::http::HttpExchange &exchange, int status_code, std::string_view body,
+                    const ListenerRuntime *listener = nullptr,
+                    fiber::http::ResponseConnectionMode connection_mode = fiber::http::ResponseConnectionMode::Auto) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
     if (listener != nullptr && listener->http3 && !listener->http3_alt_svc.empty()) {
@@ -60,7 +65,7 @@ fiber::async::Task<void> send_plain_response(fiber::http::HttpExchange &exchange
             .status_code = status_code,
             .headers = &headers,
             .body = fiber::http::HttpBodySpec::ContentLength(body.size()),
-            .connection_mode = fiber::http::ResponseConnectionMode::Auto,
+            .connection_mode = connection_mode,
             .end_stream = body.empty(),
     });
     if (!header_result) {
@@ -88,9 +93,11 @@ fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::
                                     const fiber::http_script::ConstPackage &const_package,
                                     const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
                                     fiber::http_script::HttpScriptServices *services,
-                                    const logging::RequestLogContext &log_context) {
+                                    const logging::RequestLogContext &log_context,
+                                    fiber::http_script::ScriptRequestBody request_body,
+                                    const RequestBodyLimiter &body_limiter) {
     fiber::script::GcHeap heap;
-    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection};
+    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection, request_body};
     auto constants_ready = ctx.prepare_constants(const_package);
     if (!constants_ready || !ctx.bind_path_constants(const_package, path_vars)) {
         co_await ctx.write_error_json(500, "SCRIPT_CONSTANTS");
@@ -99,6 +106,12 @@ fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::
     ctx.set_services(services);
     fiber::script::JsValue root = fiber::script::JsValue::make_undefined();
     auto result = co_await script.exec_async(root, &ctx, heap);
+
+    // The dispatcher finalizes request-body limit failures as 413. Do not turn
+    // the limiter's read error into a script-level 500.
+    if (body_limiter.exceeded()) {
+        co_return;
+    }
 
     if (ctx.response_header_sent()) {
         co_return; // script/directive already wrote the full response
@@ -318,12 +331,25 @@ private:
         log_context.access_log = location.access_log;
         log_context.location_pattern = location.pattern;
         log_context.path_vars = std::move(match_context.path_vars);
+        RequestBodyLimiter body_limiter(exchange, location.client_max_body_size);
+        if (body_limiter.exceeded()) {
+            co_await send_plain_response(exchange, 413, kPayloadTooLargeBody, &listener,
+                                         fiber::http::ResponseConnectionMode::Close);
+            co_return;
+        }
+        const fiber::http_script::ScriptRequestBody request_body =
+                fiber::http_script::make_script_request_body(body_limiter);
         if (location.script) {
             assert(location.const_package != nullptr);
             co_await run_script(exchange, *location.script, *location.const_package, log_context.path_vars,
-                                script_services_, log_context);
+                                script_services_, log_context, request_body, body_limiter);
         } else {
-            co_await proxy_.handle(exchange, listener, location, log_context.path_vars, script_services_, log_context);
+            co_await proxy_.handle(exchange, request_body.pipe_reader(), listener, location, log_context.path_vars,
+                                   script_services_, log_context);
+        }
+        if (body_limiter.exceeded() && !exchange.response_stats().header_sent) {
+            co_await send_plain_response(exchange, 413, kPayloadTooLargeBody, &listener,
+                                         fiber::http::ResponseConnectionMode::Close);
         }
     }
 

@@ -312,6 +312,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 LocationRuntime runtime_location;
                 runtime_location.location = location.location;
                 runtime_location.pattern = location.pattern;
+                runtime_location.client_max_body_size = location.client_max_body_size;
                 const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
 
                 // Add the route first so the matcher extracts the pattern's path variable
@@ -409,6 +410,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                     resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
             runtime_location.buffering.buffer_size = location.proxy.buffering.buffer_size;
             runtime_location.buffering.low_water = location.proxy.buffering.low_water;
+            runtime_location.client_max_body_size = location.client_max_body_size;
             runtime_location.upstream_index = upstream_index;
             runtime_location.reuse_connection = location.reuse_connection;
             runtime_location.close_on_client_abort = location.proxy.close_on_client_abort;

@@ -128,6 +128,7 @@ struct LocationRuntime {
     std::chrono::milliseconds read_timeout{60000};
     std::chrono::milliseconds send_timeout{60000};
     ProxyBufferingRuntime buffering;
+    std::size_t client_max_body_size = 0;
     std::uint32_t upstream_index = 0;
     AccessLogId access_log = kDisabledAccessLog;
     bool host_header_overridden = false;

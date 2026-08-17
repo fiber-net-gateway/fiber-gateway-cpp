@@ -40,6 +40,8 @@
 namespace {
 
 using namespace std::chrono_literals;
+using fiber::lite_nginx::config::ConfigLoader;
+using fiber::lite_nginx::runtime::RuntimeBuilder;
 
 const char kSelfSignedCertPem[] = R"(-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUEDCdxH6aX38+fEeFx3nlY3pJwdkwDQYJKoZIhvcNAQEL
@@ -1349,7 +1351,10 @@ http {
         location /stream {
             proxy_pass http://127.0.0.1:9001;
             proxy_buffering off;
+            client_max_body_size 0;
         }
+
+        client_max_body_size 2m;
     }
 }
 )",
@@ -1367,10 +1372,12 @@ http {
     EXPECT_EQ(buffered.buffering.low_water, 32u * 1024u);
     EXPECT_EQ(buffered.read_timeout, std::chrono::seconds(60));
     EXPECT_EQ(buffered.send_timeout, std::chrono::seconds(60));
+    EXPECT_EQ(buffered.client_max_body_size, 2u * 1024u * 1024u);
 
     const auto &stream = runtime->servers[0].locations[1];
     EXPECT_FALSE(stream.buffering.enabled());
     EXPECT_EQ(stream.buffering.low_water, 0u);
+    EXPECT_EQ(stream.client_max_body_size, 0u);
 }
 
 TEST(LiteNginxRuntimeTest, CompilesAccessLogInheritance) {
@@ -2028,6 +2035,164 @@ http {
     EXPECT_EQ(proxied_request.find("Content-Length:", content_length + 1), std::string::npos) << proxied_request;
     EXPECT_EQ(proxied_request.find("Content-Length: 99\r\n"), std::string::npos) << proxied_request;
     EXPECT_EQ(proxied_request.find("Transfer-Encoding:"), std::string::npos) << proxied_request;
+}
+
+TEST(LiteNginxRuntimeTest, ProxyTerminatesExpectContinueAndAllowsBodyAtExactLimit) {
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    client_max_body_size 5;
+
+    server {
+        server_name localhost;
+        location /* {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = ConfigLoader::load_from_string(config_text, "expect_continue.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char headers[] = "POST /upload HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Expect: 100-continue\r\n"
+                           "Content-Length: 5\r\n"
+                           "Connection: close\r\n"
+                           "\r\n";
+    ASSERT_EQ(::send(client, headers, sizeof(headers) - 1, 0), static_cast<ssize_t>(sizeof(headers) - 1));
+    const std::string informational = recv_until_contains(client, "\r\n\r\n");
+    ASSERT_EQ(informational, "HTTP/1.1 100 Continue\r\n\r\n");
+
+    ASSERT_TRUE(send_all(client, "hello"));
+    const std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    const std::string proxied_request = upstream_future.get();
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(proxied_request.find("\r\n\r\nhello"), std::string::npos) << proxied_request;
+    EXPECT_EQ(proxied_request.find("Expect:"), std::string::npos) << proxied_request;
+}
+
+TEST(LiteNginxRuntimeTest, RejectsKnownOversizedBodyBeforeContinueOrUpstreamConnect) {
+    const std::uint16_t port = reserve_loopback_port();
+    const std::uint16_t unavailable_upstream_port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    ASSERT_NE(unavailable_upstream_port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    server {
+        server_name localhost;
+        location /* {
+            client_max_body_size 5;
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(unavailable_upstream_port));
+
+    auto config = ConfigLoader::load_from_string(config_text, "known_oversized_body.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+
+    const char request[] = "POST /upload HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Expect: 100-continue\r\n"
+                           "Content-Length: 6\r\n"
+                           "\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    const std::string response = recv_http_response(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 413 Payload Too Large\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Connection: close\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("100 Continue"), std::string::npos) << response;
+    EXPECT_EQ(response.find("502 Bad Gateway"), std::string::npos) << response;
+}
+
+TEST(LiteNginxRuntimeTest, RejectsOversizedChunkedProxyBodyIncrementally) {
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            client_max_body_size 5;
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = ConfigLoader::load_from_string(config_text, "chunked_oversized_body.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char request[] = "POST /upload HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Transfer-Encoding: chunked\r\n"
+                           "Connection: close\r\n"
+                           "\r\n"
+                           "6\r\nabcdef\r\n"
+                           "0\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    const std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    const std::string proxied_request = upstream_future.get();
+    EXPECT_NE(response.find("HTTP/1.1 413 Payload Too Large\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_EQ(proxied_request.find("Expect:"), std::string::npos) << proxied_request;
 }
 
 TEST(LiteNginxRuntimeTest, SuppressesOverriddenAndConnectionDeclaredRequestHeaders) {
@@ -2880,6 +3045,52 @@ http {
     ::unlink(script_path.c_str());
 }
 
+TEST(LiteNginxRuntimeTest, ScriptBodyConsumersMapIncrementalLimitFailureTo413) {
+    TestScriptFile script("body_limit", "req.discardBody(); return req.readBinary();");
+    ASSERT_TRUE(script.ok());
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            client_max_body_size 5;
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+
+    auto config = ConfigLoader::load_from_string(config_text, "script_body_limit.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char request[] = "POST /upload HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Transfer-Encoding: chunked\r\n"
+                           "Connection: close\r\n"
+                           "\r\n"
+                           "6\r\nabcdef\r\n"
+                           "0\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    const std::string response = recv_http_response(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 413 Payload Too Large\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("HTTP/1.1 500"), std::string::npos) << response;
+}
+
 // Drives a single GET /x through a script_file location whose script is `script_body`, and
 // returns the raw HTTP/1.1 response. Used to check how run_script synthesizes a response from
 // the script outcome (Value -> 200+json, Void -> 204, Exception -> 500+json, Abort -> 500+json)
@@ -3461,7 +3672,10 @@ http {
     upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
     server {
         server_name localhost;
-        location /* { script_file SCRIPT_PATH; }
+        location /* {
+            client_max_body_size 5;
+            script_file SCRIPT_PATH;
+        }
     }
 }
 )";
@@ -3481,8 +3695,16 @@ http {
     int client = connect_client(harness.port());
     ASSERT_GE(client, 0);
 
-    const char request[] = "GET /api/42 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+    const char headers[] = "POST /api/42 HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Expect: 100-continue\r\n"
+                           "Content-Length: 5\r\n"
+                           "Connection: close\r\n"
+                           "\r\n";
+    ASSERT_EQ(::send(client, headers, sizeof(headers) - 1, 0), static_cast<ssize_t>(sizeof(headers) - 1));
+    const std::string informational = recv_until_contains(client, "\r\n\r\n");
+    ASSERT_EQ(informational, "HTTP/1.1 100 Continue\r\n\r\n");
+    ASSERT_TRUE(send_all(client, "hello"));
 
     std::string response = recv_http_response(client);
     ::close(client);
@@ -3492,7 +3714,9 @@ http {
 
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
     EXPECT_NE(response.find("proxied"), std::string::npos) << response;
-    EXPECT_NE(proxied_request.find("GET /api/42 HTTP/1.1"), std::string::npos) << proxied_request;
+    EXPECT_NE(proxied_request.find("POST /api/42 HTTP/1.1"), std::string::npos) << proxied_request;
+    EXPECT_NE(proxied_request.find("\r\n\r\nhello"), std::string::npos) << proxied_request;
+    EXPECT_EQ(proxied_request.find("Expect:"), std::string::npos) << proxied_request;
 
     ::unlink(script_path.c_str());
 }

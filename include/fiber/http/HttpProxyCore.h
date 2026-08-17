@@ -126,6 +126,19 @@ inline bool is_request_framing_header(const fiber::http::HttpHeaders::HeaderFiel
            (field.name_hash == kTransferEncodingHash && field.lowcase_view() == "transfer-encoding");
 }
 
+inline bool is_expect_header(const fiber::http::HttpHeaders::HeaderField &field) noexcept {
+    static constexpr std::uint64_t kExpectHash = fiber::http::http_header_name_hash("expect");
+    return field.name_hash == kExpectHash && field.lowcase_view() == "expect";
+}
+
+// Expect is terminated by the proxy: the downstream server decides whether to
+// emit 100 Continue, while the upstream request is sent without an expectation
+// unless the caller explicitly adds one again after this filtering step.
+inline bool should_skip_proxy_request_header(const fiber::http::HttpHeaders &headers,
+                                             const fiber::http::HttpHeaders::HeaderField &field) noexcept {
+    return is_request_framing_header(field) || is_expect_header(field) || should_skip_hop_by_hop_header(headers, field);
+}
+
 inline void remove_request_framing_headers(fiber::http::HttpHeaders &headers) noexcept {
     static constexpr std::uint64_t kContentLengthHash = fiber::http::http_header_name_hash("content-length");
     static constexpr std::uint64_t kTransferEncodingHash = fiber::http::http_header_name_hash("transfer-encoding");

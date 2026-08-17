@@ -180,10 +180,11 @@ bool resolve_request_target(const fiber::http::HttpExchange &exchange, const run
 bool should_skip_request_header(const runtime::LocationRuntime &location,
                                 const fiber::http::HttpHeaders &request_headers,
                                 const fiber::http::HttpHeaders::HeaderField &field) noexcept {
-    if (is_request_framing_header(field) || location.skip_headers.get(field.lowcase_view(), field.name_hash)) {
+    if (should_skip_proxy_request_header(request_headers, field) ||
+        location.skip_headers.get(field.lowcase_view(), field.name_hash)) {
         return true;
     }
-    return connection_declares_hop_by_hop(request_headers, field.lowcase_view());
+    return false;
 }
 
 void apply_http3_alt_svc(const runtime::ListenerRuntime &listener, fiber::http::HttpHeaders &headers) {
@@ -264,8 +265,9 @@ void build_downstream_response_headers(const fiber::http::Http1ResponseHead &ups
 }
 
 fiber::async::Task<void>
-proxy_over_connection(fiber::http::HttpExchange &exchange, const runtime::LocationRuntime &location,
-                      fiber::http::Http1ClientConnection &conn, const runtime::ListenerRuntime &listener,
+proxy_over_connection(fiber::http::HttpExchange &exchange, fiber::http::HttpBodyPipeReader request_body_reader,
+                      const runtime::LocationRuntime &location, fiber::http::Http1ClientConnection &conn,
+                      const runtime::ListenerRuntime &listener,
                       const std::vector<std::string> &resolved_template_values, std::string_view request_target,
                       logging::RequestLogContext &log_context) {
     WebSocketHandshake websocket{
@@ -309,7 +311,7 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, const runtime::Locati
     if (!request_end_stream) {
         RequestBodyForwardState forward_state(request_body);
         while (true) {
-            auto body_result = co_await exchange.read_body(kBodyChunkSize);
+            auto body_result = co_await request_body_reader.read(kBodyChunkSize, std::chrono::milliseconds::max());
             if (!body_result) {
                 (void) upstream_exchange.abort(body_result.error());
                 co_return;
@@ -446,14 +448,13 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, const runtime::Locati
     }
 }
 
-fiber::async::Task<void> run_proxy_request(fiber::http::HttpExchange &exchange,
-                                           const runtime::ListenerRuntime &listener,
-                                           const runtime::LocationRuntime &location,
-                                           const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-                                           fiber::http_script::HttpScriptServices *services,
-                                           logging::RequestLogContext &log_context, upstream::ConnectionPool &pool,
-                                           runtime::DnsService &dns, const runtime::UpstreamPeerRuntime &peer,
-                                           upstream::AcquiredUpstreamConnection &acquired) {
+fiber::async::Task<void>
+run_proxy_request(fiber::http::HttpExchange &exchange, fiber::http::HttpBodyPipeReader request_body,
+                  const runtime::ListenerRuntime &listener, const runtime::LocationRuntime &location,
+                  const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+                  fiber::http_script::HttpScriptServices *services, logging::RequestLogContext &log_context,
+                  upstream::ConnectionPool &pool, runtime::DnsService &dns, const runtime::UpstreamPeerRuntime &peer,
+                  upstream::AcquiredUpstreamConnection &acquired) {
     ResolvedProxyValues resolved;
     if (location_has_proxy_templates(location) &&
         !evaluate_proxy_templates(exchange, location, path_vars, services, log_context.connection, resolved)) {
@@ -478,7 +479,7 @@ fiber::async::Task<void> run_proxy_request(fiber::http::HttpExchange &exchange,
     }
     acquired = std::move(*acquired_result);
 
-    co_await proxy_over_connection(exchange, location, *acquired.conn, listener, resolved.header_values,
+    co_await proxy_over_connection(exchange, request_body, location, *acquired.conn, listener, resolved.header_values,
                                    resolved.request_target, log_context);
 }
 
@@ -488,8 +489,8 @@ ProxyHandler::ProxyHandler(upstream::UpstreamRegistry &upstreams, upstream::Conn
                            runtime::DnsService &dns) noexcept : upstreams_(&upstreams), pool_(&pool), dns_(&dns) {}
 
 fiber::async::Task<void>
-ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::ListenerRuntime &listener,
-                     const runtime::LocationRuntime &location,
+ProxyHandler::handle(fiber::http::HttpExchange &exchange, fiber::http::HttpBodyPipeReader request_body,
+                     const runtime::ListenerRuntime &listener, const runtime::LocationRuntime &location,
                      const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
                      fiber::http_script::HttpScriptServices *services, logging::RequestLogContext &log_context) const {
     if (!exchange.protocol().empty() && (exchange.method() != fiber::http::HttpMethod::Connect ||
@@ -517,18 +518,18 @@ ProxyHandler::handle(fiber::http::HttpExchange &exchange, const runtime::Listene
 
     upstream::AcquiredUpstreamConnection acquired;
     if (!location.close_on_client_abort) {
-        co_await run_proxy_request(exchange, listener, location, path_vars, services, log_context, *pool_, *dns_, *peer,
-                                   acquired);
+        co_await run_proxy_request(exchange, request_body, listener, location, path_vars, services, log_context, *pool_,
+                                   *dns_, *peer, acquired);
         co_return;
     }
 
-    auto completed = co_await fiber::async::when_any([&exchange]() { return exchange.wait_response_channel_closed(); },
-                                                     [&]() {
-                                                         return run_proxy_request(exchange, listener, location,
-                                                                                  path_vars, services, log_context,
-                                                                                  *pool_, *dns_, *peer, acquired)
-                                                                 .select();
-                                                     });
+    auto completed = co_await fiber::async::when_any(
+            [&exchange]() { return exchange.wait_response_channel_closed(); },
+            [&]() {
+                return run_proxy_request(exchange, request_body, listener, location, path_vars, services, log_context,
+                                         *pool_, *dns_, *peer, acquired)
+                        .select();
+            });
     if (completed.is<1>()) {
         completed.get<1>();
         co_return;

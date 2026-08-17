@@ -7,6 +7,7 @@
 #include <coroutine>
 #include <cstring>
 #include <future>
+#include <poll.h>
 #include <string>
 #include <sys/socket.h>
 #include <thread>
@@ -197,7 +198,8 @@ fiber::common::IoResult<uint16_t> resolve_port(int fd) {
 
 DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandler handler,
                           fiber::event::EventLoopGroup *worker_group, std::promise<uint16_t> *port_promise,
-                          std::promise<fiber::http::Http1Server *> *server_promise) {
+                          std::promise<fiber::http::Http1Server *> *server_promise,
+                          fiber::http::HttpServerOptions http_options = {}) {
     fiber::net::ListenOptions options{};
     constexpr std::uint16_t kFirstTestPort = 20000;
     constexpr std::uint16_t kPortSpan = 20000;
@@ -206,7 +208,7 @@ DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandle
     for (std::size_t i = 0; i < kPortSpan; ++i) {
         std::uint32_t next = next_test_port.fetch_add(1, std::memory_order_relaxed);
         std::uint16_t port = static_cast<std::uint16_t>(kFirstTestPort + ((next - kFirstTestPort) % kPortSpan));
-        auto *server = new fiber::http::Http1Server(*loop, handler, {}, worker_group);
+        auto *server = new fiber::http::Http1Server(*loop, handler, http_options, worker_group);
         fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), port);
         auto bind_result = server->bind(addr, options);
         if (!bind_result) {
@@ -420,6 +422,56 @@ TEST(Http1ServerTest, CanSendContinueHeaderBeforeFinalResponse) {
     EXPECT_LT(first_pos, final_pos);
     EXPECT_EQ(response.find("Content-Length:"), std::string::npos);
     EXPECT_EQ(response.find("Transfer-Encoding:"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+TEST(Http1ServerTest, CloseResponseSkipsConfiguredUnreadBodyDrain) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Http1Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            (void) co_await send_final_header(exchange, 413, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
+                                              fiber::http::ResponseConnectionMode::Close, true);
+        };
+        fiber::http::HttpServerOptions options;
+        options.drain_unread_body = true;
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise, options);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    const uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    const int client = connect_client(port);
+    ASSERT_GE(client, 0);
+    const char request[] = "POST /upload HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Content-Length: 5\r\n"
+                           "\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+
+    const std::string response = recv_http_response(client);
+    EXPECT_NE(response.find("HTTP/1.1 413 Payload Too Large\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Connection: close\r\n"), std::string::npos) << response;
+
+    pollfd descriptor{
+            .fd = client,
+            .events = POLLIN,
+    };
+    ASSERT_GT(::poll(&descriptor, 1, 500), 0);
+    char byte = 0;
+    EXPECT_EQ(::recv(client, &byte, 1, 0), 0);
+    ::close(client);
 
     fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
     group.join();

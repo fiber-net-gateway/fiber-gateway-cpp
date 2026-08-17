@@ -4840,6 +4840,50 @@ TEST(Http2ConnectionTest, ServerHandlerCanSendInformationalHeadersBeforeFinalRes
     EXPECT_TRUE(found_server);
 }
 
+TEST(Http2ConnectionTest, ServerFinalResponseDiscardsUnreadRequestBodyWithoutReset) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "POST"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/upload"},
+                                                 {":authority", "example.com"},
+                                                 {"content-length", "6"},
+                                         },
+                                         false);
+
+    auto header_result = std::make_shared<fiber::common::IoResult<void>>();
+    fiber::http::HttpHandler handler =
+            [header_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *header_result = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 413,
+                .headers = nullptr,
+                .body = fiber::http::HttpBodySpec::ContentLength(0),
+                .end_stream = true,
+        });
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(header_result->has_value());
+
+    const auto blocks = collect_stream_header_blocks(outcome.written, 1);
+    ASSERT_EQ(blocks.size(), 1U);
+    const auto fields = decode_header_block(blocks[0].header_block);
+    ASSERT_FALSE(fields.empty());
+    EXPECT_EQ(fields[0].first, ":status");
+    EXPECT_EQ(fields[0].second, "413");
+
+    const std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    auto rst = std::find_if(frames.begin(), frames.end(),
+                            [](const EncodedFrame &frame) { return frame.type == 0x3U && frame.stream_id == 1U; });
+    EXPECT_EQ(rst, frames.end()) << describe_frames(frames);
+}
+
 TEST(Http2ConnectionTest, ServerHandlerCanSendResponseBodyDataFrames) {
     std::string request = std::string(kClientConnectionPreface);
     request += make_frame(0, 0x4, 0x0, 0, {});

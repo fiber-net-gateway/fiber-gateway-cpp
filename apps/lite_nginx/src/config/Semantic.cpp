@@ -230,6 +230,16 @@ std::expected<ProxyBufferingSettings, ConfigError> parse_proxy_buffering(const D
     };
 }
 
+std::expected<std::size_t, ConfigError> parse_client_max_body_size(const DirectiveNode &directive) {
+    if (directive.has_block || directive.args.size() != 1) {
+        return std::unexpected(make_error(directive, "client_max_body_size expects exactly one size argument"));
+    }
+    if (contains_variable(directive.args[0])) {
+        return std::unexpected(make_error(directive, "client_max_body_size does not support variables"));
+    }
+    return parse_size(directive, directive.args[0], "client_max_body_size");
+}
+
 std::expected<unsigned, ConfigError> parse_non_negative_unsigned(const DirectiveNode &directive, std::string_view value,
                                                                  const char *field_name) {
     unsigned parsed = 0;
@@ -1100,7 +1110,8 @@ std::expected<LoggingConfig, ConfigError> parse_logging(const DirectiveNode &dir
 }
 
 std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &directive,
-                                                          const ProxySettingsBuilder &server_proxy_defaults) {
+                                                          const ProxySettingsBuilder &server_proxy_defaults,
+                                                          std::size_t inherited_client_max_body_size) {
     if (!directive.has_block) {
         return std::unexpected(make_error(directive, "location must be a block"));
     }
@@ -1121,6 +1132,7 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     bool seen_access_log = false;
     bool seen_rewrite_path = false;
     bool seen_reuse_connection = false;
+    bool seen_client_max_body_size = false;
 
     for (const auto &child: directive.children) {
         if (child.has_block) {
@@ -1216,6 +1228,18 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
             location_proxy_defaults.buffering = *buffering;
             continue;
         }
+        if (child.name == "client_max_body_size") {
+            if (seen_client_max_body_size) {
+                return std::unexpected(make_error(child, "client_max_body_size must not be repeated in location"));
+            }
+            auto size = parse_client_max_body_size(child);
+            if (!size) {
+                return std::unexpected(size.error());
+            }
+            location.client_max_body_size = *size;
+            seen_client_max_body_size = true;
+            continue;
+        }
         if (child.name == "access_log") {
             if (seen_access_log) {
                 return std::unexpected(make_error(child, "access_log must not be repeated in location"));
@@ -1245,10 +1269,14 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
         return std::unexpected(make_error(directive, "reuse_connection requires proxy_pass"));
     }
     location.proxy = merge_proxy_settings(server_proxy_defaults, location_proxy_defaults);
+    if (!seen_client_max_body_size) {
+        location.client_max_body_size = inherited_client_max_body_size;
+    }
     return location;
 }
 
-std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &directive) {
+std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &directive,
+                                                      std::size_t inherited_client_max_body_size) {
     if (!directive.has_block) {
         return std::unexpected(make_error(directive, "server must be a block"));
     }
@@ -1263,6 +1291,7 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
     bool seen_certificate = false;
     bool seen_certificate_key = false;
     bool seen_access_log = false;
+    bool seen_client_max_body_size = false;
 
     for (const auto &child: directive.children) {
         if (child.name == "server_name") {
@@ -1348,6 +1377,19 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
             continue;
         }
 
+        if (child.name == "client_max_body_size") {
+            if (seen_client_max_body_size) {
+                return std::unexpected(make_error(child, "client_max_body_size must not be repeated in server"));
+            }
+            auto size = parse_client_max_body_size(child);
+            if (!size) {
+                return std::unexpected(size.error());
+            }
+            server.client_max_body_size = *size;
+            seen_client_max_body_size = true;
+            continue;
+        }
+
         if (child.name == "access_log") {
             if (seen_access_log) {
                 return std::unexpected(make_error(child, "access_log must not be repeated in server"));
@@ -1369,8 +1411,12 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
         return std::unexpected(make_error(child, "unsupported directive in server block: " + child.name));
     }
 
+    if (!seen_client_max_body_size) {
+        server.client_max_body_size = inherited_client_max_body_size;
+    }
+
     for (const DirectiveNode *location_directive: location_directives) {
-        auto location = parse_location(*location_directive, proxy_defaults);
+        auto location = parse_location(*location_directive, proxy_defaults, server.client_max_body_size);
         if (!location) {
             return std::unexpected(location.error());
         }
@@ -1490,8 +1536,10 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
 
     HttpConfig http;
     std::unordered_set<std::string> upstream_names;
+    std::vector<const DirectiveNode *> server_directives;
     bool has_tls_listen = false;
     bool seen_access_log = false;
+    bool seen_client_max_body_size = false;
 
     for (const auto &child: directive.children) {
         if (child.name == "listen") {
@@ -1534,12 +1582,20 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
             seen_access_log = true;
             continue;
         }
-        if (child.name == "server") {
-            auto server = parse_server(child);
-            if (!server) {
-                return std::unexpected(server.error());
+        if (child.name == "client_max_body_size") {
+            if (seen_client_max_body_size) {
+                return std::unexpected(make_error(child, "client_max_body_size must not be repeated in http"));
             }
-            http.servers.push_back(std::move(*server));
+            auto size = parse_client_max_body_size(child);
+            if (!size) {
+                return std::unexpected(size.error());
+            }
+            http.client_max_body_size = *size;
+            seen_client_max_body_size = true;
+            continue;
+        }
+        if (child.name == "server") {
+            server_directives.push_back(&child);
             continue;
         }
         return std::unexpected(make_error(child, "unsupported directive in http block: " + child.name));
@@ -1548,8 +1604,16 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
     if (http.listens.empty()) {
         return std::unexpected(make_error(directive, "http must define at least one listen"));
     }
-    if (http.servers.empty()) {
+    if (server_directives.empty()) {
         return std::unexpected(make_error(directive, "http must define at least one server"));
+    }
+
+    for (const DirectiveNode *server_directive: server_directives) {
+        auto server = parse_server(*server_directive, http.client_max_body_size);
+        if (!server) {
+            return std::unexpected(server.error());
+        }
+        http.servers.push_back(std::move(*server));
     }
 
     for (const auto &server: http.servers) {

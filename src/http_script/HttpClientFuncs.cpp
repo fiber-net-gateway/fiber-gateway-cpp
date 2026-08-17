@@ -648,8 +648,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
     fiber::http::HttpHeaders req_headers(exchange.pool());
     // Copy inbound request headers (hop-by-hop filtered), then apply options.headers overrides.
     for (const fiber::http::HttpHeaders::HeaderField &field: exchange.request_headers()) {
-        if (field.name_len == 0 || is_request_framing_header(field) ||
-            should_skip_hop_by_hop_header(exchange.request_headers(), field)) {
+        if (field.name_len == 0 || should_skip_proxy_request_header(exchange.request_headers(), field)) {
             continue;
         }
         req_headers.add_view(field.name_view(), field.value_view(), field.lowcase_name, field.name_hash);
@@ -726,9 +725,11 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         co_return error_exn(*heap, "http.proxyPass: send request header failed");
     }
     if (!req_end_stream) {
+        const ScriptRequestBody request_body = ctx->request_body();
         for (;;) {
-            auto body_result = co_await exchange.read_body(kBodyChunkSize);
+            auto body_result = co_await request_body.read(kBodyChunkSize);
             if (!body_result) {
+                (void) upstream.abort(body_result.error());
                 co_return error_exn(*heap, "http.proxyPass: read request body failed");
             }
             const bool last = body_result->complete();

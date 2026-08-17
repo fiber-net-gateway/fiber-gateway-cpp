@@ -138,6 +138,7 @@ Top level:
 
 - `access_log <logger-name> "<script-template>";` or `access_log off;` - select the logger
   category and synchronous message template; inherited by `server` and `location`.
+- `client_max_body_size <size>;` - request-body limit inherited by `server` and `location`.
 - `listen <port>;`
 - `listen <port> ssl;`
 - `listen <port> ssl http3;`
@@ -173,6 +174,7 @@ Top level:
 `server` block:
 
 - `access_log <logger-name> "<script-template>";` or `access_log off;`
+- `client_max_body_size <size>;`
 - `server_name <name> [name ...];`
 - `certificate <path>;`
 - `certificate_key <path>;`
@@ -188,6 +190,7 @@ Top level:
 `location` block:
 
 - `access_log <logger-name> "<script-template>";` or `access_log off;`
+- `client_max_body_size <size>;`
 - `proxy_pass upstream://<upstream_name>;`
 - `proxy_pass http://<host>[:port];`
 - `proxy_pass https://<host>[:port];`
@@ -212,6 +215,18 @@ mark. At upstream EOF it writes the remaining payload and completion marker rega
 water level. Data below the low-water mark may wait for more upstream data or EOF, so streaming and
 SSE locations should use `proxy_buffering off`. Buffering is memory-only and does not spill to a
 temporary file.
+
+`client_max_body_size` accepts bytes or a `k`/`m` suffix (case-insensitive). It may be set in
+`http`, `server`, or `location`; the closest setting wins. The lite-nginx default is `0`
+(unlimited) for backward compatibility, unlike nginx's 1 MiB default, and an explicit `0` also
+disables the limit. A known `Content-Length` above the limit is rejected with 413 before an
+upstream connection is acquired. Streaming or chunked bodies are checked incrementally and are
+rejected as soon as the limit is crossed.
+
+For HTTP/1.1 `Expect: 100-continue`, lite-nginx sends `100 Continue` lazily when the selected
+proxy or script first reads an allowed body. A request whose known length is already too large
+receives only the final 413. `Expect` is terminated at lite-nginx and is not copied to direct
+proxy requests or script `http.proxyPass` requests.
 
 Proxy read/send timeouts default to 60 seconds. In lite-nginx, `proxy_send_timeout` is also the
 timeout for writing a proxied response body to the downstream client.
@@ -378,6 +393,8 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
   literals. The script `url` call option is the request path plus optional query, not a host.
 - `proxy_buffering` accepts the nginx-compatible `on`/`off` forms and the lite-nginx
   `<buffer-size> <low-water>` extension. The default is `off`, unlike nginx.
+- `client_max_body_size` uses nginx's directive name and inheritance model, but defaults to
+  unlimited (`0`) rather than nginx's 1 MiB.
 - A single global keepalive pool is shared across all upstreams and script targets; per-upstream
   `keepalive` sizing is not available (use `connection_pool { keepalive_size ...; }`).
 
