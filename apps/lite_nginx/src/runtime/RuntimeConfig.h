@@ -114,6 +114,14 @@ struct ProxyBufferingRuntime {
     [[nodiscard]] bool enabled() const noexcept { return low_water != fiber::http::kUnbufferedBodyPipeLowWater; }
 };
 
+struct GzipRuntime {
+    bool enabled = false;
+    bool any_type = false;
+    std::vector<std::string> types{"text/html"};
+    std::size_t min_length = 20;
+    int compression_level = 1;
+};
+
 struct LocationRuntime {
     config::SourceLocation location;
     // The location pattern, fed verbatim to RoutePathMatcher: a bare pattern matches exactly
@@ -128,6 +136,7 @@ struct LocationRuntime {
     std::chrono::milliseconds read_timeout{60000};
     std::chrono::milliseconds send_timeout{60000};
     ProxyBufferingRuntime buffering;
+    GzipRuntime gzip;
     std::size_t client_max_body_size = 0;
     std::uint32_t upstream_index = 0;
     AccessLogId access_log = kDisabledAccessLog;
@@ -148,6 +157,7 @@ struct ServerRuntime {
     std::vector<LocationRuntime> locations;
     fiber::util::RoutePathMatcher<std::uint32_t> location_matcher;
     AccessLogId access_log = kDisabledAccessLog;
+    GzipRuntime gzip;
 };
 
 struct ServerNameRuntime {
@@ -178,6 +188,7 @@ struct RuntimeConfig {
     std::vector<ServerRuntime> servers;
     std::vector<ListenerRuntime> listeners;
     ConnectionPoolRuntime connection_pool;
+    GzipRuntime gzip;
     // Shared across serial script compilation in this runtime. Dynamic constant userdata is
     // owned by the immutable package attached to each script-bearing runtime object; fixed
     // exchange constant userdata has static storage.

@@ -258,6 +258,103 @@ TEST(LiteNginxConfigTest, RejectsInvalidProxyBufferingSettings) {
     }
 }
 
+TEST(LiteNginxConfigTest, ParsesAndInheritsGzipSettingsIndependently) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            gzip on;
+            gzip_types application/json text/plain;
+            gzip_min_length 1k;
+            gzip_comp_level 3;
+
+            server {
+                server_name localhost;
+                gzip_comp_level 5;
+
+                location /inherited {
+                    script_file /tmp/inherited.js;
+                }
+
+                location /overridden {
+                    script_file /tmp/overridden.js;
+                    gzip off;
+                    gzip_types *;
+                    gzip_min_length 0;
+                }
+            }
+        }
+    )",
+                                                        "gzip.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    const auto &http = config_result->http;
+    EXPECT_TRUE(http.gzip.enabled);
+    EXPECT_FALSE(http.gzip.any_type);
+    ASSERT_EQ(http.gzip.types.size(), 3u);
+    EXPECT_EQ(http.gzip.types[0], "text/html");
+    EXPECT_EQ(http.gzip.types[1], "application/json");
+    EXPECT_EQ(http.gzip.types[2], "text/plain");
+    EXPECT_EQ(http.gzip.min_length, 1024u);
+    EXPECT_EQ(http.gzip.compression_level, 3);
+
+    const auto &server = http.servers[0];
+    EXPECT_TRUE(server.gzip.enabled);
+    EXPECT_EQ(server.gzip.min_length, 1024u);
+    EXPECT_EQ(server.gzip.compression_level, 5);
+
+    ASSERT_EQ(server.locations.size(), 2u);
+    const auto &inherited = server.locations[0].gzip;
+    EXPECT_TRUE(inherited.enabled);
+    EXPECT_FALSE(inherited.any_type);
+    EXPECT_EQ(inherited.types, http.gzip.types);
+    EXPECT_EQ(inherited.min_length, 1024u);
+    EXPECT_EQ(inherited.compression_level, 5);
+
+    const auto &overridden = server.locations[1].gzip;
+    EXPECT_FALSE(overridden.enabled);
+    EXPECT_TRUE(overridden.any_type);
+    EXPECT_EQ(overridden.min_length, 0u);
+    EXPECT_EQ(overridden.compression_level, 5);
+}
+
+TEST(LiteNginxConfigTest, RejectsInvalidGzipSettings) {
+    static constexpr std::string_view kDirectives[] = {
+            "gzip;",
+            "gzip maybe;",
+            "gzip on; gzip off;",
+            "gzip_types;",
+            "gzip_types invalid;",
+            "gzip_types text/*;",
+            "gzip_types $dynamic;",
+            "gzip_types text/plain; gzip_types application/json;",
+            "gzip_min_length;",
+            "gzip_min_length -1;",
+            "gzip_comp_level 0;",
+            "gzip_comp_level 10;",
+            "gzip_comp_level two;",
+            "gzip_comp_level 1 2;",
+    };
+
+    for (std::string_view directive: kDirectives) {
+        std::string config_text = R"(
+            http {
+                listen 8080;
+                GZIP_DIRECTIVE
+                server {
+                    server_name localhost;
+                    location / {
+                        script_file /tmp/test.js;
+                    }
+                }
+            }
+        )";
+        config_text.replace(config_text.find("GZIP_DIRECTIVE"), sizeof("GZIP_DIRECTIVE") - 1, directive);
+
+        auto config_result = ConfigLoader::load_from_string(config_text, "bad_gzip.conf");
+        EXPECT_FALSE(config_result.has_value()) << directive;
+    }
+}
+
 TEST(LiteNginxConfigTest, ParsesAndInheritsClientMaxBodySizeIndependentOfDirectiveOrder) {
     auto config_result = ConfigLoader::load_from_string(R"(
         http {

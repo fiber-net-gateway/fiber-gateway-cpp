@@ -18,8 +18,9 @@ inline constexpr std::size_t kUnbufferedBodyPipeLowWater = 0;
 
 struct HttpBodyPipeOptions {
     std::size_t buffer_size = kDefaultBodyPipeBufferSize;
-    // Zero disables cross-read aggregation: the current source chunk is drained before the
-    // next read. A positive value allows reads while total buffered data stays below the mark.
+    // Zero disables cross-read aggregation: the current source chunk is drained and the sink
+    // is flushed before the next read. A positive value allows reads while total buffered data
+    // stays below the mark.
     std::size_t low_water = kDefaultBodyPipeLowWater;
     std::chrono::milliseconds read_timeout{60000};
     std::chrono::milliseconds write_timeout{60000};
@@ -75,17 +76,24 @@ class HttpBodyPipeWriter {
 public:
     using WriteFn = async::Task<common::IoResult<std::size_t>> (*)(void *context, mem::IoBufChain &buffer,
                                                                    std::chrono::milliseconds timeout) noexcept;
+    using FlushFn = async::Task<common::IoResult<void>> (*)(void *context, std::chrono::milliseconds timeout) noexcept;
     using AbortFn = common::IoResult<void> (*)(void *context, common::IoErr reason) noexcept;
 
     HttpBodyPipeWriter() noexcept = default;
-    HttpBodyPipeWriter(void *context, WriteFn write, AbortFn abort) noexcept :
-        context_(context), write_(write), abort_(abort) {}
+    HttpBodyPipeWriter(void *context, WriteFn write, FlushFn flush, AbortFn abort) noexcept :
+        context_(context), write_(write), flush_(flush), abort_(abort) {}
 
-    [[nodiscard]] bool valid() const noexcept { return context_ != nullptr && write_ != nullptr && abort_ != nullptr; }
+    [[nodiscard]] bool valid() const noexcept {
+        return context_ != nullptr && write_ != nullptr && flush_ != nullptr && abort_ != nullptr;
+    }
 
     async::Task<common::IoResult<std::size_t>> write(mem::IoBufChain &buffer,
                                                      std::chrono::milliseconds timeout) const noexcept {
         return write_(context_, buffer, timeout);
+    }
+
+    async::Task<common::IoResult<void>> flush(std::chrono::milliseconds timeout) const noexcept {
+        return flush_(context_, timeout);
     }
 
     common::IoResult<void> abort(common::IoErr reason) const noexcept { return abort_(context_, reason); }
@@ -93,6 +101,7 @@ public:
 private:
     void *context_ = nullptr;
     WriteFn write_ = nullptr;
+    FlushFn flush_ = nullptr;
     AbortFn abort_ = nullptr;
 };
 
@@ -117,6 +126,9 @@ HttpBodyPipeWriter make_http_body_pipe_writer(T &sink) noexcept {
             [](void *context, mem::IoBufChain &buffer,
                std::chrono::milliseconds timeout) noexcept -> async::Task<common::IoResult<std::size_t>> {
                 return static_cast<T *>(context)->write(buffer, timeout);
+            },
+            [](void *context, std::chrono::milliseconds timeout) noexcept -> async::Task<common::IoResult<void>> {
+                return static_cast<T *>(context)->flush(timeout);
             },
             [](void *context, common::IoErr reason) noexcept -> common::IoResult<void> {
                 return static_cast<T *>(context)->abort(reason);

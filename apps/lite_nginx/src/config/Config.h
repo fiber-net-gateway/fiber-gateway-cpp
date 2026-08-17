@@ -123,6 +123,14 @@ struct ProxySettings {
     bool close_on_client_abort = false;
 };
 
+struct GzipSettings {
+    bool enabled = false;
+    bool any_type = false;
+    std::vector<std::string> types{"text/html"};
+    std::size_t min_length = 20;
+    int compression_level = 1;
+};
+
 struct ListenAddress {
     SourceLocation location;
     std::string host;
@@ -195,6 +203,7 @@ struct LocationConfig {
     std::optional<RewritePathConfig> rewrite_path;
     std::string script_file;
     ProxySettings proxy;
+    GzipSettings gzip;
     std::size_t client_max_body_size = 0;
     bool reuse_connection = true;
     // nullopt inherits the enclosing server; Off explicitly disables an inherited log.
@@ -207,6 +216,7 @@ struct ServerConfig {
     std::string certificate;
     std::string certificate_key;
     ProxySettings proxy_defaults;
+    GzipSettings gzip;
     std::size_t client_max_body_size = 0;
     std::vector<LocationConfig> locations;
     // nullopt inherits the enclosing http block; Off explicitly disables an inherited log.
@@ -218,6 +228,7 @@ struct HttpConfig {
     std::vector<UpstreamConfig> upstreams;
     std::vector<ServerConfig> servers;
     ConnectionPoolConfig connection_pool;
+    GzipSettings gzip;
     std::size_t client_max_body_size = 0;
     // nullopt and Off both resolve to disabled at the root http scope.
     std::optional<AccessLogConfig> access_log;

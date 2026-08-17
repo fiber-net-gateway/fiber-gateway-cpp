@@ -7,6 +7,7 @@
 
 #include <fiber/async/Task.h>
 #include <fiber/http/HttpBodyPipe.h>
+#include <fiber/http/HttpResponseWriter.h>
 
 #include "../runtime/RuntimeConfig.h"
 
@@ -42,8 +43,9 @@ public:
     // services: app-provided upstream services, attached to a per-request ScriptExchangeCtx so
     // template header values ($header.host etc.) resolve. Unused for static-header locations.
     [[nodiscard]] fiber::async::Task<void>
-    handle(fiber::http::HttpExchange &exchange, fiber::http::HttpBodyPipeReader request_body,
-           const runtime::ListenerRuntime &listener, const runtime::LocationRuntime &location,
+    handle(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter response,
+           fiber::http::HttpBodyPipeReader request_body, const runtime::ListenerRuntime &listener,
+           const runtime::LocationRuntime &location,
            const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
            fiber::http_script::HttpScriptServices *services, logging::RequestLogContext &log_context) const;
 

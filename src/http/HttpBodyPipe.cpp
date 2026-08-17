@@ -137,6 +137,14 @@ async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBo
         }
 
         if (after_bytes == 0 && !buffer.complete()) {
+            if (options.low_water == kUnbufferedBodyPipeLowWater && !before_complete) {
+                auto flush_result = co_await sink.flush(options.write_timeout);
+                if (!flush_result) {
+                    const common::IoErr error = flush_result.error();
+                    abort_guard.abort(error);
+                    co_return pipe_error(error, HttpBodyPipePhase::Write);
+                }
+            }
             write_started = false;
         }
         stats.bytes_written += written;

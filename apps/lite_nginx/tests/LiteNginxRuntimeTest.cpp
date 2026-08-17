@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -18,6 +19,9 @@
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
+
+#include <zlib.h>
 
 #include <openssl/sha.h>
 
@@ -29,11 +33,16 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp2Exchange.h>
+#include <fiber/http/ClientHttp3Exchange.h>
 #include <fiber/http/Http2ClientConnection.h>
+#include <fiber/http/Http3Client.h>
+#include <fiber/http/Http3Server.h>
+#include <fiber/http/HttpResponseWriter.h>
 #include <fiber/http/HttpServer.h>
 #include <fiber/log/LoggerManager.h>
 #include "config/ConfigLoader.h"
 #include "logging/LoggingBuilder.h"
+#include "runtime/GzipResponseWriter.h"
 #include "runtime/RuntimeBuilder.h"
 #include "runtime/ServerLauncher.h"
 
@@ -262,6 +271,69 @@ std::string recv_http_response(int fd) {
         }
         content_length = static_cast<std::size_t>(std::stoul(out.substr(cl_pos, cl_end - cl_pos)));
     }
+}
+
+std::string recv_until_close(int fd) {
+    std::string out;
+    std::array<char, 4096> buf{};
+    for (;;) {
+        const ssize_t rc = ::recv(fd, buf.data(), buf.size(), 0);
+        if (rc <= 0) {
+            return out;
+        }
+        out.append(buf.data(), static_cast<std::size_t>(rc));
+    }
+}
+
+std::string decode_chunked_body(std::string_view response) {
+    const std::size_t header_end = response.find("\r\n\r\n");
+    if (header_end == std::string_view::npos) {
+        return {};
+    }
+    std::string decoded;
+    std::size_t offset = header_end + 4;
+    while (offset < response.size()) {
+        const std::size_t line_end = response.find("\r\n", offset);
+        if (line_end == std::string_view::npos) {
+            return {};
+        }
+        std::size_t chunk_size = 0;
+        auto parsed = std::from_chars(response.data() + offset, response.data() + line_end, chunk_size, 16);
+        if (parsed.ec != std::errc() || parsed.ptr != response.data() + line_end) {
+            return {};
+        }
+        offset = line_end + 2;
+        if (chunk_size == 0) {
+            return decoded;
+        }
+        if (chunk_size > response.size() - offset || response.size() - offset - chunk_size < 2 ||
+            response.substr(offset + chunk_size, 2) != "\r\n") {
+            return {};
+        }
+        decoded.append(response.substr(offset, chunk_size));
+        offset += chunk_size + 2;
+    }
+    return {};
+}
+
+std::string gunzip_body(std::string_view compressed) {
+    z_stream stream{};
+    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
+        return {};
+    }
+    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(compressed.data()));
+    stream.avail_in = static_cast<uInt>(compressed.size());
+    std::string output;
+    std::array<char, 4096> buffer{};
+    int result = Z_OK;
+    while (result == Z_OK) {
+        stream.next_out = reinterpret_cast<Bytef *>(buffer.data());
+        stream.avail_out = static_cast<uInt>(buffer.size());
+        result = inflate(&stream, Z_NO_FLUSH);
+        output.append(buffer.data(), buffer.size() - stream.avail_out);
+    }
+    const int end_result = inflateEnd(&stream);
+    return result == Z_STREAM_END && end_result == Z_OK ? output : std::string{};
 }
 
 std::uint16_t reserve_loopback_port() {
@@ -1036,6 +1108,15 @@ struct Http2WebSocketOutcome {
     bool extended_connect_enabled = false;
 };
 
+struct Http2GzipOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    int status_code = 0;
+    std::string content_encoding;
+    std::string content_length;
+    std::string body;
+    bool body_complete = false;
+};
+
 struct Http2RunState {
     std::atomic_bool done{false};
 };
@@ -1150,6 +1231,158 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
     promise->set_value(std::move(outcome));
 }
 
+fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, std::uint16_t port,
+                                                 std::promise<Http2GzipOutcome> *promise) {
+    Http2GzipOutcome outcome;
+    fiber::http::Http2ClientConnection::Options options;
+    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    options.tls.enabled = true;
+    options.tls.server_name = "localhost";
+
+    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
+    auto connect_result = co_await connection->connect(5s);
+    if (!connect_result) {
+        outcome.error = connect_result.error();
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    auto run_state = std::make_shared<Http2RunState>();
+    fiber::async::spawn(*loop, [connection, run_state]() { return run_http2_connection(connection, run_state); });
+
+    fiber::mem::BufPool pool;
+    fiber::http::HttpHeaders headers(pool);
+    headers.set("Accept-Encoding", "gzip");
+    fiber::http::ClientHttp2Exchange exchange(*connection, pool);
+    auto send_result = co_await exchange.send_request_header(
+            {
+                    .method = fiber::http::HttpMethod::Get,
+                    .scheme = "https",
+                    .authority = "localhost",
+                    .path = "/gzip",
+                    .headers = &headers,
+            },
+            true, 2s);
+    if (!send_result) {
+        outcome.error = send_result.error();
+    } else {
+        auto header_result = co_await exchange.read_header(2s);
+        if (!header_result) {
+            outcome.error = header_result.error();
+        } else {
+            outcome.status_code = (*header_result)->status_code;
+            outcome.content_encoding = std::string((*header_result)->headers.get("content-encoding"));
+            outcome.content_length = std::string((*header_result)->headers.get("content-length"));
+            while (!outcome.body_complete) {
+                auto body_result = co_await exchange.read_body(64 * 1024, 2s);
+                if (!body_result) {
+                    outcome.error = body_result.error();
+                    break;
+                }
+                outcome.body_complete = body_result->complete();
+                outcome.body.append(chain_to_string(std::move(*body_result)));
+            }
+        }
+    }
+
+    connection->shutdown();
+    for (int i = 0; i < 500 && !run_state->done.load(std::memory_order_acquire); ++i) {
+        co_await fiber::async::sleep(1ms);
+    }
+    if (!run_state->done.load(std::memory_order_acquire) && outcome.error == fiber::common::IoErr::None) {
+        outcome.error = fiber::common::IoErr::TimedOut;
+    }
+    promise->set_value(std::move(outcome));
+}
+
+struct Http3GzipOutcome {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    int status_code = 0;
+    std::string content_encoding;
+    std::string content_length;
+    std::string body;
+    fiber::http::Http3RequestOutcome request_outcome = fiber::http::Http3RequestOutcome::NotSent;
+    bool body_complete = false;
+};
+
+fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *endpoint,
+                                                 const fiber::net::SocketAddress *server_addr,
+                                                 const std::string *cert_path,
+                                                 std::promise<Http3GzipOutcome> *promise) {
+    Http3GzipOutcome outcome;
+    fiber::http::Http3Client::Options client_options;
+    client_options.tls.ca_file = *cert_path;
+    client_options.verify_peer = true;
+    fiber::http::Http3Client client(*endpoint, std::move(client_options));
+
+    auto endpoint_started = endpoint->start();
+    if (!endpoint_started) {
+        outcome.error = endpoint_started.error();
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+    auto initialized = client.init();
+    if (!initialized) {
+        outcome.error = initialized.error();
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    fiber::quic::QuicClientConnectOptions connect_options;
+    connect_options.remote_addr = *server_addr;
+    connect_options.server_name = "localhost";
+    connect_options.handshake_timeout = 2s;
+    auto connected = co_await client.connect(std::move(connect_options));
+    if (!connected) {
+        outcome.error = connected.error().io_error;
+        promise->set_value(std::move(outcome));
+        co_return;
+    }
+
+    {
+        fiber::mem::BufPool pool;
+        fiber::http::HttpHeaders headers(pool);
+        headers.set("Accept-Encoding", "gzip");
+        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        auto send_result = co_await exchange.send_request_header(
+                {
+                        .method = fiber::http::HttpMethod::Get,
+                        .scheme = "https",
+                        .authority = "localhost",
+                        .path = "/gzip",
+                        .headers = &headers,
+                },
+                true, 2s);
+        if (!send_result) {
+            outcome.error = send_result.error();
+        } else {
+            auto header_result = co_await exchange.read_header(2s);
+            if (!header_result || *header_result == nullptr) {
+                outcome.error = header_result ? fiber::common::IoErr::Invalid : header_result.error();
+            } else {
+                outcome.status_code = (*header_result)->status_code;
+                outcome.content_encoding = std::string((*header_result)->headers.get("content-encoding"));
+                outcome.content_length = std::string((*header_result)->headers.get("content-length"));
+            }
+        }
+        while (outcome.error == fiber::common::IoErr::None && !outcome.body_complete) {
+            auto body_result = co_await exchange.read_body(64 * 1024, 2s);
+            if (!body_result) {
+                outcome.error = body_result.error();
+                break;
+            }
+            outcome.body_complete = body_result->complete();
+            outcome.body.append(chain_to_string(std::move(*body_result)));
+        }
+        outcome.request_outcome = exchange.outcome();
+    }
+
+    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
+    *connected = fiber::http::Http3ClientConnection{};
+    endpoint->close();
+    promise->set_value(std::move(outcome));
+}
+
 class RuntimeHarness {
 public:
     explicit RuntimeHarness(const fiber::lite_nginx::runtime::RuntimeConfig &runtime) : launcher_(loop_) {
@@ -1195,7 +1428,7 @@ struct StagedProxyPassOutcome {
     bool first_body_arrived_before_tail = false;
 };
 
-StagedProxyPassOutcome run_staged_proxy_pass(std::string_view options) {
+StagedProxyPassOutcome run_staged_proxy_pass(std::string_view options, bool gzip = false) {
     StagedProxyPassOutcome outcome;
     std::string source = "directive svc = http \"@backend\";\nsvc.proxyPass(";
     source.append(options);
@@ -1227,7 +1460,12 @@ http {
     upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
     server {
         server_name localhost;
-        location /* { script_file SCRIPT_PATH; }
+        location /* {
+            gzip GZIP_ENABLED;
+            gzip_types text/plain;
+            gzip_min_length 1;
+            script_file SCRIPT_PATH;
+        }
     }
 }
 )";
@@ -1235,6 +1473,7 @@ http {
     config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
                         std::to_string(upstream.port()));
     config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+    config_text.replace(config_text.find("GZIP_ENABLED"), sizeof("GZIP_ENABLED") - 1, gzip ? "on" : "off");
 
     auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "proxy_pass_buffering.conf");
     if (!config) {
@@ -1254,7 +1493,13 @@ http {
         return outcome;
     }
 
-    const std::string_view request = "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    const std::string_view request = gzip ? "GET /stream HTTP/1.1\r\n"
+                                            "Host: localhost\r\n"
+                                            "Accept-Encoding: gzip\r\n"
+                                            "Connection: close\r\n\r\n"
+                                          : "GET /stream HTTP/1.1\r\n"
+                                            "Host: localhost\r\n"
+                                            "Connection: close\r\n\r\n";
     if (!send_all(client, request)) {
         outcome.error = "send downstream request failed";
         ::close(client);
@@ -1268,13 +1513,105 @@ http {
     }
 
     outcome.response = recv_until_contains(client, "\r\n\r\n");
-    if (outcome.response.find("first") == std::string::npos && socket_readable(client, 500ms)) {
+    const std::size_t header_end = outcome.response.find("\r\n\r\n");
+    if ((header_end == std::string::npos || outcome.response.size() == header_end + 4) &&
+        socket_readable(client, 500ms)) {
         outcome.response.append(recv_available(client));
     }
-    outcome.first_body_arrived_before_tail = outcome.response.find("first") != std::string::npos;
+    outcome.first_body_arrived_before_tail =
+            header_end != std::string::npos && outcome.response.size() > header_end + 4;
 
     upstream.release_tail();
-    outcome.response.append(recv_until_contains(client, "second"));
+    if (gzip) {
+        outcome.response.append(recv_until_close(client));
+    } else {
+        outcome.response.append(recv_until_contains(client, "second"));
+    }
+    ::close(client);
+    return outcome;
+}
+
+StagedProxyPassOutcome run_staged_direct_chunked_proxy(bool buffering) {
+    StagedProxyPassOutcome outcome;
+    StagedResponseUpstream upstream(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n5\r\nfirst\r\n",
+            "6\r\nsecond\r\n0\r\n\r\n");
+    if (upstream.port() == 0) {
+        outcome.error = "create staged upstream failed";
+        return outcome;
+    }
+
+    const std::uint16_t port = reserve_loopback_port();
+    if (port == 0) {
+        outcome.error = "reserve listener port failed";
+        return outcome;
+    }
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    server {
+        server_name localhost;
+        location /* {
+            gzip on;
+            gzip_types text/plain;
+            gzip_min_length 1;
+            proxy_buffering BUFFERING;
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("BUFFERING"), sizeof("BUFFERING") - 1, buffering ? "on" : "off");
+
+    auto config = ConfigLoader::load_from_string(config_text, "gzip_staged_direct_proxy.conf");
+    if (!config) {
+        outcome.error = config.error().message;
+        return outcome;
+    }
+    auto runtime = RuntimeBuilder::build(*config);
+    if (!runtime) {
+        outcome.error = runtime.error().message;
+        return outcome;
+    }
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    if (client < 0) {
+        outcome.error = "connect downstream failed";
+        return outcome;
+    }
+    static constexpr std::string_view kRequest = "GET /stream HTTP/1.1\r\n"
+                                                 "Host: localhost\r\n"
+                                                 "Accept-Encoding: gzip\r\n"
+                                                 "Connection: close\r\n\r\n";
+    if (!send_all(client, kRequest)) {
+        outcome.error = "send downstream request failed";
+        ::close(client);
+        return outcome;
+    }
+    if (!upstream.wait_for_first_segment(3s)) {
+        outcome.error = "upstream first segment was not sent";
+        upstream.release_tail();
+        ::close(client);
+        return outcome;
+    }
+
+    outcome.response = recv_until_contains(client, "\r\n\r\n");
+    const std::size_t header_end = outcome.response.find("\r\n\r\n");
+    if ((header_end == std::string::npos || outcome.response.size() == header_end + 4) &&
+        socket_readable(client, 500ms)) {
+        outcome.response.append(recv_available(client));
+    }
+    outcome.first_body_arrived_before_tail =
+            header_end != std::string::npos && outcome.response.size() > header_end + 4;
+
+    upstream.release_tail();
+    outcome.response.append(recv_until_close(client));
     ::close(client);
     return outcome;
 }
@@ -2422,7 +2759,7 @@ logging {
 }
 http {
     listen 127.0.0.1:PORT;
-    access_log lite_nginx.access "request_id=${$access.request_id} remote_addr=\"${$conn.remote_addr}\" remote_port=${$conn.remote_port} method=\"${$req.method}\" path=\"${$req.path}\" protocol=${$conn.http_version} scheme=${$conn.scheme} tls=${$conn.tls} server=\"${$access.server}\" location=\"${$access.location}\" status=${$access.status} body_bytes_sent=${$access.body_bytes_sent} request_time_us=${$access.request_time_us} outcome=${$access.outcome}";
+    access_log lite_nginx.access "request_id=${$access.request_id} remote_addr=\"${$conn.remote_addr}\" remote_port=${$conn.remote_port} method=\"${$req.method}\" path=\"${$req.path}\" protocol=${$conn.http_version} scheme=${$conn.scheme} tls=${$conn.tls} server=\"${$access.server}\" location=\"${$access.location}\" status=${$access.status} body_bytes_sent=${$access.body_bytes_sent} request_time_us=${$access.request_time_us} outcome=${$access.outcome} gzip_status=${$gzip.status} gzip_used=${$gzip.used} gzip_input_bytes=${$gzip.input_bytes} gzip_output_bytes=${$gzip.output_bytes} gzip_ratio=${$gzip.ratio}";
     server {
         server_name localhost;
         location /api/:id { proxy_pass http://127.0.0.1:9001; }
@@ -2470,6 +2807,11 @@ http {
     EXPECT_NE(access.find("status=404"), std::string::npos);
     EXPECT_NE(access.find("body_bytes_sent=14"), std::string::npos);
     EXPECT_NE(access.find("outcome=ok"), std::string::npos);
+    EXPECT_NE(access.find("gzip_status=off"), std::string::npos);
+    EXPECT_NE(access.find("gzip_used=false"), std::string::npos);
+    EXPECT_NE(access.find("gzip_input_bytes=0"), std::string::npos);
+    EXPECT_NE(access.find("gzip_output_bytes=0"), std::string::npos);
+    EXPECT_NE(access.find("gzip_ratio=null"), std::string::npos);
 }
 
 TEST(LiteNginxRuntimeTest, ReusesNamedUpstreamConnectionsWithKeepalive) {
@@ -2988,6 +3330,260 @@ http {
     EXPECT_NE(first_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
     EXPECT_NE(second_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
     EXPECT_EQ(upstream.accept_count(), 1);
+}
+
+TEST(LiteNginxRuntimeTest, AppliesInheritedGzipToScriptResponse) {
+    TestScriptFile script("gzip_script",
+                          "resp.sendJson(200, {message: \"lite-nginx gzip runtime response response response\"});");
+    ASSERT_TRUE(script.ok());
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    gzip on;
+    gzip_types application/json;
+    gzip_min_length 1;
+    gzip_comp_level 2;
+
+    server {
+        server_name localhost;
+        location /* {
+            script_file SCRIPT_PATH;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+
+    auto config = ConfigLoader::load_from_string(config_text, "gzip_runtime.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    const auto &gzip = runtime->servers[0].locations[0].gzip;
+    EXPECT_TRUE(gzip.enabled);
+    EXPECT_EQ(gzip.compression_level, 2);
+    EXPECT_EQ(gzip.min_length, 1u);
+
+    RuntimeHarness harness(*runtime);
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kRequest = "GET /script HTTP/1.1\r\n"
+                                                 "Host: localhost\r\n"
+                                                 "Accept-Encoding: gzip\r\n"
+                                                 "Connection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kRequest));
+    const std::string response = recv_until_close(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Content-Encoding: gzip\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response;
+    EXPECT_NE(response.find("Vary: Accept-Encoding\r\n"), std::string::npos) << response;
+    const std::string compressed = decode_chunked_body(response);
+    ASSERT_FALSE(compressed.empty());
+    const std::string decoded = gunzip_body(compressed);
+    EXPECT_NE(decoded.find("\"message\":\"lite-nginx gzip runtime response response response\""), std::string::npos)
+            << decoded;
+}
+
+TEST(LiteNginxRuntimeTest, CompressesScriptResponseOverHttp2) {
+    TestPemFile cert("gzip-h2-cert", kSelfSignedCertPem);
+    TestPemFile key("gzip-h2-key", kSelfSignedKeyPem);
+    TestScriptFile script("gzip_h2_script",
+                          "resp.sendJson(200, {message: \"lite-nginx HTTP/2 gzip response response\"});");
+    ASSERT_TRUE(cert.ok());
+    ASSERT_TRUE(key.ok());
+    ASSERT_TRUE(script.ok());
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT ssl;
+    gzip on;
+    gzip_types application/json;
+    gzip_min_length 1;
+
+    server {
+        server_name localhost;
+        certificate CERT_FILE;
+        certificate_key KEY_FILE;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("CERT_FILE"), sizeof("CERT_FILE") - 1, cert.path());
+    config_text.replace(config_text.find("KEY_FILE"), sizeof("KEY_FILE") - 1, key.path());
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script.path());
+
+    auto config = ConfigLoader::load_from_string(config_text, "gzip_h2_runtime.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    fiber::event::EventLoopGroup client_group(1);
+    client_group.start();
+    std::promise<Http2GzipOutcome> client_promise;
+    auto client_future = client_promise.get_future();
+    fiber::async::spawn(client_group.at(0),
+                        [&]() { return run_http2_gzip_client(&client_group.at(0), harness.port(), &client_promise); });
+
+    const std::future_status client_status = client_future.wait_for(5s);
+    Http2GzipOutcome outcome;
+    if (client_status == std::future_status::ready) {
+        outcome = client_future.get();
+    }
+    client_group.stop();
+    client_group.join();
+
+    ASSERT_EQ(client_status, std::future_status::ready);
+    EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.status_code, 200);
+    EXPECT_EQ(outcome.content_encoding, "gzip");
+    EXPECT_TRUE(outcome.content_length.empty());
+    EXPECT_TRUE(outcome.body_complete);
+    const std::string decoded = gunzip_body(outcome.body);
+    EXPECT_NE(decoded.find("\"message\":\"lite-nginx HTTP/2 gzip response response\""), std::string::npos) << decoded;
+}
+
+TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
+    TestPemFile cert("gzip-h3-cert", kSelfSignedCertPem);
+    TestPemFile key("gzip-h3-key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok());
+    ASSERT_TRUE(key.ok());
+
+    static constexpr std::string_view kBody = "lite-nginx HTTP/3 gzip response lite-nginx HTTP/3 gzip response";
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::http::HttpServerOptions server_options;
+    server_options.tls.enabled = true;
+    server_options.tls.cert_file = cert.path();
+    server_options.tls.key_file = key.path();
+    server_options.http3.enabled = true;
+    fiber::http::HttpHandler handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        static const std::vector<std::string> kTypes{"text/plain"};
+        auto base = fiber::http::make_http_response_writer(exchange);
+        fiber::lite_nginx::runtime::GzipResponseWriter gzip(
+                exchange, base, {.enabled = true, .types = kTypes, .min_length = 1, .compression_level = 1});
+        auto response = gzip.writer();
+        fiber::http::HttpHeaders headers(exchange.pool());
+        headers.set("Content-Type", "text/plain");
+        headers.set("Content-Length", std::to_string(kBody.size()));
+        auto header_result = co_await response.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .headers = &headers,
+                .body = fiber::http::HttpBodySpec::ContentLength(kBody.size()),
+                .end_stream = false,
+        });
+        if (header_result) {
+            (void) co_await response.write_all(reinterpret_cast<const std::uint8_t *>(kBody.data()), kBody.size(), true,
+                                               2s);
+        }
+    };
+    fiber::http::Http3Server server(group.at(0), std::move(handler), std::move(server_options));
+    ASSERT_TRUE(server.bind({fiber::net::IpAddress::loopback_v4(), 0}));
+    server.serve();
+
+    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options;
+    endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    ASSERT_TRUE(client_endpoint.init(group.at(0), endpoint_options));
+
+    std::promise<Http3GzipOutcome> client_promise;
+    auto client_future = client_promise.get_future();
+    const fiber::net::SocketAddress server_addr = server.local_addr();
+    const std::string cert_path = cert.path();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_http3_gzip_client(&client_endpoint, &server_addr, &cert_path, &client_promise);
+    });
+
+    const std::future_status client_status = client_future.wait_for(5s);
+    Http3GzipOutcome outcome;
+    if (client_status == std::future_status::ready) {
+        outcome = client_future.get();
+    }
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        server.close();
+        close_promise.set_value();
+        co_return;
+    });
+    close_future.wait();
+    group.stop();
+    group.join();
+
+    ASSERT_EQ(client_status, std::future_status::ready);
+    EXPECT_EQ(outcome.error, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.status_code, 200);
+    EXPECT_EQ(outcome.content_encoding, "gzip");
+    EXPECT_TRUE(outcome.content_length.empty());
+    EXPECT_TRUE(outcome.body_complete);
+    EXPECT_EQ(outcome.request_outcome, fiber::http::Http3RequestOutcome::Complete);
+    EXPECT_EQ(gunzip_body(outcome.body), kBody);
+}
+
+TEST(LiteNginxRuntimeTest, CompressesUnknownLengthProxyResponse) {
+    const std::string body = "unknown-length proxy body unknown-length proxy body unknown-length proxy body";
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n" + body,
+                                   nullptr);
+    ASSERT_NE(upstream.port(), 0);
+
+    const std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    gzip on;
+    gzip_types text/plain;
+    gzip_min_length 1;
+
+    server {
+        server_name localhost;
+        location /* {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = ConfigLoader::load_from_string(config_text, "gzip_unknown_length_proxy.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    RuntimeHarness harness(*runtime);
+
+    const int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kRequest = "GET /proxy HTTP/1.1\r\n"
+                                                 "Host: localhost\r\n"
+                                                 "Accept-Encoding: gzip\r\n"
+                                                 "Connection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kRequest));
+    const std::string response = recv_until_close(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("Content-Encoding: gzip\r\n"), std::string::npos) << response;
+    EXPECT_NE(response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << response;
+    EXPECT_EQ(response.find("Content-Length:"), std::string::npos) << response;
+    const std::string compressed = decode_chunked_body(response);
+    ASSERT_FALSE(compressed.empty());
+    EXPECT_EQ(gunzip_body(compressed), body);
 }
 
 TEST(LiteNginxRuntimeTest, ScriptFileLocationServesScriptResponse) {
@@ -3674,6 +4270,9 @@ http {
         server_name localhost;
         location /* {
             client_max_body_size 5;
+            gzip on;
+            gzip_types text/plain;
+            gzip_min_length 1;
             script_file SCRIPT_PATH;
         }
     }
@@ -3697,6 +4296,7 @@ http {
 
     const char headers[] = "POST /api/42 HTTP/1.1\r\n"
                            "Host: localhost\r\n"
+                           "Accept-Encoding: gzip\r\n"
                            "Expect: 100-continue\r\n"
                            "Content-Length: 5\r\n"
                            "Connection: close\r\n"
@@ -3706,14 +4306,17 @@ http {
     ASSERT_EQ(informational, "HTTP/1.1 100 Continue\r\n\r\n");
     ASSERT_TRUE(send_all(client, "hello"));
 
-    std::string response = recv_http_response(client);
+    std::string response = recv_until_close(client);
     ::close(client);
 
     ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
     std::string proxied_request = upstream_future.get();
 
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
-    EXPECT_NE(response.find("proxied"), std::string::npos) << response;
+    EXPECT_NE(response.find("Content-Encoding: gzip\r\n"), std::string::npos) << response;
+    const std::string compressed = decode_chunked_body(response);
+    ASSERT_FALSE(compressed.empty());
+    EXPECT_EQ(gunzip_body(compressed), "proxied");
     EXPECT_NE(proxied_request.find("POST /api/42 HTTP/1.1"), std::string::npos) << proxied_request;
     EXPECT_NE(proxied_request.find("\r\n\r\nhello"), std::string::npos) << proxied_request;
     EXPECT_EQ(proxied_request.find("Expect:"), std::string::npos) << proxied_request;
@@ -3741,6 +4344,46 @@ TEST(LiteNginxRuntimeTest, HttpProxyPassFlushControlsResponseBodyBuffering) {
         EXPECT_NE(outcome.response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << outcome.response;
         EXPECT_NE(outcome.response.find("first"), std::string::npos) << outcome.response;
         EXPECT_NE(outcome.response.find("second"), std::string::npos) << outcome.response;
+    }
+}
+
+TEST(LiteNginxRuntimeTest, HttpProxyPassFlushControlsGzipSyncFlush) {
+    struct TestCase {
+        std::string_view options;
+        bool expect_first_body_before_tail;
+    };
+    constexpr std::array<TestCase, 2> cases{{
+            {.options = "{flush: false}", .expect_first_body_before_tail = false},
+            {.options = "{flush: true}", .expect_first_body_before_tail = true},
+    }};
+
+    for (const TestCase &test: cases) {
+        SCOPED_TRACE(test.options);
+        StagedProxyPassOutcome outcome = run_staged_proxy_pass(test.options, true);
+
+        ASSERT_TRUE(outcome.error.empty()) << outcome.error;
+        EXPECT_EQ(outcome.first_body_arrived_before_tail, test.expect_first_body_before_tail);
+        EXPECT_NE(outcome.response.find("Content-Encoding: gzip\r\n"), std::string::npos) << outcome.response;
+        EXPECT_NE(outcome.response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << outcome.response;
+        const std::string compressed = decode_chunked_body(outcome.response);
+        ASSERT_FALSE(compressed.empty());
+        EXPECT_EQ(gunzip_body(compressed), "firstsecond");
+    }
+}
+
+TEST(LiteNginxRuntimeTest, ProxyBufferingOffSyncFlushesChunkedUpstreamGzipResponse) {
+    for (const bool buffering: {true, false}) {
+        SCOPED_TRACE(buffering ? "proxy_buffering on" : "proxy_buffering off");
+        StagedProxyPassOutcome outcome = run_staged_direct_chunked_proxy(buffering);
+
+        ASSERT_TRUE(outcome.error.empty()) << outcome.error;
+        EXPECT_EQ(outcome.first_body_arrived_before_tail, !buffering);
+        EXPECT_NE(outcome.response.find("Content-Encoding: gzip\r\n"), std::string::npos) << outcome.response;
+        EXPECT_NE(outcome.response.find("Transfer-Encoding: chunked\r\n"), std::string::npos) << outcome.response;
+        EXPECT_EQ(outcome.response.find("Content-Length:"), std::string::npos) << outcome.response;
+        const std::string compressed = decode_chunked_body(outcome.response);
+        ASSERT_FALSE(compressed.empty());
+        EXPECT_EQ(gunzip_body(compressed), "firstsecond");
     }
 }
 

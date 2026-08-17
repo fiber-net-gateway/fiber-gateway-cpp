@@ -769,7 +769,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         apply_options_response_headers(*heap, options, resp_headers);
         finalize_downstream_websocket_headers(resp_headers, websocket);
 
-        auto response_header_result = co_await exchange.send_header({
+        auto response_header_result = co_await ctx->response_writer().send_header({
                 .kind = fiber::http::OutgoingHeaderKind::Final,
                 .status_code = websocket.extended_connect() ? 200 : 101,
                 .reason = websocket.extended_connect() ? std::string_view{} : resp_head->reason,
@@ -810,7 +810,7 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
 
     const bool flush = field_bool(*heap, options, "flush", 5, false);
 
-    auto response_header_result = co_await exchange.send_header({
+    auto response_header_result = co_await ctx->response_writer().send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = resp_head->status_code,
             .reason = resp_head->reason,
@@ -838,9 +838,10 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
             .read_timeout = timeout,
             .write_timeout = std::chrono::milliseconds::max(),
     };
-    auto pipe_result = co_await fiber::http::pipe_http_body(
-            fiber::http::make_http_body_pipe_reader(upstream), fiber::http::make_http_body_pipe_writer(exchange),
-            fiber::event::EventLoop::current().io_buf_node_pool(), pipe_options);
+    auto pipe_result =
+            co_await fiber::http::pipe_http_body(fiber::http::make_http_body_pipe_reader(upstream),
+                                                 fiber::http::make_http_body_pipe_writer(ctx->response_writer()),
+                                                 fiber::event::EventLoop::current().io_buf_node_pool(), pipe_options);
     if (!pipe_result) {
         if (pipe_result.error().phase == fiber::http::HttpBodyPipePhase::Read) {
             co_return error_exn(*heap, "http.proxyPass: read response body failed");

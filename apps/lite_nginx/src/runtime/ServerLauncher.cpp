@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <sys/socket.h>
 #include <utility>
@@ -17,6 +18,7 @@
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpExchangeIo.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpResponseWriter.h>
 #include <fiber/http_script/ConstPackage.h>
 #include <fiber/http_script/ScriptExchangeCtx.h>
 #include <fiber/log/Log.h>
@@ -32,6 +34,7 @@
 #include "../upstream/ConnectionPool.h"
 #include "../upstream/UpstreamRegistry.h"
 #include "DnsService.h"
+#include "GzipResponseWriter.h"
 #include "HttpScriptServices.h"
 #include "RequestBodyLimiter.h"
 
@@ -43,6 +46,62 @@ constexpr std::string_view kPayloadTooLargeBody = "413 Payload Too Large\n";
 
 DEFINE_LOGGER(LOG_SCRIPT, "lite_nginx.script");
 
+class RequestResponseScope : public fiber::common::NonCopyable, public fiber::common::NonMovable {
+public:
+    RequestResponseScope(fiber::http::HttpExchange &exchange, const GzipRuntime &runtime,
+                         logging::RequestLogContext &log_context) noexcept :
+        log_context_(&log_context), writer_(fiber::http::make_http_response_writer(exchange)) {
+        if (!runtime.enabled) {
+            return;
+        }
+        gzip_.emplace(exchange, writer_,
+                      GzipResponseWriterOptions{
+                              .enabled = true,
+                              .any_type = runtime.any_type,
+                              .types = runtime.types,
+                              .min_length = runtime.min_length,
+                              .compression_level = runtime.compression_level,
+                      });
+        writer_ = gzip_->writer();
+    }
+
+    ~RequestResponseScope() noexcept {
+        if (!gzip_) {
+            return;
+        }
+        const auto &stats = gzip_->stats();
+        log_context_->gzip_input_bytes = stats.input_bytes;
+        log_context_->gzip_output_bytes = stats.output_bytes;
+        log_context_->gzip_used = stats.decision == GzipResponseDecision::Active ||
+                                  stats.decision == GzipResponseDecision::Completed || stats.input_bytes != 0 ||
+                                  stats.output_bytes != 0;
+        switch (stats.decision) {
+            case GzipResponseDecision::Undecided:
+                log_context_->gzip_status = "not_started";
+                break;
+            case GzipResponseDecision::Bypassed:
+                log_context_->gzip_status = "bypassed";
+                break;
+            case GzipResponseDecision::Active:
+                log_context_->gzip_status = "active";
+                break;
+            case GzipResponseDecision::Completed:
+                log_context_->gzip_status = "compressed";
+                break;
+            case GzipResponseDecision::Failed:
+                log_context_->gzip_status = "failed";
+                break;
+        }
+    }
+
+    [[nodiscard]] fiber::http::HttpResponseWriter &writer() noexcept { return writer_; }
+
+private:
+    logging::RequestLogContext *log_context_;
+    fiber::http::HttpResponseWriter writer_;
+    std::optional<GzipResponseWriter> gzip_;
+};
+
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
             .message = std::move(message),
@@ -51,8 +110,8 @@ RuntimeError make_error(const config::SourceLocation &location, std::string mess
 }
 
 fiber::async::Task<void>
-send_plain_response(fiber::http::HttpExchange &exchange, int status_code, std::string_view body,
-                    const ListenerRuntime *listener = nullptr,
+send_plain_response(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter response, int status_code,
+                    std::string_view body, const ListenerRuntime *listener = nullptr,
                     fiber::http::ResponseConnectionMode connection_mode = fiber::http::ResponseConnectionMode::Auto) {
     fiber::http::HttpHeaders headers(exchange.pool());
     headers.set("Content-Type", "text/plain");
@@ -60,7 +119,7 @@ send_plain_response(fiber::http::HttpExchange &exchange, int status_code, std::s
         headers.set("Alt-Svc", listener->http3_alt_svc);
     }
 
-    auto header_result = co_await exchange.send_header({
+    auto header_result = co_await response.send_header({
             .kind = fiber::http::OutgoingHeaderKind::Final,
             .status_code = status_code,
             .headers = &headers,
@@ -75,7 +134,7 @@ send_plain_response(fiber::http::HttpExchange &exchange, int status_code, std::s
         co_return;
     }
 
-    (void) co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+    (void) co_await response.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
 }
 
 // Runs a compiled script against the request, wiring the HttpExchange via a
@@ -89,15 +148,14 @@ send_plain_response(fiber::http::HttpExchange &exchange, int status_code, std::s
 //   Abort      -> 500 + JSON {"error": "<AbortReason>"}
 // path_vars are the route captures for this request (name/value pairs borrowing the matcher
 // text and request path buffer).
-fiber::async::Task<void> run_script(fiber::http::HttpExchange &exchange, fiber::script::Script &script,
-                                    const fiber::http_script::ConstPackage &const_package,
-                                    const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
-                                    fiber::http_script::HttpScriptServices *services,
-                                    const logging::RequestLogContext &log_context,
-                                    fiber::http_script::ScriptRequestBody request_body,
-                                    const RequestBodyLimiter &body_limiter) {
+fiber::async::Task<void>
+run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter response, fiber::script::Script &script,
+           const fiber::http_script::ConstPackage &const_package,
+           const std::vector<std::pair<std::string_view, std::string_view>> &path_vars,
+           fiber::http_script::HttpScriptServices *services, const logging::RequestLogContext &log_context,
+           fiber::http_script::ScriptRequestBody request_body, const RequestBodyLimiter &body_limiter) {
     fiber::script::GcHeap heap;
-    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection, request_body};
+    fiber::http_script::ScriptExchangeCtx ctx{exchange, heap, log_context.connection, request_body, response};
     auto constants_ready = ctx.prepare_constants(const_package);
     if (!constants_ready || !ctx.bind_path_constants(const_package, path_vars)) {
         co_await ctx.write_error_json(500, "SCRIPT_CONSTANTS");
@@ -294,7 +352,8 @@ private:
     fiber::async::Task<void> handle_inner(std::uint32_t listener_index, fiber::http::HttpExchange &exchange,
                                           logging::RequestLogContext &log_context) const {
         if (!runtime_ || listener_index >= runtime_->listeners.size()) {
-            co_await send_plain_response(exchange, 404, kNotFoundBody);
+            auto response = fiber::http::make_http_response_writer(exchange);
+            co_await send_plain_response(exchange, response, 404, kNotFoundBody);
             co_return;
         }
 
@@ -310,7 +369,8 @@ private:
 
         const std::uint32_t server_index = find_server_index(listener, host_name);
         if (server_index >= runtime_->servers.size()) {
-            co_await send_plain_response(exchange, 404, kNotFoundBody, &listener);
+            RequestResponseScope response_scope(exchange, runtime_->gzip, log_context);
+            co_await send_plain_response(exchange, response_scope.writer(), 404, kNotFoundBody, &listener);
             co_return;
         }
 
@@ -323,7 +383,8 @@ private:
         std::string_view path = exchange.uri().path.empty() ? std::string_view("/") : exchange.uri().path;
         if (!server.location_matcher.match_path(path, match_context) ||
             match_context.location_index >= server.locations.size()) {
-            co_await send_plain_response(exchange, 404, kNotFoundBody, &listener);
+            RequestResponseScope response_scope(exchange, server.gzip, log_context);
+            co_await send_plain_response(exchange, response_scope.writer(), 404, kNotFoundBody, &listener);
             co_return;
         }
 
@@ -331,9 +392,10 @@ private:
         log_context.access_log = location.access_log;
         log_context.location_pattern = location.pattern;
         log_context.path_vars = std::move(match_context.path_vars);
+        RequestResponseScope response_scope(exchange, location.gzip, log_context);
         RequestBodyLimiter body_limiter(exchange, location.client_max_body_size);
         if (body_limiter.exceeded()) {
-            co_await send_plain_response(exchange, 413, kPayloadTooLargeBody, &listener,
+            co_await send_plain_response(exchange, response_scope.writer(), 413, kPayloadTooLargeBody, &listener,
                                          fiber::http::ResponseConnectionMode::Close);
             co_return;
         }
@@ -341,14 +403,14 @@ private:
                 fiber::http_script::make_script_request_body(body_limiter);
         if (location.script) {
             assert(location.const_package != nullptr);
-            co_await run_script(exchange, *location.script, *location.const_package, log_context.path_vars,
-                                script_services_, log_context, request_body, body_limiter);
+            co_await run_script(exchange, response_scope.writer(), *location.script, *location.const_package,
+                                log_context.path_vars, script_services_, log_context, request_body, body_limiter);
         } else {
-            co_await proxy_.handle(exchange, request_body.pipe_reader(), listener, location, log_context.path_vars,
-                                   script_services_, log_context);
+            co_await proxy_.handle(exchange, response_scope.writer(), request_body.pipe_reader(), listener, location,
+                                   log_context.path_vars, script_services_, log_context);
         }
         if (body_limiter.exceeded() && !exchange.response_stats().header_sent) {
-            co_await send_plain_response(exchange, 413, kPayloadTooLargeBody, &listener,
+            co_await send_plain_response(exchange, response_scope.writer(), 413, kPayloadTooLargeBody, &listener,
                                          fiber::http::ResponseConnectionMode::Close);
         }
     }
