@@ -1883,8 +1883,12 @@ ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
     std::size_t remaining_budget = max_bytes;
     for (;;) {
         if (response_body_parser_.remaining() == 0) {
-            auto parse_result = co_await advance_chunked_body(read_buf, remaining_budget, !read_call_used_io,
-                                                              read_call_used_io, timeout);
+            // Parse framing already in memory, but return decoded payload before waiting for
+            // another transport read. This keeps chunked bodies incremental when the next chunk
+            // has not arrived yet.
+            const bool allow_read = !read_call_used_io && out.readable_bytes() == 0;
+            auto parse_result =
+                    co_await advance_chunked_body(read_buf, remaining_budget, allow_read, read_call_used_io, timeout);
             if (!parse_result) {
                 co_return fail_exchange(parse_result.error());
             }
@@ -1906,7 +1910,7 @@ ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
         }
 
         if (read_buf.readable() == 0) {
-            if (read_call_used_io) {
+            if (read_call_used_io || out.readable_bytes() != 0) {
                 auto stash_result = stash_pending_buf(read_buf);
                 if (!stash_result) {
                     co_return fail_exchange(stash_result.error());

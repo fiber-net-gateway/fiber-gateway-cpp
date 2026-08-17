@@ -1220,7 +1220,7 @@ Ordinary HTTP behavior:
 - Inbound request headers are copied after filtering framing and hop-by-hop fields, then `headers` overrides apply. The request body streams directly from inbound to upstream, so there is no `body` option and the inbound body is consumed.
 - Upstream 1xx responses are skipped until a final response. Hop-by-hop response fields are filtered before `responseHeaders`. HEAD and statuses that disallow a body send no downstream body and attempt to discard any remaining upstream body.
 - A known Content-Length preserves fixed-length framing; otherwise automatic framing is used. The response body pipe defaults to a 64 KiB buffer and 48 KiB low-water mark, waiting for more data or EOF below that threshold.
-- `flush: true` sets low-water to zero and disables aggregation across reads. It reads at most 64 KiB and fully writes each chunk before reading the next. It does not add `X-Accel-Buffering: no` or disable buffering in another proxy/protocol layer. Ordinary downstream body writes do not use the `timeout` deadline.
+- `flush: true` sets low-water to zero and disables aggregation across reads. It reads at most 64 KiB, then fully writes and flushes each chunk before reading the next; when gzip is active, the flush uses `Z_SYNC_FLUSH`. It does not add `X-Accel-Buffering: no` or disable buffering in another proxy/protocol layer. Ordinary downstream body writes do not use the `timeout` deadline.
 
 WebSocket behavior:
 

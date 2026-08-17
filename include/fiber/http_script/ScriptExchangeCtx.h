@@ -10,6 +10,7 @@
 #include "../common/IoError.h"
 #include "../http/HttpExchange.h"
 #include "../http/HttpHeaders.h"
+#include "../http/HttpResponseWriter.h"
 #include "../script/JsGc.h"
 #include "../script/JsValue.h"
 #include "../script/ScriptResult.h"
@@ -44,7 +45,7 @@ struct IndexedConstValue {
 //      stored via HttpExchange.Attr.
 //   2. An indexed dynamic-constant frame prepared from an immutable ConstPackage before scripts run.
 //   3. A response state machine: response headers accumulate in pending_headers_ until a
-//      send/write flushes them via HttpExchange::send_header + write_all (header_sent_
+//      send/write flushes them through the host-provided HttpResponseWriter (header_sent_
 //      guards against post-send mutation).
 class ScriptExchangeCtx {
 public:
@@ -53,6 +54,8 @@ public:
                       ScriptConnectionInfo connection) noexcept;
     ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap, ScriptConnectionInfo connection,
                       ScriptRequestBody request_body) noexcept;
+    ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap, ScriptConnectionInfo connection,
+                      ScriptRequestBody request_body, fiber::http::HttpResponseWriter response_writer) noexcept;
     ~ScriptExchangeCtx() = default;
 
     ScriptExchangeCtx(const ScriptExchangeCtx &) = delete;
@@ -61,6 +64,8 @@ public:
     ScriptExchangeCtx &operator=(ScriptExchangeCtx &&) = delete;
 
     [[nodiscard]] fiber::http::HttpExchange &exchange() const noexcept { return exchange_; }
+    [[nodiscard]] fiber::http::HttpResponseWriter &response_writer() noexcept { return response_writer_; }
+    [[nodiscard]] const fiber::http::HttpResponseWriter &response_writer() const noexcept { return response_writer_; }
     [[nodiscard]] fiber::script::GcHeap &heap() const noexcept { return heap_; }
     [[nodiscard]] ScriptRequestBody request_body() const noexcept { return request_body_; }
 
@@ -139,6 +144,7 @@ private:
                                                                            const std::uint8_t *data) noexcept;
 
     fiber::http::HttpExchange &exchange_;
+    fiber::http::HttpResponseWriter response_writer_;
     fiber::script::GcHeap &heap_;
     ScriptConnectionInfo connection_{};
     ScriptRequestBody request_body_;

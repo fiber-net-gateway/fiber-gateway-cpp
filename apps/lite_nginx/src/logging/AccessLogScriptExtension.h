@@ -17,15 +17,19 @@ struct AccessLogScriptData {
     std::uint64_t body_bytes_sent = 0;
     std::uint64_t request_time_us = 0;
     std::uint64_t upstream_time_us = 0;
+    std::uint64_t gzip_input_bytes = 0;
+    std::uint64_t gzip_output_bytes = 0;
     std::string_view server_name;
     std::string_view location_pattern;
     std::string_view outcome;
     std::string_view upstream_host;
+    std::string_view gzip_status;
     std::uint16_t upstream_port = 0;
     int status = 0;
     int upstream_status = 0;
     fiber::common::IoErr upstream_error = fiber::common::IoErr::None;
     bool upstream_started = false;
+    bool gzip_used = false;
 };
 
 class AccessLogEvalContext final : public fiber::http_script::ScriptExchangeCtx {
@@ -61,6 +65,11 @@ private:
         BodyBytesSent,
         RequestTimeUs,
         Outcome,
+        GzipStatus,
+        GzipUsed,
+        GzipInputBytes,
+        GzipOutputBytes,
+        GzipRatio,
         UpstreamHost,
         UpstreamPort,
         UpstreamStatus,

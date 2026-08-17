@@ -57,7 +57,7 @@ Validate a custom config file:
 - Variable support such as `$host`, `$remote_addr`, or `$request_uri`.
 - `rewrite`, `if`, regex `location`, or dynamic config reload.
 - DNS-based upstream resolution.
-- Cache, gzip, upstream HTTP/2, or active health checks.
+- Cache, upstream HTTP/2, or active health checks.
 - Full logging subsystem compatibility with nginx.
 
 ## V1 Functional Scope
@@ -85,6 +85,7 @@ Validate a custom config file:
 - Optionally close the active upstream connection when the downstream response
   channel is aborted.
 - Support request/response streaming instead of whole-body buffering.
+- Optionally gzip eligible responses across downstream HTTP/1.1, HTTP/2, and HTTP/3.
 - Map upstream connect/read/write failures into standard gateway errors.
 
 ## Supported Configuration Syntax
@@ -139,6 +140,9 @@ Top level:
 - `access_log <logger-name> "<script-template>";` or `access_log off;` - select the logger
   category and synchronous message template; inherited by `server` and `location`.
 - `client_max_body_size <size>;` - request-body limit inherited by `server` and `location`.
+- `gzip on|off;`, `gzip_types <mime-type>...;`, `gzip_min_length <size>;`, and
+  `gzip_comp_level <1..9>;` - response compression settings inherited independently by
+  `server` and `location`.
 - `listen <port>;`
 - `listen <port> ssl;`
 - `listen <port> ssl http3;`
@@ -175,6 +179,8 @@ Top level:
 
 - `access_log <logger-name> "<script-template>";` or `access_log off;`
 - `client_max_body_size <size>;`
+- `gzip on|off;`, `gzip_types <mime-type>...;`, `gzip_min_length <size>;`, and
+  `gzip_comp_level <1..9>;`
 - `server_name <name> [name ...];`
 - `certificate <path>;`
 - `certificate_key <path>;`
@@ -191,6 +197,8 @@ Top level:
 
 - `access_log <logger-name> "<script-template>";` or `access_log off;`
 - `client_max_body_size <size>;`
+- `gzip on|off;`, `gzip_types <mime-type>...;`, `gzip_min_length <size>;`, and
+  `gzip_comp_level <1..9>;`
 - `proxy_pass upstream://<upstream_name>;`
 - `proxy_pass http://<host>[:port];`
 - `proxy_pass https://<host>[:port];`
@@ -213,8 +221,9 @@ two-size form is a lite-nginx extension and enables buffering with explicit valu
 while at least `low-water` bytes remain, and resumes reading after a partial write drops below the
 mark. At upstream EOF it writes the remaining payload and completion marker regardless of the
 water level. Data below the low-water mark may wait for more upstream data or EOF, so streaming and
-SSE locations should use `proxy_buffering off`. Buffering is memory-only and does not spill to a
-temporary file.
+SSE locations should use `proxy_buffering off`. The off mode drains and flushes each upstream read
+before starting the next; when gzip is active, that flush uses `Z_SYNC_FLUSH`, matching nginx's
+non-buffered proxy behavior. Buffering is memory-only and does not spill to a temporary file.
 
 `client_max_body_size` accepts bytes or a `k`/`m` suffix (case-insensitive). It may be set in
 `http`, `server`, or `location`; the closest setting wins. The lite-nginx default is `0`
@@ -230,6 +239,33 @@ proxy requests or script `http.proxyPass` requests.
 
 Proxy read/send timeouts default to 60 seconds. In lite-nginx, `proxy_send_timeout` is also the
 timeout for writing a proxied response body to the downstream client.
+
+### Gzip Response Compression
+
+Gzip is off by default. When enabled, each directive inherits independently from `http` through
+`server` to `location`. Defaults are `gzip_types text/html`, `gzip_min_length 20`, and
+`gzip_comp_level 1`. A `gzip_types` declaration keeps `text/html` and adds the listed MIME types;
+`gzip_types *` matches every response content type.
+
+Compression requires a 200, 403, or 404 response with a body, an eligible content type, and an
+`Accept-Encoding` value that permits gzip. An explicit `gzip;q=0` overrides `*`; MIME parameters
+and case are ignored for matching. Responses with an existing non-empty `Content-Encoding`, raw
+streams/WebSocket upgrades, HEAD/204/304 responses, and requests or responses carrying
+`Cache-Control: no-transform` pass through unchanged. Unknown response lengths are eligible;
+known lengths below `gzip_min_length` are not.
+
+For a compressed response, lite-nginx adds `Content-Encoding: gzip` and `Vary: Accept-Encoding`,
+removes `Content-Length` and `Accept-Ranges`, and weakens a valid strong ETag. HTTP/1.1 selects
+chunked framing while HTTP/2 and HTTP/3 use their native stream completion. Compression is
+incremental and backpressure-aware. `proxy_buffering off` and script `proxyPass({flush: true})`
+issue `Z_SYNC_FLUSH` after each non-final upstream read so small streaming updates are emitted
+without waiting for the gzip output buffer to fill. `gzip_static`, `gunzip`, `gzip_buffers`,
+`gzip_disable`, `gzip_proxied`, and `gzip_vary` are not supported.
+
+Gzip is an application-owned response-writer decorator. The dispatcher passes the same explicit
+writer through generated responses, scripts, `http.proxyPass`, direct proxying, and body piping;
+the shared `HttpExchange` and its HTTP/1.1, HTTP/2, and HTTP/3 transports remain unaware of gzip
+and receive only the transformed headers and bytes.
 
 ## Logging
 
@@ -298,6 +334,10 @@ and `$upstream.error`, and resolve to `null` when no upstream value is available
 inherits from `http` to `server` to `location`; an explicit pair replaces the inherited pair and
 `off` disables it.
 
+Gzip fields are `$gzip.status` (`off`, `not_started`, `bypassed`, `active`, `compressed`, or
+`failed`), `$gzip.used`, `$gzip.input_bytes`, `$gzip.output_bytes`, and `$gzip.ratio` (compressed
+bytes divided by original bytes, or `null` when gzip was not used).
+
 ## Scripting
 
 A `script_file` location runs an embedded JS-like script per request. The script reaches the
@@ -354,9 +394,10 @@ let st = svc.proxyPass({});
   `method`/`path`/`query` (default to the inbound values), `headers`, `responseHeaders` (set on
   the downstream response; `null` removes), `timeout`, `flush`, and `websocket`. Responses use a
   64 KiB buffer with a 48 KiB low-water mark by default; `flush: true` disables cross-read body
-  aggregation so each upstream chunk is drained before reading the next one. Use it for SSE and
-  other low-latency streaming responses. It does not add `X-Accel-Buffering: no` or disable an
-  outer proxy's buffering. Set `websocket: true` to proxy an inbound HTTP/1.1 WebSocket Upgrade or
+  aggregation so each upstream chunk is drained and flushed before reading the next one. With
+  gzip active this performs `Z_SYNC_FLUSH`. Use it for SSE and other low-latency streaming
+  responses. It does not add `X-Accel-Buffering: no` or disable an outer proxy's buffering. Set
+  `websocket: true` to proxy an inbound HTTP/1.1 WebSocket Upgrade or
   HTTP/2/3 Extended CONNECT as a bidirectional tunnel. WebSocket mode always uses an upstream
   HTTP/1.1 GET Upgrade, rejects an explicit non-GET `method`, and uses `timeout` as the
   per-operation tunnel read/write timeout. Required handshake fields (`Connection`, `Upgrade`, and
@@ -543,7 +584,7 @@ apps/lite_nginx/
 
 - `app/`: process startup, signal handling, config loading, server lifecycle.
 - `config/`: lexer, parser, directive AST, semantic validation.
-- `runtime/`: immutable compiled config, server matcher, location matcher.
+- `runtime/`: immutable compiled config, server/location matching, and response writers.
 - `proxy/`: request forwarding, response relay, header filtering, error mapping.
 - `upstream/`: upstream registry, peer selection, and connection pool access.
 

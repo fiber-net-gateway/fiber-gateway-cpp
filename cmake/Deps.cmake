@@ -9,8 +9,9 @@ set(FIBER_BORINGSSL_URL
 set(FIBER_BORINGSSL_SHA256
     "d47f89b894bf534c82071d7426c5abf1e5bd044fee242def53cd5d3d0f656c09"
     CACHE STRING "BoringSSL source archive SHA-256")
+set(FIBER_ZLIB_VERSION "1.3.1" CACHE STRING "Pinned zlib version")
 set(FIBER_ZLIB_URL
-    "https://codeload.github.com/madler/zlib/tar.gz/refs/tags/v1.3.1"
+    "https://codeload.github.com/madler/zlib/tar.gz/refs/tags/v${FIBER_ZLIB_VERSION}"
     CACHE STRING "zlib source archive URL")
 set(FIBER_ZLIB_SHA256
     "17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c"
@@ -129,8 +130,8 @@ set(BORINGSSL_INCLUDE_DIR "${boringssl_SOURCE_DIR}/include" CACHE PATH "" FORCE)
 set(BORINGSSL_LIBRARY_DIR "${boringssl_BINARY_DIR}" CACHE PATH "" FORCE)
 set(BORINGSSL_ROOT_DIR "${boringssl_BINARY_DIR}" CACHE PATH "" FORCE)
 
-# Populate zlib for external consumers such as scripts/build_nginx.sh.  Keep it
-# out of this project's target graph until fiber_lib has an in-tree gzip user.
+# Populate zlib for external consumers such as scripts/build_nginx.sh. The static
+# target is added lazily by fiber_prepare_zlib_target() when an application needs it.
 fiber_use_cached_content(zlib)
 FetchContent_Declare(
     zlib
@@ -140,6 +141,35 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(zlib)
 set(FIBER_ZLIB_SOURCE_DIR "${zlib_SOURCE_DIR}" CACHE PATH "Downloaded zlib source directory" FORCE)
+
+function(fiber_prepare_zlib_target)
+    if (TARGET ZLIB::ZLIBSTATIC)
+        return()
+    endif()
+
+    set(zlib_header "${FIBER_ZLIB_SOURCE_DIR}/zlib.h")
+    if (NOT EXISTS "${zlib_header}")
+        message(FATAL_ERROR "zlib header not found under ${FIBER_ZLIB_SOURCE_DIR}")
+    endif()
+    file(STRINGS "${zlib_header}" zlib_version_line
+        REGEX "^#define ZLIB_VERSION \"[0-9]+\\.[0-9]+\\.[0-9]+\"$")
+    if (NOT zlib_version_line STREQUAL "#define ZLIB_VERSION \"${FIBER_ZLIB_VERSION}\"")
+        message(FATAL_ERROR
+            "Cached zlib source version does not match the pinned ${FIBER_ZLIB_VERSION}: "
+            "${zlib_version_line}. Remove or refresh ${FIBER_ZLIB_SOURCE_DIR} and reconfigure.")
+    endif()
+
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${FIBER_ZLIB_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/zlib-build" EXCLUDE_FROM_ALL)
+
+    if (TARGET zlibstatic AND NOT TARGET ZLIB::ZLIBSTATIC)
+        add_library(ZLIB::ZLIBSTATIC ALIAS zlibstatic)
+    endif()
+
+    if (NOT TARGET ZLIB::ZLIBSTATIC)
+        message(FATAL_ERROR "zlib static target was not created")
+    endif()
+endfunction()
 
 # ---- optional protobuf-lite runtime + protoc codegen ----
 # Nacos is the only protobuf consumer. Keep the dependency out of the target

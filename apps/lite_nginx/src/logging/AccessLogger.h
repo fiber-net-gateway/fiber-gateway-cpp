@@ -30,6 +30,7 @@ struct RequestLogContext {
     std::string_view server_name;
     std::string_view location_pattern;
     std::string_view upstream_host;
+    std::string_view gzip_status = "off";
     std::uint16_t upstream_port = 0;
     int upstream_status = 0;
     fiber::common::IoErr upstream_error = fiber::common::IoErr::None;
@@ -38,6 +39,9 @@ struct RequestLogContext {
     std::vector<std::pair<std::string_view, std::string_view>> path_vars;
     bool upstream_started = false;
     bool client_aborted = false;
+    bool gzip_used = false;
+    std::uint64_t gzip_input_bytes = 0;
+    std::uint64_t gzip_output_bytes = 0;
 };
 
 [[nodiscard]] std::uint64_t next_request_id() noexcept;

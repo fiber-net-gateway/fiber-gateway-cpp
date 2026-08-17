@@ -80,6 +80,20 @@ AccessLogScriptExtension::resolve_constant(std::string_view namespace_name, std:
         } else {
             return nullptr;
         }
+    } else if (namespace_name == "$gzip") {
+        if (key == "status") {
+            field = Field::GzipStatus;
+        } else if (key == "used") {
+            field = Field::GzipUsed;
+        } else if (key == "input_bytes") {
+            field = Field::GzipInputBytes;
+        } else if (key == "output_bytes") {
+            field = Field::GzipOutputBytes;
+        } else if (key == "ratio") {
+            field = Field::GzipRatio;
+        } else {
+            return nullptr;
+        }
     } else if (namespace_name == "$upstream") {
         if (key == "host") {
             field = Field::UpstreamHost;
@@ -123,6 +137,19 @@ AbiResult AccessLogScriptExtension::field_fn(void *userdata, const HostCallFrame
             return AbiResult::success(make_uint(data.request_time_us));
         case Field::Outcome:
             return make_string(frame.runtime, data.outcome);
+        case Field::GzipStatus:
+            return make_string(frame.runtime, data.gzip_status);
+        case Field::GzipUsed:
+            return AbiResult::success(JsValue::make_boolean(data.gzip_used));
+        case Field::GzipInputBytes:
+            return AbiResult::success(make_uint(data.gzip_input_bytes));
+        case Field::GzipOutputBytes:
+            return AbiResult::success(make_uint(data.gzip_output_bytes));
+        case Field::GzipRatio:
+            return data.gzip_used && data.gzip_input_bytes != 0
+                           ? AbiResult::success(JsValue::make_float(static_cast<double>(data.gzip_output_bytes) /
+                                                                    static_cast<double>(data.gzip_input_bytes)))
+                           : AbiResult::success(JsValue::make_null());
         case Field::UpstreamHost:
             return make_optional_string(frame.runtime, data.upstream_host);
         case Field::UpstreamPort:

@@ -63,6 +63,14 @@ struct ProxySettingsBuilder {
     std::vector<HeaderOverride> set_headers;
 };
 
+struct GzipSettingsBuilder {
+    std::optional<bool> enabled;
+    std::optional<bool> any_type;
+    std::optional<std::vector<std::string>> types;
+    std::optional<std::size_t> min_length;
+    std::optional<int> compression_level;
+};
+
 ConfigError make_error(const DirectiveNode &directive, std::string message) {
     return ConfigError{
             .message = std::move(message),
@@ -256,6 +264,119 @@ std::expected<bool, ConfigError> parse_on_off(const DirectiveNode &directive, co
         return std::unexpected(make_error(directive, std::string(field_name) + " expects 'on' or 'off'"));
     }
     return directive.args[0] == "on";
+}
+
+bool valid_mime_type(std::string_view value) noexcept {
+    const std::size_t slash = value.find('/');
+    if (slash == std::string_view::npos || slash == 0 || slash + 1 == value.size() ||
+        value.find('/', slash + 1) != std::string_view::npos) {
+        return false;
+    }
+    for (char ch: value) {
+        const bool alpha = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+        const bool digit = ch >= '0' && ch <= '9';
+        if (!alpha && !digit && ch != '!' && ch != '#' && ch != '$' && ch != '&' && ch != '-' && ch != '^' &&
+            ch != '_' && ch != '.' && ch != '+' && ch != '/') {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::expected<bool, ConfigError> apply_gzip_directive(GzipSettingsBuilder &settings, const DirectiveNode &directive) {
+    if (directive.name == "gzip") {
+        if (settings.enabled.has_value()) {
+            return std::unexpected(make_error(directive, "gzip must not be repeated in the same scope"));
+        }
+        auto enabled = parse_on_off(directive, "gzip");
+        if (!enabled) {
+            return std::unexpected(enabled.error());
+        }
+        settings.enabled = *enabled;
+        return true;
+    }
+    if (directive.name == "gzip_types") {
+        if (directive.has_block || directive.args.empty()) {
+            return std::unexpected(make_error(directive, "gzip_types expects one or more MIME types"));
+        }
+        if (settings.types.has_value()) {
+            return std::unexpected(make_error(directive, "gzip_types must not be repeated in the same scope"));
+        }
+        std::vector<std::string> types{"text/html"};
+        std::unordered_set<std::string> seen{"text/html"};
+        bool any_type = false;
+        for (const std::string &argument: directive.args) {
+            if (contains_variable(argument)) {
+                return std::unexpected(make_error(directive, "gzip_types does not support variables"));
+            }
+            if (argument == "*") {
+                any_type = true;
+                continue;
+            }
+            if (!valid_mime_type(argument)) {
+                return std::unexpected(make_error(directive, "gzip_types contains an invalid MIME type"));
+            }
+            std::string type = to_lowercase(argument);
+            if (seen.insert(type).second) {
+                types.push_back(std::move(type));
+            }
+        }
+        settings.any_type = any_type;
+        settings.types = std::move(types);
+        return true;
+    }
+    if (directive.name == "gzip_min_length") {
+        if (directive.has_block || directive.args.size() != 1) {
+            return std::unexpected(make_error(directive, "gzip_min_length expects exactly one size argument"));
+        }
+        if (settings.min_length.has_value()) {
+            return std::unexpected(make_error(directive, "gzip_min_length must not be repeated in the same scope"));
+        }
+        if (contains_variable(directive.args[0])) {
+            return std::unexpected(make_error(directive, "gzip_min_length does not support variables"));
+        }
+        auto size = parse_size(directive, directive.args[0], "gzip_min_length");
+        if (!size) {
+            return std::unexpected(size.error());
+        }
+        settings.min_length = *size;
+        return true;
+    }
+    if (directive.name == "gzip_comp_level") {
+        if (directive.has_block || directive.args.size() != 1) {
+            return std::unexpected(make_error(directive, "gzip_comp_level expects exactly one integer argument"));
+        }
+        if (settings.compression_level.has_value()) {
+            return std::unexpected(make_error(directive, "gzip_comp_level must not be repeated in the same scope"));
+        }
+        int level = 0;
+        const std::string &value = directive.args[0];
+        auto parsed = std::from_chars(value.data(), value.data() + value.size(), level);
+        if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() || level < 1 || level > 9) {
+            return std::unexpected(make_error(directive, "gzip_comp_level must be in range 1..9"));
+        }
+        settings.compression_level = level;
+        return true;
+    }
+    return false;
+}
+
+GzipSettings resolve_gzip_settings(const GzipSettingsBuilder &settings, const GzipSettings &inherited) {
+    GzipSettings result = inherited;
+    if (settings.enabled.has_value()) {
+        result.enabled = *settings.enabled;
+    }
+    if (settings.types.has_value()) {
+        result.types = *settings.types;
+        result.any_type = *settings.any_type;
+    }
+    if (settings.min_length.has_value()) {
+        result.min_length = *settings.min_length;
+    }
+    if (settings.compression_level.has_value()) {
+        result.compression_level = *settings.compression_level;
+    }
+    return result;
 }
 
 std::expected<AccessLogConfig, ConfigError> parse_access_log(const DirectiveNode &directive) {
@@ -1111,7 +1232,8 @@ std::expected<LoggingConfig, ConfigError> parse_logging(const DirectiveNode &dir
 
 std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &directive,
                                                           const ProxySettingsBuilder &server_proxy_defaults,
-                                                          std::size_t inherited_client_max_body_size) {
+                                                          std::size_t inherited_client_max_body_size,
+                                                          const GzipSettings &inherited_gzip) {
     if (!directive.has_block) {
         return std::unexpected(make_error(directive, "location must be a block"));
     }
@@ -1127,6 +1249,7 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
     }
 
     ProxySettingsBuilder location_proxy_defaults;
+    GzipSettingsBuilder gzip_settings;
     bool has_proxy_pass = false;
     bool has_script_file = false;
     bool seen_access_log = false;
@@ -1253,6 +1376,14 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
             continue;
         }
 
+        auto gzip_result = apply_gzip_directive(gzip_settings, child);
+        if (!gzip_result) {
+            return std::unexpected(gzip_result.error());
+        }
+        if (*gzip_result) {
+            continue;
+        }
+
         return std::unexpected(make_error(child, "unsupported directive in location block: " + child.name));
     }
 
@@ -1269,6 +1400,7 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
         return std::unexpected(make_error(directive, "reuse_connection requires proxy_pass"));
     }
     location.proxy = merge_proxy_settings(server_proxy_defaults, location_proxy_defaults);
+    location.gzip = resolve_gzip_settings(gzip_settings, inherited_gzip);
     if (!seen_client_max_body_size) {
         location.client_max_body_size = inherited_client_max_body_size;
     }
@@ -1276,7 +1408,8 @@ std::expected<LocationConfig, ConfigError> parse_location(const DirectiveNode &d
 }
 
 std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &directive,
-                                                      std::size_t inherited_client_max_body_size) {
+                                                      std::size_t inherited_client_max_body_size,
+                                                      const GzipSettings &inherited_gzip) {
     if (!directive.has_block) {
         return std::unexpected(make_error(directive, "server must be a block"));
     }
@@ -1287,6 +1420,7 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
     ServerConfig server;
     server.location = directive.location;
     ProxySettingsBuilder proxy_defaults;
+    GzipSettingsBuilder gzip_settings;
     std::vector<const DirectiveNode *> location_directives;
     bool seen_certificate = false;
     bool seen_certificate_key = false;
@@ -1408,15 +1542,24 @@ std::expected<ServerConfig, ConfigError> parse_server(const DirectiveNode &direc
             continue;
         }
 
+        auto gzip_result = apply_gzip_directive(gzip_settings, child);
+        if (!gzip_result) {
+            return std::unexpected(gzip_result.error());
+        }
+        if (*gzip_result) {
+            continue;
+        }
+
         return std::unexpected(make_error(child, "unsupported directive in server block: " + child.name));
     }
 
     if (!seen_client_max_body_size) {
         server.client_max_body_size = inherited_client_max_body_size;
     }
+    server.gzip = resolve_gzip_settings(gzip_settings, inherited_gzip);
 
     for (const DirectiveNode *location_directive: location_directives) {
-        auto location = parse_location(*location_directive, proxy_defaults, server.client_max_body_size);
+        auto location = parse_location(*location_directive, proxy_defaults, server.client_max_body_size, server.gzip);
         if (!location) {
             return std::unexpected(location.error());
         }
@@ -1540,6 +1683,7 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
     bool has_tls_listen = false;
     bool seen_access_log = false;
     bool seen_client_max_body_size = false;
+    GzipSettingsBuilder gzip_settings;
 
     for (const auto &child: directive.children) {
         if (child.name == "listen") {
@@ -1598,6 +1742,13 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
             server_directives.push_back(&child);
             continue;
         }
+        auto gzip_result = apply_gzip_directive(gzip_settings, child);
+        if (!gzip_result) {
+            return std::unexpected(gzip_result.error());
+        }
+        if (*gzip_result) {
+            continue;
+        }
         return std::unexpected(make_error(child, "unsupported directive in http block: " + child.name));
     }
 
@@ -1608,8 +1759,9 @@ std::expected<HttpConfig, ConfigError> parse_http(const DirectiveNode &directive
         return std::unexpected(make_error(directive, "http must define at least one server"));
     }
 
+    http.gzip = resolve_gzip_settings(gzip_settings, GzipSettings{});
     for (const DirectiveNode *server_directive: server_directives) {
-        auto server = parse_server(*server_directive, http.client_max_body_size);
+        auto server = parse_server(*server_directive, http.client_max_body_size, http.gzip);
         if (!server) {
             return std::unexpected(server.error());
         }
