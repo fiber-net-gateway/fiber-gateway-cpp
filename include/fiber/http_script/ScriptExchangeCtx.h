@@ -16,6 +16,7 @@
 
 #include "ConstPackage.h"
 #include "HttpScriptServices.h"
+#include "ScriptRequestBody.h"
 
 namespace fiber::http_script {
 
@@ -50,6 +51,8 @@ public:
     ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap) noexcept;
     ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap,
                       ScriptConnectionInfo connection) noexcept;
+    ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap, ScriptConnectionInfo connection,
+                      ScriptRequestBody request_body) noexcept;
     ~ScriptExchangeCtx() = default;
 
     ScriptExchangeCtx(const ScriptExchangeCtx &) = delete;
@@ -59,6 +62,7 @@ public:
 
     [[nodiscard]] fiber::http::HttpExchange &exchange() const noexcept { return exchange_; }
     [[nodiscard]] fiber::script::GcHeap &heap() const noexcept { return heap_; }
+    [[nodiscard]] ScriptRequestBody request_body() const noexcept { return request_body_; }
 
     // App-provided upstream-connection services (global pool + DNS). Set per request by the host
     // before the script runs; null => http.request / http.proxyPass fail with InvalidState.
@@ -137,6 +141,7 @@ private:
     fiber::http::HttpExchange &exchange_;
     fiber::script::GcHeap &heap_;
     ScriptConnectionInfo connection_{};
+    ScriptRequestBody request_body_;
     HttpScriptServices *services_ = nullptr;
 
     // Persistent GC root slots (GcHeap::global_value) holding the cached request views.

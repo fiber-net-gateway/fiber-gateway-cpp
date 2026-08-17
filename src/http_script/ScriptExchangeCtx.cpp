@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 
+#include <fiber/common/Assert.h>
 #include <fiber/common/json/JsonEncode.h>
 #include <fiber/common/util/CookieCodec.h>
 #include <fiber/common/util/UrlForm.h>
@@ -78,7 +79,14 @@ ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber:
 
 ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap,
                                      ScriptConnectionInfo connection) noexcept :
-    exchange_(exchange), heap_(heap), connection_(connection), pending_headers_(exchange.pool()) {}
+    ScriptExchangeCtx(exchange, heap, connection, make_script_request_body(exchange)) {}
+
+ScriptExchangeCtx::ScriptExchangeCtx(fiber::http::HttpExchange &exchange, fiber::script::GcHeap &heap,
+                                     ScriptConnectionInfo connection, ScriptRequestBody request_body) noexcept :
+    exchange_(exchange), heap_(heap), connection_(connection), request_body_(request_body),
+    pending_headers_(exchange.pool()) {
+    FIBER_ASSERT(request_body_.valid());
+}
 
 fiber::script::AbiResult ScriptExchangeCtx::remote_address_constant() noexcept {
     if (!fiber::script::js_value_is_undefined(remote_addr_constant_)) {

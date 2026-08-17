@@ -733,6 +733,68 @@ TEST(Http3ConnectionTest, ServerCanSendFinalResponseHeader) {
     group.join();
 }
 
+TEST(Http3ConnectionTest, ServerFinalResponseStopsOnlyUnreadRequestReceiveDirection) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options quic_options{};
+    quic_options.loop = &group.at(0);
+    ServerRequestContext ctx;
+    auto header_promise = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
+    auto header_future = header_promise->get_future();
+    ctx.handler = [header_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        auto result = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 413,
+                .headers = nullptr,
+                .body = fiber::http::HttpBodySpec::ContentLength(0),
+                .end_stream = true,
+        });
+        header_promise->set_value(result);
+    };
+
+    fiber::http::Http3Connection::Options h3_options{};
+    h3_options.owner = &ctx;
+    h3_options.ops.create_server_request = &create_server_request;
+
+    fiber::quic::QuicConnection quic(quic_options);
+    fiber::http::Http3Connection h3(quic, h3_options);
+    auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
+    ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
+
+    HeaderList headers{
+            {":method", "POST"},  {":scheme", "https"},    {":authority", "example.com"},
+            {":path", "/upload"}, {"content-length", "5"},
+    };
+    std::vector<std::uint8_t> request = headers_frame(headers);
+    std::promise<void> feed_done;
+    auto feed_future = feed_done.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &request, &feed_done]() -> fiber::async::DetachedTask {
+        return feed_stream_then_delay(&quic, &request, 0, &feed_done);
+    });
+
+    ASSERT_EQ(feed_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(header_future.wait_for(2s), std::future_status::ready);
+    EXPECT_TRUE(header_future.get().has_value());
+
+    std::promise<std::pair<bool, bool>> stream_state;
+    auto stream_state_future = stream_state.get_future();
+    fiber::async::spawn(group.at(0), [&quic, &stream_state]() -> fiber::async::DetachedTask {
+        const fiber::quic::QuicStream *stream = quic.find_stream(0);
+        stream_state.set_value(
+                {stream != nullptr && stream->stop_sending(), stream != nullptr && stream->send_aborted()});
+        co_return;
+    });
+    ASSERT_EQ(stream_state_future.wait_for(2s), std::future_status::ready);
+    const auto [receive_stopped, response_aborted] = stream_state_future.get();
+    EXPECT_TRUE(receive_stopped);
+    EXPECT_FALSE(response_aborted);
+
+    h3.close();
+    group.stop();
+    group.join();
+}
+
 TEST(Http3ConnectionTest, ServerCanWriteFinalResponseBody) {
     fiber::event::EventLoopGroup group(1);
     group.start();

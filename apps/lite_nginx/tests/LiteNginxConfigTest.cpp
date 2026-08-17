@@ -258,6 +258,102 @@ TEST(LiteNginxConfigTest, RejectsInvalidProxyBufferingSettings) {
     }
 }
 
+TEST(LiteNginxConfigTest, ParsesAndInheritsClientMaxBodySizeIndependentOfDirectiveOrder) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+
+            server {
+                server_name localhost;
+
+                location /http-default {
+                    proxy_pass http://127.0.0.1:9001;
+                }
+
+                location /disabled {
+                    proxy_pass http://127.0.0.1:9001;
+                    client_max_body_size 0;
+                }
+
+                client_max_body_size 2m;
+            }
+
+            server {
+                server_name fallback.local;
+                location / {
+                    proxy_pass http://127.0.0.1:9001;
+                }
+            }
+
+            client_max_body_size 1m;
+        }
+    )",
+                                                        "client_max_body_size.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    EXPECT_EQ(config_result->http.client_max_body_size, 1024u * 1024u);
+    ASSERT_EQ(config_result->http.servers.size(), 2u);
+
+    const auto &overridden = config_result->http.servers[0];
+    EXPECT_EQ(overridden.client_max_body_size, 2u * 1024u * 1024u);
+    ASSERT_EQ(overridden.locations.size(), 2u);
+    EXPECT_EQ(overridden.locations[0].client_max_body_size, 2u * 1024u * 1024u);
+    EXPECT_EQ(overridden.locations[1].client_max_body_size, 0u);
+
+    const auto &inherited = config_result->http.servers[1];
+    EXPECT_EQ(inherited.client_max_body_size, 1024u * 1024u);
+    ASSERT_EQ(inherited.locations.size(), 1u);
+    EXPECT_EQ(inherited.locations[0].client_max_body_size, 1024u * 1024u);
+}
+
+TEST(LiteNginxConfigTest, ClientMaxBodySizeDefaultsToUnlimited) {
+    auto config_result = ConfigLoader::load_from_string(R"(
+        http {
+            listen 8080;
+            server {
+                server_name localhost;
+                location / { proxy_pass http://127.0.0.1:9001; }
+            }
+        }
+    )",
+                                                        "default_client_max_body_size.conf");
+
+    ASSERT_TRUE(config_result.has_value()) << config_result.error().message;
+    EXPECT_EQ(config_result->http.client_max_body_size, 0u);
+    EXPECT_EQ(config_result->http.servers[0].client_max_body_size, 0u);
+    EXPECT_EQ(config_result->http.servers[0].locations[0].client_max_body_size, 0u);
+}
+
+TEST(LiteNginxConfigTest, RejectsInvalidClientMaxBodySizeSettings) {
+    static constexpr std::string_view kDirectives[] = {
+            "client_max_body_size;",
+            "client_max_body_size 1m 2m;",
+            "client_max_body_size $body_limit;",
+            "client_max_body_size invalid;",
+            "client_max_body_size 1m; client_max_body_size 2m;",
+    };
+
+    for (std::string_view directive: kDirectives) {
+        std::string config_text = R"(
+            http {
+                listen 8080;
+                server {
+                    server_name localhost;
+                    location / {
+                        proxy_pass http://127.0.0.1:9001;
+                        CLIENT_MAX_BODY_SIZE_DIRECTIVE
+                    }
+                }
+            }
+        )";
+        config_text.replace(config_text.find("CLIENT_MAX_BODY_SIZE_DIRECTIVE"),
+                            sizeof("CLIENT_MAX_BODY_SIZE_DIRECTIVE") - 1, directive);
+
+        auto config_result = ConfigLoader::load_from_string(config_text, "bad_client_max_body_size.conf");
+        EXPECT_FALSE(config_result.has_value()) << directive;
+    }
+}
+
 TEST(LiteNginxConfigTest, ParsesProxyTargetRewriteAndConnectionPolicies) {
     auto config_result = ConfigLoader::load_from_string(R"(
         http {

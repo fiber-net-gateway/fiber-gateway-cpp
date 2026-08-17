@@ -246,6 +246,12 @@ common::IoErr ServerHttp2Request::on_body(void *owner, mem::IoBuf &&buf, bool en
         request->exchange_.request_trailers_complete_) {
         return common::IoErr::Invalid;
     }
+    if (request->discard_request_body_) {
+        if (end_stream) {
+            request->exchange_.request_trailers_complete_ = true;
+        }
+        return request->stream_.maybe_replenish_recv_window(0);
+    }
     common::IoErr err = request->request_body_recv_.push_body(std::move(buf), end_stream);
     if (err != common::IoErr::None) {
         return err;
@@ -271,6 +277,16 @@ fiber::async::DetachedTask ServerHttp2Request::run_handler_task(ServerHttp2Reque
 
     co_await (*request->handler_)(request->exchange_);
     request->handler_done_ = true;
+
+    if (request->response_finished_ && !request->stream_.remote_end_stream() && !request->stream_.local_rst() &&
+        !request->stream_.remote_rst()) {
+        request->discard_request_body_ = true;
+        request->request_body_recv_.discard_buffered();
+        const common::IoErr err = request->stream_.maybe_replenish_recv_window(0);
+        if (err != common::IoErr::None) {
+            (void) request->stream_.close_rst(Http2ErrorCode::InternalError, err);
+        }
+    }
     request->exchange_.set_io(nullptr);
 
     if (!request->stream_.local_end_stream() && !request->stream_.local_rst() && !request->stream_.remote_rst() &&

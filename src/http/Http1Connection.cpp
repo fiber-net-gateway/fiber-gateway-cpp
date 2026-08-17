@@ -373,6 +373,11 @@ fiber::async::Task<void> Http1Connection::run() {
                 break;
             }
 
+            if (!io.response_complete() || !io.should_keep_alive(exchange)) {
+                exchange.set_io(nullptr);
+                break;
+            }
+
             if (!io.request_body_complete()) {
                 if (options_.drain_unread_body) {
                     auto discard_result = co_await exchange.discard_body();
@@ -386,12 +391,7 @@ fiber::async::Task<void> Http1Connection::run() {
                 }
             }
 
-            if (!io.response_complete()) {
-                exchange.set_io(nullptr);
-                break;
-            }
-
-            if ((server_ && server_->shutting_down()) || !io.should_keep_alive(exchange)) {
+            if (server_ && server_->shutting_down()) {
                 exchange.set_io(nullptr);
                 break;
             }
