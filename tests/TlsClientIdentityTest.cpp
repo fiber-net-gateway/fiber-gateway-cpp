@@ -27,6 +27,7 @@
 #include <fiber/net/TlsContext.h>
 #include <fiber/net/TlsOptions.h>
 
+#include "QuicTestTlsCertificate.h"
 #include "TlsClientIdentityTestData.h"
 
 namespace {
@@ -81,6 +82,7 @@ struct SigpipeGuard {
 
 struct IdentityFiles {
     TempPemFile root{"root", fiber::test::kRootCertPem};
+    TempPemFile alternate_root{"alternate_root", fiber::test::kQuicTestCertificatePem};
     TempPemFile server_chain{"server_chain", fiber::test::kServerCertPem, fiber::test::kIntermediateCertPem};
     TempPemFile server_key{"server_key", fiber::test::kServerKeyPem};
     TempPemFile client_chain{"client_chain", fiber::test::kClientCertPem, fiber::test::kIntermediateCertPem};
@@ -88,7 +90,8 @@ struct IdentityFiles {
     TempPemFile wrong_key{"wrong_key", fiber::test::kWrongKeyPem};
 
     [[nodiscard]] bool ok() const noexcept {
-        return root.ok && server_chain.ok && server_key.ok && client_chain.ok && client_key.ok && wrong_key.ok;
+        return root.ok && alternate_root.ok && server_chain.ok && server_key.ok && client_chain.ok && client_key.ok &&
+               wrong_key.ok;
     }
 };
 
@@ -117,6 +120,7 @@ struct HandshakeResult {
     std::string server_alpn;
     std::string client_alpn;
     bool completed = false;
+    bool transports_released = false;
 };
 
 struct HandshakeSideResult {
@@ -202,6 +206,7 @@ HandshakeResult run_handshake_pair(fiber::net::TlsServerContext &server_context,
     destroy_on_owner(group.at(1), client_transport);
     group.stop();
     group.join();
+    result.transports_released = true;
     return result;
 }
 
@@ -284,29 +289,38 @@ TEST(TlsClientIdentityTest, ValidatesPairAndChainBeforePublishingContext) {
 TEST(TlsClientIdentityTest, MtlsComposesWithPeerVerificationIndependentNameSniAndAlpn) {
     IdentityFiles files;
     ASSERT_TRUE(files.ok());
-    SelectorState selector_state;
 
-    auto server_options = make_server_options(files, &selector_state);
-    fiber::net::TlsServerContext server_context(std::move(server_options));
-    ASSERT_TRUE(server_context.init());
+    for (int version: {0x0303, 0x0304}) {
+        SCOPED_TRACE(version);
+        SelectorState selector_state;
 
-    auto client_options = make_client_options(files);
-    client_options.ca_file = files.root.path;
-    client_options.verify_peer = true;
-    client_options.server_name = "routing.identity.test";
-    client_options.verify_name = "server.identity.test";
-    fiber::net::TlsContext client_context(std::move(client_options), false);
-    ASSERT_TRUE(client_context.init());
+        auto server_options = make_server_options(files, &selector_state);
+        server_options.min_version = version;
+        server_options.max_version = version;
+        fiber::net::TlsServerContext server_context(std::move(server_options));
+        ASSERT_TRUE(server_context.init());
 
-    auto result = run_handshake_pair(server_context, client_context);
-    ASSERT_TRUE(result.completed);
-    EXPECT_EQ(result.server_err, fiber::common::IoErr::None);
-    EXPECT_EQ(result.client_err, fiber::common::IoErr::None);
-    EXPECT_EQ(result.server_alpn, "fiber-mtls-test");
-    EXPECT_EQ(result.client_alpn, "fiber-mtls-test");
-    EXPECT_EQ(std::string_view(selector_state.server_name.data(), selector_state.server_name_size),
-              "routing.identity.test");
-    EXPECT_TRUE(selector_state.saw_test_alpn);
+        auto client_options = make_client_options(files);
+        client_options.ca_file = files.root.path;
+        client_options.verify_peer = true;
+        client_options.server_name = "routing.identity.test";
+        client_options.verify_name = "server.identity.test";
+        client_options.min_version = version;
+        client_options.max_version = version;
+        fiber::net::TlsContext client_context(std::move(client_options), false);
+        ASSERT_TRUE(client_context.init());
+
+        auto result = run_handshake_pair(server_context, client_context);
+        ASSERT_TRUE(result.completed);
+        EXPECT_EQ(result.server_err, fiber::common::IoErr::None);
+        EXPECT_EQ(result.client_err, fiber::common::IoErr::None);
+        EXPECT_EQ(result.server_alpn, "fiber-mtls-test");
+        EXPECT_EQ(result.client_alpn, "fiber-mtls-test");
+        EXPECT_EQ(std::string_view(selector_state.server_name.data(), selector_state.server_name_size),
+                  "routing.identity.test");
+        EXPECT_TRUE(selector_state.saw_test_alpn);
+        EXPECT_TRUE(result.transports_released);
+    }
 }
 
 TEST(TlsClientIdentityTest, MtlsIdentityWorksWhenPeerVerificationIsDisabled) {
@@ -351,6 +365,30 @@ TEST(TlsClientIdentityTest, ServerRequiringClientIdentityRejectsAnonymousClient)
     auto result = run_handshake_pair(server_context, client_context);
     ASSERT_TRUE(result.completed);
     EXPECT_NE(result.server_err, fiber::common::IoErr::None);
+    EXPECT_TRUE(result.transports_released);
+}
+
+TEST(TlsClientIdentityTest, ServerRejectsClientSignedByUnknownCaAndReleasesTransports) {
+    IdentityFiles files;
+    ASSERT_TRUE(files.ok());
+    SelectorState selector_state;
+
+    auto server_options = make_server_options(files, &selector_state);
+    server_options.ca_file = files.alternate_root.path;
+    fiber::net::TlsServerContext server_context(std::move(server_options));
+    ASSERT_TRUE(server_context.init());
+
+    auto client_options = make_client_options(files);
+    client_options.ca_file = files.root.path;
+    client_options.verify_peer = true;
+    client_options.server_name = "server.identity.test";
+    fiber::net::TlsContext client_context(std::move(client_options), false);
+    ASSERT_TRUE(client_context.init());
+
+    auto result = run_handshake_pair(server_context, client_context);
+    ASSERT_TRUE(result.completed);
+    EXPECT_NE(result.server_err, fiber::common::IoErr::None);
+    EXPECT_TRUE(result.transports_released);
 }
 
 TEST(TlsClientIdentityTest, FailedClientHandshakeCanBeReleasedOnOwnerLoop) {
