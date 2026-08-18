@@ -12,12 +12,20 @@
 
 namespace fiber::http {
 
+struct Http3Server::Runtime {
+    explicit Runtime(HttpHandler handler) : handler(std::make_shared<HttpHandler>(std::move(handler))) {}
+
+    std::shared_ptr<const HttpHandler> handler{};
+    std::atomic<bool> shutting_down{false};
+    async::WaitGroup connections{};
+};
+
 class Http3Server::ServerConnection final : public common::NonCopyable, public common::NonMovable {
 public:
-    ServerConnection(const quic::QuicConnection::Options &quic_options, const HttpHandler &handler,
-                     const HttpServerOptions &http_options) noexcept :
-        handler_(handler), http_options_(http_options), quic_(make_quic_options(quic_options, this)),
-        h3_(quic_, make_http3_options(this)) {
+    ServerConnection(const quic::QuicConnection::Options &quic_options, std::shared_ptr<const HttpHandler> handler,
+                     const HttpServerOptions &http_options, std::shared_ptr<Runtime> runtime) noexcept :
+        runtime_(std::move(runtime)), handler_(std::move(handler)), http_options_(http_options),
+        quic_(make_quic_options(quic_options, this)), h3_(quic_, make_http3_options(this)) {
         prepared_ = h3_.prepare().has_value();
     }
 
@@ -71,6 +79,9 @@ private:
         server_conn->cleanup_started_ = true;
         event::EventLoop *loop = connection.loop();
         if (loop == nullptr) {
+            if (server_conn->runtime_) {
+                server_conn->runtime_->connections.done();
+            }
             delete server_conn;
             return;
         }
@@ -96,13 +107,18 @@ private:
             co_return;
         }
 
+        std::shared_ptr<Runtime> runtime = server_conn->runtime_;
         co_await server_conn->tasks_.join();
         co_await server_conn->h3_.wait_closed();
+        if (runtime) {
+            runtime->connections.done();
+        }
         delete server_conn;
         co_return;
     }
 
-    HttpHandler handler_;
+    std::shared_ptr<Runtime> runtime_;
+    std::shared_ptr<const HttpHandler> handler_{};
     HttpServerOptions http_options_;
     quic::QuicConnection quic_;
     Http3Connection h3_;
@@ -113,7 +129,8 @@ private:
 
 Http3Server::Http3Server(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options,
                          event::EventLoopGroup *worker_group) :
-    loop_(loop), worker_group_(worker_group), handler_(std::move(handler)), options_(std::move(options)) {}
+    loop_(loop), worker_group_(worker_group), runtime_(std::make_shared<Runtime>(std::move(handler))),
+    options_(std::move(options)) {}
 
 Http3Server::~Http3Server() { close(); }
 
@@ -166,7 +183,8 @@ common::IoResult<void> Http3Server::bind(const net::SocketAddress &addr) noexcep
 }
 
 void Http3Server::serve() noexcept {
-    if (!initialized_ || started_.exchange(true, std::memory_order_acq_rel)) {
+    if (!initialized_ || runtime_->shutting_down.load(std::memory_order_acquire) ||
+        started_.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
 
@@ -184,21 +202,33 @@ void Http3Server::serve() noexcept {
 }
 
 void Http3Server::close() noexcept {
+    runtime_->shutting_down.store(true, std::memory_order_release);
     for (auto &shard: shards_) {
         if (!shard || shard->loop == nullptr) {
             continue;
         }
-        if (shard->loop->in_loop()) {
-            on_close_shard(shard.get());
-            continue;
-        }
-        if (shard->close_posted) {
+        if (shard->close_completed || shard->close_posted) {
             continue;
         }
         shard->close_posted = true;
-        shard->loop->post<Shard, &Shard::close_entry, &Http3Server::on_close_shard>(*shard);
+        close_wg_.add();
+        if (shard->loop->in_loop()) {
+            on_close_shard(shard.get());
+        } else {
+            shard->loop->post<Shard, &Shard::close_entry, &Http3Server::on_close_shard>(*shard);
+        }
     }
 }
+
+fiber::async::Task<void> Http3Server::shutdown_and_wait() noexcept {
+    runtime_->shutting_down.store(true, std::memory_order_release);
+    close();
+    co_await close_wg_.join();
+    co_await runtime_->connections.join();
+    co_return;
+}
+
+bool Http3Server::shutting_down() const noexcept { return runtime_->shutting_down.load(std::memory_order_acquire); }
 
 bool Http3Server::valid() const noexcept {
     for (const auto &shard: shards_) {
@@ -221,8 +251,13 @@ quic::QuicConnection::Lease Http3Server::create_connection_op(void *owner,
 }
 
 quic::QuicConnection::Lease Http3Server::create_connection(const quic::QuicConnection::Options &options) noexcept {
-    auto *connection = new (std::nothrow) ServerConnection(options, handler_, options_);
+    if (runtime_->shutting_down.load(std::memory_order_acquire)) {
+        return {};
+    }
+    runtime_->connections.add();
+    auto *connection = new (std::nothrow) ServerConnection(options, runtime_->handler, options_, runtime_);
     if (connection == nullptr) {
+        runtime_->connections.done();
         return {};
     }
 
@@ -281,7 +316,13 @@ void Http3Server::on_close_shard(Shard *shard) noexcept {
         return;
     }
     shard->close_posted = false;
+    shard->close_completed = true;
     shard->endpoint.close();
+    // close_wg_ is incremented before either the direct or posted callback.
+    // The endpoint close itself is loop-affine and is complete at this point.
+    if (shard->server != nullptr) {
+        shard->server->close_wg_.done();
+    }
 }
 
 } // namespace fiber::http

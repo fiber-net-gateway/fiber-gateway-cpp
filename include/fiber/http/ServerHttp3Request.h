@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include "../async/Spawn.h"
 #include "../async/Task.h"
@@ -28,6 +29,9 @@ public:
     [[nodiscard]] static quic::QuicStream::Lease create(std::uint64_t stream_id, Http3Connection &conn,
                                                         const HttpServerOptions &http_options,
                                                         const HttpHandler &handler) noexcept;
+    [[nodiscard]] static quic::QuicStream::Lease create(std::uint64_t stream_id, Http3Connection &conn,
+                                                        const HttpServerOptions &http_options,
+                                                        std::shared_ptr<const HttpHandler> handler) noexcept;
 
     [[nodiscard]] static ServerHttp3Request *from_stream(quic::QuicStream &stream) noexcept;
     [[nodiscard]] static const ServerHttp3Request *from_stream(const quic::QuicStream &stream) noexcept;
@@ -67,8 +71,8 @@ private:
     enum class BodyRecvState : std::uint8_t;
     class HeaderBlockParser;
 
-    ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options,
-                       const HttpHandler &handler) noexcept;
+    ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options, const HttpHandler &handler,
+                       std::shared_ptr<const HttpHandler> handler_owner = {}) noexcept;
 
     static void destroy_owner(void *owner, quic::QuicStream &stream) noexcept;
 
@@ -94,6 +98,7 @@ private:
     mem::IoBufChain inbound_buf_;
     HttpExchange exchange_;
     const HttpHandler *handler_ = nullptr;
+    std::shared_ptr<const HttpHandler> handler_owner_{};
     std::uint32_t max_qpack_string_size_ = 0;
     std::chrono::milliseconds body_timeout_{};
     Http3FrameHeaderParser frame_parser_;

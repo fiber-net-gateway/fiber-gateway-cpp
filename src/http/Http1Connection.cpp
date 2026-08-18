@@ -83,9 +83,10 @@ Http1HeaderParseBufferOptions header_parse_buffer_options(const HttpServerOption
 } // namespace
 
 Http1Connection::Http1Connection(Http1Server *server, std::unique_ptr<HttpTransport> transport, HttpHandler handler,
-                                 HttpServerOptions options) :
-    server_(server), loop_(event::EventLoop::current()), transport_(std::move(transport)), handler_(std::move(handler)),
-    options_(std::move(options)), inbound_bufs_(loop_.io_buf_node_pool()) {}
+                                 HttpServerOptions options, const std::atomic<bool> *shutdown_flag) :
+    server_(server), shutdown_flag_(shutdown_flag), loop_(event::EventLoop::current()),
+    transport_(std::move(transport)), handler_(std::move(handler)), options_(std::move(options)),
+    inbound_bufs_(loop_.io_buf_node_pool()) {}
 
 Http1Connection::~Http1Connection() {
     if (transport_ && transport_->valid() && loop_.in_loop()) {
@@ -342,7 +343,7 @@ fiber::async::Task<void> Http1Connection::run() {
     }
 
     for (;;) {
-        if (server_ && server_->shutting_down()) {
+        if (stopping()) {
             break;
         }
 
@@ -391,7 +392,7 @@ fiber::async::Task<void> Http1Connection::run() {
                 break;
             }
 
-            if ((server_ && server_->shutting_down()) || !io.should_keep_alive(exchange)) {
+            if (stopping() || !io.should_keep_alive(exchange)) {
                 exchange.set_io(nullptr);
                 break;
             }
@@ -407,7 +408,15 @@ fiber::async::Task<void> Http1Connection::run() {
     co_return;
 }
 
-bool Http1Connection::stopping() const noexcept { return server_ && server_->shutting_down(); }
+void Http1Connection::shutdown() noexcept {
+    FIBER_ASSERT(loop_.in_loop());
+    finish();
+}
+
+bool Http1Connection::stopping() const noexcept {
+    return (server_ && server_->shutting_down()) ||
+           (shutdown_flag_ != nullptr && shutdown_flag_->load(std::memory_order_acquire));
+}
 
 void Http1Connection::finish() noexcept {
     if (finished_.exchange(true, std::memory_order_acq_rel)) {

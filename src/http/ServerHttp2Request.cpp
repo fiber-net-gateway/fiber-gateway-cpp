@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <utility>
 
 #include <fiber/common/Assert.h>
 #include <fiber/common/IoError.h>
@@ -173,8 +174,9 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
 }
 
 ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn,
-                                       const HttpServerOptions &http_options, const HttpHandler &handler) noexcept :
-    conn_(&conn), handler_(&handler), stream_(this, stream_ops()),
+                                       const HttpServerOptions &http_options, const HttpHandler &handler,
+                                       std::shared_ptr<const HttpHandler> handler_owner) noexcept :
+    conn_(&conn), handler_(&handler), handler_owner_(std::move(handler_owner)), stream_(this, stream_ops()),
     exchange_(conn.transport().loop().io_buf_node_pool(), http_options, conn.transport().remote_addr()),
     request_body_recv_(conn.transport().loop().io_buf_node_pool()) {
     (void) stream_id;
@@ -186,6 +188,19 @@ Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Conn
                                               const HttpServerOptions &http_options,
                                               const HttpHandler &handler) noexcept {
     auto *owner = new (std::nothrow) ServerHttp2Request(stream_id, conn, http_options, handler);
+    if (!owner) {
+        return {};
+    }
+    return Http2Stream::Lease::adopt(&owner->stream_);
+}
+
+Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Connection &conn,
+                                              const HttpServerOptions &http_options,
+                                              std::shared_ptr<const HttpHandler> handler) noexcept {
+    if (!handler) {
+        return {};
+    }
+    auto *owner = new (std::nothrow) ServerHttp2Request(stream_id, conn, http_options, *handler, std::move(handler));
     if (!owner) {
         return {};
     }
