@@ -66,6 +66,11 @@ public:
     [[nodiscard]] fiber::http::HttpExchange &exchange() const noexcept { return exchange_; }
     [[nodiscard]] fiber::http::HttpResponseWriter &response_writer() noexcept { return response_writer_; }
     [[nodiscard]] const fiber::http::HttpResponseWriter &response_writer() const noexcept { return response_writer_; }
+    // Replace the response sink before the script emits headers or body bytes. The
+    // replacement remains request-local and is also used by http.proxyPass.
+    void set_response_writer(fiber::http::HttpResponseWriter response_writer) noexcept {
+        response_writer_ = response_writer;
+    }
     [[nodiscard]] fiber::script::GcHeap &heap() const noexcept { return heap_; }
     [[nodiscard]] ScriptRequestBody request_body() const noexcept { return request_body_; }
 

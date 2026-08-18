@@ -1,5 +1,3 @@
-fiber_prepare_zlib_target()
-
 add_library(lite_nginx_config STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/config/ConfigLoader.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/config/Lexer.cpp"
@@ -20,7 +18,6 @@ add_library(lite_nginx_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/logging/LoggingBuilder.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/proxy/ProxyHandler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/DnsService.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/runtime/GzipResponseWriter.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/HttpScriptServices.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RequestBodyLimiter.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/runtime/RuntimeBuilder.cpp"
@@ -30,8 +27,7 @@ add_library(lite_nginx_core STATIC
     "${CMAKE_CURRENT_LIST_DIR}/src/upstream/UpstreamRegistry.cpp")
 target_include_directories(lite_nginx_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
 target_link_libraries(lite_nginx_core
-    PUBLIC fiber_lib lite_nginx_config
-    PRIVATE ZLIB::ZLIBSTATIC)
+    PUBLIC fiber_lib lite_nginx_config fiber::http_compression)
 target_compile_definitions(lite_nginx_core PRIVATE
     FIBER_LITE_NGINX_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 set_target_properties(lite_nginx_core PROPERTIES FOLDER "apps/lite_nginx")

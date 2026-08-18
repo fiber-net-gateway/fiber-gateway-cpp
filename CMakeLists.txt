@@ -16,6 +16,7 @@ option(FIBER_BUILD_APPS "Build multi-file applications under apps/" ON)
 option(FIBER_BUILD_NACOS "Build the reusable fiber::nacos component" ${FIBER_BUILD_APPS})
 option(FIBER_BUILD_CAT "Build the reusable fiber::cat component" ${FIBER_BUILD_APPS})
 option(FIBER_BUILD_PROMETHEUS "Build the reusable fiber::prometheus component" ${FIBER_BUILD_APPS})
+option(FIBER_BUILD_HTTP_COMPRESSION "Build the reusable HTTP gzip response writer" ${FIBER_BUILD_APPS})
 option(FIBER_BUILD_CAT_DEMO "Build the CAT client demo" OFF)
 option(FIBER_BUILD_PROMETHEUS_BENCHMARK "Build the Prometheus record-path benchmark" OFF)
 
@@ -35,6 +36,11 @@ configure_file(cmake/FiberPlatformConfig.h.in
     "${FIBER_GENERATED_INCLUDE_DIR}/fiber/FiberPlatformConfig.h")
 
 file(GLOB_RECURSE CPP_SRC_LIST CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
+
+# HTTP compression has a private zlib dependency. Keep it out of fiber_lib so
+# applications that do not use compression do not inherit zlib at link time.
+list(REMOVE_ITEM CPP_SRC_LIST
+    "${CMAKE_CURRENT_LIST_DIR}/src/http/GzipResponseWriter.cpp")
 
 add_library(fiber_lib STATIC ${CPP_SRC_LIST})
 add_library(fiber_allocator INTERFACE)
@@ -141,6 +147,24 @@ if (FIBER_ENABLE_LTO)
             message(STATUS "IPO/LTO not supported: ${FIBER_IPO_ERROR}")
         endif()
     endif()
+endif()
+
+if (FIBER_BUILD_HTTP_COMPRESSION)
+    fiber_prepare_zlib_target()
+    add_library(fiber_http_compression STATIC
+        "${CMAKE_CURRENT_LIST_DIR}/src/http/GzipResponseWriter.cpp")
+    target_include_directories(fiber_http_compression
+        PUBLIC
+            "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>"
+            "$<INSTALL_INTERFACE:include>")
+    target_link_libraries(fiber_http_compression
+        PUBLIC fiber_lib
+        PRIVATE ZLIB::ZLIBSTATIC)
+    set_target_properties(fiber_http_compression PROPERTIES FOLDER "fiber/http")
+    if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
+        set_property(TARGET fiber_http_compression PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+    add_library(fiber::http_compression ALIAS fiber_http_compression)
 endif()
 
 option(FIBER_BUILD_EXAMPLES "Build simple demo examples" ON)
