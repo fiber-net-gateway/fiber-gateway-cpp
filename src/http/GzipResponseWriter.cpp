@@ -1,4 +1,4 @@
-#include "GzipResponseWriter.h"
+#include <fiber/http/GzipResponseWriter.h>
 
 #include <algorithm>
 #include <cstring>
@@ -11,9 +11,7 @@
 #include <fiber/common/Assert.h>
 #include <fiber/http/HttpExchange.h>
 
-namespace fiber::lite_nginx::runtime {
-
-using namespace fiber::http;
+namespace fiber::http {
 
 namespace {
 
@@ -188,14 +186,22 @@ bool matches_content_type(const HttpHeaders &headers, const GzipResponseWriterOp
     if (content_type.empty()) {
         return false;
     }
-    if (options.types.empty()) {
-        return ascii_equal_ci(content_type, "text/html");
+    if (!options.types.empty()) {
+        return std::ranges::any_of(
+                options.types, [&](const std::string &type) noexcept { return ascii_equal_ci(content_type, type); });
     }
-    return std::ranges::any_of(options.types,
-                               [&](const std::string &type) noexcept { return ascii_equal_ci(content_type, type); });
+    if (!options.type_views.empty()) {
+        return std::ranges::any_of(options.type_views,
+                                   [&](std::string_view type) noexcept { return ascii_equal_ci(content_type, type); });
+    }
+    return ascii_equal_ci(content_type, "text/html");
 }
 
-bool response_status_is_compressible(int status_code) noexcept {
+bool response_status_is_compressible(int status_code, bool all_body_statuses) noexcept {
+    if (all_body_statuses) {
+        return (status_code >= 200 && status_code < 600) && status_code != 204 && status_code != 205 &&
+               status_code != 206 && status_code != 304;
+    }
     return status_code == 200 || status_code == 403 || status_code == 404;
 }
 
@@ -311,16 +317,19 @@ async::Task<common::IoResult<void>> GzipResponseWriter::send_header(const Outgoi
 
     const HttpHeaders *headers = header.headers;
     const bool intrinsic_candidate =
-            options_.enabled && response_status_is_compressible(header.status_code) &&
+            options_.enabled && response_status_is_compressible(header.status_code, options_.all_body_statuses) &&
             exchange_->method() != HttpMethod::Head && !header.end_stream && !header.body.is_none() &&
             !header.body.is_stream() &&
             (!header.body.is_content_length() || header.body.content_length() >= options_.min_length) &&
             headers != nullptr && !has_nonempty_header(*headers, "content-encoding") &&
             !contains_directive(*headers, "cache-control", "no-transform") && matches_content_type(*headers, options_);
     const bool add_vary = intrinsic_candidate && !vary_contains_accept_encoding(*headers);
+    const bool request_accepts_gzip = options_.request_accepts_gzip.has_value()
+                                              ? *options_.request_accepts_gzip
+                                              : accepts_gzip(exchange_->request_headers());
     const bool active = intrinsic_candidate &&
                         !contains_directive(exchange_->request_headers(), "cache-control", "no-transform") &&
-                        accepts_gzip(exchange_->request_headers());
+                        request_accepts_gzip;
 
     if (!active && !add_vary) {
         state_ = State::Bypass;
@@ -692,4 +701,4 @@ void GzipResponseWriter::fail(common::IoErr error) noexcept {
     (void) next_.abort(error);
 }
 
-} // namespace fiber::lite_nginx::runtime
+} // namespace fiber::http
