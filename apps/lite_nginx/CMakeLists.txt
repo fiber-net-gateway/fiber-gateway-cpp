@@ -51,7 +51,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     add_executable(lite_nginx_tests
         "${CMAKE_CURRENT_LIST_DIR}/tests/LiteNginxConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LiteNginxRuntimeTest.cpp")
-    target_link_libraries(lite_nginx_tests PRIVATE lite_nginx_core GTest::gtest_main)
+    target_link_libraries(lite_nginx_tests PRIVATE lite_nginx_core ZLIB::ZLIBSTATIC GTest::gtest_main)
     target_include_directories(lite_nginx_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
     target_compile_definitions(lite_nginx_tests PRIVATE
         FIBER_LITE_NGINX_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")

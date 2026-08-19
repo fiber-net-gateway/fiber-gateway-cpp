@@ -200,7 +200,9 @@ Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Conn
     if (!handler) {
         return {};
     }
-    auto *owner = new (std::nothrow) ServerHttp2Request(stream_id, conn, http_options, *handler, std::move(handler));
+    const HttpHandler *handler_ptr = handler.get();
+    auto *owner =
+            new (std::nothrow) ServerHttp2Request(stream_id, conn, http_options, *handler_ptr, std::move(handler));
     if (!owner) {
         return {};
     }

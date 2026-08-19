@@ -195,7 +195,8 @@ quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http
     if (!handler) {
         return {};
     }
-    auto *request = new (std::nothrow) ServerHttp3Request(conn, http_options, *handler, std::move(handler));
+    const HttpHandler *handler_ptr = handler.get();
+    auto *request = new (std::nothrow) ServerHttp3Request(conn, http_options, *handler_ptr, std::move(handler));
     if (request == nullptr) {
         return {};
     }
