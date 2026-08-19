@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cerrno>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -519,9 +520,43 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
 }
 
 void ServerLauncher::close() {
-    for (auto &server: servers_) {
-        server->close();
+    if (accept_loop_.in_loop()) {
+        // A caller on the owner loop cannot synchronously wait without
+        // deadlocking that loop. Leave the facades and dependent loops alive;
+        // the next close (normally the launcher destructor after the loop
+        // stops) completes the barrier and performs the destruction.
+        for (auto &server: servers_) {
+            if (server) {
+                server->request_close();
+            }
+        }
+        return;
     }
+
+    if (!servers_.empty()) {
+        // HttpServer::close() only requests shutdown. Keep the server facades
+        // and worker loops alive until every owner-loop cleanup has completed;
+        // otherwise the posted close callbacks can never run after the
+        // accept loop has stopped, and loop-affine resources outlive their
+        // owning server.
+        std::promise<void> shutdown_promise;
+        auto shutdown_future = shutdown_promise.get_future();
+        fiber::async::spawn(accept_loop_, [this, &shutdown_promise]() -> fiber::async::DetachedTask {
+            for (auto &server: servers_) {
+                if (server) {
+                    co_await server->shutdown_and_wait();
+                }
+            }
+            shutdown_promise.set_value();
+            accept_loop_.stop();
+            co_return;
+        });
+        if (!accept_loop_.running()) {
+            accept_loop_.run();
+        }
+        shutdown_future.get();
+    }
+
     servers_.clear();
     bound_listeners_.clear();
     started_ = false;
