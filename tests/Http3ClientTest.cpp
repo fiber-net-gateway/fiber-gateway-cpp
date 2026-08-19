@@ -507,7 +507,7 @@ TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        server.close();
+        co_await server.shutdown_and_wait();
         close_promise.set_value();
         co_return;
     });
@@ -574,7 +574,7 @@ TEST(Http3ClientTest, PartialWriteContinuesDataFrameWithoutRepeatingHeader) {
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        server.close();
+        co_await server.shutdown_and_wait();
         close_promise.set_value();
         co_return;
     });

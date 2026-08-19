@@ -1076,7 +1076,7 @@ public:
         auto stopped_future = stopped.get_future();
         fiber::async::spawn(group_.at(0), [this, &stopped]() -> fiber::async::DetachedTask {
             if (server_) {
-                server_->close();
+                co_await server_->shutdown_and_wait();
             }
             group_.at(0).stop();
             stopped.set_value();
@@ -3516,7 +3516,7 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        server.close();
+        co_await server.shutdown_and_wait();
         close_promise.set_value();
         co_return;
     });

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 
 #include "../async/Spawn.h"
@@ -26,6 +27,9 @@ public:
     [[nodiscard]] static Http2Stream::Lease create(std::uint32_t stream_id, Http2Connection &conn,
                                                    const HttpServerOptions &http_options,
                                                    const HttpHandler &handler) noexcept;
+    [[nodiscard]] static Http2Stream::Lease create(std::uint32_t stream_id, Http2Connection &conn,
+                                                   const HttpServerOptions &http_options,
+                                                   std::shared_ptr<const HttpHandler> handler) noexcept;
 
     [[nodiscard]] Http2Stream &stream() noexcept { return stream_; }
     [[nodiscard]] const Http2Stream &stream() const noexcept { return stream_; }
@@ -68,7 +72,7 @@ private:
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
     static const HeaderMap<PseudoHeaderHandler> &pseudo_header_handler_map() noexcept;
     ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpServerOptions &http_options,
-                       const HttpHandler &handler) noexcept;
+                       const HttpHandler &handler, std::shared_ptr<const HttpHandler> handler_owner = {}) noexcept;
     static common::IoErr on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept;
     static common::IoErr on_header_block_complete(void *owner, bool end_stream) noexcept;
     static common::IoErr on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept;
@@ -113,6 +117,7 @@ private:
 
     [[maybe_unused]] Http2Connection *conn_ = nullptr;
     const HttpHandler *handler_ = nullptr;
+    std::shared_ptr<const HttpHandler> handler_owner_{};
     Http2Stream stream_;
     HttpExchange exchange_;
     detail::Http2BodyRecvState request_body_recv_;

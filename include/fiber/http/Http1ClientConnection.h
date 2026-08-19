@@ -17,6 +17,7 @@
 #include "../net/SocketAddress.h"
 #include "../net/TcpSocketOptions.h"
 #include "../net/TlsContext.h"
+#include "Http1ConnectionPoolAffinity.h"
 
 namespace fiber::http {
 
@@ -27,6 +28,10 @@ struct Http1ClientConnectionOptions {
     net::SocketAddress peer_addr{};
     net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
     net::TlsOptions tls{};
+    // Non-secret identity for all connection-bound transport settings when
+    // this connection is pooled. It must match the acquiring lease key; zero
+    // preserves the legacy/default pool partition.
+    Http1ConnectionPoolAffinity pool_affinity{};
 };
 
 class Http1ClientConnection : public common::NonCopyable, public common::NonMovable {

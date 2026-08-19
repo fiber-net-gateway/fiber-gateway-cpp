@@ -9,6 +9,7 @@
 相关头文件：
 
 - `include/fiber/http/Http1ConnectionGroupKey.h`
+- `include/fiber/http/Http1ConnectionPoolAffinity.h`
 - `include/fiber/http/Http1ConnectionPoolCore.h`
 - `include/fiber/http/LocalHttp1ConnectionPoolSet.h`
 - `include/fiber/http/StealableHttp1ConnectionPoolSet.h`
@@ -99,6 +100,9 @@ auto mtls_key = Http1ConnectionGroupKey::from_name(
     443,
     Http1ConnectionGroupKey::Scheme::Https,
     fiber::http::Http1ConnectionPoolAffinity{tls_profile_generation});
+
+fiber::http::Http1ClientConnectionOptions connection_options;
+connection_options.pool_affinity = mtls_key->pool_affinity();
 ```
 
 注意：
@@ -107,19 +111,22 @@ auto mtls_key = Http1ConnectionGroupKey::from_name(
 - 域名和 IP 是不同的 host kind，不会混用
 - `http` 和 `https` 永远不会共用连接
 - `example.com:443 + https` 与 `1.2.3.4:443 + https` 不是同组
-- affinity 默认为 `0`，因此不传该参数时保持原有分组语义
+- key 和 `Http1ClientConnectionOptions` 的 affinity 都默认为 `0`，因此不传该参数时保持原有分组与建连语义
 - 同一 endpoint 的 affinity 不同，本地复用和跨 loop steal 都不会共享连接
+- miss lease 的 `emplace_connection()` 要求 connection options affinity 与 lease key 完全一致；不一致时返回 `IoErr::Invalid`，且不会构造连接
 
 建议：
 
 - 如果上层请求目标是域名，就用域名建 key
 - 如果上层是按 IP 直连，就用 IP 建 key
 - 对 HTTPS，不要把不同域名压成同一个 IP key
-- 当同一 endpoint 可能使用不同的客户端证书或其它连接级 TLS 配置时，为每个有效 TLS profile 分配不同的非零 affinity
-- affinity 是固定宽度的非敏感标识，不要放证书路径、私钥内容，也不要从私钥内容计算它
-- 凭据轮换时，先创建并初始化新的 `TlsContext`，再发布新的 profile generation/affinity；旧 idle 连接会因 key 不同而无法命中，可等待超时淘汰或显式清池
+- 当同一 endpoint 可能使用不同的客户端证书或其它连接级 TLS 配置时，为每个有效、不可变的 transport profile 分配不同的非零 affinity
+- 同一个 profile 在共享连接池的所有 worker 上必须使用同一个 affinity；不同 profile 在其生命周期重叠时必须使用不同 affinity
+- affinity 只需在一个连接池实例及其仍可能归还的 lease/连接生命周期内唯一，不要求跨进程或跨重启全局唯一
+- affinity 是固定宽度的非敏感 `uint64_t` 标识；不要把证书路径、域名、CA 内容、私钥内容或其它 secret 编码进 key，也不要从 secret 内容直接计算它
+- 凭据或连接级策略轮换时，先创建并初始化新的 `TlsContext`，再发布新的 profile generation/affinity；在旧 profile 的所有 lease 和连接销毁、淘汰或清池前，不要复用其 affinity
 
-连接池不会从 `TlsOptions` 自动推导 affinity。配置控制层必须保证 `TlsContext` 与建 key 时使用的 affinity 属于同一个不可变 TLS profile。除客户端身份外，信任根、peer verification、SNI、`verify_name`、ALPN 等会固化在已建立连接上的选项也应纳入 profile generation。正在使用旧连接的 lease 可以自然完成；销毁旧 `TlsContext` 前必须确保所有由它创建的连接都已释放。
+连接池不会从 `TlsOptions` 的字符串或证书内容自动推导 affinity。配置控制层必须把同一个显式 affinity 同时写入 key 和 `Http1ClientConnectionOptions`，并保证它们对应同一个不可变 TLS profile。`emplace_connection()` 能拒绝两处显式 affinity 不一致，但无法判断调用方是否错误地给两组不同的 TLS 配置分配了同一个值。除客户端身份外，信任根、peer verification、SNI、`verify_name`、ALPN 等会固化在已建立连接上的选项也应纳入 profile generation。正在使用旧连接的 lease 可以自然完成；销毁旧 `TlsContext` 前必须确保所有由它创建的连接都已释放。
 
 ## 4. `Lease` 语义
 

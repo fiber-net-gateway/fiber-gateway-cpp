@@ -57,6 +57,9 @@ Http1ConnectionPoolCore::Lease::emplace_connection(Http1ClientConnectionOptions 
     if (pool_->shutdown_effective()) {
         return std::unexpected(common::IoErr::Canceled);
     }
+    if (options.pool_affinity != key_->pool_affinity()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     if (!entry_) {
         entry_ = pool_->allocate_entry();
         if (!entry_) {

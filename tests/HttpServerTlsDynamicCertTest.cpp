@@ -148,7 +148,7 @@ struct ClientResult {
 
 DetachedTask stop_http_server(fiber::event::EventLoop *loop, fiber::http::HttpServer *server) {
     if (server) {
-        server->close();
+        co_await server->shutdown_and_wait();
     }
     loop->stop();
     co_return;

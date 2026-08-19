@@ -52,6 +52,7 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
 
     fiber::http::Http1ClientConnectionOptions connection_options;
     connection_options.peer_addr = peers[0];
+    connection_options.pool_affinity = key.pool_affinity();
     if (key.scheme() == fiber::http::Http1ConnectionGroupKey::Scheme::Https) {
         connection_options.tls.enabled = true;
         connection_options.tls.server_name = std::string(tls_server_name);

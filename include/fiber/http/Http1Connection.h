@@ -24,11 +24,15 @@ class HttpTransport;
 
 class Http1Connection : public common::NonCopyable, public common::NonMovable {
 public:
+    // shutdown_flag is an optional externally-owned cancellation flag. When
+    // supplied, its lifetime must cover this connection.
     Http1Connection(Http1Server *server, std::unique_ptr<HttpTransport> transport, HttpHandler handler,
-                    HttpServerOptions options);
+                    HttpServerOptions options, const std::atomic<bool> *shutdown_flag = nullptr);
     ~Http1Connection();
 
     fiber::async::Task<void> run();
+    // Must be called on loop(). Closes the transport and wakes a pending read.
+    void shutdown() noexcept;
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
     [[nodiscard]] HttpTransport &transport() noexcept { return *transport_; }
@@ -49,6 +53,7 @@ private:
     void finish() noexcept;
 
     Http1Server *server_ = nullptr;
+    const std::atomic<bool> *shutdown_flag_ = nullptr;
     event::EventLoop &loop_;
     std::unique_ptr<HttpTransport> transport_;
     HttpHandler handler_;
