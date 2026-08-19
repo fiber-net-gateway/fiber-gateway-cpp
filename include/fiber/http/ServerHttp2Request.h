@@ -129,6 +129,7 @@ private:
     bool request_head_received_ = false;
     bool handler_started_ = false;
     bool handler_done_ = false;
+    bool discard_request_body_ = false;
     bool response_headers_sent_ = false;
     bool response_finished_ = false;
     bool response_channel_closed_ = false;

@@ -800,6 +800,9 @@ async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease le
     handler_started_ = true;
     co_await (*handler_)(exchange_);
     handler_done_ = true;
+    if (response_finished_ && !stream_.recv_closed() && !stream_.stop_sending()) {
+        (void) stream_.stop_read(error_value(Http3ErrorCode::RequestCancelled));
+    }
     exchange_.set_io(nullptr);
 
     if (!response_finished_) {

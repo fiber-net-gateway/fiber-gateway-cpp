@@ -4,6 +4,7 @@
 #include <cstring>
 #include <future>
 #include <new>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include <fiber/quic/QuicClient.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
 #include "QuicTestTlsCertificate.h"
+#include "TlsClientIdentityTestData.h"
 
 namespace {
 
@@ -150,7 +152,23 @@ struct ConnectSummary {
     bool peer_transport_received = false;
     bool server_scid_adopted = false;
     bool retry_processed = false;
+    std::size_t client_endpoint_connections = 0;
+    std::size_t server_endpoint_connections = 0;
 };
+
+enum class QuicClientIdentityMode : std::uint8_t {
+    Trusted,
+    Anonymous,
+    UnknownCa,
+};
+
+struct QuicMtlsCase {
+    const char *name = nullptr;
+    QuicClientIdentityMode identity = QuicClientIdentityMode::Anonymous;
+    bool expect_success = false;
+};
+
+class QuicClientMtlsTest : public ::testing::TestWithParam<QuicMtlsCase> {};
 
 struct TestClientCache {
     ~TestClientCache() {
@@ -417,6 +435,61 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
     promise->set_value(std::move(summary));
 }
 
+fiber::async::DetachedTask connect_loopback_confirmed(fiber::quic::QuicUdpEndpoint *server_endpoint,
+                                                      fiber::quic::QuicUdpEndpoint *client_endpoint,
+                                                      fiber::quic::QuicClient *client, const char *server_name,
+                                                      std::promise<ConnectSummary> *promise) {
+    ConnectSummary summary{};
+    auto server_started = server_endpoint->start();
+    auto client_started = client_endpoint->start();
+    if (!server_started || !client_started) {
+        summary.error = !server_started ? server_started.error() : client_started.error();
+        if (client_endpoint->valid()) {
+            client_endpoint->close();
+        }
+        if (server_endpoint->valid()) {
+            server_endpoint->close();
+        }
+        promise->set_value(std::move(summary));
+        co_return;
+    }
+
+    fiber::quic::QuicClientConnectOptions options{};
+    options.remote_addr = {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()};
+    options.server_name = server_name;
+    options.handshake_timeout = 2s;
+    auto started = client->start_connect(options);
+    if (!started) {
+        summary.error = started.error().io_error;
+        summary.phase = started.error().phase;
+        summary.tls_verify_result = started.error().tls_verify_result;
+        summary.tls_alert = started.error().tls_alert;
+    } else {
+        fiber::quic::QuicClientAttempt attempt = std::move(*started);
+        auto confirmed = co_await attempt.wait_confirmed(2s);
+        if (!confirmed) {
+            summary.error = confirmed.error().io_error;
+            summary.phase = confirmed.error().phase;
+            summary.tls_verify_result = confirmed.error().tls_verify_result;
+            summary.tls_alert = confirmed.error().tls_alert;
+        } else {
+            fiber::quic::QuicConnection *connection = attempt.connection();
+            summary.state = connection->state();
+            summary.selected_alpn.assign(connection->tls().selected_alpn());
+            summary.peer_transport_received = connection->peer_transport_params_received();
+            summary.server_scid_adopted = connection->has_server_initial_source_connection_id();
+            summary.retry_processed = connection->retry_processed();
+        }
+        attempt.cancel();
+    }
+
+    client_endpoint->close();
+    server_endpoint->close();
+    summary.client_endpoint_connections = client_endpoint->active_connection_count();
+    summary.server_endpoint_connections = server_endpoint->active_connection_count();
+    promise->set_value(std::move(summary));
+}
+
 } // namespace
 
 TEST(QuicClientTest, StartConnectAttachesAndQueuesClientInitial) {
@@ -552,6 +625,96 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshake) {
     group.stop();
     group.join();
 }
+
+TEST_P(QuicClientMtlsTest, EnforcesClientCertificateAuthentication) {
+    const QuicMtlsCase &test_case = GetParam();
+    fiber::test::QuicTestTlsFile server_cert("server_cert", fiber::test::kQuicTestCertificatePem);
+    fiber::test::QuicTestTlsFile server_key("server_key", fiber::test::kQuicTestPrivateKeyPem);
+    fiber::test::QuicTestTlsFile client_root("client_root", fiber::test::kRootCertPem);
+    const std::string client_chain_contents =
+            std::string(fiber::test::kClientCertPem) + fiber::test::kIntermediateCertPem;
+    fiber::test::QuicTestTlsFile client_chain("client_chain", client_chain_contents);
+    fiber::test::QuicTestTlsFile client_key("client_key", fiber::test::kClientKeyPem);
+    ASSERT_TRUE(server_cert.valid());
+    ASSERT_TRUE(server_key.valid());
+    ASSERT_TRUE(client_root.valid());
+    ASSERT_TRUE(client_chain.valid());
+    ASSERT_TRUE(client_key.valid());
+
+    fiber::net::TlsOptions server_tls_options{};
+    server_tls_options.cert_file = server_cert.path();
+    server_tls_options.key_file = server_key.path();
+    server_tls_options.ca_file =
+            test_case.identity == QuicClientIdentityMode::UnknownCa ? server_cert.path() : client_root.path();
+    server_tls_options.verify_client = true;
+    server_tls_options.min_version = 0x0304;
+    server_tls_options.max_version = 0x0304;
+    server_tls_options.alpn = {"fiber-quic-test"};
+    fiber::net::TlsServerContext server_tls(std::move(server_tls_options));
+    ASSERT_TRUE(server_tls.init());
+
+    fiber::net::TlsOptions client_tls_options{};
+    client_tls_options.ca_file = server_cert.path();
+    client_tls_options.verify_peer = true;
+    client_tls_options.min_version = 0x0304;
+    client_tls_options.max_version = 0x0304;
+    client_tls_options.alpn = {"fiber-quic-test"};
+    if (test_case.identity != QuicClientIdentityMode::Anonymous) {
+        client_tls_options.cert_file = client_chain.path();
+        client_tls_options.key_file = client_key.path();
+    }
+    fiber::net::TlsContext client_tls(std::move(client_tls_options), false);
+    ASSERT_TRUE(client_tls.init());
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint server_endpoint;
+    fiber::quic::QuicUdpEndpoint::Options server_options{};
+    server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    server_options.tls_context = &server_tls;
+    server_options.create_connection = create_connection;
+    ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
+
+    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
+    client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
+
+    fiber::quic::QuicClient client;
+    ASSERT_TRUE(client.init(client_endpoint, client_tls,
+                            {.connection_owner = nullptr, .create_connection = create_connection}));
+
+    std::promise<ConnectSummary> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return connect_loopback_confirmed(&server_endpoint, &client_endpoint, &client, "localhost", &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    const ConnectSummary summary = future.get();
+    if (test_case.expect_success) {
+        EXPECT_EQ(summary.error, fiber::common::IoErr::None);
+        EXPECT_EQ(summary.state, fiber::quic::QuicConnectionState::Established);
+        EXPECT_EQ(summary.selected_alpn, "fiber-quic-test");
+    } else {
+        EXPECT_NE(summary.error, fiber::common::IoErr::None);
+        EXPECT_TRUE(summary.phase == fiber::quic::QuicConnectPhase::Tls ||
+                    summary.phase == fiber::quic::QuicConnectPhase::PeerClose);
+        EXPECT_NE(summary.tls_alert, 0U);
+    }
+    EXPECT_EQ(summary.client_endpoint_connections, 0U);
+    EXPECT_EQ(summary.server_endpoint_connections, 0U);
+
+    group.stop();
+    group.join();
+}
+
+INSTANTIATE_TEST_SUITE_P(ClientIdentity, QuicClientMtlsTest,
+                         ::testing::Values(QuicMtlsCase{"Trusted", QuicClientIdentityMode::Trusted, true},
+                                           QuicMtlsCase{"Anonymous", QuicClientIdentityMode::Anonymous, false},
+                                           QuicMtlsCase{"UnknownCa", QuicClientIdentityMode::UnknownCa, false}),
+                         [](const ::testing::TestParamInfo<QuicMtlsCase> &info) { return info.param.name; });
 
 TEST(QuicClientTest, RejectsCertificateForWrongHostname) {
     fiber::test::QuicTestTlsFile cert("cert", fiber::test::kQuicTestCertificatePem);

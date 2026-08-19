@@ -36,6 +36,16 @@ RuntimeError make_error(const config::SourceLocation &location, std::string mess
     };
 }
 
+GzipRuntime make_gzip_runtime(const config::GzipSettings &settings) {
+    return GzipRuntime{
+            .enabled = settings.enabled,
+            .any_type = settings.any_type,
+            .types = settings.types,
+            .min_length = settings.min_length,
+            .compression_level = settings.compression_level,
+    };
+}
+
 // Reads a script file and compiles it against the runtime's StdLibrary.
 std::expected<std::shared_ptr<fiber::script::Script>, RuntimeError>
 compile_script_file(fiber::script::Library &library, const std::string &path, const config::SourceLocation &loc) {
@@ -223,6 +233,7 @@ struct LocationRouteDefiner {
 std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::MainConfig &config) {
     RuntimeConfig runtime;
     runtime.worker_processes = config.worker_processes;
+    runtime.gzip = make_gzip_runtime(config.http.gzip);
     const std::vector<std::string> no_path_vars;
     auto http_access_log = compile_access_log(runtime, config.http.access_log, kDisabledAccessLog, no_path_vars);
     if (!http_access_log) {
@@ -287,6 +298,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         runtime_server.server_names = server.server_names;
         runtime_server.certificate = server.certificate;
         runtime_server.certificate_key = server.certificate_key;
+        runtime_server.gzip = make_gzip_runtime(server.gzip);
         auto server_access_log = compile_access_log(runtime, server.access_log, runtime.access_log, no_path_vars);
         if (!server_access_log) {
             return std::unexpected(server_access_log.error());
@@ -312,6 +324,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 LocationRuntime runtime_location;
                 runtime_location.location = location.location;
                 runtime_location.pattern = location.pattern;
+                runtime_location.gzip = make_gzip_runtime(location.gzip);
+                runtime_location.client_max_body_size = location.client_max_body_size;
                 const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
 
                 // Add the route first so the matcher extracts the pattern's path variable
@@ -409,6 +423,8 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                     resolve_timeout(location.proxy.send_timeout, inherited_send, kDefaultSendTimeout);
             runtime_location.buffering.buffer_size = location.proxy.buffering.buffer_size;
             runtime_location.buffering.low_water = location.proxy.buffering.low_water;
+            runtime_location.gzip = make_gzip_runtime(location.gzip);
+            runtime_location.client_max_body_size = location.client_max_body_size;
             runtime_location.upstream_index = upstream_index;
             runtime_location.reuse_connection = location.reuse_connection;
             runtime_location.close_on_client_abort = location.proxy.close_on_client_abort;

@@ -61,10 +61,10 @@ AbiResult invalid_state() noexcept { return AbiResult::abort(ScriptAbortReason::
 
 // Reads the entire request body into out, looping read_body until the chain is complete.
 // Mirrors the read loop in example/http1_echo.cpp. Returns the IoErr on failure.
-fiber::async::Task<fiber::common::IoResult<void>> read_full_body(fiber::http::HttpExchange &exchange,
+fiber::async::Task<fiber::common::IoResult<void>> read_full_body(ScriptRequestBody request_body,
                                                                  std::string &out) noexcept {
     for (;;) {
-        auto read_result = co_await exchange.read_body(65536);
+        auto read_result = co_await request_body.read(65536);
         if (!read_result) {
             co_return std::unexpected(read_result.error());
         }
@@ -155,7 +155,7 @@ AsyncTask read_json_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
         co_return invalid_state();
     }
     std::string body;
-    auto read_result = co_await read_full_body(ctx->exchange(), body);
+    auto read_result = co_await read_full_body(ctx->request_body(), body);
     if (!read_result) {
         co_return error_exn(*heap, "read request body failed");
     }
@@ -185,7 +185,7 @@ AsyncTask read_binary_fn(void * /*userdata*/, const Library::HostCallFrame &fram
         co_return invalid_state();
     }
     std::string body;
-    auto read_result = co_await read_full_body(ctx->exchange(), body);
+    auto read_result = co_await read_full_body(ctx->request_body(), body);
     if (!read_result) {
         co_return error_exn(*heap, "read request body failed");
     }
@@ -209,7 +209,7 @@ AsyncTask discard_body_fn(void * /*userdata*/, const Library::HostCallFrame &fra
     if (ctx == nullptr) {
         co_return invalid_state();
     }
-    auto result = co_await ctx->exchange().discard_body();
+    auto result = co_await ctx->request_body().discard();
     (void) result; // Java fire-and-forget ignores drain errors
     co_return AbiResult::success(JsValue::make_null());
 }

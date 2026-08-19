@@ -25,6 +25,7 @@ public:
 
     [[nodiscard]] common::IoErr push_body(mem::IoBuf &&buf, bool end_stream) noexcept;
     void close_input() noexcept;
+    void discard_buffered() noexcept;
     void abort(common::IoErr reason) noexcept;
     [[nodiscard]] std::size_t queued_bytes() const noexcept { return queue_.readable_bytes(); }
 

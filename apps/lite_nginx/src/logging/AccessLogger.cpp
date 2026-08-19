@@ -92,15 +92,19 @@ void AccessLogger::write(fiber::http::HttpExchange &exchange, const RequestLogCo
             .body_bytes_sent = stats.body_bytes_sent,
             .request_time_us = elapsed_us(context.started_at, finished_at),
             .upstream_time_us = upstream_time,
+            .gzip_input_bytes = context.gzip_input_bytes,
+            .gzip_output_bytes = context.gzip_output_bytes,
             .server_name = context.server_name,
             .location_pattern = context.location_pattern,
             .outcome = access_outcome(stats, context),
             .upstream_host = context.upstream_host,
+            .gzip_status = context.gzip_status,
             .upstream_port = context.upstream_port,
             .status = stats.status_code,
             .upstream_status = context.upstream_status,
             .upstream_error = context.upstream_error,
             .upstream_started = context.upstream_started,
+            .gzip_used = context.gzip_used,
     };
     fiber::script::GcHeap heap(exchange.pool());
     AccessLogEvalContext script_context(exchange, heap, context.connection, data);

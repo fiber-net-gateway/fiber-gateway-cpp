@@ -1219,7 +1219,7 @@ interface HttpService {
 - 入站请求头复制到上游前会过滤 framing 和 hop-by-hop 字段；随后应用 `headers`。请求体从入站流直接写到上游，因此没有 `body` option，并且会消费当前请求体。
 - 上游 1xx 响应会被跳过，直到最终响应；上游响应头过滤 hop-by-hop 字段后应用 `responseHeaders`。HEAD 和不允许 body 的状态不会向下游发送 body，剩余上游 body 会尝试丢弃。
 - 已知 Content-Length 会保留固定长度 framing，否则使用自动 framing。响应体默认使用 64 KiB buffer 和 48 KiB low-water，不足 low-water 时等待更多数据或 EOF。
-- `flush: true` 把 low-water 设为 0，关闭跨读取聚合；每次最多读取 64 KiB，当前块写完后再读下一块。它不自动设置 `X-Accel-Buffering: no`，也不关闭外层代理或协议栈的缓冲。普通 body pipe 的下游写入不使用 `timeout` 截止时间。
+- `flush: true` 把 low-water 设为 0，关闭跨读取聚合；每次最多读取 64 KiB，当前块写完并 flush 后再读下一块，gzip 启用时会使用 `Z_SYNC_FLUSH`。它不自动设置 `X-Accel-Buffering: no`，也不关闭外层代理或协议栈的缓冲。普通 body pipe 的下游写入不使用 `timeout` 截止时间。
 
 WebSocket 行为：
 
