@@ -277,9 +277,8 @@ fiber::async::Task<void> handle_echo(fiber::http::HttpExchange &exchange, const 
 
 fiber::async::Task<void> shutdown_demo(fiber::event::EventLoop *loop, fiber::http::HttpServer *server) {
     if (server) {
-        server->close();
+        co_await server->shutdown_and_wait();
     }
-    co_await fiber::async::sleep(std::chrono::milliseconds(1));
     if (loop) {
         loop->stop();
     }

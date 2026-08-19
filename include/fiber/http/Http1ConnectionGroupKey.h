@@ -10,26 +10,9 @@
 
 #include "../common/Assert.h"
 #include "../net/IpAddress.h"
+#include "Http1ConnectionPoolAffinity.h"
 
 namespace fiber::http {
-
-// A non-secret, application-assigned partition for otherwise identical
-// endpoints. Zero preserves legacy grouping. HTTPS callers with multiple
-// effective TLS profiles must use distinct nonzero values and change the value
-// when credentials or other connection-bound TLS settings rotate.
-class Http1ConnectionPoolAffinity {
-public:
-    constexpr Http1ConnectionPoolAffinity() noexcept = default;
-    explicit constexpr Http1ConnectionPoolAffinity(std::uint64_t value) noexcept : value_(value) {}
-
-    [[nodiscard]] constexpr std::uint64_t value() const noexcept { return value_; }
-
-    friend constexpr bool operator==(Http1ConnectionPoolAffinity left,
-                                     Http1ConnectionPoolAffinity right) noexcept = default;
-
-private:
-    std::uint64_t value_ = 0;
-};
 
 class Http1ConnectionGroupKey {
 public:

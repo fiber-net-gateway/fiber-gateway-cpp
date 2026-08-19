@@ -6,6 +6,8 @@
 #include <memory>
 #include <vector>
 
+#include "../async/Task.h"
+#include "../async/WaitGroup.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -27,11 +29,17 @@ public:
 
     [[nodiscard]] common::IoResult<void> bind(const net::SocketAddress &addr) noexcept;
     void serve() noexcept;
+    // Non-blocking shutdown request; initiate it on the server's owner loop.
+    // Await shutdown_and_wait() before destroying an initialized server.
     void close() noexcept;
+    fiber::async::Task<void> shutdown_and_wait() noexcept;
+    [[nodiscard]] bool shutting_down() const noexcept;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept;
 
 private:
+    struct Runtime;
+
     struct Shard {
         Http3Server *server = nullptr;
         event::EventLoop *loop = nullptr;
@@ -40,6 +48,7 @@ private:
         event::EventLoop::NotifyEntry close_entry{};
         bool endpoint_started = false;
         bool close_posted = false;
+        bool close_completed = false;
     };
 
     class ServerConnection;
@@ -57,13 +66,14 @@ private:
 
     event::EventLoop &loop_;
     event::EventLoopGroup *worker_group_ = nullptr;
-    HttpHandler handler_;
+    std::shared_ptr<Runtime> runtime_;
     HttpServerOptions options_;
     std::unique_ptr<net::TlsServerContext> tls_ctx_{};
     std::vector<std::unique_ptr<Shard>> shards_{};
     net::SocketAddress local_addr_{};
     std::atomic<bool> started_{false};
     bool initialized_ = false;
+    fiber::async::WaitGroup close_wg_{};
 };
 
 } // namespace fiber::http

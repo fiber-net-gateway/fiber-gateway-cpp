@@ -272,7 +272,7 @@ DetachedTask start_http_server(fiber::event::EventLoop *loop, fiber::http::HttpH
 
 DetachedTask close_server_on_loop(fiber::http::HttpServer *server, std::promise<void> *done_promise) {
     if (server) {
-        server->close();
+        co_await server->shutdown_and_wait();
     }
     done_promise->set_value();
     co_return;

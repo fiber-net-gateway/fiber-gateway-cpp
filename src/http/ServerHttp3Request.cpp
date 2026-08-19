@@ -163,10 +163,12 @@ enum class ServerHttp3Request::BodyRecvState : std::uint8_t {
 };
 
 ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options,
-                                       const HttpHandler &handler) noexcept :
+                                       const HttpHandler &handler,
+                                       std::shared_ptr<const HttpHandler> handler_owner) noexcept :
     quic_lease_(conn.quic().lease()), stream_(this, &ServerHttp3Request::destroy_owner),
     inbound_buf_(conn.quic().recv_extent_pool()),
     exchange_(conn.quic().recv_extent_pool(), http_options, conn.quic().remote_addr()), handler_(&handler),
+    handler_owner_(std::move(handler_owner)),
     max_qpack_string_size_(static_cast<std::uint32_t>(
             std::min<std::size_t>(http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
     body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader),
@@ -180,6 +182,21 @@ quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http
                                                    const HttpHandler &handler) noexcept {
     (void) stream_id;
     auto *request = new (std::nothrow) ServerHttp3Request(conn, http_options, handler);
+    if (request == nullptr) {
+        return {};
+    }
+    return quic::QuicStream::Lease::adopt(&request->stream_);
+}
+
+quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3Connection &conn,
+                                                   const HttpServerOptions &http_options,
+                                                   std::shared_ptr<const HttpHandler> handler) noexcept {
+    (void) stream_id;
+    if (!handler) {
+        return {};
+    }
+    const HttpHandler *handler_ptr = handler.get();
+    auto *request = new (std::nothrow) ServerHttp3Request(conn, http_options, *handler_ptr, std::move(handler));
     if (request == nullptr) {
         return {};
     }

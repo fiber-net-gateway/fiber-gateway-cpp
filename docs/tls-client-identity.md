@@ -46,8 +46,12 @@ auto key = fiber::http::Http1ConnectionGroupKey::from_name(
         upstream_port,
         fiber::http::Http1ConnectionGroupKey::Scheme::Https,
         fiber::http::Http1ConnectionPoolAffinity{tls_profile_generation});
+
+fiber::http::Http1ClientConnectionOptions connection_options;
+connection_options.pool_affinity = key->pool_affinity();
+// Fill peer_addr and tls from the same immutable profile before emplacing.
 ```
 
-`0` 是兼容旧调用方的默认 affinity。存在多个身份时，应由安全配置控制层分配互不冲突的非零 generation；不要使用证书路径或私钥内容作为 affinity。轮换时先完整初始化新上下文，再原子发布新上下文和新 generation。这样新请求不会命中旧身份的 idle 连接；旧连接可自然退役，也可以由应用显式清池。
+`0` 是 key 与 connection options 兼容旧调用方的默认 affinity。`Lease::emplace_connection()` 会拒绝两者 affinity 不一致的连接，但 affinity 与具体 TLS 内容的映射仍由配置控制层负责。存在多个身份时，应分配互不冲突的非零 generation；不要使用证书路径或私钥内容作为 affinity。轮换时先完整初始化新上下文，再原子发布新上下文和新 generation，并在旧连接全部退役前避免复用旧 generation。这样新请求不会命中旧身份的 idle 连接；旧连接可自然退役，也可以由应用显式清池。
 
 普通路由内容、管理 API 和常规日志只应携带不透明的 secret reference 或 profile generation，不应携带私钥内容或解析后的私钥路径。
