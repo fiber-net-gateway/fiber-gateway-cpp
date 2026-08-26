@@ -164,6 +164,101 @@ std::vector<std::uint8_t> make_a_response(std::uint16_t id, std::string_view qna
     return packet;
 }
 
+void append_compressed_record(std::vector<std::uint8_t> &packet, std::uint16_t type, std::uint32_t ttl,
+                              const std::uint8_t *rdata, std::uint16_t rdata_len) {
+    push_be16(packet, 0xc00cU);
+    push_be16(packet, type);
+    push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
+    push_be32(packet, ttl);
+    push_be16(packet, rdata_len);
+    packet.insert(packet.end(), rdata, rdata + rdata_len);
+}
+
+std::vector<std::uint8_t> make_large_sections_a_response(std::uint16_t id, std::string_view qname,
+                                                         std::array<std::uint8_t, 4> addr) {
+    std::vector<std::uint8_t> packet;
+    push_be16(packet, id);
+    push_be16(packet, 0x8180U);
+    push_be16(packet, 1);
+    push_be16(packet, 1);
+    push_be16(packet, 13);
+    push_be16(packet, 10);
+
+    auto qname_wire = encode_dns_name(qname);
+    packet.insert(packet.end(), qname_wire.begin(), qname_wire.end());
+    push_be16(packet, static_cast<std::uint16_t>(RecordType::A));
+    push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
+
+    append_compressed_record(packet, static_cast<std::uint16_t>(RecordType::A), 60, addr.data(), addr.size());
+    const std::uint8_t compressed_name[] = {0xc0, 0x0c};
+    for (std::uint16_t i = 0; i < 13; ++i) {
+        append_compressed_record(packet, static_cast<std::uint16_t>(RecordType::NS), 60, compressed_name,
+                                 sizeof(compressed_name));
+    }
+    for (std::uint16_t i = 0; i < 10; ++i) {
+        append_compressed_record(packet, static_cast<std::uint16_t>(RecordType::A), 60, addr.data(), addr.size());
+    }
+    return packet;
+}
+
+std::vector<std::uint8_t> make_large_authority_nodata_response(std::uint16_t id, std::string_view qname) {
+    std::vector<std::uint8_t> packet;
+    push_be16(packet, id);
+    push_be16(packet, 0x8180U);
+    push_be16(packet, 1);
+    push_be16(packet, 0);
+    push_be16(packet, 14);
+    push_be16(packet, 10);
+
+    auto qname_wire = encode_dns_name(qname);
+    packet.insert(packet.end(), qname_wire.begin(), qname_wire.end());
+    push_be16(packet, static_cast<std::uint16_t>(RecordType::A));
+    push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
+
+    const std::uint8_t compressed_name[] = {0xc0, 0x0c};
+    for (std::uint16_t i = 0; i < 13; ++i) {
+        append_compressed_record(packet, static_cast<std::uint16_t>(RecordType::NS), 60, compressed_name,
+                                 sizeof(compressed_name));
+    }
+
+    std::vector<std::uint8_t> soa_rdata{0xc0, 0x0c, 0xc0, 0x0c};
+    push_be32(soa_rdata, 1);
+    push_be32(soa_rdata, 60);
+    push_be32(soa_rdata, 60);
+    push_be32(soa_rdata, 300);
+    push_be32(soa_rdata, 30);
+    append_compressed_record(packet, static_cast<std::uint16_t>(RecordType::SOA), 120, soa_rdata.data(),
+                             soa_rdata.size());
+
+    const std::uint8_t address[] = {192, 0, 2, 1};
+    for (std::uint16_t i = 0; i < 10; ++i) {
+        append_compressed_record(packet, static_cast<std::uint16_t>(RecordType::A), 60, address, sizeof(address));
+    }
+    return packet;
+}
+
+std::vector<std::uint8_t> make_referral_response(std::uint16_t id, std::string_view qname) {
+    std::vector<std::uint8_t> packet;
+    push_be16(packet, id);
+    push_be16(packet, 0x8180U);
+    push_be16(packet, 1);
+    push_be16(packet, 0);
+    push_be16(packet, 1);
+    push_be16(packet, 1);
+
+    auto qname_wire = encode_dns_name(qname);
+    packet.insert(packet.end(), qname_wire.begin(), qname_wire.end());
+    push_be16(packet, static_cast<std::uint16_t>(RecordType::A));
+    push_be16(packet, static_cast<std::uint16_t>(RecordClass::IN));
+
+    const std::uint8_t compressed_name[] = {0xc0, 0x0c};
+    append_compressed_record(packet, static_cast<std::uint16_t>(RecordType::NS), 60, compressed_name,
+                             sizeof(compressed_name));
+    const std::uint8_t address[] = {192, 0, 2, 53};
+    append_compressed_record(packet, static_cast<std::uint16_t>(RecordType::A), 60, address, sizeof(address));
+    return packet;
+}
+
 std::vector<std::uint8_t> make_conflicting_cname_response(std::uint16_t id, std::string_view qname,
                                                           std::string_view first_target,
                                                           std::string_view second_target) {
@@ -531,6 +626,104 @@ TEST(DnsResolverLocalTest, ResolvesCnameAndUsesCacheOnSecondLookup) {
     ASSERT_EQ(outcome.canonical, "edge.example.net");
     ASSERT_EQ(outcome.records.size(), 1u);
     EXPECT_EQ(outcome.records[0], "7.7.7.7");
+}
+
+TEST(DnsResolverLocalTest, ResolvesAnswerWithLargeUnneededSections) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::dns::SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init(group.at(0)));
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ResolveOutcome> resolve_promise;
+    auto response = make_large_sections_a_response(0, "www.example.com", {203, 0, 113, 7});
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response, 0ms, 300ms);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_double_resolve(&group.at(0), &cache, port, &resolve_promise); });
+    const auto outcome = resolve_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    shutdown_cache(group.at(0), cache);
+    group.stop();
+    group.join();
+
+    ASSERT_EQ(server.err, IoErr::None);
+    EXPECT_EQ(server.recv_count, 1u);
+    ASSERT_EQ(outcome.err, IoErr::None);
+    ASSERT_EQ(outcome.status, ResolveStatus::Success);
+    ASSERT_EQ(outcome.records.size(), 1u);
+    EXPECT_EQ(outcome.records[0], "203.0.113.7");
+}
+
+TEST(DnsResolverLocalTest, FindsNegativeSoaAfterLargeNsSection) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::dns::SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init(group.at(0)));
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ResolveOutcome> resolve_promise;
+    auto response = make_large_authority_nodata_response(0, "www.example.com");
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response, 0ms, 300ms);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_double_resolve(&group.at(0), &cache, port, &resolve_promise); });
+    const auto outcome = resolve_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    shutdown_cache(group.at(0), cache);
+    group.stop();
+    group.join();
+
+    ASSERT_EQ(server.err, IoErr::None);
+    EXPECT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(outcome.err, IoErr::None);
+    EXPECT_EQ(outcome.status, ResolveStatus::NoData);
+    EXPECT_TRUE(outcome.records.empty());
+}
+
+TEST(DnsResolverLocalTest, DoesNotTreatReferralAsNoData) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::dns::SharedDnsCache2 cache;
+    ASSERT_TRUE(cache.init(group.at(0)));
+
+    std::promise<std::uint16_t> port_promise;
+    std::promise<ServerOutcome> server_promise;
+    std::promise<ResolveOutcome> resolve_promise;
+    auto response = make_referral_response(0, "referral.example");
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_response_server(&group.at(0), &port_promise, &server_promise, response);
+    });
+    const auto port = port_promise.get_future().get();
+    ASSERT_NE(port, 0);
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_single_resolve(&group.at(0), &cache, port, "referral.example", {}, &resolve_promise);
+    });
+    const auto outcome = resolve_promise.get_future().get();
+    const auto server = server_promise.get_future().get();
+    shutdown_cache(group.at(0), cache);
+    group.stop();
+    group.join();
+
+    EXPECT_EQ(server.err, IoErr::None);
+    EXPECT_EQ(server.recv_count, 1u);
+    EXPECT_EQ(outcome.err, IoErr::None);
+    EXPECT_EQ(outcome.status, ResolveStatus::ServerFailure);
+    EXPECT_TRUE(outcome.records.empty());
 }
 
 TEST(DnsResolverLocalTest, CachesOnlyReachableCnameAnswers) {

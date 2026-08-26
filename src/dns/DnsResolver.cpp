@@ -80,9 +80,18 @@ const FamilyQueryState *pick_status_family(AddressPolicy policy, const FamilyQue
         return second;
     }
     if (first->err == common::IoErr::None) {
+        if (first->status == ResolveStatus::NoData && second->err != common::IoErr::None) {
+            return second;
+        }
         return first;
     }
-    return second;
+    if (second->err == common::IoErr::None) {
+        if (second->status == ResolveStatus::NoData) {
+            return first;
+        }
+        return second;
+    }
+    return first;
 }
 
 } // namespace
@@ -132,7 +141,7 @@ common::IoErr AddressResolveResult::assign_positive(std::string_view canonical_n
                                                     std::uint16_t count, std::uint16_t v4_count, std::uint16_t v6_count,
                                                     std::chrono::steady_clock::time_point expire_at) noexcept {
     if ((count != 0 && records == nullptr) || count > options_.max_records || count != v4_count + v6_count) {
-        return count > options_.max_records ? common::IoErr::NoMem : common::IoErr::Invalid;
+        return count > options_.max_records ? common::IoErr::MessageTooLarge : common::IoErr::Invalid;
     }
     common::IoErr err = assign_canonical(canonical_name);
     if (err != common::IoErr::None) {
@@ -150,7 +159,7 @@ common::IoErr AddressResolveResult::assign_positive(std::string_view canonical_n
 
 common::IoErr AddressResolveResult::assign_canonical(std::string_view canonical_name) noexcept {
     if (canonical_name.size() > options_.max_name_storage) {
-        return common::IoErr::NoMem;
+        return common::IoErr::MessageTooLarge;
     }
     std::copy(canonical_name.begin(), canonical_name.end(), name_storage_.get());
     canonical_name_ = std::string_view(name_storage_.get(), canonical_name.size());
@@ -200,7 +209,7 @@ common::IoErr EndpointResolveResult::assign_positive(std::string_view canonical_
                                                      std::uint16_t count,
                                                      std::chrono::steady_clock::time_point expire_at) noexcept {
     if ((count != 0 && records == nullptr) || count > options_.max_records) {
-        return count > options_.max_records ? common::IoErr::NoMem : common::IoErr::Invalid;
+        return count > options_.max_records ? common::IoErr::MessageTooLarge : common::IoErr::Invalid;
     }
     common::IoErr err = assign_canonical(canonical_name);
     if (err != common::IoErr::None) {
@@ -216,7 +225,7 @@ common::IoErr EndpointResolveResult::assign_positive(std::string_view canonical_
 
 common::IoErr EndpointResolveResult::assign_canonical(std::string_view canonical_name) noexcept {
     if (canonical_name.size() > options_.max_name_storage) {
-        return common::IoErr::NoMem;
+        return common::IoErr::MessageTooLarge;
     }
     std::copy(canonical_name.begin(), canonical_name.end(), name_storage_.get());
     canonical_name_ = std::string_view(name_storage_.get(), canonical_name.size());
@@ -308,15 +317,18 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
             return state.status;
         }
 
+        if (out.options_.max_records == 0) {
+            return std::unexpected(common::IoErr::MessageTooLarge);
+        }
+        const std::uint16_t retained_count = std::min(state.result.record_count(), out.options_.max_records);
         std::uint16_t v4_count = 0;
         std::uint16_t v6_count = 0;
-        for (std::uint16_t i = 0; i < state.result.record_count(); ++i) {
+        for (std::uint16_t i = 0; i < retained_count; ++i) {
             v4_count += state.result.records()[i].is_v4() ? 1 : 0;
             v6_count += state.result.records()[i].is_v6() ? 1 : 0;
         }
-        common::IoErr err =
-                out.assign_positive(state.result.canonical_name(), state.result.records(), state.result.record_count(),
-                                    v4_count, v6_count, state.result.expire_at());
+        common::IoErr err = out.assign_positive(state.result.canonical_name(), state.result.records(), retained_count,
+                                                v4_count, v6_count, state.result.expire_at());
         if (err != common::IoErr::None) {
             return std::unexpected(err);
         }
@@ -367,42 +379,57 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
             canonical_source = fallback_family(policy, v4, v6);
         }
 
-        std::array<net::IpAddress, 32> stack_records{};
-        std::unique_ptr<net::IpAddress[]> heap_records{};
-        const std::uint16_t total_count =
-                (v4_success ? v4.result.record_count() : 0) + (v6_success ? v6.result.record_count() : 0);
-        net::IpAddress *merged = nullptr;
-        if (total_count <= stack_records.size()) {
-            merged = stack_records.data();
-        } else {
-            heap_records = std::make_unique<net::IpAddress[]>(total_count);
-            if (!heap_records) {
-                co_return std::unexpected(common::IoErr::NoMem);
-            }
-            merged = heap_records.get();
+        if (out.options_.max_records == 0) {
+            co_return std::unexpected(common::IoErr::MessageTooLarge);
         }
 
+        std::array<net::IpAddress, kDnsMaxAddressCount> merged{};
+        const std::uint16_t total_count =
+                (v4_success ? v4.result.record_count() : 0) + (v6_success ? v6.result.record_count() : 0);
+        const std::uint16_t retained_count = std::min(total_count, out.options_.max_records);
         std::uint16_t index = 0;
         auto append_records = [&](const FamilyQueryState &state) noexcept {
-            for (std::uint16_t i = 0; i < state.result.record_count(); ++i) {
+            for (std::uint16_t i = 0; i < state.result.record_count() && index < retained_count; ++i) {
                 merged[index++] = state.result.records()[i];
             }
         };
 
-        if (policy == AddressPolicy::V6First) {
-            if (v6_success) {
-                append_records(v6);
-            }
-            if (v4_success) {
-                append_records(v4);
+        if (total_count <= retained_count || !v4_success || !v6_success) {
+            if (policy == AddressPolicy::V6First) {
+                if (v6_success) {
+                    append_records(v6);
+                }
+                if (v4_success) {
+                    append_records(v4);
+                }
+            } else {
+                if (v4_success) {
+                    append_records(v4);
+                }
+                if (v6_success) {
+                    append_records(v6);
+                }
             }
         } else {
-            if (v4_success) {
-                append_records(v4);
+            const FamilyQueryState &preferred = policy == AddressPolicy::V6First ? v6 : v4;
+            const FamilyQueryState &alternate = policy == AddressPolicy::V6First ? v4 : v6;
+            std::uint16_t preferred_index = 0;
+            std::uint16_t alternate_index = 0;
+            while (index < retained_count) {
+                if (preferred_index < preferred.result.record_count()) {
+                    merged[index++] = preferred.result.records()[preferred_index++];
+                }
+                if (index < retained_count && alternate_index < alternate.result.record_count()) {
+                    merged[index++] = alternate.result.records()[alternate_index++];
+                }
             }
-            if (v6_success) {
-                append_records(v6);
-            }
+        }
+
+        std::uint16_t retained_v4_count = 0;
+        std::uint16_t retained_v6_count = 0;
+        for (std::uint16_t i = 0; i < retained_count; ++i) {
+            retained_v4_count += merged[i].is_v4() ? 1 : 0;
+            retained_v6_count += merged[i].is_v6() ? 1 : 0;
         }
 
         std::chrono::steady_clock::time_point expire_at = std::chrono::steady_clock::time_point::max();
@@ -413,9 +440,8 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolver::resolve_host(std::stri
             expire_at = std::min(expire_at, v6.result.expire_at());
         }
 
-        common::IoErr err = out.assign_positive(canonical_source->result.canonical_name(), merged, total_count,
-                                                v4_success ? v4.result.record_count() : 0,
-                                                v6_success ? v6.result.record_count() : 0, expire_at);
+        common::IoErr err = out.assign_positive(canonical_source->result.canonical_name(), merged.data(),
+                                                retained_count, retained_v4_count, retained_v6_count, expire_at);
         if (err != common::IoErr::None) {
             co_return std::unexpected(err);
         }
@@ -491,25 +517,29 @@ async::Task<common::IoResult<ResolveStatus>> AddressResolver::resolve(std::strin
         co_return *resolved;
     }
 
+    if (out.options_.max_records == 0) {
+        co_return std::unexpected(common::IoErr::MessageTooLarge);
+    }
+    const std::uint16_t retained_count = std::min(addresses.record_count(), out.options_.max_records);
+
     std::array<net::SocketAddress, 32> stack_records{};
     std::unique_ptr<net::SocketAddress[]> heap_records{};
     net::SocketAddress *records = nullptr;
-    if (addresses.record_count() <= stack_records.size()) {
+    if (retained_count <= stack_records.size()) {
         records = stack_records.data();
     } else {
-        heap_records = std::make_unique<net::SocketAddress[]>(addresses.record_count());
+        heap_records = std::make_unique<net::SocketAddress[]>(retained_count);
         if (!heap_records) {
             co_return std::unexpected(common::IoErr::NoMem);
         }
         records = heap_records.get();
     }
 
-    for (std::uint16_t i = 0; i < addresses.record_count(); ++i) {
+    for (std::uint16_t i = 0; i < retained_count; ++i) {
         records[i] = net::SocketAddress(addresses.records()[i], port);
     }
 
-    common::IoErr err =
-            out.assign_positive(addresses.canonical_name(), records, addresses.record_count(), addresses.expire_at());
+    common::IoErr err = out.assign_positive(addresses.canonical_name(), records, retained_count, addresses.expire_at());
     if (err != common::IoErr::None) {
         co_return std::unexpected(err);
     }

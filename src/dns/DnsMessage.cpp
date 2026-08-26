@@ -1,5 +1,6 @@
 #include <fiber/dns/DnsMessage.h>
 
+#include <array>
 #include <cstring>
 
 namespace fiber::dns {
@@ -7,6 +8,7 @@ namespace fiber::dns {
 namespace {
 
 constexpr std::size_t kDnsHeaderSize = 12;
+constexpr std::size_t kMaxDnsNameLen = 255;
 
 std::uint16_t read_be16(const std::uint8_t *data) noexcept {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8U) | data[1]);
@@ -101,7 +103,7 @@ common::IoErr MessageParser::parse_question(const std::uint8_t *data, std::size_
     if (!name) {
         return name.error();
     }
-    if (next_offset + 4 > len) {
+    if (next_offset > len || len - next_offset < 4) {
         return common::IoErr::Invalid;
     }
 
@@ -119,13 +121,13 @@ common::IoErr MessageParser::parse_record(const std::uint8_t *data, std::size_t 
     if (!name) {
         return name.error();
     }
-    if (next_offset + 10 > len) {
+    if (next_offset > len || len - next_offset < 10) {
         return common::IoErr::Invalid;
     }
 
     std::uint16_t rdata_len = read_be16(data + next_offset + 8);
     std::size_t rdata_offset = next_offset + 10;
-    if (rdata_offset + rdata_len > len) {
+    if (rdata_len > len - rdata_offset) {
         return common::IoErr::Invalid;
     }
 
@@ -140,7 +142,36 @@ common::IoErr MessageParser::parse_record(const std::uint8_t *data, std::size_t 
     return common::IoErr::None;
 }
 
-common::IoResult<MessageParser::MessageView> MessageParser::parse(const std::uint8_t *data, std::size_t len) noexcept {
+common::IoErr MessageParser::parse_record_into(const std::uint8_t *data, std::size_t len, std::size_t &offset,
+                                               char *name_storage, std::size_t name_storage_cap,
+                                               ResourceRecord &out) noexcept {
+    auto name = decode_name(data, len, offset, name_storage, name_storage_cap);
+    if (!name) {
+        return name.error();
+    }
+    if (name->next_offset > len || len - name->next_offset < 10) {
+        return common::IoErr::Invalid;
+    }
+
+    const std::uint16_t rdata_len = read_be16(data + name->next_offset + 8);
+    const std::size_t rdata_offset = name->next_offset + 10;
+    if (rdata_len > len - rdata_offset) {
+        return common::IoErr::Invalid;
+    }
+
+    out.name = name->name;
+    out.type = read_be16(data + name->next_offset);
+    out.dns_class = read_be16(data + name->next_offset + 2);
+    out.ttl = read_be32(data + name->next_offset + 4);
+    out.rdata = data + rdata_offset;
+    out.rdata_len = rdata_len;
+    out.rdata_offset = rdata_offset;
+    offset = rdata_offset + rdata_len;
+    return common::IoErr::None;
+}
+
+common::IoResult<MessageParser::ScannedMessageView> MessageParser::scan(const std::uint8_t *data,
+                                                                        std::size_t len) noexcept {
     if (!questions_ || !name_storage_ || data == nullptr || len < kDnsHeaderSize) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -154,43 +185,117 @@ common::IoResult<MessageParser::MessageView> MessageParser::parse(const std::uin
     header.authority_count = read_be16(data + 8);
     header.additional_count = read_be16(data + 10);
 
-    std::uint32_t total_records = static_cast<std::uint32_t>(header.answer_count) +
-                                  static_cast<std::uint32_t>(header.authority_count) +
-                                  static_cast<std::uint32_t>(header.additional_count);
-    if (header.question_count > options_.max_questions || total_records > options_.max_records) {
-        return std::unexpected(common::IoErr::NoMem);
+    if (header.question_count > options_.max_questions) {
+        return std::unexpected(common::IoErr::MessageTooLarge);
     }
 
     std::size_t offset = kDnsHeaderSize;
     for (std::uint16_t i = 0; i < header.question_count; ++i) {
         common::IoErr err = parse_question(data, len, offset, questions_[i]);
         if (err != common::IoErr::None) {
-            return std::unexpected(err);
+            return std::unexpected(err == common::IoErr::NoMem ? common::IoErr::MessageTooLarge : err);
         }
     }
 
-    ResourceRecord *record_cursor = records_.get();
-    for (std::uint16_t i = 0; i < total_records; ++i) {
-        common::IoErr err = parse_record(data, len, offset, record_cursor[i]);
-        if (err != common::IoErr::None) {
-            return std::unexpected(err);
+    std::array<char, kMaxDnsNameLen + 1> record_name_storage{};
+    const auto scan_section = [&](std::uint16_t count, RecordSectionView &section) noexcept -> common::IoErr {
+        section.offset = offset;
+        section.count = count;
+        ResourceRecord record;
+        for (std::uint16_t i = 0; i < count; ++i) {
+            common::IoErr err = parse_record_into(data, len, offset, record_name_storage.data(),
+                                                  record_name_storage.size(), record);
+            if (err != common::IoErr::None) {
+                return err;
+            }
         }
-    }
+        section.end_offset = offset;
+        return common::IoErr::None;
+    };
 
-    if (offset > len) {
+    ScannedMessageView scanned;
+    scanned.packet_data = data;
+    scanned.packet_len = len;
+    scanned.header = header;
+    scanned.questions = header.question_count != 0 ? questions_.get() : nullptr;
+    scanned.question_count = header.question_count;
+    common::IoErr err = scan_section(header.answer_count, scanned.answers);
+    if (err == common::IoErr::None) {
+        err = scan_section(header.authority_count, scanned.authorities);
+    }
+    if (err == common::IoErr::None) {
+        err = scan_section(header.additional_count, scanned.additionals);
+    }
+    if (err != common::IoErr::None) {
+        return std::unexpected(err);
+    }
+    return scanned;
+}
+
+MessageParser::RecordCursor MessageParser::cursor(RecordSectionView section) noexcept {
+    return RecordCursor{section.offset, section.end_offset, section.count};
+}
+
+common::IoResult<bool> MessageParser::next_record(const ScannedMessageView &message, RecordCursor &record_cursor,
+                                                  char *name_storage, std::size_t name_storage_cap,
+                                                  ResourceRecord &out) noexcept {
+    if (message.packet_data == nullptr || record_cursor.offset > record_cursor.end_offset ||
+        record_cursor.end_offset > message.packet_len) {
         return std::unexpected(common::IoErr::Invalid);
     }
+    if (record_cursor.remaining == 0) {
+        if (record_cursor.offset != record_cursor.end_offset) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        return false;
+    }
 
-    message_.header = header;
-    message_.questions = header.question_count != 0 ? questions_.get() : nullptr;
-    message_.answers = header.answer_count != 0 ? records_.get() : nullptr;
-    message_.authorities = header.authority_count != 0 ? records_.get() + header.answer_count : nullptr;
-    message_.additionals =
-            header.additional_count != 0 ? records_.get() + header.answer_count + header.authority_count : nullptr;
-    message_.question_count = header.question_count;
-    message_.answer_count = header.answer_count;
-    message_.authority_count = header.authority_count;
-    message_.additional_count = header.additional_count;
+    common::IoErr err = parse_record_into(message.packet_data, message.packet_len, record_cursor.offset, name_storage,
+                                          name_storage_cap, out);
+    if (err != common::IoErr::None || record_cursor.offset > record_cursor.end_offset) {
+        return std::unexpected(err != common::IoErr::None ? err : common::IoErr::Invalid);
+    }
+    --record_cursor.remaining;
+    if (record_cursor.remaining == 0 && record_cursor.offset != record_cursor.end_offset) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return true;
+}
+
+common::IoResult<MessageParser::MessageView> MessageParser::parse(const std::uint8_t *data, std::size_t len) noexcept {
+    auto scanned = scan(data, len);
+    if (!scanned) {
+        return std::unexpected(scanned.error());
+    }
+
+    const std::uint32_t total_records = static_cast<std::uint32_t>(scanned->header.answer_count) +
+                                        static_cast<std::uint32_t>(scanned->header.authority_count) +
+                                        static_cast<std::uint32_t>(scanned->header.additional_count);
+    if (total_records > options_.max_records) {
+        return std::unexpected(common::IoErr::MessageTooLarge);
+    }
+
+    std::size_t offset = scanned->answers.offset;
+    ResourceRecord *record_cursor = records_.get();
+    for (std::uint32_t i = 0; i < total_records; ++i) {
+        common::IoErr err = parse_record(data, len, offset, record_cursor[i]);
+        if (err != common::IoErr::None) {
+            return std::unexpected(err == common::IoErr::NoMem ? common::IoErr::MessageTooLarge : err);
+        }
+    }
+
+    message_.header = scanned->header;
+    message_.questions = scanned->questions;
+    message_.answers = scanned->header.answer_count != 0 ? records_.get() : nullptr;
+    message_.authorities =
+            scanned->header.authority_count != 0 ? records_.get() + scanned->header.answer_count : nullptr;
+    message_.additionals = scanned->header.additional_count != 0
+                                   ? records_.get() + scanned->header.answer_count + scanned->header.authority_count
+                                   : nullptr;
+    message_.question_count = scanned->header.question_count;
+    message_.answer_count = scanned->header.answer_count;
+    message_.authority_count = scanned->header.authority_count;
+    message_.additional_count = scanned->header.additional_count;
     return message_;
 }
 
