@@ -46,6 +46,29 @@ public:
         std::uint16_t additional_count = 0;
     };
 
+    struct RecordSectionView {
+        std::size_t offset = 0;
+        std::size_t end_offset = 0;
+        std::uint16_t count = 0;
+    };
+
+    struct ScannedMessageView {
+        const std::uint8_t *packet_data = nullptr;
+        std::size_t packet_len = 0;
+        Header header{};
+        const Question *questions = nullptr;
+        std::uint16_t question_count = 0;
+        RecordSectionView answers{};
+        RecordSectionView authorities{};
+        RecordSectionView additionals{};
+    };
+
+    struct RecordCursor {
+        std::size_t offset = 0;
+        std::size_t end_offset = 0;
+        std::uint16_t remaining = 0;
+    };
+
     struct Options {
         std::uint16_t max_questions = 2;
         std::uint16_t max_records = 16;
@@ -57,6 +80,14 @@ public:
     [[nodiscard]] bool init() noexcept { return init(Options{}); }
     [[nodiscard]] bool init(Options options) noexcept;
     void release() noexcept;
+    // Validates every declared record and exposes section offsets without retaining resource records.
+    [[nodiscard]] common::IoResult<ScannedMessageView> scan(const std::uint8_t *data, std::size_t len) noexcept;
+    [[nodiscard]] static RecordCursor cursor(RecordSectionView section) noexcept;
+    // The returned record name refers to caller-owned name_storage until its next use.
+    [[nodiscard]] static common::IoResult<bool> next_record(const ScannedMessageView &message, RecordCursor &cursor,
+                                                            char *name_storage, std::size_t name_storage_cap,
+                                                            ResourceRecord &out) noexcept;
+    // Materializes all resource records and returns MessageTooLarge when max_records is insufficient.
     [[nodiscard]] common::IoResult<MessageView> parse(const std::uint8_t *data, std::size_t len) noexcept;
 
 private:
@@ -66,6 +97,9 @@ private:
                                                Question &out) noexcept;
     [[nodiscard]] common::IoErr parse_record(const std::uint8_t *data, std::size_t len, std::size_t &offset,
                                              ResourceRecord &out) noexcept;
+    [[nodiscard]] static common::IoErr parse_record_into(const std::uint8_t *data, std::size_t len, std::size_t &offset,
+                                                         char *name_storage, std::size_t name_storage_cap,
+                                                         ResourceRecord &out) noexcept;
     void reset_parse_state(const std::uint8_t *data, std::size_t len) noexcept;
 
     Options options_{};

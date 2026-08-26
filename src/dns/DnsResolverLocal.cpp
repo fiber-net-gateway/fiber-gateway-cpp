@@ -81,7 +81,7 @@ bool parse_ipv6(const MessageParser::ResourceRecord &record, net::IpAddress &out
     return true;
 }
 
-common::IoResult<std::uint32_t> parse_soa_negative_ttl(const MessageParser::MessageView &message,
+common::IoResult<std::uint32_t> parse_soa_negative_ttl(const MessageParser::ScannedMessageView &message,
                                                        const MessageParser::ResourceRecord &record) noexcept {
     if (record.type != static_cast<std::uint16_t>(RecordType::SOA) || record.rdata == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
@@ -93,12 +93,16 @@ common::IoResult<std::uint32_t> parse_soa_negative_ttl(const MessageParser::Mess
     if (!mname) {
         return std::unexpected(mname.error());
     }
+    const std::size_t rdata_end = record.rdata_offset + record.rdata_len;
+    if (mname->next_offset > rdata_end) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     auto rname =
             decode_name(message.packet_data, message.packet_len, mname->next_offset, scratch.data(), scratch.size());
     if (!rname) {
         return std::unexpected(rname.error());
     }
-    if (rname->next_offset + 20 > message.packet_len) {
+    if (rname->next_offset > rdata_end || rdata_end - rname->next_offset != 20) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -107,19 +111,43 @@ common::IoResult<std::uint32_t> parse_soa_negative_ttl(const MessageParser::Mess
     return std::min(record.ttl, minimum);
 }
 
-common::IoResult<std::uint32_t> find_negative_ttl(const MessageParser::MessageView &message,
-                                                  std::uint16_t qclass) noexcept {
-    for (std::uint16_t i = 0; i < message.authority_count; ++i) {
-        const auto &record = message.authorities[i];
-        if (record.type != static_cast<std::uint16_t>(RecordType::SOA) || record.dns_class != qclass) {
+struct NegativeAuthorityView {
+    bool has_soa_ttl = false;
+    bool saw_ns = false;
+    std::uint32_t soa_ttl = 0;
+};
+
+common::IoResult<NegativeAuthorityView> inspect_negative_authority(const MessageParser::ScannedMessageView &message,
+                                                                   std::uint16_t qclass) noexcept {
+    NegativeAuthorityView out;
+    MessageParser::RecordCursor cursor = MessageParser::cursor(message.authorities);
+    std::array<char, kMaxDnsNameLen + 1> record_name_storage{};
+    for (;;) {
+        MessageParser::ResourceRecord record;
+        auto next = MessageParser::next_record(message, cursor, record_name_storage.data(), record_name_storage.size(),
+                                               record);
+        if (!next) {
+            return std::unexpected(next.error());
+        }
+        if (!*next) {
+            return out;
+        }
+        if (record.dns_class != qclass) {
+            continue;
+        }
+        if (record.type == static_cast<std::uint16_t>(RecordType::NS)) {
+            out.saw_ns = true;
+            continue;
+        }
+        if (out.has_soa_ttl || record.type != static_cast<std::uint16_t>(RecordType::SOA)) {
             continue;
         }
         auto ttl = parse_soa_negative_ttl(message, record);
         if (ttl) {
-            return ttl;
+            out.has_soa_ttl = true;
+            out.soa_ttl = *ttl;
         }
     }
-    return std::unexpected(common::IoErr::NotFound);
 }
 
 enum class AnswerSetKind : std::uint8_t {
@@ -135,10 +163,11 @@ struct AnswerSetView {
     std::string_view cname_target{};
 };
 
-common::IoErr inspect_answer_set(const MessageParser::MessageView &message, std::string_view owner, std::uint16_t qtype,
-                                 std::uint16_t qclass, char *target_storage, std::size_t target_storage_cap,
-                                 AnswerSetView &out) noexcept {
+common::IoErr inspect_answer_set(const MessageParser::ScannedMessageView &message, std::string_view owner,
+                                 std::uint16_t qtype, std::uint16_t qclass, char *target_storage,
+                                 std::size_t target_storage_cap, AnswerSetView &out) noexcept {
     out = {};
+    std::array<char, kMaxDnsNameLen + 1> record_name_storage{};
     std::array<char, kMaxDnsNameLen + 1> owner_buf{};
     std::array<char, kMaxDnsNameLen + 1> decoded_target_buf{};
     std::array<char, kMaxDnsNameLen + 1> other_target_buf{};
@@ -148,8 +177,17 @@ common::IoErr inspect_answer_set(const MessageParser::MessageView &message, std:
     std::uint32_t address_ttl = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t cname_ttl = std::numeric_limits<std::uint32_t>::max();
 
-    for (std::uint16_t i = 0; i < message.answer_count; ++i) {
-        const MessageParser::ResourceRecord &record = message.answers[i];
+    MessageParser::RecordCursor cursor = MessageParser::cursor(message.answers);
+    for (;;) {
+        MessageParser::ResourceRecord record;
+        auto next = MessageParser::next_record(message, cursor, record_name_storage.data(), record_name_storage.size(),
+                                               record);
+        if (!next) {
+            return next.error();
+        }
+        if (!*next) {
+            break;
+        }
         if (record.dns_class != qclass) {
             continue;
         }
@@ -168,10 +206,11 @@ common::IoErr inspect_answer_set(const MessageParser::MessageView &message, std:
             net::IpAddress address;
             const bool parsed = qtype == static_cast<std::uint16_t>(RecordType::A) ? parse_ipv4(record, address)
                                                                                    : parse_ipv6(record, address);
-            if (parsed) {
-                ++out.address_count;
-                address_ttl = std::min(address_ttl, record.ttl);
+            if (!parsed) {
+                return common::IoErr::Invalid;
             }
+            ++out.address_count;
+            address_ttl = std::min(address_ttl, record.ttl);
             continue;
         }
 
@@ -260,7 +299,7 @@ common::IoErr ResolveResult::assign_positive(std::string_view canonical_name, co
 
 common::IoErr ResolveResult::assign_canonical(std::string_view canonical_name) noexcept {
     if (canonical_name.size() >= sizeof(canonical_name_)) {
-        return common::IoErr::NoMem;
+        return common::IoErr::MessageTooLarge;
     }
     std::memcpy(canonical_name_, canonical_name.data(), canonical_name.size());
     canonical_name_[canonical_name.size()] = '\0';
@@ -658,7 +697,7 @@ DnsClient::ResponseDisposition DnsResolverLocal::validate_upstream_response(void
                                                                             std::size_t packet_len) noexcept {
     FIBER_ASSERT(context != nullptr);
     auto &resolver = *static_cast<DnsResolverLocal *>(context);
-    auto parsed = resolver.parser_.parse(packet, packet_len);
+    auto parsed = resolver.parser_.scan(packet, packet_len);
     if (!parsed) {
         return parsed.error() == common::IoErr::Invalid ? DnsClient::ResponseDisposition::RetryServer
                                                         : DnsClient::ResponseDisposition::Accept;
@@ -672,12 +711,12 @@ DnsClient::ResponseDisposition DnsResolverLocal::validate_upstream_response(void
 common::IoResult<DnsResolverLocal::PendingOutcome>
 DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, std::uint16_t qclass,
                                   const std::uint8_t *packet, std::size_t packet_len) noexcept {
-    auto parsed = parser_.parse(packet, packet_len);
+    auto parsed = parser_.scan(packet, packet_len);
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
 
-    const MessageParser::MessageView &message = *parsed;
+    const MessageParser::ScannedMessageView &message = *parsed;
     if (!message.header.is_response() || message.question_count != 1 || message.questions == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -703,11 +742,14 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
 
     const auto now = loop_->now();
     if (rcode == RCode::NxDomain) {
-        auto neg_ttl = find_negative_ttl(message, qclass);
-        if (neg_ttl) {
+        auto authority = inspect_negative_authority(message, qclass);
+        if (!authority) {
+            return std::unexpected(authority.error());
+        }
+        if (authority->has_soa_ttl) {
             const DnsCacheKey key{qname, dns_cache_hash(qname)};
             err = cache_->upsert_nxdomain(
-                    key, ttl_deadline(now, *neg_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
+                    key, ttl_deadline(now, authority->soa_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
             if (err != common::IoErr::None) {
                 return std::unexpected(err);
             }
@@ -751,24 +793,27 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
     }
 
     if (!has_relevant_answer) {
-        if (message.answer_count != 0) {
+        if (message.answers.count != 0) {
             return std::unexpected(common::IoErr::Invalid);
         }
-        auto neg_ttl = find_negative_ttl(message, qclass);
-        if (neg_ttl) {
+        auto authority = inspect_negative_authority(message, qclass);
+        if (!authority) {
+            return std::unexpected(authority.error());
+        }
+        if (authority->has_soa_ttl) {
             const DnsCacheKey key{qname, dns_cache_hash(qname)};
             const net::IpFamily family =
                     qtype == static_cast<std::uint16_t>(RecordType::A) ? net::IpFamily::V4 : net::IpFamily::V6;
             err = cache_->upsert_address_set(
                     key, family, nullptr, 0,
-                    ttl_deadline(now, *neg_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
+                    ttl_deadline(now, authority->soa_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
             if (err != common::IoErr::None) {
                 return std::unexpected(err);
             }
             outcome.action = PendingAction::RetryFromCache;
             return outcome;
         }
-        outcome.status = ResolveStatus::NoData;
+        outcome.status = authority->saw_ns ? ResolveStatus::ServerFailure : ResolveStatus::NoData;
         return outcome;
     }
 
@@ -805,10 +850,21 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
         }
 
         if (answer_set.kind == AnswerSetKind::Address) {
+            std::array<char, kMaxDnsNameLen + 1> record_name_storage{};
             std::array<char, kMaxDnsNameLen + 1> owner_buf{};
             std::uint16_t count = 0;
-            for (std::uint16_t i = 0; i < message.answer_count; ++i) {
-                const MessageParser::ResourceRecord &record = message.answers[i];
+            std::uint16_t seen_count = 0;
+            MessageParser::RecordCursor cursor = MessageParser::cursor(message.answers);
+            for (;;) {
+                MessageParser::ResourceRecord record;
+                auto next = MessageParser::next_record(message, cursor, record_name_storage.data(),
+                                                       record_name_storage.size(), record);
+                if (!next) {
+                    return std::unexpected(next.error());
+                }
+                if (!*next) {
+                    break;
+                }
                 if (record.type != qtype || record.dns_class != qclass) {
                     continue;
                 }
@@ -824,14 +880,15 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
                 net::IpAddress address;
                 const bool parsed = qtype == static_cast<std::uint16_t>(RecordType::A) ? parse_ipv4(record, address)
                                                                                        : parse_ipv6(record, address);
-                if (parsed) {
-                    if (count >= temp_records.size()) {
-                        return std::unexpected(common::IoErr::MessageTooLarge);
-                    }
+                if (!parsed) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                ++seen_count;
+                if (count < temp_records.size()) {
                     temp_records[count++] = address;
                 }
             }
-            if (count != answer_set.address_count) {
+            if (seen_count != answer_set.address_count) {
                 return std::unexpected(common::IoErr::Invalid);
             }
 
