@@ -61,6 +61,7 @@ public:
     [[nodiscard]] MetricsShard *shard(ShardId id) noexcept;
     [[nodiscard]] const MetricsShard *shard(ShardId id) const noexcept;
 
+    // Overlapping collections share one stable shard snapshot generation and encode into caller-owned output.
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
     collect_text(fiber::mem::IoBufNodePool &node_pool, CollectOptions options = {}) noexcept;
 

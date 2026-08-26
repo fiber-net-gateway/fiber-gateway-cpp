@@ -67,16 +67,15 @@ struct RegistryData {
     std::vector<std::unique_ptr<MetricsShard>> shards;
     std::vector<std::vector<std::uint64_t>> snapshots;
     std::vector<std::unique_ptr<SnapshotRequest>> snapshot_requests;
-    std::vector<std::uint64_t> histogram_scratch;
     fiber::async::WaitGroup snapshot_wait;
     fiber::async::WaitGroup idle_wait;
     std::mutex collect_mutex;
     std::size_t pending_snapshots = 0;
+    std::size_t attached_collectors = 0;
     std::size_t word_count = 0;
     bool frozen = false;
     bool accepting_collects = true;
     bool collect_active = false;
-    bool collect_attached = false;
 };
 
 } // namespace detail

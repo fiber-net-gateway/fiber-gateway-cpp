@@ -18,6 +18,7 @@ namespace {
 using fiber::async::DetachedTask;
 using fiber::common::IoErr;
 using fiber::common::IoResult;
+using fiber::prometheus::CollectOptions;
 using fiber::prometheus::CounterRef;
 using fiber::prometheus::GaugeReduction;
 using fiber::prometheus::GaugeRef;
@@ -55,6 +56,33 @@ DetachedTask collect_to_string(MetricsRegistry *registry, std::promise<IoResult<
     }
     if (stop_group) {
         stop_group->stop();
+    }
+    co_return;
+}
+
+DetachedTask collect_into_string(MetricsRegistry *registry, std::promise<IoResult<std::string>> *done,
+                                 CollectOptions options = {}) {
+    fiber::mem::IoBuf out = fiber::mem::IoBuf::allocate(4096);
+    auto result = co_await registry->collect_text_into(out, options);
+    if (!result) {
+        done->set_value(std::unexpected(result.error()));
+    } else {
+        done->set_value(std::string(reinterpret_cast<const char *>(out.readable_data()), out.readable()));
+    }
+    co_return;
+}
+
+DetachedTask signal_ready(std::promise<void> *done) {
+    done->set_value();
+    co_return;
+}
+
+DetachedTask update_counter_histogram(CounterRef counter, HistogramRef histogram, std::uint64_t counter_value,
+                                      std::uint64_t observation, std::promise<void> *done) {
+    counter.add(counter_value);
+    histogram.observe(observation);
+    if (done) {
+        done->set_value();
     }
     co_return;
 }
@@ -219,7 +247,109 @@ TEST(MultiLoopSnapshotTest, CollectsOnOwnerLoopsAndAggregatesDeterministically) 
     loops.join();
 }
 
-TEST(MultiLoopSnapshotTest, ConcurrentCollectReturnsBusyAndStopWaitsForInflight) {
+TEST(MultiLoopSnapshotTest, OverlappingCollectorsShareOneSnapshotGeneration) {
+    fiber::event::EventLoopGroup loops(3);
+    MetricsRegistry registry;
+    auto counter_family = registry.register_counter("requests_total", "Requests");
+    auto histogram_family =
+            registry.register_histogram("request_size", "Request size", std::array<std::uint64_t, 2>{1, 5});
+    ASSERT_TRUE(counter_family);
+    ASSERT_TRUE(histogram_family);
+    auto counter_series = registry.register_series(*counter_family);
+    auto histogram_series = registry.register_series(*histogram_family);
+    auto shard_id = registry.add_shard(loops.at(1));
+    ASSERT_TRUE(counter_series);
+    ASSERT_TRUE(histogram_series);
+    ASSERT_TRUE(shard_id);
+    ASSERT_TRUE(registry.freeze());
+
+    auto counter = registry.shard(*shard_id)->counter(*counter_series);
+    auto histogram = registry.shard(*shard_id)->histogram(*histogram_series);
+    ASSERT_TRUE(counter);
+    ASSERT_TRUE(histogram);
+
+    std::promise<void> initialized;
+    auto initialized_future = initialized.get_future();
+    std::atomic<bool> release{false};
+    std::promise<void> blocker_entered;
+    auto blocker_entered_future = blocker_entered.get_future();
+    BlockingCallback blocker{.release = &release, .entered = &blocker_entered};
+    std::promise<IoResult<std::string>> first;
+    std::promise<IoResult<std::string>> second;
+    std::promise<IoResult<std::string>> refreshed;
+    auto first_future = first.get_future();
+    auto second_future = second.get_future();
+    auto refreshed_future = refreshed.get_future();
+    std::promise<void> first_started;
+    std::promise<void> second_started;
+    auto first_started_future = first_started.get_future();
+    auto second_started_future = second_started.get_future();
+    std::promise<void> updated;
+    auto updated_future = updated.get_future();
+
+    loops.start();
+    fiber::async::spawn(loops.at(1),
+                        [&]() { return update_counter_histogram(*counter, *histogram, 1, 1, &initialized); });
+    ASSERT_EQ(initialized_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    loops.at(1).post<BlockingCallback, &BlockingCallback::notify_entry, &BlockingCallback::run>(blocker);
+    ASSERT_EQ(blocker_entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    fiber::async::spawn(loops.at(0), [&]() { return collect_to_string(&registry, &first); });
+    fiber::async::spawn(loops.at(0), [&]() { return signal_ready(&first_started); });
+    ASSERT_EQ(first_started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+    fiber::async::spawn(loops.at(1), [&]() { return update_counter_histogram(*counter, *histogram, 1, 7, &updated); });
+
+    fiber::async::spawn(loops.at(2), [&]() {
+        return collect_into_string(&registry, &second, CollectOptions{.max_output_bytes = 4096});
+    });
+    fiber::async::spawn(loops.at(2), [&]() { return signal_ready(&second_started); });
+    ASSERT_EQ(second_started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(first_future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_EQ(second_future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+
+    release.store(true, std::memory_order_release);
+    ASSERT_EQ(first_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(second_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(updated_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto first_result = first_future.get();
+    auto second_result = second_future.get();
+    ASSERT_TRUE(first_result);
+    ASSERT_TRUE(second_result);
+    const std::string expected_snapshot = "# HELP requests_total Requests\n"
+                                          "# TYPE requests_total counter\n"
+                                          "requests_total 1\n"
+                                          "# HELP request_size Request size\n"
+                                          "# TYPE request_size histogram\n"
+                                          "request_size_bucket{le=\"1\"} 1\n"
+                                          "request_size_bucket{le=\"5\"} 1\n"
+                                          "request_size_bucket{le=\"+Inf\"} 1\n"
+                                          "request_size_sum 1\n"
+                                          "request_size_count 1\n";
+    EXPECT_EQ(*first_result, expected_snapshot);
+    EXPECT_EQ(*second_result, expected_snapshot);
+
+    fiber::async::spawn(loops.at(0), [&]() { return collect_to_string(&registry, &refreshed); });
+    ASSERT_EQ(refreshed_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto refreshed_result = refreshed_future.get();
+    ASSERT_TRUE(refreshed_result);
+    EXPECT_EQ(*refreshed_result, "# HELP requests_total Requests\n"
+                                 "# TYPE requests_total counter\n"
+                                 "requests_total 2\n"
+                                 "# HELP request_size Request size\n"
+                                 "# TYPE request_size histogram\n"
+                                 "request_size_bucket{le=\"1\"} 1\n"
+                                 "request_size_bucket{le=\"5\"} 1\n"
+                                 "request_size_bucket{le=\"+Inf\"} 2\n"
+                                 "request_size_sum 8\n"
+                                 "request_size_count 2\n");
+
+    loops.stop();
+    loops.join();
+}
+
+TEST(MultiLoopSnapshotTest, StopRejectsNewCollectsAndWaitsForOverlappingCollectors) {
     fiber::event::EventLoopGroup loops(2);
     MetricsRegistry registry;
     auto family = registry.register_counter("requests_total", "Requests");
@@ -238,6 +368,8 @@ TEST(MultiLoopSnapshotTest, ConcurrentCollectReturnsBusyAndStopWaitsForInflight)
     auto first_future = first.get_future();
     auto second_future = second.get_future();
     auto canceled_future = canceled.get_future();
+    std::promise<void> collectors_started;
+    auto collectors_started_future = collectors_started.get_future();
     std::promise<void> idle;
     auto idle_future = idle.get_future();
 
@@ -247,10 +379,10 @@ TEST(MultiLoopSnapshotTest, ConcurrentCollectReturnsBusyAndStopWaitsForInflight)
 
     fiber::async::spawn(loops.at(0), [&]() { return collect_to_string(&registry, &first); });
     fiber::async::spawn(loops.at(0), [&]() { return collect_to_string(&registry, &second); });
-    ASSERT_EQ(second_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
-    auto second_result = second_future.get();
-    ASSERT_FALSE(second_result);
-    EXPECT_EQ(second_result.error(), IoErr::Busy);
+    fiber::async::spawn(loops.at(0), [&]() { return signal_ready(&collectors_started); });
+    ASSERT_EQ(collectors_started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(first_future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_EQ(second_future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
 
     registry.stop_collecting();
     fiber::async::spawn(loops.at(0), [&]() { return collect_to_string(&registry, &canceled); });
@@ -263,13 +395,15 @@ TEST(MultiLoopSnapshotTest, ConcurrentCollectReturnsBusyAndStopWaitsForInflight)
 
     release.store(true, std::memory_order_release);
     ASSERT_EQ(first_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_EQ(second_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_TRUE(first_future.get());
+    EXPECT_TRUE(second_future.get());
     ASSERT_EQ(idle_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     loops.stop();
     loops.join();
 }
 
-TEST(MultiLoopSnapshotTest, DestroyedCollectTaskLeavesCallbacksOwnedByRegistry) {
+TEST(MultiLoopSnapshotTest, DestroyedLeaderLeavesSnapshotForOverlappingCollector) {
     fiber::event::EventLoopGroup loops(2);
     MetricsRegistry registry;
     auto family = registry.register_counter("requests_total", "Requests");
@@ -291,6 +425,10 @@ TEST(MultiLoopSnapshotTest, DestroyedCollectTaskLeavesCallbacksOwnedByRegistry) 
     std::promise<void> canceled;
     auto canceled_future = canceled.get_future();
     CancelCollect cancel{.task = &collect_task, .canceled = &canceled};
+    std::promise<IoResult<std::string>> follower;
+    auto follower_future = follower.get_future();
+    std::promise<void> follower_started;
+    auto follower_started_future = follower_started.get_future();
     std::promise<void> idle;
     auto idle_future = idle.get_future();
 
@@ -299,13 +437,19 @@ TEST(MultiLoopSnapshotTest, DestroyedCollectTaskLeavesCallbacksOwnedByRegistry) 
     ASSERT_EQ(blocker_entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     loops.at(0).post<StartCancelable, &StartCancelable::notify_entry, &StartCancelable::run>(start);
     ASSERT_EQ(started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    fiber::async::spawn(loops.at(0), [&]() { return collect_to_string(&registry, &follower); });
+    fiber::async::spawn(loops.at(0), [&]() { return signal_ready(&follower_started); });
+    ASSERT_EQ(follower_started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     loops.at(0).post<CancelCollect, &CancelCollect::notify_entry, &CancelCollect::run>(cancel);
     ASSERT_EQ(canceled_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
 
     registry.stop_collecting();
     fiber::async::spawn(loops.at(0), [&]() { return wait_idle_then_signal(&registry, &idle); });
     EXPECT_EQ(idle_future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_EQ(follower_future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
     release.store(true, std::memory_order_release);
+    ASSERT_EQ(follower_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(follower_future.get());
     ASSERT_EQ(idle_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_FALSE(collect_completed);
 

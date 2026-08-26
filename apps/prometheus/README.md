@@ -59,7 +59,9 @@ be used on its shard's owner EventLoop. Integer overflow is outside the v1 contr
 ## Collection and shutdown
 
 Collection must be awaited from a running EventLoop. `IoBufNodePool` and output objects belong to that collector loop;
-snapshot callbacks only touch their own snapshot slot.
+snapshot callbacks only touch their own snapshot slot. Overlapping collections share one stable shard snapshot
+generation, then encode independently into their caller-owned output. Calls with different `CollectOptions` therefore
+share metric values without sharing output storage or output errors.
 
 ```cpp
 auto result = co_await registry.collect_text(
@@ -71,15 +73,21 @@ auto result = co_await registry.collect_text(
 or output-limit failure, the existing readable region is unchanged. `collect_text()` builds a local chain and never
 marks it complete.
 
-Only one collect may be in flight per Registry; another returns `IoErr::Busy`. Shut down in this order:
+The first collection in a generation copies the local shard and posts one snapshot request to every remote shard owner.
+Later overlapping collections await those same requests, including calls that arrive after the snapshots are ready but
+while another caller is still encoding. The Registry does not overwrite the snapshot slots until every attached caller
+has finished and every posted callback has returned.
+
+Shut down in this order:
 
 1. Call `stop_collecting()` to reject new calls with `IoErr::Canceled`.
 2. Await `wait_for_idle()` on a running EventLoop.
 3. Stop and join every shard owner EventLoop.
 4. Destroy workers and their handles, then destroy the Registry.
 
-Destroying a Task that is waiting for snapshots does not invalidate posted callbacks. The Registry retains the
-snapshot state and remains busy until all callbacks finish.
+Destroying a Task that is waiting for snapshots detaches only that caller and does not invalidate posted callbacks or
+other callers sharing the generation. The Registry owns the request and snapshot state and remains active until all
+callbacks and attached callers finish.
 
 ## Benchmark
 
