@@ -197,6 +197,8 @@ MetricsRegistry::MetricsRegistry(RegistryOptions options) : data_(std::make_uniq
 MetricsRegistry::~MetricsRegistry() {
     std::lock_guard guard(data_->collect_mutex);
     FIBER_ASSERT(!data_->collect_active);
+    FIBER_ASSERT(data_->attached_collectors == 0);
+    FIBER_ASSERT(data_->pending_snapshots == 0);
 }
 
 fiber::common::IoResult<FamilyId> MetricsRegistry::register_counter(std::string_view name, std::string_view help,
@@ -305,11 +307,7 @@ fiber::common::IoResult<void> MetricsRegistry::freeze() {
     }
 
     std::size_t word_count = 0;
-    std::size_t max_histogram_buckets = 0;
     for (auto &family: data_->families) {
-        if (family.type == MetricType::Histogram) {
-            max_histogram_buckets = std::max(max_histogram_buckets, family.upper_bounds.size());
-        }
         const std::size_t series_words = family.type == MetricType::Histogram ? family.upper_bounds.size() + 2 : 1;
         for (auto &series: family.series) {
             series.word_offset = word_count;
@@ -340,7 +338,6 @@ fiber::common::IoResult<void> MetricsRegistry::freeze() {
         request->shard_index = index;
         data_->snapshot_requests.push_back(std::move(request));
     }
-    data_->histogram_scratch.resize(max_histogram_buckets);
     data_->word_count = word_count;
     data_->frozen = true;
     return {};
@@ -393,7 +390,7 @@ fiber::async::Task<fiber::common::IoResult<MetricsRegistry::CollectToken>> Metri
     }
 
     std::size_t local_shard = data_->shards.size();
-    std::size_t remote_count = 0;
+    bool start_snapshot = false;
     {
         std::lock_guard guard(data_->collect_mutex);
         if (!data_->frozen) {
@@ -402,40 +399,43 @@ fiber::async::Task<fiber::common::IoResult<MetricsRegistry::CollectToken>> Metri
         if (!data_->accepting_collects) {
             co_return std::unexpected(IoErr::Canceled);
         }
-        if (data_->collect_active) {
-            co_return std::unexpected(IoErr::Busy);
-        }
-        for (std::size_t index = 0; index < data_->shards.size(); ++index) {
-            fiber::event::EventLoop &owner = data_->shards[index]->owner_loop();
-            if (!owner.running()) {
-                co_return std::unexpected(IoErr::Invalid);
+        if (!data_->collect_active) {
+            for (std::size_t index = 0; index < data_->shards.size(); ++index) {
+                fiber::event::EventLoop &owner = data_->shards[index]->owner_loop();
+                if (!owner.running()) {
+                    co_return std::unexpected(IoErr::Invalid);
+                }
+                if (&owner == collector) {
+                    local_shard = index;
+                }
             }
-            if (&owner == collector) {
-                local_shard = index;
-            } else {
-                ++remote_count;
-            }
-        }
 
-        data_->snapshot_wait.add(remote_count);
-        data_->idle_wait.add();
-        data_->pending_snapshots = remote_count;
-        data_->collect_active = true;
-        data_->collect_attached = true;
+            data_->snapshot_wait.add(data_->shards.size());
+            data_->idle_wait.add();
+            data_->pending_snapshots = data_->shards.size();
+            data_->collect_active = true;
+            start_snapshot = true;
+        }
+        FIBER_ASSERT(data_->attached_collectors != std::numeric_limits<std::size_t>::max());
+        ++data_->attached_collectors;
     }
 
     CollectToken token(*this);
-    if (local_shard != data_->shards.size()) {
-        copy_snapshot(local_shard);
-    }
-    for (std::size_t index = 0; index < data_->shards.size(); ++index) {
-        fiber::event::EventLoop &owner = data_->shards[index]->owner_loop();
-        if (&owner == collector) {
-            continue;
+    if (start_snapshot) {
+        if (local_shard != data_->shards.size()) {
+            copy_snapshot(local_shard);
+            data_->snapshot_wait.done();
+            snapshot_finished();
         }
-        auto &request = *data_->snapshot_requests[index];
-        owner.post<detail::SnapshotRequest, &detail::SnapshotRequest::notify_entry, &MetricsRegistry::run_snapshot>(
-                request);
+        for (std::size_t index = 0; index < data_->shards.size(); ++index) {
+            fiber::event::EventLoop &owner = data_->shards[index]->owner_loop();
+            if (&owner == collector) {
+                continue;
+            }
+            auto &request = *data_->snapshot_requests[index];
+            owner.post<detail::SnapshotRequest, &detail::SnapshotRequest::notify_entry, &MetricsRegistry::run_snapshot>(
+                    request);
+        }
     }
 
     co_await data_->snapshot_wait.join();
@@ -466,7 +466,7 @@ void MetricsRegistry::snapshot_finished() noexcept {
         FIBER_ASSERT(data_->collect_active);
         FIBER_ASSERT(data_->pending_snapshots > 0);
         --data_->pending_snapshots;
-        if (data_->pending_snapshots == 0 && !data_->collect_attached) {
+        if (data_->pending_snapshots == 0 && data_->attached_collectors == 0) {
             data_->collect_active = false;
             became_idle = true;
         }
@@ -481,9 +481,9 @@ void MetricsRegistry::release_collect() noexcept {
     {
         std::lock_guard guard(data_->collect_mutex);
         FIBER_ASSERT(data_->collect_active);
-        FIBER_ASSERT(data_->collect_attached);
-        data_->collect_attached = false;
-        if (data_->pending_snapshots == 0) {
+        FIBER_ASSERT(data_->attached_collectors > 0);
+        --data_->attached_collectors;
+        if (data_->pending_snapshots == 0 && data_->attached_collectors == 0) {
             data_->collect_active = false;
             became_idle = true;
         }

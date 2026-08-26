@@ -89,7 +89,6 @@ TEST(TextEncoderTest, EncodesCumulativeHistogramAndExactDurationSeconds) {
     data.families = {histogram};
     data.word_count = 4;
     data.snapshots = {{2, 1, 4, 12}, {1, 2, 5, 20}};
-    data.histogram_scratch.resize(2);
 
     fiber::mem::IoBufNodePool pool;
     auto encoded = fiber::prometheus::detail::encode_text_chain(data, pool, CollectOptions{.chunk_size = 7});

@@ -372,26 +372,24 @@ IoErr write_gauge(Writer &writer, const RegistryData &data, const FamilySchema &
 }
 
 template<typename Writer>
-IoErr write_histogram(Writer &writer, RegistryData &data, const FamilySchema &family,
+IoErr write_histogram(Writer &writer, const RegistryData &data, const FamilySchema &family,
                       const SeriesSchema &series) noexcept {
     const std::size_t bucket_count = family.upper_bounds.size();
-    if (!valid_snapshot(data, series.word_offset, bucket_count + 2) || data.histogram_scratch.size() < bucket_count) {
+    if (!valid_snapshot(data, series.word_offset, bucket_count + 2)) {
         return IoErr::Invalid;
     }
-    std::fill_n(data.histogram_scratch.begin(), bucket_count, 0);
     std::uint64_t count = 0;
     std::uint64_t sum = 0;
     for (const auto &snapshot: data.snapshots) {
-        for (std::size_t bucket = 0; bucket < bucket_count; ++bucket) {
-            data.histogram_scratch[bucket] += snapshot[series.word_offset + bucket];
-        }
         count += snapshot[series.word_offset + bucket_count];
         sum += snapshot[series.word_offset + bucket_count + 1];
     }
 
     std::uint64_t cumulative = 0;
     for (std::size_t bucket = 0; bucket < bucket_count; ++bucket) {
-        cumulative += data.histogram_scratch[bucket];
+        for (const auto &snapshot: data.snapshots) {
+            cumulative += snapshot[series.word_offset + bucket];
+        }
         IoErr error = writer.write(family.name);
         if (error == IoErr::None) {
             error = writer.write("_bucket");
@@ -469,7 +467,7 @@ IoErr write_histogram(Writer &writer, RegistryData &data, const FamilySchema &fa
 }
 
 template<typename Writer>
-IoErr encode(Writer &writer, RegistryData &data) noexcept {
+IoErr encode(Writer &writer, const RegistryData &data) noexcept {
     for (const auto &family: data.families) {
         if (family.series.empty()) {
             continue;
@@ -501,7 +499,7 @@ IoErr encode(Writer &writer, RegistryData &data) noexcept {
 } // namespace
 
 fiber::common::IoResult<fiber::mem::IoBufChain>
-encode_text_chain(RegistryData &data, fiber::mem::IoBufNodePool &node_pool, CollectOptions options) noexcept {
+encode_text_chain(const RegistryData &data, fiber::mem::IoBufNodePool &node_pool, CollectOptions options) noexcept {
     if (options.chunk_size == 0) {
         return std::unexpected(IoErr::Invalid);
     }
@@ -513,7 +511,7 @@ encode_text_chain(RegistryData &data, fiber::mem::IoBufNodePool &node_pool, Coll
     return writer.take();
 }
 
-fiber::common::IoResult<std::size_t> encode_text_into(RegistryData &data, fiber::mem::IoBuf &out,
+fiber::common::IoResult<std::size_t> encode_text_into(const RegistryData &data, fiber::mem::IoBuf &out,
                                                       CollectOptions options) noexcept {
     if (!out) {
         return std::unexpected(IoErr::Invalid);
