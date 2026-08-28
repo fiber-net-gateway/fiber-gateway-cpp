@@ -19,16 +19,16 @@
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Http3Connection.h>
 #include <fiber/http/Http3Protocol.h>
-#include <fiber/http/Http3QpackEncoderIoBufWriter.h>
 #include <fiber/http/Http3QpackStaticTable.h>
 #include <fiber/http/HttpHeaderHash.h>
 #include <fiber/http/HttpHeaders.h>
-#include <fiber/http/ServerHttp3Request.h>
 #include <fiber/quic/QuicConnection.h>
 #include <fiber/quic/QuicCursor.h>
 #include <fiber/quic/QuicFrame.h>
-#include <fiber/quic/QuicTransportCodec.h>
-#include <fiber/quic/QuicTransportParamsCodec.h>
+#include "http/Http3QpackEncoderIoBufWriter.h"
+#include "http/ServerHttp3Request.h"
+#include "quic/QuicTransportCodec.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 #include "QuicTestLoop.h"
 

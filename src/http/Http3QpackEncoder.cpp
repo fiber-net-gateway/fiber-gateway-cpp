@@ -7,7 +7,7 @@
 #include <fiber/common/Assert.h>
 #include <fiber/http/Http3QpackStaticTable.h>
 #include <fiber/http/HttpHeaderHash.h>
-#include <fiber/http/Huffman.h>
+#include "http/Huffman.h"
 
 namespace fiber::http {
 

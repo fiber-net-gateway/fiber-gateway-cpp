@@ -107,7 +107,9 @@ library, HTTP API, and C++ embedding contract.
 ```
 
 The main core modules have public headers under `include/fiber/` and
-implementations under the corresponding `src/` directory:
+implementations plus private headers under the corresponding `src/` directory.
+Only `include/fiber/` is propagated to consumers; `src/` is available privately
+to the core library and its white-box tests:
 
 - `event/` — event loops, pollers, timers, and loop groups.
 - `async/` — coroutine tasks, scheduling, and synchronization primitives.

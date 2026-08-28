@@ -6,9 +6,9 @@
 
 #include <fiber/common/Assert.h>
 #include <fiber/net/TlsContext.h>
-#include <fiber/quic/QuicCrypto.h>
 #include <fiber/quic/QuicProtocol.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
+#include "quic/QuicCrypto.h"
 
 namespace fiber::quic {
 

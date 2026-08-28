@@ -11,11 +11,11 @@
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/http/Http3QpackDecoder.h>
 #include <fiber/http/Http3QpackEncoder.h>
-#include <fiber/http/Http3QpackEncoderIoBufWriter.h>
 #include <fiber/http/HttpHeaderHash.h>
-#include <fiber/http/Huffman.h>
 #include <fiber/quic/QuicCursor.h>
-#include <fiber/quic/QuicTransportCodec.h>
+#include "http/Http3QpackEncoderIoBufWriter.h"
+#include "http/Huffman.h"
+#include "quic/QuicTransportCodec.h"
 
 namespace {
 

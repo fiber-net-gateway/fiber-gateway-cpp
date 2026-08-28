@@ -524,11 +524,11 @@ BoringSSL client session cache 使用 external cache：
 
 - `include/fiber/quic/QuicPacketProcessor.h`
 - `src/quic/QuicPacketProcessor.cpp`
-- `include/fiber/quic/QuicPacketCodec.h`
+- `src/quic/QuicPacketCodec.h`
 - `src/quic/QuicPacketCodec.cpp`
-- `include/fiber/quic/QuicCrypto.h`
+- `src/quic/QuicCrypto.h`
 - `src/quic/QuicCrypto.cpp`
-- `include/fiber/quic/QuicLossRecovery.h`
+- `src/quic/QuicLossRecovery.h`
 - `src/quic/QuicLossRecovery.cpp`
 - `include/fiber/quic/QuicCongestion.h + src/quic/QuicCongestion.cpp`
 - `include/fiber/quic/QuicPacer.h + src/quic/QuicPacer.cpp`
@@ -623,7 +623,7 @@ Initial -> EarlyData -> Handshake -> Application
 
 修改文件：
 
-- `include/fiber/quic/QuicTransportParamsCodec.h`
+- `src/quic/QuicTransportParamsCodec.h`
 - `src/quic/QuicTransportParamsCodec.cpp`
 
 ### 12.1 角色与身份校验
@@ -811,12 +811,12 @@ create connection
 | `include/fiber/quic/QuicConnectionId.h + src/quic/QuicConnectionId.cpp` | preferred CID 和 endpoint reset-token index node |
 | `include/fiber/quic/QuicTlsSession.h + src/quic/QuicTlsSession.cpp` | `init_client`、role-aware TP、peer verify、post-handshake/session callback |
 | `include/fiber/quic/QuicPacketProcessor.h + src/quic/QuicPacketProcessor.cpp` | client unprotected control packets、Server Initial SCID 采纳、NEW_TOKEN |
-| `include/fiber/quic/QuicPacketCodec.h + src/quic/QuicPacketCodec.cpp` | VN version list、Retry decode context、Initial token/0-RTT metadata |
-| `include/fiber/quic/QuicCrypto.h + src/quic/QuicCrypto.cpp` | Retry integrity validation、只重派生 Initial keys |
-| `include/fiber/quic/QuicLossRecovery.h + src/quic/QuicLossRecovery.cpp` | `reset_after_retry`、0-RTT rejection cleanup |
+| `src/quic/QuicPacketCodec.h + src/quic/QuicPacketCodec.cpp` | VN version list、Retry decode context、Initial token/0-RTT metadata |
+| `src/quic/QuicCrypto.h + src/quic/QuicCrypto.cpp` | Retry integrity validation、只重派生 Initial keys |
+| `src/quic/QuicLossRecovery.h + src/quic/QuicLossRecovery.cpp` | `reset_after_retry`、0-RTT rejection cleanup |
 | `include/fiber/quic/QuicCongestion.h + src/quic/QuicCongestion.cpp` | Retry 后恢复到初始 congestion state |
 | `include/fiber/quic/QuicPacer.h + src/quic/QuicPacer.cpp` | Retry 后按新 congestion/path 重置 pacing state |
-| `include/fiber/quic/QuicTransportParamsCodec.h + src/quic/QuicTransportParamsCodec.cpp` | preferred address、角色约束、remembered TP snapshot |
+| `src/quic/QuicTransportParamsCodec.h + src/quic/QuicTransportParamsCodec.cpp` | preferred address、角色约束、remembered TP snapshot |
 | `include/fiber/quic/QuicPath.h`, `QuicPathManager.*` | role-aware amplification、initial path reconcile、preferred validation |
 | `include/fiber/quic/QuicStream.h + src/quic/QuicStream.cpp` | early-data mode 和 rejection 所需 stream 标记 |
 | `include/fiber/net/TlsOptions.h`, `TlsContext.*` | peer verification、trust store、通用 client session trampoline |

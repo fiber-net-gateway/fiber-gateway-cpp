@@ -14,13 +14,13 @@
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/quic/QuicAckHandler.h>
 #include <fiber/quic/QuicConnection.h>
-#include <fiber/quic/QuicLossRecovery.h>
 #include <fiber/quic/QuicPacketProcessor.h>
 #include <fiber/quic/QuicProtocol.h>
-#include <fiber/quic/QuicTransportCodec.h>
-#include <fiber/quic/QuicTransportParamsCodec.h>
+#include "quic/QuicAckHandler.h"
+#include "quic/QuicLossRecovery.h"
+#include "quic/QuicTransportCodec.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 #include "QuicTestLoop.h"
 

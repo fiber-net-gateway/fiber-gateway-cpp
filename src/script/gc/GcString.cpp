@@ -3,7 +3,7 @@
 //
 
 #include <fiber/script/gc/GcInternal.h>
-#include <fiber/script/gc/Wtf8.h>
+#include "script/gc/Wtf8.h"
 
 #include <fiber/common/Assert.h>
 #include <fiber/common/json/Utf.h>

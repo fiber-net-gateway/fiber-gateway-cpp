@@ -1,8 +1,8 @@
-#include <fiber/script/std/RandFuncs.h>
+#include "script/std/RandFuncs.h"
 
-#include <fiber/script/std/Crc32.h>
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
+#include "script/std/Crc32.h"
 
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>

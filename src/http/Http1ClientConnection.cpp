@@ -7,10 +7,10 @@
 
 #include <fiber/common/Assert.h>
 #include <fiber/http/HttpTransport.h>
-#include <fiber/http/TlsAlpn.h>
 #include <fiber/net/TcpConnector.h>
 #include <fiber/net/TcpListener.h>
 #include <fiber/net/TcpStream.h>
+#include "http/TlsAlpn.h"
 
 namespace fiber::http {
 

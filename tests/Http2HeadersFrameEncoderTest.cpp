@@ -10,9 +10,9 @@
 
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http2HeadersFrameEncoder.h>
 #include <fiber/http/Http2HpackDecoder.h>
 #include <fiber/http/HttpHeaderHash.h>
+#include "http/Http2HeadersFrameEncoder.h"
 #define private public
 #include <fiber/http/Http2Outbound.h>
 #include <fiber/http/Http2Stream.h>

@@ -2,7 +2,7 @@
 
 #include <fiber/quic/QuicPacketNumberSpace.h>
 #include <fiber/quic/QuicProtocol.h>
-#include <fiber/quic/QuicTransportCodec.h>
+#include "quic/QuicTransportCodec.h"
 
 TEST(QuicPacketNumberSpaceTest, RecordsEcnCountersForReceivedPackets) {
     fiber::quic::QuicPacketNumberSpace space{};

@@ -9,10 +9,10 @@
 
 #include <fiber/script/ScriptResult.h>
 #include <fiber/script/gc/GcInternal.h>
-#include <fiber/script/run/Access.h>
-#include <fiber/script/run/Binaries.h>
 #include <fiber/script/run/Compares.h>
-#include <fiber/script/run/Unaries.h>
+#include "script/run/Access.h"
+#include "script/run/Binaries.h"
+#include "script/run/Unaries.h"
 
 using fiber::script::CallResult;
 using fiber::script::GcArray;

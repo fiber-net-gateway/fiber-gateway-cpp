@@ -12,9 +12,9 @@
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/TlsContext.h>
 #include <fiber/quic/QuicConnection.h>
-#include <fiber/quic/QuicCrypto.h>
 #include <fiber/quic/QuicCursor.h>
-#include <fiber/quic/QuicTransportParamsCodec.h>
+#include "quic/QuicCrypto.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 namespace fiber::quic {
 

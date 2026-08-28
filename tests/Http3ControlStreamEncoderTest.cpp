@@ -5,8 +5,8 @@
 #include <gtest/gtest.h>
 
 #include <fiber/common/mem/IoBufChain.h>
-#include <fiber/http/Http3ControlStreamEncoder.h>
 #include <fiber/http/Http3Protocol.h>
+#include "http/Http3ControlStreamEncoder.h"
 
 namespace {
 

@@ -6,7 +6,7 @@
 
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/common/mem/IoBufChain.h>
-#include <fiber/http/Http3QpackControlStreamDecoder.h>
+#include "http/Http3QpackControlStreamDecoder.h"
 
 namespace {
 

@@ -10,10 +10,10 @@
 #include <fiber/common/Assert.h>
 #include <fiber/common/mem/IoBufChain.h>
 #include <fiber/http/Http3Codec.h>
-#include <fiber/http/Http3ControlStreamDecoder.h>
-#include <fiber/http/Http3ControlStreamEncoder.h>
-#include <fiber/http/Http3QpackControlStreamDecoder.h>
-#include <fiber/http/ServerHttp3Request.h>
+#include "http/Http3ControlStreamDecoder.h"
+#include "http/Http3ControlStreamEncoder.h"
+#include "http/Http3QpackControlStreamDecoder.h"
+#include "http/ServerHttp3Request.h"
 
 namespace fiber::http {
 

@@ -1,4 +1,4 @@
-#include <fiber/script/ir/Compiler.h>
+#include "script/ir/Compiler.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -12,34 +12,34 @@
 #include <vector>
 
 #include <fiber/common/Assert.h>
-#include <fiber/script/ast/Assign.h>
-#include <fiber/script/ast/BinaryOperator.h>
-#include <fiber/script/ast/Block.h>
-#include <fiber/script/ast/BreakStatement.h>
-#include <fiber/script/ast/ConstantVal.h>
-#include <fiber/script/ast/ContinueStatement.h>
-#include <fiber/script/ast/DirectiveStatement.h>
-#include <fiber/script/ast/ExpandArrArg.h>
-#include <fiber/script/ast/ExpressionStatement.h>
-#include <fiber/script/ast/ForeachStatement.h>
-#include <fiber/script/ast/FunctionCall.h>
-#include <fiber/script/ast/Identifier.h>
-#include <fiber/script/ast/IfStatement.h>
-#include <fiber/script/ast/Indexer.h>
-#include <fiber/script/ast/InlineList.h>
-#include <fiber/script/ast/InlineObject.h>
-#include <fiber/script/ast/Literal.h>
-#include <fiber/script/ast/LogicRelationalExpression.h>
-#include <fiber/script/ast/PropertyReference.h>
-#include <fiber/script/ast/ReturnStatement.h>
-#include <fiber/script/ast/Statement.h>
-#include <fiber/script/ast/TemplateString.h>
-#include <fiber/script/ast/Ternary.h>
-#include <fiber/script/ast/ThrowStatement.h>
-#include <fiber/script/ast/TryCatchStatement.h>
-#include <fiber/script/ast/UnaryOperator.h>
-#include <fiber/script/ast/VariableDeclareStatement.h>
-#include <fiber/script/ast/VariableReference.h>
+#include "script/ast/Assign.h"
+#include "script/ast/BinaryOperator.h"
+#include "script/ast/Block.h"
+#include "script/ast/BreakStatement.h"
+#include "script/ast/ConstantVal.h"
+#include "script/ast/ContinueStatement.h"
+#include "script/ast/DirectiveStatement.h"
+#include "script/ast/ExpandArrArg.h"
+#include "script/ast/ExpressionStatement.h"
+#include "script/ast/ForeachStatement.h"
+#include "script/ast/FunctionCall.h"
+#include "script/ast/Identifier.h"
+#include "script/ast/IfStatement.h"
+#include "script/ast/Indexer.h"
+#include "script/ast/InlineList.h"
+#include "script/ast/InlineObject.h"
+#include "script/ast/Literal.h"
+#include "script/ast/LogicRelationalExpression.h"
+#include "script/ast/PropertyReference.h"
+#include "script/ast/ReturnStatement.h"
+#include "script/ast/Statement.h"
+#include "script/ast/TemplateString.h"
+#include "script/ast/Ternary.h"
+#include "script/ast/ThrowStatement.h"
+#include "script/ast/TryCatchStatement.h"
+#include "script/ast/UnaryOperator.h"
+#include "script/ast/VariableDeclareStatement.h"
+#include "script/ast/VariableReference.h"
 
 namespace fiber::script::ir {
 

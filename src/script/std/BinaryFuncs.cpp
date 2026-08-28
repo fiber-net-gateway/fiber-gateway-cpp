@@ -1,4 +1,4 @@
-#include <fiber/script/std/BinaryFuncs.h>
+#include "script/std/BinaryFuncs.h"
 
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>

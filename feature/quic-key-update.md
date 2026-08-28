@@ -35,7 +35,7 @@ requirement (§4.9) and is already handled.
 
 ### Step 1. Add key update state to `QuicConnection` (and `QuicCryptoState`)
 
-**Files**: `include/fiber/quic/QuicConnection.h`, `src/quic/QuicCrypto.cpp`, `include/fiber/quic/QuicCrypto.h`
+**Files**: `include/fiber/quic/QuicConnection.h`, `src/quic/QuicCrypto.cpp`, `src/quic/QuicCrypto.h`
 
 **Add two new `QuicPacketProtectionKeys` slots in `QuicCryptoState`**:
 

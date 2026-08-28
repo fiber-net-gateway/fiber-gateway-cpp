@@ -77,7 +77,8 @@ resp.sendJson(200, {status: "ready", path: $req.path});
 └── scripts/      # 构建、互操作和 benchmark 工具
 ```
 
-核心模块的公共头文件位于 `include/fiber/`，实现位于对应的 `src/` 目录：
+核心模块的公共头文件位于 `include/fiber/`，实现和私有头文件位于对应的 `src/`
+目录。只有 `include/fiber/` 会传递给使用方；`src/` 仅供核心库和白盒测试私有使用：
 
 - `event/`：事件循环、poller、定时器和 loop group。
 - `async/`：协程任务、调度和同步原语。

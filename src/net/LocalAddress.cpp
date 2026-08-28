@@ -1,7 +1,7 @@
 #include <fiber/net/LocalAddress.h>
 
 #include <fiber/net/SocketAddress.h>
-#include <fiber/net/detail/LocalAddressSelector.h>
+#include "net/detail/LocalAddressSelector.h"
 
 #include <algorithm>
 #include <cerrno>

@@ -11,7 +11,7 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/HttpHeaderHash.h>
-#include <fiber/http/Huffman.h>
+#include "http/Huffman.h"
 
 #define private public
 #define protected public

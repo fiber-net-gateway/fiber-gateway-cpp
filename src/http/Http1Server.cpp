@@ -6,8 +6,8 @@
 #include <fiber/common/IoError.h>
 #include <fiber/http/Http1Connection.h>
 #include <fiber/http/HttpTransport.h>
-#include <fiber/http/TlsAlpn.h>
 #include <fiber/net/TcpStream.h>
+#include "http/TlsAlpn.h"
 
 namespace fiber::http {
 

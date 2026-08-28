@@ -1,11 +1,11 @@
-#include <fiber/http/Http3ControlStreamEncoder.h>
+#include "http/Http3ControlStreamEncoder.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <utility>
 
-#include <fiber/quic/QuicTransportCodec.h>
+#include "quic/QuicTransportCodec.h"
 
 namespace fiber::http {
 

@@ -8,11 +8,11 @@
 #include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/http/ClientHttp2Exchange.h>
-#include <fiber/http/ClientHttp2Push.h>
 #include <fiber/http/Http2Connection.h>
-#include <fiber/http/Http2DataFrameEncoder.h>
-#include <fiber/http/Http2HeadersFrameEncoder.h>
-#include <fiber/http/detail/Http2HeaderDecodeUtil.h>
+#include "http/ClientHttp2Push.h"
+#include "http/Http2DataFrameEncoder.h"
+#include "http/Http2HeadersFrameEncoder.h"
+#include "http/detail/Http2HeaderDecodeUtil.h"
 
 namespace fiber::http {
 

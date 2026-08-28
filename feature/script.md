@@ -26,19 +26,19 @@
 - Access: obj.prop, obj[key], array index, function calls, spread in arrays/objects.
 
 ## Module Layout (C++)
-- `include/fiber/script/parse/TokenKind.h + src/script/parse/TokenKind.cpp`
-- `include/fiber/script/parse/Tokenizer.h + src/script/parse/Tokenizer.cpp`
-- `include/fiber/script/parse/Parser.h + src/script/parse/Parser.cpp`
+- `src/script/parse/TokenKind.h + src/script/parse/TokenKind.cpp`
+- `src/script/parse/Tokenizer.h + src/script/parse/Tokenizer.cpp`
+- `src/script/parse/Parser.h + src/script/parse/Parser.cpp`
 - `src/script/ast/*`
-- `include/fiber/script/parse/Optimiser.h + src/script/parse/Optimiser.cpp`
+- `src/script/parse/Optimiser.h + src/script/parse/Optimiser.cpp`
 - `include/fiber/script/ir/Code.h`
-- `include/fiber/script/ir/Compiler.h + src/script/ir/Compiler.cpp`
+- `src/script/ir/Compiler.h + src/script/ir/Compiler.cpp`
 - `include/fiber/script/ir/Compiled.h + src/script/ir/Compiled.cpp`
-- `include/fiber/script/run/InterpreterVm.h + src/script/run/InterpreterVm.cpp`
-- `include/fiber/script/run/Access.h + src/script/run/Access.cpp`
+- `src/script/run/InterpreterVm.h + src/script/run/InterpreterVm.cpp`
+- `src/script/run/Access.h + src/script/run/Access.cpp`
 - `include/fiber/script/run/Compares.h + src/script/run/Compares.cpp`
-- `include/fiber/script/run/Unaries.h + src/script/run/Unaries.cpp`
-- `include/fiber/script/run/Binaries.h + src/script/run/Binaries.cpp`
+- `src/script/run/Unaries.h + src/script/run/Unaries.cpp`
+- `src/script/run/Binaries.h + src/script/run/Binaries.cpp`
 - `include/fiber/script/Script.h + src/script/Script.cpp`
 - `include/fiber/script/Library.h + src/script/Library.cpp`
 - `src/script/ExecutionContext.h|.cpp`

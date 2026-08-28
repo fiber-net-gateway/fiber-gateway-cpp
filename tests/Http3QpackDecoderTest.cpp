@@ -8,7 +8,7 @@
 #include <fiber/common/IoError.h>
 #include <fiber/http/Http3QpackDecoder.h>
 #include <fiber/http/HttpHeaderHash.h>
-#include <fiber/http/Huffman.h>
+#include "http/Huffman.h"
 
 namespace {
 

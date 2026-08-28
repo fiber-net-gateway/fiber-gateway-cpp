@@ -4,7 +4,7 @@
 #include <utility>
 
 #include <fiber/common/Assert.h>
-#include <fiber/script/run/InterpreterVm.h>
+#include "script/run/InterpreterVm.h"
 
 namespace fiber::script {
 

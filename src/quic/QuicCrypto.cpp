@@ -1,4 +1,4 @@
-#include <fiber/quic/QuicCrypto.h>
+#include "quic/QuicCrypto.h"
 
 #include <algorithm>
 #include <cstring>
@@ -9,7 +9,7 @@
 #include <openssl/hkdf.h>
 #include <openssl/mem.h>
 
-#include <fiber/quic/QuicTransportCodec.h>
+#include "quic/QuicTransportCodec.h"
 
 namespace fiber::quic {
 

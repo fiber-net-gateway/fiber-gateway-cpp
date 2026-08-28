@@ -1,4 +1,4 @@
-#include <fiber/script/std/ArrayFuncs.h>
+#include "script/std/ArrayFuncs.h"
 
 #include <fiber/script/std/StdLibrary.h>
 

@@ -5,7 +5,7 @@
 
 #include <fiber/common/Assert.h>
 #include <fiber/quic/QuicCursor.h>
-#include <fiber/quic/QuicTransportCodec.h>
+#include "quic/QuicTransportCodec.h"
 
 namespace fiber::quic {
 

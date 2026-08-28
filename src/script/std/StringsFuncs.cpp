@@ -1,4 +1,4 @@
-#include <fiber/script/std/StringsFuncs.h>
+#include "script/std/StringsFuncs.h"
 
 #include <fiber/script/std/StdLibrary.h>
 

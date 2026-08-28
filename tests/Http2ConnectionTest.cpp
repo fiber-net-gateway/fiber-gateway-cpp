@@ -28,14 +28,14 @@
 #undef private
 
 #include <fiber/http/ClientHttp2Exchange.h>
-#include <fiber/http/Http2HeadersFrameEncoder.h>
 #include <fiber/http/Http2HpackDecoder.h>
 #include <fiber/http/Http2HpackStaticTable.h>
 #include <fiber/http/Http2Stream.h>
-#include <fiber/http/Huffman.h>
 #include <fiber/http/ServerRequestFactory.h>
 #include "Http2TestSupport.h"
 #include "HttpTransportStub.h"
+#include "http/Http2HeadersFrameEncoder.h"
+#include "http/Huffman.h"
 
 namespace {
 

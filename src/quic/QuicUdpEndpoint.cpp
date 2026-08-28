@@ -13,9 +13,9 @@
 #include <fiber/common/Assert.h>
 #include <fiber/net/TlsContext.h>
 #include <fiber/quic/QuicCongestion.h>
-#include <fiber/quic/QuicCrypto.h>
-#include <fiber/quic/QuicPacketCodec.h>
-#include <fiber/quic/QuicTransportCodec.h>
+#include "quic/QuicCrypto.h"
+#include "quic/QuicPacketCodec.h"
+#include "quic/QuicTransportCodec.h"
 
 namespace fiber::quic {
 

@@ -7,7 +7,7 @@
 
 #include <fiber/async/Spawn.h>
 #include <fiber/common/Assert.h>
-#include <fiber/http/TlsAlpn.h>
+#include "http/TlsAlpn.h"
 
 namespace fiber::http {
 

@@ -7,9 +7,9 @@
 #include <string_view>
 #include <vector>
 
-#include <fiber/quic/QuicCrypto.h>
-#include <fiber/quic/QuicPacketCodec.h>
-#include <fiber/quic/QuicTransportCodec.h>
+#include "quic/QuicCrypto.h"
+#include "quic/QuicPacketCodec.h"
+#include "quic/QuicTransportCodec.h"
 
 #include "QuicTestLoop.h"
 

@@ -1,7 +1,7 @@
 #include <fiber/dns/DnsClient.h>
 
 #include <fiber/dns/DnsMessage.h>
-#include <fiber/dns/detail/DnsQuerySecurity.h>
+#include "dns/detail/DnsQuerySecurity.h"
 
 #include <algorithm>
 #include <array>

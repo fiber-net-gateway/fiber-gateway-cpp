@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include <fiber/http/Huffman.h>
+#include "http/Huffman.h"
 
 namespace {
 

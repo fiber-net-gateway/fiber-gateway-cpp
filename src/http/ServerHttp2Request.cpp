@@ -1,4 +1,4 @@
-#include <fiber/http/ServerHttp2Request.h>
+#include "http/ServerHttp2Request.h"
 
 #include <algorithm>
 #include <charconv>
@@ -12,10 +12,10 @@
 #include <fiber/common/IoError.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/http/Http2Connection.h>
-#include <fiber/http/Http2DataFrameEncoder.h>
-#include <fiber/http/Http2HeadersFrameEncoder.h>
 #include <fiber/http/HttpUriParse.h>
-#include <fiber/http/Huffman.h>
+#include "http/Http2DataFrameEncoder.h"
+#include "http/Http2HeadersFrameEncoder.h"
+#include "http/Huffman.h"
 
 namespace fiber::http {
 
