@@ -1,16 +1,16 @@
 #include <fiber/script/std/StdLibrary.h>
 
-#include <fiber/script/std/ArrayFuncs.h>
-#include <fiber/script/std/BinaryFuncs.h>
-#include <fiber/script/std/HashFuncs.h>
-#include <fiber/script/std/IncludesFunc.h>
-#include <fiber/script/std/JsonFuncs.h>
-#include <fiber/script/std/LengthFunc.h>
-#include <fiber/script/std/MathFuncs.h>
-#include <fiber/script/std/ObjectsFuncs.h>
-#include <fiber/script/std/RandFuncs.h>
-#include <fiber/script/std/StringsFuncs.h>
-#include <fiber/script/std/UrlFuncs.h>
+#include "script/std/ArrayFuncs.h"
+#include "script/std/BinaryFuncs.h"
+#include "script/std/HashFuncs.h"
+#include "script/std/IncludesFunc.h"
+#include "script/std/JsonFuncs.h"
+#include "script/std/LengthFunc.h"
+#include "script/std/MathFuncs.h"
+#include "script/std/ObjectsFuncs.h"
+#include "script/std/RandFuncs.h"
+#include "script/std/StringsFuncs.h"
+#include "script/std/UrlFuncs.h"
 
 #include <fiber/common/Assert.h>
 

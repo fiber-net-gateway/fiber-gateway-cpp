@@ -5,7 +5,7 @@
 #include <cstring>
 #include <vector>
 
-#include <fiber/quic/QuicTransportCodec.h>
+#include "quic/QuicTransportCodec.h"
 
 namespace {
 

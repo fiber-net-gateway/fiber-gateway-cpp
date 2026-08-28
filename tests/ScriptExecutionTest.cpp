@@ -12,9 +12,9 @@
 #include <fiber/script/Library.h>
 #include <fiber/script/Script.h>
 #include <fiber/script/gc/GcInternal.h>
-#include <fiber/script/ir/Compiler.h>
-#include <fiber/script/parse/Parser.h>
-#include <fiber/script/run/InterpreterVm.h>
+#include "script/ir/Compiler.h"
+#include "script/parse/Parser.h"
+#include "script/run/InterpreterVm.h"
 
 namespace {
 

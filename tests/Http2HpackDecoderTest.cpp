@@ -9,7 +9,7 @@
 #include <fiber/common/IoError.h>
 #include <fiber/http/Http2HpackDecoder.h>
 #include <fiber/http/HttpHeaderHash.h>
-#include <fiber/http/Huffman.h>
+#include "http/Huffman.h"
 
 namespace {
 

@@ -1,7 +1,7 @@
 #ifndef FIBER_SCRIPT_RUN_COMPARES_H
 #define FIBER_SCRIPT_RUN_COMPARES_H
 
-#include "../JsGc.h"
+#include <fiber/script/JsGc.h>
 
 namespace fiber::script::run {
 

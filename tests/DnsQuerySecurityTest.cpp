@@ -7,7 +7,7 @@
 
 #include <fiber/dns/DnsMessage.h>
 #include <fiber/dns/DnsName.h>
-#include <fiber/dns/detail/DnsQuerySecurity.h>
+#include "dns/detail/DnsQuerySecurity.h"
 
 namespace {
 

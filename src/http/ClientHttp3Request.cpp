@@ -1,4 +1,4 @@
-#include <fiber/http/ClientHttp3Request.h>
+#include "http/ClientHttp3Request.h"
 
 #include <algorithm>
 #include <charconv>
@@ -10,10 +10,10 @@
 
 #include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
-#include <fiber/http/Http3FrameWriter.h>
-#include <fiber/http/Http3QpackEncoderIoBufWriter.h>
 #include <fiber/http/HttpHeaderHash.h>
-#include <fiber/http/detail/Http2HeaderDecodeUtil.h>
+#include "http/Http3FrameWriter.h"
+#include "http/Http3QpackEncoderIoBufWriter.h"
+#include "http/detail/Http2HeaderDecodeUtil.h"
 
 namespace fiber::http {
 

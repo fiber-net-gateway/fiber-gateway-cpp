@@ -1,4 +1,4 @@
-#include <fiber/script/std/ObjectsFuncs.h>
+#include "script/std/ObjectsFuncs.h"
 
 #include <fiber/script/std/StdLibrary.h>
 

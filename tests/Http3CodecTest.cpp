@@ -10,7 +10,7 @@
 #include <fiber/http/Http3Codec.h>
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/quic/QuicCursor.h>
-#include <fiber/quic/QuicTransportCodec.h>
+#include "quic/QuicTransportCodec.h"
 
 namespace {
 

@@ -1,8 +1,8 @@
 #include <fiber/http_script/HttpScriptLib.h>
 
 #include <fiber/http_script/RequestFuncs.h>
-#include <fiber/http_script/ResponseFuncs.h>
 #include <fiber/script/std/StdLibrary.h>
+#include "http_script/ResponseFuncs.h"
 
 namespace fiber::http_script {
 

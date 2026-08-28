@@ -8,7 +8,7 @@
 
 #include "Library.h"
 #include "Script.h"
-#include "ast/Node.h"
+#include "ScriptLimits.h"
 #include "parse/ParseError.h"
 
 namespace fiber::script {

@@ -4,20 +4,20 @@
 #include <string_view>
 
 #include <fiber/script/Library.h>
-#include <fiber/script/ast/Assign.h>
-#include <fiber/script/ast/BinaryOperator.h>
-#include <fiber/script/ast/Block.h>
-#include <fiber/script/ast/ExpressionStatement.h>
-#include <fiber/script/ast/IfStatement.h>
-#include <fiber/script/ast/InlineList.h>
-#include <fiber/script/ast/InlineObject.h>
-#include <fiber/script/ast/Literal.h>
-#include <fiber/script/ast/Operator.h>
-#include <fiber/script/ast/ReturnStatement.h>
-#include <fiber/script/ast/Ternary.h>
-#include <fiber/script/ast/UnaryOperator.h>
-#include <fiber/script/ast/VariableReference.h>
-#include <fiber/script/parse/Parser.h>
+#include "script/ast/Assign.h"
+#include "script/ast/BinaryOperator.h"
+#include "script/ast/Block.h"
+#include "script/ast/ExpressionStatement.h"
+#include "script/ast/IfStatement.h"
+#include "script/ast/InlineList.h"
+#include "script/ast/InlineObject.h"
+#include "script/ast/Literal.h"
+#include "script/ast/Operator.h"
+#include "script/ast/ReturnStatement.h"
+#include "script/ast/Ternary.h"
+#include "script/ast/UnaryOperator.h"
+#include "script/ast/VariableReference.h"
+#include "script/parse/Parser.h"
 
 namespace {
 

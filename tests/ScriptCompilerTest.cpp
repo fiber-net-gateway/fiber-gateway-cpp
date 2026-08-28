@@ -9,14 +9,14 @@
 #include <vector>
 
 #include <fiber/script/Library.h>
-#include <fiber/script/ast/BinaryOperator.h>
-#include <fiber/script/ast/Expression.h>
-#include <fiber/script/ast/Literal.h>
-#include <fiber/script/ast/Operator.h>
-#include <fiber/script/ast/Statement.h>
 #include <fiber/script/ir/Code.h>
-#include <fiber/script/ir/Compiler.h>
-#include <fiber/script/parse/Parser.h>
+#include "script/ast/BinaryOperator.h"
+#include "script/ast/Expression.h"
+#include "script/ast/Literal.h"
+#include "script/ast/Operator.h"
+#include "script/ast/Statement.h"
+#include "script/ir/Compiler.h"
+#include "script/parse/Parser.h"
 
 namespace {
 

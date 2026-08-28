@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <fiber/common/util/CpuConcurrency.h>
-#include <fiber/common/util/detail/CpuConcurrencyProbe.h>
+#include "common/util/detail/CpuConcurrencyProbe.h"
 
 #include <filesystem>
 #include <fstream>

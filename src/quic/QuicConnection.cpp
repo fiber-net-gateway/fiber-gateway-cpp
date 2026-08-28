@@ -11,12 +11,12 @@
 #include <openssl/mem.h>
 
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/quic/QuicCrypto.h>
-#include <fiber/quic/QuicLossRecovery.h>
 #include <fiber/quic/QuicPacketProcessor.h>
 #include <fiber/quic/QuicProtocol.h>
-#include <fiber/quic/QuicTransportParamsCodec.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
+#include "quic/QuicCrypto.h"
+#include "quic/QuicLossRecovery.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 namespace fiber::quic {
 

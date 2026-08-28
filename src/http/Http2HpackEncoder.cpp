@@ -5,7 +5,7 @@
 #include <cstring>
 
 #include <fiber/http/Http2HpackStaticTable.h>
-#include <fiber/http/Huffman.h>
+#include "http/Huffman.h"
 
 namespace fiber::http {
 

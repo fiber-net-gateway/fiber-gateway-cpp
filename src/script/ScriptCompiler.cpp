@@ -5,9 +5,9 @@
 #include <string>
 #include <utility>
 
-#include <fiber/script/ir/Compiler.h>
-#include <fiber/script/parse/Optimiser.h>
-#include <fiber/script/parse/Parser.h>
+#include "script/ir/Compiler.h"
+#include "script/parse/Optimiser.h"
+#include "script/parse/Parser.h"
 
 namespace fiber::script {
 

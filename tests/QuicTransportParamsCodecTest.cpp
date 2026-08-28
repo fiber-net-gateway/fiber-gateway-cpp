@@ -3,8 +3,8 @@
 #include <array>
 #include <cstdint>
 
-#include <fiber/quic/QuicTransportCodec.h>
-#include <fiber/quic/QuicTransportParamsCodec.h>
+#include "quic/QuicTransportCodec.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 namespace {
 

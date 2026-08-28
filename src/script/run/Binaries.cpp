@@ -1,4 +1,4 @@
-#include <fiber/script/run/Binaries.h>
+#include "script/run/Binaries.h"
 
 #include <charconv>
 #include <cmath>
@@ -8,8 +8,8 @@
 
 #include <fiber/common/json/Utf.h>
 #include <fiber/script/gc/GcInternal.h>
-#include <fiber/script/gc/Wtf8.h>
 #include <fiber/script/run/Compares.h>
+#include "script/gc/Wtf8.h"
 
 namespace fiber::script::run {
 

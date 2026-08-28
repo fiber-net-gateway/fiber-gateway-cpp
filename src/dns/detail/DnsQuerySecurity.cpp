@@ -1,4 +1,4 @@
-#include <fiber/dns/detail/DnsQuerySecurity.h>
+#include "dns/detail/DnsQuerySecurity.h"
 
 #include <array>
 #include <string_view>

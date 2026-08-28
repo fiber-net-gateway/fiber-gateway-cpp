@@ -1,4 +1,4 @@
-#include <fiber/script/std/MathFuncs.h>
+#include "script/std/MathFuncs.h"
 
 #include <fiber/script/std/StdLibrary.h>
 

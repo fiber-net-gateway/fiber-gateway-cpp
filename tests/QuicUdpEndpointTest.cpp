@@ -24,13 +24,13 @@
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/UdpSocket.h>
-#include <fiber/quic/QuicCrypto.h>
-#include <fiber/quic/QuicLossRecovery.h>
-#include <fiber/quic/QuicPacketCodec.h>
 #include <fiber/quic/QuicToken.h>
-#include <fiber/quic/QuicTransportCodec.h>
-#include <fiber/quic/QuicTransportParamsCodec.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
+#include "quic/QuicCrypto.h"
+#include "quic/QuicLossRecovery.h"
+#include "quic/QuicPacketCodec.h"
+#include "quic/QuicTransportCodec.h"
+#include "quic/QuicTransportParamsCodec.h"
 
 #include "QuicTestLoop.h"
 

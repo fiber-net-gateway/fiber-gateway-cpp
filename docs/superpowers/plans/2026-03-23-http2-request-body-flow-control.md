@@ -14,7 +14,7 @@
 
 **Files:**
 - Modify: `tests/Http2ConnectionTest.cpp`
-- Modify: `include/fiber/http/ServerHttp2Request.h`
+- Modify: `src/http/ServerHttp2Request.h`
 - Modify: `src/http/ServerHttp2Request.cpp`
 
 - [ ] **Step 1: Write failing tests for buffered HTTP/2 request body reads**
@@ -32,7 +32,7 @@ Expected: FAIL in the new HTTP/2 request-body tests because `ServerHttp2Request:
 ### Task 2: Implement Minimal Buffered `read_body()` Support
 
 **Files:**
-- Modify: `include/fiber/http/ServerHttp2Request.h`
+- Modify: `src/http/ServerHttp2Request.h`
 - Modify: `src/http/ServerHttp2Request.cpp`
 - Test: `tests/Http2ConnectionTest.cpp`
 
@@ -80,7 +80,7 @@ Expected: FAIL because receive-side flow-control accounting and replenishment ar
 - Modify: `src/http/Http2Connection.cpp`
 - Modify: `include/fiber/http/Http2Stream.h`
 - Modify: `src/http/Http2Stream.cpp`
-- Modify: `include/fiber/http/ServerHttp2Request.h`
+- Modify: `src/http/ServerHttp2Request.h`
 - Modify: `src/http/ServerHttp2Request.cpp`
 - Test: `tests/Http2ConnectionTest.cpp`
 

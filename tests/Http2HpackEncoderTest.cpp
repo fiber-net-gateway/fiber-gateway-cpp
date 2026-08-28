@@ -9,9 +9,9 @@
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/http/Http2HpackDecoder.h>
 #include <fiber/http/Http2HpackEncoder.h>
-#include <fiber/http/Http2HpackEncoderIoBufWriter.h>
 #include <fiber/http/HttpHeaderHash.h>
-#include <fiber/http/Huffman.h>
+#include "http/Http2HpackEncoderIoBufWriter.h"
+#include "http/Huffman.h"
 
 namespace {
 

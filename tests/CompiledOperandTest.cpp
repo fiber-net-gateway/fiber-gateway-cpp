@@ -8,8 +8,8 @@
 
 #include <fiber/script/Library.h>
 #include <fiber/script/ir/Code.h>
-#include <fiber/script/ir/Compiler.h>
-#include <fiber/script/parse/Parser.h>
+#include "script/ir/Compiler.h"
+#include "script/parse/Parser.h"
 
 namespace {
 

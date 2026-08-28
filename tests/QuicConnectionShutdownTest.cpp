@@ -12,8 +12,8 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/quic/QuicConnection.h>
-#include <fiber/quic/QuicCrypto.h>
 #include <fiber/quic/QuicPacketProcessor.h>
+#include "quic/QuicCrypto.h"
 
 #include "QuicTestLoop.h"
 

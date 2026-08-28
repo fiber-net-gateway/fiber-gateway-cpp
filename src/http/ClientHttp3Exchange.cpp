@@ -5,9 +5,9 @@
 #include <utility>
 
 #include <fiber/common/Assert.h>
-#include <fiber/http/ClientHttp3Request.h>
 #include <fiber/http/Http3ClientConnection.h>
 #include <fiber/http/Http3Connection.h>
+#include "http/ClientHttp3Request.h"
 
 namespace fiber::http {
 

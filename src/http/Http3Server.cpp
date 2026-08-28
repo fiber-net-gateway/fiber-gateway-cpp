@@ -7,8 +7,8 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/async/WaitGroup.h>
 #include <fiber/common/Assert.h>
-#include <fiber/http/ServerHttp3Request.h>
-#include <fiber/http/TlsAlpn.h>
+#include "http/ServerHttp3Request.h"
+#include "http/TlsAlpn.h"
 
 namespace fiber::http {
 
