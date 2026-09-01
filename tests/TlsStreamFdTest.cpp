@@ -126,6 +126,51 @@ struct TempFile {
     }
 };
 
+struct TestTlsPair {
+    std::unique_ptr<fiber::net::TlsContext> server_context;
+    std::unique_ptr<fiber::net::TlsContext> client_context;
+    fiber::net::TlsServerConnectionOptions server_options;
+    fiber::net::TlsClientConnectionOptions client_options;
+};
+
+fiber::common::IoResult<TestTlsPair> create_tls_pair(const std::string &cert_path, const std::string &key_path) {
+    fiber::net::TlsOptions server_material{};
+    server_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert_path);
+    server_material.private_key = fiber::net::TlsPemSource::from_file(key_path);
+    auto server_context = fiber::net::TlsContext::create(server_material);
+    if (!server_context) {
+        return std::unexpected(server_context.error());
+    }
+    auto client_context = fiber::net::TlsContext::create({});
+    if (!client_context) {
+        return std::unexpected(client_context.error());
+    }
+    TestTlsPair pair{};
+    pair.server_context = std::move(*server_context);
+    pair.client_context = std::move(*client_context);
+    pair.server_options.default_context = pair.server_context.get();
+    pair.client_options.context = pair.client_context.get();
+    return pair;
+}
+
+fiber::common::IoResult<void> init_tls_stream_pair(TestTlsPair &pair, fiber::net::detail::TlsStreamFd &server_stream,
+                                                   fiber::net::detail::TlsStreamFd &client_stream) {
+    auto server_ssl = fiber::net::TlsContext::create_server_ssl(pair.server_options, nullptr, nullptr,
+                                                                fiber::net::TlsTransportKind::Tcp);
+    if (!server_ssl) {
+        return std::unexpected(server_ssl.error());
+    }
+    auto server_init = server_stream.init(*server_ssl);
+    if (!server_init) {
+        return std::unexpected(server_init.error());
+    }
+    auto client_ssl = pair.client_context->create_client_ssl(pair.client_options);
+    if (!client_ssl) {
+        return std::unexpected(client_ssl.error());
+    }
+    return client_stream.init(*client_ssl);
+}
+
 struct SigpipeGuard {
     using Handler = void (*)(int);
 
@@ -255,15 +300,8 @@ TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
     ASSERT_TRUE(cert.ok);
     ASSERT_TRUE(key.ok);
 
-    fiber::net::TlsOptions server_options{};
-    server_options.cert_file = cert.path;
-    server_options.key_file = key.path;
-    fiber::net::TlsContext server_ctx(std::move(server_options), true);
-    ASSERT_TRUE(server_ctx.init());
-
-    fiber::net::TlsOptions client_options{};
-    fiber::net::TlsContext client_ctx(std::move(client_options), false);
-    ASSERT_TRUE(client_ctx.init());
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
 
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
@@ -273,8 +311,7 @@ TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
 
     auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
     auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
-    ASSERT_TRUE(server_stream->init(server_ctx.raw(), true));
-    ASSERT_TRUE(client_stream->init(client_ctx.raw(), false));
+    ASSERT_TRUE(init_tls_stream_pair(*tls_pair, *server_stream, *client_stream));
 
     std::promise<fiber::common::IoResult<std::string>> server_promise;
     std::promise<fiber::common::IoResult<std::string>> client_promise;
@@ -310,15 +347,8 @@ TEST(TlsStreamFdTest, CrossLoopWriteFailureDoesNotTouchOwnerPoller) {
     ASSERT_TRUE(cert.ok);
     ASSERT_TRUE(key.ok);
 
-    fiber::net::TlsOptions server_options{};
-    server_options.cert_file = cert.path;
-    server_options.key_file = key.path;
-    fiber::net::TlsContext server_ctx(std::move(server_options), true);
-    ASSERT_TRUE(server_ctx.init());
-
-    fiber::net::TlsOptions client_options{};
-    fiber::net::TlsContext client_ctx(std::move(client_options), false);
-    ASSERT_TRUE(client_ctx.init());
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
 
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
@@ -328,8 +358,7 @@ TEST(TlsStreamFdTest, CrossLoopWriteFailureDoesNotTouchOwnerPoller) {
 
     auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
     auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
-    ASSERT_TRUE(server_stream->init(server_ctx.raw(), true));
-    ASSERT_TRUE(client_stream->init(client_ctx.raw(), false));
+    ASSERT_TRUE(init_tls_stream_pair(*tls_pair, *server_stream, *client_stream));
 
     std::atomic_bool client_handshake_done = false;
     std::atomic_bool server_closed = false;
@@ -652,15 +681,8 @@ TEST(TlsStreamFdTest, TlsTransportWaitReadableSeesPendingDecryptedData) {
     ASSERT_TRUE(cert.ok);
     ASSERT_TRUE(key.ok);
 
-    fiber::net::TlsOptions server_options{};
-    server_options.cert_file = cert.path;
-    server_options.key_file = key.path;
-    fiber::net::TlsContext server_ctx(std::move(server_options), true);
-    ASSERT_TRUE(server_ctx.init());
-
-    fiber::net::TlsOptions client_options{};
-    fiber::net::TlsContext client_ctx(std::move(client_options), false);
-    ASSERT_TRUE(client_ctx.init());
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
 
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
@@ -669,10 +691,10 @@ TEST(TlsStreamFdTest, TlsTransportWaitReadableSeesPendingDecryptedData) {
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), server_ctx);
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer), client_ctx);
+    auto server_transport_result = fiber::http::TlsTransport::create(
+            group.at(0), fiber::net::AcceptResult(fds[0], peer), tls_pair->server_options);
+    auto client_transport_result = fiber::http::TlsTransport::create(
+            group.at(1), fiber::net::AcceptResult(fds[1], peer), tls_pair->client_options);
     ASSERT_TRUE(server_transport_result);
     ASSERT_TRUE(client_transport_result);
     auto *server_transport = server_transport_result->release();
@@ -721,15 +743,8 @@ TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
     ASSERT_TRUE(cert.ok);
     ASSERT_TRUE(key.ok);
 
-    fiber::net::TlsOptions server_options{};
-    server_options.cert_file = cert.path;
-    server_options.key_file = key.path;
-    fiber::net::TlsContext server_ctx(std::move(server_options), true);
-    ASSERT_TRUE(server_ctx.init());
-
-    fiber::net::TlsOptions client_options{};
-    fiber::net::TlsContext client_ctx(std::move(client_options), false);
-    ASSERT_TRUE(client_ctx.init());
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
 
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
@@ -738,10 +753,10 @@ TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), server_ctx);
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer), client_ctx);
+    auto server_transport_result = fiber::http::TlsTransport::create(
+            group.at(0), fiber::net::AcceptResult(fds[0], peer), tls_pair->server_options);
+    auto client_transport_result = fiber::http::TlsTransport::create(
+            group.at(1), fiber::net::AcceptResult(fds[1], peer), tls_pair->client_options);
     ASSERT_TRUE(server_transport_result);
     ASSERT_TRUE(client_transport_result);
     auto *server_transport = server_transport_result->release();
@@ -795,15 +810,8 @@ TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBloc
     ASSERT_TRUE(cert.ok);
     ASSERT_TRUE(key.ok);
 
-    fiber::net::TlsOptions server_options{};
-    server_options.cert_file = cert.path;
-    server_options.key_file = key.path;
-    fiber::net::TlsContext server_ctx(std::move(server_options), true);
-    ASSERT_TRUE(server_ctx.init());
-
-    fiber::net::TlsOptions client_options{};
-    fiber::net::TlsContext client_ctx(std::move(client_options), false);
-    ASSERT_TRUE(client_ctx.init());
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
 
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
@@ -814,10 +822,10 @@ TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBloc
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), server_ctx);
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer), client_ctx);
+    auto server_transport_result = fiber::http::TlsTransport::create(
+            group.at(0), fiber::net::AcceptResult(fds[0], peer), tls_pair->server_options);
+    auto client_transport_result = fiber::http::TlsTransport::create(
+            group.at(1), fiber::net::AcceptResult(fds[1], peer), tls_pair->client_options);
     ASSERT_TRUE(server_transport_result);
     ASSERT_TRUE(client_transport_result);
     auto *server_transport = server_transport_result->release();
@@ -871,15 +879,8 @@ TEST(TlsStreamFdTest, TlsTransportAbandonPendingWriteDropsChainReference) {
     ASSERT_TRUE(cert.ok);
     ASSERT_TRUE(key.ok);
 
-    fiber::net::TlsOptions server_options{};
-    server_options.cert_file = cert.path;
-    server_options.key_file = key.path;
-    fiber::net::TlsContext server_ctx(std::move(server_options), true);
-    ASSERT_TRUE(server_ctx.init());
-
-    fiber::net::TlsOptions client_options{};
-    fiber::net::TlsContext client_ctx(std::move(client_options), false);
-    ASSERT_TRUE(client_ctx.init());
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
 
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
@@ -890,10 +891,10 @@ TEST(TlsStreamFdTest, TlsTransportAbandonPendingWriteDropsChainReference) {
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), server_ctx);
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer), client_ctx);
+    auto server_transport_result = fiber::http::TlsTransport::create(
+            group.at(0), fiber::net::AcceptResult(fds[0], peer), tls_pair->server_options);
+    auto client_transport_result = fiber::http::TlsTransport::create(
+            group.at(1), fiber::net::AcceptResult(fds[1], peer), tls_pair->client_options);
     ASSERT_TRUE(server_transport_result);
     ASSERT_TRUE(client_transport_result);
     auto *server_transport = server_transport_result->release();

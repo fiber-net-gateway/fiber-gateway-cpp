@@ -20,14 +20,13 @@ fiber::common::IoResult<void> Http1Server::bind(const net::SocketAddress &addr, 
     if (!result) {
         return std::unexpected(result.error());
     }
-    if (options_.tls.enabled) {
+    if (options_.tls.enabled()) {
         normalize_http1_alpn(options_.tls);
-        auto ctx = std::make_unique<net::TlsContext>(options_.tls, true);
-        auto init_result = ctx->init();
-        if (!init_result) {
-            return std::unexpected(init_result.error());
+        if (!options_.tls.default_context->has_identity() ||
+            (options_.tls.client_certificate_mode != net::TlsClientCertificateMode::None &&
+             !options_.tls.default_context->has_trust_store())) {
+            return std::unexpected(common::IoErr::Invalid);
         }
-        tls_ctx_ = std::move(ctx);
     }
     return {};
 }
@@ -60,12 +59,9 @@ fiber::async::DetachedTask Http1Server::serve() {
                     } guard{this};
 
                     std::unique_ptr<HttpTransport> transport;
-                    if (options_.tls.enabled) {
-                        if (!tls_ctx_) {
-                            co_return;
-                        }
+                    if (options_.tls.enabled()) {
                         auto tls_result = TlsTransport::create(event::EventLoop::current(), std::move(accept),
-                                                               *tls_ctx_, options_.tcp);
+                                                               options_.tls, options_.tcp);
                         if (!tls_result) {
                             co_return;
                         }

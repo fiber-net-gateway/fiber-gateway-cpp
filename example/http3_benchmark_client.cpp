@@ -939,9 +939,21 @@ private:
         }
         local_address_ = endpoint_.local_addr().to_string();
 
+        fiber::net::TlsOptions tls_material{};
+        if (!options_.insecure) {
+            tls_material.trust_store = options_.ca_file.empty()
+                                               ? fiber::net::TlsTrustStoreSource::system()
+                                               : fiber::net::TlsTrustStoreSource::from_file(options_.ca_file);
+        }
+        auto tls_context = fiber::net::TlsContext::create(tls_material);
+        if (!tls_context) {
+            co_return fail_setup(SetupPhase::ClientInit, tls_context.error());
+        }
+        tls_context_ = std::move(*tls_context);
+
         fiber::http::Http3Client::Options client_options{};
-        client_options.tls.ca_file = options_.ca_file;
-        client_options.verify_peer = !options_.insecure;
+        client_options.tls.context = tls_context_.get();
+        client_options.tls.verify_peer = !options_.insecure;
         client_options.drain_timeout = options_.drain;
         client_ = std::make_unique<fiber::http::Http3Client>(endpoint_, std::move(client_options));
         auto client_initialized = client_->init();
@@ -1327,6 +1339,7 @@ private:
     const BenchmarkOptions &options_;
     RunCoordinator &coordinator_;
     fiber::quic::QuicUdpEndpoint endpoint_;
+    std::unique_ptr<fiber::net::TlsContext> tls_context_;
     std::unique_ptr<fiber::http::Http3Client> client_;
     std::vector<fiber::http::Http3ClientConnection> connections_;
     fiber::mem::IoBuf request_body_;

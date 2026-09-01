@@ -38,7 +38,6 @@ fiber::http::Http1ClientConnectionOptions client_options(std::uint16_t port,
                                                          fiber::http::Http1ConnectionPoolAffinity pool_affinity = {}) {
     fiber::http::Http1ClientConnectionOptions options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enabled = false;
     options.pool_affinity = pool_affinity;
     return options;
 }

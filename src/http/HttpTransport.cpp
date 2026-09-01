@@ -304,7 +304,7 @@ const net::SocketAddress &TcpTransport::remote_addr() const noexcept { return st
 event::EventLoop &TcpTransport::loop() const noexcept { return stream_.loop(); }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     net::TlsContext &context,
+                                                                     const net::TlsClientConnectionOptions &options,
                                                                      net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
@@ -314,7 +314,7 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
         return std::unexpected(option_err);
     }
     auto transport =
-            std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), context));
+            std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), options));
     auto init_result = transport->init();
     if (!init_result) {
         return std::unexpected(init_result.error());
@@ -323,7 +323,7 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
 }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     net::TlsServerContext &context,
+                                                                     const net::TlsServerConnectionOptions &options,
                                                                      net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
@@ -333,7 +333,7 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
         return std::unexpected(option_err);
     }
     auto transport =
-            std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), context));
+            std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), options));
     auto init_result = transport->init();
     if (!init_result) {
         return std::unexpected(init_result.error());
@@ -341,12 +341,13 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
     return transport;
 }
 
-TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, net::TlsContext &context) :
-    stream_(loop, fd, std::move(remote_addr)), context_(&context) {}
+TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
+                           const net::TlsClientConnectionOptions &options) :
+    stream_(loop, fd, std::move(remote_addr)), client_options_(&options) {}
 
 TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
-                           net::TlsServerContext &context) :
-    stream_(loop, fd, std::move(remote_addr)), server_context_(&context) {}
+                           const net::TlsServerConnectionOptions &options) :
+    stream_(loop, fd, std::move(remote_addr)), server_options_(&options) {}
 
 TlsTransport::~TlsTransport() = default;
 
@@ -517,57 +518,21 @@ common::IoErr TlsTransport::poll_writev(mem::IoBufChain &buf, size_t &out, event
 
 common::IoResult<void> TlsTransport::init() {
     clear_pending_write();
-    SSL_CTX *ctx = nullptr;
-    bool is_server = false;
-    if (server_context_) {
-        ctx = server_context_->raw();
-        is_server = true;
-    } else if (context_) {
-        ctx = context_->raw();
-        is_server = context_->is_server();
+    common::IoResult<SSL *> ssl = std::unexpected(common::IoErr::Invalid);
+    if (server_options_) {
+        ssl = net::TlsContext::create_server_ssl(*server_options_, nullptr, &stream_.remote_addr(),
+                                                 net::TlsTransportKind::Tcp);
+    } else if (client_options_ && client_options_->context) {
+        ssl = client_options_->context->create_client_ssl(*client_options_);
     }
-    if (!ctx) {
-        return std::unexpected(common::IoErr::Invalid);
+    if (!ssl) {
+        return std::unexpected(ssl.error());
     }
-    auto init_result = stream_.init(ctx, is_server, &TlsTransport::configure_ssl, this);
+    auto init_result = stream_.init(*ssl);
     if (!init_result) {
         return std::unexpected(init_result.error());
     }
     return {};
-}
-
-void TlsTransport::configure_ssl(SSL *ssl, void *ctx) noexcept {
-    auto *self = static_cast<TlsTransport *>(ctx);
-    if (!self || !ssl) {
-        return;
-    }
-    if (self->server_context_) {
-        (void) self->server_context_->bind_ssl(ssl, &self->stream_.remote_addr());
-        return;
-    }
-    if (!self->context_ || self->context_->is_server()) {
-        return;
-    }
-    const net::TlsOptions &options = self->context_->options();
-    if (!options.server_name.empty()) {
-        (void) SSL_set_tlsext_host_name(ssl, options.server_name.c_str());
-    }
-    if (!options.verify_peer) {
-        return;
-    }
-    const std::string &verify_name = options.verify_name.empty() ? options.server_name : options.verify_name;
-    if (verify_name.empty()) {
-        return;
-    }
-    net::IpAddress verify_ip;
-    if (net::IpAddress::parse(verify_name, verify_ip)) {
-        X509_VERIFY_PARAM *parameters = SSL_get0_param(ssl);
-        if (parameters) {
-            (void) X509_VERIFY_PARAM_set1_ip_asc(parameters, verify_name.c_str());
-        }
-    } else {
-        (void) SSL_set1_host(ssl, verify_name.c_str());
-    }
 }
 
 bool TlsTransport::handshake_done() const noexcept { return stream_.handshake_done(); }

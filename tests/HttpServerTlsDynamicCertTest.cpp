@@ -188,20 +188,20 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
     }
 
     auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*connect_result));
-    fiber::net::TlsOptions tls_options{};
-    tls_options.alpn = {"http/1.1"};
-    tls_options.server_name.assign(server_name.data(), server_name.size());
-    fiber::net::TlsContext client_ctx(std::move(tls_options), false);
-    auto init_result = client_ctx.init();
-    if (!init_result) {
-        result.err = init_result.error();
+    auto client_ctx = fiber::net::TlsContext::create({});
+    if (!client_ctx) {
+        result.err = client_ctx.error();
         result_promise->set_value(std::move(result));
         co_return;
     }
+    fiber::net::TlsClientConnectionOptions tls_options{};
+    tls_options.context = client_ctx->get();
+    tls_options.alpn = {"http/1.1"};
+    tls_options.sni_name.assign(server_name.data(), server_name.size());
 
     int fd = stream->release_fd();
     fiber::net::AcceptResult accept(fd, stream->remote_addr());
-    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), client_ctx);
+    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), tls_options);
     if (!transport_result) {
         result.err = transport_result.error();
         result_promise->set_value(std::move(result));
@@ -248,23 +248,22 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
 }
 
 struct SelectorState {
+    const fiber::net::TlsContext *selected_context = nullptr;
     std::atomic<int> calls{0};
     std::atomic<bool> saw_http11{false};
     std::atomic<std::size_t> server_name_len{0};
     std::array<char, 128> server_name{};
 };
 
-fiber::net::TlsContext *select_alt_identity(void *ctx, const fiber::net::TlsClientHelloView &client_hello) noexcept {
+const fiber::net::TlsContext *select_alt_identity(void *ctx,
+                                                  const fiber::net::TlsClientHelloView &client_hello) noexcept {
     auto *state = static_cast<SelectorState *>(ctx);
     state->calls.fetch_add(1, std::memory_order_relaxed);
-    state->saw_http11.store(client_hello.alpn.contains("http/1.1"), std::memory_order_relaxed);
+    state->saw_http11.store(client_hello.offered_alpn.contains("http/1.1"), std::memory_order_relaxed);
     std::size_t len = std::min(client_hello.server_name.size(), state->server_name.size());
     std::memcpy(state->server_name.data(), client_hello.server_name.data(), len);
     state->server_name_len.store(len, std::memory_order_relaxed);
-    if (!client_hello.server_context) {
-        return nullptr;
-    }
-    return client_hello.server_context->find_identity_by_name("alt");
+    return state->selected_context;
 }
 
 TEST(HttpServerTlsDynamicCertTest, SelectorCallbackCanChooseNamedIdentityUsingSniAndAlpn) {
@@ -276,18 +275,16 @@ TEST(HttpServerTlsDynamicCertTest, SelectorCallbackCanChooseNamedIdentityUsingSn
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    SelectorState selector_state;
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path);
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    ASSERT_TRUE(tls_context);
+    SelectorState selector_state{.selected_context = tls_context->get()};
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file.clear();
-    server_options.tls.key_file.clear();
-    server_options.tls.identities.push_back({
-            .name = "alt",
-            .cert_file = cert.path,
-            .key_file = key.path,
-    });
-    server_options.tls.identity_selector_ops.select = &select_alt_identity;
-    server_options.tls.identity_selector_ops.ctx = &selector_state;
+    server_options.tls.default_context = tls_context->get();
+    server_options.tls.select_tls_ctx_callback = &select_alt_identity;
+    server_options.tls.select_tls_ctx_ctx = &selector_state;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;
@@ -335,10 +332,13 @@ TEST(HttpServerTlsDynamicCertTest, DefaultIdentityCanServeWithoutCustomSelector)
     fiber::event::EventLoopGroup group(1);
     group.start();
 
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path);
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.path;
-    server_options.tls.key_file = key.path;
+    server_options.tls.default_context = tls_context->get();
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;
@@ -389,20 +389,20 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
     }
 
     auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*connect_result));
-    fiber::net::TlsOptions tls_options{};
-    tls_options.alpn = {"http/1.1"};
-    tls_options.server_name.assign(server_name.data(), server_name.size());
-    fiber::net::TlsContext client_ctx(std::move(tls_options), false);
-    auto init_result = client_ctx.init();
-    if (!init_result) {
-        result.err = init_result.error();
+    auto client_ctx = fiber::net::TlsContext::create({});
+    if (!client_ctx) {
+        result.err = client_ctx.error();
         result_promise->set_value(std::move(result));
         co_return;
     }
+    fiber::net::TlsClientConnectionOptions tls_options{};
+    tls_options.context = client_ctx->get();
+    tls_options.alpn = {"http/1.1"};
+    tls_options.sni_name.assign(server_name.data(), server_name.size());
 
     int fd = stream->release_fd();
     fiber::net::AcceptResult accept(fd, stream->remote_addr());
-    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), client_ctx);
+    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), tls_options);
     if (!transport_result) {
         result.err = transport_result.error();
         result_promise->set_value(std::move(result));
@@ -462,10 +462,13 @@ TEST(HttpServerTlsDynamicCertTest, ChunkedResponseEchoedOverTls) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path);
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.path;
-    server_options.tls.key_file = key.path;
+    server_options.tls.default_context = tls_context->get();
 
     const std::string body = "Hello, TLS chunked world!"; // 25 bytes = 0x19
     auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {

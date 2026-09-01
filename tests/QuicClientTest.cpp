@@ -49,6 +49,42 @@ fiber::quic::QuicConnection::Lease create_connection(void *,
     return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(owned));
 }
 
+fiber::common::IoResult<std::unique_ptr<fiber::net::TlsContext>>
+create_tls_context(std::string_view certificate = {}, std::string_view private_key = {}, std::string_view trust = {}) {
+    fiber::net::TlsOptions material{};
+    if (!certificate.empty()) {
+        material.certificate_chain = fiber::net::TlsPemSource::from_file(std::string(certificate));
+        material.private_key = fiber::net::TlsPemSource::from_file(std::string(private_key));
+    }
+    if (!trust.empty()) {
+        material.trust_store = fiber::net::TlsTrustStoreSource::from_file(std::string(trust));
+    }
+    return fiber::net::TlsContext::create(material);
+}
+
+fiber::net::TlsClientConnectionOptions make_quic_client_tls(const fiber::net::TlsContext *context,
+                                                            bool verify_peer = true) {
+    return {
+            .context = context,
+            .verify_peer = verify_peer,
+            .min_version = 0x0304,
+            .max_version = 0x0304,
+            .alpn = {"fiber-quic-test"},
+    };
+}
+
+fiber::net::TlsServerConnectionOptions make_quic_server_tls(
+        const fiber::net::TlsContext *context,
+        fiber::net::TlsClientCertificateMode client_certificate_mode = fiber::net::TlsClientCertificateMode::None) {
+    return {
+            .default_context = context,
+            .client_certificate_mode = client_certificate_mode,
+            .min_version = 0x0304,
+            .max_version = 0x0304,
+            .alpn = {"fiber-quic-test"},
+    };
+}
+
 struct StartSummary {
     fiber::common::IoErr error = fiber::common::IoErr::None;
     fiber::quic::QuicConnectionState state = fiber::quic::QuicConnectionState::Closed;
@@ -501,16 +537,13 @@ TEST(QuicClientTest, StartConnectAttachesAndQueuesClientInitial) {
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
 
-    fiber::net::TlsOptions tls_options{};
-    tls_options.min_version = 0x0304;
-    tls_options.max_version = 0x0304;
-    tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsContext tls_context(std::move(tls_options), false);
-    ASSERT_TRUE(tls_context.init());
+    auto tls_context = create_tls_context();
+    ASSERT_TRUE(tls_context);
+    auto tls_options = make_quic_client_tls(tls_context->get(), false);
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(
-            client.init(endpoint, tls_context, {.connection_owner = nullptr, .create_connection = create_connection}));
+            client.init(endpoint, tls_options, {.connection_owner = nullptr, .create_connection = create_connection}));
 
     std::promise<StartSummary> promise;
     auto future = promise.get_future();
@@ -539,16 +572,13 @@ TEST(QuicClientTest, HandshakeTimeoutCancelsAndDetachesConnection) {
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
 
-    fiber::net::TlsOptions tls_options{};
-    tls_options.min_version = 0x0304;
-    tls_options.max_version = 0x0304;
-    tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsContext tls_context(std::move(tls_options), false);
-    ASSERT_TRUE(tls_context.init());
+    auto tls_context = create_tls_context();
+    ASSERT_TRUE(tls_context);
+    auto tls_options = make_quic_client_tls(tls_context->get(), false);
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(
-            client.init(endpoint, tls_context, {.connection_owner = nullptr, .create_connection = create_connection}));
+            client.init(endpoint, tls_options, {.connection_owner = nullptr, .create_connection = create_connection}));
 
     std::promise<TimeoutSummary> promise;
     auto future = promise.get_future();
@@ -570,23 +600,12 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshake) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    fiber::net::TlsOptions server_tls_options{};
-    server_tls_options.cert_file = cert.path();
-    server_tls_options.key_file = key.path();
-    server_tls_options.min_version = 0x0304;
-    server_tls_options.max_version = 0x0304;
-    server_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsServerContext server_tls(std::move(server_tls_options));
-    ASSERT_TRUE(server_tls.init());
-
-    fiber::net::TlsOptions client_tls_options{};
-    client_tls_options.ca_file = cert.path();
-    client_tls_options.verify_peer = true;
-    client_tls_options.min_version = 0x0304;
-    client_tls_options.max_version = 0x0304;
-    client_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsContext client_tls(std::move(client_tls_options), false);
-    ASSERT_TRUE(client_tls.init());
+    auto server_context = create_tls_context(cert.path(), key.path());
+    ASSERT_TRUE(server_context);
+    auto server_tls = make_quic_server_tls(server_context->get());
+    auto client_context = create_tls_context({}, {}, cert.path());
+    ASSERT_TRUE(client_context);
+    auto client_tls = make_quic_client_tls(client_context->get());
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -594,7 +613,7 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshake) {
     fiber::quic::QuicUdpEndpoint server_endpoint;
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    server_options.tls_context = &server_tls;
+    server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
     ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
 
@@ -641,30 +660,17 @@ TEST_P(QuicClientMtlsTest, EnforcesClientCertificateAuthentication) {
     ASSERT_TRUE(client_chain.valid());
     ASSERT_TRUE(client_key.valid());
 
-    fiber::net::TlsOptions server_tls_options{};
-    server_tls_options.cert_file = server_cert.path();
-    server_tls_options.key_file = server_key.path();
-    server_tls_options.ca_file =
+    const std::string &server_trust =
             test_case.identity == QuicClientIdentityMode::UnknownCa ? server_cert.path() : client_root.path();
-    server_tls_options.verify_client = true;
-    server_tls_options.min_version = 0x0304;
-    server_tls_options.max_version = 0x0304;
-    server_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsServerContext server_tls(std::move(server_tls_options));
-    ASSERT_TRUE(server_tls.init());
+    auto server_context = create_tls_context(server_cert.path(), server_key.path(), server_trust);
+    ASSERT_TRUE(server_context);
+    auto server_tls = make_quic_server_tls(server_context->get(), fiber::net::TlsClientCertificateMode::Required);
 
-    fiber::net::TlsOptions client_tls_options{};
-    client_tls_options.ca_file = server_cert.path();
-    client_tls_options.verify_peer = true;
-    client_tls_options.min_version = 0x0304;
-    client_tls_options.max_version = 0x0304;
-    client_tls_options.alpn = {"fiber-quic-test"};
-    if (test_case.identity != QuicClientIdentityMode::Anonymous) {
-        client_tls_options.cert_file = client_chain.path();
-        client_tls_options.key_file = client_key.path();
-    }
-    fiber::net::TlsContext client_tls(std::move(client_tls_options), false);
-    ASSERT_TRUE(client_tls.init());
+    auto client_context = test_case.identity == QuicClientIdentityMode::Anonymous
+                                  ? create_tls_context({}, {}, server_cert.path())
+                                  : create_tls_context(client_chain.path(), client_key.path(), server_cert.path());
+    ASSERT_TRUE(client_context);
+    auto client_tls = make_quic_client_tls(client_context->get());
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -672,7 +678,7 @@ TEST_P(QuicClientMtlsTest, EnforcesClientCertificateAuthentication) {
     fiber::quic::QuicUdpEndpoint server_endpoint;
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    server_options.tls_context = &server_tls;
+    server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
     ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
 
@@ -722,23 +728,12 @@ TEST(QuicClientTest, RejectsCertificateForWrongHostname) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    fiber::net::TlsOptions server_tls_options{};
-    server_tls_options.cert_file = cert.path();
-    server_tls_options.key_file = key.path();
-    server_tls_options.min_version = 0x0304;
-    server_tls_options.max_version = 0x0304;
-    server_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsServerContext server_tls(std::move(server_tls_options));
-    ASSERT_TRUE(server_tls.init());
-
-    fiber::net::TlsOptions client_tls_options{};
-    client_tls_options.ca_file = cert.path();
-    client_tls_options.verify_peer = true;
-    client_tls_options.min_version = 0x0304;
-    client_tls_options.max_version = 0x0304;
-    client_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsContext client_tls(std::move(client_tls_options), false);
-    ASSERT_TRUE(client_tls.init());
+    auto server_context = create_tls_context(cert.path(), key.path());
+    ASSERT_TRUE(server_context);
+    auto server_tls = make_quic_server_tls(server_context->get());
+    auto client_context = create_tls_context({}, {}, cert.path());
+    ASSERT_TRUE(client_context);
+    auto client_tls = make_quic_client_tls(client_context->get());
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -746,7 +741,7 @@ TEST(QuicClientTest, RejectsCertificateForWrongHostname) {
     fiber::quic::QuicUdpEndpoint server_endpoint;
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    server_options.tls_context = &server_tls;
+    server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
     ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
 
@@ -781,23 +776,12 @@ TEST(QuicClientTest, UnknownDcidStatelessResetUsesEndpointTokenIndex) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    fiber::net::TlsOptions server_tls_options{};
-    server_tls_options.cert_file = cert.path();
-    server_tls_options.key_file = key.path();
-    server_tls_options.min_version = 0x0304;
-    server_tls_options.max_version = 0x0304;
-    server_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsServerContext server_tls(std::move(server_tls_options));
-    ASSERT_TRUE(server_tls.init());
-
-    fiber::net::TlsOptions client_tls_options{};
-    client_tls_options.ca_file = cert.path();
-    client_tls_options.verify_peer = true;
-    client_tls_options.min_version = 0x0304;
-    client_tls_options.max_version = 0x0304;
-    client_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsContext client_tls(std::move(client_tls_options), false);
-    ASSERT_TRUE(client_tls.init());
+    auto server_context = create_tls_context(cert.path(), key.path());
+    ASSERT_TRUE(server_context);
+    auto server_tls = make_quic_server_tls(server_context->get());
+    auto client_context = create_tls_context({}, {}, cert.path());
+    ASSERT_TRUE(client_context);
+    auto client_tls = make_quic_client_tls(client_context->get());
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -813,7 +797,7 @@ TEST(QuicClientTest, UnknownDcidStatelessResetUsesEndpointTokenIndex) {
     server_endpoint_options.stateless_reset_secret_set = true;
     server_endpoint_options.stateless_reset_secret = reset_secret;
     fiber::quic::QuicUdpEndpoint::ServerAdmissionOptions server_options{};
-    server_options.tls_context = &server_tls;
+    server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
     ASSERT_TRUE(server_endpoint.init(group.at(0), server_endpoint_options, server_options));
 
@@ -851,23 +835,12 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshakeAfterRetry) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    fiber::net::TlsOptions server_tls_options{};
-    server_tls_options.cert_file = cert.path();
-    server_tls_options.key_file = key.path();
-    server_tls_options.min_version = 0x0304;
-    server_tls_options.max_version = 0x0304;
-    server_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsServerContext server_tls(std::move(server_tls_options));
-    ASSERT_TRUE(server_tls.init());
-
-    fiber::net::TlsOptions client_tls_options{};
-    client_tls_options.ca_file = cert.path();
-    client_tls_options.verify_peer = true;
-    client_tls_options.min_version = 0x0304;
-    client_tls_options.max_version = 0x0304;
-    client_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsContext client_tls(std::move(client_tls_options), false);
-    ASSERT_TRUE(client_tls.init());
+    auto server_context = create_tls_context(cert.path(), key.path());
+    ASSERT_TRUE(server_context);
+    auto server_tls = make_quic_server_tls(server_context->get());
+    auto client_context = create_tls_context({}, {}, cert.path());
+    ASSERT_TRUE(client_context);
+    auto client_tls = make_quic_client_tls(client_context->get());
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -875,7 +848,7 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshakeAfterRetry) {
     fiber::quic::QuicUdpEndpoint server_endpoint;
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    server_options.tls_context = &server_tls;
+    server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
     server_options.retry = true;
     ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
@@ -914,23 +887,12 @@ TEST(QuicClientTest, ReusesSessionAndNewTokenWithEarlyData) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    fiber::net::TlsOptions server_tls_options{};
-    server_tls_options.cert_file = cert.path();
-    server_tls_options.key_file = key.path();
-    server_tls_options.min_version = 0x0304;
-    server_tls_options.max_version = 0x0304;
-    server_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsServerContext server_tls(std::move(server_tls_options));
-    ASSERT_TRUE(server_tls.init());
-
-    fiber::net::TlsOptions client_tls_options{};
-    client_tls_options.ca_file = cert.path();
-    client_tls_options.verify_peer = true;
-    client_tls_options.min_version = 0x0304;
-    client_tls_options.max_version = 0x0304;
-    client_tls_options.alpn = {"fiber-quic-test"};
-    fiber::net::TlsContext client_tls(std::move(client_tls_options), false);
-    ASSERT_TRUE(client_tls.init());
+    auto server_context = create_tls_context(cert.path(), key.path());
+    ASSERT_TRUE(server_context);
+    auto server_tls = make_quic_server_tls(server_context->get());
+    auto client_context = create_tls_context({}, {}, cert.path());
+    ASSERT_TRUE(client_context);
+    auto client_tls = make_quic_client_tls(client_context->get());
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -938,7 +900,7 @@ TEST(QuicClientTest, ReusesSessionAndNewTokenWithEarlyData) {
     fiber::quic::QuicUdpEndpoint server_endpoint;
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    server_options.tls_context = &server_tls;
+    server_options.tls = &server_tls;
     server_options.create_connection = create_server_connection;
     server_options.issue_new_token = true;
     server_options.enable_early_data = true;

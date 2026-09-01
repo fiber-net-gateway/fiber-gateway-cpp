@@ -9,16 +9,14 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "../net/TlsConnectionOptions.h"
 
 struct ssl_st;
 typedef struct ssl_st SSL;
 struct ssl_session_st;
 typedef struct ssl_session_st SSL_SESSION;
 
-namespace fiber::net {
-class TlsContext;
-class TlsServerContext;
-} // namespace fiber::net
+namespace fiber::net {} // namespace fiber::net
 
 namespace fiber::quic {
 
@@ -30,12 +28,11 @@ public:
     QuicTlsSession() noexcept = default;
     ~QuicTlsSession();
 
-    [[nodiscard]] common::IoResult<void> init_server(net::TlsServerContext &context,
+    [[nodiscard]] common::IoResult<void> init_server(const net::TlsServerConnectionOptions &options,
                                                      QuicConnection &connection) noexcept;
-    [[nodiscard]] common::IoResult<void> init_client(net::TlsContext &context, QuicConnection &connection,
-                                                     const char *server_name, bool allow_insecure,
-                                                     SSL_SESSION *session = nullptr) noexcept;
-    [[nodiscard]] static common::IoResult<void> install_client_session_callback(net::TlsContext &context) noexcept;
+    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientConnectionOptions &options,
+                                                     QuicConnection &connection, const char *server_name,
+                                                     bool allow_insecure, SSL_SESSION *session = nullptr) noexcept;
     [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicEncryptionLevel level, const std::uint8_t *data,
                                                              std::size_t len) noexcept;
     [[nodiscard]] common::IoResult<void> drive_handshake() noexcept;
@@ -64,6 +61,7 @@ private:
     std::optional<std::uint8_t> last_alert_;
     bool client_mode_ = false;
     bool verify_peer_ = false;
+    net::TlsNewSessionOps new_session_ops_{};
 };
 
 } // namespace fiber::quic

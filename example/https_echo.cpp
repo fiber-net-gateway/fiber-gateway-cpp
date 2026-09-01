@@ -305,14 +305,14 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
 
     auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*infant_result));
 
-    fiber::net::TlsOptions tls_options{};
-    tls_options.alpn = {"http/1.1"};
-    fiber::net::TlsContext client_ctx(tls_options, false);
-    auto ctx_result = client_ctx.init();
-    if (!ctx_result) {
-        co_await fail("tls context init failed", ctx_result.error());
+    auto client_ctx = fiber::net::TlsContext::create({});
+    if (!client_ctx) {
+        co_await fail("tls context init failed", client_ctx.error());
         co_return;
     }
+    fiber::net::TlsClientConnectionOptions tls_options{};
+    tls_options.context = client_ctx->get();
+    tls_options.alpn = {"http/1.1"};
 
     int fd = stream->release_fd();
     if (fd < 0) {
@@ -320,7 +320,7 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
         co_return;
     }
     fiber::net::AcceptResult accept(fd, stream->remote_addr());
-    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), client_ctx);
+    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), tls_options);
     if (!transport_result) {
         co_await fail("tls transport create failed", transport_result.error());
         co_return;
@@ -400,10 +400,17 @@ int main(int argc, char **argv) {
 
     fiber::event::EventLoop loop;
 
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert_file.path);
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key_file.path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    if (!tls_context) {
+        std::cerr << "TLS context initialization failed: " << fiber::common::io_err_name(tls_context.error()) << '\n';
+        return 1;
+    }
+
     fiber::http::HttpServerOptions server_options{};
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert_file.path;
-    server_options.tls.key_file = key_file.path;
+    server_options.tls.default_context = tls_context->get();
     server_options.http3.enabled = true;
 
     ServerContext context;

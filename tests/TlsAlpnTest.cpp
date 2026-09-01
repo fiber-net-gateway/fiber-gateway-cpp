@@ -8,7 +8,7 @@
 namespace {
 
 TEST(TlsAlpnTest, NormalizeHttp1AlpnPrefersHttp11AndDropsH2) {
-    fiber::net::TlsOptions options;
+    fiber::net::TlsClientConnectionOptions options;
     options.alpn = {"h2", "", "acme/1", "http/1.1", "custom"};
 
     fiber::http::normalize_http1_alpn(options);
@@ -18,7 +18,7 @@ TEST(TlsAlpnTest, NormalizeHttp1AlpnPrefersHttp11AndDropsH2) {
 }
 
 TEST(TlsAlpnTest, NormalizeHttp1AlpnAddsHttp11WhenMissing) {
-    fiber::net::TlsOptions options;
+    fiber::net::TlsClientConnectionOptions options;
     options.alpn.clear();
 
     fiber::http::normalize_http1_alpn(options);
@@ -28,7 +28,7 @@ TEST(TlsAlpnTest, NormalizeHttp1AlpnAddsHttp11WhenMissing) {
 }
 
 TEST(TlsAlpnTest, NormalizeHttpServerAlpnPrefersH2ThenHttp11) {
-    fiber::net::TlsOptions options;
+    fiber::net::TlsServerConnectionOptions options;
     options.alpn = {"custom", "http/1.1", "h2", "", "custom"};
 
     fiber::http::normalize_http_server_alpn(options);
@@ -38,7 +38,7 @@ TEST(TlsAlpnTest, NormalizeHttpServerAlpnPrefersH2ThenHttp11) {
 }
 
 TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
-    fiber::net::TlsOptions options;
+    fiber::net::TlsServerConnectionOptions options;
     options.alpn = {"acme/1"};
 
     fiber::http::normalize_http_server_alpn(options);
@@ -48,7 +48,7 @@ TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
 }
 
 TEST(TlsAlpnTest, NormalizeHttp3AlpnPrefersH3AndDropsTcpProtocols) {
-    fiber::net::TlsOptions options;
+    fiber::net::TlsClientConnectionOptions options;
     options.alpn = {"http/1.1", "h3", "custom", "h2", "", "custom"};
 
     fiber::http::normalize_http3_alpn(options);

@@ -27,6 +27,7 @@
 #include <fiber/http/HttpServer.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
+#include <fiber/net/TlsContext.h>
 #include "helloworld.pb.h"
 #include "rpc/grpc/GrpcClient.h"
 
@@ -59,6 +60,13 @@ struct TlsCert {
     TlsCert(const TlsCert &) = delete;
     TlsCert &operator=(const TlsCert &) = delete;
 };
+
+fiber::common::IoResult<std::unique_ptr<fiber::net::TlsContext>> create_server_tls_context(const TlsCert &cert) {
+    fiber::net::TlsOptions material{};
+    material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.cert_path);
+    material.private_key = fiber::net::TlsPemSource::from_file(cert.key_path);
+    return fiber::net::TlsContext::create(material);
+}
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     sockaddr_storage bound{};
@@ -309,10 +317,16 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
                         std::string_view method, const helloworld::HelloRequest &request,
                         std::shared_ptr<std::promise<ClientResult>> promise) {
     ClientResult result;
+    auto tls_context = fiber::net::TlsContext::create({});
+    if (!tls_context) {
+        result.err = tls_context.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
     fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enabled = true;
-    options.tls.server_name = "localhost";
+    options.tls.context = tls_context->get();
+    options.tls.sni_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
 
@@ -349,10 +363,16 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
                                   const helloworld::HelloRequest &request,
                                   std::shared_ptr<std::promise<TwoCallResult>> promise) {
     TwoCallResult result;
+    auto tls_context = fiber::net::TlsContext::create({});
+    if (!tls_context) {
+        result.err = tls_context.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
     fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enabled = true;
-    options.tls.server_name = "localhost";
+    options.tls.context = tls_context->get();
+    options.tls.sni_name = "localhost";
     // The second call exercises repeated request encoding on the same HTTP/2
     // connection without relying on HPACK dynamic-table state.
     options.authority = "localhost";
@@ -403,10 +423,16 @@ struct LifecycleResult {
 DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t port,
                                   std::shared_ptr<std::promise<LifecycleResult>> promise) {
     LifecycleResult result;
+    auto tls_context = fiber::net::TlsContext::create({});
+    if (!tls_context) {
+        result.err = tls_context.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
     fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enabled = true;
-    options.tls.server_name = "localhost";
+    options.tls.context = tls_context->get();
+    options.tls.sni_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
 
@@ -445,10 +471,10 @@ TEST(GrpcClientTest, StreamUnaryRoundTrip) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
+    auto tls_context = create_server_tls_context(cert);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.cert_path;
-    server_options.tls.key_file = cert.key_path;
+    server_options.tls.default_context = tls_context->get();
     server_options.tls.alpn = {"h2"};
 
     std::promise<std::uint16_t> port_promise;
@@ -500,10 +526,10 @@ TEST(GrpcClientTest, StreamUnaryReturnsGrpcError) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
+    auto tls_context = create_server_tls_context(cert);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.cert_path;
-    server_options.tls.key_file = cert.key_path;
+    server_options.tls.default_context = tls_context->get();
     server_options.tls.alpn = {"h2"};
 
     std::promise<std::uint16_t> port_promise;
@@ -552,10 +578,10 @@ TEST(GrpcClientTest, RepeatedUnaryCallsWorkWithoutHpackDynamicTable) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
+    auto tls_context = create_server_tls_context(cert);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.cert_path;
-    server_options.tls.key_file = cert.key_path;
+    server_options.tls.default_context = tls_context->get();
     server_options.tls.alpn = {"h2"};
 
     std::promise<std::uint16_t> port_promise;
@@ -610,10 +636,10 @@ TEST(GrpcClientTest, ImmediateShutdownReleasesAllConnectionCloseWaiters) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
+    auto tls_context = create_server_tls_context(cert);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.cert_path;
-    server_options.tls.key_file = cert.key_path;
+    server_options.tls.default_context = tls_context->get();
     server_options.tls.alpn = {"h2"};
 
     std::promise<std::uint16_t> port_promise;

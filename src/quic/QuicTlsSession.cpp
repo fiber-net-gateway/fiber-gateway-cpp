@@ -20,17 +20,9 @@ namespace fiber::quic {
 
 namespace {
 
-int quic_client_connection_ex_index() noexcept {
-    static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
-    return index;
-}
-
-int on_new_client_session(SSL *ssl, SSL_SESSION *session) noexcept {
-    if (ssl == nullptr || session == nullptr) {
-        return 0;
-    }
-    auto *connection = static_cast<QuicConnection *>(SSL_get_ex_data(ssl, quic_client_connection_ex_index()));
-    return connection != nullptr && connection->on_new_tls_session(session) ? 1 : 0;
+bool store_new_client_session(void *ctx, SSL_SESSION *session) noexcept {
+    auto *connection = static_cast<QuicConnection *>(ctx);
+    return connection != nullptr && session != nullptr && connection->on_new_tls_session(session);
 }
 
 [[nodiscard]] common::IoResult<QuicEncryptionLevel> quic_level_from_ssl(enum ssl_encryption_level_t level) noexcept {
@@ -289,35 +281,24 @@ QuicTlsSession::~QuicTlsSession() {
     }
 }
 
-common::IoResult<void> QuicTlsSession::init_server(net::TlsServerContext &context,
+common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerConnectionOptions &options,
                                                    QuicConnection &connection) noexcept {
     if (ssl_ != nullptr) {
         return std::unexpected(common::IoErr::Already);
     }
 
-    SSL_CTX *ctx = context.raw();
-    if (ctx == nullptr) {
-        return std::unexpected(common::IoErr::Invalid);
+    auto created_ssl = net::TlsContext::create_server_ssl(options, &connection.local_addr(), &connection.remote_addr(),
+                                                          net::TlsTransportKind::Quic);
+    if (!created_ssl) {
+        return std::unexpected(created_ssl.error());
     }
-
-    SSL *ssl = SSL_new(ctx);
-    if (ssl == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
+    SSL *ssl = *created_ssl;
 
     if (SSL_set_quic_method(ssl, &kQuicTlsMethod) != 1) {
         SSL_free(ssl);
         return std::unexpected(common::IoErr::Invalid);
     }
     SSL_set_app_data(ssl, &connection);
-    SSL_set_accept_state(ssl);
-
-    auto bound = context.bind_quic_ssl(ssl, &connection.local_addr(), &connection.remote_addr());
-    if (!bound) {
-        SSL_free(ssl);
-        return std::unexpected(bound.error());
-    }
-
     std::array<std::uint8_t, 512> transport_params{};
     auto transport_params_wire =
             create_server_transport_params(connection, transport_params.data(), transport_params.size());
@@ -345,22 +326,13 @@ common::IoResult<void> QuicTlsSession::init_server(net::TlsServerContext &contex
     return {};
 }
 
-common::IoResult<void> QuicTlsSession::install_client_session_callback(net::TlsContext &context) noexcept {
-    if (context.is_server() || context.raw() == nullptr || quic_client_connection_ex_index() < 0) {
+common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientConnectionOptions &base_options,
+                                                   QuicConnection &connection, const char *server_name,
+                                                   bool allow_insecure, SSL_SESSION *session) noexcept {
+    if (ssl_ != nullptr || !base_options.enabled() || base_options.alpn.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    SSL_CTX_set_session_cache_mode(context.raw(), SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
-    SSL_CTX_sess_set_new_cb(context.raw(), on_new_client_session);
-    return {};
-}
-
-common::IoResult<void> QuicTlsSession::init_client(net::TlsContext &context, QuicConnection &connection,
-                                                   const char *server_name, bool allow_insecure,
-                                                   SSL_SESSION *session) noexcept {
-    if (ssl_ != nullptr || context.is_server() || context.raw() == nullptr || context.alpn().empty()) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    const bool verify_peer = context.options().verify_peer;
+    const bool verify_peer = base_options.verify_peer;
     if (!verify_peer && !allow_insecure) {
         return std::unexpected(common::IoErr::Permission);
     }
@@ -368,41 +340,29 @@ common::IoResult<void> QuicTlsSession::init_client(net::TlsContext &context, Qui
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    SSL *ssl = SSL_new(context.raw());
-    if (ssl == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
+    net::TlsClientConnectionOptions options = base_options;
+    if (server_name != nullptr && server_name[0] != '\0') {
+        options.sni_name = server_name;
+        if (options.verify_name.empty()) {
+            options.verify_name = server_name;
+        }
     }
+    options.enable_early_data = connection.early_data_enabled();
+    new_session_ops_ = {.ctx = &connection, .store = &store_new_client_session};
+    options.new_session_ops = &new_session_ops_;
+    auto created_ssl = options.context->create_client_ssl(options);
+    if (!created_ssl) {
+        return std::unexpected(created_ssl.error());
+    }
+    SSL *ssl = *created_ssl;
     if (SSL_set_quic_method(ssl, &kQuicTlsMethod) != 1) {
         SSL_free(ssl);
         return std::unexpected(common::IoErr::Invalid);
     }
     SSL_set_app_data(ssl, &connection);
-    if (SSL_set_ex_data(ssl, quic_client_connection_ex_index(), &connection) != 1 ||
-        (session != nullptr && SSL_set_session(ssl, session) != 1)) {
+    if (session != nullptr && SSL_set_session(ssl, session) != 1) {
         SSL_free(ssl);
         return std::unexpected(common::IoErr::Invalid);
-    }
-    SSL_set_connect_state(ssl);
-    if (connection.early_data_enabled()) {
-        SSL_set_early_data_enabled(ssl, 1);
-    }
-
-    if (server_name != nullptr && server_name[0] != '\0') {
-        net::IpAddress address{};
-        if (net::IpAddress::parse(server_name, address)) {
-            X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
-            if (verify_peer &&
-                (param == nullptr || X509_VERIFY_PARAM_set1_ip(param, address.data(), address.byte_size()) != 1)) {
-                SSL_free(ssl);
-                return std::unexpected(common::IoErr::Invalid);
-            }
-        } else {
-            if (SSL_set_tlsext_host_name(ssl, server_name) != 1 ||
-                (verify_peer && SSL_set1_host(ssl, server_name) != 1)) {
-                SSL_free(ssl);
-                return std::unexpected(common::IoErr::Invalid);
-            }
-        }
     }
 
     std::array<std::uint8_t, 512> transport_params{};

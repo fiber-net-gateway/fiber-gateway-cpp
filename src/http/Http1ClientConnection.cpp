@@ -127,14 +127,14 @@ void Http1ClientConnection::IoAwaiter::on_cancel_resume(IoAwaiter *awaiter) noex
 }
 
 Http1ClientConnectionOptions Http1ClientConnection::normalize_options(Http1ClientConnectionOptions options) noexcept {
-    if (options.tls.enabled) {
+    if (options.tls.enabled()) {
         normalize_http1_alpn(options.tls);
     }
     return options;
 }
 
 Http1ClientConnection::Http1ClientConnection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept :
-    loop_(&loop), options_(normalize_options(std::move(options))), tls_ctx_(options_.tls, false, false) {}
+    loop_(&loop), options_(normalize_options(std::move(options))) {}
 
 Http1ClientConnection::~Http1ClientConnection() {
     FIBER_ASSERT(loop_ != nullptr);
@@ -162,13 +162,6 @@ common::IoErr Http1ClientConnection::begin_connect() noexcept {
     }
     state_ = State::Connecting;
 
-    if (options_.tls.enabled) {
-        auto init_result = tls_ctx_.init();
-        if (!init_result) {
-            state_ = State::Init;
-            return init_result.error();
-        }
-    }
     return common::IoErr::None;
 }
 
@@ -213,14 +206,14 @@ Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresse
 
     net::AcceptResult accept(infant->release_fd(), infant->take_peer());
     std::unique_ptr<HttpTransport> transport;
-    if (options_.tls.enabled) {
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_ctx_, options_.tcp);
+    if (options_.tls.enabled()) {
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), options_.tls, options_.tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
         transport = std::move(*transport_result);
 
-        auto handshake_result = co_await transport->handshake(tls_ctx_.options().handshake_timeout);
+        auto handshake_result = co_await transport->handshake(options_.tls.handshake_timeout);
         if (!handshake_result) {
             transport->close();
             co_return std::unexpected(handshake_result.error());

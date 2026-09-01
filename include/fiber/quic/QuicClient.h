@@ -20,7 +20,8 @@ typedef struct ssl_session_st SSL_SESSION;
 
 namespace fiber::net {
 class TlsContext;
-}
+struct TlsClientConnectionOptions;
+} // namespace fiber::net
 
 namespace fiber::quic {
 
@@ -133,7 +134,8 @@ public:
     // it must outlive every connection started through it.
     ~QuicClient() = default;
 
-    [[nodiscard]] common::IoResult<void> init(QuicUdpEndpoint &endpoint, net::TlsContext &tls_context,
+    [[nodiscard]] common::IoResult<void> init(QuicUdpEndpoint &endpoint,
+                                              const net::TlsClientConnectionOptions &tls_options,
                                               const Options &options) noexcept;
     [[nodiscard]] std::expected<QuicClientAttempt, QuicConnectError>
     start_connect(const QuicClientConnectOptions &options) noexcept;
@@ -148,7 +150,7 @@ private:
                                                const net::SocketAddress &remote_addr) const noexcept;
 
     QuicUdpEndpoint *endpoint_ = nullptr;
-    net::TlsContext *tls_context_ = nullptr;
+    const net::TlsClientConnectionOptions *tls_options_ = nullptr;
     Options options_{};
 };
 

@@ -168,22 +168,19 @@ TlsStreamFd::~TlsStreamFd() {
     FIBER_ASSERT(false);
 }
 
-common::IoResult<void> TlsStreamFd::init(SSL_CTX *ctx, bool is_server, ConfigureSslFn configure_ssl,
-                                         void *configure_ssl_ctx) {
-    if (!ctx) {
+common::IoResult<void> TlsStreamFd::init(SSL *ssl) {
+    if (!ssl) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (!stream_fd_.valid()) {
+        SSL_free(ssl);
         return std::unexpected(common::IoErr::BadFd);
     }
     if (ssl_) {
         SSL_free(ssl_);
         ssl_ = nullptr;
     }
-    ssl_ = SSL_new(ctx);
-    if (!ssl_) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
+    ssl_ = ssl;
     // Install a custom fd BIO (instead of SSL_set_fd's built-in socket BIO) so
     // TLS writes use ::send(MSG_NOSIGNAL) and never raise SIGPIPE on a closed
     // peer. The BIO does not own the fd (BIO_NOCLOSE); stream_fd_ does.
@@ -196,14 +193,6 @@ common::IoResult<void> TlsStreamFd::init(SSL_CTX *ctx, bool is_server, Configure
     }
     BIO_set_fd(bio, stream_fd_.fd(), BIO_NOCLOSE);
     SSL_set_bio(ssl_, bio, bio);
-    if (is_server) {
-        SSL_set_accept_state(ssl_);
-    } else {
-        SSL_set_connect_state(ssl_);
-    }
-    if (configure_ssl) {
-        configure_ssl(ssl_, configure_ssl_ctx);
-    }
     handshake_done_ = false;
     return {};
 }

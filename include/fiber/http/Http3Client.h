@@ -36,13 +36,12 @@ using Http3ClientConnectResult = std::expected<Http3ClientConnection, Http3Clien
 class Http3Client : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
-        net::TlsOptions tls{};
+        net::TlsClientConnectionOptions tls{.verify_peer = true};
         quic::QuicClientCacheOps cache{};
         Http3Settings local_settings{};
         std::chrono::milliseconds drain_timeout = std::chrono::seconds(3);
         std::uint32_t max_qpack_string_size = 64 * 1024;
         std::size_t max_field_section_size = 128 * 1024;
-        bool verify_peer = true;
     };
 
     Http3Client(quic::QuicUdpEndpoint &endpoint, Options options) noexcept;
@@ -53,13 +52,13 @@ public:
     [[nodiscard]] common::IoResult<void> init() noexcept;
     [[nodiscard]] async::Task<Http3ClientConnectResult> connect(quic::QuicClientConnectOptions options) noexcept;
 
-    [[nodiscard]] net::TlsContext &tls_context() noexcept { return tls_context_; }
-    [[nodiscard]] const net::TlsContext &tls_context() const noexcept { return tls_context_; }
+    [[nodiscard]] const net::TlsContext *tls_context() const noexcept { return options_.tls.context; }
 
 private:
     class Session;
 
-    [[nodiscard]] static net::TlsOptions normalize_tls_options(net::TlsOptions options, bool verify_peer) noexcept;
+    [[nodiscard]] static net::TlsClientConnectionOptions
+    normalize_tls_options(net::TlsClientConnectionOptions options) noexcept;
     [[nodiscard]] static quic::QuicConnection::Lease
     create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept;
@@ -69,7 +68,6 @@ private:
 
     quic::QuicUdpEndpoint *endpoint_ = nullptr;
     Options options_{};
-    net::TlsContext tls_context_;
     quic::QuicClient quic_client_{};
     Session *last_created_session_ = nullptr;
     bool initialized_ = false;

@@ -19,7 +19,7 @@
 #include "../event/EventLoop.h"
 #include "../net/SocketAddress.h"
 #include "../net/TcpSocketOptions.h"
-#include "../net/TlsOptions.h"
+#include "../net/TlsConnectionOptions.h"
 #include "../net/UdpSocket.h"
 #include "../quic/QuicConnection.h"
 #include "../quic/QuicSendScheduler.h"
@@ -58,7 +58,7 @@ struct HttpServerOptions {
     std::size_t header_large_num = 4;
     bool drain_unread_body = false;
     bool enable_extended_connect = false;
-    net::TlsOptions tls{};
+    net::TlsServerConnectionOptions tls{};
     Http3Options http3{};
 };
 

@@ -62,9 +62,7 @@ private:
     bool cleanup_started_ = false;
 };
 
-net::TlsOptions Http3Client::normalize_tls_options(net::TlsOptions options, bool verify_peer) noexcept {
-    options.enabled = true;
-    options.verify_peer = verify_peer;
+net::TlsClientConnectionOptions Http3Client::normalize_tls_options(net::TlsClientConnectionOptions options) noexcept {
     options.min_version = 0x0304;
     options.max_version = 0x0304;
     normalize_http3_alpn(options);
@@ -72,23 +70,23 @@ net::TlsOptions Http3Client::normalize_tls_options(net::TlsOptions options, bool
 }
 
 Http3Client::Http3Client(quic::QuicUdpEndpoint &endpoint, Options options) noexcept :
-    endpoint_(&endpoint), options_(std::move(options)),
-    tls_context_(normalize_tls_options(options_.tls, options_.verify_peer), false) {}
+    endpoint_(&endpoint), options_(std::move(options)) {
+    options_.tls = normalize_tls_options(std::move(options_.tls));
+}
 
 common::IoResult<void> Http3Client::init() noexcept {
     if (initialized_ || endpoint_ == nullptr || !endpoint_->valid()) {
         return std::unexpected(initialized_ ? common::IoErr::Already : common::IoErr::Invalid);
     }
-    auto tls_initialized = tls_context_.init();
-    if (!tls_initialized) {
-        return std::unexpected(tls_initialized.error());
+    if (!options_.tls.enabled()) {
+        return std::unexpected(common::IoErr::Invalid);
     }
 
     quic::QuicClient::Options client_options{};
     client_options.connection_owner = this;
     client_options.create_connection = &Http3Client::create_connection_op;
     client_options.cache = options_.cache;
-    auto client_initialized = quic_client_.init(*endpoint_, tls_context_, client_options);
+    auto client_initialized = quic_client_.init(*endpoint_, options_.tls, client_options);
     if (!client_initialized) {
         return std::unexpected(client_initialized.error());
     }

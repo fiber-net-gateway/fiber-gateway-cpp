@@ -131,10 +131,10 @@ class TlsTransport final : public HttpTransport {
 public:
     ~TlsTransport() override;
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  net::TlsContext &context,
+                                                                  const net::TlsClientConnectionOptions &options,
                                                                   net::TcpSocketOptions tcp_options = {});
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  net::TlsServerContext &context,
+                                                                  const net::TlsServerConnectionOptions &options,
                                                                   net::TcpSocketOptions tcp_options = {});
 
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
@@ -174,10 +174,11 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
 private:
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, net::TlsContext &context);
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, net::TlsServerContext &context);
+    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
+                 const net::TlsClientConnectionOptions &options);
+    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
+                 const net::TlsServerConnectionOptions &options);
     common::IoResult<void> init();
-    static void configure_ssl(SSL *ssl, void *ctx) noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
     void clear_pending_write() noexcept;
 
@@ -188,8 +189,8 @@ private:
     };
 
     net::TlsTcpStream stream_;
-    net::TlsContext *context_ = nullptr;
-    net::TlsServerContext *server_context_ = nullptr;
+    const net::TlsClientConnectionOptions *client_options_ = nullptr;
+    const net::TlsServerConnectionOptions *server_options_ = nullptr;
     std::unique_ptr<std::uint8_t[]> writev_scratch_;
     PendingWriteKind pending_write_kind_ = PendingWriteKind::None;
     const void *pending_write_data_ = nullptr;

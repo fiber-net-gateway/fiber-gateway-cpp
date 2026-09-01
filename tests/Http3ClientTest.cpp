@@ -136,9 +136,17 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
                                       const fiber::net::SocketAddress *server_addr, const std::string *cert_path,
                                       std::promise<ClientObservation> *promise) {
     ClientObservation observation{};
+    fiber::net::TlsOptions tls_material{};
+    tls_material.trust_store = fiber::net::TlsTrustStoreSource::from_file(*cert_path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    if (!tls_context) {
+        observation.error = tls_context.error();
+        promise->set_value(std::move(observation));
+        co_return;
+    }
     fiber::http::Http3Client::Options client_options{};
-    client_options.tls.ca_file = *cert_path;
-    client_options.verify_peer = true;
+    client_options.tls.context = tls_context->get();
+    client_options.tls.verify_peer = true;
     fiber::http::Http3Client client(*endpoint, std::move(client_options));
 
     auto endpoint_started = endpoint->start();
@@ -274,8 +282,15 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
                                             const fiber::net::SocketAddress *server_addr,
                                             std::promise<ClientObservation> *promise) {
     ClientObservation observation{};
+    auto tls_context = fiber::net::TlsContext::create({});
+    if (!tls_context) {
+        observation.error = tls_context.error();
+        promise->set_value(std::move(observation));
+        co_return;
+    }
     fiber::http::Http3Client::Options client_options{};
-    client_options.verify_peer = false;
+    client_options.tls.context = tls_context->get();
+    client_options.tls.verify_peer = false;
     fiber::http::Http3Client client(*endpoint, std::move(client_options));
 
     auto endpoint_started = endpoint->start();
@@ -348,9 +363,17 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
                                               const std::string *cert_path,
                                               std::promise<PartialClientObservation> *promise) {
     PartialClientObservation observation{};
+    fiber::net::TlsOptions tls_material{};
+    tls_material.trust_store = fiber::net::TlsTrustStoreSource::from_file(*cert_path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    if (!tls_context) {
+        observation.error = tls_context.error();
+        promise->set_value(std::move(observation));
+        co_return;
+    }
     fiber::http::Http3Client::Options client_options{};
-    client_options.tls.ca_file = *cert_path;
-    client_options.verify_peer = true;
+    client_options.tls.context = tls_context->get();
+    client_options.tls.verify_peer = true;
     fiber::http::Http3Client client(*endpoint, std::move(client_options));
 
     auto endpoint_started = endpoint->start();
@@ -457,10 +480,13 @@ TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
 
     auto server_promise = std::make_shared<std::promise<ServerObservation>>();
     auto server_future = server_promise->get_future();
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path());
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path());
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options{};
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.path();
-    server_options.tls.key_file = key.path();
+    server_options.tls.default_context = tls_context->get();
     server_options.http3.enabled = true;
     fiber::http::HttpHandler handler = [server_promise](fiber::http::HttpExchange &exchange) {
         return echo_handler(exchange, server_promise);
@@ -527,10 +553,13 @@ TEST(Http3ClientTest, PartialWriteContinuesDataFrameWithoutRepeatingHeader) {
 
     auto server_promise = std::make_shared<std::promise<ServerObservation>>();
     auto server_future = server_promise->get_future();
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path());
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path());
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options{};
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.path();
-    server_options.tls.key_file = key.path();
+    server_options.tls.default_context = tls_context->get();
     server_options.http3.enabled = true;
     server_options.http3.recv_flow.stream_buffer_limit = 128;
     server_options.http3.recv_flow.stream_low_water = 64;

@@ -468,7 +468,7 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Endpo
     options.retained_storage_limit = endpoint_options.retained_storage_limit;
     options.stateless_reset_secret_set = endpoint_options.stateless_reset_secret_set;
     options.stateless_reset_secret = endpoint_options.stateless_reset_secret;
-    options.tls_context = server_options.tls_context;
+    options.tls = server_options.tls;
     options.transport = server_options.transport;
     options.keepalive_interval = server_options.keepalive_interval;
     options.recv_flow = server_options.recv_flow;
@@ -498,9 +498,6 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
 
     options_ = options;
     server_admission_enabled_ = options_.create_connection != nullptr;
-    if (options_.tls_context != nullptr && options_.enable_early_data) {
-        options_.tls_context->set_early_data_enabled(true);
-    }
     recv_storage_budget_.init(options_.retained_storage_limit);
     if (options_.retry) {
         options_.issue_new_token = true;
@@ -1613,7 +1610,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
     conn_options.enable_early_data = options_.enable_early_data;
-    conn_options.tls_context = options_.tls_context;
+    conn_options.tls = options_.tls;
 
     QuicConnection::Lease lease = options_.create_connection(options_.connection_owner, conn_options);
     QuicConnection *connection = lease.get();

@@ -1,5 +1,6 @@
 #include "http/TlsAlpn.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -7,7 +8,8 @@ namespace fiber::http {
 
 namespace {
 
-std::vector<std::string> normalize_base(const net::TlsOptions &options) {
+template<typename Options>
+std::vector<std::string> normalize_base(const Options &options) {
     std::vector<std::string> normalized;
     normalized.reserve(options.alpn.size() + 2);
     for (const auto &proto: options.alpn) {
@@ -22,9 +24,8 @@ std::vector<std::string> normalize_base(const net::TlsOptions &options) {
     return normalized;
 }
 
-} // namespace
-
-void normalize_http1_alpn(net::TlsOptions &options) {
+template<typename Options>
+void normalize_http1_alpn_impl(Options &options) {
     std::vector<std::string> normalized = normalize_base(options);
     normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
     normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
@@ -32,7 +33,23 @@ void normalize_http1_alpn(net::TlsOptions &options) {
     options.alpn = std::move(normalized);
 }
 
-void normalize_http_server_alpn(net::TlsOptions &options) {
+template<typename Options>
+void normalize_http3_alpn_impl(Options &options) {
+    std::vector<std::string> normalized = normalize_base(options);
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h3"), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
+    normalized.insert(normalized.begin(), "h3");
+    options.alpn = std::move(normalized);
+}
+
+} // namespace
+
+void normalize_http1_alpn(net::TlsClientConnectionOptions &options) { normalize_http1_alpn_impl(options); }
+
+void normalize_http1_alpn(net::TlsServerConnectionOptions &options) { normalize_http1_alpn_impl(options); }
+
+void normalize_http_server_alpn(net::TlsServerConnectionOptions &options) {
     std::vector<std::string> normalized = normalize_base(options);
     normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
     normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
@@ -41,13 +58,8 @@ void normalize_http_server_alpn(net::TlsOptions &options) {
     options.alpn = std::move(normalized);
 }
 
-void normalize_http3_alpn(net::TlsOptions &options) {
-    std::vector<std::string> normalized = normalize_base(options);
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h3"), normalized.end());
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
-    normalized.insert(normalized.begin(), "h3");
-    options.alpn = std::move(normalized);
-}
+void normalize_http3_alpn(net::TlsClientConnectionOptions &options) { normalize_http3_alpn_impl(options); }
+
+void normalize_http3_alpn(net::TlsServerConnectionOptions &options) { normalize_http3_alpn_impl(options); }
 
 } // namespace fiber::http

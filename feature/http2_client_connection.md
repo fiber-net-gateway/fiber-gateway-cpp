@@ -59,8 +59,8 @@
 
 ## Transport Selection
 
-- If `tls.enabled == false`, `connect()` creates a `TcpTransport`.
-- If `tls.enabled == true`, `connect()` creates a `TlsTransport`, performs handshake, and verifies
+- If `tls.context == nullptr`, `connect()` creates a `TcpTransport`.
+- If `tls.context != nullptr`, `connect()` creates a `TlsTransport`, performs handshake, and verifies
   `negotiated_alpn() == "h2"`.
 
 ## Minimal Example
@@ -68,8 +68,8 @@
 ```cpp
 fiber::http::Http2ClientConnection::Options options;
 options.peer_addr = fiber::net::SocketAddress(peer_ip, 443);
-options.tls.enabled = true;
-options.tls.server_name = "example.com";
+options.tls.context = tls_context.get();
+options.tls.sni_name = "example.com";
 
 fiber::http::Http2ClientConnection conn(loop, std::move(options));
 

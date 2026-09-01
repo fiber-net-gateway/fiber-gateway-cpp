@@ -1,130 +1,67 @@
 #ifndef FIBER_NET_TLS_OPTIONS_H
 #define FIBER_NET_TLS_OPTIONS_H
 
-#include <chrono>
-#include <cstddef>
 #include <cstdint>
 #include <string>
-#include <string_view>
-#include <vector>
+#include <utility>
 
 namespace fiber::net {
 
-class SocketAddress;
-
-class TlsContext;
-class TlsServerContext;
-
-class TlsAlpnProtocolsView {
-public:
-    constexpr TlsAlpnProtocolsView() noexcept = default;
-    constexpr TlsAlpnProtocolsView(const std::uint8_t *data, std::size_t size) noexcept : data_(data), size_(size) {}
-
-    [[nodiscard]] constexpr const std::uint8_t *data() const noexcept { return data_; }
-    [[nodiscard]] constexpr std::size_t size() const noexcept { return size_; }
-    [[nodiscard]] bool empty() const noexcept { return protocol_list_size() == 0; }
-    [[nodiscard]] bool contains(std::string_view protocol) const noexcept;
-
-private:
-    [[nodiscard]] std::size_t protocol_list_size() const noexcept;
-
-    const std::uint8_t *data_ = nullptr;
-    std::size_t size_ = 0;
+enum class TlsPemSourceKind : std::uint8_t {
+    None,
+    File,
+    Content,
 };
 
-inline std::size_t TlsAlpnProtocolsView::protocol_list_size() const noexcept {
-    if (!data_ || size_ < 2) {
-        return 0;
+struct TlsPemSource {
+    TlsPemSourceKind kind = TlsPemSourceKind::None;
+    std::string value{};
+
+    [[nodiscard]] static TlsPemSource from_file(std::string path) {
+        return {.kind = TlsPemSourceKind::File, .value = std::move(path)};
     }
-    std::size_t encoded = (static_cast<std::size_t>(data_[0]) << 8U) | static_cast<std::size_t>(data_[1]);
-    if (encoded + 2 > size_) {
-        return 0;
+
+    [[nodiscard]] static TlsPemSource from_content(std::string pem) {
+        return {.kind = TlsPemSourceKind::Content, .value = std::move(pem)};
     }
-    return encoded;
-}
 
-inline bool TlsAlpnProtocolsView::contains(std::string_view protocol) const noexcept {
-    std::size_t remaining = protocol_list_size();
-    if (remaining == 0) {
-        return false;
+    [[nodiscard]] bool empty() const noexcept { return kind == TlsPemSourceKind::None; }
+};
+
+enum class TlsTrustStoreKind : std::uint8_t {
+    None,
+    System,
+    File,
+    Content,
+};
+
+struct TlsTrustStoreSource {
+    TlsTrustStoreKind kind = TlsTrustStoreKind::None;
+    std::string value{};
+
+    [[nodiscard]] static TlsTrustStoreSource system() noexcept { return {.kind = TlsTrustStoreKind::System}; }
+
+    [[nodiscard]] static TlsTrustStoreSource from_file(std::string path) {
+        return {.kind = TlsTrustStoreKind::File, .value = std::move(path)};
     }
-    const std::uint8_t *cur = data_ + 2;
-    while (remaining > 0) {
-        std::size_t len = cur[0];
-        if (len + 1 > remaining) {
-            return false;
-        }
-        if (len == protocol.size() &&
-            std::char_traits<char>::compare(reinterpret_cast<const char *>(cur + 1), protocol.data(),
-                                            static_cast<std::size_t>(len)) == 0) {
-            return true;
-        }
-        cur += len + 1;
-        remaining -= len + 1;
+
+    [[nodiscard]] static TlsTrustStoreSource from_content(std::string pem) {
+        return {.kind = TlsTrustStoreKind::Content, .value = std::move(pem)};
     }
-    return false;
-}
 
-enum class TlsTransportKind : std::uint8_t {
-    Tcp,
-    Quic,
+    [[nodiscard]] bool empty() const noexcept { return kind == TlsTrustStoreKind::None; }
 };
 
-struct TlsIdentitySelectInput {
-    std::string_view server_name{};
-    TlsAlpnProtocolsView alpn{};
-    std::string_view selected_alpn{};
-    const SocketAddress *remote_addr = nullptr;
-    const SocketAddress *local_addr = nullptr;
-    const TlsServerContext *server_context = nullptr;
-    TlsTransportKind transport = TlsTransportKind::Tcp;
-};
-
-using TlsClientHelloView = TlsIdentitySelectInput;
-
-struct TlsIdentitySelectorOps {
-    TlsContext *(*select)(void *ctx, const TlsIdentitySelectInput &input) noexcept = nullptr;
-    void *ctx = nullptr;
-};
-
-struct TlsIdentityOptions {
-    std::string name;
-    std::string cert_file;
-    std::string key_file;
-};
-
+// Configuration-time certificate material. TlsContext::create() consumes this
+// description synchronously and does not retain paths or PEM content.
 struct TlsOptions {
-    bool enabled = false;
     // PEM leaf certificate followed by optional intermediate certificates.
-    // This identity is loaded for both client and server contexts. cert_file
-    // and key_file must either both be empty or both be set.
-    std::string cert_file;
-    // PEM private key matching the leaf certificate in cert_file.
-    std::string key_file;
-    // Server trust roots when verify_client is enabled, or client trust roots
-    // when verify_peer is enabled. An empty client value uses system roots.
-    std::string ca_file;
-    // Server-only: require and verify a client certificate.
-    bool verify_client = false;
-    // Client contexts remain backward-compatible by default. Protocol clients
-    // which require authenticated peers (for example QuicClient) reject a
-    // context with this disabled unless the caller explicitly opts into an
-    // insecure connection.
-    bool verify_peer = false;
-    std::chrono::seconds handshake_timeout{10};
-    int min_version = 0x0303; // TLS 1.2
-    int max_version = 0x0304; // TLS 1.3
-    std::vector<std::string> alpn{"http/1.1"};
-    // SNI name sent to the peer. When verify_name is empty this is also the
-    // authenticated certificate name. Client identity selection is independent
-    // of this value.
-    std::string server_name;
-    // Optional certificate identity separate from SNI. This supports HTTPS
-    // connections to IP literals without emitting an IP-valued SNI extension.
-    std::string verify_name;
-    // Server-only named certificate identities and selection callback.
-    std::vector<TlsIdentityOptions> identities;
-    TlsIdentitySelectorOps identity_selector_ops{};
+    TlsPemSource certificate_chain{};
+    // PEM private key matching the leaf certificate.
+    TlsPemSource private_key{};
+    // Root certificates used to authenticate a peer. Whether authentication is
+    // enabled is a per-connection policy, not a property of this material.
+    TlsTrustStoreSource trust_store{};
 };
 
 } // namespace fiber::net

@@ -78,7 +78,6 @@ struct HttpServer::Runtime {
     HttpHandler handler;
     HttpServerOptions options;
     ServerRequestFactory http2_request_factory;
-    std::unique_ptr<net::TlsServerContext> tls_context{};
     std::unique_ptr<Http3Server> http3_server{};
     std::atomic<HttpServer::State> state{HttpServer::State::Created};
     std::atomic<bool> shutting_down_flag{false};
@@ -234,7 +233,7 @@ fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, c
     if (runtime->state.load(std::memory_order_acquire) != State::Created) {
         return std::unexpected(common::IoErr::Already);
     }
-    if (runtime->options.http3.enabled && !runtime->options.tls.enabled) {
+    if (runtime->options.http3.enabled && !runtime->options.tls.enabled()) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -251,36 +250,31 @@ fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, c
     }
     bound_addr = *local_addr;
 
-    if (runtime->options.tls.enabled) {
+    if (runtime->options.tls.enabled()) {
         normalize_http_server_alpn(runtime->options.tls);
-        auto ctx = std::make_unique<net::TlsServerContext>(runtime->options.tls);
-        auto init_result = ctx->init();
-        if (!init_result) {
-            runtime->tls_context.reset();
+        if (!runtime->options.tls.default_context->has_identity() ||
+            (runtime->options.tls.client_certificate_mode != net::TlsClientCertificateMode::None &&
+             !runtime->options.tls.default_context->has_trust_store())) {
             runtime->listener.close();
-            return std::unexpected(init_result.error());
+            return std::unexpected(common::IoErr::Invalid);
         }
-        runtime->tls_context = std::move(ctx);
     }
     if (runtime->options.http3.enabled) {
         runtime->http3_server = std::make_unique<Http3Server>(runtime->listener.loop(), runtime->handler,
                                                               runtime->options, runtime->worker_group);
         if (!runtime->http3_server) {
-            runtime->tls_context.reset();
             runtime->listener.close();
             return std::unexpected(common::IoErr::NoMem);
         }
         auto http3_bound = runtime->http3_server->bind(bound_addr);
         if (!http3_bound) {
             runtime->http3_server.reset();
-            runtime->tls_context.reset();
             runtime->listener.close();
             return std::unexpected(http3_bound.error());
         }
     }
     if (!runtime->mark_bound()) {
         runtime->http3_server.reset();
-        runtime->tls_context.reset();
         runtime->listener.close();
         return std::unexpected(common::IoErr::Canceled);
     }
@@ -365,11 +359,8 @@ fiber::async::DetachedTask HttpServer::handle_connection(std::shared_ptr<Runtime
     }
 
     std::unique_ptr<HttpTransport> transport;
-    if (runtime->options.tls.enabled) {
-        if (!runtime->tls_context) {
-            co_return;
-        }
-        auto tls_result = TlsTransport::create(event::EventLoop::current(), std::move(accept), *runtime->tls_context,
+    if (runtime->options.tls.enabled()) {
+        auto tls_result = TlsTransport::create(event::EventLoop::current(), std::move(accept), runtime->options.tls,
                                                runtime->options.tcp);
         if (!tls_result) {
             co_return;
@@ -396,7 +387,7 @@ fiber::async::DetachedTask HttpServer::handle_connection(std::shared_ptr<Runtime
         co_return;
     }
 
-    if (!runtime->options.tls.enabled) {
+    if (!runtime->options.tls.enabled()) {
         co_await serve_http1(runtime, std::move(transport));
         co_return;
     }

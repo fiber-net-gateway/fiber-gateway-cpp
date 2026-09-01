@@ -135,21 +135,11 @@ Http3Server::Http3Server(event::EventLoop &loop, HttpHandler handler, HttpServer
 Http3Server::~Http3Server() { close(); }
 
 common::IoResult<void> Http3Server::bind(const net::SocketAddress &addr) noexcept {
-    if (initialized_ || !options_.http3.enabled || !options_.tls.enabled) {
+    if (initialized_ || !options_.http3.enabled || !options_.tls.enabled()) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    net::TlsOptions tls_options = options_.tls;
-    normalize_http3_alpn(tls_options);
-    auto tls_ctx = std::make_unique<net::TlsServerContext>(std::move(tls_options));
-    if (!tls_ctx) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    auto tls_initialized = tls_ctx->init();
-    if (!tls_initialized) {
-        return std::unexpected(tls_initialized.error());
-    }
-    tls_ctx_ = std::move(tls_ctx);
+    normalize_http3_alpn(options_.tls);
 
     const std::size_t count = shard_count();
     shards_.reserve(count);
@@ -280,7 +270,7 @@ quic::QuicUdpEndpoint::EndpointOptions Http3Server::make_endpoint_options(const 
 
 quic::QuicUdpEndpoint::ServerAdmissionOptions Http3Server::make_server_admission_options() noexcept {
     quic::QuicUdpEndpoint::ServerAdmissionOptions options{};
-    options.tls_context = tls_ctx_.get();
+    options.tls = &options_.tls;
     options.transport = options_.http3.transport;
     options.transport.max_ack_delay = options_.http3.max_ack_delay;
     options.transport.ack_delay_exponent = options_.http3.ack_delay_exponent;
