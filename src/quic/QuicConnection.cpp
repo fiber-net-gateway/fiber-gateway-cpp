@@ -2699,10 +2699,10 @@ common::IoResult<void> QuicConnection::ensure_server_tls() noexcept {
     if (tls_.initialized()) {
         return {};
     }
-    if (options_.tls_context == nullptr) {
+    if (options_.tls == nullptr) {
         return {};
     }
-    return tls_.init_server(*options_.tls_context, *this);
+    return tls_.init_server(*options_.tls, *this);
 }
 
 common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTransportParams &params) noexcept {

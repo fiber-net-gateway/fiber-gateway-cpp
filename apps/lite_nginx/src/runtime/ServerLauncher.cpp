@@ -40,6 +40,17 @@
 #include "RequestBodyLimiter.h"
 
 namespace fiber::lite_nginx::runtime {
+
+struct ListenerTlsContexts {
+    struct Entry {
+        std::string name;
+        std::unique_ptr<fiber::net::TlsContext> context;
+    };
+
+    std::unique_ptr<fiber::net::TlsContext> default_context;
+    std::vector<Entry> identities;
+};
+
 namespace {
 
 constexpr std::string_view kNotFoundBody = "404 Not Found\n";
@@ -213,12 +224,44 @@ run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter 
     co_return;
 }
 
-fiber::net::TlsContext *select_identity_by_server_name(void *,
-                                                       const fiber::net::TlsClientHelloView &client_hello) noexcept {
-    if (!client_hello.server_context || client_hello.server_name.empty()) {
+const fiber::net::TlsContext *
+select_identity_by_server_name(void *ctx, const fiber::net::TlsClientHelloView &client_hello) noexcept {
+    auto *contexts = static_cast<const ListenerTlsContexts *>(ctx);
+    if (!contexts || client_hello.server_name.empty()) {
         return nullptr;
     }
-    return client_hello.server_context->find_identity_by_name(client_hello.server_name);
+    auto it = std::lower_bound(
+            contexts->identities.begin(), contexts->identities.end(), client_hello.server_name,
+            [](const ListenerTlsContexts::Entry &entry, std::string_view name) { return entry.name < name; });
+    return it != contexts->identities.end() && it->name == client_hello.server_name ? it->context.get() : nullptr;
+}
+
+std::expected<std::unique_ptr<ListenerTlsContexts>, RuntimeError> make_tls_contexts(const ListenerRuntime &listener) {
+    auto contexts = std::make_unique<ListenerTlsContexts>();
+    fiber::net::TlsOptions default_options{};
+    default_options.certificate_chain = fiber::net::TlsPemSource::from_file(listener.default_certificate);
+    default_options.private_key = fiber::net::TlsPemSource::from_file(listener.default_certificate_key);
+    auto default_context = fiber::net::TlsContext::create(default_options);
+    if (!default_context) {
+        return std::unexpected(make_error(listener.location, "failed to load default TLS identity"));
+    }
+    contexts->default_context = std::move(*default_context);
+    contexts->identities.reserve(listener.tls_identities.size());
+    for (const auto &identity: listener.tls_identities) {
+        fiber::net::TlsOptions options{};
+        options.certificate_chain = fiber::net::TlsPemSource::from_file(identity.certificate);
+        options.private_key = fiber::net::TlsPemSource::from_file(identity.certificate_key);
+        auto context = fiber::net::TlsContext::create(options);
+        if (!context) {
+            return std::unexpected(make_error(listener.location, "failed to load named TLS identity"));
+        }
+        contexts->identities.push_back({.name = identity.server_name, .context = std::move(*context)});
+    }
+    std::sort(contexts->identities.begin(), contexts->identities.end(),
+              [](const ListenerTlsContexts::Entry &left, const ListenerTlsContexts::Entry &right) {
+                  return left.name < right.name;
+              });
+    return contexts;
 }
 
 std::expected<fiber::net::SocketAddress, RuntimeError> make_socket_address(const ListenerRuntime &listener) {
@@ -247,7 +290,8 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
-fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listener) {
+fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listener,
+                                                   const ListenerTlsContexts *tls_contexts) {
     fiber::http::HttpServerOptions options;
     options.drain_unread_body = true;
     options.enable_extended_connect = true;
@@ -256,22 +300,10 @@ fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listen
         return options;
     }
 
-    options.tls.enabled = true;
-    options.tls.cert_file = listener.default_certificate;
-    options.tls.key_file = listener.default_certificate_key;
+    options.tls.default_context = tls_contexts ? tls_contexts->default_context.get() : nullptr;
     options.tls.alpn = {"h2", "http/1.1"};
-    options.tls.identity_selector_ops = {
-            .select = &select_identity_by_server_name,
-            .ctx = nullptr,
-    };
-    options.tls.identities.reserve(listener.tls_identities.size());
-    for (const auto &identity: listener.tls_identities) {
-        options.tls.identities.push_back({
-                .name = identity.server_name,
-                .cert_file = identity.certificate,
-                .key_file = identity.certificate_key,
-        });
-    }
+    options.tls.select_tls_ctx_callback = &select_identity_by_server_name;
+    options.tls.select_tls_ctx_ctx = const_cast<ListenerTlsContexts *>(tls_contexts);
     return options;
 }
 
@@ -469,6 +501,7 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
                                                           script_services_.get(), std::move(access_logger));
 
     servers_.reserve(runtime_->listeners.size());
+    tls_contexts_.reserve(runtime_->listeners.size());
     bound_listeners_.reserve(runtime_->listeners.size());
 
     for (std::uint32_t listener_index = 0; listener_index < runtime_->listeners.size(); ++listener_index) {
@@ -479,7 +512,16 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
             return std::unexpected(addr_result.error());
         }
 
-        auto options = make_server_options(listener);
+        std::unique_ptr<ListenerTlsContexts> tls_contexts;
+        if (listener.tls) {
+            auto created_contexts = make_tls_contexts(listener);
+            if (!created_contexts) {
+                close();
+                return std::unexpected(created_contexts.error());
+            }
+            tls_contexts = std::move(*created_contexts);
+        }
+        auto options = make_server_options(listener, tls_contexts.get());
         auto server = std::make_unique<fiber::http::HttpServer>(
                 accept_loop_,
                 [dispatcher, listener_index](fiber::http::HttpExchange &exchange) {
@@ -513,6 +555,7 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
         auto *server_ptr = server.get();
         fiber::async::spawn(accept_loop_, [server_ptr]() { return server_ptr->serve(); });
         servers_.push_back(std::move(server));
+        tls_contexts_.push_back(std::move(tls_contexts));
     }
 
     started_ = true;
@@ -558,6 +601,7 @@ void ServerLauncher::close() {
     }
 
     servers_.clear();
+    tls_contexts_.clear();
     bound_listeners_.clear();
     started_ = false;
 

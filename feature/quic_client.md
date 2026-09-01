@@ -214,7 +214,7 @@ public:
 
 - 已解析的远端 `SocketAddress`。
 - 可选本地绑定地址；允许 unspecified IP 交给内核选路。
-- `server_name`，用于 SNI 和证书名称校验。
+- `server_name`，写入 SNI，并在 `verify_name` 为空时作为证书校验名。
 - ALPN 列表；不能为空。
 - handshake timeout 和 idle timeout。
 - 本地 QUIC transport parameters、flow-control 和 stream limits。
@@ -279,7 +279,7 @@ reset-token secret 是角色无关配置：客户端后续通过 `NEW_CONNECTION
 仅服务端字段：
 
 - server connection factory 和 owner。
-- `TlsServerContext`。
+- 指向不可变 TLS context 配置的 `TlsServerConnectionOptions`。
 - Retry/token policy。
 - 服务端 transport parameters 和 flow-control defaults。
 - unknown Initial admission limits。
@@ -450,6 +450,7 @@ token 必须使用不同的状态/类型表达。
 - `include/fiber/quic/QuicTlsSession.h`
 - `src/quic/QuicTlsSession.cpp`
 - `include/fiber/net/TlsOptions.h`
+- `include/fiber/net/TlsConnectionOptions.h`
 - `include/fiber/net/TlsContext.h`
 - `src/net/TlsContext.cpp`
 
@@ -485,16 +486,17 @@ parameters。
 
 ### 8.3 证书与 ALPN 安全边界
 
-在 `TlsOptions` 增加 `verify_peer`：
+客户端证书验证由 `TlsClientConnectionOptions` 控制：
 
-- `verify_peer=true` 且配置 CA 文件时加载指定 trust store。
-- 未指定 CA 时加载系统默认 trust store。
+- `verify_peer=true` 时使用 `TlsContext` 中预加载的 trust store。
+- 系统默认 trust store 必须在创建 context 时显式选择。
 - client SSL 设置 peer verification。
 - DNS name 使用 hostname verification；IP literal 使用 IP SAN verification。
 
-为避免无意改变现有 TCP TLS 客户端的兼容行为，通用 `TlsOptions` 可以保持兼容默认值；
-但 `QuicClient` 默认拒绝使用未启用 peer verification 的 context。只有显式
-`allow_insecure=true` 才允许跳过校验，并在接口命名和文档中标明仅用于测试或受控环境。
+`TlsOptions` 只描述证书材料，不携带任何校验开关；是否校验 peer 完全由每次连接的
+`TlsClientConnectionOptions::verify_peer` 决定。`QuicClient` 在此之上默认拒绝
+`verify_peer=false` 的连接。只有显式 `allow_insecure=true` 才允许跳过校验，
+该选项仅用于测试或受控环境。
 
 ALPN 要求：
 
@@ -819,7 +821,7 @@ create connection
 | `src/quic/QuicTransportParamsCodec.h + src/quic/QuicTransportParamsCodec.cpp` | preferred address、角色约束、remembered TP snapshot |
 | `include/fiber/quic/QuicPath.h`, `QuicPathManager.*` | role-aware amplification、initial path reconcile、preferred validation |
 | `include/fiber/quic/QuicStream.h + src/quic/QuicStream.cpp` | early-data mode 和 rejection 所需 stream 标记 |
-| `include/fiber/net/TlsOptions.h`, `TlsContext.*` | peer verification、trust store、通用 client session trampoline |
+| `include/fiber/net/TlsOptions.h`, `TlsConnectionOptions.h`, `TlsContext.*` | trust store、每连接 peer verification、通用 client session trampoline |
 | `include/fiber/http/Http3Server.h + src/http/Http3Server.cpp` | 适配 endpoint/server admission options 拆分，不增加 H3 client |
 | `tests/*` | 单元、loopback、TLS、Retry、0-RTT、path 测试 |
 

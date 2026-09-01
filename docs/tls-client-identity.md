@@ -1,40 +1,44 @@
 # TLS 客户端证书身份
 
-`TlsOptions::cert_file` 和 `TlsOptions::key_file` 同时适用于客户端与服务端 `TlsContext`。客户端配置这两个字段后，会在握手时发送证书身份，可用于 mTLS。
+`TlsContext` 是一组不可变的证书身份与信任根，既可派生客户端连接，也可派生服务端连接。客户端使用带证书身份的 context 时，会在握手中发送证书链，可用于 mTLS。
 
 ## 文件和初始化语义
 
-- `cert_file` 使用 PEM 格式：第一个证书是 leaf，后面可依次包含 intermediate chain。
-- `key_file` 是与 leaf 匹配的 PEM 私钥。
-- 两个字段必须同时为空或同时设置；客户端同时为空保持原有匿名 TLS 行为。
-- `TlsContext::init()` 会加载完整证书链、加载私钥并校验匹配关系。任何一步失败都返回 `IoErr::Invalid`，且不会通过 `raw()` 发布半初始化的 `SSL_CTX`。
+- `certificate_chain` 和 `private_key` 分别接受 PEM 文件路径或 PEM 内容；证书内容的第一个证书是 leaf，后面可依次包含 intermediate chain。
+- 两者必须同时为空或同时设置；同时为空表示 context 没有本端证书身份。
+- `trust_store` 接受根证书文件、根证书内容或显式的系统信任根。
+- `TlsContext::create()` 同步加载材料并校验证书和私钥是否匹配。任何一步失败都返回错误，不会发布半初始化的 context。
 - 初始化错误不会包含证书路径、私钥信息或 OpenSSL 错误队列详情。调用方也不应在普通日志或 API 响应中输出 secret reference 或解析后的文件路径。
 
 客户端身份与服务端认证互相独立：
 
-- `verify_peer` 决定是否验证服务端证书。
-- `ca_file` 在 `verify_peer=true` 时提供客户端信任根；为空时使用系统信任根。
-- `server_name` 是发送给服务端的 SNI。
-- `verify_name` 是独立的证书校验名；为空时回退到 `server_name`。
+- `TlsClientConnectionOptions::verify_peer` 决定是否验证服务端证书；启用时 context 必须包含 trust store。
+- `sni_name` 是发送给服务端的 SNI；IP 地址不会作为 SNI 发送。
+- `verify_name` 是独立的证书校验名；为空时回退到 DNS 类型的 `sni_name`。
 - ALPN、握手超时、取消和关闭仍沿用原有 TLS transport 行为。
 
 一个典型配置如下：
 
 ```cpp
-fiber::net::TlsOptions tls{};
-tls.cert_file = resolved_client_chain_path;
-tls.key_file = resolved_client_key_path;
+fiber::net::TlsOptions material{};
+material.certificate_chain = fiber::net::TlsPemSource::from_file(resolved_client_chain_path);
+material.private_key = fiber::net::TlsPemSource::from_file(resolved_client_key_path);
+material.trust_store = fiber::net::TlsTrustStoreSource::from_file(resolved_ca_path);
+
+auto context = fiber::net::TlsContext::create(material);
+if (!context) {
+    return std::unexpected(context.error());
+}
+
+fiber::net::TlsClientConnectionOptions tls{};
+tls.context = context->get();
 tls.verify_peer = true;
-tls.ca_file = resolved_ca_path;
-tls.server_name = "route.example.com";
+tls.sni_name = "route.example.com";
 tls.verify_name = "certificate.example.com";
 tls.alpn = {"h2", "http/1.1"};
-
-fiber::net::TlsContext context(std::move(tls), false);
-auto result = context.init();
 ```
 
-证书文件只在 `init()` 时读入。初始化成功后，应把 `TlsContext` 当作不可变对象，并保证它比所有由其创建的 TLS 连接活得更久。
+证书文件只在 `create()` 时读入。初始化成功后不得通过 `raw()` 修改 `SSL_CTX`，并须保证 context 比所有由其创建的 TLS 连接活得更久。
 
 ## 连接池与轮换
 

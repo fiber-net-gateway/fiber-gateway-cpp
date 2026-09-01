@@ -68,7 +68,6 @@ private:
     event::EventLoopGroup *worker_group_ = nullptr;
     std::shared_ptr<Runtime> runtime_;
     HttpServerOptions options_;
-    std::unique_ptr<net::TlsServerContext> tls_ctx_{};
     std::vector<std::unique_ptr<Shard>> shards_{};
     net::SocketAddress local_addr_{};
     std::atomic<bool> started_{false};

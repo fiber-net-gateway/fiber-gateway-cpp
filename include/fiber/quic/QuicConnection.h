@@ -474,7 +474,7 @@ public:
         // Server TLS context used to lazily create the SSL object only after
         // the first Initial packet passes AEAD authentication (mirrors nginx
         // ngx_quic_init_connection, which runs after ngx_quic_decrypt).
-        net::TlsServerContext *tls_context = nullptr;
+        const net::TlsServerConnectionOptions *tls = nullptr;
     };
 
     explicit QuicConnection(const Options &options) noexcept;

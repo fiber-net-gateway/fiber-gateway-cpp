@@ -243,7 +243,7 @@ auto &conn = lease.connection();
 注意：
 
 - `Http1ClientConnection::connect(timeout)` 只能在连接所属 loop 上调用
-- `timeout` 只限制 TCP connect 阶段；TLS 握手继续使用 `TlsOptions::handshake_timeout`
+- `timeout` 只限制 TCP connect 阶段；TLS 握手继续使用 `options.tls.handshake_timeout`（`TlsClientConnectionOptions`）
 - `lease.emplace_connection()` 只负责在 entry 中构造连接对象，不会自动 `connect()`
 - 如果 connect 失败，连接对象仍会随 lease 生命周期被清理
 

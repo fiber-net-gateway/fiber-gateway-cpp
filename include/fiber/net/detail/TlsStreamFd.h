@@ -21,7 +21,6 @@ namespace fiber::net::detail {
 
 class TlsStreamFd : public common::NonCopyable, public common::NonMovable {
 public:
-    using ConfigureSslFn = void (*)(SSL *ssl, void *ctx) noexcept;
     using HandshakeTask = fiber::async::Task<fiber::common::IoResult<void>>;
     using ShutdownTask = fiber::async::Task<fiber::common::IoResult<void>>;
     using IoTask = fiber::async::Task<fiber::common::IoResult<size_t>>;
@@ -30,8 +29,8 @@ public:
     TlsStreamFd(fiber::event::EventLoop &loop, int fd);
     ~TlsStreamFd();
 
-    common::IoResult<void> init(SSL_CTX *ctx, bool is_server, ConfigureSslFn configure_ssl = nullptr,
-                                void *configure_ssl_ctx = nullptr);
+    // Takes ownership of ssl, including on failure.
+    common::IoResult<void> init(SSL *ssl);
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;

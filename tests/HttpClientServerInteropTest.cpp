@@ -457,10 +457,16 @@ DetachedTask run_http1_client_with_body(fiber::event::EventLoop *loop, std::uint
 DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16_t port,
                                       std::promise<ClientRoundTripResult> *promise) {
     ClientRoundTripResult result;
+    auto tls_context = fiber::net::TlsContext::create({});
+    if (!tls_context) {
+        result.err = tls_context.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
     fiber::http::Http2ClientConnection::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enabled = true;
-    options.tls.server_name = "localhost";
+    options.tls.context = tls_context->get();
+    options.tls.sni_name = "localhost";
 
     fiber::http::Http2ClientConnection connection(*loop, std::move(options));
     auto connect_result = co_await connection.connect(5s);
@@ -525,10 +531,16 @@ DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16
 DetachedTask run_http2_client_with_body(fiber::event::EventLoop *loop, std::uint16_t port,
                                         std::promise<ClientRoundTripResult> *promise) {
     ClientRoundTripResult result;
+    auto tls_context = fiber::net::TlsContext::create({});
+    if (!tls_context) {
+        result.err = tls_context.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
     fiber::http::Http2ClientConnection::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enabled = true;
-    options.tls.server_name = "localhost";
+    options.tls.context = tls_context->get();
+    options.tls.sni_name = "localhost";
 
     fiber::http::Http2ClientConnection connection(*loop, std::move(options));
     auto connect_result = co_await connection.connect(5s);
@@ -761,10 +773,13 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithoutBody) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path);
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.path;
-    server_options.tls.key_file = key.path;
+    server_options.tls.default_context = tls_context->get();
     server_options.tls.alpn = {"h2"};
 
     std::promise<std::uint16_t> port_promise;
@@ -825,10 +840,13 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithBody) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path);
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.path;
-    server_options.tls.key_file = key.path;
+    server_options.tls.default_context = tls_context->get();
     server_options.tls.alpn = {"h2"};
 
     std::promise<std::uint16_t> port_promise;
@@ -887,10 +905,13 @@ TEST(HttpClientServerInteropTest, Http2ServerEventLoopGroupDispatch) {
     fiber::event::EventLoopGroup group(2);
     group.start();
 
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path);
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    ASSERT_TRUE(tls_context);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert.path;
-    server_options.tls.key_file = key.path;
+    server_options.tls.default_context = tls_context->get();
     server_options.tls.alpn = {"h2"};
 
     std::promise<std::uint16_t> port_promise;

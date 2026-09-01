@@ -18,8 +18,9 @@ constexpr std::string_view kH2Alpn = "h2";
 
 } // namespace
 
-net::TlsOptions Http2ClientConnection::normalize_tls_options(net::TlsOptions options) noexcept {
-    if (options.enabled) {
+net::TlsClientConnectionOptions
+Http2ClientConnection::normalize_tls_options(net::TlsClientConnectionOptions options) noexcept {
+    if (options.enabled()) {
         options.alpn.clear();
         options.alpn.push_back(std::string(kH2Alpn));
     }
@@ -33,7 +34,7 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Options options) noexcept :
     loop_(&loop), peer_addr_(std::move(options.peer_addr)), tcp_options_(options.tcp),
-    tls_ctx_(normalize_tls_options(std::move(options.tls)), false, false),
+    tls_options_(normalize_tls_options(std::move(options.tls))),
     conn_(normalize_h2_options(std::move(options.h2)), nullptr, ClientHttp2Request::factory_ops()) {}
 
 Http2ClientConnection::~Http2ClientConnection() {
@@ -48,13 +49,6 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
     }
     if (conn_.state() != Http2Connection::State::Init) {
         co_return std::unexpected(common::IoErr::Busy);
-    }
-
-    if (tls_ctx_.options().enabled) {
-        auto init_result = tls_ctx_.init();
-        if (!init_result) {
-            co_return std::unexpected(init_result.error());
-        }
     }
 
     auto connect_result = co_await net::TcpStream::connect(*loop_, peer_addr_, timeout);
@@ -75,14 +69,14 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
 
     net::AcceptResult accept(connect_result->release_fd(), connect_result->take_peer());
     std::unique_ptr<HttpTransport> transport;
-    if (tls_ctx_.options().enabled) {
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_ctx_, tcp_options_);
+    if (tls_options_.enabled()) {
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_options_, tcp_options_);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
         transport = std::move(*transport_result);
 
-        auto handshake_result = co_await transport->handshake(tls_ctx_.options().handshake_timeout);
+        auto handshake_result = co_await transport->handshake(tls_options_.handshake_timeout);
         if (!handshake_result) {
             co_return std::unexpected(handshake_result.error());
         }

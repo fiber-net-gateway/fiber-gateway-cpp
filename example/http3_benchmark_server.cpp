@@ -195,11 +195,20 @@ int main(int argc, char **argv) {
     fiber::event::EventLoopGroup worker_group(workers);
     worker_group.start();
 
+    fiber::net::TlsOptions tls_material{};
+    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert_file);
+    tls_material.private_key = fiber::net::TlsPemSource::from_file(key_file);
+    auto tls_context = fiber::net::TlsContext::create(tls_material);
+    if (!tls_context) {
+        std::cerr << "TLS context initialization failed: " << fiber::common::io_err_name(tls_context.error()) << '\n';
+        worker_group.stop();
+        worker_group.join();
+        return 1;
+    }
+
     fiber::http::HttpServerOptions server_options{};
     server_options.drain_unread_body = true;
-    server_options.tls.enabled = true;
-    server_options.tls.cert_file = cert_file;
-    server_options.tls.key_file = key_file;
+    server_options.tls.default_context = tls_context->get();
     server_options.tls.alpn = {"h2", "http/1.1"};
     server_options.http3.enabled = true;
     server_options.http3.send.pacing.enabled = pacing_enabled;

@@ -44,10 +44,13 @@ TEST(HttpServerLifecycleTest, FailedTlsBindRollsBackListener) {
     std::promise<BindObservation> observation_promise;
     auto observation_future = observation_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        auto tls_context = fiber::net::TlsContext::create({});
+        if (!tls_context) {
+            observation_promise.set_value({.error = tls_context.error()});
+            co_return;
+        }
         fiber::http::HttpServerOptions options;
-        options.tls.enabled = true;
-        options.tls.cert_file = "/tmp/fiber-http-server-missing-cert.pem";
-        options.tls.key_file = "/tmp/fiber-http-server-missing-key.pem";
+        options.tls.default_context = tls_context->get();
         fiber::http::HttpServer server(group.at(0), {}, std::move(options));
 
         auto result = server.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});

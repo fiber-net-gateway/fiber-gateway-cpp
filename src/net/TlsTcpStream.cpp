@@ -7,10 +7,7 @@ TlsTcpStream::TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress 
 
 TlsTcpStream::~TlsTcpStream() {}
 
-common::IoResult<void> TlsTcpStream::init(SSL_CTX *ctx, bool is_server,
-                                          detail::TlsStreamFd::ConfigureSslFn configure_ssl, void *configure_ssl_ctx) {
-    return stream_.init(ctx, is_server, configure_ssl, configure_ssl_ctx);
-}
+common::IoResult<void> TlsTcpStream::init(SSL *ssl) { return stream_.init(ssl); }
 
 bool TlsTcpStream::valid() const noexcept { return stream_.valid(); }
 

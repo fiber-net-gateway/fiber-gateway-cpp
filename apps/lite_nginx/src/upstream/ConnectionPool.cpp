@@ -145,6 +145,11 @@ ConnectionPool::ConnectionPool(fiber::event::EventLoopGroup &group,
 ConnectionPool::~ConnectionPool() = default;
 
 bool ConnectionPool::init() noexcept {
+    auto tls_context = fiber::net::TlsContext::create({});
+    if (!tls_context) {
+        return false;
+    }
+    tls_context_ = std::move(*tls_context);
     return std::visit(
             [](auto &pool) -> bool {
                 if (!pool) {

@@ -22,7 +22,11 @@ namespace {
 
 QuicClientCacheKey QuicClient::cache_key(std::string_view server_name,
                                          const net::SocketAddress &remote_addr) const noexcept {
-    return QuicClientCacheKey{.server_name = server_name, .remote_addr = remote_addr, .tls_context = tls_context_};
+    return QuicClientCacheKey{
+            .server_name = server_name,
+            .remote_addr = remote_addr,
+            .tls_context = tls_options_ ? tls_options_->context : nullptr,
+    };
 }
 
 bool QuicClient::store_session(void *owner, QuicConnection &connection, SSL_SESSION *session) noexcept {
@@ -141,24 +145,15 @@ void QuicClientAttempt::cancel() noexcept {
     handshake_deadline_ = std::chrono::steady_clock::time_point::max();
 }
 
-common::IoResult<void> QuicClient::init(QuicUdpEndpoint &endpoint, net::TlsContext &tls_context,
+common::IoResult<void> QuicClient::init(QuicUdpEndpoint &endpoint, const net::TlsClientConnectionOptions &tls_options,
                                         const Options &options) noexcept {
-    if (endpoint_ != nullptr || !endpoint.valid() || endpoint.loop_ == nullptr || tls_context.raw() == nullptr ||
-        tls_context.is_server() || tls_context.alpn().empty() || options.create_connection == nullptr) {
+    if (endpoint_ != nullptr || !endpoint.valid() || endpoint.loop_ == nullptr || !tls_options.enabled() ||
+        tls_options.alpn.empty() || options.create_connection == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
     endpoint_ = &endpoint;
-    tls_context_ = &tls_context;
+    tls_options_ = &tls_options;
     options_ = options;
-    if (options_.cache.store_session != nullptr) {
-        auto installed = QuicTlsSession::install_client_session_callback(tls_context);
-        if (!installed) {
-            endpoint_ = nullptr;
-            tls_context_ = nullptr;
-            options_ = {};
-            return std::unexpected(installed.error());
-        }
-    }
     return {};
 }
 
@@ -168,7 +163,7 @@ QuicConnectError QuicClient::error(QuicConnectPhase phase, common::IoErr io_erro
 
 std::expected<QuicClientAttempt, QuicConnectError>
 QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
-    if (endpoint_ == nullptr || tls_context_ == nullptr || !endpoint_->running() || endpoint_->loop_ == nullptr ||
+    if (endpoint_ == nullptr || tls_options_ == nullptr || !endpoint_->running() || endpoint_->loop_ == nullptr ||
         !endpoint_->loop_->in_loop() || options.remote_addr.port() == 0 || options.remote_addr.ip().is_unspecified() ||
         options.handshake_timeout < std::chrono::milliseconds::zero()) {
         return std::unexpected(error(QuicConnectPhase::Endpoint, common::IoErr::Invalid));
@@ -234,7 +229,7 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
     connection_options.has_remembered_peer_transport = attempt_early_data;
     connection_options.client_server_name = options.server_name;
     connection_options.client_cache_remote_addr = options.remote_addr;
-    connection_options.client_tls_context = tls_context_;
+    connection_options.client_tls_context = tls_options_->context;
     connection_options.client_cache_owner = this;
     connection_options.on_new_tls_session = options_.cache.store_session != nullptr ? store_session : nullptr;
     connection_options.on_new_token = options_.cache.store_token != nullptr ? store_token : nullptr;
@@ -257,7 +252,7 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
     if (!initialized_crypto) {
         return std::unexpected(error(QuicConnectPhase::InitialCrypto, initialized_crypto.error()));
     }
-    auto initialized_tls = connection->tls().init_client(*tls_context_, *connection, options.server_name.c_str(),
+    auto initialized_tls = connection->tls().init_client(*tls_options_, *connection, options.server_name.c_str(),
                                                          options.allow_insecure, cached.session);
     if (!initialized_tls) {
         return std::unexpected(error(QuicConnectPhase::Tls, initialized_tls.error()));

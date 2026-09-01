@@ -27,7 +27,7 @@ class HttpTransport;
 struct Http1ClientConnectionOptions {
     net::SocketAddress peer_addr{};
     net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
-    net::TlsOptions tls{};
+    net::TlsClientConnectionOptions tls{};
     // Non-secret identity for all connection-bound transport settings when
     // this connection is pooled. It must match the acquiring lease key; zero
     // preserves the legacy/default pool partition.
@@ -140,7 +140,6 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     Http1ClientConnectionOptions options_{};
-    net::TlsContext tls_ctx_;
     std::unique_ptr<HttpTransport> transport_;
     event::EventLoop *active_loop_ = nullptr;
     IoAwaiter *reader_ = nullptr;

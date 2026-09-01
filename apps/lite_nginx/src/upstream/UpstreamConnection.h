@@ -12,7 +12,7 @@
 #include <fiber/http/Http1ConnectionGroupKey.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
-#include <fiber/net/TlsOptions.h>
+#include <fiber/net/TlsConnectionOptions.h>
 
 #include "ConnectionPool.h"
 
@@ -45,7 +45,7 @@ struct AcquiredUpstreamConnection {
 //   3. emplace_connection(opts) + connect() (pooled), or construct a transient connection +
 //      connect() when no pool is configured or Transient was requested. A pooled miss holds one
 //      lease until TCP and optional TLS setup complete, and publishes no partial connection.
-// `tls_server_name` is forwarded to TlsOptions.server_name for HTTPS keys (SNI); ignored for HTTP.
+// `tls_server_name` is forwarded as SNI for HTTPS keys; ignored for HTTP.
 [[nodiscard]] fiber::async::Task<fiber::common::IoResult<AcquiredUpstreamConnection>>
 acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService &dns,
                     const fiber::http::Http1ConnectionGroupKey &key, std::string_view tls_server_name,

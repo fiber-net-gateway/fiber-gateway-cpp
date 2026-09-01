@@ -26,7 +26,7 @@ public:
     struct Options {
         net::SocketAddress peer_addr{};
         net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
-        net::TlsOptions tls{};
+        net::TlsClientConnectionOptions tls{};
         Http2Connection::Options h2{};
     };
 
@@ -49,7 +49,7 @@ public:
     [[nodiscard]] const std::optional<net::SocketAddress> &local_addr() const noexcept { return local_addr_; }
 
 private:
-    static net::TlsOptions normalize_tls_options(net::TlsOptions options) noexcept;
+    static net::TlsClientConnectionOptions normalize_tls_options(net::TlsClientConnectionOptions options) noexcept;
     static Http2Connection::Options normalize_h2_options(Http2Connection::Options options) noexcept;
     static void on_http2_closed(void *ctx, Http2Connection &connection, Http2Connection::CloseResult result) noexcept;
 
@@ -57,7 +57,7 @@ private:
     net::SocketAddress peer_addr_{};
     net::TcpSocketOptions tcp_options_{};
     std::optional<net::SocketAddress> local_addr_;
-    net::TlsContext tls_ctx_;
+    net::TlsClientConnectionOptions tls_options_{};
     fiber::async::WaitGroup close_wg_;
     Http2Connection conn_;
     common::IoErr terminal_error_ = common::IoErr::None;

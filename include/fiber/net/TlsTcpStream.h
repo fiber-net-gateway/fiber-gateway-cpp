@@ -33,9 +33,8 @@ public:
     TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress remote_addr);
     ~TlsTcpStream();
 
-    common::IoResult<void> init(SSL_CTX *ctx, bool is_server,
-                                detail::TlsStreamFd::ConfigureSslFn configure_ssl = nullptr,
-                                void *configure_ssl_ctx = nullptr);
+    // Takes ownership of ssl, including on failure.
+    common::IoResult<void> init(SSL *ssl);
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
