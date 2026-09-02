@@ -76,8 +76,10 @@ fiber::common::IoErr configure_tls(
 trampoline 再从 `client_hello->ssl` 取回。因此业务回调修改的是当前连接的 `SSL`，不会切换或修改共享
 `SSL_CTX`，也不会暴露原始 `SSL *`。
 
-回调当前只支持同步成功或失败，不返回 `ssl_select_cert_retry`。`TlsCredential`、`TrustStore`、参数对象
-和 callback state 必须至少活到握手任务结束。
+回调当前只支持同步成功或失败，不返回 `ssl_select_cert_retry`。`TlsServerParam` 必须活到握手任务结束；
+callback state 及其选择的 `TlsCredential`、`TrustStore` 必须活到同步回调完成。成功调用
+`SSL_add1_credential()` 或 `SSL_set1_verify_cert_store()` 后，当前 `SSL` 会持有自己的引用，材料对象无需继续
+等待握手结束。
 
 ## 连接池与轮换
 

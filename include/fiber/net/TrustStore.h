@@ -41,8 +41,9 @@ struct TrustStoreOptions {
     }
 };
 
-// Immutable peer trust anchors. Peer-verification policy remains per
-// connection and is not a property of this object.
+// Immutable, reusable peer trust anchors. Peer-verification policy remains per
+// connection and is not a property of this object. Once installed with a set1
+// API, the SSL retains its own reference to the underlying store.
 class TrustStore : public common::NonCopyable, public common::NonMovable {
 public:
     ~TrustStore();
