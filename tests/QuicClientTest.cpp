@@ -14,7 +14,9 @@
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/net/TrustStore.h>
 #include <fiber/net/UdpSocket.h>
 #include <fiber/quic/QuicClient.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
@@ -49,40 +51,58 @@ fiber::quic::QuicConnection::Lease create_connection(void *,
     return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(owned));
 }
 
-fiber::common::IoResult<std::unique_ptr<fiber::net::TlsContext>>
-create_tls_context(std::string_view certificate = {}, std::string_view private_key = {}, std::string_view trust = {}) {
-    fiber::net::TlsOptions material{};
+struct QuicTestTls {
+    std::unique_ptr<fiber::net::TlsCredential> credential;
+    std::unique_ptr<fiber::net::TrustStore> trust_store;
+};
+
+fiber::common::IoResult<QuicTestTls> create_quic_tls(std::string_view certificate = {},
+                                                     std::string_view private_key = {}, std::string_view trust = {}) {
+    QuicTestTls material{};
     if (!certificate.empty()) {
-        material.certificate_chain = fiber::net::TlsPemSource::from_file(std::string(certificate));
-        material.private_key = fiber::net::TlsPemSource::from_file(std::string(private_key));
+        fiber::net::TlsCredentialOptions credential_options{};
+        credential_options.certificate_chain = fiber::net::TlsPemSource::from_file(std::string(certificate));
+        credential_options.private_key = fiber::net::TlsPemSource::from_file(std::string(private_key));
+        auto credential = fiber::net::TlsCredential::create(credential_options);
+        if (!credential) {
+            return std::unexpected(credential.error());
+        }
+        material.credential = std::move(*credential);
     }
     if (!trust.empty()) {
-        material.trust_store = fiber::net::TlsTrustStoreSource::from_file(std::string(trust));
+        auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(std::string(trust)));
+        if (!trust_store) {
+            return std::unexpected(trust_store.error());
+        }
+        material.trust_store = std::move(*trust_store);
     }
-    return fiber::net::TlsContext::create(material);
+    return material;
 }
 
-fiber::net::TlsClientConnectionOptions make_quic_client_tls(const fiber::net::TlsContext *context,
-                                                            bool verify_peer = true) {
-    return {
-            .context = context,
-            .verify_peer = verify_peer,
-            .min_version = 0x0304,
-            .max_version = 0x0304,
-            .alpn = {"fiber-quic-test"},
-    };
+fiber::net::TlsClientParam make_quic_client_tls(const QuicTestTls &material, bool verify_peer = true) {
+    fiber::net::TlsClientParam options{};
+    options.enable_tls = true;
+    options.credential = material.credential.get();
+    options.trust_store = material.trust_store.get();
+    options.verify_peer = verify_peer;
+    options.min_version = 0x0304;
+    options.max_version = 0x0304;
+    options.alpn = {"fiber-quic-test"};
+    return options;
 }
 
-fiber::net::TlsServerConnectionOptions make_quic_server_tls(
-        const fiber::net::TlsContext *context,
+fiber::net::TlsServerParam make_quic_server_tls(
+        const QuicTestTls &material,
         fiber::net::TlsClientCertificateMode client_certificate_mode = fiber::net::TlsClientCertificateMode::None) {
-    return {
-            .default_context = context,
-            .client_certificate_mode = client_certificate_mode,
-            .min_version = 0x0304,
-            .max_version = 0x0304,
-            .alpn = {"fiber-quic-test"},
-    };
+    fiber::net::TlsServerParam options{};
+    options.configure_callback = &fiber::net::configure_tls_with_credential;
+    options.configure_ctx = material.credential.get();
+    options.trust_store = material.trust_store.get();
+    options.client_certificate_mode = client_certificate_mode;
+    options.min_version = 0x0304;
+    options.max_version = 0x0304;
+    options.alpn = {"fiber-quic-test"};
+    return options;
 }
 
 struct StartSummary {
@@ -537,9 +557,9 @@ TEST(QuicClientTest, StartConnectAttachesAndQueuesClientInitial) {
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
 
-    auto tls_context = create_tls_context();
-    ASSERT_TRUE(tls_context);
-    auto tls_options = make_quic_client_tls(tls_context->get(), false);
+    auto tls_material = create_quic_tls();
+    ASSERT_TRUE(tls_material);
+    auto tls_options = make_quic_client_tls(*tls_material, false);
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(
@@ -572,9 +592,9 @@ TEST(QuicClientTest, HandshakeTimeoutCancelsAndDetachesConnection) {
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
 
-    auto tls_context = create_tls_context();
-    ASSERT_TRUE(tls_context);
-    auto tls_options = make_quic_client_tls(tls_context->get(), false);
+    auto tls_material = create_quic_tls();
+    ASSERT_TRUE(tls_material);
+    auto tls_options = make_quic_client_tls(*tls_material, false);
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(
@@ -600,12 +620,12 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshake) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    auto server_context = create_tls_context(cert.path(), key.path());
-    ASSERT_TRUE(server_context);
-    auto server_tls = make_quic_server_tls(server_context->get());
-    auto client_context = create_tls_context({}, {}, cert.path());
-    ASSERT_TRUE(client_context);
-    auto client_tls = make_quic_client_tls(client_context->get());
+    auto server_material = create_quic_tls(cert.path(), key.path());
+    ASSERT_TRUE(server_material);
+    auto server_tls = make_quic_server_tls(*server_material);
+    auto client_material = create_quic_tls({}, {}, cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -662,15 +682,15 @@ TEST_P(QuicClientMtlsTest, EnforcesClientCertificateAuthentication) {
 
     const std::string &server_trust =
             test_case.identity == QuicClientIdentityMode::UnknownCa ? server_cert.path() : client_root.path();
-    auto server_context = create_tls_context(server_cert.path(), server_key.path(), server_trust);
-    ASSERT_TRUE(server_context);
-    auto server_tls = make_quic_server_tls(server_context->get(), fiber::net::TlsClientCertificateMode::Required);
+    auto server_material = create_quic_tls(server_cert.path(), server_key.path(), server_trust);
+    ASSERT_TRUE(server_material);
+    auto server_tls = make_quic_server_tls(*server_material, fiber::net::TlsClientCertificateMode::Required);
 
-    auto client_context = test_case.identity == QuicClientIdentityMode::Anonymous
-                                  ? create_tls_context({}, {}, server_cert.path())
-                                  : create_tls_context(client_chain.path(), client_key.path(), server_cert.path());
-    ASSERT_TRUE(client_context);
-    auto client_tls = make_quic_client_tls(client_context->get());
+    auto client_material = test_case.identity == QuicClientIdentityMode::Anonymous
+                                   ? create_quic_tls({}, {}, server_cert.path())
+                                   : create_quic_tls(client_chain.path(), client_key.path(), server_cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -728,12 +748,12 @@ TEST(QuicClientTest, RejectsCertificateForWrongHostname) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    auto server_context = create_tls_context(cert.path(), key.path());
-    ASSERT_TRUE(server_context);
-    auto server_tls = make_quic_server_tls(server_context->get());
-    auto client_context = create_tls_context({}, {}, cert.path());
-    ASSERT_TRUE(client_context);
-    auto client_tls = make_quic_client_tls(client_context->get());
+    auto server_material = create_quic_tls(cert.path(), key.path());
+    ASSERT_TRUE(server_material);
+    auto server_tls = make_quic_server_tls(*server_material);
+    auto client_material = create_quic_tls({}, {}, cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -776,12 +796,12 @@ TEST(QuicClientTest, UnknownDcidStatelessResetUsesEndpointTokenIndex) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    auto server_context = create_tls_context(cert.path(), key.path());
-    ASSERT_TRUE(server_context);
-    auto server_tls = make_quic_server_tls(server_context->get());
-    auto client_context = create_tls_context({}, {}, cert.path());
-    ASSERT_TRUE(client_context);
-    auto client_tls = make_quic_client_tls(client_context->get());
+    auto server_material = create_quic_tls(cert.path(), key.path());
+    ASSERT_TRUE(server_material);
+    auto server_tls = make_quic_server_tls(*server_material);
+    auto client_material = create_quic_tls({}, {}, cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -835,12 +855,12 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshakeAfterRetry) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    auto server_context = create_tls_context(cert.path(), key.path());
-    ASSERT_TRUE(server_context);
-    auto server_tls = make_quic_server_tls(server_context->get());
-    auto client_context = create_tls_context({}, {}, cert.path());
-    ASSERT_TRUE(client_context);
-    auto client_tls = make_quic_client_tls(client_context->get());
+    auto server_material = create_quic_tls(cert.path(), key.path());
+    ASSERT_TRUE(server_material);
+    auto server_tls = make_quic_server_tls(*server_material);
+    auto client_material = create_quic_tls({}, {}, cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
 
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -887,12 +907,12 @@ TEST(QuicClientTest, ReusesSessionAndNewTokenWithEarlyData) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    auto server_context = create_tls_context(cert.path(), key.path());
-    ASSERT_TRUE(server_context);
-    auto server_tls = make_quic_server_tls(server_context->get());
-    auto client_context = create_tls_context({}, {}, cert.path());
-    ASSERT_TRUE(client_context);
-    auto client_tls = make_quic_client_tls(client_context->get());
+    auto server_material = create_quic_tls(cert.path(), key.path());
+    ASSERT_TRUE(server_material);
+    auto server_tls = make_quic_server_tls(*server_material);
+    auto client_material = create_quic_tls({}, {}, cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
 
     fiber::event::EventLoopGroup group(1);
     group.start();

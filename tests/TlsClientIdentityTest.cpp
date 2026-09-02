@@ -24,8 +24,9 @@
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
-#include <fiber/net/TlsContext.h>
-#include <fiber/net/TlsOptions.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/net/TrustStore.h>
 
 #include "QuicTestTlsCertificate.h"
 #include "TlsClientIdentityTestData.h"
@@ -101,17 +102,40 @@ struct SelectorState {
     bool saw_test_alpn = false;
 };
 
-const fiber::net::TlsContext *capture_client_hello(void *ctx, const fiber::net::TlsClientHelloView &input) noexcept {
-    auto *state = static_cast<SelectorState *>(ctx);
-    if (!state) {
-        return nullptr;
+struct IdentityTls {
+    std::unique_ptr<fiber::net::TlsCredential> credential;
+    std::unique_ptr<fiber::net::TrustStore> trust_store;
+};
+
+struct ServerCallbackState {
+    const fiber::net::TlsCredential *credential = nullptr;
+    SelectorState *selector = nullptr;
+};
+
+fiber::common::IoErr capture_client_hello(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
+                                          const fiber::net::TlsClientHelloView &input) noexcept {
+    auto *state = static_cast<ServerCallbackState *>(ctx);
+    if (!state || !state->credential) {
+        return fiber::common::IoErr::Invalid;
     }
-    state->server_name_size = std::min(input.server_name.size(), state->server_name.size());
-    if (state->server_name_size != 0) {
-        std::memcpy(state->server_name.data(), input.server_name.data(), state->server_name_size);
+    if (state->selector) {
+        SelectorState &selector = *state->selector;
+        selector.server_name_size = std::min(input.server_name.size(), selector.server_name.size());
+        if (selector.server_name_size != 0) {
+            std::memcpy(selector.server_name.data(), input.server_name.data(), selector.server_name_size);
+        }
+        selector.saw_test_alpn = input.offered_alpn.contains("fiber-mtls-test");
     }
-    state->saw_test_alpn = input.offered_alpn.contains("fiber-mtls-test");
-    return nullptr;
+    fiber::common::IoErr error = config.add_credential(*state->credential);
+    if (error == fiber::common::IoErr::None && state->selector && state->selector->saw_test_alpn) {
+        error = config.select_alpn("fiber-mtls-test");
+    }
+    return error;
+}
+
+fiber::common::IoErr reject_server_configuration(void *, fiber::net::TlsServerHandshakeConfig &,
+                                                 const fiber::net::TlsClientHelloView &) noexcept {
+    return fiber::common::IoErr::Permission;
 }
 
 struct HandshakeResult {
@@ -154,8 +178,8 @@ void destroy_on_owner(fiber::event::EventLoop &loop, fiber::http::TlsTransport *
     future.wait();
 }
 
-HandshakeResult run_handshake_pair(const fiber::net::TlsServerConnectionOptions &server_options,
-                                   const fiber::net::TlsClientConnectionOptions &client_options) {
+HandshakeResult run_handshake_pair(const fiber::net::TlsServerParam &server_options,
+                                   const fiber::net::TlsClientParam &client_options) {
     SigpipeGuard sigpipe_guard;
     HandshakeResult result;
     int fds[2] = {-1, -1};
@@ -210,86 +234,112 @@ HandshakeResult run_handshake_pair(const fiber::net::TlsServerConnectionOptions 
     return result;
 }
 
-fiber::net::TlsOptions make_server_material(const IdentityFiles &files, std::string trust_path = {}) {
-    fiber::net::TlsOptions material{};
-    material.certificate_chain = fiber::net::TlsPemSource::from_file(files.server_chain.path);
-    material.private_key = fiber::net::TlsPemSource::from_file(files.server_key.path);
-    material.trust_store =
-            fiber::net::TlsTrustStoreSource::from_file(trust_path.empty() ? files.root.path : std::move(trust_path));
-    return material;
-}
-
-fiber::net::TlsOptions make_client_material(const IdentityFiles &files, bool include_identity = true) {
-    fiber::net::TlsOptions material{};
-    if (include_identity) {
-        material.certificate_chain = fiber::net::TlsPemSource::from_file(files.client_chain.path);
-        material.private_key = fiber::net::TlsPemSource::from_file(files.client_key.path);
+fiber::common::IoResult<IdentityTls> make_server_material(const IdentityFiles &files, std::string trust_path = {}) {
+    fiber::net::TlsCredentialOptions credential_options{};
+    credential_options.certificate_chain = fiber::net::TlsPemSource::from_file(files.server_chain.path);
+    credential_options.private_key = fiber::net::TlsPemSource::from_file(files.server_key.path);
+    auto credential = fiber::net::TlsCredential::create(credential_options);
+    if (!credential) {
+        return std::unexpected(credential.error());
     }
-    material.trust_store = fiber::net::TlsTrustStoreSource::from_file(files.root.path);
+    auto trust_store = fiber::net::TrustStore::create(
+            fiber::net::TrustStoreOptions::from_file(trust_path.empty() ? files.root.path : std::move(trust_path)));
+    if (!trust_store) {
+        return std::unexpected(trust_store.error());
+    }
+    return IdentityTls{.credential = std::move(*credential), .trust_store = std::move(*trust_store)};
+}
+
+fiber::common::IoResult<IdentityTls> make_client_material(const IdentityFiles &files, bool include_identity = true) {
+    IdentityTls material{};
+    if (include_identity) {
+        fiber::net::TlsCredentialOptions credential_options{};
+        credential_options.certificate_chain = fiber::net::TlsPemSource::from_file(files.client_chain.path);
+        credential_options.private_key = fiber::net::TlsPemSource::from_file(files.client_key.path);
+        auto credential = fiber::net::TlsCredential::create(credential_options);
+        if (!credential) {
+            return std::unexpected(credential.error());
+        }
+        material.credential = std::move(*credential);
+    }
+    auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(files.root.path));
+    if (!trust_store) {
+        return std::unexpected(trust_store.error());
+    }
+    material.trust_store = std::move(*trust_store);
     return material;
 }
 
-fiber::net::TlsServerConnectionOptions make_server_options(const fiber::net::TlsContext *context,
-                                                           SelectorState *selector_state) {
-    return {
-            .default_context = context,
-            .select_tls_ctx_callback = &capture_client_hello,
-            .select_tls_ctx_ctx = selector_state,
-            .client_certificate_mode = fiber::net::TlsClientCertificateMode::Required,
-            .alpn = {"fiber-mtls-test"},
-    };
+fiber::net::TlsServerParam make_server_options(const IdentityTls &material, ServerCallbackState &callback_state,
+                                               SelectorState *selector_state) {
+    callback_state.credential = material.credential.get();
+    callback_state.selector = selector_state;
+    fiber::net::TlsServerParam options{};
+    options.configure_callback = &capture_client_hello;
+    options.configure_ctx = &callback_state;
+    options.trust_store = material.trust_store.get();
+    options.client_certificate_mode = fiber::net::TlsClientCertificateMode::Required;
+    // The callback overrides this default after inspecting ClientHello.
+    options.alpn = {"server-default"};
+    return options;
 }
 
-fiber::net::TlsClientConnectionOptions make_client_options(const fiber::net::TlsContext *context) {
-    return {
-            .context = context,
-            .verify_peer = true,
-            .alpn = {"fiber-mtls-test"},
-    };
+fiber::net::TlsClientParam make_client_options(const IdentityTls &material) {
+    fiber::net::TlsClientParam options{};
+    options.enable_tls = true;
+    options.credential = material.credential.get();
+    options.trust_store = material.trust_store.get();
+    options.verify_peer = true;
+    options.alpn = {"fiber-mtls-test"};
+    return options;
 }
 
-TEST(TlsClientIdentityTest, ValidatesPairAndChainBeforePublishingContext) {
+TEST(TlsClientIdentityTest, ValidatesPairAndChainBeforePublishingCredential) {
     IdentityFiles files;
     ASSERT_TRUE(files.ok());
 
-    auto empty_context = fiber::net::TlsContext::create({});
-    ASSERT_TRUE(empty_context);
-    ASSERT_NE((*empty_context)->raw(), nullptr);
-
-    fiber::net::TlsOptions cert_only_options{};
+    fiber::net::TlsCredentialOptions cert_only_options{};
     cert_only_options.certificate_chain = fiber::net::TlsPemSource::from_file(files.client_chain.path);
-    auto cert_only_result = fiber::net::TlsContext::create(cert_only_options);
+    auto cert_only_result = fiber::net::TlsCredential::create(cert_only_options);
     ASSERT_FALSE(cert_only_result);
     EXPECT_EQ(cert_only_result.error(), fiber::common::IoErr::Invalid);
 
-    fiber::net::TlsOptions key_only_options{};
+    fiber::net::TlsCredentialOptions key_only_options{};
     key_only_options.private_key = fiber::net::TlsPemSource::from_file(files.client_key.path);
-    auto key_only_result = fiber::net::TlsContext::create(key_only_options);
+    auto key_only_result = fiber::net::TlsCredential::create(key_only_options);
     ASSERT_FALSE(key_only_result);
     EXPECT_EQ(key_only_result.error(), fiber::common::IoErr::Invalid);
 
-    fiber::net::TlsOptions mismatch_options{};
+    fiber::net::TlsCredentialOptions mismatch_options{};
     mismatch_options.certificate_chain = fiber::net::TlsPemSource::from_file(files.client_chain.path);
     mismatch_options.private_key = fiber::net::TlsPemSource::from_file(files.wrong_key.path);
-    auto mismatch_result = fiber::net::TlsContext::create(mismatch_options);
+    auto mismatch_result = fiber::net::TlsCredential::create(mismatch_options);
     ASSERT_FALSE(mismatch_result);
     EXPECT_EQ(mismatch_result.error(), fiber::common::IoErr::Invalid);
     EXPECT_EQ(ERR_peek_error(), 0U);
 
-    fiber::net::TlsOptions missing_options{};
+    fiber::net::TlsCredentialOptions missing_options{};
     missing_options.certificate_chain = fiber::net::TlsPemSource::from_file("/does-not-exist/client-chain.pem");
     missing_options.private_key = fiber::net::TlsPemSource::from_file("/does-not-exist/client-key.pem");
-    auto missing_result = fiber::net::TlsContext::create(missing_options);
+    auto missing_result = fiber::net::TlsCredential::create(missing_options);
     ASSERT_FALSE(missing_result);
     EXPECT_EQ(missing_result.error(), fiber::common::IoErr::Invalid);
     EXPECT_EQ(ERR_peek_error(), 0U);
 
-    auto valid_context = fiber::net::TlsContext::create(make_client_material(files));
-    ASSERT_TRUE(valid_context);
-    STACK_OF(X509) *chain = nullptr;
-    ASSERT_EQ(SSL_CTX_get0_chain_certs((*valid_context)->raw(), &chain), 1);
-    ASSERT_NE(chain, nullptr);
-    EXPECT_EQ(sk_X509_num(chain), 1U);
+    auto valid_material = make_client_material(files);
+    ASSERT_TRUE(valid_material);
+}
+
+TEST(TlsClientIdentityTest, ServerConfigurationCallbackErrorIsReturnedByHandshake) {
+    fiber::net::TlsServerParam server_options{};
+    server_options.configure_callback = &reject_server_configuration;
+    fiber::net::TlsClientParam client_options{};
+    client_options.enable_tls = true;
+
+    auto result = run_handshake_pair(server_options, client_options);
+    ASSERT_TRUE(result.completed);
+    EXPECT_EQ(result.server_err, fiber::common::IoErr::Permission);
+    EXPECT_TRUE(result.transports_released);
 }
 
 TEST(TlsClientIdentityTest, MtlsComposesWithPeerVerificationIndependentNameSniAndAlpn) {
@@ -299,16 +349,17 @@ TEST(TlsClientIdentityTest, MtlsComposesWithPeerVerificationIndependentNameSniAn
     for (int version: {0x0303, 0x0304}) {
         SCOPED_TRACE(version);
         SelectorState selector_state;
+        ServerCallbackState callback_state;
 
-        auto server_context = fiber::net::TlsContext::create(make_server_material(files));
-        ASSERT_TRUE(server_context);
-        auto server_options = make_server_options(server_context->get(), &selector_state);
+        auto server_material = make_server_material(files);
+        ASSERT_TRUE(server_material);
+        auto server_options = make_server_options(*server_material, callback_state, &selector_state);
         server_options.min_version = version;
         server_options.max_version = version;
 
-        auto client_context = fiber::net::TlsContext::create(make_client_material(files));
-        ASSERT_TRUE(client_context);
-        auto client_options = make_client_options(client_context->get());
+        auto client_material = make_client_material(files);
+        ASSERT_TRUE(client_material);
+        auto client_options = make_client_options(*client_material);
         client_options.sni_name = "routing.identity.test";
         client_options.verify_name = "server.identity.test";
         client_options.min_version = version;
@@ -331,14 +382,15 @@ TEST(TlsClientIdentityTest, MtlsIdentityWorksWhenPeerVerificationIsDisabled) {
     IdentityFiles files;
     ASSERT_TRUE(files.ok());
     SelectorState selector_state;
+    ServerCallbackState callback_state;
 
-    auto server_context = fiber::net::TlsContext::create(make_server_material(files));
-    ASSERT_TRUE(server_context);
-    auto server_options = make_server_options(server_context->get(), &selector_state);
+    auto server_material = make_server_material(files);
+    ASSERT_TRUE(server_material);
+    auto server_options = make_server_options(*server_material, callback_state, &selector_state);
 
-    auto client_context = fiber::net::TlsContext::create(make_client_material(files));
-    ASSERT_TRUE(client_context);
-    auto client_options = make_client_options(client_context->get());
+    auto client_material = make_client_material(files);
+    ASSERT_TRUE(client_material);
+    auto client_options = make_client_options(*client_material);
     client_options.verify_peer = false;
     client_options.sni_name = "routing.identity.test";
     client_options.verify_name = "intentionally-wrong.identity.test";
@@ -353,14 +405,15 @@ TEST(TlsClientIdentityTest, ServerRequiringClientIdentityRejectsAnonymousClient)
     IdentityFiles files;
     ASSERT_TRUE(files.ok());
     SelectorState selector_state;
+    ServerCallbackState callback_state;
 
-    auto server_context = fiber::net::TlsContext::create(make_server_material(files));
-    ASSERT_TRUE(server_context);
-    auto server_options = make_server_options(server_context->get(), &selector_state);
+    auto server_material = make_server_material(files);
+    ASSERT_TRUE(server_material);
+    auto server_options = make_server_options(*server_material, callback_state, &selector_state);
 
-    auto client_context = fiber::net::TlsContext::create(make_client_material(files, false));
-    ASSERT_TRUE(client_context);
-    auto client_options = make_client_options(client_context->get());
+    auto client_material = make_client_material(files, false);
+    ASSERT_TRUE(client_material);
+    auto client_options = make_client_options(*client_material);
     client_options.sni_name = "server.identity.test";
     client_options.alpn = {"fiber-mtls-test"};
 
@@ -374,14 +427,15 @@ TEST(TlsClientIdentityTest, ServerRejectsClientSignedByUnknownCaAndReleasesTrans
     IdentityFiles files;
     ASSERT_TRUE(files.ok());
     SelectorState selector_state;
+    ServerCallbackState callback_state;
 
-    auto server_context = fiber::net::TlsContext::create(make_server_material(files, files.alternate_root.path));
-    ASSERT_TRUE(server_context);
-    auto server_options = make_server_options(server_context->get(), &selector_state);
+    auto server_material = make_server_material(files, files.alternate_root.path);
+    ASSERT_TRUE(server_material);
+    auto server_options = make_server_options(*server_material, callback_state, &selector_state);
 
-    auto client_context = fiber::net::TlsContext::create(make_client_material(files));
-    ASSERT_TRUE(client_context);
-    auto client_options = make_client_options(client_context->get());
+    auto client_material = make_client_material(files);
+    ASSERT_TRUE(client_material);
+    auto client_options = make_client_options(*client_material);
     client_options.sni_name = "server.identity.test";
 
     auto result = run_handshake_pair(server_options, client_options);
@@ -394,9 +448,9 @@ TEST(TlsClientIdentityTest, FailedClientHandshakeCanBeReleasedOnOwnerLoop) {
     SigpipeGuard sigpipe_guard;
     IdentityFiles files;
     ASSERT_TRUE(files.ok());
-    auto client_context = fiber::net::TlsContext::create(make_client_material(files));
-    ASSERT_TRUE(client_context);
-    auto client_options = make_client_options(client_context->get());
+    auto client_material = make_client_material(files);
+    ASSERT_TRUE(client_material);
+    auto client_options = make_client_options(*client_material);
     client_options.verify_peer = false;
 
     int fds[2] = {-1, -1};

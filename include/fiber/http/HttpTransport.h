@@ -15,7 +15,7 @@
 #include "../event/EventLoop.h"
 #include "../net/TcpListener.h"
 #include "../net/TcpStream.h"
-#include "../net/TlsContext.h"
+#include "../net/TlsParams.h"
 #include "../net/TlsTcpStream.h"
 
 namespace fiber::http {
@@ -131,10 +131,10 @@ class TlsTransport final : public HttpTransport {
 public:
     ~TlsTransport() override;
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  const net::TlsClientConnectionOptions &options,
+                                                                  const net::TlsClientParam &options,
                                                                   net::TcpSocketOptions tcp_options = {});
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  const net::TlsServerConnectionOptions &options,
+                                                                  const net::TlsServerParam &options,
                                                                   net::TcpSocketOptions tcp_options = {});
 
     fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
@@ -174,11 +174,8 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
 private:
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
-                 const net::TlsClientConnectionOptions &options);
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
-                 const net::TlsServerConnectionOptions &options);
-    common::IoResult<void> init();
+    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, const net::TlsClientParam &options);
+    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, const net::TlsServerParam &options);
     [[nodiscard]] bool handshake_done() const noexcept;
     void clear_pending_write() noexcept;
 
@@ -189,8 +186,8 @@ private:
     };
 
     net::TlsTcpStream stream_;
-    const net::TlsClientConnectionOptions *client_options_ = nullptr;
-    const net::TlsServerConnectionOptions *server_options_ = nullptr;
+    const net::TlsClientParam *client_options_ = nullptr;
+    const net::TlsServerParam *server_options_ = nullptr;
     std::unique_ptr<std::uint8_t[]> writev_scratch_;
     PendingWriteKind pending_write_kind_ = PendingWriteKind::None;
     const void *pending_write_data_ = nullptr;

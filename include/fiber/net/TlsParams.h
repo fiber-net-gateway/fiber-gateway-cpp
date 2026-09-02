@@ -1,5 +1,5 @@
-#ifndef FIBER_NET_TLS_CONNECTION_OPTIONS_H
-#define FIBER_NET_TLS_CONNECTION_OPTIONS_H
+#ifndef FIBER_NET_TLS_PARAMS_H
+#define FIBER_NET_TLS_PARAMS_H
 
 #include <chrono>
 #include <cstddef>
@@ -8,13 +8,17 @@
 #include <string_view>
 #include <vector>
 
+#include "../common/IoError.h"
+
 struct ssl_session_st;
 typedef struct ssl_session_st SSL_SESSION;
 
 namespace fiber::net {
 
 class SocketAddress;
-class TlsContext;
+class TlsCredential;
+class TrustStore;
+class TlsServerHandshakeConfig;
 
 class TlsAlpnProtocolsView {
 public:
@@ -75,8 +79,6 @@ struct TlsClientHelloView {
     TlsTransportKind transport = TlsTransportKind::Tcp;
 };
 
-using SelectTlsContextCallback = const TlsContext *(*) (void *ctx, const TlsClientHelloView &client_hello) noexcept;
-
 enum class TlsClientCertificateMode : std::uint8_t {
     None,
     Optional,
@@ -88,32 +90,40 @@ struct TlsNewSessionOps {
     bool (*store)(void *ctx, SSL_SESSION *session) noexcept = nullptr;
 };
 
-struct TlsClientConnectionOptions {
-    // Borrowed. The context must outlive the SSL connection.
-    const TlsContext *context = nullptr;
+using ConfigureTlsCallback = common::IoErr (*)(void *ctx, TlsServerHandshakeConfig &config,
+                                               const TlsClientHelloView &client_hello) noexcept;
+
+struct TlsClientParam {
+    // Parameters and borrowed material must remain valid until the handshake
+    // task completes. TlsCredential and TrustStore may then be reused freely.
+    // TLS clients without a client certificate leave credential null.
+    const TlsCredential *credential = nullptr;
+    const TrustStore *trust_store = nullptr;
     bool verify_peer = false;
     std::chrono::milliseconds handshake_timeout{10000};
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3
     std::vector<std::string> alpn{"http/1.1"};
-    // DNS name sent in ClientHello. IP literals are not emitted as SNI.
     std::string sni_name{};
-    // DNS name or IP address authenticated against the peer certificate. When
-    // empty, a DNS-valued sni_name is used.
     std::string verify_name{};
     bool enable_early_data = false;
     const TlsNewSessionOps *new_session_ops = nullptr;
 
-    [[nodiscard]] bool enabled() const noexcept { return context != nullptr; }
+    // Higher-level transports use a value member for TLS parameters. This bit
+    // distinguishes a plain connection from certificate-less client TLS.
+    bool enable_tls = false;
+
+    [[nodiscard]] bool enabled() const noexcept { return enable_tls; }
 };
 
-struct TlsServerConnectionOptions {
-    // Borrowed. The default and callback-selected contexts, this options
-    // object, and callback state must outlive every derived SSL connection.
-    const TlsContext *default_context = nullptr;
-    // Returning nullptr selects default_context.
-    SelectTlsContextCallback select_tls_ctx_callback = nullptr;
-    void *select_tls_ctx_ctx = nullptr;
+struct TlsServerParam {
+    // This object, callback state, and borrowed material must remain valid
+    // until the handshake task completes.
+    // Required for TLS. The synchronous callback configures the current SSL
+    // after ClientHello and must add at least one credential.
+    ConfigureTlsCallback configure_callback = nullptr;
+    void *configure_ctx = nullptr;
+    const TrustStore *trust_store = nullptr;
     TlsClientCertificateMode client_certificate_mode = TlsClientCertificateMode::None;
     std::chrono::milliseconds handshake_timeout{10000};
     int min_version = 0x0303; // TLS 1.2
@@ -121,9 +131,9 @@ struct TlsServerConnectionOptions {
     std::vector<std::string> alpn{"http/1.1"};
     bool enable_early_data = false;
 
-    [[nodiscard]] bool enabled() const noexcept { return default_context != nullptr; }
+    [[nodiscard]] bool enabled() const noexcept { return configure_callback != nullptr; }
 };
 
 } // namespace fiber::net
 
-#endif // FIBER_NET_TLS_CONNECTION_OPTIONS_H
+#endif // FIBER_NET_TLS_PARAMS_H

@@ -27,8 +27,8 @@
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
-#include <fiber/net/TlsContext.h>
-#include <fiber/net/TlsOptions.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/detail/TlsStreamFd.h>
 
 namespace {
@@ -127,48 +127,25 @@ struct TempFile {
 };
 
 struct TestTlsPair {
-    std::unique_ptr<fiber::net::TlsContext> server_context;
-    std::unique_ptr<fiber::net::TlsContext> client_context;
-    fiber::net::TlsServerConnectionOptions server_options;
-    fiber::net::TlsClientConnectionOptions client_options;
+    std::unique_ptr<fiber::net::TlsCredential> server_credential;
+    fiber::net::TlsServerParam server_options;
+    fiber::net::TlsClientParam client_options;
 };
 
 fiber::common::IoResult<TestTlsPair> create_tls_pair(const std::string &cert_path, const std::string &key_path) {
-    fiber::net::TlsOptions server_material{};
-    server_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert_path);
-    server_material.private_key = fiber::net::TlsPemSource::from_file(key_path);
-    auto server_context = fiber::net::TlsContext::create(server_material);
-    if (!server_context) {
-        return std::unexpected(server_context.error());
-    }
-    auto client_context = fiber::net::TlsContext::create({});
-    if (!client_context) {
-        return std::unexpected(client_context.error());
+    fiber::net::TlsCredentialOptions credential_options{};
+    credential_options.certificate_chain = fiber::net::TlsPemSource::from_file(cert_path);
+    credential_options.private_key = fiber::net::TlsPemSource::from_file(key_path);
+    auto server_credential = fiber::net::TlsCredential::create(credential_options);
+    if (!server_credential) {
+        return std::unexpected(server_credential.error());
     }
     TestTlsPair pair{};
-    pair.server_context = std::move(*server_context);
-    pair.client_context = std::move(*client_context);
-    pair.server_options.default_context = pair.server_context.get();
-    pair.client_options.context = pair.client_context.get();
+    pair.server_credential = std::move(*server_credential);
+    pair.server_options.configure_callback = &fiber::net::configure_tls_with_credential;
+    pair.server_options.configure_ctx = pair.server_credential.get();
+    pair.client_options.enable_tls = true;
     return pair;
-}
-
-fiber::common::IoResult<void> init_tls_stream_pair(TestTlsPair &pair, fiber::net::detail::TlsStreamFd &server_stream,
-                                                   fiber::net::detail::TlsStreamFd &client_stream) {
-    auto server_ssl = fiber::net::TlsContext::create_server_ssl(pair.server_options, nullptr, nullptr,
-                                                                fiber::net::TlsTransportKind::Tcp);
-    if (!server_ssl) {
-        return std::unexpected(server_ssl.error());
-    }
-    auto server_init = server_stream.init(*server_ssl);
-    if (!server_init) {
-        return std::unexpected(server_init.error());
-    }
-    auto client_ssl = pair.client_context->create_client_ssl(pair.client_options);
-    if (!client_ssl) {
-        return std::unexpected(client_ssl.error());
-    }
-    return client_stream.init(*client_ssl);
 }
 
 struct SigpipeGuard {
@@ -195,9 +172,10 @@ DetachedTask close_tls_streams(fiber::net::detail::TlsStreamFd *server_stream,
     co_return;
 }
 
-DetachedTask run_tls_server(fiber::net::detail::TlsStreamFd *server_stream,
+DetachedTask run_tls_server(fiber::net::detail::TlsStreamFd *server_stream, const fiber::net::TlsServerParam &param,
                             std::promise<fiber::common::IoResult<std::string>> *done) {
-    auto handshake_result = co_await server_stream->handshake();
+    auto handshake_result =
+            co_await server_stream->handshake(param, nullptr, nullptr, fiber::net::TlsTransportKind::Tcp);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -221,9 +199,9 @@ DetachedTask run_tls_server(fiber::net::detail::TlsStreamFd *server_stream,
     co_return;
 }
 
-DetachedTask run_tls_client(fiber::net::detail::TlsStreamFd *client_stream,
+DetachedTask run_tls_client(fiber::net::detail::TlsStreamFd *client_stream, const fiber::net::TlsClientParam &param,
                             std::promise<fiber::common::IoResult<std::string>> *done) {
-    auto handshake_result = co_await client_stream->handshake();
+    auto handshake_result = co_await client_stream->handshake(param);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -248,10 +226,12 @@ DetachedTask run_tls_client(fiber::net::detail::TlsStreamFd *client_stream,
 }
 
 DetachedTask reset_tls_server_after_client_handshake(fiber::net::detail::TlsStreamFd *server_stream,
+                                                     const fiber::net::TlsServerParam &param,
                                                      std::atomic_bool *client_handshake_done,
                                                      std::atomic_bool *server_closed,
                                                      std::promise<fiber::common::IoErr> *done) {
-    auto handshake_result = co_await server_stream->handshake();
+    auto handshake_result =
+            co_await server_stream->handshake(param, nullptr, nullptr, fiber::net::TlsTransportKind::Tcp);
     if (!handshake_result) {
         server_closed->store(true, std::memory_order_release);
         done->set_value(handshake_result.error());
@@ -276,9 +256,10 @@ DetachedTask reset_tls_server_after_client_handshake(fiber::net::detail::TlsStre
 }
 
 DetachedTask write_tls_after_server_reset(fiber::net::detail::TlsStreamFd *client_stream,
+                                          const fiber::net::TlsClientParam &param,
                                           std::atomic_bool *client_handshake_done, std::atomic_bool *server_closed,
                                           std::promise<fiber::common::IoErr> *done) {
-    auto handshake_result = co_await client_stream->handshake();
+    auto handshake_result = co_await client_stream->handshake(param);
     client_handshake_done->store(true, std::memory_order_release);
     if (!handshake_result) {
         done->set_value(handshake_result.error());
@@ -311,15 +292,16 @@ TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
 
     auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
     auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
-    ASSERT_TRUE(init_tls_stream_pair(*tls_pair, *server_stream, *client_stream));
 
     std::promise<fiber::common::IoResult<std::string>> server_promise;
     std::promise<fiber::common::IoResult<std::string>> client_promise;
     auto server_future = server_promise.get_future();
     auto client_future = client_promise.get_future();
 
-    fiber::async::spawn(group.at(0), [&]() { return run_tls_server(server_stream, &server_promise); });
-    fiber::async::spawn(group.at(1), [&]() { return run_tls_client(client_stream, &client_promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_tls_server(server_stream, tls_pair->server_options, &server_promise); });
+    fiber::async::spawn(group.at(1),
+                        [&]() { return run_tls_client(client_stream, tls_pair->client_options, &client_promise); });
 
     ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
     ASSERT_EQ(client_future.wait_for(2s), std::future_status::ready);
@@ -358,7 +340,6 @@ TEST(TlsStreamFdTest, CrossLoopWriteFailureDoesNotTouchOwnerPoller) {
 
     auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
     auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
-    ASSERT_TRUE(init_tls_stream_pair(*tls_pair, *server_stream, *client_stream));
 
     std::atomic_bool client_handshake_done = false;
     std::atomic_bool server_closed = false;
@@ -368,11 +349,12 @@ TEST(TlsStreamFdTest, CrossLoopWriteFailureDoesNotTouchOwnerPoller) {
     auto client_future = client_promise.get_future();
 
     fiber::async::spawn(group.at(0), [&]() {
-        return reset_tls_server_after_client_handshake(server_stream, &client_handshake_done, &server_closed,
-                                                       &server_promise);
+        return reset_tls_server_after_client_handshake(server_stream, tls_pair->server_options, &client_handshake_done,
+                                                       &server_closed, &server_promise);
     });
     fiber::async::spawn(group.at(1), [&]() {
-        return write_tls_after_server_reset(client_stream, &client_handshake_done, &server_closed, &client_promise);
+        return write_tls_after_server_reset(client_stream, tls_pair->client_options, &client_handshake_done,
+                                            &server_closed, &client_promise);
     });
 
     ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);

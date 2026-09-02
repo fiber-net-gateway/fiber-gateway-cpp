@@ -150,7 +150,7 @@ QPACK 和 request streams，不需要改动 UDP endpoint 或 QUIC 建连状态�
 
 ### 5.1 `QuicClient`
 
-`QuicClient` 是绑定 endpoint、TLS context、cache 和 owner loop 的长期 connector，不代表
+`QuicClient` 是绑定 endpoint、`TlsClientParam`、cache 和 owner loop 的长期 connector，不代表
 单条 QUIC 连接。
 
 建议接口形态：
@@ -159,7 +159,7 @@ QPACK 和 request streams，不需要改动 UDP endpoint 或 QUIC 建连状态�
 class QuicClient {
 public:
     common::IoResult<void> init(QuicUdpEndpoint &endpoint,
-                                net::TlsContext &tls_context,
+                                const net::TlsClientParam &tls_param,
                                 const Options &options) noexcept;
 
     [[nodiscard]] std::expected<QuicClientAttempt, QuicConnectError>
@@ -449,10 +449,10 @@ token 必须使用不同的状态/类型表达。
 
 - `include/fiber/quic/QuicTlsSession.h`
 - `src/quic/QuicTlsSession.cpp`
-- `include/fiber/net/TlsOptions.h`
-- `include/fiber/net/TlsConnectionOptions.h`
-- `include/fiber/net/TlsContext.h`
-- `src/net/TlsContext.cpp`
+- `include/fiber/net/TlsCredential.h`
+- `include/fiber/net/TrustStore.h`
+- `include/fiber/net/TlsParams.h`
+- `src/net/detail/TlsSslFactory.cpp`
 
 ### 8.1 `QuicTlsSession::init_client`
 
@@ -486,15 +486,15 @@ parameters。
 
 ### 8.3 证书与 ALPN 安全边界
 
-客户端证书验证由 `TlsClientConnectionOptions` 控制：
+客户端证书验证由 `TlsClientParam` 控制：
 
-- `verify_peer=true` 时使用 `TlsContext` 中预加载的 trust store。
-- 系统默认 trust store 必须在创建 context 时显式选择。
+- `verify_peer=true` 时使用连接参数借用的 `TrustStore`。
+- 系统默认 trust store 必须在创建 `TrustStore` 时显式选择。
 - client SSL 设置 peer verification。
 - DNS name 使用 hostname verification；IP literal 使用 IP SAN verification。
 
-`TlsOptions` 只描述证书材料，不携带任何校验开关；是否校验 peer 完全由每次连接的
-`TlsClientConnectionOptions::verify_peer` 决定。`QuicClient` 在此之上默认拒绝
+`TlsCredential` 只描述证书链和私钥，`TrustStore` 只描述信任锚；是否校验 peer 完全由每次连接的
+`TlsClientParam::verify_peer` 决定。`QuicClient` 在此之上默认拒绝
 `verify_peer=false` 的连接。只有显式 `allow_insecure=true` 才允许跳过校验，
 该选项仅用于测试或受控环境。
 
@@ -821,7 +821,7 @@ create connection
 | `src/quic/QuicTransportParamsCodec.h + src/quic/QuicTransportParamsCodec.cpp` | preferred address、角色约束、remembered TP snapshot |
 | `include/fiber/quic/QuicPath.h`, `QuicPathManager.*` | role-aware amplification、initial path reconcile、preferred validation |
 | `include/fiber/quic/QuicStream.h + src/quic/QuicStream.cpp` | early-data mode 和 rejection 所需 stream 标记 |
-| `include/fiber/net/TlsOptions.h`, `TlsConnectionOptions.h`, `TlsContext.*` | trust store、每连接 peer verification、通用 client session trampoline |
+| `include/fiber/net/TlsCredential.h`, `TrustStore.h`, `TlsParams.h`, `src/net/detail/TlsSslFactory.*` | 独立证书/私钥与 trust store、每连接 peer verification、通用 client session trampoline |
 | `include/fiber/http/Http3Server.h + src/http/Http3Server.cpp` | 适配 endpoint/server admission options 拆分，不增加 H3 client |
 | `tests/*` | 单元、loopback、TLS、Retry、0-RTT、path 测试 |
 

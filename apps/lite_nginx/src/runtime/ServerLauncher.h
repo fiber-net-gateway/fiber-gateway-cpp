@@ -22,7 +22,7 @@ namespace fiber::lite_nginx::runtime {
 
 class DnsService;
 class HttpScriptServicesImpl;
-struct ListenerTlsContexts;
+struct ListenerTlsCredentials;
 
 class ServerLauncher {
 public:
@@ -50,7 +50,7 @@ private:
     std::unique_ptr<HttpScriptServicesImpl> script_services_{};
     std::unique_ptr<fiber::event::EventLoopGroup> worker_group_;
     std::vector<std::unique_ptr<fiber::http::HttpServer>> servers_;
-    std::vector<std::unique_ptr<ListenerTlsContexts>> tls_contexts_;
+    std::vector<std::unique_ptr<ListenerTlsCredentials>> tls_credentials_;
     std::vector<BoundListener> bound_listeners_;
     bool started_ = false;
 };

@@ -124,9 +124,9 @@ connection_options.pool_affinity = mtls_key->pool_affinity();
 - 同一个 profile 在共享连接池的所有 worker 上必须使用同一个 affinity；不同 profile 在其生命周期重叠时必须使用不同 affinity
 - affinity 只需在一个连接池实例及其仍可能归还的 lease/连接生命周期内唯一，不要求跨进程或跨重启全局唯一
 - affinity 是固定宽度的非敏感 `uint64_t` 标识；不要把证书路径、域名、CA 内容、私钥内容或其它 secret 编码进 key，也不要从 secret 内容直接计算它
-- 凭据或连接级策略轮换时，先创建并初始化新的 `TlsContext`，再发布新的 profile generation/affinity；在旧 profile 的所有 lease 和连接销毁、淘汰或清池前，不要复用其 affinity
+- 凭据或连接级策略轮换时，先创建并初始化新的 `TlsCredential`/`TrustStore`，再发布新的 profile generation/affinity；在旧 profile 的所有 lease 和连接销毁、淘汰或清池前，不要复用其 affinity
 
-连接池不会从 `TlsOptions` 的字符串或证书内容自动推导 affinity。配置控制层必须把同一个显式 affinity 同时写入 key 和 `Http1ClientConnectionOptions`，并保证它们对应同一个不可变 TLS profile。`emplace_connection()` 能拒绝两处显式 affinity 不一致，但无法判断调用方是否错误地给两组不同的 TLS 配置分配了同一个值。除客户端身份外，信任根、peer verification、SNI、`verify_name`、ALPN 等会固化在已建立连接上的选项也应纳入 profile generation。正在使用旧连接的 lease 可以自然完成；销毁旧 `TlsContext` 前必须确保所有由它创建的连接都已释放。
+连接池不会从 `TlsCredential`、`TrustStore` 或参数内容自动推导 affinity。配置控制层必须把同一个显式 affinity 同时写入 key 和 `Http1ClientConnectionOptions`，并保证它们对应同一个不可变 TLS profile。`emplace_connection()` 能拒绝两处显式 affinity 不一致，但无法判断调用方是否错误地给两组不同的 TLS 配置分配了同一个值。除客户端身份外，信任根、peer verification、SNI、`verify_name`、ALPN 等会固化在已建立连接上的选项也应纳入 profile generation。正在使用旧连接的 lease 可以自然完成；销毁旧 TLS 材料前必须确保借用它们的连接都已释放。
 
 ## 4. `Lease` 语义
 
@@ -243,7 +243,7 @@ auto &conn = lease.connection();
 注意：
 
 - `Http1ClientConnection::connect(timeout)` 只能在连接所属 loop 上调用
-- `timeout` 只限制 TCP connect 阶段；TLS 握手继续使用 `options.tls.handshake_timeout`（`TlsClientConnectionOptions`）
+- `timeout` 只限制 TCP connect 阶段；TLS 握手继续使用 `options.tls.handshake_timeout`（`TlsClientParam`）
 - `lease.emplace_connection()` 只负责在 entry 中构造连接对象，不会自动 `connect()`
 - 如果 connect 失败，连接对象仍会随 lease 生命周期被清理
 

@@ -40,7 +40,9 @@
 #include <fiber/http/HttpResponseWriter.h>
 #include <fiber/http/HttpServer.h>
 #include <fiber/log/LoggerManager.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/net/TrustStore.h>
 #include "config/ConfigLoader.h"
 #include "logging/LoggingBuilder.h"
 #include "runtime/GzipResponseWriter.h"
@@ -1019,22 +1021,23 @@ public:
             return;
         }
 
-        fiber::net::TlsOptions tls_material{};
+        fiber::net::TlsCredentialOptions tls_material{};
         tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert_.path());
         tls_material.private_key = fiber::net::TlsPemSource::from_file(key_.path());
-        auto tls_context = fiber::net::TlsContext::create(tls_material);
-        EXPECT_TRUE(tls_context);
-        if (!tls_context) {
+        auto tls_credential = fiber::net::TlsCredential::create(tls_material);
+        EXPECT_TRUE(tls_credential);
+        if (!tls_credential) {
             return;
         }
-        tls_context_ = std::move(*tls_context);
+        tls_credential_ = std::move(*tls_credential);
 
         group_.start();
         std::promise<std::uint16_t> ready;
         auto ready_future = ready.get_future();
         fiber::async::spawn(group_.at(0), [this, &ready]() -> fiber::async::DetachedTask {
             fiber::http::HttpServerOptions options;
-            options.tls.default_context = tls_context_.get();
+            options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
+            options.tls.configure_ctx = tls_credential_.get();
 
             auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
                 static constexpr std::string_view kBody = "secure";
@@ -1101,7 +1104,7 @@ public:
 private:
     TestPemFile cert_;
     TestPemFile key_;
-    std::unique_ptr<fiber::net::TlsContext> tls_context_;
+    std::unique_ptr<fiber::net::TlsCredential> tls_credential_;
     fiber::event::EventLoopGroup group_{1};
     fiber::http::HttpServer *server_ = nullptr;
     std::uint16_t port_ = 0;
@@ -1150,15 +1153,9 @@ std::string chain_to_string(fiber::mem::IoBufChain chain) {
 fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                                       std::promise<Http2WebSocketOutcome> *promise) {
     Http2WebSocketOutcome outcome;
-    auto tls_context = fiber::net::TlsContext::create({});
-    if (!tls_context) {
-        outcome.error = tls_context.error();
-        promise->set_value(std::move(outcome));
-        co_return;
-    }
     fiber::http::Http2ClientConnection::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.context = tls_context->get();
+    options.tls.enable_tls = true;
     options.tls.sni_name = "localhost";
 
     auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
@@ -1250,15 +1247,9 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
 fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                                  std::promise<Http2GzipOutcome> *promise) {
     Http2GzipOutcome outcome;
-    auto tls_context = fiber::net::TlsContext::create({});
-    if (!tls_context) {
-        outcome.error = tls_context.error();
-        promise->set_value(std::move(outcome));
-        co_return;
-    }
     fiber::http::Http2ClientConnection::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.context = tls_context->get();
+    options.tls.enable_tls = true;
     options.tls.sni_name = "localhost";
 
     auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
@@ -1332,16 +1323,14 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
                                                  const std::string *cert_path,
                                                  std::promise<Http3GzipOutcome> *promise) {
     Http3GzipOutcome outcome;
-    fiber::net::TlsOptions tls_material{};
-    tls_material.trust_store = fiber::net::TlsTrustStoreSource::from_file(*cert_path);
-    auto tls_context = fiber::net::TlsContext::create(tls_material);
-    if (!tls_context) {
-        outcome.error = tls_context.error();
+    auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(*cert_path));
+    if (!trust_store) {
+        outcome.error = trust_store.error();
         promise->set_value(std::move(outcome));
         co_return;
     }
     fiber::http::Http3Client::Options client_options;
-    client_options.tls.context = tls_context->get();
+    client_options.tls.trust_store = trust_store->get();
     client_options.tls.verify_peer = true;
     fiber::http::Http3Client client(*endpoint, std::move(client_options));
 
@@ -3494,13 +3483,14 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::net::TlsOptions tls_material{};
+    fiber::net::TlsCredentialOptions tls_material{};
     tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.path());
     tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path());
-    auto tls_context = fiber::net::TlsContext::create(tls_material);
-    ASSERT_TRUE(tls_context);
+    auto tls_credential = fiber::net::TlsCredential::create(tls_material);
+    ASSERT_TRUE(tls_credential);
     fiber::http::HttpServerOptions server_options;
-    server_options.tls.default_context = tls_context->get();
+    server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
+    server_options.tls.configure_ctx = tls_credential->get();
     server_options.http3.enabled = true;
     fiber::http::HttpHandler handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         static const std::vector<std::string> kTypes{"text/plain"};

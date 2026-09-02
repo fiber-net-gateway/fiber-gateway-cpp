@@ -62,7 +62,7 @@ private:
     bool cleanup_started_ = false;
 };
 
-net::TlsClientConnectionOptions Http3Client::normalize_tls_options(net::TlsClientConnectionOptions options) noexcept {
+net::TlsClientParam Http3Client::normalize_tls_options(net::TlsClientParam options) noexcept {
     options.min_version = 0x0304;
     options.max_version = 0x0304;
     normalize_http3_alpn(options);

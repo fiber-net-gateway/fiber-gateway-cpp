@@ -10,9 +10,9 @@
 #include <openssl/x509.h>
 
 #include <fiber/net/IpAddress.h>
-#include <fiber/net/TlsContext.h>
 #include <fiber/quic/QuicConnection.h>
 #include <fiber/quic/QuicCursor.h>
+#include "net/detail/TlsSslFactory.h"
 #include "quic/QuicCrypto.h"
 #include "quic/QuicTransportParamsCodec.h"
 
@@ -281,14 +281,17 @@ QuicTlsSession::~QuicTlsSession() {
     }
 }
 
-common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerConnectionOptions &options,
+common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerParam &options,
                                                    QuicConnection &connection) noexcept {
     if (ssl_ != nullptr) {
         return std::unexpected(common::IoErr::Already);
     }
 
-    auto created_ssl = net::TlsContext::create_server_ssl(options, &connection.local_addr(), &connection.remote_addr(),
-                                                          net::TlsTransportKind::Quic);
+    server_param_ = options;
+    server_param_.enable_early_data = connection.early_data_enabled();
+    auto created_ssl =
+            net::detail::TlsSslFactory::create_server(server_param_, server_handshake_state_, &connection.local_addr(),
+                                                      &connection.remote_addr(), net::TlsTransportKind::Quic);
     if (!created_ssl) {
         return std::unexpected(created_ssl.error());
     }
@@ -326,9 +329,9 @@ common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerConnectio
     return {};
 }
 
-common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientConnectionOptions &base_options,
-                                                   QuicConnection &connection, const char *server_name,
-                                                   bool allow_insecure, SSL_SESSION *session) noexcept {
+common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientParam &base_options, QuicConnection &connection,
+                                                   const char *server_name, bool allow_insecure,
+                                                   SSL_SESSION *session) noexcept {
     if (ssl_ != nullptr || !base_options.enabled() || base_options.alpn.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -340,7 +343,7 @@ common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientConnectio
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    net::TlsClientConnectionOptions options = base_options;
+    net::TlsClientParam options = base_options;
     if (server_name != nullptr && server_name[0] != '\0') {
         options.sni_name = server_name;
         if (options.verify_name.empty()) {
@@ -349,8 +352,7 @@ common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientConnectio
     }
     options.enable_early_data = connection.early_data_enabled();
     new_session_ops_ = {.ctx = &connection, .store = &store_new_client_session};
-    options.new_session_ops = &new_session_ops_;
-    auto created_ssl = options.context->create_client_ssl(options);
+    auto created_ssl = net::detail::TlsSslFactory::create_client(options, &new_session_ops_);
     if (!created_ssl) {
         return std::unexpected(created_ssl.error());
     }
@@ -450,6 +452,9 @@ common::IoResult<void> QuicTlsSession::drive_handshake() noexcept {
     }
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
         return std::unexpected(common::IoErr::WouldBlock);
+    }
+    if (!client_mode_ && server_handshake_state_.callback_error != common::IoErr::None) {
+        return std::unexpected(server_handshake_state_.callback_error);
     }
 
     // A TLS alert was raised during the handshake (captured by the send_alert

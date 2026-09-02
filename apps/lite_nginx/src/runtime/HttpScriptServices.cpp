@@ -7,7 +7,6 @@
 #include <fiber/http_script/HttpTarget.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
-#include <fiber/net/TlsOptions.h>
 
 #include "../upstream/ConnectionPool.h"
 #include "../upstream/UpstreamConnection.h"

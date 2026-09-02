@@ -13,7 +13,6 @@
 #include <fiber/http/Http1ConnectionGroupKey.h>
 #include <fiber/http/LocalHttp1ConnectionPoolSet.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
-#include <fiber/net/TlsContext.h>
 
 #include "../runtime/RuntimeConfig.h"
 
@@ -75,11 +74,9 @@ public:
     [[nodiscard]] bool stealable() const noexcept {
         return std::holds_alternative<std::unique_ptr<fiber::http::StealableHttp1ConnectionPoolSet>>(impl_);
     }
-    [[nodiscard]] const fiber::net::TlsContext *tls_context() const noexcept { return tls_context_.get(); }
 
 private:
     fiber::event::EventLoopGroup *group_ = nullptr;
-    std::unique_ptr<fiber::net::TlsContext> tls_context_{};
     std::variant<std::unique_ptr<fiber::http::LocalHttp1ConnectionPoolSet>,
                  std::unique_ptr<fiber::http::StealableHttp1ConnectionPoolSet>>
             impl_;

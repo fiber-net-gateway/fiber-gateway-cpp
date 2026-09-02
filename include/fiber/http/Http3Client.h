@@ -10,7 +10,8 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "../net/TlsContext.h"
+#include "../net/TlsCredential.h"
+#include "../net/TrustStore.h"
 #include "../quic/QuicClient.h"
 #include "../quic/QuicUdpEndpoint.h"
 #include "Http3ClientConnection.h"
@@ -36,7 +37,7 @@ using Http3ClientConnectResult = std::expected<Http3ClientConnection, Http3Clien
 class Http3Client : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
-        net::TlsClientConnectionOptions tls{.verify_peer = true};
+        net::TlsClientParam tls{.verify_peer = true, .enable_tls = true};
         quic::QuicClientCacheOps cache{};
         Http3Settings local_settings{};
         std::chrono::milliseconds drain_timeout = std::chrono::seconds(3);
@@ -52,13 +53,13 @@ public:
     [[nodiscard]] common::IoResult<void> init() noexcept;
     [[nodiscard]] async::Task<Http3ClientConnectResult> connect(quic::QuicClientConnectOptions options) noexcept;
 
-    [[nodiscard]] const net::TlsContext *tls_context() const noexcept { return options_.tls.context; }
+    [[nodiscard]] const net::TlsCredential *tls_credential() const noexcept { return options_.tls.credential; }
+    [[nodiscard]] const net::TrustStore *trust_store() const noexcept { return options_.tls.trust_store; }
 
 private:
     class Session;
 
-    [[nodiscard]] static net::TlsClientConnectionOptions
-    normalize_tls_options(net::TlsClientConnectionOptions options) noexcept;
+    [[nodiscard]] static net::TlsClientParam normalize_tls_options(net::TlsClientParam options) noexcept;
     [[nodiscard]] static quic::QuicConnection::Lease
     create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept;

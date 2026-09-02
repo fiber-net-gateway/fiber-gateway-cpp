@@ -5,7 +5,7 @@
 #include <utility>
 
 #include <fiber/common/Assert.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TlsParams.h>
 #include <fiber/quic/QuicProtocol.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
 #include "quic/QuicCrypto.h"
@@ -25,7 +25,8 @@ QuicClientCacheKey QuicClient::cache_key(std::string_view server_name,
     return QuicClientCacheKey{
             .server_name = server_name,
             .remote_addr = remote_addr,
-            .tls_context = tls_options_ ? tls_options_->context : nullptr,
+            .credential = tls_options_ ? tls_options_->credential : nullptr,
+            .trust_store = tls_options_ ? tls_options_->trust_store : nullptr,
     };
 }
 
@@ -145,7 +146,7 @@ void QuicClientAttempt::cancel() noexcept {
     handshake_deadline_ = std::chrono::steady_clock::time_point::max();
 }
 
-common::IoResult<void> QuicClient::init(QuicUdpEndpoint &endpoint, const net::TlsClientConnectionOptions &tls_options,
+common::IoResult<void> QuicClient::init(QuicUdpEndpoint &endpoint, const net::TlsClientParam &tls_options,
                                         const Options &options) noexcept {
     if (endpoint_ != nullptr || !endpoint.valid() || endpoint.loop_ == nullptr || !tls_options.enabled() ||
         tls_options.alpn.empty() || options.create_connection == nullptr) {
@@ -229,7 +230,8 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
     connection_options.has_remembered_peer_transport = attempt_early_data;
     connection_options.client_server_name = options.server_name;
     connection_options.client_cache_remote_addr = options.remote_addr;
-    connection_options.client_tls_context = tls_options_->context;
+    connection_options.client_tls_credential = tls_options_->credential;
+    connection_options.client_trust_store = tls_options_->trust_store;
     connection_options.client_cache_owner = this;
     connection_options.on_new_tls_session = options_.cache.store_session != nullptr ? store_session : nullptr;
     connection_options.on_new_token = options_.cache.store_token != nullptr ? store_token : nullptr;
