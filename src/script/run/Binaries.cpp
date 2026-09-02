@@ -1,5 +1,6 @@
 #include "script/run/Binaries.h"
 
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -60,6 +61,79 @@ bool to_int64(const fiber::script::JsValue &value, std::int64_t &out) noexcept {
         default:
             return false;
     }
+}
+
+// Exact IEEE fmod(lhs, rhs) on binary significands, replacing the libm fmod()
+// call whose newer symbol versions raise the binary's minimum glibc
+// requirement. The remainder of two doubles is always exactly representable,
+// so integer shift-and-subtract yields bit-identical results; ldexp() stays on
+// the GLIBC_2.2.5 symbol. Iteration count is bounded by the binary exponent
+// gap between the operands.
+double float_mod(double lhs, double rhs) noexcept {
+    constexpr std::uint64_t kExpMask = 0x7ff0'0000'0000'0000ull;
+    constexpr std::uint64_t kFracMask = 0x000f'ffff'ffff'ffffull;
+    constexpr std::uint64_t kSignMask = 0x8000'0000'0000'0000ull;
+    constexpr int kBias = 1023;
+
+    const std::uint64_t xi = std::bit_cast<std::uint64_t>(lhs);
+    const std::uint64_t yi = std::bit_cast<std::uint64_t>(rhs);
+    const int ex = static_cast<int>((xi & kExpMask) >> 52);
+    const int ey = static_cast<int>((yi & kExpMask) >> 52);
+    if (ex == 0x7ff || (yi & ~kSignMask) == 0 || (ey == 0x7ff && (yi & kFracMask) != 0)) {
+        // NaN operand, infinite dividend, or zero divisor.
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    if (ey == 0x7ff) {
+        return lhs; // finite dividend, infinite divisor
+    }
+    if ((xi & ~kSignMask) < (yi & ~kSignMask)) {
+        return lhs; // |lhs| < |rhs|, sign and payload preserved (covers +-0)
+    }
+
+    // Decompose into mantissa * 2^exp with the mantissa in [2^52, 2^53);
+    // subnormals are normalized by shifting, so both operands reach the loop
+    // with full-width integer significands.
+    auto decompose = [](std::uint64_t bits, std::uint64_t &mantissa, int &exp) noexcept {
+        const int biased = static_cast<int>((bits & kExpMask) >> 52);
+        mantissa = bits & kFracMask;
+        if (biased != 0) {
+            mantissa |= 1ull << 52;
+            exp = biased - kBias - 52;
+        } else {
+            exp = 1 - kBias - 52;
+            while ((mantissa >> 52) == 0) {
+                mantissa <<= 1;
+                --exp;
+            }
+        }
+    };
+    std::uint64_t mx = 0;
+    std::uint64_t my = 0;
+    int xe = 0;
+    int ye = 0;
+    decompose(xi, mx, xe);
+    decompose(yi, my, ye);
+
+    while (true) {
+        if (xe < ye || (xe == ye && mx < my)) {
+            break; // remainder below the divisor magnitude
+        }
+        if (mx >= my) {
+            mx -= my;
+        } else {
+            mx = mx * 2 - my;
+            --xe;
+        }
+        while (mx != 0 && (mx >> 52) == 0) {
+            mx <<= 1;
+            --xe;
+        }
+        if (mx == 0) {
+            break;
+        }
+    }
+    const double magnitude = std::ldexp(static_cast<double>(mx), xe);
+    return (xi & kSignMask) != 0 ? -magnitude : magnitude;
 }
 
 const fiber::script::GcString *as_heap_string(const fiber::script::JsValue &value) noexcept {
@@ -381,7 +455,7 @@ CallResult Binaries::modulo(GcHeap &runtime, ConstValueHandle a, ConstValueHandl
         if (rhs == 0.0) {
             return set_exception(result, fiber::script::ExceptionKind::RangeError);
         }
-        return set_value(result, fiber::script::JsValue::make_float(std::fmod(lhs, rhs)));
+        return set_value(result, fiber::script::JsValue::make_float(float_mod(lhs, rhs)));
     }
     std::int64_t lhs = 0;
     std::int64_t rhs = 0;

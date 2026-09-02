@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -95,6 +97,29 @@ TEST(ScriptRuntimeOpsTest, BinaryDivideByZero) {
     auto status = fiber::script::run::Binaries::divide(heap, lhs, rhs, result);
     ASSERT_EQ(status, CallResult::Exception);
     EXPECT_EQ(fiber::script::js_value_exception_kind(result.exception), fiber::script::ExceptionKind::RangeError);
+}
+
+TEST(ScriptRuntimeOpsTest, BinaryModuloFloatIsExactIeeeFmod) {
+    GcHeap heap;
+    ResultPayload result;
+    auto run_mod = [&](double lhs, double rhs) -> double {
+        auto l = handle(heap, JsValue::make_float(lhs));
+        auto r = handle(heap, JsValue::make_float(rhs));
+        auto status = fiber::script::run::Binaries::modulo(heap, l, r, result);
+        EXPECT_EQ(status, CallResult::Success);
+        return fiber::script::js_value_double(result.value);
+    };
+    EXPECT_DOUBLE_EQ(run_mod(7.5, 2.0), 1.5);
+    EXPECT_DOUBLE_EQ(run_mod(-7.5, 2.0), -1.5);
+    EXPECT_DOUBLE_EQ(run_mod(1.5, 2.5), 1.5); // |lhs| < |rhs| keeps the dividend
+    EXPECT_DOUBLE_EQ(run_mod(10.0, 2.5), 0.0); // 4 * 2.5 divides exactly
+    EXPECT_TRUE(std::signbit(run_mod(-10.0, 2.5))); // zero result keeps the dividend sign
+    // Wide exponent gaps and subnormal operands stay bit-exact versus fmod.
+    EXPECT_DOUBLE_EQ(run_mod(1e300, 0.1), std::fmod(1e300, 0.1));
+    EXPECT_DOUBLE_EQ(run_mod(123456789.123456789, 0.001), std::fmod(123456789.123456789, 0.001));
+    EXPECT_DOUBLE_EQ(run_mod(1e-310, 5e-324), std::fmod(1e-310, 5e-324));
+    EXPECT_TRUE(std::isnan(run_mod(std::numeric_limits<double>::infinity(), 2.0)));
+    EXPECT_DOUBLE_EQ(run_mod(2.0, std::numeric_limits<double>::infinity()), 2.0);
 }
 
 TEST(ScriptRuntimeOpsTest, UnaryPlusTypeError) {
