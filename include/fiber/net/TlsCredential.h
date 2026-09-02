@@ -28,8 +28,9 @@ struct TlsCredentialOptions {
     TlsPemSource private_key{};
 };
 
-// Immutable certificate chain and private key. The object must outlive every
-// handshake to which it is added.
+// Immutable, reusable certificate chain and private key. This object owns one
+// BoringSSL credential reference. SSL_add1_credential retains a separate
+// reference, so this object only needs to remain alive until that call succeeds.
 class TlsCredential : public common::NonCopyable, public common::NonMovable {
 public:
     ~TlsCredential();

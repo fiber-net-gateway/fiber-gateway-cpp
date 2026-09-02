@@ -25,7 +25,9 @@ struct TlsServerHandshakeState;
 class TlsServerHandshakeConfig {
 public:
     [[nodiscard]] common::IoErr clear_credentials() noexcept;
+    // On success, the current SSL retains its own BoringSSL reference.
     [[nodiscard]] common::IoErr add_credential(const TlsCredential &credential) noexcept;
+    // On success, the current SSL retains its own X509_STORE reference.
     [[nodiscard]] common::IoErr set_trust_store(const TrustStore &trust_store) noexcept;
     [[nodiscard]] common::IoErr set_session_id_context(std::span<const std::uint8_t> context) noexcept;
     [[nodiscard]] common::IoErr set_protocol_versions(int min_version, int max_version) noexcept;

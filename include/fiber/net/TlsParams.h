@@ -94,8 +94,9 @@ using ConfigureTlsCallback = common::IoErr (*)(void *ctx, TlsServerHandshakeConf
                                                const TlsClientHelloView &client_hello) noexcept;
 
 struct TlsClientParam {
-    // Parameters and borrowed material must remain valid until the handshake
-    // task completes. TlsCredential and TrustStore may then be reused freely.
+    // handshake() synchronously creates and configures the SSL before returning
+    // its task. These borrowed objects only need to remain valid through that
+    // setup; the SSL retains its own references after successful installation.
     // TLS clients without a client certificate leave credential null.
     const TlsCredential *credential = nullptr;
     const TrustStore *trust_store = nullptr;
@@ -117,8 +118,9 @@ struct TlsClientParam {
 };
 
 struct TlsServerParam {
-    // This object, callback state, and borrowed material must remain valid
-    // until the handshake task completes.
+    // This object remains borrowed through the handshake. Callback state and
+    // material selected by it must remain valid until the synchronous callback
+    // finishes. The SSL retains its own material references after installation.
     // Required for TLS. The synchronous callback configures the current SSL
     // after ClientHello and must add at least one credential.
     ConfigureTlsCallback configure_callback = nullptr;
