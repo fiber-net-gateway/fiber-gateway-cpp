@@ -37,20 +37,15 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return address.port();
 }
 
-TEST(HttpServerLifecycleTest, FailedTlsBindRollsBackListener) {
+TEST(HttpServerLifecycleTest, FailedHttp3WithoutTlsBindRollsBackListener) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
     std::promise<BindObservation> observation_promise;
     auto observation_future = observation_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
-        auto tls_context = fiber::net::TlsContext::create({});
-        if (!tls_context) {
-            observation_promise.set_value({.error = tls_context.error()});
-            co_return;
-        }
         fiber::http::HttpServerOptions options;
-        options.tls.default_context = tls_context->get();
+        options.http3.enabled = true;
         fiber::http::HttpServer server(group.at(0), {}, std::move(options));
 
         auto result = server.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});

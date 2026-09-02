@@ -9,6 +9,8 @@
 #include <openssl/bio.h>
 #include <openssl/ssl.h>
 
+#include "TlsSslFactory.h"
+
 namespace fiber::net::detail {
 
 namespace {
@@ -168,7 +170,7 @@ TlsStreamFd::~TlsStreamFd() {
     FIBER_ASSERT(false);
 }
 
-common::IoResult<void> TlsStreamFd::init(SSL *ssl) {
+common::IoResult<void> TlsStreamFd::attach_ssl(SSL *ssl) noexcept {
     if (!ssl) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -177,8 +179,8 @@ common::IoResult<void> TlsStreamFd::init(SSL *ssl) {
         return std::unexpected(common::IoErr::BadFd);
     }
     if (ssl_) {
-        SSL_free(ssl_);
-        ssl_ = nullptr;
+        SSL_free(ssl);
+        return std::unexpected(common::IoErr::Already);
     }
     ssl_ = ssl;
     // Install a custom fd BIO (instead of SSL_set_fd's built-in socket BIO) so
@@ -197,7 +199,7 @@ common::IoResult<void> TlsStreamFd::init(SSL *ssl) {
     return {};
 }
 
-bool TlsStreamFd::valid() const noexcept { return stream_fd_.valid() && ssl_ != nullptr; }
+bool TlsStreamFd::valid() const noexcept { return stream_fd_.valid(); }
 
 int TlsStreamFd::fd() const noexcept { return stream_fd_.fd(); }
 
@@ -366,13 +368,64 @@ fiber::common::IoResult<size_t> TlsStreamFd::try_write(const void *buf, size_t l
     return std::unexpected(err);
 }
 
-TlsStreamFd::HandshakeTask TlsStreamFd::handshake() {
+common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) noexcept {
+    if (role_ != Role::None) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    role_ = Role::Client;
+    new_session_ops_ = param.new_session_ops ? *param.new_session_ops : TlsNewSessionOps{};
+    auto ssl = TlsSslFactory::create_client(param, &new_session_ops_);
+    if (!ssl) {
+        return std::unexpected(ssl.error());
+    }
+    return attach_ssl(*ssl);
+}
+
+common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param, const SocketAddress *local_addr,
+                                                 const SocketAddress *remote_addr,
+                                                 TlsTransportKind transport) noexcept {
+    if (role_ != Role::None) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    role_ = Role::Server;
+    auto ssl = TlsSslFactory::create_server(param, server_handshake_state_, local_addr, remote_addr, transport);
+    if (!ssl) {
+        return std::unexpected(ssl.error());
+    }
+    return attach_ssl(*ssl);
+}
+
+TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param) {
+    return handshake(param, param.handshake_timeout);
+}
+
+TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param, std::chrono::milliseconds timeout) {
+    return handshake_impl(start_client(param), timeout);
+}
+
+TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, const SocketAddress *local_addr,
+                                                  const SocketAddress *remote_addr, TlsTransportKind transport) {
+    return handshake(param, local_addr, remote_addr, transport, param.handshake_timeout);
+}
+
+TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, const SocketAddress *local_addr,
+                                                  const SocketAddress *remote_addr, TlsTransportKind transport,
+                                                  std::chrono::milliseconds timeout) {
+    return handshake_impl(start_server(param, local_addr, remote_addr, transport), timeout);
+}
+
+TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(common::IoResult<void> start_result,
+                                                       std::chrono::milliseconds timeout) {
+    if (!start_result) {
+        co_return std::unexpected(start_result.error());
+    }
     if (busy_) {
         co_return std::unexpected(fiber::common::IoErr::Busy);
     }
 
     busy_ = true;
     BusyResetGuard busy_reset(&busy_);
+    Deadline deadline = make_deadline(timeout);
     for (;;) {
         fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
         fiber::common::IoErr err = handshake_once(wait_event);
@@ -380,17 +433,24 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake() {
             co_return fiber::common::IoResult<void>{};
         }
         if (err != fiber::common::IoErr::WouldBlock) {
+            if (role_ == Role::Server && server_handshake_state_.callback_error != common::IoErr::None) {
+                co_return std::unexpected(server_handshake_state_.callback_error);
+            }
             co_return std::unexpected(err);
         }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
         if (wait_event == fiber::event::IoEvent::Read) {
-            auto wait_result = co_await stream_fd_.wait_readable();
+            auto wait_result = co_await stream_fd_.wait_readable(*remaining);
             if (!wait_result) {
                 co_return std::unexpected(wait_result.error());
             }
             continue;
         }
         if (wait_event == fiber::event::IoEvent::Write) {
-            auto wait_result = co_await stream_fd_.wait_writable();
+            auto wait_result = co_await stream_fd_.wait_writable(*remaining);
             if (!wait_result) {
                 co_return std::unexpected(wait_result.error());
             }
@@ -440,10 +500,6 @@ StreamFd::WaitReadableAwaiter TlsStreamFd::wait_readable(std::chrono::millisecon
 
 StreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return stream_fd_.wait_writable(timeout);
-}
-
-fiber::common::IoErr TlsStreamFd::poll_handshake(fiber::event::IoEvent &event) noexcept {
-    return handshake_once(event);
 }
 
 fiber::common::IoErr TlsStreamFd::poll_shutdown(fiber::event::IoEvent &event) noexcept { return shutdown_once(event); }

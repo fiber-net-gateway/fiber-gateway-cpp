@@ -12,7 +12,7 @@
 #include <fiber/http/Http1ConnectionGroupKey.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
-#include <fiber/net/TlsConnectionOptions.h>
+#include <fiber/net/TlsParams.h>
 
 #include "ConnectionPool.h"
 

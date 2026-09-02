@@ -7,10 +7,6 @@
 #include <new>
 #include <sys/uio.h>
 
-#include <openssl/ssl.h>
-#include <openssl/tls1.h>
-#include <openssl/x509.h>
-
 #include <fiber/async/Timeout.h>
 #include <fiber/common/Assert.h>
 #include <fiber/net/IpAddress.h>
@@ -304,7 +300,7 @@ const net::SocketAddress &TcpTransport::remote_addr() const noexcept { return st
 event::EventLoop &TcpTransport::loop() const noexcept { return stream_.loop(); }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     const net::TlsClientConnectionOptions &options,
+                                                                     const net::TlsClientParam &options,
                                                                      net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
@@ -315,15 +311,11 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
     }
     auto transport =
             std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), options));
-    auto init_result = transport->init();
-    if (!init_result) {
-        return std::unexpected(init_result.error());
-    }
     return transport;
 }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     const net::TlsServerConnectionOptions &options,
+                                                                     const net::TlsServerParam &options,
                                                                      net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
@@ -334,19 +326,15 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
     }
     auto transport =
             std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), options));
-    auto init_result = transport->init();
-    if (!init_result) {
-        return std::unexpected(init_result.error());
-    }
     return transport;
 }
 
 TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
-                           const net::TlsClientConnectionOptions &options) :
+                           const net::TlsClientParam &options) :
     stream_(loop, fd, std::move(remote_addr)), client_options_(&options) {}
 
 TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
-                           const net::TlsServerConnectionOptions &options) :
+                           const net::TlsServerParam &options) :
     stream_(loop, fd, std::move(remote_addr)), server_options_(&options) {}
 
 TlsTransport::~TlsTransport() = default;
@@ -516,25 +504,6 @@ common::IoErr TlsTransport::poll_writev(mem::IoBufChain &buf, size_t &out, event
     return err;
 }
 
-common::IoResult<void> TlsTransport::init() {
-    clear_pending_write();
-    common::IoResult<SSL *> ssl = std::unexpected(common::IoErr::Invalid);
-    if (server_options_) {
-        ssl = net::TlsContext::create_server_ssl(*server_options_, nullptr, &stream_.remote_addr(),
-                                                 net::TlsTransportKind::Tcp);
-    } else if (client_options_ && client_options_->context) {
-        ssl = client_options_->context->create_client_ssl(*client_options_);
-    }
-    if (!ssl) {
-        return std::unexpected(ssl.error());
-    }
-    auto init_result = stream_.init(*ssl);
-    if (!init_result) {
-        return std::unexpected(init_result.error());
-    }
-    return {};
-}
-
 bool TlsTransport::handshake_done() const noexcept { return stream_.handshake_done(); }
 
 void TlsTransport::clear_pending_write() noexcept {
@@ -545,21 +514,14 @@ void TlsTransport::clear_pending_write() noexcept {
 }
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(std::chrono::milliseconds timeout) {
-    auto deadline = make_deadline(timeout);
-    for (;;) {
-        event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = stream_.poll_handshake(wait_event);
-        if (err == common::IoErr::None) {
-            co_return common::IoResult<void>{};
-        }
-        if (err != common::IoErr::WouldBlock) {
-            co_return std::unexpected(err);
-        }
-        auto wait_result = co_await wait_tls_event(stream_, wait_event, deadline);
-        if (!wait_result) {
-            co_return std::unexpected(wait_result.error());
-        }
+    clear_pending_write();
+    if (server_options_) {
+        return stream_.handshake(*server_options_, timeout);
     }
+    if (client_options_) {
+        return stream_.handshake(*client_options_, timeout);
+    }
+    return stream_.handshake(net::TlsClientParam{}, timeout);
 }
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::shutdown(std::chrono::milliseconds timeout) {

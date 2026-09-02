@@ -1,61 +1,88 @@
-# TLS 客户端证书身份
+# TLS 凭据、信任根与握手参数
 
-`TlsContext` 是一组不可变的证书身份与信任根，既可派生客户端连接，也可派生服务端连接。客户端使用带证书身份的 context 时，会在握手中发送证书链，可用于 mTLS。
+TLS 材料与连接策略相互独立：
 
-## 文件和初始化语义
+- `TlsCredential` 是不可变的证书链和私钥，内部持有 BoringSSL `SSL_CREDENTIAL *`。
+- `TrustStore` 是不可变的信任根集合，内部持有 `X509_STORE *`。
+- `TlsClientParam` 和 `TlsServerParam` 只描述一次连接的握手策略，借用上述材料。
 
-- `certificate_chain` 和 `private_key` 分别接受 PEM 文件路径或 PEM 内容；证书内容的第一个证书是 leaf，后面可依次包含 intermediate chain。
-- 两者必须同时为空或同时设置；同时为空表示 context 没有本端证书身份。
-- `trust_store` 接受根证书文件、根证书内容或显式的系统信任根。
-- `TlsContext::create()` 同步加载材料并校验证书和私钥是否匹配。任何一步失败都返回错误，不会发布半初始化的 context。
-- 初始化错误不会包含证书路径、私钥信息或 OpenSSL 错误队列详情。调用方也不应在普通日志或 API 响应中输出 secret reference 或解析后的文件路径。
+`TlsCredential::create()` 会同步读取 PEM、构造证书链并校验证书与私钥是否匹配；
+`TrustStore::create()` 支持 PEM 文件、PEM 内容和系统信任根。失败时不会发布半初始化对象，普通日志和
+API 响应也不应输出私钥内容、secret reference 或解析后的私钥路径。
 
-客户端身份与服务端认证互相独立：
+## 客户端
 
-- `TlsClientConnectionOptions::verify_peer` 决定是否验证服务端证书；启用时 context 必须包含 trust store。
-- `sni_name` 是发送给服务端的 SNI；IP 地址不会作为 SNI 发送。
-- `verify_name` 是独立的证书校验名；为空时回退到 DNS 类型的 `sni_name`。
-- ALPN、握手超时、取消和关闭仍沿用原有 TLS transport 行为。
-
-一个典型配置如下：
+没有客户端证书时，`credential` 保持为空。`verify_peer=true` 时必须提供 `trust_store`；`sni_name`
+用于 ClientHello SNI，IP 字面量不会作为 SNI 发送，`verify_name` 则独立控制证书 DNS/IP SAN 校验目标。
 
 ```cpp
-fiber::net::TlsOptions material{};
-material.certificate_chain = fiber::net::TlsPemSource::from_file(resolved_client_chain_path);
-material.private_key = fiber::net::TlsPemSource::from_file(resolved_client_key_path);
-material.trust_store = fiber::net::TlsTrustStoreSource::from_file(resolved_ca_path);
+fiber::net::TlsCredentialOptions credential_options{};
+credential_options.certificate_chain =
+        fiber::net::TlsPemSource::from_file(resolved_client_chain_path);
+credential_options.private_key =
+        fiber::net::TlsPemSource::from_file(resolved_client_key_path);
+auto credential = fiber::net::TlsCredential::create(credential_options);
 
-auto context = fiber::net::TlsContext::create(material);
-if (!context) {
-    return std::unexpected(context.error());
+auto trust_store = fiber::net::TrustStore::create(
+        fiber::net::TrustStoreOptions::from_file(resolved_ca_path));
+if (!credential || !trust_store) {
+    return std::unexpected(credential ? trust_store.error() : credential.error());
 }
 
-fiber::net::TlsClientConnectionOptions tls{};
-tls.context = context->get();
+fiber::net::TlsClientParam tls{};
+tls.enable_tls = true;
+tls.credential = credential->get();
+tls.trust_store = trust_store->get();
 tls.verify_peer = true;
 tls.sni_name = "route.example.com";
 tls.verify_name = "certificate.example.com";
 tls.alpn = {"h2", "http/1.1"};
 ```
 
-证书文件只在 `create()` 时读入。初始化成功后不得通过 `raw()` 修改 `SSL_CTX`，并须保证 context 比所有由其创建的 TLS 连接活得更久。
+## 服务端 ClientHello 配置回调
+
+`TlsServerParam` 没有默认凭据字段。服务端必须设置同步 `configure_callback`；回调接收
+`TlsClientHelloView` 和仅在回调期间有效的 `TlsServerHandshakeConfig`，并至少调用一次
+`add_credential()`。它还可以添加多个候选凭据、替换 trust store、设置客户端证书模式、session ID
+context、TLS 版本、early data，或指定本次连接的 ALPN。
+
+静态单证书服务也走同一条路径：
+
+```cpp
+fiber::net::TlsServerParam tls{};
+tls.configure_callback = &fiber::net::configure_tls_with_credential;
+tls.configure_ctx = credential.get();
+```
+
+动态 SNI 配置示例：
+
+```cpp
+fiber::common::IoErr configure_tls(
+        void *ctx,
+        fiber::net::TlsServerHandshakeConfig &config,
+        const fiber::net::TlsClientHelloView &hello) noexcept {
+    auto &identities = *static_cast<IdentityTable *>(ctx);
+    const fiber::net::TlsCredential *credential = identities.find(hello.server_name);
+    if (!credential) {
+        credential = identities.fallback();
+    }
+    return credential ? config.add_credential(*credential)
+                      : fiber::common::IoErr::NotFound;
+}
+```
+
+内部只创建一份进程级 client `SSL_CTX` 和一份 server `SSL_CTX`。server context 通过
+`SSL_CTX_set_select_certificate_cb` 安装固定 trampoline；每条连接的回调状态放在 `SSL` ex-data 中，
+trampoline 再从 `client_hello->ssl` 取回。因此业务回调修改的是当前连接的 `SSL`，不会切换或修改共享
+`SSL_CTX`，也不会暴露原始 `SSL *`。
+
+回调当前只支持同步成功或失败，不返回 `ssl_select_cert_retry`。`TlsCredential`、`TrustStore`、参数对象
+和 callback state 必须至少活到握手任务结束。
 
 ## 连接池与轮换
 
-TLS 连接建立后，客户端身份、信任与验证结果都属于该连接。不同身份不能共用 HTTP/1 keep-alive 连接，因此使用连接池时必须把有效 TLS profile 映射到 `Http1ConnectionPoolAffinity`：
-
-```cpp
-auto key = fiber::http::Http1ConnectionGroupKey::from_name(
-        upstream_host,
-        upstream_port,
-        fiber::http::Http1ConnectionGroupKey::Scheme::Https,
-        fiber::http::Http1ConnectionPoolAffinity{tls_profile_generation});
-
-fiber::http::Http1ClientConnectionOptions connection_options;
-connection_options.pool_affinity = key->pool_affinity();
-// Fill peer_addr and tls from the same immutable profile before emplacing.
-```
-
-`0` 是 key 与 connection options 兼容旧调用方的默认 affinity。`Lease::emplace_connection()` 会拒绝两者 affinity 不一致的连接，但 affinity 与具体 TLS 内容的映射仍由配置控制层负责。存在多个身份时，应分配互不冲突的非零 generation；不要使用证书路径或私钥内容作为 affinity。轮换时先完整初始化新上下文，再原子发布新上下文和新 generation，并在旧连接全部退役前避免复用旧 generation。这样新请求不会命中旧身份的 idle 连接；旧连接可自然退役，也可以由应用显式清池。
-
-普通路由内容、管理 API 和常规日志只应携带不透明的 secret reference 或 profile generation，不应携带私钥内容或解析后的私钥路径。
+客户端身份、信任根、peer verification、SNI、`verify_name` 和 ALPN 都属于有效 TLS profile。
+不同 profile 不得共用 HTTP/1 keep-alive 连接，应映射到不同的
+`Http1ConnectionPoolAffinity`。轮换时先完整创建新 `TlsCredential`/`TrustStore`，再与新的 profile
+generation 一起发布；旧连接退役前不要复用旧 generation。不要从证书路径、私钥或 secret 内容推导
+affinity。

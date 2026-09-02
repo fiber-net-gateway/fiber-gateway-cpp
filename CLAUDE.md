@@ -64,7 +64,7 @@ All stream types are coroutine-aware. Low-level fd wrappers live in `src/net/det
 - **TcpListener/TcpStream**: TCP server and client
 - **UdpSocket**: UDP with `UdpPacket`
 - **UnixListener/UnixStream**: Unix domain sockets
-- **TlsTcpStream**: TLS via BoringSSL, with `TlsContext` for server/client configuration
+- **TlsTcpStream**: TLS via BoringSSL, with immutable `TlsCredential`/`TrustStore` material and per-handshake parameters
 - **IpAddress/SocketAddress/UnixAddress**: Address types
 
 ### HTTP (`src/http/`)

@@ -11,7 +11,7 @@
 #include <openssl/rand.h>
 
 #include <fiber/common/Assert.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TlsParams.h>
 #include <fiber/quic/QuicCongestion.h>
 #include "quic/QuicCrypto.h"
 #include "quic/QuicPacketCodec.h"

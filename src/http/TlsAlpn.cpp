@@ -45,11 +45,11 @@ void normalize_http3_alpn_impl(Options &options) {
 
 } // namespace
 
-void normalize_http1_alpn(net::TlsClientConnectionOptions &options) { normalize_http1_alpn_impl(options); }
+void normalize_http1_alpn(net::TlsClientParam &options) { normalize_http1_alpn_impl(options); }
 
-void normalize_http1_alpn(net::TlsServerConnectionOptions &options) { normalize_http1_alpn_impl(options); }
+void normalize_http1_alpn(net::TlsServerParam &options) { normalize_http1_alpn_impl(options); }
 
-void normalize_http_server_alpn(net::TlsServerConnectionOptions &options) {
+void normalize_http_server_alpn(net::TlsServerParam &options) {
     std::vector<std::string> normalized = normalize_base(options);
     normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
     normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
@@ -58,8 +58,8 @@ void normalize_http_server_alpn(net::TlsServerConnectionOptions &options) {
     options.alpn = std::move(normalized);
 }
 
-void normalize_http3_alpn(net::TlsClientConnectionOptions &options) { normalize_http3_alpn_impl(options); }
+void normalize_http3_alpn(net::TlsClientParam &options) { normalize_http3_alpn_impl(options); }
 
-void normalize_http3_alpn(net::TlsServerConnectionOptions &options) { normalize_http3_alpn_impl(options); }
+void normalize_http3_alpn(net::TlsServerParam &options) { normalize_http3_alpn_impl(options); }
 
 } // namespace fiber::http

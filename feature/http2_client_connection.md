@@ -4,7 +4,7 @@
 
 - `Http2ClientConnection` is a thin client-side connection owner.
 - It creates and starts one client HTTP/2 connection on a single `EventLoop`.
-- It owns one `TlsContext` and one `Http2Connection`.
+- It owns one `TlsClientParam` value and one `Http2Connection`; certificate and trust material are borrowed.
 - It creates non-owning `ClientHttp2Exchange` handles through `open_exchange(pool)`; the caller owns each exchange
   and its buffer pool.
 
@@ -20,9 +20,9 @@
 
 - `Options::peer_addr` must be set.
 - `Options::h2.role` is forced to `Client` internally.
-- If `Options::tls.enabled == true`:
+- If `Options::tls.enabled() == true`:
   - ALPN is forced to `h2`.
-  - `TlsContext::init()` is run before handshake.
+  - `TlsTransport` creates the per-connection `SSL` when the handshake starts.
 
 ## Lifecycle
 
@@ -35,7 +35,7 @@
 
 - `connect(timeout)` is a member function, not a static factory.
 - `connect(timeout)` may only be called once.
-- `timeout` only bounds the TCP connect phase; TLS uses `TlsOptions::handshake_timeout`.
+- `timeout` only bounds the TCP connect phase; TLS uses `TlsClientParam::handshake_timeout`.
 - `std::chrono::milliseconds::max()` means an unlimited TCP connect wait.
 - After `connect(timeout)` succeeds, `Http2Connection::start(transport)` has already run.
 - For client role, initial preface and SETTINGS are already queued during `start()`.
@@ -59,8 +59,8 @@
 
 ## Transport Selection
 
-- If `tls.context == nullptr`, `connect()` creates a `TcpTransport`.
-- If `tls.context != nullptr`, `connect()` creates a `TlsTransport`, performs handshake, and verifies
+- If `tls.enabled() == false`, `connect()` creates a `TcpTransport`.
+- If `tls.enabled() == true`, `connect()` creates a `TlsTransport`, performs handshake, and verifies
   `negotiated_alpn() == "h2"`.
 
 ## Minimal Example
@@ -68,8 +68,11 @@
 ```cpp
 fiber::http::Http2ClientConnection::Options options;
 options.peer_addr = fiber::net::SocketAddress(peer_ip, 443);
-options.tls.context = tls_context.get();
+options.tls.enable_tls = true;
+options.tls.trust_store = trust_store.get();
+options.tls.verify_peer = true;
 options.tls.sni_name = "example.com";
+options.tls.verify_name = "example.com";
 
 fiber::http::Http2ClientConnection conn(loop, std::move(options));
 

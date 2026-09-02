@@ -19,8 +19,9 @@ struct ssl_session_st;
 typedef struct ssl_session_st SSL_SESSION;
 
 namespace fiber::net {
-class TlsContext;
-struct TlsClientConnectionOptions;
+class TlsCredential;
+class TrustStore;
+struct TlsClientParam;
 } // namespace fiber::net
 
 namespace fiber::quic {
@@ -30,7 +31,8 @@ class QuicUdpEndpoint;
 struct QuicClientCacheKey {
     std::string_view server_name{};
     net::SocketAddress remote_addr{};
-    const net::TlsContext *tls_context = nullptr;
+    const net::TlsCredential *credential = nullptr;
+    const net::TrustStore *trust_store = nullptr;
 };
 
 struct QuicClientCachedState {
@@ -134,8 +136,7 @@ public:
     // it must outlive every connection started through it.
     ~QuicClient() = default;
 
-    [[nodiscard]] common::IoResult<void> init(QuicUdpEndpoint &endpoint,
-                                              const net::TlsClientConnectionOptions &tls_options,
+    [[nodiscard]] common::IoResult<void> init(QuicUdpEndpoint &endpoint, const net::TlsClientParam &tls_options,
                                               const Options &options) noexcept;
     [[nodiscard]] std::expected<QuicClientAttempt, QuicConnectError>
     start_connect(const QuicClientConnectOptions &options) noexcept;
@@ -150,7 +151,7 @@ private:
                                                const net::SocketAddress &remote_addr) const noexcept;
 
     QuicUdpEndpoint *endpoint_ = nullptr;
-    const net::TlsClientConnectionOptions *tls_options_ = nullptr;
+    const net::TlsClientParam *tls_options_ = nullptr;
     Options options_{};
 };
 

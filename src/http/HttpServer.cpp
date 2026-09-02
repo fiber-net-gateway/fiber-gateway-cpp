@@ -252,12 +252,6 @@ fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, c
 
     if (runtime->options.tls.enabled()) {
         normalize_http_server_alpn(runtime->options.tls);
-        if (!runtime->options.tls.default_context->has_identity() ||
-            (runtime->options.tls.client_certificate_mode != net::TlsClientCertificateMode::None &&
-             !runtime->options.tls.default_context->has_trust_store())) {
-            runtime->listener.close();
-            return std::unexpected(common::IoErr::Invalid);
-        }
     }
     if (runtime->options.http3.enabled) {
         runtime->http3_server = std::make_unique<Http3Server>(runtime->listener.loop(), runtime->handler,

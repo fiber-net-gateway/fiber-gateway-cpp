@@ -9,14 +9,13 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "../net/TlsConnectionOptions.h"
+#include "../net/TlsParams.h"
+#include "../net/detail/TlsHandshakeState.h"
 
 struct ssl_st;
 typedef struct ssl_st SSL;
 struct ssl_session_st;
 typedef struct ssl_session_st SSL_SESSION;
-
-namespace fiber::net {} // namespace fiber::net
 
 namespace fiber::quic {
 
@@ -28,11 +27,11 @@ public:
     QuicTlsSession() noexcept = default;
     ~QuicTlsSession();
 
-    [[nodiscard]] common::IoResult<void> init_server(const net::TlsServerConnectionOptions &options,
+    [[nodiscard]] common::IoResult<void> init_server(const net::TlsServerParam &options,
                                                      QuicConnection &connection) noexcept;
-    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientConnectionOptions &options,
-                                                     QuicConnection &connection, const char *server_name,
-                                                     bool allow_insecure, SSL_SESSION *session = nullptr) noexcept;
+    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientParam &options, QuicConnection &connection,
+                                                     const char *server_name, bool allow_insecure,
+                                                     SSL_SESSION *session = nullptr) noexcept;
     [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicEncryptionLevel level, const std::uint8_t *data,
                                                              std::size_t len) noexcept;
     [[nodiscard]] common::IoResult<void> drive_handshake() noexcept;
@@ -44,8 +43,6 @@ public:
     [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] long peer_verify_result() const noexcept;
     [[nodiscard]] std::optional<std::uint8_t> last_alert() const noexcept { return last_alert_; }
-    [[nodiscard]] SSL *raw() const noexcept { return ssl_; }
-
     // Capture a TLS alert raised by BoringSSL's send_alert callback during the
     // handshake. drive_handshake() consumes it via take_pending_alert() to emit
     // a CRYPTO_ERROR close (RFC 9000 §20.1).
@@ -62,6 +59,11 @@ private:
     bool client_mode_ = false;
     bool verify_peer_ = false;
     net::TlsNewSessionOps new_session_ops_{};
+    // Session-owned copy of the server param: the ClientHello configure
+    // callback re-applies enable_early_data from it, so the connection-level
+    // QUIC switch is merged in here instead of relying on the borrowed param.
+    net::TlsServerParam server_param_{};
+    net::detail::TlsServerHandshakeState server_handshake_state_{};
 };
 
 } // namespace fiber::quic

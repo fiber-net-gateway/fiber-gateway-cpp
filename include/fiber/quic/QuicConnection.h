@@ -466,15 +466,16 @@ public:
         bool has_remembered_peer_transport = false;
         std::string client_server_name{};
         net::SocketAddress client_cache_remote_addr{};
-        const net::TlsContext *client_tls_context = nullptr;
+        const net::TlsCredential *client_tls_credential = nullptr;
+        const net::TrustStore *client_trust_store = nullptr;
         void *client_cache_owner = nullptr;
         bool (*on_new_tls_session)(void *owner, QuicConnection &connection, SSL_SESSION *session) noexcept = nullptr;
         void (*on_new_token)(void *owner, QuicConnection &connection, const std::uint8_t *token,
                              std::size_t token_len) noexcept = nullptr;
-        // Server TLS context used to lazily create the SSL object only after
+        // Server TLS parameters used to lazily create the SSL object only after
         // the first Initial packet passes AEAD authentication (mirrors nginx
         // ngx_quic_init_connection, which runs after ngx_quic_decrypt).
-        const net::TlsServerConnectionOptions *tls = nullptr;
+        const net::TlsServerParam *tls = nullptr;
     };
 
     explicit QuicConnection(const Options &options) noexcept;
@@ -749,13 +750,16 @@ public:
     [[nodiscard]] common::IoResult<void> recv_new_token_frame(const QuicInputFrame &frame) noexcept;
     [[nodiscard]] bool on_new_tls_session(SSL_SESSION *session) noexcept;
     [[nodiscard]] std::string_view client_server_name() const noexcept { return options_.client_server_name; }
-    [[nodiscard]] const net::TlsContext *client_tls_context() const noexcept { return options_.client_tls_context; }
+    [[nodiscard]] const net::TlsCredential *client_tls_credential() const noexcept {
+        return options_.client_tls_credential;
+    }
+    [[nodiscard]] const net::TrustStore *client_trust_store() const noexcept { return options_.client_trust_store; }
     [[nodiscard]] const net::SocketAddress &client_cache_remote_addr() const noexcept {
         return options_.client_cache_remote_addr;
     }
     void fail_client_connect(common::IoErr error) noexcept;
     // Lazily create the server SSL object the first time an Initial packet
-    // is authenticated. Idempotent; no-op when no TLS context is configured
+    // is authenticated. Idempotent; no-op when no TLS parameters are configured
     // (e.g. tests). Deferring SSL_new past AEAD auth avoids per-forged-packet
     // TLS setup cost (DoS hardening, audit #4).
     [[nodiscard]] common::IoResult<void> ensure_server_tls() noexcept;

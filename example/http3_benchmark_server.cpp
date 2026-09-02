@@ -16,6 +16,8 @@
 #include <fiber/http/HttpServer.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
 
 namespace {
 
@@ -195,12 +197,12 @@ int main(int argc, char **argv) {
     fiber::event::EventLoopGroup worker_group(workers);
     worker_group.start();
 
-    fiber::net::TlsOptions tls_material{};
-    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert_file);
-    tls_material.private_key = fiber::net::TlsPemSource::from_file(key_file);
-    auto tls_context = fiber::net::TlsContext::create(tls_material);
-    if (!tls_context) {
-        std::cerr << "TLS context initialization failed: " << fiber::common::io_err_name(tls_context.error()) << '\n';
+    fiber::net::TlsCredentialOptions credential_options{};
+    credential_options.certificate_chain = fiber::net::TlsPemSource::from_file(cert_file);
+    credential_options.private_key = fiber::net::TlsPemSource::from_file(key_file);
+    auto credential = fiber::net::TlsCredential::create(credential_options);
+    if (!credential) {
+        std::cerr << "TLS credential initialization failed: " << fiber::common::io_err_name(credential.error()) << '\n';
         worker_group.stop();
         worker_group.join();
         return 1;
@@ -208,7 +210,8 @@ int main(int argc, char **argv) {
 
     fiber::http::HttpServerOptions server_options{};
     server_options.drain_unread_body = true;
-    server_options.tls.default_context = tls_context->get();
+    server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
+    server_options.tls.configure_ctx = credential->get();
     server_options.tls.alpn = {"h2", "http/1.1"};
     server_options.http3.enabled = true;
     server_options.http3.send.pacing.enabled = pacing_enabled;

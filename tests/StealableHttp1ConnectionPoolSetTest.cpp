@@ -31,7 +31,9 @@
 #include <fiber/http/HttpHeaders.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
 #include <fiber/net/TcpListener.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/net/TrustStore.h>
 #include <fiber/net/detail/TlsStreamFd.h>
 
 namespace {
@@ -192,11 +194,11 @@ fiber::http::Http1ClientConnectionOptions client_options(std::uint16_t port,
 }
 
 fiber::http::Http1ClientConnectionOptions
-https_client_options(std::uint16_t port, const fiber::net::TlsContext *tls_context,
+https_client_options(std::uint16_t port, const fiber::net::TlsClientParam &tls,
                      fiber::http::Http1ConnectionPoolAffinity pool_affinity = {}) {
     fiber::http::Http1ClientConnectionOptions options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.context = tls_context;
+    options.tls = tls;
     options.tls.sni_name = "localhost";
     options.pool_affinity = pool_affinity;
     return options;
@@ -313,13 +315,13 @@ DetachedTask run_tls_hold_server(fiber::event::EventLoop *loop, std::string cert
         co_return;
     }
 
-    fiber::net::TlsOptions tls_material{};
-    tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(std::move(cert_path));
-    tls_material.private_key = fiber::net::TlsPemSource::from_file(std::move(key_path));
-    auto server_ctx = fiber::net::TlsContext::create(tls_material);
-    if (!server_ctx) {
+    fiber::net::TlsCredentialOptions credential_options{};
+    credential_options.certificate_chain = fiber::net::TlsPemSource::from_file(std::move(cert_path));
+    credential_options.private_key = fiber::net::TlsPemSource::from_file(std::move(key_path));
+    auto server_credential = fiber::net::TlsCredential::create(credential_options);
+    if (!server_credential) {
         listener.close();
-        result_promise->set_value(server_ctx.error());
+        result_promise->set_value(server_credential.error());
         co_return;
     }
 
@@ -331,22 +333,10 @@ DetachedTask run_tls_hold_server(fiber::event::EventLoop *loop, std::string cert
     }
 
     fiber::net::detail::TlsStreamFd stream(*loop, accept_result->release_fd());
-    fiber::net::TlsServerConnectionOptions tls_options{.default_context = server_ctx->get()};
-    auto ssl =
-            fiber::net::TlsContext::create_server_ssl(tls_options, nullptr, nullptr, fiber::net::TlsTransportKind::Tcp);
-    if (!ssl) {
-        listener.close();
-        result_promise->set_value(ssl.error());
-        co_return;
-    }
-    auto stream_init_result = stream.init(*ssl);
-    if (!stream_init_result) {
-        listener.close();
-        result_promise->set_value(stream_init_result.error());
-        co_return;
-    }
-
-    auto handshake_result = co_await stream.handshake();
+    fiber::net::TlsServerParam tls_options{};
+    tls_options.configure_callback = &fiber::net::configure_tls_with_credential;
+    tls_options.configure_ctx = server_credential->get();
+    auto handshake_result = co_await stream.handshake(tls_options, nullptr, nullptr, fiber::net::TlsTransportKind::Tcp);
     if (!handshake_result) {
         stream.close();
         listener.close();
@@ -409,11 +399,11 @@ acquire_in_task(fiber::http::StealableHttp1ConnectionPoolSet *set, const fiber::
 
 DetachedTask run_https_home_connect(fiber::http::StealableHttp1ConnectionPoolSet *set,
                                     const fiber::http::Http1ConnectionGroupKey *key, std::uint16_t port,
-                                    const fiber::net::TlsContext *tls_context,
+                                    const fiber::net::TlsClientParam *tls,
                                     std::atomic<fiber::http::Http1ClientConnection *> *home_conn,
                                     std::atomic_bool *done) {
     auto lease = co_await set->acquire(*key);
-    auto conn_result = co_await ensure_connected(lease, https_client_options(port, tls_context, key->pool_affinity()));
+    auto conn_result = co_await ensure_connected(lease, https_client_options(port, *tls, key->pool_affinity()));
     home_conn->store(conn_result ? *conn_result : nullptr, std::memory_order_release);
     done->store(true, std::memory_order_release);
     lease.reset();
@@ -1440,12 +1430,14 @@ TEST(StealableHttp1ConnectionPoolSetTest, HttpsTransportProfilesStayIsolatedAcro
     const std::uint16_t port = server_port_future.get();
     ASSERT_NE(port, 0);
 
-    auto insecure_tls_context = fiber::net::TlsContext::create({});
-    ASSERT_TRUE(insecure_tls_context);
-    fiber::net::TlsOptions verified_tls_material{};
-    verified_tls_material.trust_store = fiber::net::TlsTrustStoreSource::from_file(cert.path);
-    auto verified_tls_context = fiber::net::TlsContext::create(verified_tls_material);
-    ASSERT_TRUE(verified_tls_context);
+    fiber::net::TlsClientParam insecure_tls{};
+    insecure_tls.enable_tls = true;
+    auto verified_trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(cert.path));
+    ASSERT_TRUE(verified_trust_store);
+    fiber::net::TlsClientParam verified_tls{};
+    verified_tls.enable_tls = true;
+    verified_tls.trust_store = verified_trust_store->get();
+    verified_tls.verify_peer = true;
 
     fiber::event::EventLoopGroup group(2);
     auto *loop0 = &group.at(0);
@@ -1463,7 +1455,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, HttpsTransportProfilesStayIsolatedAcro
     ASSERT_TRUE(different_key_result.has_value());
     const auto different_key = *different_key_result;
 
-    auto different_options = https_client_options(port, verified_tls_context->get(), different_key.pool_affinity());
+    auto different_options = https_client_options(port, verified_tls, different_key.pool_affinity());
     different_options.tls.verify_peer = true;
     different_options.tls.sni_name = "routing.example.test";
     different_options.tls.verify_name = "localhost";
@@ -1477,7 +1469,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, HttpsTransportProfilesStayIsolatedAcro
 
     group.start();
     fiber::async::spawn(*loop0, [&]() {
-        return run_https_home_connect(&set, &key, port, insecure_tls_context->get(), home_conn.get(), home_ready.get());
+        return run_https_home_connect(&set, &key, port, &insecure_tls, home_conn.get(), home_ready.get());
     });
 
     for (int i = 0; i < 2000 && !home_ready->load(std::memory_order_acquire); ++i) {

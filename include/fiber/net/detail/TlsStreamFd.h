@@ -10,10 +10,10 @@
 #include "../../common/NonCopyable.h"
 #include "../../common/NonMovable.h"
 #include "../../event/Poller.h"
+#include "../TlsParams.h"
 #include "StreamFd.h"
+#include "TlsHandshakeState.h"
 
-struct ssl_ctx_st;
-typedef struct ssl_ctx_st SSL_CTX;
 struct ssl_st;
 typedef struct ssl_st SSL;
 
@@ -29,13 +29,10 @@ public:
     TlsStreamFd(fiber::event::EventLoop &loop, int fd);
     ~TlsStreamFd();
 
-    // Takes ownership of ssl, including on failure.
-    common::IoResult<void> init(SSL *ssl);
-
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
-    // Borrowed view into ssl_. Invalidated by close(), init(), or destruction.
+    // Borrowed view into ssl_. Invalidated by close() or destruction.
     [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
@@ -55,24 +52,43 @@ public:
                                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
-    [[nodiscard]] HandshakeTask handshake();
+    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param);
+    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param, std::chrono::milliseconds timeout);
+    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param, const SocketAddress *local_addr,
+                                          const SocketAddress *remote_addr, TlsTransportKind transport);
+    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param, const SocketAddress *local_addr,
+                                          const SocketAddress *remote_addr, TlsTransportKind transport,
+                                          std::chrono::milliseconds timeout);
     [[nodiscard]] ShutdownTask shutdown();
     [[nodiscard]] StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] StreamFd::WaitWritableAwaiter
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
-    fiber::common::IoErr poll_handshake(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
 
 private:
+    enum class Role : std::uint8_t {
+        None,
+        Client,
+        Server,
+    };
+
+    common::IoResult<void> start_client(const TlsClientParam &param) noexcept;
+    common::IoResult<void> start_server(const TlsServerParam &param, const SocketAddress *local_addr,
+                                        const SocketAddress *remote_addr, TlsTransportKind transport) noexcept;
+    common::IoResult<void> attach_ssl(SSL *ssl) noexcept;
+    [[nodiscard]] HandshakeTask handshake_impl(common::IoResult<void> start_result, std::chrono::milliseconds timeout);
     fiber::common::IoErr handshake_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr write_once(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     StreamFd stream_fd_;
     SSL *ssl_ = nullptr;
+    TlsServerHandshakeState server_handshake_state_{};
+    TlsNewSessionOps new_session_ops_{};
+    Role role_ = Role::None;
     bool handshake_done_ = false;
     bool busy_ = false;
 };

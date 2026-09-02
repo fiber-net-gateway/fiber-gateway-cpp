@@ -9,7 +9,6 @@
 #include "../http/Http1ConnectionGroupKey.h"
 #include "../net/IpAddress.h"
 #include "../net/SocketAddress.h"
-#include "../net/TlsOptions.h"
 
 #include "HttpTarget.h"
 

@@ -7,8 +7,6 @@ TlsTcpStream::TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress 
 
 TlsTcpStream::~TlsTcpStream() {}
 
-common::IoResult<void> TlsTcpStream::init(SSL *ssl) { return stream_.init(ssl); }
-
 bool TlsTcpStream::valid() const noexcept { return stream_.valid(); }
 
 int TlsTcpStream::fd() const noexcept { return stream_.fd(); }
@@ -71,7 +69,19 @@ fiber::common::IoResult<size_t> TlsTcpStream::try_write(const void *buf, size_t 
     return stream_.try_write(buf, len);
 }
 
-TlsTcpStream::HandshakeTask TlsTcpStream::handshake() { return stream_.handshake(); }
+TlsTcpStream::HandshakeTask TlsTcpStream::handshake(const TlsClientParam &param) { return stream_.handshake(param); }
+
+TlsTcpStream::HandshakeTask TlsTcpStream::handshake(const TlsClientParam &param, std::chrono::milliseconds timeout) {
+    return stream_.handshake(param, timeout);
+}
+
+TlsTcpStream::HandshakeTask TlsTcpStream::handshake(const TlsServerParam &param) {
+    return stream_.handshake(param, nullptr, &remote_addr_, TlsTransportKind::Tcp);
+}
+
+TlsTcpStream::HandshakeTask TlsTcpStream::handshake(const TlsServerParam &param, std::chrono::milliseconds timeout) {
+    return stream_.handshake(param, nullptr, &remote_addr_, TlsTransportKind::Tcp, timeout);
+}
 
 TlsTcpStream::ShutdownTask TlsTcpStream::shutdown() { return stream_.shutdown(); }
 
@@ -81,10 +91,6 @@ detail::StreamFd::WaitReadableAwaiter TlsTcpStream::wait_readable(std::chrono::m
 
 detail::StreamFd::WaitWritableAwaiter TlsTcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return stream_.wait_writable(timeout);
-}
-
-fiber::common::IoErr TlsTcpStream::poll_handshake(fiber::event::IoEvent &event) noexcept {
-    return stream_.poll_handshake(event);
 }
 
 fiber::common::IoErr TlsTcpStream::poll_shutdown(fiber::event::IoEvent &event) noexcept {

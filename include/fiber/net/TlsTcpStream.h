@@ -14,12 +14,8 @@
 #include "../event/Poller.h"
 #include "SocketAddress.h"
 #include "TcpSocketOptions.h"
+#include "TlsParams.h"
 #include "detail/TlsStreamFd.h"
-
-struct ssl_ctx_st;
-typedef struct ssl_ctx_st SSL_CTX;
-struct ssl_st;
-typedef struct ssl_st SSL;
 
 namespace fiber::net {
 
@@ -32,9 +28,6 @@ public:
 
     TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress remote_addr);
     ~TlsTcpStream();
-
-    // Takes ownership of ssl, including on failure.
-    common::IoResult<void> init(SSL *ssl);
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
@@ -60,13 +53,15 @@ public:
                                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
-    [[nodiscard]] HandshakeTask handshake();
+    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param);
+    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param, std::chrono::milliseconds timeout);
+    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param);
+    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param, std::chrono::milliseconds timeout);
     [[nodiscard]] ShutdownTask shutdown();
     [[nodiscard]] detail::StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] detail::StreamFd::WaitWritableAwaiter
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
-    fiber::common::IoErr poll_handshake(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;

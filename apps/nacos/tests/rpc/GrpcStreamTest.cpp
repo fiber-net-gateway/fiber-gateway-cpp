@@ -29,7 +29,8 @@
 #include <fiber/http/HttpServer.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
 #include "helloworld.pb.h"
 #include "rpc/grpc/GrpcClient.h"
 #include "rpc/grpc/GrpcStream.h"
@@ -655,15 +656,9 @@ DetachedTask wait_for_client_connection(fiber::nacos::detail::grpc::GrpcClient *
 DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scenario sc,
                         std::shared_ptr<std::promise<Result>> promise) {
     Result result;
-    auto tls_context = fiber::net::TlsContext::create({});
-    if (!tls_context) {
-        result.err = tls_context.error();
-        promise->set_value(std::move(result));
-        co_return;
-    }
     fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.context = tls_context->get();
+    options.tls.enable_tls = true;
     options.tls.sni_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
@@ -715,7 +710,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
 
 struct ServerCtx {
     TlsCert cert;
-    std::unique_ptr<fiber::net::TlsContext> tls_context;
+    std::unique_ptr<fiber::net::TlsCredential> tls_credential;
     std::uint16_t port = 0;
     fiber::http::HttpServer *server = nullptr;
 
@@ -723,16 +718,17 @@ struct ServerCtx {
         if (!cert.ok) {
             return false;
         }
-        fiber::net::TlsOptions tls_material{};
+        fiber::net::TlsCredentialOptions tls_material{};
         tls_material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.cert_path);
         tls_material.private_key = fiber::net::TlsPemSource::from_file(cert.key_path);
-        auto created_context = fiber::net::TlsContext::create(tls_material);
-        if (!created_context) {
+        auto created_credential = fiber::net::TlsCredential::create(tls_material);
+        if (!created_credential) {
             return false;
         }
-        tls_context = std::move(*created_context);
+        tls_credential = std::move(*created_credential);
         fiber::http::HttpServerOptions server_options;
-        server_options.tls.default_context = tls_context.get();
+        server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
+        server_options.tls.configure_ctx = tls_credential.get();
         server_options.tls.alpn = {"h2"};
         std::promise<std::uint16_t> port_promise;
         std::promise<fiber::http::HttpServer *> server_promise;

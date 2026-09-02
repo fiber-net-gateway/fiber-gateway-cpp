@@ -25,7 +25,8 @@
 #include <fiber/log/Log.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/TcpListener.h>
-#include <fiber/net/TlsContext.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/script/JsGc.h>
 #include <fiber/script/JsValue.h>
 #include <fiber/script/ScriptResult.h>
@@ -41,13 +42,13 @@
 
 namespace fiber::lite_nginx::runtime {
 
-struct ListenerTlsContexts {
+struct ListenerTlsCredentials {
     struct Entry {
         std::string name;
-        std::unique_ptr<fiber::net::TlsContext> context;
+        std::unique_ptr<fiber::net::TlsCredential> credential;
     };
 
-    std::unique_ptr<fiber::net::TlsContext> default_context;
+    std::unique_ptr<fiber::net::TlsCredential> default_credential;
     std::vector<Entry> identities;
 };
 
@@ -224,44 +225,51 @@ run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter 
     co_return;
 }
 
-const fiber::net::TlsContext *
-select_identity_by_server_name(void *ctx, const fiber::net::TlsClientHelloView &client_hello) noexcept {
-    auto *contexts = static_cast<const ListenerTlsContexts *>(ctx);
-    if (!contexts || client_hello.server_name.empty()) {
-        return nullptr;
+fiber::common::IoErr configure_identity_by_server_name(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
+                                                       const fiber::net::TlsClientHelloView &client_hello) noexcept {
+    auto *credentials = static_cast<const ListenerTlsCredentials *>(ctx);
+    if (!credentials || !credentials->default_credential) {
+        return fiber::common::IoErr::Invalid;
     }
-    auto it = std::lower_bound(
-            contexts->identities.begin(), contexts->identities.end(), client_hello.server_name,
-            [](const ListenerTlsContexts::Entry &entry, std::string_view name) { return entry.name < name; });
-    return it != contexts->identities.end() && it->name == client_hello.server_name ? it->context.get() : nullptr;
+    const fiber::net::TlsCredential *selected = credentials->default_credential.get();
+    if (!client_hello.server_name.empty()) {
+        auto it = std::lower_bound(
+                credentials->identities.begin(), credentials->identities.end(), client_hello.server_name,
+                [](const ListenerTlsCredentials::Entry &entry, std::string_view name) { return entry.name < name; });
+        if (it != credentials->identities.end() && it->name == client_hello.server_name) {
+            selected = it->credential.get();
+        }
+    }
+    return config.add_credential(*selected);
 }
 
-std::expected<std::unique_ptr<ListenerTlsContexts>, RuntimeError> make_tls_contexts(const ListenerRuntime &listener) {
-    auto contexts = std::make_unique<ListenerTlsContexts>();
-    fiber::net::TlsOptions default_options{};
+std::expected<std::unique_ptr<ListenerTlsCredentials>, RuntimeError>
+make_tls_credentials(const ListenerRuntime &listener) {
+    auto credentials = std::make_unique<ListenerTlsCredentials>();
+    fiber::net::TlsCredentialOptions default_options{};
     default_options.certificate_chain = fiber::net::TlsPemSource::from_file(listener.default_certificate);
     default_options.private_key = fiber::net::TlsPemSource::from_file(listener.default_certificate_key);
-    auto default_context = fiber::net::TlsContext::create(default_options);
-    if (!default_context) {
+    auto default_credential = fiber::net::TlsCredential::create(default_options);
+    if (!default_credential) {
         return std::unexpected(make_error(listener.location, "failed to load default TLS identity"));
     }
-    contexts->default_context = std::move(*default_context);
-    contexts->identities.reserve(listener.tls_identities.size());
+    credentials->default_credential = std::move(*default_credential);
+    credentials->identities.reserve(listener.tls_identities.size());
     for (const auto &identity: listener.tls_identities) {
-        fiber::net::TlsOptions options{};
+        fiber::net::TlsCredentialOptions options{};
         options.certificate_chain = fiber::net::TlsPemSource::from_file(identity.certificate);
         options.private_key = fiber::net::TlsPemSource::from_file(identity.certificate_key);
-        auto context = fiber::net::TlsContext::create(options);
-        if (!context) {
+        auto credential = fiber::net::TlsCredential::create(options);
+        if (!credential) {
             return std::unexpected(make_error(listener.location, "failed to load named TLS identity"));
         }
-        contexts->identities.push_back({.name = identity.server_name, .context = std::move(*context)});
+        credentials->identities.push_back({.name = identity.server_name, .credential = std::move(*credential)});
     }
-    std::sort(contexts->identities.begin(), contexts->identities.end(),
-              [](const ListenerTlsContexts::Entry &left, const ListenerTlsContexts::Entry &right) {
+    std::sort(credentials->identities.begin(), credentials->identities.end(),
+              [](const ListenerTlsCredentials::Entry &left, const ListenerTlsCredentials::Entry &right) {
                   return left.name < right.name;
               });
-    return contexts;
+    return credentials;
 }
 
 std::expected<fiber::net::SocketAddress, RuntimeError> make_socket_address(const ListenerRuntime &listener) {
@@ -291,7 +299,7 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
 }
 
 fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listener,
-                                                   const ListenerTlsContexts *tls_contexts) {
+                                                   const ListenerTlsCredentials *tls_credentials) {
     fiber::http::HttpServerOptions options;
     options.drain_unread_body = true;
     options.enable_extended_connect = true;
@@ -300,10 +308,9 @@ fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listen
         return options;
     }
 
-    options.tls.default_context = tls_contexts ? tls_contexts->default_context.get() : nullptr;
     options.tls.alpn = {"h2", "http/1.1"};
-    options.tls.select_tls_ctx_callback = &select_identity_by_server_name;
-    options.tls.select_tls_ctx_ctx = const_cast<ListenerTlsContexts *>(tls_contexts);
+    options.tls.configure_callback = &configure_identity_by_server_name;
+    options.tls.configure_ctx = const_cast<ListenerTlsCredentials *>(tls_credentials);
     return options;
 }
 
@@ -501,7 +508,7 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
                                                           script_services_.get(), std::move(access_logger));
 
     servers_.reserve(runtime_->listeners.size());
-    tls_contexts_.reserve(runtime_->listeners.size());
+    tls_credentials_.reserve(runtime_->listeners.size());
     bound_listeners_.reserve(runtime_->listeners.size());
 
     for (std::uint32_t listener_index = 0; listener_index < runtime_->listeners.size(); ++listener_index) {
@@ -512,16 +519,16 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
             return std::unexpected(addr_result.error());
         }
 
-        std::unique_ptr<ListenerTlsContexts> tls_contexts;
+        std::unique_ptr<ListenerTlsCredentials> tls_credentials;
         if (listener.tls) {
-            auto created_contexts = make_tls_contexts(listener);
-            if (!created_contexts) {
+            auto created_credentials = make_tls_credentials(listener);
+            if (!created_credentials) {
                 close();
-                return std::unexpected(created_contexts.error());
+                return std::unexpected(created_credentials.error());
             }
-            tls_contexts = std::move(*created_contexts);
+            tls_credentials = std::move(*created_credentials);
         }
-        auto options = make_server_options(listener, tls_contexts.get());
+        auto options = make_server_options(listener, tls_credentials.get());
         auto server = std::make_unique<fiber::http::HttpServer>(
                 accept_loop_,
                 [dispatcher, listener_index](fiber::http::HttpExchange &exchange) {
@@ -555,7 +562,7 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
         auto *server_ptr = server.get();
         fiber::async::spawn(accept_loop_, [server_ptr]() { return server_ptr->serve(); });
         servers_.push_back(std::move(server));
-        tls_contexts_.push_back(std::move(tls_contexts));
+        tls_credentials_.push_back(std::move(tls_credentials));
     }
 
     started_ = true;
@@ -601,7 +608,7 @@ void ServerLauncher::close() {
     }
 
     servers_.clear();
-    tls_contexts_.clear();
+    tls_credentials_.clear();
     bound_listeners_.clear();
     started_ = false;
 

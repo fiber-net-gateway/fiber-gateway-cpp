@@ -22,11 +22,6 @@ fiber::common::IoResult<void> Http1Server::bind(const net::SocketAddress &addr, 
     }
     if (options_.tls.enabled()) {
         normalize_http1_alpn(options_.tls);
-        if (!options_.tls.default_context->has_identity() ||
-            (options_.tls.client_certificate_mode != net::TlsClientCertificateMode::None &&
-             !options_.tls.default_context->has_trust_store())) {
-            return std::unexpected(common::IoErr::Invalid);
-        }
     }
     return {};
 }

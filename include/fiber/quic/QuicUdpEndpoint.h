@@ -23,7 +23,7 @@
 #include "QuicToken.h"
 
 namespace fiber::net {
-struct TlsServerConnectionOptions;
+struct TlsServerParam;
 } // namespace fiber::net
 
 namespace fiber::quic {
@@ -83,7 +83,7 @@ public:
     };
 
     struct ServerAdmissionOptions {
-        const net::TlsServerConnectionOptions *tls = nullptr;
+        const net::TlsServerParam *tls = nullptr;
         QuicTransportSettings transport{};
         std::chrono::milliseconds keepalive_interval{0};
         QuicRecvFlowControlSettings recv_flow{};
@@ -105,7 +105,7 @@ public:
     struct Options {
         net::SocketAddress bind_addr{};
         std::size_t max_connections = 1024;
-        const net::TlsServerConnectionOptions *tls = nullptr;
+        const net::TlsServerParam *tls = nullptr;
         net::UdpBindOptions udp{};
         QuicSendScheduler::Options send{};
         QuicTransportSettings transport{};
