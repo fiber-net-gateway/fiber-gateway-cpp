@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <limits>
+#include <string_view>
 #include <type_traits>
 
 #include <fiber/script/ScriptResult.h>
@@ -222,6 +224,27 @@ TEST(ScriptValueOpsTest, LooseEqualityParsesNumericStringsWithoutAllocation) {
     char trailing_bytes[] = {'I', 'n', 'f', 'i', 'n', 'i', 't', 'y', 'x'};
     auto trailing = handle(heap, JsValue::make_native_string(trailing_bytes, sizeof(trailing_bytes)));
     EXPECT_FALSE(fiber::script::run::Compares::eq(trailing, inf_number));
+}
+
+TEST(ScriptValueOpsTest, LooseEqualityParsesExtremeDecimalExponents) {
+    GcHeap heap;
+    // Decimal-string parsing folds 10^exp from a compile-time table, so these
+    // pin the correctly-rounded results (e.g. 1e23 is a round-half-even tie)
+    // and the overflow/underflow exponent guards.
+    auto parses_to = [&](std::string_view text, double expected) {
+        char buffer[16];
+        ASSERT_LT(text.size(), sizeof(buffer));
+        std::memcpy(buffer, text.data(), text.size());
+        auto str = handle(heap, JsValue::make_native_string(buffer, text.size()));
+        auto num = handle(heap, JsValue::make_float(expected));
+        EXPECT_TRUE(fiber::script::run::Compares::eq(str, num)) << text;
+    };
+    parses_to("1e23", 1e23);
+    parses_to("1e210", 1e210);
+    parses_to("1e308", 1e308);
+    parses_to("1e-323", 1e-323);
+    parses_to("1e-330", 0.0);
+    parses_to("1e309", std::numeric_limits<double>::infinity());
 }
 
 TEST(ScriptValueOpsTest, CompareHeapAsciiStrings) {
