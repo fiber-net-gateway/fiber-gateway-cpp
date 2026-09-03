@@ -107,8 +107,6 @@ struct TlsClientParam {
     std::vector<std::string> alpn{"http/1.1"};
     std::string sni_name{};
     std::string verify_name{};
-    bool enable_early_data = false;
-    const TlsNewSessionOps *new_session_ops = nullptr;
 
     // Higher-level transports use a value member for TLS parameters. This bit
     // distinguishes a plain connection from certificate-less client TLS.

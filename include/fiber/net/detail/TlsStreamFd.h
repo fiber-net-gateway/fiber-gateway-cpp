@@ -87,7 +87,6 @@ private:
     StreamFd stream_fd_;
     SSL *ssl_ = nullptr;
     TlsServerHandshakeState server_handshake_state_{};
-    TlsNewSessionOps new_session_ops_{};
     Role role_ = Role::None;
     bool handshake_done_ = false;
     bool busy_ = false;

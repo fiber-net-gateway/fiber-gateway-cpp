@@ -350,7 +350,6 @@ common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientParam &ba
             options.verify_name = server_name;
         }
     }
-    options.enable_early_data = connection.early_data_enabled();
     new_session_ops_ = {.ctx = &connection, .store = &store_new_client_session};
     auto created_ssl = net::detail::TlsSslFactory::create_client(options, &new_session_ops_);
     if (!created_ssl) {
@@ -362,6 +361,9 @@ common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientParam &ba
         return std::unexpected(common::IoErr::Invalid);
     }
     SSL_set_app_data(ssl, &connection);
+    // Enable early data before installing the cached session: 0-RTT is offered
+    // only when the enabled session advertises max_early_data.
+    SSL_set_early_data_enabled(ssl, connection.early_data_enabled() ? 1 : 0);
     if (session != nullptr && SSL_set_session(ssl, session) != 1) {
         SSL_free(ssl);
         return std::unexpected(common::IoErr::Invalid);
