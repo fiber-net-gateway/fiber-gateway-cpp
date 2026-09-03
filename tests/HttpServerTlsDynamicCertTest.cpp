@@ -190,9 +190,10 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
     }
 
     auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*connect_result));
+    static constexpr std::string_view kAlpn[] = {"http/1.1"};
     fiber::net::TlsClientParam tls_options{};
-    tls_options.alpn = {"http/1.1"};
-    tls_options.server_name.assign(server_name.data(), server_name.size());
+    tls_options.alpn = kAlpn;
+    tls_options.server_name = server_name;
 
     int fd = stream->release_fd();
     fiber::net::AcceptResult accept(fd, stream->remote_addr());
@@ -385,9 +386,10 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
     }
 
     auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*connect_result));
+    static constexpr std::string_view kAlpn[] = {"http/1.1"};
     fiber::net::TlsClientParam tls_options{};
-    tls_options.alpn = {"http/1.1"};
-    tls_options.server_name.assign(server_name.data(), server_name.size());
+    tls_options.alpn = kAlpn;
+    tls_options.server_name = server_name;
 
     int fd = stream->release_fd();
     fiber::net::AcceptResult accept(fd, stream->remote_addr());

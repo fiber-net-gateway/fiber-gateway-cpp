@@ -16,8 +16,9 @@ TEST(TlsAlpnTest, Http1ClientOwnsHttp11Alpn) {
 
     auto param = fiber::http::make_http1_client_tls_param(options);
 
-    const std::vector<std::string> expected = {"http/1.1"};
-    EXPECT_EQ(param.alpn, expected);
+    const std::vector<std::string_view> expected = {"http/1.1"};
+    const std::vector<std::string_view> actual(param.alpn.begin(), param.alpn.end());
+    EXPECT_EQ(actual, expected);
     EXPECT_EQ(param.server_name, options.server_name);
     EXPECT_EQ(param.verify_name, options.verify_name);
 }
@@ -27,8 +28,9 @@ TEST(TlsAlpnTest, Http2ClientOwnsH2Alpn) {
 
     auto param = fiber::http::make_http2_client_tls_param(options);
 
-    const std::vector<std::string> expected = {"h2"};
-    EXPECT_EQ(param.alpn, expected);
+    const std::vector<std::string_view> expected = {"h2"};
+    const std::vector<std::string_view> actual(param.alpn.begin(), param.alpn.end());
+    EXPECT_EQ(actual, expected);
 }
 
 TEST(TlsAlpnTest, Http1ServerAlpnIsHttp11Only) {

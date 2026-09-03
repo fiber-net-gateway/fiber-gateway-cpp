@@ -334,31 +334,22 @@ common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerParam &op
     return {};
 }
 
-common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientSecurity &security,
-                                                   const std::vector<std::string> &alpn, QuicConnection &connection,
-                                                   std::string_view server_name, std::string_view verify_name,
+common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientParam &param, QuicConnection &connection,
                                                    bool allow_insecure, SSL_SESSION *session) noexcept {
-    if (ssl_ != nullptr || alpn.empty()) {
+    if (ssl_ != nullptr || param.alpn.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    const bool verify_peer = security.verify_peer;
+    const bool verify_peer = param.security.verify_peer;
     if (!verify_peer && !allow_insecure) {
         return std::unexpected(common::IoErr::Permission);
     }
-    if (verify_peer && server_name.empty() && verify_name.empty()) {
+    if (verify_peer && param.server_name.empty() && param.verify_name.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    net::TlsClientParam options{};
-    options.security = security;
-    options.min_version = 0x0304;
-    options.max_version = 0x0304;
-    options.alpn = alpn;
-    options.server_name.assign(server_name);
-    options.verify_name.assign(verify_name);
     new_session_ops_ = {.ctx = &connection, .store = &store_new_client_session};
     auto created_ssl =
-            net::detail::TlsSslFactory::create_client(options, connection.early_data_enabled(), &new_session_ops_);
+            net::detail::TlsSslFactory::create_client(param, connection.early_data_enabled(), &new_session_ops_);
     if (!created_ssl) {
         return std::unexpected(created_ssl.error());
     }

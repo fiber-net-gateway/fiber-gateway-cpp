@@ -72,7 +72,7 @@ common::IoResult<void> Http3Client::init() noexcept {
     client_options.connection_owner = this;
     client_options.create_connection = &Http3Client::create_connection_op;
     client_options.cache = options_.cache;
-    client_options.alpn.emplace_back(kHttp3Alpn);
+    client_options.alpn = {kHttp3Alpn};
     auto client_initialized = quic_client_.init(*endpoint_, options_.tls, std::move(client_options));
     if (!client_initialized) {
         return std::unexpected(client_initialized.error());

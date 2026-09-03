@@ -306,8 +306,9 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
 
     auto stream = std::make_unique<fiber::net::TcpStream>(std::move(*infant_result));
 
+    static constexpr std::string_view kAlpn[] = {"http/1.1"};
     fiber::net::TlsClientParam tls_options{};
-    tls_options.alpn = {"http/1.1"};
+    tls_options.alpn = kAlpn;
 
     int fd = stream->release_fd();
     if (fd < 0) {

@@ -283,12 +283,14 @@ fiber::net::TlsServerParam make_server_options(const IdentityTls &material, Serv
     return options;
 }
 
+constexpr std::string_view kMtlsTestAlpn[] = {"fiber-mtls-test"};
+
 fiber::net::TlsClientParam make_client_options(const IdentityTls &material) {
     fiber::net::TlsClientParam options{};
     options.security.credential = material.credential.get();
     options.security.trust_store = material.trust_store.get();
     options.security.verify_peer = true;
-    options.alpn = {"fiber-mtls-test"};
+    options.alpn = kMtlsTestAlpn;
     return options;
 }
 
@@ -412,7 +414,7 @@ TEST(TlsClientIdentityTest, ServerRequiringClientIdentityRejectsAnonymousClient)
     ASSERT_TRUE(client_material);
     auto client_options = make_client_options(*client_material);
     client_options.server_name = "server.identity.test";
-    client_options.alpn = {"fiber-mtls-test"};
+    client_options.alpn = kMtlsTestAlpn;
 
     auto result = run_handshake_pair(server_options, client_options);
     ASSERT_TRUE(result.completed);
