@@ -373,8 +373,7 @@ common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) no
         return std::unexpected(common::IoErr::Already);
     }
     role_ = Role::Client;
-    new_session_ops_ = param.new_session_ops ? *param.new_session_ops : TlsNewSessionOps{};
-    auto ssl = TlsSslFactory::create_client(param, &new_session_ops_);
+    auto ssl = TlsSslFactory::create_client(param);
     if (!ssl) {
         return std::unexpected(ssl.error());
     }
@@ -396,7 +395,7 @@ common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param, co
 }
 
 TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param) {
-    return handshake(param, param.handshake_timeout);
+    return handshake(param, kDefaultTlsHandshakeTimeout);
 }
 
 TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param, std::chrono::milliseconds timeout) {

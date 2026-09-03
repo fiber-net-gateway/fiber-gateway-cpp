@@ -5,12 +5,14 @@
 #include <cstdint>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../net/TlsParams.h"
 #include "../net/detail/TlsHandshakeState.h"
+#include "../net/detail/TlsSessionOps.h"
 
 struct ssl_st;
 typedef struct ssl_st SSL;
@@ -29,9 +31,10 @@ public:
 
     [[nodiscard]] common::IoResult<void> init_server(const net::TlsServerParam &options,
                                                      QuicConnection &connection) noexcept;
-    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientParam &options, QuicConnection &connection,
-                                                     const char *server_name, bool allow_insecure,
-                                                     SSL_SESSION *session = nullptr) noexcept;
+    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientSecurity &security,
+                                                     const std::vector<std::string> &alpn, QuicConnection &connection,
+                                                     std::string_view server_name, std::string_view verify_name,
+                                                     bool allow_insecure, SSL_SESSION *session = nullptr) noexcept;
     [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicEncryptionLevel level, const std::uint8_t *data,
                                                              std::size_t len) noexcept;
     [[nodiscard]] common::IoResult<void> drive_handshake() noexcept;
@@ -58,7 +61,7 @@ private:
     std::optional<std::uint8_t> last_alert_;
     bool client_mode_ = false;
     bool verify_peer_ = false;
-    net::TlsNewSessionOps new_session_ops_{};
+    net::detail::TlsNewSessionOps new_session_ops_{};
     // Session-owned copy of the server param: the ClientHello configure
     // callback re-applies enable_early_data from it, so the connection-level
     // QUIC switch is merged in here instead of relying on the borrowed param.

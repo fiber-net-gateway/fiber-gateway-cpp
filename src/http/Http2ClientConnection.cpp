@@ -9,6 +9,7 @@
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/TcpListener.h>
 #include <fiber/net/TcpStream.h>
+#include "http/TlsAlpn.h"
 
 namespace fiber::http {
 
@@ -18,14 +19,6 @@ constexpr std::string_view kH2Alpn = "h2";
 
 } // namespace
 
-net::TlsClientParam Http2ClientConnection::normalize_tls_options(net::TlsClientParam options) noexcept {
-    if (options.enabled()) {
-        options.alpn.clear();
-        options.alpn.push_back(std::string(kH2Alpn));
-    }
-    return options;
-}
-
 Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connection::Options options) noexcept {
     options.role = Http2Connection::ConnectionRole::Client;
     return options;
@@ -33,7 +26,7 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Options options) noexcept :
     loop_(&loop), peer_addr_(std::move(options.peer_addr)), tcp_options_(options.tcp),
-    tls_options_(normalize_tls_options(std::move(options.tls))),
+    tls_options_(std::move(options.tls)),
     conn_(normalize_h2_options(std::move(options.h2)), nullptr, ClientHttp2Request::factory_ops()) {}
 
 Http2ClientConnection::~Http2ClientConnection() {
@@ -68,14 +61,15 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
 
     net::AcceptResult accept(connect_result->release_fd(), connect_result->take_peer());
     std::unique_ptr<HttpTransport> transport;
-    if (tls_options_.enabled()) {
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tls_options_, tcp_options_);
+    if (tls_options_) {
+        auto tls_param = make_http2_client_tls_param(*tls_options_);
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), std::move(tls_param), tcp_options_);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
         transport = std::move(*transport_result);
 
-        auto handshake_result = co_await transport->handshake(tls_options_.handshake_timeout);
+        auto handshake_result = co_await transport->handshake(tls_options_->handshake_timeout);
         if (!handshake_result) {
             co_return std::unexpected(handshake_result.error());
         }

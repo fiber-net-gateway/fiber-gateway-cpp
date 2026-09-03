@@ -144,7 +144,6 @@ fiber::common::IoResult<TestTlsPair> create_tls_pair(const std::string &cert_pat
     pair.server_credential = std::move(*server_credential);
     pair.server_options.configure_callback = &fiber::net::configure_tls_with_credential;
     pair.server_options.configure_ctx = pair.server_credential.get();
-    pair.client_options.enable_tls = true;
     return pair;
 }
 

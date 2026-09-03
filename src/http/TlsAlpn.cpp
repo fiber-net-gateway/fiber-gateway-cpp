@@ -8,6 +8,17 @@ namespace fiber::http {
 
 namespace {
 
+net::TlsClientParam make_http_client_tls_param(const HttpClientTlsOptions &options, const char *alpn) noexcept {
+    net::TlsClientParam param{};
+    param.security = options.security;
+    param.min_version = options.min_version;
+    param.max_version = options.max_version;
+    param.alpn.emplace_back(alpn);
+    param.server_name = options.server_name;
+    param.verify_name = options.verify_name;
+    return param;
+}
+
 template<typename Options>
 std::vector<std::string> normalize_base(const Options &options) {
     std::vector<std::string> normalized;
@@ -45,7 +56,13 @@ void normalize_http3_alpn_impl(Options &options) {
 
 } // namespace
 
-void normalize_http1_alpn(net::TlsClientParam &options) { normalize_http1_alpn_impl(options); }
+net::TlsClientParam make_http1_client_tls_param(const HttpClientTlsOptions &options) noexcept {
+    return make_http_client_tls_param(options, "http/1.1");
+}
+
+net::TlsClientParam make_http2_client_tls_param(const HttpClientTlsOptions &options) noexcept {
+    return make_http_client_tls_param(options, "h2");
+}
 
 void normalize_http1_alpn(net::TlsServerParam &options) { normalize_http1_alpn_impl(options); }
 
@@ -57,8 +74,6 @@ void normalize_http_server_alpn(net::TlsServerParam &options) {
     normalized.insert(normalized.begin(), "h2");
     options.alpn = std::move(normalized);
 }
-
-void normalize_http3_alpn(net::TlsClientParam &options) { normalize_http3_alpn_impl(options); }
 
 void normalize_http3_alpn(net::TlsServerParam &options) { normalize_http3_alpn_impl(options); }
 

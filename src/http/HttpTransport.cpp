@@ -34,6 +34,10 @@ std::chrono::steady_clock::time_point make_deadline(std::chrono::milliseconds ti
     return event::EventLoop::current().now() + timeout;
 }
 
+fiber::async::Task<common::IoResult<void>> invalid_tls_handshake() {
+    co_return std::unexpected(common::IoErr::Invalid);
+}
+
 common::IoResult<std::chrono::milliseconds> remaining_timeout(std::chrono::steady_clock::time_point deadline) noexcept {
     if (deadline == std::chrono::steady_clock::time_point::max()) {
         return std::chrono::milliseconds::max();
@@ -300,7 +304,7 @@ const net::SocketAddress &TcpTransport::remote_addr() const noexcept { return st
 event::EventLoop &TcpTransport::loop() const noexcept { return stream_.loop(); }
 
 common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                     const net::TlsClientParam &options,
+                                                                     net::TlsClientParam options,
                                                                      net::TcpSocketOptions tcp_options) {
     if (!accept.valid()) {
         return std::unexpected(common::IoErr::Invalid);
@@ -309,8 +313,8 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
     if (option_err != common::IoErr::None) {
         return std::unexpected(option_err);
     }
-    auto transport =
-            std::unique_ptr<TlsTransport>(new TlsTransport(loop, accept.release_fd(), accept.take_peer(), options));
+    auto transport = std::unique_ptr<TlsTransport>(
+            new TlsTransport(loop, accept.release_fd(), accept.take_peer(), std::move(options)));
     return transport;
 }
 
@@ -330,8 +334,8 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
 }
 
 TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
-                           const net::TlsClientParam &options) :
-    stream_(loop, fd, std::move(remote_addr)), client_options_(&options) {}
+                           net::TlsClientParam options) :
+    stream_(loop, fd, std::move(remote_addr)), client_options_(std::move(options)) {}
 
 TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
                            const net::TlsServerParam &options) :
@@ -521,7 +525,8 @@ fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(std::chrono::
     if (client_options_) {
         return stream_.handshake(*client_options_, timeout);
     }
-    return stream_.handshake(net::TlsClientParam{}, timeout);
+    FIBER_ASSERT(false);
+    return invalid_tls_handshake();
 }
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::shutdown(std::chrono::milliseconds timeout) {

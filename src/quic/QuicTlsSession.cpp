@@ -329,30 +329,31 @@ common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerParam &op
     return {};
 }
 
-common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientParam &base_options, QuicConnection &connection,
-                                                   const char *server_name, bool allow_insecure,
-                                                   SSL_SESSION *session) noexcept {
-    if (ssl_ != nullptr || !base_options.enabled() || base_options.alpn.empty()) {
+common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientSecurity &security,
+                                                   const std::vector<std::string> &alpn, QuicConnection &connection,
+                                                   std::string_view server_name, std::string_view verify_name,
+                                                   bool allow_insecure, SSL_SESSION *session) noexcept {
+    if (ssl_ != nullptr || alpn.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    const bool verify_peer = base_options.verify_peer;
+    const bool verify_peer = security.verify_peer;
     if (!verify_peer && !allow_insecure) {
         return std::unexpected(common::IoErr::Permission);
     }
-    if (verify_peer && (server_name == nullptr || server_name[0] == '\0')) {
+    if (verify_peer && server_name.empty() && verify_name.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    net::TlsClientParam options = base_options;
-    if (server_name != nullptr && server_name[0] != '\0') {
-        options.sni_name = server_name;
-        if (options.verify_name.empty()) {
-            options.verify_name = server_name;
-        }
-    }
-    options.enable_early_data = connection.early_data_enabled();
+    net::TlsClientParam options{};
+    options.security = security;
+    options.min_version = 0x0304;
+    options.max_version = 0x0304;
+    options.alpn = alpn;
+    options.server_name.assign(server_name);
+    options.verify_name.assign(verify_name);
     new_session_ops_ = {.ctx = &connection, .store = &store_new_client_session};
-    auto created_ssl = net::detail::TlsSslFactory::create_client(options, &new_session_ops_);
+    auto created_ssl =
+            net::detail::TlsSslFactory::create_client(options, connection.early_data_enabled(), &new_session_ops_);
     if (!created_ssl) {
         return std::unexpected(created_ssl.error());
     }

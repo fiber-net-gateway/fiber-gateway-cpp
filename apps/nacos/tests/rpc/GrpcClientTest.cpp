@@ -320,8 +320,8 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, std::
     ClientResult result;
     fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enable_tls = true;
-    options.tls.sni_name = "localhost";
+    options.tls.emplace();
+    options.tls->server_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
 
@@ -360,8 +360,8 @@ DetachedTask run_client_two_calls(fiber::event::EventLoop *loop, std::uint16_t p
     TwoCallResult result;
     fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enable_tls = true;
-    options.tls.sni_name = "localhost";
+    options.tls.emplace();
+    options.tls->server_name = "localhost";
     // The second call exercises repeated request encoding on the same HTTP/2
     // connection without relying on HPACK dynamic-table state.
     options.authority = "localhost";
@@ -414,8 +414,8 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
     LifecycleResult result;
     fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enable_tls = true;
-    options.tls.sni_name = "localhost";
+    options.tls.emplace();
+    options.tls->server_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
 

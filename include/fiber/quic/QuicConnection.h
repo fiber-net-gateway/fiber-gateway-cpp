@@ -465,6 +465,7 @@ public:
         QuicTransportSettings remembered_peer_transport{};
         bool has_remembered_peer_transport = false;
         std::string client_server_name{};
+        std::string client_verify_name{};
         net::SocketAddress client_cache_remote_addr{};
         const net::TlsCredential *client_tls_credential = nullptr;
         const net::TrustStore *client_trust_store = nullptr;
@@ -750,6 +751,7 @@ public:
     [[nodiscard]] common::IoResult<void> recv_new_token_frame(const QuicInputFrame &frame) noexcept;
     [[nodiscard]] bool on_new_tls_session(SSL_SESSION *session) noexcept;
     [[nodiscard]] std::string_view client_server_name() const noexcept { return options_.client_server_name; }
+    [[nodiscard]] std::string_view client_verify_name() const noexcept { return options_.client_verify_name; }
     [[nodiscard]] const net::TlsCredential *client_tls_credential() const noexcept {
         return options_.client_tls_credential;
     }

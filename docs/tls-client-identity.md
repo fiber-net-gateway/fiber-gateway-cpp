@@ -4,7 +4,9 @@ TLS 材料与连接策略相互独立：
 
 - `TlsCredential` 是不可变的证书链和私钥，内部持有 BoringSSL `SSL_CREDENTIAL *`。
 - `TrustStore` 是不可变的信任根集合，内部持有 `X509_STORE *`。
-- `TlsClientParam` 和 `TlsServerParam` 只描述一次连接的握手策略，借用上述材料。
+- `TlsClientSecurity` 组合一次客户端连接使用的身份、信任根和 peer verification 策略。
+- `TlsClientParam` 只描述创建一个原始 client SSL 时实际应用的安全、版本、SNI、校验名和 ALPN。
+- HTTP 和 QUIC 使用各自的连接参数管理 TLS 开关、超时、协议 ALPN、session cache 和 0-RTT。
 
 `TlsCredential::create()` 会同步读取 PEM、构造证书链并校验证书与私钥是否匹配；
 `TrustStore::create()` 支持 PEM 文件、PEM 内容和系统信任根。失败时不会发布半初始化对象，普通日志和
@@ -12,7 +14,7 @@ API 响应也不应输出私钥内容、secret reference 或解析后的私钥�
 
 ## 客户端
 
-没有客户端证书时，`credential` 保持为空。`verify_peer=true` 时必须提供 `trust_store`；`sni_name`
+没有客户端证书时，`credential` 保持为空。`verify_peer=true` 时必须提供 `trust_store`；`server_name`
 用于 ClientHello SNI，IP 字面量不会作为 SNI 发送，`verify_name` 则独立控制证书 DNS/IP SAN 校验目标。
 
 ```cpp
@@ -30,14 +32,17 @@ if (!credential || !trust_store) {
 }
 
 fiber::net::TlsClientParam tls{};
-tls.enable_tls = true;
-tls.credential = credential->get();
-tls.trust_store = trust_store->get();
-tls.verify_peer = true;
-tls.sni_name = "route.example.com";
+tls.security.credential = credential->get();
+tls.security.trust_store = trust_store->get();
+tls.security.verify_peer = true;
+tls.server_name = "route.example.com";
 tls.verify_name = "certificate.example.com";
 tls.alpn = {"h2", "http/1.1"};
 ```
+
+`TlsClientParam` 不包含 enable bit 或 handshake timeout：调用 `TlsTcpStream::handshake()` 本身就表示启用
+TLS，超时由该操作的参数控制。它也不提供 session 保存 callback；TCP 当前没有配套的 session 恢复 API。
+QUIC resumption/0-RTT 使用 `QuicClientCacheOps`，不经过通用 TLS 参数。
 
 ## 服务端 ClientHello 配置回调
 
