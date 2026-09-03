@@ -139,7 +139,7 @@ common::IoResult<void> Http3Server::bind(const net::SocketAddress &addr) noexcep
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    normalize_http3_alpn(options_.tls);
+    normalize_http3_alpn(options_.tls, options_.tls_alpn);
 
     const std::size_t count = shard_count();
     shards_.reserve(count);

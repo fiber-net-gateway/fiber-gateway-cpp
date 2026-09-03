@@ -97,7 +97,8 @@ fiber::net::TlsServerParam make_quic_server_tls(
     options.client_certificate_mode = client_certificate_mode;
     options.min_version = 0x0304;
     options.max_version = 0x0304;
-    options.alpn = {"fiber-quic-test"};
+    static constexpr std::string_view kQuicTestAlpn[] = {"fiber-quic-test"};
+    options.alpn = kQuicTestAlpn;
     return options;
 }
 

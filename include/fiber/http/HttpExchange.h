@@ -59,6 +59,9 @@ struct HttpServerOptions {
     bool drain_unread_body = false;
     bool enable_extended_connect = false;
     net::TlsServerParam tls{};
+    // Backing storage for tls.alpn; rebuilt by the normalize_*_alpn calls at
+    // bind time, frozen afterwards (the span must stay valid across handshakes).
+    net::TlsAlpnList tls_alpn{};
     Http3Options http3{};
 };
 

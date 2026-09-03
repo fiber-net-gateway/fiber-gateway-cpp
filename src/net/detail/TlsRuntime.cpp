@@ -58,38 +58,22 @@ enum ssl_select_cert_result_t TlsRuntime::select_certificate_callback(const SSL_
         return ssl_select_cert_error;
     }
 
+    // Static configuration (protocol versions, early data, trust store,
+    // client certificate mode) was already installed when the SSL was created;
+    // the callback only selects per-ClientHello material.
     state->reset_for_callback();
-    TlsServerHandshakeConfig config(ssl, *state);
+    TlsServerHandshakeConfig config(ssl);
     common::IoErr error = config.clear_credentials();
-    if (error == common::IoErr::None) {
-        error = config.set_protocol_versions(state->param->min_version, state->param->max_version);
-    }
-    if (error == common::IoErr::None) {
-        error = config.set_early_data_enabled(state->param->enable_early_data);
-    }
-    if (error == common::IoErr::None && state->param->trust_store) {
-        error = config.set_trust_store(*state->param->trust_store);
-    }
-    if (error == common::IoErr::None) {
-        error = config.set_client_certificate_mode(state->param->client_certificate_mode);
-    }
 
     const char *server_name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
     const TlsClientHelloView hello{
             .server_name = server_name ? std::string_view(server_name) : std::string_view{},
             .offered_alpn = parse_client_hello_alpn(client_hello),
-            .remote_addr = state->remote_addr,
-            .local_addr = state->local_addr,
-            .transport = state->transport,
     };
     if (error == common::IoErr::None) {
         error = state->param->configure_callback(state->param->configure_ctx, config, hello);
     }
-    if (error == common::IoErr::None && state->credential_count == 0) {
-        error = common::IoErr::Invalid;
-    }
-    if (error == common::IoErr::None && state->client_certificate_mode != TlsClientCertificateMode::None &&
-        !state->trust_store_set) {
+    if (error == common::IoErr::None && config.credential_count() == 0) {
         error = common::IoErr::Invalid;
     }
     state->callback_error = error;
@@ -106,18 +90,10 @@ int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen, c
         return SSL_TLSEXT_ERR_NOACK;
     }
 
-    if (state->selected_alpn_size != 0) {
-        const std::string_view selected(reinterpret_cast<const char *>(state->selected_alpn.data()),
-                                        state->selected_alpn_size);
-        if (!offered_alpn_contains(in, inlen, selected)) {
-            return SSL_TLSEXT_ERR_NOACK;
-        }
-        *out = state->selected_alpn.data();
-        *outlen = state->selected_alpn_size;
-        return SSL_TLSEXT_ERR_OK;
-    }
-
-    for (const auto &protocol: state->param->alpn) {
+    // The server's preference list, borrowed from the param; pick the first
+    // protocol the client also offered. BoringSSL copies the selection into
+    // the session, so the backing only needs to stay valid for this call.
+    for (const std::string_view protocol: state->param->alpn) {
         if (!protocol.empty() && protocol.size() <= 255 && offered_alpn_contains(in, inlen, protocol)) {
             *out = reinterpret_cast<const unsigned char *>(protocol.data());
             *outlen = static_cast<unsigned char>(protocol.size());
@@ -178,6 +154,12 @@ int TlsRuntime::server_handshake_state_index() noexcept {
 int TlsRuntime::new_session_ops_index() noexcept {
     static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
     return index;
+}
+
+void TlsRuntime::set_server_handshake_state(SSL *ssl, TlsServerHandshakeState *state) noexcept {
+    if (ssl != nullptr) {
+        SSL_set_ex_data(ssl, server_handshake_state_index(), state);
+    }
 }
 
 } // namespace fiber::net::detail

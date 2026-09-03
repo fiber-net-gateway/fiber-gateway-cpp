@@ -9,6 +9,7 @@
 #include <openssl/bio.h>
 #include <openssl/ssl.h>
 
+#include "TlsRuntime.h"
 #include "TlsSslFactory.h"
 
 namespace fiber::net::detail {
@@ -50,6 +51,23 @@ struct BusyResetGuard {
     ~BusyResetGuard() {
         if (busy) {
             *busy = false;
+        }
+    }
+};
+
+// Unlinks a frame-local TlsServerHandshakeState from the SSL when the
+// handshake coroutine exits, so a later misuse of the SSL (e.g. SSL_read
+// implicitly driving a never-finished handshake) fails safe in the callbacks
+// instead of touching a dead coroutine frame. Watches TlsStreamFd::ssl_
+// through a pointer to the slot: if close() already freed the SSL, the ex_data
+// died with it and there is nothing to unlink.
+struct ServerStateGuard {
+    SSL **slot = nullptr;
+    bool wired = false;
+
+    ~ServerStateGuard() {
+        if (wired && slot != nullptr && *slot != nullptr) {
+            TlsRuntime::set_server_handshake_state(*slot, nullptr);
         }
     }
 };
@@ -380,41 +398,29 @@ common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) no
     return attach_ssl(*ssl);
 }
 
-common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param, const SocketAddress *local_addr,
-                                                 const SocketAddress *remote_addr,
-                                                 TlsTransportKind transport) noexcept {
+common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param) noexcept {
     if (role_ != Role::None) {
         return std::unexpected(common::IoErr::Already);
     }
     role_ = Role::Server;
-    auto ssl = TlsSslFactory::create_server(param, server_handshake_state_, local_addr, remote_addr, transport);
+    auto ssl = TlsSslFactory::create_server(param);
     if (!ssl) {
         return std::unexpected(ssl.error());
     }
     return attach_ssl(*ssl);
 }
 
-TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param) {
-    return handshake(param, kDefaultTlsHandshakeTimeout);
-}
-
 TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param, std::chrono::milliseconds timeout) {
-    return handshake_impl(start_client(param), timeout);
+    return handshake_impl(start_client(param), timeout, nullptr);
 }
 
-TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, const SocketAddress *local_addr,
-                                                  const SocketAddress *remote_addr, TlsTransportKind transport) {
-    return handshake(param, local_addr, remote_addr, transport, param.handshake_timeout);
-}
-
-TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, const SocketAddress *local_addr,
-                                                  const SocketAddress *remote_addr, TlsTransportKind transport,
-                                                  std::chrono::milliseconds timeout) {
-    return handshake_impl(start_server(param, local_addr, remote_addr, transport), timeout);
+TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, std::chrono::milliseconds timeout) {
+    return handshake_impl(start_server(param), timeout, &param);
 }
 
 TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(common::IoResult<void> start_result,
-                                                       std::chrono::milliseconds timeout) {
+                                                       std::chrono::milliseconds timeout,
+                                                       const TlsServerParam *server_param) {
     if (!start_result) {
         co_return std::unexpected(start_result.error());
     }
@@ -424,6 +430,18 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(common::IoResult<void> st
 
     busy_ = true;
     BusyResetGuard busy_reset(&busy_);
+
+    // The server handshake state lives in this coroutine frame: the SSL
+    // callbacks reach it through ex_data while the handshake (and thus this
+    // frame) is alive, and the guard unlinks it on every exit path. Client
+    // handshakes never fire the server callbacks, so the state stays idle.
+    TlsServerHandshakeState state{.param = server_param};
+    ServerStateGuard state_guard{.slot = &ssl_};
+    if (server_param != nullptr) {
+        TlsRuntime::set_server_handshake_state(ssl_, &state);
+        state_guard.wired = true;
+    }
+
     Deadline deadline = make_deadline(timeout);
     for (;;) {
         fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
@@ -432,8 +450,8 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(common::IoResult<void> st
             co_return fiber::common::IoResult<void>{};
         }
         if (err != fiber::common::IoErr::WouldBlock) {
-            if (role_ == Role::Server && server_handshake_state_.callback_error != common::IoErr::None) {
-                co_return std::unexpected(server_handshake_state_.callback_error);
+            if (state.callback_error != common::IoErr::None) {
+                co_return std::unexpected(state.callback_error);
             }
             co_return std::unexpected(err);
         }

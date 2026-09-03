@@ -459,7 +459,8 @@ TEST(GrpcClientTest, StreamUnaryRoundTrip) {
     fiber::http::HttpServerOptions server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = tls_credential->get();
-    server_options.tls.alpn = {"h2"};
+    static constexpr std::string_view kServerAlpn[] = {"h2"};
+    server_options.tls.alpn = kServerAlpn;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;
@@ -515,7 +516,8 @@ TEST(GrpcClientTest, StreamUnaryReturnsGrpcError) {
     fiber::http::HttpServerOptions server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = tls_credential->get();
-    server_options.tls.alpn = {"h2"};
+    static constexpr std::string_view kServerAlpn[] = {"h2"};
+    server_options.tls.alpn = kServerAlpn;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;
@@ -568,7 +570,8 @@ TEST(GrpcClientTest, RepeatedUnaryCallsWorkWithoutHpackDynamicTable) {
     fiber::http::HttpServerOptions server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = tls_credential->get();
-    server_options.tls.alpn = {"h2"};
+    static constexpr std::string_view kServerAlpn[] = {"h2"};
+    server_options.tls.alpn = kServerAlpn;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;
@@ -627,7 +630,8 @@ TEST(GrpcClientTest, ImmediateShutdownReleasesAllConnectionCloseWaiters) {
     fiber::http::HttpServerOptions server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = tls_credential->get();
-    server_options.tls.alpn = {"h2"};
+    static constexpr std::string_view kServerAlpn[] = {"h2"};
+    server_options.tls.alpn = kServerAlpn;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "http/TlsAlpn.h"
@@ -30,33 +31,43 @@ TEST(TlsAlpnTest, Http2ClientOwnsH2Alpn) {
 }
 
 TEST(TlsAlpnTest, NormalizeHttpServerAlpnPrefersH2ThenHttp11) {
+    static constexpr std::string_view input[] = {"custom", "http/1.1", "h2", "", "custom"};
     fiber::net::TlsServerParam options;
-    options.alpn = {"custom", "http/1.1", "h2", "", "custom"};
+    options.alpn = input;
 
-    fiber::http::normalize_http_server_alpn(options);
+    fiber::net::TlsAlpnList alpn;
+    fiber::http::normalize_http_server_alpn(options, alpn);
 
-    const std::vector<std::string> expected = {"h2", "http/1.1", "custom"};
-    EXPECT_EQ(options.alpn, expected);
+    const std::vector<std::string_view> expected = {"h2", "http/1.1", "custom"};
+    const std::vector<std::string_view> actual(options.alpn.begin(), options.alpn.end());
+    EXPECT_EQ(actual, expected);
+    EXPECT_EQ(options.alpn.data(), alpn.view().data());
 }
 
 TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
+    static constexpr std::string_view input[] = {"acme/1"};
     fiber::net::TlsServerParam options;
-    options.alpn = {"acme/1"};
+    options.alpn = input;
 
-    fiber::http::normalize_http_server_alpn(options);
+    fiber::net::TlsAlpnList alpn;
+    fiber::http::normalize_http_server_alpn(options, alpn);
 
-    const std::vector<std::string> expected = {"h2", "http/1.1", "acme/1"};
-    EXPECT_EQ(options.alpn, expected);
+    const std::vector<std::string_view> expected = {"h2", "http/1.1", "acme/1"};
+    const std::vector<std::string_view> actual(options.alpn.begin(), options.alpn.end());
+    EXPECT_EQ(actual, expected);
 }
 
 TEST(TlsAlpnTest, NormalizeHttp3ServerAlpnPrefersH3AndDropsTcpProtocols) {
+    static constexpr std::string_view input[] = {"http/1.1", "h3", "custom", "h2", "", "custom"};
     fiber::net::TlsServerParam options;
-    options.alpn = {"http/1.1", "h3", "custom", "h2", "", "custom"};
+    options.alpn = input;
 
-    fiber::http::normalize_http3_alpn(options);
+    fiber::net::TlsAlpnList alpn;
+    fiber::http::normalize_http3_alpn(options, alpn);
 
-    const std::vector<std::string> expected = {"h3", "custom"};
-    EXPECT_EQ(options.alpn, expected);
+    const std::vector<std::string_view> expected = {"h3", "custom"};
+    const std::vector<std::string_view> actual(options.alpn.begin(), options.alpn.end());
+    EXPECT_EQ(actual, expected);
 }
 
 TEST(TlsAlpnTest, AlpnProtocolsViewContainsOfferedProtocols) {

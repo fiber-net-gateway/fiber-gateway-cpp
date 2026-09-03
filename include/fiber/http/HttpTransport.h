@@ -188,7 +188,7 @@ private:
 
     net::TlsTcpStream stream_;
     std::optional<net::TlsClientParam> client_options_{};
-    const net::TlsServerParam *server_options_ = nullptr;
+    net::TlsServerParam server_options_{};
     std::unique_ptr<std::uint8_t[]> writev_scratch_;
     PendingWriteKind pending_write_kind_ = PendingWriteKind::None;
     const void *pending_write_data_ = nullptr;

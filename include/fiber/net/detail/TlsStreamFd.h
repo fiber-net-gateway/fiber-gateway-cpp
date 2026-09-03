@@ -52,13 +52,10 @@ public:
                                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
-    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param);
-    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param, std::chrono::milliseconds timeout);
-    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param, const SocketAddress *local_addr,
-                                          const SocketAddress *remote_addr, TlsTransportKind transport);
-    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param, const SocketAddress *local_addr,
-                                          const SocketAddress *remote_addr, TlsTransportKind transport,
-                                          std::chrono::milliseconds timeout);
+    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param,
+                                          std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
+    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param,
+                                          std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
     [[nodiscard]] ShutdownTask shutdown();
     [[nodiscard]] StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -76,17 +73,18 @@ private:
     };
 
     common::IoResult<void> start_client(const TlsClientParam &param) noexcept;
-    common::IoResult<void> start_server(const TlsServerParam &param, const SocketAddress *local_addr,
-                                        const SocketAddress *remote_addr, TlsTransportKind transport) noexcept;
+    common::IoResult<void> start_server(const TlsServerParam &param) noexcept;
     common::IoResult<void> attach_ssl(SSL *ssl) noexcept;
-    [[nodiscard]] HandshakeTask handshake_impl(common::IoResult<void> start_result, std::chrono::milliseconds timeout);
+    // server_param is the caller's param, borrowed for the handshake's
+    // duration; the server handshake state lives in the coroutine frame.
+    [[nodiscard]] HandshakeTask handshake_impl(common::IoResult<void> start_result, std::chrono::milliseconds timeout,
+                                               const TlsServerParam *server_param);
     fiber::common::IoErr handshake_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr write_once(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     StreamFd stream_fd_;
     SSL *ssl_ = nullptr;
-    TlsServerHandshakeState server_handshake_state_{};
     Role role_ = Role::None;
     bool handshake_done_ = false;
     bool busy_ = false;

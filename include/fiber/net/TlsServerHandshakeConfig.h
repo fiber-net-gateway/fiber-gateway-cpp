@@ -1,9 +1,8 @@
 #ifndef FIBER_NET_TLS_SERVER_HANDSHAKE_CONFIG_H
 #define FIBER_NET_TLS_SERVER_HANDSHAKE_CONFIG_H
 
-#include <cstdint>
+#include <cstddef>
 #include <span>
-#include <string_view>
 
 #include "../common/IoError.h"
 #include "TlsParams.h"
@@ -17,7 +16,7 @@ class TlsCredential;
 class TrustStore;
 namespace detail {
 class TlsRuntime;
-struct TlsServerHandshakeState;
+class TlsSslFactory;
 } // namespace detail
 
 // A synchronous, callback-duration view for configuring the current server
@@ -31,17 +30,23 @@ public:
     [[nodiscard]] common::IoErr set_trust_store(const TrustStore &trust_store) noexcept;
     [[nodiscard]] common::IoErr set_session_id_context(std::span<const std::uint8_t> context) noexcept;
     [[nodiscard]] common::IoErr set_protocol_versions(int min_version, int max_version) noexcept;
+    // Client-certificate verification needs a trust store: install one via
+    // TlsServerParam::trust_store or set_trust_store before requesting a mode
+    // other than None, otherwise the handshake fails verification.
     [[nodiscard]] common::IoErr set_client_certificate_mode(TlsClientCertificateMode mode) noexcept;
     [[nodiscard]] common::IoErr set_early_data_enabled(bool enabled) noexcept;
-    [[nodiscard]] common::IoErr select_alpn(std::string_view protocol) noexcept;
 
 private:
     friend class detail::TlsRuntime;
+    friend class detail::TlsSslFactory;
 
-    TlsServerHandshakeConfig(SSL *ssl, detail::TlsServerHandshakeState &state) noexcept : ssl_(ssl), state_(state) {}
+    TlsServerHandshakeConfig(SSL *ssl) noexcept : ssl_(ssl) {}
+
+    [[nodiscard]] std::size_t credential_count() const noexcept { return credential_count_; }
 
     SSL *ssl_;
-    detail::TlsServerHandshakeState &state_;
+    std::size_t credential_count_ = 0;
+    bool session_id_context_set_ = false;
 };
 
 // Convenience callback for static single-certificate servers. Dynamic servers

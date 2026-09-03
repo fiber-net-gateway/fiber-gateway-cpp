@@ -212,7 +212,8 @@ int main(int argc, char **argv) {
     server_options.drain_unread_body = true;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
-    server_options.tls.alpn = {"h2", "http/1.1"};
+    server_options.tls_alpn = {"h2", "http/1.1"};
+    server_options.tls.alpn = server_options.tls_alpn.view();
     server_options.http3.enabled = true;
     server_options.http3.send.pacing.enabled = pacing_enabled;
     fiber::http::HttpServer server(accept_loop, handle_request, server_options, &worker_group);

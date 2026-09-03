@@ -173,8 +173,7 @@ DetachedTask close_tls_streams(fiber::net::detail::TlsStreamFd *server_stream,
 
 DetachedTask run_tls_server(fiber::net::detail::TlsStreamFd *server_stream, const fiber::net::TlsServerParam &param,
                             std::promise<fiber::common::IoResult<std::string>> *done) {
-    auto handshake_result =
-            co_await server_stream->handshake(param, nullptr, nullptr, fiber::net::TlsTransportKind::Tcp);
+    auto handshake_result = co_await server_stream->handshake(param);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -229,8 +228,7 @@ DetachedTask reset_tls_server_after_client_handshake(fiber::net::detail::TlsStre
                                                      std::atomic_bool *client_handshake_done,
                                                      std::atomic_bool *server_closed,
                                                      std::promise<fiber::common::IoErr> *done) {
-    auto handshake_result =
-            co_await server_stream->handshake(param, nullptr, nullptr, fiber::net::TlsTransportKind::Tcp);
+    auto handshake_result = co_await server_stream->handshake(param);
     if (!handshake_result) {
         server_closed->store(true, std::memory_order_release);
         done->set_value(handshake_result.error());
