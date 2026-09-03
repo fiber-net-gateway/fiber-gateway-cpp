@@ -354,7 +354,7 @@ fiber::async::Task<void> Http1Connection::run() {
             }
         }
 
-        HttpExchange exchange(loop_.io_buf_node_pool(), options_, transport_->remote_addr());
+        HttpExchange exchange(loop_.io_buf_node_pool(), transport_->remote_addr());
         auto parse_result = co_await parse_request(exchange);
         if (!parse_result) {
             break;

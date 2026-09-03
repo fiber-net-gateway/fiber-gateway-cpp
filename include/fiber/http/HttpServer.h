@@ -17,6 +17,7 @@
 #include "Http2Connection.h"
 #include "Http3Server.h"
 #include "HttpExchange.h"
+#include "HttpServerOptions.h"
 #include "HttpTransport.h"
 #include "ServerRequestFactory.h"
 

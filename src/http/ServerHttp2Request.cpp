@@ -177,7 +177,7 @@ ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection 
                                        const HttpServerOptions &http_options, const HttpHandler &handler,
                                        std::shared_ptr<const HttpHandler> handler_owner) noexcept :
     conn_(&conn), handler_(&handler), handler_owner_(std::move(handler_owner)), stream_(this, stream_ops()),
-    exchange_(conn.transport().loop().io_buf_node_pool(), http_options, conn.transport().remote_addr()),
+    exchange_(conn.transport().loop().io_buf_node_pool(), conn.transport().remote_addr()),
     request_body_recv_(conn.transport().loop().io_buf_node_pool()) {
     (void) stream_id;
     FIBER_ASSERT(handler_ != nullptr);

@@ -13,6 +13,7 @@
 #include <fiber/http/Http1HeaderParseBuffer.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpServerOptions.h>
 #include <fiber/http/HttpTransport.h>
 
 namespace fiber::http {

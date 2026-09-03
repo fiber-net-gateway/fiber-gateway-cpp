@@ -14,6 +14,7 @@
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpExchangeIo.h>
+#include <fiber/http/HttpServerOptions.h>
 #include <fiber/quic/QuicConnection.h>
 
 namespace fiber::event {

@@ -13,6 +13,7 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/http/Http1Parser.h>
 #include <fiber/http/HttpExchange.h>
+#include <fiber/http/HttpServerOptions.h>
 
 namespace fiber::http {
 

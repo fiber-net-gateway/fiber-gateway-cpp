@@ -18,6 +18,7 @@
 #include "../quic/QuicUdpEndpoint.h"
 #include "Http3Connection.h"
 #include "HttpExchange.h"
+#include "HttpServerOptions.h"
 
 namespace fiber::http {
 

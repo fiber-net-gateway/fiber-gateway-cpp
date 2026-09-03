@@ -15,6 +15,7 @@
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpExchangeIo.h>
 #include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpServerOptions.h>
 #include <fiber/http/detail/Http2BodyRecvState.h>
 #include <fiber/http/detail/Http2SendAwaiter.h>
 
