@@ -74,7 +74,6 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
         return fail(error);
     }
     SSL_set_connect_state(ssl);
-    SSL_set_early_data_enabled(ssl, param.enable_early_data ? 1 : 0);
 
     IpAddress sni_ip{};
     const bool sni_is_ip = !param.sni_name.empty() && IpAddress::parse(param.sni_name, sni_ip);
