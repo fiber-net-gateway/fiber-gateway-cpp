@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,7 +13,6 @@
 
 namespace fiber::net {
 
-class SocketAddress;
 class TlsCredential;
 class TrustStore;
 class TlsServerHandshakeConfig;
@@ -63,17 +63,9 @@ inline bool TlsAlpnProtocolsView::contains(std::string_view protocol) const noex
     return false;
 }
 
-enum class TlsTransportKind : std::uint8_t {
-    Tcp,
-    Quic,
-};
-
 struct TlsClientHelloView {
     std::string_view server_name{};
     TlsAlpnProtocolsView offered_alpn{};
-    const SocketAddress *remote_addr = nullptr;
-    const SocketAddress *local_addr = nullptr;
-    TlsTransportKind transport = TlsTransportKind::Tcp;
 };
 
 enum class TlsClientCertificateMode : std::uint8_t {
@@ -107,20 +99,84 @@ struct TlsClientParam {
 
 inline constexpr std::chrono::milliseconds kDefaultTlsHandshakeTimeout{10000};
 
+// Owning ALPN protocol list backing TlsServerParam::alpn. assign() copies the
+// protocol characters; views returned by view() stay valid until the next
+// mutation. Copy and move rebind the internal views to the new storage.
+class TlsAlpnList {
+public:
+    TlsAlpnList() = default;
+    TlsAlpnList(std::initializer_list<std::string_view> protocols) { assign(protocols); }
+    TlsAlpnList(std::span<const std::string_view> protocols) { assign(protocols); }
+    TlsAlpnList(const TlsAlpnList &other) { assign(other.view()); }
+    TlsAlpnList(TlsAlpnList &&other) noexcept : owned_(std::move(other.owned_)) {
+        other.owned_.clear();
+        rebind_views();
+    }
+    TlsAlpnList &operator=(const TlsAlpnList &other) {
+        if (this != &other) {
+            assign(other.view());
+        }
+        return *this;
+    }
+    TlsAlpnList &operator=(TlsAlpnList &&other) noexcept {
+        if (this != &other) {
+            owned_ = std::move(other.owned_);
+            other.owned_.clear();
+            rebind_views();
+        }
+        return *this;
+    }
+
+    void assign(std::span<const std::string_view> protocols) {
+        owned_.clear();
+        owned_.reserve(protocols.size());
+        for (const auto &protocol: protocols) {
+            owned_.emplace_back(protocol);
+        }
+        rebind_views();
+    }
+    void assign(std::vector<std::string> &&protocols) {
+        owned_ = std::move(protocols);
+        rebind_views();
+    }
+    void clear() noexcept {
+        owned_.clear();
+        views_.clear();
+    }
+    [[nodiscard]] std::span<const std::string_view> view() const noexcept { return views_; }
+    [[nodiscard]] bool empty() const noexcept { return views_.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return views_.size(); }
+
+private:
+    void rebind_views() {
+        views_.clear();
+        views_.reserve(owned_.size());
+        for (const auto &protocol: owned_) {
+            views_.emplace_back(protocol.data(), protocol.size());
+        }
+    }
+
+    std::vector<std::string> owned_;
+    std::vector<std::string_view> views_;
+};
+
 struct TlsServerParam {
-    // This object remains borrowed through the handshake. Callback state and
-    // material selected by it must remain valid until the synchronous callback
-    // finishes. The SSL retains its own material references after installation.
-    // Required for TLS. The synchronous callback configures the current SSL
-    // after ClientHello and must add at least one credential.
+    // Trivially copyable, non-owning view assembled per handshake. The
+    // handshake borrows it until it co_returns: the param, the storage its
+    // alpn span points into, and the pointees of configure_ctx and trust_store
+    // must stay valid until the handshake completes (the configure callback
+    // runs at ClientHello; afterwards the SSL retains its own material
+    // references). Copying the param is free and extends the borrow — but the
+    // alpn span keeps pointing at the original backing. Required for TLS: the
+    // callback configures the current SSL after ClientHello and must add at
+    // least one credential.
     ConfigureTlsCallback configure_callback = nullptr;
     void *configure_ctx = nullptr;
     const TrustStore *trust_store = nullptr;
     TlsClientCertificateMode client_certificate_mode = TlsClientCertificateMode::None;
-    std::chrono::milliseconds handshake_timeout{kDefaultTlsHandshakeTimeout};
+    std::span<const std::string_view> alpn{};
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3
-    std::vector<std::string> alpn{"http/1.1"};
     bool enable_early_data = false;
 
     [[nodiscard]] bool enabled() const noexcept { return configure_callback != nullptr; }

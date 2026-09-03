@@ -337,7 +337,7 @@ DetachedTask run_tls_hold_server(fiber::event::EventLoop *loop, std::string cert
     fiber::net::TlsServerParam tls_options{};
     tls_options.configure_callback = &fiber::net::configure_tls_with_credential;
     tls_options.configure_ctx = server_credential->get();
-    auto handshake_result = co_await stream.handshake(tls_options, nullptr, nullptr, fiber::net::TlsTransportKind::Tcp);
+    auto handshake_result = co_await stream.handshake(tls_options);
     if (!handshake_result) {
         stream.close();
         listener.close();

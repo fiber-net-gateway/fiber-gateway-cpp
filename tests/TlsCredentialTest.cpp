@@ -10,7 +10,9 @@
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
+#include <fiber/net/detail/TlsHandshakeState.h>
 #include "QuicTestTlsCertificate.h"
+#include "net/detail/TlsRuntime.h"
 #include "net/detail/TlsSslFactory.h"
 
 namespace {
@@ -92,9 +94,7 @@ TEST(TlsCredentialTest, SslFactoryBuildsClientAndServerRoles) {
     server_param.configure_callback = &fiber::net::configure_tls_with_credential;
     server_param.configure_ctx = credential->get();
     server_param.trust_store = trust_store->get();
-    fiber::net::detail::TlsServerHandshakeState state{};
-    auto server_ssl = fiber::net::detail::TlsSslFactory::create_server(server_param, state, nullptr, nullptr,
-                                                                       fiber::net::TlsTransportKind::Tcp);
+    auto server_ssl = fiber::net::detail::TlsSslFactory::create_server(server_param);
     ASSERT_TRUE(server_ssl.has_value()) << "server factory failed with io_error="
                                         << fiber::common::io_err_name(server_ssl.error());
     SSL_free(*server_ssl);
@@ -113,11 +113,13 @@ TEST(TlsCredentialTest, SslRetainsCredentialAfterOwnerReferenceIsReleased) {
     fiber::net::TlsServerParam server_param{};
     server_param.configure_callback = &add_and_release_credential;
     server_param.configure_ctx = &callback_state;
-    fiber::net::detail::TlsServerHandshakeState server_state{};
-    auto server_result = fiber::net::detail::TlsSslFactory::create_server(server_param, server_state, nullptr, nullptr,
-                                                                          fiber::net::TlsTransportKind::Tcp);
+    // The handshake below is driven manually, so the borrowed state (and the
+    // param it points to) must outlive the whole drive loop.
+    fiber::net::detail::TlsServerHandshakeState server_state{.param = &server_param};
+    auto server_result = fiber::net::detail::TlsSslFactory::create_server(server_param);
     ASSERT_TRUE(server_result.has_value());
     bssl::UniquePtr<SSL> server(*server_result);
+    fiber::net::detail::TlsRuntime::set_server_handshake_state(server.get(), &server_state);
 
     fiber::net::TlsClientParam client_param{};
     auto client_result = fiber::net::detail::TlsSslFactory::create_client(client_param);
@@ -165,11 +167,7 @@ TEST(TlsSslFactoryTest, CertificateLessInsecureClientIsAllowed) {
 
 TEST(TlsSslFactoryTest, ServerWithoutConfigurationCallbackIsRejected) {
     fiber::net::TlsServerParam server_param{};
-    fiber::net::detail::TlsServerHandshakeState state{};
-    EXPECT_EQ(fiber::net::detail::TlsSslFactory::create_server(server_param, state, nullptr, nullptr,
-                                                               fiber::net::TlsTransportKind::Tcp)
-                      .error(),
-              fiber::common::IoErr::Invalid);
+    EXPECT_EQ(fiber::net::detail::TlsSslFactory::create_server(server_param).error(), fiber::common::IoErr::Invalid);
 }
 
 TEST(TlsSslFactoryTest, VerifyPeerWithoutTrustStoreIsRejected) {

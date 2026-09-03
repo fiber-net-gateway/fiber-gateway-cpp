@@ -1,13 +1,9 @@
 #include <fiber/net/TlsServerHandshakeConfig.h>
 
-#include <cstring>
-#include <limits>
-
 #include <openssl/ssl.h>
 
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TrustStore.h>
-#include <fiber/net/detail/TlsHandshakeState.h>
 
 namespace fiber::net {
 
@@ -16,8 +12,8 @@ common::IoErr TlsServerHandshakeConfig::clear_credentials() noexcept {
         return common::IoErr::Invalid;
     }
     SSL_certs_clear(ssl_);
-    state_.credential_count = 0;
-    state_.session_id_context_set = false;
+    credential_count_ = 0;
+    session_id_context_set_ = false;
     return common::IoErr::None;
 }
 
@@ -25,12 +21,12 @@ common::IoErr TlsServerHandshakeConfig::add_credential(const TlsCredential &cred
     if (!ssl_ || !credential.credential_ || SSL_add1_credential(ssl_, credential.credential_) != 1) {
         return common::IoErr::Invalid;
     }
-    ++state_.credential_count;
-    if (!state_.session_id_context_set && SSL_set_session_id_context(ssl_, credential.session_identity_.data(),
-                                                                     credential.session_identity_.size()) != 1) {
+    ++credential_count_;
+    if (!session_id_context_set_ && SSL_set_session_id_context(ssl_, credential.session_identity_.data(),
+                                                               credential.session_identity_.size()) != 1) {
         return common::IoErr::Invalid;
     }
-    state_.session_id_context_set = true;
+    session_id_context_set_ = true;
     return common::IoErr::None;
 }
 
@@ -38,7 +34,6 @@ common::IoErr TlsServerHandshakeConfig::set_trust_store(const TrustStore &trust_
     if (!ssl_ || !trust_store.store_ || SSL_set1_verify_cert_store(ssl_, trust_store.store_) != 1) {
         return common::IoErr::Invalid;
     }
-    state_.trust_store_set = true;
     return common::IoErr::None;
 }
 
@@ -47,7 +42,7 @@ common::IoErr TlsServerHandshakeConfig::set_session_id_context(std::span<const s
         SSL_set_session_id_context(ssl_, context.data(), context.size()) != 1) {
         return common::IoErr::Invalid;
     }
-    state_.session_id_context_set = true;
+    session_id_context_set_ = true;
     return common::IoErr::None;
 }
 
@@ -71,7 +66,6 @@ common::IoErr TlsServerHandshakeConfig::set_client_certificate_mode(TlsClientCer
         }
     }
     SSL_set_verify(ssl_, verify_mode, nullptr);
-    state_.client_certificate_mode = mode;
     return common::IoErr::None;
 }
 
@@ -80,15 +74,6 @@ common::IoErr TlsServerHandshakeConfig::set_early_data_enabled(bool enabled) noe
         return common::IoErr::Invalid;
     }
     SSL_set_early_data_enabled(ssl_, enabled ? 1 : 0);
-    return common::IoErr::None;
-}
-
-common::IoErr TlsServerHandshakeConfig::select_alpn(std::string_view protocol) noexcept {
-    if (!ssl_ || protocol.empty() || protocol.size() > state_.selected_alpn.size()) {
-        return common::IoErr::Invalid;
-    }
-    std::memcpy(state_.selected_alpn.data(), protocol.data(), protocol.size());
-    state_.selected_alpn_size = static_cast<std::uint8_t>(protocol.size());
     return common::IoErr::None;
 }
 

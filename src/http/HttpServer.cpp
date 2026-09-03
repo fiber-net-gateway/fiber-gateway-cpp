@@ -251,7 +251,7 @@ fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, c
     bound_addr = *local_addr;
 
     if (runtime->options.tls.enabled()) {
-        normalize_http_server_alpn(runtime->options.tls);
+        normalize_http_server_alpn(runtime->options.tls, runtime->options.tls_alpn);
     }
     if (runtime->options.http3.enabled) {
         runtime->http3_server = std::make_unique<Http3Server>(runtime->listener.loop(), runtime->handler,
@@ -360,7 +360,7 @@ fiber::async::DetachedTask HttpServer::handle_connection(std::shared_ptr<Runtime
             co_return;
         }
         transport = std::move(*tls_result);
-        auto hs_result = co_await transport->handshake(runtime->options.tls.handshake_timeout);
+        auto hs_result = co_await transport->handshake(net::kDefaultTlsHandshakeTimeout);
         if (!hs_result) {
             transport->close();
             co_return;

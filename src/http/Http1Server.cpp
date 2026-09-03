@@ -21,7 +21,7 @@ fiber::common::IoResult<void> Http1Server::bind(const net::SocketAddress &addr, 
         return std::unexpected(result.error());
     }
     if (options_.tls.enabled()) {
-        normalize_http1_alpn(options_.tls);
+        normalize_http1_alpn(options_.tls, options_.tls_alpn);
     }
     return {};
 }
@@ -61,7 +61,7 @@ fiber::async::DetachedTask Http1Server::serve() {
                             co_return;
                         }
                         transport = std::move(*tls_result);
-                        auto hs_result = co_await transport->handshake(options_.tls.handshake_timeout);
+                        auto hs_result = co_await transport->handshake(net::kDefaultTlsHandshakeTimeout);
                         if (!hs_result) {
                             transport->close();
                             co_return;

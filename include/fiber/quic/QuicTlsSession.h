@@ -62,9 +62,10 @@ private:
     bool client_mode_ = false;
     bool verify_peer_ = false;
     net::detail::TlsNewSessionOps new_session_ops_{};
-    // Session-owned copy of the server param: the ClientHello configure
-    // callback re-applies enable_early_data from it, so the connection-level
-    // QUIC switch is merged in here instead of relying on the borrowed param.
+    // Server handshake borrow pair: the param copy (with the connection-level
+    // early-data switch merged in) and the state borrowing it. Unlike TCP, the
+    // QUIC handshake spans many drive_handshake() calls with no owning
+    // coroutine frame, so both live here for the session's lifetime.
     net::TlsServerParam server_param_{};
     net::detail::TlsServerHandshakeState server_handshake_state_{};
 };

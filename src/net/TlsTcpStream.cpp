@@ -69,18 +69,12 @@ fiber::common::IoResult<size_t> TlsTcpStream::try_write(const void *buf, size_t 
     return stream_.try_write(buf, len);
 }
 
-TlsTcpStream::HandshakeTask TlsTcpStream::handshake(const TlsClientParam &param) { return stream_.handshake(param); }
-
 TlsTcpStream::HandshakeTask TlsTcpStream::handshake(const TlsClientParam &param, std::chrono::milliseconds timeout) {
     return stream_.handshake(param, timeout);
 }
 
-TlsTcpStream::HandshakeTask TlsTcpStream::handshake(const TlsServerParam &param) {
-    return stream_.handshake(param, nullptr, &remote_addr_, TlsTransportKind::Tcp);
-}
-
 TlsTcpStream::HandshakeTask TlsTcpStream::handshake(const TlsServerParam &param, std::chrono::milliseconds timeout) {
-    return stream_.handshake(param, nullptr, &remote_addr_, TlsTransportKind::Tcp, timeout);
+    return stream_.handshake(param, timeout);
 }
 
 TlsTcpStream::ShutdownTask TlsTcpStream::shutdown() { return stream_.shutdown(); }

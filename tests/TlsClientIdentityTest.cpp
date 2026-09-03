@@ -126,11 +126,7 @@ fiber::common::IoErr capture_client_hello(void *ctx, fiber::net::TlsServerHandsh
         }
         selector.saw_test_alpn = input.offered_alpn.contains("fiber-mtls-test");
     }
-    fiber::common::IoErr error = config.add_credential(*state->credential);
-    if (error == fiber::common::IoErr::None && state->selector && state->selector->saw_test_alpn) {
-        error = config.select_alpn("fiber-mtls-test");
-    }
-    return error;
+    return config.add_credential(*state->credential);
 }
 
 fiber::common::IoErr reject_server_configuration(void *, fiber::net::TlsServerHandshakeConfig &,
@@ -279,8 +275,10 @@ fiber::net::TlsServerParam make_server_options(const IdentityTls &material, Serv
     options.configure_ctx = &callback_state;
     options.trust_store = material.trust_store.get();
     options.client_certificate_mode = fiber::net::TlsClientCertificateMode::Required;
-    // The callback overrides this default after inspecting ClientHello.
-    options.alpn = {"server-default"};
+    // Server preference order: clients offering only "fiber-mtls-test" force
+    // the negotiation to walk past the preferred "server-default" entry.
+    static constexpr std::string_view kServerDefaultAlpn[] = {"server-default", "fiber-mtls-test"};
+    options.alpn = kServerDefaultAlpn;
     return options;
 }
 

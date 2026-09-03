@@ -339,7 +339,7 @@ TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress re
 
 TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr,
                            const net::TlsServerParam &options) :
-    stream_(loop, fd, std::move(remote_addr)), server_options_(&options) {}
+    stream_(loop, fd, std::move(remote_addr)), server_options_(options) {}
 
 TlsTransport::~TlsTransport() = default;
 
@@ -519,8 +519,8 @@ void TlsTransport::clear_pending_write() noexcept {
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(std::chrono::milliseconds timeout) {
     clear_pending_write();
-    if (server_options_) {
-        return stream_.handshake(*server_options_, timeout);
+    if (server_options_.enabled()) {
+        return stream_.handshake(server_options_, timeout);
     }
     if (client_options_) {
         return stream_.handshake(*client_options_, timeout);

@@ -10,6 +10,7 @@
 
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
 #include <fiber/net/detail/TlsSessionOps.h>
 
@@ -119,9 +120,7 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
     return ssl;
 }
 
-common::IoResult<SSL *> TlsSslFactory::create_server(const TlsServerParam &param, TlsServerHandshakeState &state,
-                                                     const SocketAddress *local_addr, const SocketAddress *remote_addr,
-                                                     TlsTransportKind transport) noexcept {
+common::IoResult<SSL *> TlsSslFactory::create_server(const TlsServerParam &param) noexcept {
     OpenSslErrorQueueScope error_queue_scope;
     SSL_CTX *context = TlsRuntime::server_context();
     if (!context || !param.enabled()) {
@@ -131,17 +130,34 @@ common::IoResult<SSL *> TlsSslFactory::create_server(const TlsServerParam &param
     if (!ssl) {
         return std::unexpected(common::IoErr::NoMem);
     }
-    state = {
-            .param = &param,
-            .remote_addr = remote_addr,
-            .local_addr = local_addr,
-            .transport = transport,
-    };
-    SSL_set_accept_state(ssl);
-    if (SSL_set_ex_data(ssl, TlsRuntime::server_handshake_state_index(), &state) != 1) {
+    auto fail = [ssl](common::IoErr error) -> common::IoResult<SSL *> {
         SSL_free(ssl);
-        return std::unexpected(common::IoErr::Invalid);
+        return std::unexpected(error);
+    };
+
+    // Install the static (non-ClientHello-dependent) configuration up front.
+    // Only the configure callback still runs at ClientHello, borrowing the
+    // param through the handshake state.
+    TlsServerHandshakeConfig config(ssl);
+    common::IoErr error = config.set_protocol_versions(param.min_version, param.max_version);
+    if (error == common::IoErr::None) {
+        error = config.set_early_data_enabled(param.enable_early_data);
     }
+    if (error == common::IoErr::None && param.trust_store) {
+        error = config.set_trust_store(*param.trust_store);
+    }
+    if (error == common::IoErr::None) {
+        error = config.set_client_certificate_mode(param.client_certificate_mode);
+    }
+    if (error == common::IoErr::None && param.client_certificate_mode != TlsClientCertificateMode::None &&
+        !param.trust_store) {
+        error = common::IoErr::Invalid;
+    }
+    if (error != common::IoErr::None) {
+        return fail(error);
+    }
+
+    SSL_set_accept_state(ssl);
     return ssl;
 }
 

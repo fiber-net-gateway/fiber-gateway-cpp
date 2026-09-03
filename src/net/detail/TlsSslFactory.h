@@ -3,7 +3,6 @@
 
 #include <fiber/common/IoError.h>
 #include <fiber/net/TlsParams.h>
-#include <fiber/net/detail/TlsHandshakeState.h>
 
 struct ssl_st;
 typedef struct ssl_st SSL;
@@ -17,9 +16,12 @@ public:
     [[nodiscard]] static common::IoResult<SSL *>
     create_client(const TlsClientParam &param, bool enable_early_data = false,
                   const TlsNewSessionOps *new_session_ops = nullptr) noexcept;
-    [[nodiscard]] static common::IoResult<SSL *>
-    create_server(const TlsServerParam &param, TlsServerHandshakeState &state, const SocketAddress *local_addr,
-                  const SocketAddress *remote_addr, TlsTransportKind transport) noexcept;
+    // Installs the param's static configuration (protocol versions, early
+    // data, trust store, client certificate mode). The configure callback and
+    // ALPN preference list stay borrowed from the param: the caller wires a
+    // TlsServerHandshakeState (which borrows the param) via
+    // TlsRuntime::set_server_handshake_state() for the handshake's duration.
+    [[nodiscard]] static common::IoResult<SSL *> create_server(const TlsServerParam &param) noexcept;
 };
 
 } // namespace fiber::net::detail

@@ -12,6 +12,7 @@
 #include <fiber/net/IpAddress.h>
 #include <fiber/quic/QuicConnection.h>
 #include <fiber/quic/QuicCursor.h>
+#include "net/detail/TlsRuntime.h"
 #include "net/detail/TlsSslFactory.h"
 #include "quic/QuicCrypto.h"
 #include "quic/QuicTransportParamsCodec.h"
@@ -287,15 +288,19 @@ common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerParam &op
         return std::unexpected(common::IoErr::Already);
     }
 
+    // The handshake borrows server_param_ (with the connection-level
+    // early-data switch merged in) through server_handshake_state_; both are
+    // session members, so the borrow holds across every drive_handshake()
+    // call.
     server_param_ = options;
     server_param_.enable_early_data = connection.early_data_enabled();
-    auto created_ssl =
-            net::detail::TlsSslFactory::create_server(server_param_, server_handshake_state_, &connection.local_addr(),
-                                                      &connection.remote_addr(), net::TlsTransportKind::Quic);
+    server_handshake_state_ = net::detail::TlsServerHandshakeState{.param = &server_param_};
+    auto created_ssl = net::detail::TlsSslFactory::create_server(server_param_);
     if (!created_ssl) {
         return std::unexpected(created_ssl.error());
     }
     SSL *ssl = *created_ssl;
+    net::detail::TlsRuntime::set_server_handshake_state(ssl, &server_handshake_state_);
 
     if (SSL_set_quic_method(ssl, &kQuicTlsMethod) != 1) {
         SSL_free(ssl);

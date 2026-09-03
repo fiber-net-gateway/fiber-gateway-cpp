@@ -53,10 +53,10 @@ public:
                                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
-    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param);
-    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param, std::chrono::milliseconds timeout);
-    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param);
-    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param, std::chrono::milliseconds timeout);
+    [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param,
+                                          std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
+    [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param,
+                                          std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
     [[nodiscard]] ShutdownTask shutdown();
     [[nodiscard]] detail::StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
