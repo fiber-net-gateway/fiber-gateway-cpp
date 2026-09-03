@@ -20,13 +20,14 @@ namespace {
 
 } // namespace
 
-QuicClientCacheKey QuicClient::cache_key(std::string_view server_name,
+QuicClientCacheKey QuicClient::cache_key(std::string_view server_name, std::string_view verify_name,
                                          const net::SocketAddress &remote_addr) const noexcept {
     return QuicClientCacheKey{
             .server_name = server_name,
+            .verify_name = verify_name,
             .remote_addr = remote_addr,
-            .credential = tls_options_ ? tls_options_->credential : nullptr,
-            .trust_store = tls_options_ ? tls_options_->trust_store : nullptr,
+            .credential = tls_security_.credential,
+            .trust_store = tls_security_.trust_store,
     };
 }
 
@@ -35,8 +36,8 @@ bool QuicClient::store_session(void *owner, QuicConnection &connection, SSL_SESS
     if (client == nullptr || session == nullptr || client->options_.cache.store_session == nullptr) {
         return false;
     }
-    const QuicClientCacheKey key =
-            client->cache_key(connection.client_server_name(), connection.client_cache_remote_addr());
+    const QuicClientCacheKey key = client->cache_key(connection.client_server_name(), connection.client_verify_name(),
+                                                     connection.client_cache_remote_addr());
     return client->options_.cache.store_session(client->options_.cache.owner, key, session,
                                                 connection.peer_transport().params);
 }
@@ -47,8 +48,8 @@ void QuicClient::store_token(void *owner, QuicConnection &connection, const std:
     if (client == nullptr || client->options_.cache.store_token == nullptr) {
         return;
     }
-    const QuicClientCacheKey key =
-            client->cache_key(connection.client_server_name(), connection.client_cache_remote_addr());
+    const QuicClientCacheKey key = client->cache_key(connection.client_server_name(), connection.client_verify_name(),
+                                                     connection.client_cache_remote_addr());
     client->options_.cache.store_token(client->options_.cache.owner, key, token, token_len);
 }
 
@@ -146,15 +147,15 @@ void QuicClientAttempt::cancel() noexcept {
     handshake_deadline_ = std::chrono::steady_clock::time_point::max();
 }
 
-common::IoResult<void> QuicClient::init(QuicUdpEndpoint &endpoint, const net::TlsClientParam &tls_options,
-                                        const Options &options) noexcept {
-    if (endpoint_ != nullptr || !endpoint.valid() || endpoint.loop_ == nullptr || !tls_options.enabled() ||
-        tls_options.alpn.empty() || options.create_connection == nullptr) {
+common::IoResult<void> QuicClient::init(QuicUdpEndpoint &endpoint, net::TlsClientSecurity tls_security,
+                                        Options options) noexcept {
+    if (endpoint_ != nullptr || !endpoint.valid() || endpoint.loop_ == nullptr || options.alpn.empty() ||
+        options.create_connection == nullptr || (tls_security.verify_peer && tls_security.trust_store == nullptr)) {
         return std::unexpected(common::IoErr::Invalid);
     }
     endpoint_ = &endpoint;
-    tls_options_ = &tls_options;
-    options_ = options;
+    tls_security_ = tls_security;
+    options_ = std::move(options);
     return {};
 }
 
@@ -164,15 +165,16 @@ QuicConnectError QuicClient::error(QuicConnectPhase phase, common::IoErr io_erro
 
 std::expected<QuicClientAttempt, QuicConnectError>
 QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
-    if (endpoint_ == nullptr || tls_options_ == nullptr || !endpoint_->running() || endpoint_->loop_ == nullptr ||
-        !endpoint_->loop_->in_loop() || options.remote_addr.port() == 0 || options.remote_addr.ip().is_unspecified() ||
+    if (endpoint_ == nullptr || !endpoint_->running() || endpoint_->loop_ == nullptr || !endpoint_->loop_->in_loop() ||
+        options.remote_addr.port() == 0 || options.remote_addr.ip().is_unspecified() ||
         options.handshake_timeout < std::chrono::milliseconds::zero()) {
         return std::unexpected(error(QuicConnectPhase::Endpoint, common::IoErr::Invalid));
     }
 
     QuicClientCachedState cached{};
     if (options_.cache.load != nullptr) {
-        if (!options_.cache.load(options_.cache.owner, cache_key(options.server_name, options.remote_addr), cached)) {
+        if (!options_.cache.load(options_.cache.owner,
+                                 cache_key(options.server_name, options.verify_name, options.remote_addr), cached)) {
             cached = {};
         }
         if ((cached.token == nullptr && cached.token_len != 0) || cached.token_len > 16 * 1024) {
@@ -229,9 +231,10 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
     connection_options.remembered_peer_transport = cached.remembered_transport;
     connection_options.has_remembered_peer_transport = attempt_early_data;
     connection_options.client_server_name = options.server_name;
+    connection_options.client_verify_name = options.verify_name;
     connection_options.client_cache_remote_addr = options.remote_addr;
-    connection_options.client_tls_credential = tls_options_->credential;
-    connection_options.client_trust_store = tls_options_->trust_store;
+    connection_options.client_tls_credential = tls_security_.credential;
+    connection_options.client_trust_store = tls_security_.trust_store;
     connection_options.client_cache_owner = this;
     connection_options.on_new_tls_session = options_.cache.store_session != nullptr ? store_session : nullptr;
     connection_options.on_new_token = options_.cache.store_token != nullptr ? store_token : nullptr;
@@ -254,8 +257,8 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
     if (!initialized_crypto) {
         return std::unexpected(error(QuicConnectPhase::InitialCrypto, initialized_crypto.error()));
     }
-    auto initialized_tls = connection->tls().init_client(*tls_options_, *connection, options.server_name.c_str(),
-                                                         options.allow_insecure, cached.session);
+    auto initialized_tls = connection->tls().init_client(tls_security_, options_.alpn, *connection, options.server_name,
+                                                         options.verify_name, options.allow_insecure, cached.session);
     if (!initialized_tls) {
         return std::unexpected(error(QuicConnectPhase::Tls, initialized_tls.error()));
     }

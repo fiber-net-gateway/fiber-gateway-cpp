@@ -150,7 +150,7 @@ QPACK 和 request streams，不需要改动 UDP endpoint 或 QUIC 建连状态�
 
 ### 5.1 `QuicClient`
 
-`QuicClient` 是绑定 endpoint、`TlsClientParam`、cache 和 owner loop 的长期 connector，不代表
+`QuicClient` 是绑定 endpoint、`TlsClientSecurity`、ALPN、cache 和 owner loop 的长期 connector，不代表
 单条 QUIC 连接。
 
 建议接口形态：
@@ -159,8 +159,8 @@ QPACK 和 request streams，不需要改动 UDP endpoint 或 QUIC 建连状态�
 class QuicClient {
 public:
     common::IoResult<void> init(QuicUdpEndpoint &endpoint,
-                                const net::TlsClientParam &tls_param,
-                                const Options &options) noexcept;
+                                net::TlsClientSecurity tls_security,
+                                Options options) noexcept;
 
     [[nodiscard]] std::expected<QuicClientAttempt, QuicConnectError>
     start_connect(const QuicClientConnectOptions &options) noexcept;
@@ -215,7 +215,7 @@ public:
 - 已解析的远端 `SocketAddress`。
 - 可选本地绑定地址；允许 unspecified IP 交给内核选路。
 - `server_name`，写入 SNI，并在 `verify_name` 为空时作为证书校验名。
-- ALPN 列表；不能为空。
+- 可选 `verify_name`，允许证书校验目标与 SNI 独立。
 - handshake timeout 和 idle timeout。
 - 本地 QUIC transport parameters、flow-control 和 stream limits。
 - 应用 `owner`、`QuicConnection::Ops` 和 client connection factory。
@@ -486,7 +486,7 @@ parameters。
 
 ### 8.3 证书与 ALPN 安全边界
 
-客户端证书验证由 `TlsClientParam` 控制：
+客户端证书验证由 `TlsClientSecurity` 控制：
 
 - `verify_peer=true` 时使用连接参数借用的 `TrustStore`。
 - 系统默认 trust store 必须在创建 `TrustStore` 时显式选择。
@@ -494,13 +494,13 @@ parameters。
 - DNS name 使用 hostname verification；IP literal 使用 IP SAN verification。
 
 `TlsCredential` 只描述证书链和私钥，`TrustStore` 只描述信任锚；是否校验 peer 完全由每次连接的
-`TlsClientParam::verify_peer` 决定。`QuicClient` 在此之上默认拒绝
+`TlsClientSecurity::verify_peer` 决定。`QuicClient` 在此之上默认拒绝
 `verify_peer=false` 的连接。只有显式 `allow_insecure=true` 才允许跳过校验，
 该选项仅用于测试或受控环境。
 
-ALPN 要求：
+ALPN 由长期 `QuicClient::Options` 持有，而不是每次 connect 或通用 TLS 参数持有。要求：
 
-- connect options 的 ALPN 列表不能为空。
+- client options 的 ALPN 列表不能为空。
 - 服务端必须选择一个客户端提供的协议。
 - 未选择或选择不匹配时，连接以 TLS/ALPN 错误结束。
 - QUIC transport 层不硬编码 `h3`；未来 HTTP/3 client 自己传入 `h3`。

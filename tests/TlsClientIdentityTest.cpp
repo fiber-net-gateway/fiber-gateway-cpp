@@ -286,10 +286,9 @@ fiber::net::TlsServerParam make_server_options(const IdentityTls &material, Serv
 
 fiber::net::TlsClientParam make_client_options(const IdentityTls &material) {
     fiber::net::TlsClientParam options{};
-    options.enable_tls = true;
-    options.credential = material.credential.get();
-    options.trust_store = material.trust_store.get();
-    options.verify_peer = true;
+    options.security.credential = material.credential.get();
+    options.security.trust_store = material.trust_store.get();
+    options.security.verify_peer = true;
     options.alpn = {"fiber-mtls-test"};
     return options;
 }
@@ -334,7 +333,6 @@ TEST(TlsClientIdentityTest, ServerConfigurationCallbackErrorIsReturnedByHandshak
     fiber::net::TlsServerParam server_options{};
     server_options.configure_callback = &reject_server_configuration;
     fiber::net::TlsClientParam client_options{};
-    client_options.enable_tls = true;
 
     auto result = run_handshake_pair(server_options, client_options);
     ASSERT_TRUE(result.completed);
@@ -360,7 +358,7 @@ TEST(TlsClientIdentityTest, MtlsComposesWithPeerVerificationIndependentNameSniAn
         auto client_material = make_client_material(files);
         ASSERT_TRUE(client_material);
         auto client_options = make_client_options(*client_material);
-        client_options.sni_name = "routing.identity.test";
+        client_options.server_name = "routing.identity.test";
         client_options.verify_name = "server.identity.test";
         client_options.min_version = version;
         client_options.max_version = version;
@@ -391,8 +389,8 @@ TEST(TlsClientIdentityTest, MtlsIdentityWorksWhenPeerVerificationIsDisabled) {
     auto client_material = make_client_material(files);
     ASSERT_TRUE(client_material);
     auto client_options = make_client_options(*client_material);
-    client_options.verify_peer = false;
-    client_options.sni_name = "routing.identity.test";
+    client_options.security.verify_peer = false;
+    client_options.server_name = "routing.identity.test";
     client_options.verify_name = "intentionally-wrong.identity.test";
 
     auto result = run_handshake_pair(server_options, client_options);
@@ -414,7 +412,7 @@ TEST(TlsClientIdentityTest, ServerRequiringClientIdentityRejectsAnonymousClient)
     auto client_material = make_client_material(files, false);
     ASSERT_TRUE(client_material);
     auto client_options = make_client_options(*client_material);
-    client_options.sni_name = "server.identity.test";
+    client_options.server_name = "server.identity.test";
     client_options.alpn = {"fiber-mtls-test"};
 
     auto result = run_handshake_pair(server_options, client_options);
@@ -436,7 +434,7 @@ TEST(TlsClientIdentityTest, ServerRejectsClientSignedByUnknownCaAndReleasesTrans
     auto client_material = make_client_material(files);
     ASSERT_TRUE(client_material);
     auto client_options = make_client_options(*client_material);
-    client_options.sni_name = "server.identity.test";
+    client_options.server_name = "server.identity.test";
 
     auto result = run_handshake_pair(server_options, client_options);
     ASSERT_TRUE(result.completed);
@@ -451,7 +449,7 @@ TEST(TlsClientIdentityTest, FailedClientHandshakeCanBeReleasedOnOwnerLoop) {
     auto client_material = make_client_material(files);
     ASSERT_TRUE(client_material);
     auto client_options = make_client_options(*client_material);
-    client_options.verify_peer = false;
+    client_options.security.verify_peer = false;
 
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);

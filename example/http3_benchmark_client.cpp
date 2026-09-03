@@ -954,7 +954,6 @@ private:
         fiber::http::Http3Client::Options client_options{};
         client_options.tls.trust_store = trust_store_.get();
         client_options.tls.verify_peer = !options_.insecure;
-        client_options.tls.enable_tls = true;
         client_options.drain_timeout = options_.drain;
         client_ = std::make_unique<fiber::http::Http3Client>(endpoint_, std::move(client_options));
         auto client_initialized = client_->init();
@@ -973,7 +972,7 @@ private:
 
         connections_.reserve(connection_count_);
         for (std::size_t i = 0; i < connection_count_; ++i) {
-            fiber::quic::QuicClientConnectOptions connect_options{};
+            fiber::http::Http3ClientConnectOptions connect_options{};
             connect_options.remote_addr = options_.target.remote;
             connect_options.server_name = options_.target.host;
             connect_options.handshake_timeout = options_.handshake_timeout;

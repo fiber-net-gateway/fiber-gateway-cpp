@@ -8,6 +8,7 @@
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/detail/TlsHandshakeState.h>
+#include <fiber/net/detail/TlsSessionOps.h>
 
 namespace fiber::net::detail {
 

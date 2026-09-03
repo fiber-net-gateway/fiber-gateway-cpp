@@ -1155,8 +1155,8 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
     Http2WebSocketOutcome outcome;
     fiber::http::Http2ClientConnection::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enable_tls = true;
-    options.tls.sni_name = "localhost";
+    options.tls.emplace();
+    options.tls->server_name = "localhost";
 
     auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
     auto connect_result = co_await connection->connect(5s);
@@ -1249,8 +1249,8 @@ fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, 
     Http2GzipOutcome outcome;
     fiber::http::Http2ClientConnection::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enable_tls = true;
-    options.tls.sni_name = "localhost";
+    options.tls.emplace();
+    options.tls->server_name = "localhost";
 
     auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
     auto connect_result = co_await connection->connect(5s);
@@ -1347,7 +1347,7 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
         co_return;
     }
 
-    fiber::quic::QuicClientConnectOptions connect_options;
+    fiber::http::Http3ClientConnectOptions connect_options;
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;

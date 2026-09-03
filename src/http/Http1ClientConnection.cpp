@@ -126,15 +126,8 @@ void Http1ClientConnection::IoAwaiter::on_cancel_resume(IoAwaiter *awaiter) noex
     }
 }
 
-Http1ClientConnectionOptions Http1ClientConnection::normalize_options(Http1ClientConnectionOptions options) noexcept {
-    if (options.tls.enabled()) {
-        normalize_http1_alpn(options.tls);
-    }
-    return options;
-}
-
 Http1ClientConnection::Http1ClientConnection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept :
-    loop_(&loop), options_(normalize_options(std::move(options))) {}
+    loop_(&loop), options_(std::move(options)) {}
 
 Http1ClientConnection::~Http1ClientConnection() {
     FIBER_ASSERT(loop_ != nullptr);
@@ -206,14 +199,15 @@ Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresse
 
     net::AcceptResult accept(infant->release_fd(), infant->take_peer());
     std::unique_ptr<HttpTransport> transport;
-    if (options_.tls.enabled()) {
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), options_.tls, options_.tcp);
+    if (options_.tls) {
+        auto tls_param = make_http1_client_tls_param(*options_.tls);
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), std::move(tls_param), options_.tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
         transport = std::move(*transport_result);
 
-        auto handshake_result = co_await transport->handshake(options_.tls.handshake_timeout);
+        auto handshake_result = co_await transport->handshake(options_.tls->handshake_timeout);
         if (!handshake_result) {
             transport->close();
             co_return std::unexpected(handshake_result.error());
