@@ -18,6 +18,21 @@ namespace {
     return left.size() == right.size() && (left.empty() || std::memcmp(left.data(), right.data(), left.size()) == 0);
 }
 
+// QUIC requires TLS 1.3; min/max are fixed here rather than caller-configurable.
+[[nodiscard]] net::TlsClientParam make_client_tls_param(const net::TlsClientSecurity &security,
+                                                        std::span<const std::string_view> alpn,
+                                                        std::string_view server_name,
+                                                        std::string_view verify_name) noexcept {
+    net::TlsClientParam param{};
+    param.security = security;
+    param.min_version = 0x0304;
+    param.max_version = 0x0304;
+    param.alpn = alpn;
+    param.server_name = server_name;
+    param.verify_name = verify_name;
+    return param;
+}
+
 } // namespace
 
 QuicClientCacheKey QuicClient::cache_key(std::string_view server_name, std::string_view verify_name,
@@ -257,8 +272,10 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
     if (!initialized_crypto) {
         return std::unexpected(error(QuicConnectPhase::InitialCrypto, initialized_crypto.error()));
     }
-    auto initialized_tls = connection->tls().init_client(tls_security_, options_.alpn, *connection, options.server_name,
-                                                         options.verify_name, options.allow_insecure, cached.session);
+    const net::TlsClientParam tls_param =
+            make_client_tls_param(tls_security_, options_.alpn.view(), options.server_name, options.verify_name);
+    auto initialized_tls =
+            connection->tls().init_client(tls_param, *connection, options.allow_insecure, cached.session);
     if (!initialized_tls) {
         return std::unexpected(error(QuicConnectPhase::Tls, initialized_tls.error()));
     }

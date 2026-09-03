@@ -7,7 +7,6 @@
 #include <expected>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -127,7 +126,7 @@ public:
         QuicConnection::Lease (*create_connection)(void *owner,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
         QuicClientCacheOps cache{};
-        std::vector<std::string> alpn{};
+        net::TlsAlpnList alpn{};
     };
 
     QuicClient() noexcept = default;

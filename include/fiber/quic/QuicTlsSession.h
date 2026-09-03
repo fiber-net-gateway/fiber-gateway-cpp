@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <optional>
 #include <string_view>
-#include <vector>
 
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
@@ -31,9 +30,7 @@ public:
 
     [[nodiscard]] common::IoResult<void> init_server(const net::TlsServerParam &options,
                                                      QuicConnection &connection) noexcept;
-    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientSecurity &security,
-                                                     const std::vector<std::string> &alpn, QuicConnection &connection,
-                                                     std::string_view server_name, std::string_view verify_name,
+    [[nodiscard]] common::IoResult<void> init_client(const net::TlsClientParam &param, QuicConnection &connection,
                                                      bool allow_insecure, SSL_SESSION *session = nullptr) noexcept;
     [[nodiscard]] common::IoResult<void> provide_crypto_data(QuicEncryptionLevel level, const std::uint8_t *data,
                                                              std::size_t len) noexcept;

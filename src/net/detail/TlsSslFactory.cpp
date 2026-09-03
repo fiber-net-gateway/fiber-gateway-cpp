@@ -4,9 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <span>
+#include <string_view>
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <openssl/tls1.h>
+#include <openssl/x509.h>
 
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/TlsCredential.h>
@@ -36,7 +40,7 @@ common::IoErr configure_versions(SSL *ssl, int min_version, int max_version) noe
     return common::IoErr::None;
 }
 
-common::IoErr configure_client_alpn(SSL *ssl, const std::vector<std::string> &protocols) noexcept {
+common::IoErr configure_client_alpn(SSL *ssl, std::span<const std::string_view> protocols) noexcept {
     std::array<std::uint8_t, kMaxAlpnWireSize> wire{};
     std::size_t size = 0;
     for (const auto &protocol: protocols) {
@@ -80,8 +84,18 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
 
     IpAddress sni_ip{};
     const bool sni_is_ip = !param.server_name.empty() && IpAddress::parse(param.server_name, sni_ip);
-    if (!param.server_name.empty() && !sni_is_ip && SSL_set_tlsext_host_name(ssl, param.server_name.c_str()) != 1) {
-        return fail(common::IoErr::Invalid);
+    if (!param.server_name.empty() && !sni_is_ip) {
+        // SSL_set_tlsext_host_name takes a NUL-terminated C string with no
+        // length parameter; param.server_name is a borrowed, not necessarily
+        // NUL-terminated view, so copy it into a bounded local buffer first.
+        if (param.server_name.size() > TLSEXT_MAXLEN_host_name) {
+            return fail(common::IoErr::Invalid);
+        }
+        std::array<char, TLSEXT_MAXLEN_host_name + 1> host_name{};
+        std::memcpy(host_name.data(), param.server_name.data(), param.server_name.size());
+        if (SSL_set_tlsext_host_name(ssl, host_name.data()) != 1) {
+            return fail(common::IoErr::Invalid);
+        }
     }
 
     if (param.security.verify_peer) {
@@ -89,17 +103,22 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
             return fail(common::IoErr::Invalid);
         }
         SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
-        const std::string &verify_name = param.verify_name.empty() ? param.server_name : param.verify_name;
+        const std::string_view verify_name = param.verify_name.empty() ? param.server_name : param.verify_name;
         if (verify_name.empty()) {
+            return fail(common::IoErr::Invalid);
+        }
+        X509_VERIFY_PARAM *verify_params = SSL_get0_param(ssl);
+        if (!verify_params) {
             return fail(common::IoErr::Invalid);
         }
         IpAddress verify_ip{};
         if (IpAddress::parse(verify_name, verify_ip)) {
-            X509_VERIFY_PARAM *params = SSL_get0_param(ssl);
-            if (!params || X509_VERIFY_PARAM_set1_ip(params, verify_ip.data(), verify_ip.byte_size()) != 1) {
+            if (X509_VERIFY_PARAM_set1_ip(verify_params, verify_ip.data(), verify_ip.byte_size()) != 1) {
                 return fail(common::IoErr::Invalid);
             }
-        } else if (SSL_set1_host(ssl, verify_name.c_str()) != 1) {
+            // X509_VERIFY_PARAM_set1_host/set1_ip take an explicit length, so no
+            // NUL-termination is needed here — unlike SSL_set_tlsext_host_name.
+        } else if (X509_VERIFY_PARAM_set1_host(verify_params, verify_name.data(), verify_name.size()) != 1) {
             return fail(common::IoErr::Invalid);
         }
     } else {

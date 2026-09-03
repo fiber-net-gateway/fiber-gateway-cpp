@@ -86,22 +86,32 @@ struct TlsClientSecurity {
 };
 
 struct TlsClientParam {
-    // Every member is applied when the client SSL is created. Operation policy
-    // such as handshake timeout, session caching, and early data belongs to the
-    // transport driving the handshake rather than this TLS parameter object.
+    // Every member is applied synchronously when the client SSL is created
+    // (TlsSslFactory::create_client / QuicTlsSession::init_client), before the
+    // handshake coroutine ever suspends — BoringSSL copies what it needs out of
+    // alpn/server_name/verify_name during that call (create_client() copies the
+    // hostname into a bounded stack buffer itself, since it does not rely on
+    // the view being NUL-terminated), so nothing here needs to stay valid past
+    // create_client() returning, let alone for the whole handshake. Operation
+    // policy such as handshake timeout, session caching, and early data belongs
+    // to the transport driving the handshake rather than this TLS parameter
+    // object.
     TlsClientSecurity security{};
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3
-    std::vector<std::string> alpn{};
-    std::string server_name{};
-    std::string verify_name{};
+    std::span<const std::string_view> alpn{};
+    std::string_view server_name{};
+    std::string_view verify_name{};
 };
 
 inline constexpr std::chrono::milliseconds kDefaultTlsHandshakeTimeout{10000};
 
-// Owning ALPN protocol list backing TlsServerParam::alpn. assign() copies the
-// protocol characters; views returned by view() stay valid until the next
-// mutation. Copy and move rebind the internal views to the new storage.
+// Owning ALPN protocol list for callers that need to keep a caller-configured
+// set of protocols alive across many handshakes (e.g. QuicClient::Options::alpn,
+// set once at init() and reused per connect()) and hand out a borrowed span for
+// TlsClientParam::alpn/TlsServerParam::alpn. assign() copies the protocol
+// characters; views returned by view() stay valid until the next mutation.
+// Copy and move rebind the internal views to the new storage.
 class TlsAlpnList {
 public:
     TlsAlpnList() = default;
