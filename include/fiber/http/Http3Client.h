@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <string>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -34,10 +35,21 @@ struct Http3ClientConnectError {
 
 using Http3ClientConnectResult = std::expected<Http3ClientConnection, Http3ClientConnectError>;
 
+struct Http3ClientConnectOptions {
+    net::SocketAddress remote_addr{};
+    std::string server_name{};
+    std::string verify_name{};
+    quic::QuicTransportSettings transport{};
+    quic::QuicRecvFlowControlSettings recv_flow{};
+    std::chrono::milliseconds keepalive_interval{0};
+    std::chrono::milliseconds handshake_timeout{net::kDefaultTlsHandshakeTimeout};
+    bool allow_insecure = false;
+};
+
 class Http3Client : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
-        net::TlsClientParam tls{.verify_peer = true, .enable_tls = true};
+        net::TlsClientSecurity tls{.verify_peer = true};
         quic::QuicClientCacheOps cache{};
         Http3Settings local_settings{};
         std::chrono::milliseconds drain_timeout = std::chrono::seconds(3);
@@ -51,7 +63,7 @@ public:
     ~Http3Client() = default;
 
     [[nodiscard]] common::IoResult<void> init() noexcept;
-    [[nodiscard]] async::Task<Http3ClientConnectResult> connect(quic::QuicClientConnectOptions options) noexcept;
+    [[nodiscard]] async::Task<Http3ClientConnectResult> connect(Http3ClientConnectOptions options) noexcept;
 
     [[nodiscard]] const net::TlsCredential *tls_credential() const noexcept { return options_.tls.credential; }
     [[nodiscard]] const net::TrustStore *trust_store() const noexcept { return options_.tls.trust_store; }
@@ -59,7 +71,6 @@ public:
 private:
     class Session;
 
-    [[nodiscard]] static net::TlsClientParam normalize_tls_options(net::TlsClientParam options) noexcept;
     [[nodiscard]] static quic::QuicConnection::Lease
     create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept;

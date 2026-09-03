@@ -79,12 +79,11 @@ TEST(TlsCredentialTest, SslFactoryBuildsClientAndServerRoles) {
     ASSERT_TRUE(trust_store.has_value());
 
     fiber::net::TlsClientParam client_param{};
-    client_param.enable_tls = true;
-    client_param.credential = credential->get();
-    client_param.trust_store = trust_store->get();
-    client_param.verify_peer = true;
-    client_param.sni_name = "localhost";
-    auto client_ssl = fiber::net::detail::TlsSslFactory::create_client(client_param, nullptr);
+    client_param.security.credential = credential->get();
+    client_param.security.trust_store = trust_store->get();
+    client_param.security.verify_peer = true;
+    client_param.server_name = "localhost";
+    auto client_ssl = fiber::net::detail::TlsSslFactory::create_client(client_param);
     ASSERT_TRUE(client_ssl.has_value()) << "client factory failed with io_error="
                                         << fiber::common::io_err_name(client_ssl.error());
     SSL_free(*client_ssl);
@@ -121,8 +120,7 @@ TEST(TlsCredentialTest, SslRetainsCredentialAfterOwnerReferenceIsReleased) {
     bssl::UniquePtr<SSL> server(*server_result);
 
     fiber::net::TlsClientParam client_param{};
-    client_param.enable_tls = true;
-    auto client_result = fiber::net::detail::TlsSslFactory::create_client(client_param, nullptr);
+    auto client_result = fiber::net::detail::TlsSslFactory::create_client(client_param);
     ASSERT_TRUE(client_result.has_value());
     bssl::UniquePtr<SSL> client(*client_result);
 
@@ -158,11 +156,14 @@ TEST(TlsCredentialTest, SslRetainsCredentialAfterOwnerReferenceIsReleased) {
     EXPECT_TRUE(server_done);
 }
 
-TEST(TlsSslFactoryTest, DisabledParamsAreRejected) {
+TEST(TlsSslFactoryTest, CertificateLessInsecureClientIsAllowed) {
     fiber::net::TlsClientParam client_param{};
-    EXPECT_EQ(fiber::net::detail::TlsSslFactory::create_client(client_param, nullptr).error(),
-              fiber::common::IoErr::Invalid);
+    auto client = fiber::net::detail::TlsSslFactory::create_client(client_param);
+    ASSERT_TRUE(client);
+    SSL_free(*client);
+}
 
+TEST(TlsSslFactoryTest, ServerWithoutConfigurationCallbackIsRejected) {
     fiber::net::TlsServerParam server_param{};
     fiber::net::detail::TlsServerHandshakeState state{};
     EXPECT_EQ(fiber::net::detail::TlsSslFactory::create_server(server_param, state, nullptr, nullptr,
@@ -173,10 +174,8 @@ TEST(TlsSslFactoryTest, DisabledParamsAreRejected) {
 
 TEST(TlsSslFactoryTest, VerifyPeerWithoutTrustStoreIsRejected) {
     fiber::net::TlsClientParam client_param{};
-    client_param.enable_tls = true;
-    client_param.verify_peer = true;
-    EXPECT_EQ(fiber::net::detail::TlsSslFactory::create_client(client_param, nullptr).error(),
-              fiber::common::IoErr::Invalid);
+    client_param.security.verify_peer = true;
+    EXPECT_EQ(fiber::net::detail::TlsSslFactory::create_client(client_param).error(), fiber::common::IoErr::Invalid);
 }
 
 } // namespace

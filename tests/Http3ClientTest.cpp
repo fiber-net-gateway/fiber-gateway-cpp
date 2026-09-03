@@ -163,7 +163,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         co_return;
     }
 
-    fiber::quic::QuicClientConnectOptions connect_options{};
+    fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
@@ -300,7 +300,7 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
         co_return;
     }
 
-    fiber::quic::QuicClientConnectOptions connect_options{};
+    fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
@@ -381,7 +381,7 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         co_return;
     }
 
-    fiber::quic::QuicClientConnectOptions connect_options{};
+    fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;

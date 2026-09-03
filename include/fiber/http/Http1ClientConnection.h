@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 
 #include "../async/Task.h"
@@ -16,8 +17,8 @@
 #include "../net/HappyEyeballs.h"
 #include "../net/SocketAddress.h"
 #include "../net/TcpSocketOptions.h"
-#include "../net/TlsParams.h"
 #include "Http1ConnectionPoolAffinity.h"
+#include "HttpClientTlsOptions.h"
 
 namespace fiber::http {
 
@@ -27,7 +28,7 @@ class HttpTransport;
 struct Http1ClientConnectionOptions {
     net::SocketAddress peer_addr{};
     net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
-    net::TlsClientParam tls{};
+    std::optional<HttpClientTlsOptions> tls{};
     // Non-secret identity for all connection-bound transport settings when
     // this connection is pooled. It must match the acquiring lease key; zero
     // preserves the legacy/default pool partition.
@@ -119,7 +120,6 @@ private:
         Http1ClientConnection &connection_;
     };
 
-    static Http1ClientConnectionOptions normalize_options(Http1ClientConnectionOptions options) noexcept;
     common::IoErr begin_connect() noexcept;
     fiber::async::Task<common::IoResult<void>> connect_impl(std::span<const net::SocketAddress> addresses,
                                                             net::HappyEyeballsOptions options,

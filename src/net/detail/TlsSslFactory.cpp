@@ -11,6 +11,7 @@
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TrustStore.h>
+#include <fiber/net/detail/TlsSessionOps.h>
 
 #include "TlsRuntime.h"
 
@@ -53,11 +54,11 @@ common::IoErr configure_client_alpn(SSL *ssl, const std::vector<std::string> &pr
 
 } // namespace
 
-common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param,
+common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param, bool enable_early_data,
                                                      const TlsNewSessionOps *new_session_ops) noexcept {
     OpenSslErrorQueueScope error_queue_scope;
     SSL_CTX *context = TlsRuntime::client_context();
-    if (!context || !param.enabled() || (param.verify_peer && !param.trust_store)) {
+    if (!context || (param.security.verify_peer && !param.security.trust_store)) {
         return std::unexpected(common::IoErr::Invalid);
     }
     SSL *ssl = SSL_new(context);
@@ -74,19 +75,20 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
         return fail(error);
     }
     SSL_set_connect_state(ssl);
+    SSL_set_early_data_enabled(ssl, enable_early_data ? 1 : 0);
 
     IpAddress sni_ip{};
-    const bool sni_is_ip = !param.sni_name.empty() && IpAddress::parse(param.sni_name, sni_ip);
-    if (!param.sni_name.empty() && !sni_is_ip && SSL_set_tlsext_host_name(ssl, param.sni_name.c_str()) != 1) {
+    const bool sni_is_ip = !param.server_name.empty() && IpAddress::parse(param.server_name, sni_ip);
+    if (!param.server_name.empty() && !sni_is_ip && SSL_set_tlsext_host_name(ssl, param.server_name.c_str()) != 1) {
         return fail(common::IoErr::Invalid);
     }
 
-    if (param.verify_peer) {
-        if (SSL_set1_verify_cert_store(ssl, param.trust_store->store_) != 1) {
+    if (param.security.verify_peer) {
+        if (SSL_set1_verify_cert_store(ssl, param.security.trust_store->store_) != 1) {
             return fail(common::IoErr::Invalid);
         }
         SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
-        const std::string &verify_name = param.verify_name.empty() ? param.sni_name : param.verify_name;
+        const std::string &verify_name = param.verify_name.empty() ? param.server_name : param.verify_name;
         if (verify_name.empty()) {
             return fail(common::IoErr::Invalid);
         }
@@ -103,7 +105,7 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
         SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
     }
 
-    if (param.credential && SSL_add1_credential(ssl, param.credential->credential_) != 1) {
+    if (param.security.credential && SSL_add1_credential(ssl, param.security.credential->credential_) != 1) {
         return fail(common::IoErr::Invalid);
     }
     error = configure_client_alpn(ssl, param.alpn);

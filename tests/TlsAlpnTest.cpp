@@ -7,24 +7,26 @@
 
 namespace {
 
-TEST(TlsAlpnTest, NormalizeHttp1AlpnPrefersHttp11AndDropsH2) {
-    fiber::net::TlsClientParam options;
-    options.alpn = {"h2", "", "acme/1", "http/1.1", "custom"};
+TEST(TlsAlpnTest, Http1ClientOwnsHttp11Alpn) {
+    fiber::http::HttpClientTlsOptions options;
+    options.server_name = "routing.example.test";
+    options.verify_name = "certificate.example.test";
 
-    fiber::http::normalize_http1_alpn(options);
-
-    const std::vector<std::string> expected = {"http/1.1", "acme/1", "custom"};
-    EXPECT_EQ(options.alpn, expected);
-}
-
-TEST(TlsAlpnTest, NormalizeHttp1AlpnAddsHttp11WhenMissing) {
-    fiber::net::TlsClientParam options;
-    options.alpn.clear();
-
-    fiber::http::normalize_http1_alpn(options);
+    auto param = fiber::http::make_http1_client_tls_param(options);
 
     const std::vector<std::string> expected = {"http/1.1"};
-    EXPECT_EQ(options.alpn, expected);
+    EXPECT_EQ(param.alpn, expected);
+    EXPECT_EQ(param.server_name, options.server_name);
+    EXPECT_EQ(param.verify_name, options.verify_name);
+}
+
+TEST(TlsAlpnTest, Http2ClientOwnsH2Alpn) {
+    fiber::http::HttpClientTlsOptions options;
+
+    auto param = fiber::http::make_http2_client_tls_param(options);
+
+    const std::vector<std::string> expected = {"h2"};
+    EXPECT_EQ(param.alpn, expected);
 }
 
 TEST(TlsAlpnTest, NormalizeHttpServerAlpnPrefersH2ThenHttp11) {
@@ -47,8 +49,8 @@ TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
     EXPECT_EQ(options.alpn, expected);
 }
 
-TEST(TlsAlpnTest, NormalizeHttp3AlpnPrefersH3AndDropsTcpProtocols) {
-    fiber::net::TlsClientParam options;
+TEST(TlsAlpnTest, NormalizeHttp3ServerAlpnPrefersH3AndDropsTcpProtocols) {
+    fiber::net::TlsServerParam options;
     options.alpn = {"http/1.1", "h3", "custom", "h2", "", "custom"};
 
     fiber::http::normalize_http3_alpn(options);

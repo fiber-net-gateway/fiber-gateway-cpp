@@ -7,22 +7,18 @@
 #include <expected>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../net/SocketAddress.h"
+#include "../net/TlsParams.h"
 #include "QuicConnection.h"
 
 struct ssl_session_st;
 typedef struct ssl_session_st SSL_SESSION;
-
-namespace fiber::net {
-class TlsCredential;
-class TrustStore;
-struct TlsClientParam;
-} // namespace fiber::net
 
 namespace fiber::quic {
 
@@ -30,6 +26,7 @@ class QuicUdpEndpoint;
 
 struct QuicClientCacheKey {
     std::string_view server_name{};
+    std::string_view verify_name{};
     net::SocketAddress remote_addr{};
     const net::TlsCredential *credential = nullptr;
     const net::TrustStore *trust_store = nullptr;
@@ -80,6 +77,7 @@ using QuicConnectResult = std::expected<QuicConnection::Lease, QuicConnectError>
 struct QuicClientConnectOptions {
     net::SocketAddress remote_addr{};
     std::string server_name{};
+    std::string verify_name{};
     QuicTransportSettings transport{};
     QuicRecvFlowControlSettings recv_flow{};
     std::chrono::milliseconds keepalive_interval{0};
@@ -129,15 +127,17 @@ public:
         QuicConnection::Lease (*create_connection)(void *owner,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
         QuicClientCacheOps cache{};
+        std::vector<std::string> alpn{};
     };
 
     QuicClient() noexcept = default;
-    // The connector owns cache callback state referenced by its connections;
-    // it must outlive every connection started through it.
+    // The connector owns its ALPN list and cache callback state. Credential and
+    // trust-store pointers are borrowed; their material and this connector must
+    // outlive every connection started through it.
     ~QuicClient() = default;
 
-    [[nodiscard]] common::IoResult<void> init(QuicUdpEndpoint &endpoint, const net::TlsClientParam &tls_options,
-                                              const Options &options) noexcept;
+    [[nodiscard]] common::IoResult<void> init(QuicUdpEndpoint &endpoint, net::TlsClientSecurity tls_security,
+                                              Options options) noexcept;
     [[nodiscard]] std::expected<QuicClientAttempt, QuicConnectError>
     start_connect(const QuicClientConnectOptions &options) noexcept;
     [[nodiscard]] async::Task<QuicConnectResult> connect(const QuicClientConnectOptions &options) noexcept;
@@ -147,11 +147,11 @@ private:
     [[nodiscard]] static bool store_session(void *owner, QuicConnection &connection, SSL_SESSION *session) noexcept;
     static void store_token(void *owner, QuicConnection &connection, const std::uint8_t *token,
                             std::size_t token_len) noexcept;
-    [[nodiscard]] QuicClientCacheKey cache_key(std::string_view server_name,
+    [[nodiscard]] QuicClientCacheKey cache_key(std::string_view server_name, std::string_view verify_name,
                                                const net::SocketAddress &remote_addr) const noexcept;
 
     QuicUdpEndpoint *endpoint_ = nullptr;
-    const net::TlsClientParam *tls_options_ = nullptr;
+    net::TlsClientSecurity tls_security_{};
     Options options_{};
 };
 

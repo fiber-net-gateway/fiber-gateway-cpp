@@ -10,9 +10,6 @@
 
 #include "../common/IoError.h"
 
-struct ssl_session_st;
-typedef struct ssl_session_st SSL_SESSION;
-
 namespace fiber::net {
 
 class SocketAddress;
@@ -85,35 +82,30 @@ enum class TlsClientCertificateMode : std::uint8_t {
     Required,
 };
 
-struct TlsNewSessionOps {
-    void *ctx = nullptr;
-    bool (*store)(void *ctx, SSL_SESSION *session) noexcept = nullptr;
-};
-
 using ConfigureTlsCallback = common::IoErr (*)(void *ctx, TlsServerHandshakeConfig &config,
                                                const TlsClientHelloView &client_hello) noexcept;
 
-struct TlsClientParam {
-    // handshake() synchronously creates and configures the SSL before returning
-    // its task. These borrowed objects only need to remain valid through that
-    // setup; the SSL retains its own references after successful installation.
+struct TlsClientSecurity {
+    // The SSL retains its own references after successful installation.
     // TLS clients without a client certificate leave credential null.
     const TlsCredential *credential = nullptr;
     const TrustStore *trust_store = nullptr;
     bool verify_peer = false;
-    std::chrono::milliseconds handshake_timeout{10000};
+};
+
+struct TlsClientParam {
+    // Every member is applied when the client SSL is created. Operation policy
+    // such as handshake timeout, session caching, and early data belongs to the
+    // transport driving the handshake rather than this TLS parameter object.
+    TlsClientSecurity security{};
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3
-    std::vector<std::string> alpn{"http/1.1"};
-    std::string sni_name{};
+    std::vector<std::string> alpn{};
+    std::string server_name{};
     std::string verify_name{};
-
-    // Higher-level transports use a value member for TLS parameters. This bit
-    // distinguishes a plain connection from certificate-less client TLS.
-    bool enable_tls = false;
-
-    [[nodiscard]] bool enabled() const noexcept { return enable_tls; }
 };
+
+inline constexpr std::chrono::milliseconds kDefaultTlsHandshakeTimeout{10000};
 
 struct TlsServerParam {
     // This object remains borrowed through the handshake. Callback state and
@@ -125,7 +117,7 @@ struct TlsServerParam {
     void *configure_ctx = nullptr;
     const TrustStore *trust_store = nullptr;
     TlsClientCertificateMode client_certificate_mode = TlsClientCertificateMode::None;
-    std::chrono::milliseconds handshake_timeout{10000};
+    std::chrono::milliseconds handshake_timeout{kDefaultTlsHandshakeTimeout};
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3
     std::vector<std::string> alpn{"http/1.1"};

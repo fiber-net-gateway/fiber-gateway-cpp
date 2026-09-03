@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include "../async/Task.h"
@@ -131,7 +132,7 @@ class TlsTransport final : public HttpTransport {
 public:
     ~TlsTransport() override;
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  const net::TlsClientParam &options,
+                                                                  net::TlsClientParam options,
                                                                   net::TcpSocketOptions tcp_options = {});
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
                                                                   const net::TlsServerParam &options,
@@ -174,7 +175,7 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
 private:
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, const net::TlsClientParam &options);
+    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, net::TlsClientParam options);
     TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, const net::TlsServerParam &options);
     [[nodiscard]] bool handshake_done() const noexcept;
     void clear_pending_write() noexcept;
@@ -186,7 +187,7 @@ private:
     };
 
     net::TlsTcpStream stream_;
-    const net::TlsClientParam *client_options_ = nullptr;
+    std::optional<net::TlsClientParam> client_options_{};
     const net::TlsServerParam *server_options_ = nullptr;
     std::unique_ptr<std::uint8_t[]> writev_scratch_;
     PendingWriteKind pending_write_kind_ = PendingWriteKind::None;
