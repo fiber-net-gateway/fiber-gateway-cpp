@@ -196,7 +196,7 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
 
     int fd = stream->release_fd();
     fiber::net::AcceptResult accept(fd, stream->remote_addr());
-    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), tls_options);
+    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept));
     if (!transport_result) {
         result.err = transport_result.error();
         result_promise->set_value(std::move(result));
@@ -204,7 +204,7 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
     }
     auto transport = std::move(*transport_result);
 
-    auto hs_result = co_await transport->handshake(5s);
+    auto hs_result = co_await transport->handshake(tls_options, 5s);
     if (!hs_result) {
         result.err = hs_result.error();
         result_promise->set_value(std::move(result));
@@ -391,7 +391,7 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
 
     int fd = stream->release_fd();
     fiber::net::AcceptResult accept(fd, stream->remote_addr());
-    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), tls_options);
+    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept));
     if (!transport_result) {
         result.err = transport_result.error();
         result_promise->set_value(std::move(result));
@@ -399,7 +399,7 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
     }
     auto transport = std::move(*transport_result);
 
-    auto hs_result = co_await transport->handshake(5s);
+    auto hs_result = co_await transport->handshake(tls_options, 5s);
     if (!hs_result) {
         result.err = hs_result.error();
         result_promise->set_value(std::move(result));

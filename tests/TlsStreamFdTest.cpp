@@ -396,8 +396,9 @@ struct AbandonPendingWriteStats {
 };
 
 DetachedTask hold_tls_transport_after_handshake(fiber::http::TlsTransport *transport,
+                                                const fiber::net::TlsServerParam &param,
                                                 std::promise<fiber::common::IoResult<void>> *done) {
-    auto handshake_result = co_await transport->handshake(5s);
+    auto handshake_result = co_await transport->handshake(param, 5s);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -408,9 +409,10 @@ DetachedTask hold_tls_transport_after_handshake(fiber::http::TlsTransport *trans
     co_return;
 }
 
-DetachedTask abandon_blocked_tls_write(fiber::http::TlsTransport *transport, fiber::mem::IoBufChain chain,
+DetachedTask abandon_blocked_tls_write(fiber::http::TlsTransport *transport, const fiber::net::TlsClientParam &param,
+                                       fiber::mem::IoBufChain chain,
                                        std::promise<fiber::common::IoResult<AbandonPendingWriteStats>> *done) {
-    auto handshake_result = co_await transport->handshake(5s);
+    auto handshake_result = co_await transport->handshake(param, 5s);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -446,9 +448,10 @@ DetachedTask abandon_blocked_tls_write(fiber::http::TlsTransport *transport, fib
     co_return;
 }
 
-DetachedTask run_poll_transport_server(fiber::http::TlsTransport *transport, std::size_t expected_size,
+DetachedTask run_poll_transport_server(fiber::http::TlsTransport *transport, const fiber::net::TlsServerParam &param,
+                                       std::size_t expected_size,
                                        std::promise<fiber::common::IoResult<std::string>> *done) {
-    auto handshake_result = co_await transport->handshake(5s);
+    auto handshake_result = co_await transport->handshake(param, 5s);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -488,9 +491,10 @@ DetachedTask run_poll_transport_server(fiber::http::TlsTransport *transport, std
     co_return;
 }
 
-DetachedTask run_poll_transport_client(fiber::http::TlsTransport *transport, fiber::mem::IoBufChain chain,
+DetachedTask run_poll_transport_client(fiber::http::TlsTransport *transport, const fiber::net::TlsClientParam &param,
+                                       fiber::mem::IoBufChain chain,
                                        std::promise<fiber::common::IoResult<PollWriteStats>> *done) {
-    auto handshake_result = co_await transport->handshake(5s);
+    auto handshake_result = co_await transport->handshake(param, 5s);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -525,9 +529,9 @@ DetachedTask run_poll_transport_client(fiber::http::TlsTransport *transport, fib
     co_return;
 }
 
-DetachedTask run_transport_server(fiber::http::TlsTransport *transport,
+DetachedTask run_transport_server(fiber::http::TlsTransport *transport, const fiber::net::TlsServerParam &param,
                                   std::promise<fiber::common::IoResult<std::string>> *done) {
-    auto handshake_result = co_await transport->handshake(5s);
+    auto handshake_result = co_await transport->handshake(param, 5s);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -556,9 +560,10 @@ DetachedTask run_transport_server(fiber::http::TlsTransport *transport,
     co_return;
 }
 
-DetachedTask run_transport_client(fiber::http::TlsTransport *transport, fiber::mem::IoBufChain chain,
+DetachedTask run_transport_client(fiber::http::TlsTransport *transport, const fiber::net::TlsClientParam &param,
+                                  fiber::mem::IoBufChain chain,
                                   std::promise<fiber::common::IoResult<std::size_t>> *done) {
-    auto handshake_result = co_await transport->handshake(5s);
+    auto handshake_result = co_await transport->handshake(param, 5s);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -593,9 +598,9 @@ DetachedTask close_transport(fiber::http::TlsTransport *transport, std::promise<
     co_return;
 }
 
-DetachedTask read_tls_pending_payload(fiber::http::TlsTransport *transport,
+DetachedTask read_tls_pending_payload(fiber::http::TlsTransport *transport, const fiber::net::TlsServerParam &param,
                                       std::promise<fiber::common::IoResult<std::string>> *done) {
-    auto handshake_result = co_await transport->handshake(5s);
+    auto handshake_result = co_await transport->handshake(param, 5s);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -640,9 +645,9 @@ DetachedTask read_tls_pending_payload(fiber::http::TlsTransport *transport,
     co_return;
 }
 
-DetachedTask write_tls_pending_payload(fiber::http::TlsTransport *transport, std::string payload,
-                                       std::promise<fiber::common::IoResult<std::size_t>> *done) {
-    auto handshake_result = co_await transport->handshake(5s);
+DetachedTask write_tls_pending_payload(fiber::http::TlsTransport *transport, const fiber::net::TlsClientParam &param,
+                                       std::string payload, std::promise<fiber::common::IoResult<std::size_t>> *done) {
+    auto handshake_result = co_await transport->handshake(param, 5s);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
         co_return;
@@ -670,10 +675,10 @@ TEST(TlsStreamFdTest, TlsTransportWaitReadableSeesPendingDecryptedData) {
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result = fiber::http::TlsTransport::create(
-            group.at(0), fiber::net::AcceptResult(fds[0], peer), tls_pair->server_options);
-    auto client_transport_result = fiber::http::TlsTransport::create(
-            group.at(1), fiber::net::AcceptResult(fds[1], peer), tls_pair->client_options);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
     ASSERT_TRUE(server_transport_result);
     ASSERT_TRUE(client_transport_result);
     auto *server_transport = server_transport_result->release();
@@ -685,9 +690,12 @@ TEST(TlsStreamFdTest, TlsTransportWaitReadableSeesPendingDecryptedData) {
     auto server_future = server_promise.get_future();
     auto client_future = client_promise.get_future();
 
-    fiber::async::spawn(group.at(0), [&]() { return read_tls_pending_payload(server_transport, &server_promise); });
-    fiber::async::spawn(group.at(1),
-                        [&]() { return write_tls_pending_payload(client_transport, payload, &client_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return read_tls_pending_payload(server_transport, tls_pair->server_options, &server_promise);
+    });
+    fiber::async::spawn(group.at(1), [&]() {
+        return write_tls_pending_payload(client_transport, tls_pair->client_options, payload, &client_promise);
+    });
 
     ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
     ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
@@ -732,10 +740,10 @@ TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result = fiber::http::TlsTransport::create(
-            group.at(0), fiber::net::AcceptResult(fds[0], peer), tls_pair->server_options);
-    auto client_transport_result = fiber::http::TlsTransport::create(
-            group.at(1), fiber::net::AcceptResult(fds[1], peer), tls_pair->client_options);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
     ASSERT_TRUE(server_transport_result);
     ASSERT_TRUE(client_transport_result);
     auto *server_transport = server_transport_result->release();
@@ -755,9 +763,12 @@ TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
     auto server_future = server_promise.get_future();
     auto client_future = client_promise.get_future();
 
-    fiber::async::spawn(group.at(0), [&]() { return run_transport_server(server_transport, &server_promise); });
-    fiber::async::spawn(group.at(1),
-                        [&]() { return run_transport_client(client_transport, std::move(chain), &client_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_transport_server(server_transport, tls_pair->server_options, &server_promise);
+    });
+    fiber::async::spawn(group.at(1), [&]() {
+        return run_transport_client(client_transport, tls_pair->client_options, std::move(chain), &client_promise);
+    });
 
     ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
     ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
@@ -801,10 +812,10 @@ TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBloc
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result = fiber::http::TlsTransport::create(
-            group.at(0), fiber::net::AcceptResult(fds[0], peer), tls_pair->server_options);
-    auto client_transport_result = fiber::http::TlsTransport::create(
-            group.at(1), fiber::net::AcceptResult(fds[1], peer), tls_pair->client_options);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
     ASSERT_TRUE(server_transport_result);
     ASSERT_TRUE(client_transport_result);
     auto *server_transport = server_transport_result->release();
@@ -821,10 +832,10 @@ TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBloc
     auto client_future = client_promise.get_future();
 
     fiber::async::spawn(group.at(0), [&]() {
-        return run_poll_transport_server(server_transport, expected.size(), &server_promise);
+        return run_poll_transport_server(server_transport, tls_pair->server_options, expected.size(), &server_promise);
     });
     fiber::async::spawn(group.at(1), [&]() {
-        return run_poll_transport_client(client_transport, std::move(chain), &client_promise);
+        return run_poll_transport_client(client_transport, tls_pair->client_options, std::move(chain), &client_promise);
     });
 
     ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
@@ -870,10 +881,10 @@ TEST(TlsStreamFdTest, TlsTransportAbandonPendingWriteDropsChainReference) {
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result = fiber::http::TlsTransport::create(
-            group.at(0), fiber::net::AcceptResult(fds[0], peer), tls_pair->server_options);
-    auto client_transport_result = fiber::http::TlsTransport::create(
-            group.at(1), fiber::net::AcceptResult(fds[1], peer), tls_pair->client_options);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
     ASSERT_TRUE(server_transport_result);
     ASSERT_TRUE(client_transport_result);
     auto *server_transport = server_transport_result->release();
@@ -889,10 +900,11 @@ TEST(TlsStreamFdTest, TlsTransportAbandonPendingWriteDropsChainReference) {
     auto server_future = server_promise.get_future();
     auto client_future = client_promise.get_future();
 
-    fiber::async::spawn(group.at(0),
-                        [&]() { return hold_tls_transport_after_handshake(server_transport, &server_promise); });
+    fiber::async::spawn(group.at(0), [&]() {
+        return hold_tls_transport_after_handshake(server_transport, tls_pair->server_options, &server_promise);
+    });
     fiber::async::spawn(group.at(1), [&]() {
-        return abandon_blocked_tls_write(client_transport, std::move(chain), &client_promise);
+        return abandon_blocked_tls_write(client_transport, tls_pair->client_options, std::move(chain), &client_promise);
     });
 
     ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);

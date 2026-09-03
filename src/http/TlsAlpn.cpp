@@ -1,12 +1,12 @@
 #include "http/TlsAlpn.h"
 
-#include <algorithm>
-#include <string>
-#include <vector>
-
 namespace fiber::http {
 
 namespace {
+
+constexpr std::string_view kHttp1AlpnList[] = {"http/1.1"};
+constexpr std::string_view kHttpServerAlpnList[] = {"h2", "http/1.1"};
+constexpr std::string_view kHttp3AlpnList[] = {"h3"};
 
 net::TlsClientParam make_http_client_tls_param(const HttpClientTlsOptions &options, const char *alpn) noexcept {
     net::TlsClientParam param{};
@@ -19,24 +19,18 @@ net::TlsClientParam make_http_client_tls_param(const HttpClientTlsOptions &optio
     return param;
 }
 
-std::vector<std::string> normalize_base(std::span<const std::string_view> alpn) {
-    std::vector<std::string> normalized;
-    normalized.reserve(alpn.size() + 2);
-    for (const auto &proto: alpn) {
-        if (proto.empty()) {
-            continue;
-        }
-        if (std::find(normalized.begin(), normalized.end(), proto) != normalized.end()) {
-            continue;
-        }
-        normalized.emplace_back(proto);
-    }
-    return normalized;
-}
-
-void rebind(net::TlsServerParam &options, net::TlsAlpnList &alpn, std::vector<std::string> normalized) {
-    alpn.assign(std::move(normalized));
-    options.alpn = alpn.view();
+net::TlsServerParam make_server_tls_param(const HttpServerTlsOptions &options,
+                                          std::span<const std::string_view> alpn) noexcept {
+    net::TlsServerParam param{};
+    param.configure_callback = options.configure_callback;
+    param.configure_ctx = options.configure_ctx;
+    param.trust_store = options.trust_store;
+    param.client_certificate_mode = options.client_certificate_mode;
+    param.alpn = alpn;
+    param.min_version = options.min_version;
+    param.max_version = options.max_version;
+    param.enable_early_data = options.enable_early_data;
+    return param;
 }
 
 } // namespace
@@ -49,30 +43,16 @@ net::TlsClientParam make_http2_client_tls_param(const HttpClientTlsOptions &opti
     return make_http_client_tls_param(options, "h2");
 }
 
-void normalize_http1_alpn(net::TlsServerParam &options, net::TlsAlpnList &alpn) {
-    std::vector<std::string> normalized = normalize_base(options.alpn);
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
-    normalized.insert(normalized.begin(), "http/1.1");
-    rebind(options, alpn, std::move(normalized));
+net::TlsServerParam make_http1_server_tls_param(const HttpServerTlsOptions &options) noexcept {
+    return make_server_tls_param(options, kHttp1AlpnList);
 }
 
-void normalize_http_server_alpn(net::TlsServerParam &options, net::TlsAlpnList &alpn) {
-    std::vector<std::string> normalized = normalize_base(options.alpn);
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
-    normalized.insert(normalized.begin(), "http/1.1");
-    normalized.insert(normalized.begin(), "h2");
-    rebind(options, alpn, std::move(normalized));
+net::TlsServerParam make_http_server_tls_param(const HttpServerTlsOptions &options) noexcept {
+    return make_server_tls_param(options, kHttpServerAlpnList);
 }
 
-void normalize_http3_alpn(net::TlsServerParam &options, net::TlsAlpnList &alpn) {
-    std::vector<std::string> normalized = normalize_base(options.alpn);
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h3"), normalized.end());
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "h2"), normalized.end());
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), "http/1.1"), normalized.end());
-    normalized.insert(normalized.begin(), "h3");
-    rebind(options, alpn, std::move(normalized));
+net::TlsServerParam make_http3_server_tls_param(const HttpServerTlsOptions &options) noexcept {
+    return make_server_tls_param(options, kHttp3AlpnList);
 }
 
 } // namespace fiber::http

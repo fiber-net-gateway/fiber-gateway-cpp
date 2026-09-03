@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 
+#include <fiber/net/TlsServerHandshakeConfig.h>
 #include "http/TlsAlpn.h"
 
 namespace {
@@ -30,44 +31,53 @@ TEST(TlsAlpnTest, Http2ClientOwnsH2Alpn) {
     EXPECT_EQ(param.alpn, expected);
 }
 
-TEST(TlsAlpnTest, NormalizeHttpServerAlpnPrefersH2ThenHttp11) {
-    static constexpr std::string_view input[] = {"custom", "http/1.1", "h2", "", "custom"};
-    fiber::net::TlsServerParam options;
-    options.alpn = input;
+TEST(TlsAlpnTest, Http1ServerAlpnIsHttp11Only) {
+    fiber::http::HttpServerTlsOptions options;
 
-    fiber::net::TlsAlpnList alpn;
-    fiber::http::normalize_http_server_alpn(options, alpn);
+    auto param = fiber::http::make_http1_server_tls_param(options);
 
-    const std::vector<std::string_view> expected = {"h2", "http/1.1", "custom"};
-    const std::vector<std::string_view> actual(options.alpn.begin(), options.alpn.end());
-    EXPECT_EQ(actual, expected);
-    EXPECT_EQ(options.alpn.data(), alpn.view().data());
-}
-
-TEST(TlsAlpnTest, NormalizeHttpServerAlpnAddsSupportedDefaultsWhenMissing) {
-    static constexpr std::string_view input[] = {"acme/1"};
-    fiber::net::TlsServerParam options;
-    options.alpn = input;
-
-    fiber::net::TlsAlpnList alpn;
-    fiber::http::normalize_http_server_alpn(options, alpn);
-
-    const std::vector<std::string_view> expected = {"h2", "http/1.1", "acme/1"};
-    const std::vector<std::string_view> actual(options.alpn.begin(), options.alpn.end());
+    const std::vector<std::string_view> expected = {"http/1.1"};
+    const std::vector<std::string_view> actual(param.alpn.begin(), param.alpn.end());
     EXPECT_EQ(actual, expected);
 }
 
-TEST(TlsAlpnTest, NormalizeHttp3ServerAlpnPrefersH3AndDropsTcpProtocols) {
-    static constexpr std::string_view input[] = {"http/1.1", "h3", "custom", "h2", "", "custom"};
-    fiber::net::TlsServerParam options;
-    options.alpn = input;
+TEST(TlsAlpnTest, HttpServerAlpnPrefersH2ThenHttp11) {
+    fiber::http::HttpServerTlsOptions options;
 
-    fiber::net::TlsAlpnList alpn;
-    fiber::http::normalize_http3_alpn(options, alpn);
+    auto param = fiber::http::make_http_server_tls_param(options);
 
-    const std::vector<std::string_view> expected = {"h3", "custom"};
-    const std::vector<std::string_view> actual(options.alpn.begin(), options.alpn.end());
+    const std::vector<std::string_view> expected = {"h2", "http/1.1"};
+    const std::vector<std::string_view> actual(param.alpn.begin(), param.alpn.end());
     EXPECT_EQ(actual, expected);
+}
+
+TEST(TlsAlpnTest, Http3ServerAlpnIsH3Only) {
+    fiber::http::HttpServerTlsOptions options;
+
+    auto param = fiber::http::make_http3_server_tls_param(options);
+
+    const std::vector<std::string_view> expected = {"h3"};
+    const std::vector<std::string_view> actual(param.alpn.begin(), param.alpn.end());
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(TlsAlpnTest, ServerTlsParamCopiesPolicyFields) {
+    fiber::http::HttpServerTlsOptions options;
+    options.configure_callback = &fiber::net::configure_tls_with_credential;
+    options.configure_ctx = reinterpret_cast<void *>(0x1);
+    options.client_certificate_mode = fiber::net::TlsClientCertificateMode::Required;
+    options.min_version = 0x0304;
+    options.max_version = 0x0304;
+    options.enable_early_data = true;
+
+    auto param = fiber::http::make_http_server_tls_param(options);
+
+    EXPECT_EQ(param.configure_callback, options.configure_callback);
+    EXPECT_EQ(param.configure_ctx, options.configure_ctx);
+    EXPECT_EQ(param.client_certificate_mode, options.client_certificate_mode);
+    EXPECT_EQ(param.min_version, options.min_version);
+    EXPECT_EQ(param.max_version, options.max_version);
+    EXPECT_TRUE(param.enable_early_data);
 }
 
 TEST(TlsAlpnTest, AlpnProtocolsViewContainsOfferedProtocols) {

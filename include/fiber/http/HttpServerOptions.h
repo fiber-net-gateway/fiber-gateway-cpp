@@ -6,11 +6,11 @@
 #include <cstdint>
 
 #include "../net/TcpSocketOptions.h"
-#include "../net/TlsParams.h"
 #include "../net/UdpSocket.h"
 #include "../quic/QuicConnection.h"
 #include "../quic/QuicSendScheduler.h"
 #include "Http3Protocol.h"
+#include "HttpServerTlsOptions.h"
 
 namespace fiber::http {
 
@@ -42,10 +42,7 @@ struct HttpServerOptions {
     std::size_t header_large_num = 4;
     bool drain_unread_body = false;
     bool enable_extended_connect = false;
-    net::TlsServerParam tls{};
-    // Backing storage for tls.alpn; rebuilt by the normalize_*_alpn calls at
-    // bind time, frozen afterwards (the span must stay valid across handshakes).
-    net::TlsAlpnList tls_alpn{};
+    HttpServerTlsOptions tls{};
     Http3Options http3{};
 };
 

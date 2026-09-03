@@ -139,7 +139,7 @@ common::IoResult<void> Http3Server::bind(const net::SocketAddress &addr) noexcep
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    normalize_http3_alpn(options_.tls, options_.tls_alpn);
+    quic_tls_param_ = make_http3_server_tls_param(options_.tls);
 
     const std::size_t count = shard_count();
     shards_.reserve(count);
@@ -270,7 +270,7 @@ quic::QuicUdpEndpoint::EndpointOptions Http3Server::make_endpoint_options(const 
 
 quic::QuicUdpEndpoint::ServerAdmissionOptions Http3Server::make_server_admission_options() noexcept {
     quic::QuicUdpEndpoint::ServerAdmissionOptions options{};
-    options.tls = &options_.tls;
+    options.tls = &quic_tls_param_;
     options.transport = options_.http3.transport;
     options.transport.max_ack_delay = options_.http3.max_ack_delay;
     options.transport.ack_delay_exponent = options_.http3.ack_delay_exponent;

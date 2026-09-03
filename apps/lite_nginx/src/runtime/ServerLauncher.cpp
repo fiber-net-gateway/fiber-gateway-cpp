@@ -308,8 +308,6 @@ fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listen
         return options;
     }
 
-    options.tls_alpn = {"h2", "http/1.1"};
-    options.tls.alpn = options.tls_alpn.view();
     options.tls.configure_callback = &configure_identity_by_server_name;
     options.tls.configure_ctx = const_cast<ListenerTlsCredentials *>(tls_credentials);
     return options;

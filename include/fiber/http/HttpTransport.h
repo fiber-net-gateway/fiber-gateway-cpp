@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string_view>
 
 #include "../async/Task.h"
@@ -27,7 +26,6 @@ public:
 
     virtual ~HttpTransport() = default;
 
-    virtual fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) = 0;
     [[nodiscard]] virtual bool has_pending_read() const noexcept { return false; }
@@ -88,7 +86,6 @@ public:
     static common::IoResult<std::unique_ptr<TcpTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
                                                                   net::TcpSocketOptions tcp_options = {});
 
-    fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
     [[nodiscard]] bool has_pending_read() const noexcept override { return false; }
@@ -132,13 +129,14 @@ class TlsTransport final : public HttpTransport {
 public:
     ~TlsTransport() override;
     static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  net::TlsClientParam options,
-                                                                  net::TcpSocketOptions tcp_options = {});
-    static common::IoResult<std::unique_ptr<TlsTransport>> create(event::EventLoop &loop, net::AcceptResult &&accept,
-                                                                  const net::TlsServerParam &options,
                                                                   net::TcpSocketOptions tcp_options = {});
 
-    fiber::async::Task<common::IoResult<void>> handshake(std::chrono::milliseconds timeout) override;
+    // The param is borrowed only for the duration of the handshake (see
+    // net::TlsServerParam/TlsClientParam); TlsTransport does not retain it.
+    fiber::async::Task<common::IoResult<void>>
+    handshake(const net::TlsClientParam &param, std::chrono::milliseconds timeout = net::kDefaultTlsHandshakeTimeout);
+    fiber::async::Task<common::IoResult<void>>
+    handshake(const net::TlsServerParam &param, std::chrono::milliseconds timeout = net::kDefaultTlsHandshakeTimeout);
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
     [[nodiscard]] bool has_pending_read() const noexcept override;
@@ -175,8 +173,7 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept override;
 
 private:
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, net::TlsClientParam options);
-    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr, const net::TlsServerParam &options);
+    TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr);
     [[nodiscard]] bool handshake_done() const noexcept;
     void clear_pending_write() noexcept;
 
@@ -187,8 +184,6 @@ private:
     };
 
     net::TlsTcpStream stream_;
-    std::optional<net::TlsClientParam> client_options_{};
-    net::TlsServerParam server_options_{};
     std::unique_ptr<std::uint8_t[]> writev_scratch_;
     PendingWriteKind pending_write_kind_ = PendingWriteKind::None;
     const void *pending_write_data_ = nullptr;

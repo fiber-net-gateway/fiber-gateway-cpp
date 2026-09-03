@@ -69,6 +69,10 @@ private:
     event::EventLoopGroup *worker_group_ = nullptr;
     std::shared_ptr<Runtime> runtime_;
     HttpServerOptions options_;
+    // Stable storage: QuicUdpEndpoint::ServerAdmissionOptions::tls borrows this
+    // pointer for every connection attempt over the shard's lifetime, built
+    // once from options_.tls at bind() time.
+    net::TlsServerParam quic_tls_param_{};
     std::vector<std::unique_ptr<Shard>> shards_{};
     net::SocketAddress local_addr_{};
     std::atomic<bool> started_{false};
