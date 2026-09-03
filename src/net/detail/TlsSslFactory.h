@@ -10,10 +10,13 @@ typedef struct ssl_st SSL;
 
 namespace fiber::net::detail {
 
+struct TlsNewSessionOps;
+
 class TlsSslFactory {
 public:
-    [[nodiscard]] static common::IoResult<SSL *> create_client(const TlsClientParam &param,
-                                                               const TlsNewSessionOps *new_session_ops) noexcept;
+    [[nodiscard]] static common::IoResult<SSL *>
+    create_client(const TlsClientParam &param, bool enable_early_data = false,
+                  const TlsNewSessionOps *new_session_ops = nullptr) noexcept;
     [[nodiscard]] static common::IoResult<SSL *>
     create_server(const TlsServerParam &param, TlsServerHandshakeState &state, const SocketAddress *local_addr,
                   const SocketAddress *remote_addr, TlsTransportKind transport) noexcept;

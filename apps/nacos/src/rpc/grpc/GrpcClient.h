@@ -18,7 +18,6 @@
 #include <fiber/http/Http2Connection.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpSocketOptions.h>
-#include <fiber/net/TlsParams.h>
 #include "GrpcStream.h"
 
 namespace fiber::nacos::detail::grpc {
@@ -34,7 +33,7 @@ public:
     struct Options {
         net::SocketAddress peer_addr{};
         net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
-        net::TlsClientParam tls{};
+        std::optional<http::HttpClientTlsOptions> tls{};
         http::Http2Connection::Options h2{};
         std::string_view authority{};
         std::string_view scheme{"https"};

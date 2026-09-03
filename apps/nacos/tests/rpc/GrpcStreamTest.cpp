@@ -658,8 +658,8 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
     Result result;
     fiber::nacos::detail::grpc::GrpcClient::Options options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.enable_tls = true;
-    options.tls.sni_name = "localhost";
+    options.tls.emplace();
+    options.tls->server_name = "localhost";
     options.authority = "localhost";
     options.scheme = "https";
 

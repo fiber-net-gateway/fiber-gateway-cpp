@@ -79,15 +79,11 @@ fiber::common::IoResult<QuicTestTls> create_quic_tls(std::string_view certificat
     return material;
 }
 
-fiber::net::TlsClientParam make_quic_client_tls(const QuicTestTls &material, bool verify_peer = true) {
-    fiber::net::TlsClientParam options{};
-    options.enable_tls = true;
+fiber::net::TlsClientSecurity make_quic_client_tls(const QuicTestTls &material, bool verify_peer = true) {
+    fiber::net::TlsClientSecurity options{};
     options.credential = material.credential.get();
     options.trust_store = material.trust_store.get();
     options.verify_peer = verify_peer;
-    options.min_version = 0x0304;
-    options.max_version = 0x0304;
-    options.alpn = {"fiber-quic-test"};
     return options;
 }
 
@@ -448,7 +444,7 @@ fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint
 fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server_endpoint,
                                             fiber::quic::QuicUdpEndpoint *client_endpoint,
                                             fiber::quic::QuicClient *client, const char *server_name,
-                                            std::promise<ConnectSummary> *promise) {
+                                            std::promise<ConnectSummary> *promise, std::string_view verify_name = {}) {
     ConnectSummary summary{};
     auto server_started = server_endpoint->start();
     auto client_started = client_endpoint->start();
@@ -467,6 +463,7 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
     fiber::quic::QuicClientConnectOptions options{};
     options.remote_addr = {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()};
     options.server_name = server_name;
+    options.verify_name.assign(verify_name);
     options.handshake_timeout = 2s;
     auto connected = co_await client->connect(options);
     if (!connected) {
@@ -561,9 +558,16 @@ TEST(QuicClientTest, StartConnectAttachesAndQueuesClientInitial) {
     ASSERT_TRUE(tls_material);
     auto tls_options = make_quic_client_tls(*tls_material, false);
 
+    fiber::quic::QuicClient missing_alpn_client;
+    auto missing_alpn = missing_alpn_client.init(endpoint, tls_options,
+                                                 {.connection_owner = nullptr, .create_connection = create_connection});
+    ASSERT_FALSE(missing_alpn);
+    EXPECT_EQ(missing_alpn.error(), fiber::common::IoErr::Invalid);
+
     fiber::quic::QuicClient client;
-    ASSERT_TRUE(
-            client.init(endpoint, tls_options, {.connection_owner = nullptr, .create_connection = create_connection}));
+    ASSERT_TRUE(client.init(
+            endpoint, tls_options,
+            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
 
     std::promise<StartSummary> promise;
     auto future = promise.get_future();
@@ -597,8 +601,9 @@ TEST(QuicClientTest, HandshakeTimeoutCancelsAndDetachesConnection) {
     auto tls_options = make_quic_client_tls(*tls_material, false);
 
     fiber::quic::QuicClient client;
-    ASSERT_TRUE(
-            client.init(endpoint, tls_options, {.connection_owner = nullptr, .create_connection = create_connection}));
+    ASSERT_TRUE(client.init(
+            endpoint, tls_options,
+            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
 
     std::promise<TimeoutSummary> promise;
     auto future = promise.get_future();
@@ -614,7 +619,7 @@ TEST(QuicClientTest, HandshakeTimeoutCancelsAndDetachesConnection) {
     group.join();
 }
 
-TEST(QuicClientTest, CompletesVerifiedLoopbackHandshake) {
+TEST(QuicClientTest, VerifyNameMayDifferFromServerName) {
     fiber::test::QuicTestTlsFile cert("cert", fiber::test::kQuicTestCertificatePem);
     fiber::test::QuicTestTlsFile key("key", fiber::test::kQuicTestPrivateKeyPem);
     ASSERT_TRUE(cert.valid());
@@ -643,13 +648,14 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshake) {
     ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
 
     fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(client_endpoint, client_tls,
-                            {.connection_owner = nullptr, .create_connection = create_connection}));
+    ASSERT_TRUE(client.init(
+            client_endpoint, client_tls,
+            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
 
     std::promise<ConnectSummary> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return connect_loopback(&server_endpoint, &client_endpoint, &client, "localhost", &promise);
+        return connect_loopback(&server_endpoint, &client_endpoint, &client, "routing.example", &promise, "localhost");
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
@@ -708,8 +714,9 @@ TEST_P(QuicClientMtlsTest, EnforcesClientCertificateAuthentication) {
     ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
 
     fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(client_endpoint, client_tls,
-                            {.connection_owner = nullptr, .create_connection = create_connection}));
+    ASSERT_TRUE(client.init(
+            client_endpoint, client_tls,
+            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
 
     std::promise<ConnectSummary> promise;
     auto future = promise.get_future();
@@ -771,8 +778,9 @@ TEST(QuicClientTest, RejectsCertificateForWrongHostname) {
     ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
 
     fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(client_endpoint, client_tls,
-                            {.connection_owner = nullptr, .create_connection = create_connection}));
+    ASSERT_TRUE(client.init(
+            client_endpoint, client_tls,
+            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
 
     std::promise<ConnectSummary> promise;
     auto future = promise.get_future();
@@ -827,8 +835,9 @@ TEST(QuicClientTest, UnknownDcidStatelessResetUsesEndpointTokenIndex) {
     ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
 
     fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(client_endpoint, client_tls,
-                            {.connection_owner = nullptr, .create_connection = create_connection}));
+    ASSERT_TRUE(client.init(
+            client_endpoint, client_tls,
+            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
 
     std::promise<StatelessResetSummary> promise;
     auto future = promise.get_future();
@@ -879,8 +888,9 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshakeAfterRetry) {
     ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
 
     fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(client_endpoint, client_tls,
-                            {.connection_owner = nullptr, .create_connection = create_connection}));
+    ASSERT_TRUE(client.init(
+            client_endpoint, client_tls,
+            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
 
     std::promise<ConnectSummary> promise;
     auto future = promise.get_future();
@@ -941,7 +951,8 @@ TEST(QuicClientTest, ReusesSessionAndNewTokenWithEarlyData) {
             .store_session = TestClientCache::store_session,
             .store_token = TestClientCache::store_token,
     };
-    ASSERT_TRUE(client.init(client_endpoint, client_tls, client_options_config));
+    client_options_config.alpn = {"fiber-quic-test"};
+    ASSERT_TRUE(client.init(client_endpoint, client_tls, std::move(client_options_config)));
 
     std::promise<ResumptionSummary> promise;
     auto future = promise.get_future();

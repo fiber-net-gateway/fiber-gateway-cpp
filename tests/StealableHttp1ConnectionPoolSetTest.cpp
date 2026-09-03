@@ -194,12 +194,13 @@ fiber::http::Http1ClientConnectionOptions client_options(std::uint16_t port,
 }
 
 fiber::http::Http1ClientConnectionOptions
-https_client_options(std::uint16_t port, const fiber::net::TlsClientParam &tls,
+https_client_options(std::uint16_t port, const fiber::net::TlsClientSecurity &tls,
                      fiber::http::Http1ConnectionPoolAffinity pool_affinity = {}) {
     fiber::http::Http1ClientConnectionOptions options;
     options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls = tls;
-    options.tls.sni_name = "localhost";
+    options.tls.emplace();
+    options.tls->security = tls;
+    options.tls->server_name = "localhost";
     options.pool_affinity = pool_affinity;
     return options;
 }
@@ -399,7 +400,7 @@ acquire_in_task(fiber::http::StealableHttp1ConnectionPoolSet *set, const fiber::
 
 DetachedTask run_https_home_connect(fiber::http::StealableHttp1ConnectionPoolSet *set,
                                     const fiber::http::Http1ConnectionGroupKey *key, std::uint16_t port,
-                                    const fiber::net::TlsClientParam *tls,
+                                    const fiber::net::TlsClientSecurity *tls,
                                     std::atomic<fiber::http::Http1ClientConnection *> *home_conn,
                                     std::atomic_bool *done) {
     auto lease = co_await set->acquire(*key);
@@ -422,9 +423,10 @@ DetachedTask run_https_profile_isolation_and_borrow(fiber::http::StealableHttp1C
     auto different_connection = different_profile.emplace_connection(std::move(different_options));
     isolated = isolated && different_connection.has_value() && *different_connection != expected_conn &&
                (*different_connection)->options().pool_affinity == different_key->pool_affinity() &&
-               (*different_connection)->options().tls.verify_peer &&
-               (*different_connection)->options().tls.sni_name == "routing.example.test" &&
-               (*different_connection)->options().tls.verify_name == "localhost";
+               (*different_connection)->options().tls.has_value() &&
+               (*different_connection)->options().tls->security.verify_peer &&
+               (*different_connection)->options().tls->server_name == "routing.example.test" &&
+               (*different_connection)->options().tls->verify_name == "localhost";
     if (different_profile.has_connection()) {
         different_profile.connection().close();
     }
@@ -1430,12 +1432,10 @@ TEST(StealableHttp1ConnectionPoolSetTest, HttpsTransportProfilesStayIsolatedAcro
     const std::uint16_t port = server_port_future.get();
     ASSERT_NE(port, 0);
 
-    fiber::net::TlsClientParam insecure_tls{};
-    insecure_tls.enable_tls = true;
+    fiber::net::TlsClientSecurity insecure_tls{};
     auto verified_trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(cert.path));
     ASSERT_TRUE(verified_trust_store);
-    fiber::net::TlsClientParam verified_tls{};
-    verified_tls.enable_tls = true;
+    fiber::net::TlsClientSecurity verified_tls{};
     verified_tls.trust_store = verified_trust_store->get();
     verified_tls.verify_peer = true;
 
@@ -1456,9 +1456,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, HttpsTransportProfilesStayIsolatedAcro
     const auto different_key = *different_key_result;
 
     auto different_options = https_client_options(port, verified_tls, different_key.pool_affinity());
-    different_options.tls.verify_peer = true;
-    different_options.tls.sni_name = "routing.example.test";
-    different_options.tls.verify_name = "localhost";
+    different_options.tls->security.verify_peer = true;
+    different_options.tls->server_name = "routing.example.test";
+    different_options.tls->verify_name = "localhost";
 
     auto home_conn = std::make_shared<std::atomic<fiber::http::Http1ClientConnection *>>(nullptr);
     auto home_ready = std::make_shared<std::atomic_bool>(false);
