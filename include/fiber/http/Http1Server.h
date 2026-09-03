@@ -14,6 +14,7 @@
 #include "../net/TcpListener.h"
 #include "../net/TlsParams.h"
 #include "HttpExchange.h"
+#include "HttpServerOptions.h"
 
 namespace fiber::http {
 

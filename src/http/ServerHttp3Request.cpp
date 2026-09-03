@@ -166,9 +166,8 @@ ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOp
                                        const HttpHandler &handler,
                                        std::shared_ptr<const HttpHandler> handler_owner) noexcept :
     quic_lease_(conn.quic().lease()), stream_(this, &ServerHttp3Request::destroy_owner),
-    inbound_buf_(conn.quic().recv_extent_pool()),
-    exchange_(conn.quic().recv_extent_pool(), http_options, conn.quic().remote_addr()), handler_(&handler),
-    handler_owner_(std::move(handler_owner)),
+    inbound_buf_(conn.quic().recv_extent_pool()), exchange_(conn.quic().recv_extent_pool(), conn.quic().remote_addr()),
+    handler_(&handler), handler_owner_(std::move(handler_owner)),
     max_qpack_string_size_(static_cast<std::uint32_t>(
             std::min<std::size_t>(http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
     body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader),

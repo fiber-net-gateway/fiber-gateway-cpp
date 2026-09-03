@@ -6,6 +6,7 @@
 
 #include "Http2StreamFactory.h"
 #include "HttpExchange.h"
+#include "HttpServerOptions.h"
 
 namespace fiber::http {
 
