@@ -63,20 +63,21 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
     std::unique_ptr<HttpTransport> transport;
     if (tls_options_) {
         auto tls_param = make_http2_client_tls_param(*tls_options_);
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), std::move(tls_param), tcp_options_);
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tcp_options_);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
-        transport = std::move(*transport_result);
+        auto tls_transport = std::move(*transport_result);
 
-        auto handshake_result = co_await transport->handshake(tls_options_->handshake_timeout);
+        auto handshake_result = co_await tls_transport->handshake(tls_param, tls_options_->handshake_timeout);
         if (!handshake_result) {
             co_return std::unexpected(handshake_result.error());
         }
-        if (transport->negotiated_alpn() != kH2Alpn) {
-            transport->close();
+        if (tls_transport->negotiated_alpn() != kH2Alpn) {
+            tls_transport->close();
             co_return std::unexpected(common::IoErr::NotSupported);
         }
+        transport = std::move(tls_transport);
     } else {
         auto transport_result = TcpTransport::create(*loop_, std::move(accept), tcp_options_);
         if (!transport_result) {

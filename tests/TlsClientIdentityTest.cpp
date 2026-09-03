@@ -148,10 +148,11 @@ struct HandshakeSideResult {
     std::string alpn;
 };
 
-DetachedTask run_handshake(fiber::http::TlsTransport *transport, std::chrono::milliseconds timeout,
-                           std::promise<HandshakeSideResult> *done) {
+template<typename TlsParam>
+DetachedTask run_handshake(fiber::http::TlsTransport *transport, const TlsParam &param,
+                           std::chrono::milliseconds timeout, std::promise<HandshakeSideResult> *done) {
     HandshakeSideResult result;
-    auto handshake_result = co_await transport->handshake(timeout);
+    auto handshake_result = co_await transport->handshake(param, timeout);
     result.err = handshake_result ? fiber::common::IoErr::None : handshake_result.error();
     if (handshake_result) {
         result.alpn.assign(transport->negotiated_alpn());
@@ -187,11 +188,9 @@ HandshakeResult run_handshake_pair(const fiber::net::TlsServerParam &server_opti
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), server_options);
+    auto server_result = fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
     fds[0] = -1;
-    auto client_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer), client_options);
+    auto client_result = fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
     fds[1] = -1;
     if (!server_result || !client_result) {
         if (server_result) {
@@ -211,8 +210,10 @@ HandshakeResult run_handshake_pair(const fiber::net::TlsServerParam &server_opti
     std::promise<HandshakeSideResult> client_promise;
     auto server_future = server_promise.get_future();
     auto client_future = client_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return run_handshake(server_transport, 2s, &server_promise); });
-    fiber::async::spawn(group.at(1), [&]() { return run_handshake(client_transport, 2s, &client_promise); });
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_handshake(server_transport, server_options, 2s, &server_promise); });
+    fiber::async::spawn(group.at(1),
+                        [&]() { return run_handshake(client_transport, client_options, 2s, &client_promise); });
 
     auto server_side = server_future.get();
     auto client_side = client_future.get();
@@ -455,15 +456,14 @@ TEST(TlsClientIdentityTest, FailedClientHandshakeCanBeReleasedOnOwnerLoop) {
     group.start();
 
     fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer), client_options);
+    auto transport_result = fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
     fds[0] = -1;
     ASSERT_TRUE(transport_result);
     auto *transport = transport_result->release();
 
     std::promise<HandshakeSideResult> promise;
     auto future = promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return run_handshake(transport, 20ms, &promise); });
+    fiber::async::spawn(group.at(0), [&]() { return run_handshake(transport, client_options, 20ms, &promise); });
     ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(future.get().err, fiber::common::IoErr::TimedOut);
 

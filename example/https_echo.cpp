@@ -315,14 +315,14 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
         co_return;
     }
     fiber::net::AcceptResult accept(fd, stream->remote_addr());
-    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept), tls_options);
+    auto transport_result = fiber::http::TlsTransport::create(stream->loop(), std::move(accept));
     if (!transport_result) {
         co_await fail("tls transport create failed", transport_result.error());
         co_return;
     }
     auto transport = std::move(*transport_result);
 
-    auto hs_result = co_await transport->handshake(std::chrono::seconds(5));
+    auto hs_result = co_await transport->handshake(tls_options, std::chrono::seconds(5));
     if (!hs_result) {
         co_await fail("tls handshake failed", hs_result.error());
         co_return;

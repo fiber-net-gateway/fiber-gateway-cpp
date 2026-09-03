@@ -771,8 +771,6 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithoutBody) {
     fiber::http::HttpServerOptions server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
-    static constexpr std::string_view kServerAlpn[] = {"h2"};
-    server_options.tls.alpn = kServerAlpn;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;
@@ -840,8 +838,6 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithBody) {
     fiber::http::HttpServerOptions server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
-    static constexpr std::string_view kServerAlpn[] = {"h2"};
-    server_options.tls.alpn = kServerAlpn;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;
@@ -907,8 +903,6 @@ TEST(HttpClientServerInteropTest, Http2ServerEventLoopGroupDispatch) {
     fiber::http::HttpServerOptions server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
-    static constexpr std::string_view kServerAlpn[] = {"h2"};
-    server_options.tls.alpn = kServerAlpn;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::HttpServer *> server_promise;

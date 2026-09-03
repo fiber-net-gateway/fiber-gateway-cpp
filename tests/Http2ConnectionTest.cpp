@@ -50,10 +50,6 @@ public:
         chunks_(std::move(chunks)), write_steps_(std::move(write_steps)), reads_blocked_(block_reads),
         hold_eof_(hold_eof), report_pending_read_(report_pending_read) {}
 
-    fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
-        co_return fiber::common::IoResult<void>{};
-    }
-
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         ++shutdown_count_;
         co_return fiber::common::IoResult<void>{};
@@ -292,10 +288,6 @@ public:
     };
 
     explicit ScriptedReadTransport(std::vector<ReadAction> actions) : actions_(std::move(actions)) {}
-
-    fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
-        co_return fiber::common::IoResult<void>{};
-    }
 
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         ++shutdown_count_;

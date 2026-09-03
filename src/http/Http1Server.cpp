@@ -20,9 +20,6 @@ fiber::common::IoResult<void> Http1Server::bind(const net::SocketAddress &addr, 
     if (!result) {
         return std::unexpected(result.error());
     }
-    if (options_.tls.enabled()) {
-        normalize_http1_alpn(options_.tls, options_.tls_alpn);
-    }
     return {};
 }
 
@@ -55,17 +52,19 @@ fiber::async::DetachedTask Http1Server::serve() {
 
                     std::unique_ptr<HttpTransport> transport;
                     if (options_.tls.enabled()) {
-                        auto tls_result = TlsTransport::create(event::EventLoop::current(), std::move(accept),
-                                                               options_.tls, options_.tcp);
+                        auto tls_result =
+                                TlsTransport::create(event::EventLoop::current(), std::move(accept), options_.tcp);
                         if (!tls_result) {
                             co_return;
                         }
-                        transport = std::move(*tls_result);
-                        auto hs_result = co_await transport->handshake(net::kDefaultTlsHandshakeTimeout);
+                        auto tls_transport = std::move(*tls_result);
+                        auto tls_param = make_http1_server_tls_param(options_.tls);
+                        auto hs_result = co_await tls_transport->handshake(tls_param, net::kDefaultTlsHandshakeTimeout);
                         if (!hs_result) {
-                            transport->close();
+                            tls_transport->close();
                             co_return;
                         }
+                        transport = std::move(tls_transport);
                     } else {
                         auto tcp_result =
                                 TcpTransport::create(event::EventLoop::current(), std::move(accept), options_.tcp);

@@ -154,10 +154,6 @@ struct OwnedStreamHolder {
 
 class DummyHttpTransport final : public fiber::test::HttpTransportStub {
 public:
-    fiber::async::Task<fiber::common::IoResult<void>> handshake(std::chrono::milliseconds) override {
-        co_return fiber::common::IoResult<void>{};
-    }
-
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         co_return fiber::common::IoResult<void>{};
     }

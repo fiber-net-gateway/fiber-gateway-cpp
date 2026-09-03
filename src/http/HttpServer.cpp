@@ -250,9 +250,6 @@ fiber::common::IoResult<void> HttpServer::bind(const net::SocketAddress &addr, c
     }
     bound_addr = *local_addr;
 
-    if (runtime->options.tls.enabled()) {
-        normalize_http_server_alpn(runtime->options.tls, runtime->options.tls_alpn);
-    }
     if (runtime->options.http3.enabled) {
         runtime->http3_server = std::make_unique<Http3Server>(runtime->listener.loop(), runtime->handler,
                                                               runtime->options, runtime->worker_group);
@@ -354,21 +351,22 @@ fiber::async::DetachedTask HttpServer::handle_connection(std::shared_ptr<Runtime
 
     std::unique_ptr<HttpTransport> transport;
     if (runtime->options.tls.enabled()) {
-        auto tls_result = TlsTransport::create(event::EventLoop::current(), std::move(accept), runtime->options.tls,
-                                               runtime->options.tcp);
+        auto tls_result = TlsTransport::create(event::EventLoop::current(), std::move(accept), runtime->options.tcp);
         if (!tls_result) {
             co_return;
         }
-        transport = std::move(*tls_result);
-        auto hs_result = co_await transport->handshake(net::kDefaultTlsHandshakeTimeout);
+        auto tls_transport = std::move(*tls_result);
+        auto tls_param = make_http_server_tls_param(runtime->options.tls);
+        auto hs_result = co_await tls_transport->handshake(tls_param, net::kDefaultTlsHandshakeTimeout);
         if (!hs_result) {
-            transport->close();
+            tls_transport->close();
             co_return;
         }
         if (runtime->closing()) {
-            transport->close();
+            tls_transport->close();
             co_return;
         }
+        transport = std::move(tls_transport);
     } else {
         auto tcp_result = TcpTransport::create(event::EventLoop::current(), std::move(accept), runtime->options.tcp);
         if (!tcp_result) {

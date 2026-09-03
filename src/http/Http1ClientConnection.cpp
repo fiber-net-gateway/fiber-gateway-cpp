@@ -201,22 +201,23 @@ Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresse
     std::unique_ptr<HttpTransport> transport;
     if (options_.tls) {
         auto tls_param = make_http1_client_tls_param(*options_.tls);
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), std::move(tls_param), options_.tcp);
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), options_.tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
-        transport = std::move(*transport_result);
+        auto tls_transport = std::move(*transport_result);
 
-        auto handshake_result = co_await transport->handshake(options_.tls->handshake_timeout);
+        auto handshake_result = co_await tls_transport->handshake(tls_param, options_.tls->handshake_timeout);
         if (!handshake_result) {
-            transport->close();
+            tls_transport->close();
             co_return std::unexpected(handshake_result.error());
         }
 
-        if (!supports_http1_alpn(transport->negotiated_alpn())) {
-            transport->close();
+        if (!supports_http1_alpn(tls_transport->negotiated_alpn())) {
+            tls_transport->close();
             co_return std::unexpected(common::IoErr::NotSupported);
         }
+        transport = std::move(tls_transport);
     } else {
         auto transport_result = TcpTransport::create(*loop_, std::move(accept), options_.tcp);
         if (!transport_result) {
