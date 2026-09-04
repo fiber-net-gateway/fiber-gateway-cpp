@@ -63,7 +63,7 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
                                                      const TlsNewSessionOps *new_session_ops) noexcept {
     OpenSslErrorQueueScope error_queue_scope;
     SSL_CTX *context = TlsRuntime::client_context();
-    if (!context || (param.security.verify_peer && !param.security.trust_store)) {
+    if (!context) {
         return std::unexpected(common::IoErr::Invalid);
     }
     SSL *ssl = SSL_new(context);
@@ -99,7 +99,18 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
     }
 
     if (param.security.verify_peer) {
-        if (SSL_set1_verify_cert_store(ssl, param.security.trust_store->store_) != 1) {
+        // A null trust store means the process-wide system roots. Resolution
+        // happens once per process (TrustStore::system_default caches it);
+        // NotFound reports that no system CA bundle exists on this host.
+        const TrustStore *trust_store = param.security.trust_store;
+        if (trust_store == nullptr) {
+            auto system_store = TrustStore::system_default();
+            if (!system_store) {
+                return fail(system_store.error());
+            }
+            trust_store = *system_store;
+        }
+        if (SSL_set1_verify_cert_store(ssl, trust_store->store_) != 1) {
             return fail(common::IoErr::Invalid);
         }
         SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);

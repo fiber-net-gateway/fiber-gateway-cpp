@@ -53,6 +53,13 @@ public:
 
     [[nodiscard]] static const std::string &system_ca_bundle_path() noexcept;
 
+    // Process-wide system trust store, resolved on first use and cached for
+    // the lifetime of the process — including a failed resolution, so systems
+    // without a CA bundle do not re-probe the filesystem per connection. The
+    // store is intentionally never destroyed; SSLs installed with the set1
+    // APIs hold their own references regardless.
+    [[nodiscard]] static common::IoResult<const TrustStore *> system_default() noexcept;
+
 private:
     friend class TlsServerHandshakeConfig;
     friend class detail::TlsSslFactory;

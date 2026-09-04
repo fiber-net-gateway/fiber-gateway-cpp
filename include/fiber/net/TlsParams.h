@@ -81,6 +81,10 @@ struct TlsClientSecurity {
     // The SSL retains its own references after successful installation.
     // TLS clients without a client certificate leave credential null.
     const TlsCredential *credential = nullptr;
+    // Trust anchors for peer verification. Null with verify_peer set means
+    // the process-wide system roots (TrustStore::system_default): pass an
+    // explicit store when the peer must chain to a private CA only — a null
+    // store would happily accept publicly-trusted certificates too.
     const TrustStore *trust_store = nullptr;
     bool verify_peer = false;
 };

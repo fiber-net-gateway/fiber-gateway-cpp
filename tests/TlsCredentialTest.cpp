@@ -170,10 +170,33 @@ TEST(TlsSslFactoryTest, ServerWithoutConfigurationCallbackIsRejected) {
     EXPECT_EQ(fiber::net::detail::TlsSslFactory::create_server(server_param).error(), fiber::common::IoErr::Invalid);
 }
 
-TEST(TlsSslFactoryTest, VerifyPeerWithoutTrustStoreIsRejected) {
+// A verifying client without an explicit trust store falls back to the
+// process-wide system roots. Hosts without any CA bundle surface NotFound.
+TEST(TlsSslFactoryTest, VerifyPeerWithoutTrustStoreUsesSystemRoots) {
     fiber::net::TlsClientParam client_param{};
     client_param.security.verify_peer = true;
-    EXPECT_EQ(fiber::net::detail::TlsSslFactory::create_client(client_param).error(), fiber::common::IoErr::Invalid);
+    client_param.server_name = "localhost";
+    auto client = fiber::net::detail::TlsSslFactory::create_client(client_param);
+    if (!client && client.error() == fiber::common::IoErr::NotFound) {
+        GTEST_SKIP() << "no system CA bundle discovered on this host";
+    }
+    ASSERT_TRUE(client.has_value()) << "client factory failed with io_error="
+                                    << fiber::common::io_err_name(client.error());
+    SSL_free(*client);
+}
+
+TEST(TrustStoreSystemCa, SystemDefaultIsCachedSingleton) {
+    const auto first = fiber::net::TrustStore::system_default();
+    const auto second = fiber::net::TrustStore::system_default();
+    if (!first && first.error() == fiber::common::IoErr::NotFound) {
+        ASSERT_FALSE(second.has_value());
+        EXPECT_EQ(second.error(), fiber::common::IoErr::NotFound);
+        GTEST_SKIP() << "no system CA bundle discovered on this host";
+    }
+    ASSERT_TRUE(first.has_value()) << "system_default failed with io_error="
+                                   << fiber::common::io_err_name(first.error());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(*first, *second);
 }
 
 } // namespace
