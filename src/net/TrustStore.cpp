@@ -118,4 +118,28 @@ const std::string &TrustStore::system_ca_bundle_path() noexcept {
     return cached;
 }
 
+common::IoResult<const TrustStore *> TrustStore::system_default() noexcept {
+    struct SystemStoreHolder {
+        const TrustStore *store = nullptr;
+        common::IoErr error = common::IoErr::None;
+
+        SystemStoreHolder() noexcept {
+            auto created = TrustStore::create(TrustStoreOptions::system());
+            if (created) {
+                store = created->release();
+            } else {
+                error = created.error();
+            }
+        }
+    };
+    // Function-local static init is thread-safe; the holder caches both the
+    // resolved store and the failure so neither the filesystem nor the PEM
+    // parser runs more than once per process.
+    static const SystemStoreHolder holder{};
+    if (holder.store == nullptr) {
+        return std::unexpected(holder.error);
+    }
+    return holder.store;
+}
+
 } // namespace fiber::net

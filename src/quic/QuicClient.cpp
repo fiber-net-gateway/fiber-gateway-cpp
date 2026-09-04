@@ -165,7 +165,7 @@ void QuicClientAttempt::cancel() noexcept {
 common::IoResult<void> QuicClient::init(QuicUdpEndpoint &endpoint, net::TlsClientSecurity tls_security,
                                         Options options) noexcept {
     if (endpoint_ != nullptr || !endpoint.valid() || endpoint.loop_ == nullptr || options.alpn.empty() ||
-        options.create_connection == nullptr || (tls_security.verify_peer && tls_security.trust_store == nullptr)) {
+        options.create_connection == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
     endpoint_ = &endpoint;
