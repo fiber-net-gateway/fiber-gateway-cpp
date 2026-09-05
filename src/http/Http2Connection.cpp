@@ -309,7 +309,6 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
     next_local_stream_id_ = options_.role == ConnectionRole::Client ? 1U : 2U;
     peer_max_outbound_frame_size_ = options_.max_frame_size;
     conn_send_window_ = static_cast<std::int32_t>(options_.initial_connection_send_window);
-    FIBER_ASSERT(streams_.init(configured_max_active_streams()));
     FIBER_ASSERT(inbound_hpack_decoder_.init(kDefaultHeaderTableSize, options_.max_hpack_string_size));
 }
 
@@ -1820,15 +1819,12 @@ common::IoErr Http2Connection::local_stream_attach_gate() const noexcept {
     return common::IoErr::None;
 }
 
+// The stream table grows on demand, so the peer's SETTINGS_MAX_CONCURRENT_STREAMS
+// is the only ceiling on locally initiated streams.
 std::size_t Http2Connection::available_local_stream_attach_slots() const noexcept {
     const std::size_t peer_limit = static_cast<std::size_t>(peer_advertised_max_concurrent_streams_);
-    const std::size_t protocol_used = local_active_stream_count_ + local_stream_attach_granted_count_;
-    const std::size_t protocol_available = peer_limit > protocol_used ? peer_limit - protocol_used : 0;
-
-    const std::size_t table_limit = streams_.max_active_streams();
-    const std::size_t table_used = streams_.size() + local_stream_attach_granted_count_;
-    const std::size_t table_available = table_limit > table_used ? table_limit - table_used : 0;
-    return std::min(protocol_available, table_available);
+    const std::size_t used = local_active_stream_count_ + local_stream_attach_granted_count_;
+    return peer_limit > used ? peer_limit - used : 0;
 }
 
 void Http2Connection::enqueue_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept {
@@ -2123,12 +2119,6 @@ void Http2Connection::enter_closing(common::IoErr reason, bool report_error) noe
     abort_outbound(reason);
     outbound_wait_event_ = event::IoEvent::None;
     finish_connection();
-}
-
-std::size_t Http2Connection::configured_max_active_streams() const noexcept {
-    return static_cast<std::size_t>(options_.local_max_concurrent_streams) +
-           std::max(static_cast<std::size_t>(options_.max_peer_concurrent_streams),
-                    static_cast<std::size_t>(options_.max_local_push_streams));
 }
 
 void Http2Connection::bind_outbound_chain(mem::IoBufChain &chain) noexcept {
