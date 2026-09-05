@@ -478,12 +478,11 @@ const Http1ConnectionGroupKey &StealableHttp1ConnectionPoolSet::Lease::key() con
     FIBER_PANIC("empty stealable pool lease has no key");
 }
 
-common::IoResult<Http1ClientConnection *>
-StealableHttp1ConnectionPoolSet::Lease::emplace_connection(Http1ClientConnectionOptions options) noexcept {
+common::IoResult<Http1ClientConnection *> StealableHttp1ConnectionPoolSet::Lease::emplace_connection() noexcept {
     if (kind_ != Kind::Local) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    return local_.emplace_connection(std::move(options));
+    return local_.emplace_connection();
 }
 
 void StealableHttp1ConnectionPoolSet::Lease::reset() noexcept {

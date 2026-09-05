@@ -32,8 +32,7 @@ int run_wrong_thread_operation_child(WrongThreadOperation operation) {
     }
     if (pid == 0) {
         fiber::event::EventLoopGroup group(1);
-        auto *connection = new (std::nothrow)
-                fiber::http::Http1ClientConnection(group.at(0), fiber::http::Http1ClientConnectionOptions{});
+        auto *connection = new (std::nothrow) fiber::http::Http1ClientConnection(group.at(0));
         if (!connection) {
             _exit(10);
         }
@@ -89,11 +88,9 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::promise<std::ui
 DetachedTask run_client_connect(fiber::event::EventLoop *loop, std::uint16_t port,
                                 std::promise<fiber::common::IoErr> *result_promise,
                                 std::promise<bool> *connected_promise) {
-    fiber::http::Http1ClientConnectionOptions options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     connected_promise->set_value(connect_result.has_value() && connection.connected() && connection.idle() &&
                                  connection.reusable() && !connection.busy() && connection.request_count() == 0);
     result_promise->set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());
@@ -107,16 +104,13 @@ DetachedTask run_client_multi_connect(fiber::event::EventLoop *loop, std::uint16
             fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v6(), port),
             fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port),
     }};
-    fiber::http::Http1ClientConnectionOptions connection_options;
-    connection_options.peer_addr = addresses[0];
-    fiber::http::Http1ClientConnection connection(*loop, std::move(connection_options));
+    fiber::http::Http1ClientConnection connection(*loop);
 
     fiber::net::HappyEyeballsOptions connect_options;
     connect_options.total_timeout = 5s;
     auto connect_result = co_await connection.connect(addresses, connect_options);
     connected_promise->set_value(connect_result.has_value() && connection.connected() && connection.idle() &&
-                                 connection.reusable() &&
-                                 connection.options().peer_addr.family() == fiber::net::IpFamily::V4);
+                                 connection.reusable() && connection.peer_addr().family() == fiber::net::IpFamily::V4);
     result_promise->set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());
     connection.close();
 }
@@ -124,9 +118,8 @@ DetachedTask run_client_multi_connect(fiber::event::EventLoop *loop, std::uint16
 DetachedTask run_client_connect_after_failed_multi(fiber::event::EventLoop *loop, std::uint16_t port,
                                                    std::promise<fiber::common::IoErr> *result_promise,
                                                    std::promise<bool> *state_promise) {
-    fiber::http::Http1ClientConnectionOptions connection_options;
-    connection_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    fiber::http::Http1ClientConnection connection(*loop, std::move(connection_options));
+    const fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), port);
+    fiber::http::Http1ClientConnection connection(*loop);
 
     fiber::net::HappyEyeballsOptions connect_options;
     connect_options.total_timeout = 5s;
@@ -135,9 +128,9 @@ DetachedTask run_client_connect_after_failed_multi(fiber::event::EventLoop *loop
             !failed_result && failed_result.error() == fiber::common::IoErr::NotFound && !connection.valid() &&
             !connection.connected() && !connection.idle() && !connection.reusable();
 
-    auto connect_result = co_await connection.connect(5s);
+    auto connect_result = co_await connection.connect(peer, 5s);
     state_promise->set_value(failure_left_no_partial_state && connect_result.has_value() && connection.connected() &&
-                             connection.options().peer_addr.family() == fiber::net::IpFamily::V4);
+                             connection.peer_addr().family() == fiber::net::IpFamily::V4);
     result_promise->set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());
     connection.close();
 }

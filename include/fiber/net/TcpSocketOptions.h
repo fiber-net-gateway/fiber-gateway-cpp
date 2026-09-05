@@ -17,6 +17,10 @@ struct TcpSocketOptions {
     TcpOptionMode no_delay = TcpOptionMode::Unchanged;
 };
 
+// Default for client connections that write small request headers: Nagle would
+// hold a request back waiting for more bytes that never come.
+inline constexpr TcpSocketOptions kNoDelayTcpSocketOptions{.no_delay = TcpOptionMode::Enabled};
+
 namespace detail {
 
 [[nodiscard]] common::IoErr apply_tcp_socket_options(int fd, const TcpSocketOptions &options) noexcept;

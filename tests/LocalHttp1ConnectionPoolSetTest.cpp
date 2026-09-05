@@ -40,7 +40,7 @@ TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
     group.start();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
         auto lease = set.acquire(key);
-        auto conn_result = lease.emplace_connection({});
+        auto conn_result = lease.emplace_connection();
         bool ok = lease.valid() && !lease.hit() && conn_result.has_value() && lease.get() != nullptr &&
                   &lease.connection().loop() == &fiber::event::EventLoop::current() &&
                   &set.loop() == &fiber::event::EventLoop::current() && set.idle_total() == 0 && set.group_count() == 0;
@@ -50,7 +50,7 @@ TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
     });
     fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
         auto lease = set.acquire(key);
-        auto conn_result = lease.emplace_connection({});
+        auto conn_result = lease.emplace_connection();
         bool ok = lease.valid() && !lease.hit() && conn_result.has_value() && lease.get() != nullptr &&
                   &lease.connection().loop() == &fiber::event::EventLoop::current() &&
                   &set.loop() == &fiber::event::EventLoop::current() && set.idle_total() == 0 && set.group_count() == 0;

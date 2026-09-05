@@ -293,11 +293,9 @@ DetachedTask run_http1_client_no_body(fiber::event::EventLoop *loop, std::uint16
                                       std::promise<ClientRoundTripResult> *promise) {
     constexpr std::string_view kTarget = "/interop/http1/no-body";
     ClientRoundTripResult result;
-    fiber::http::Http1ClientConnectionOptions options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, options);
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -346,11 +344,9 @@ DetachedTask run_http1_client_no_body(fiber::event::EventLoop *loop, std::uint16
 DetachedTask run_http1_client_no_body_target(fiber::event::EventLoop *loop, std::uint16_t port, std::string target,
                                              std::promise<ClientRoundTripResult> *promise) {
     ClientRoundTripResult result;
-    fiber::http::Http1ClientConnectionOptions options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, options);
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -399,11 +395,9 @@ DetachedTask run_http1_client_no_body_target(fiber::event::EventLoop *loop, std:
 DetachedTask run_http1_client_with_body(fiber::event::EventLoop *loop, std::uint16_t port,
                                         std::promise<ClientRoundTripResult> *promise) {
     ClientRoundTripResult result;
-    fiber::http::Http1ClientConnectionOptions options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, options);
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -459,13 +453,12 @@ DetachedTask run_http1_client_with_body(fiber::event::EventLoop *loop, std::uint
 DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16_t port,
                                       std::promise<ClientRoundTripResult> *promise) {
     ClientRoundTripResult result;
-    fiber::http::Http2ClientConnection::Options options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.emplace();
-    options.tls->server_name = "localhost";
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
 
-    fiber::http::Http2ClientConnection connection(*loop, std::move(options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http2ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s, tls);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));
@@ -527,13 +520,12 @@ DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16
 DetachedTask run_http2_client_with_body(fiber::event::EventLoop *loop, std::uint16_t port,
                                         std::promise<ClientRoundTripResult> *promise) {
     ClientRoundTripResult result;
-    fiber::http::Http2ClientConnection::Options options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.emplace();
-    options.tls->server_name = "localhost";
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
 
-    fiber::http::Http2ClientConnection connection(*loop, std::move(options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http2ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s, tls);
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));

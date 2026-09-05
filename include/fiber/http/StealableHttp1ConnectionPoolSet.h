@@ -43,8 +43,7 @@ public:
 
         [[nodiscard]] Http1ClientConnection &connection() noexcept;
         [[nodiscard]] const Http1ConnectionGroupKey &key() const noexcept;
-        [[nodiscard]] common::IoResult<Http1ClientConnection *>
-        emplace_connection(Http1ClientConnectionOptions options) noexcept;
+        [[nodiscard]] common::IoResult<Http1ClientConnection *> emplace_connection() noexcept;
         void reset() noexcept;
 
     private:
