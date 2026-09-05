@@ -4,16 +4,13 @@
 #include <array>
 #include <chrono>
 #include <concepts>
-#include <coroutine>
 #include <cstddef>
-#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <type_traits>
 #include <utility>
 
-#include "../async/Task.h"
 #include "../common/Assert.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
@@ -87,14 +84,19 @@ public:
                     const Http2StreamFactoryOps &peer_stream_factory_ops);
 
     // Must be called on transport->loop(). A successful start owns and drives
-    // transport I/O until closure; no run coroutine is required. on_closed is
-    // invoked on the loop after all connection state is closed and may destroy
-    // the connection. Use either on_closed or wait_closed(), not both.
-    common::IoErr start(std::unique_ptr<HttpTransport> transport, ClosedCallback on_closed = nullptr,
-                        void *closed_ctx = nullptr) noexcept;
+    // transport I/O until closure; no run coroutine is required.
+    common::IoErr start(std::unique_ptr<HttpTransport> transport) noexcept;
 
-    // Waits for close completion; this does not drive I/O.
-    fiber::async::Task<CloseResult> wait_closed() noexcept;
+    // Fires once on the loop after all connection state is closed, and may
+    // destroy the connection. There is one slot: Http2CloseGate takes it and
+    // fans closure out to as many observers and coroutines as needed.
+    void set_closed_callback(ClosedCallback cb, void *ctx) noexcept;
+    void clear_closed_callback() noexcept;
+    // True once the close callback has run (or was skipped because the
+    // connection never started), i.e. no notification is still coming.
+    [[nodiscard]] bool has_closed_callback() const noexcept { return on_closed_ != nullptr; }
+    [[nodiscard]] bool close_dispatched() const noexcept { return close_completion_dispatched_; }
+    [[nodiscard]] common::IoErr terminal_error() const noexcept { return terminal_error_; }
     // Immediate fast path. Returns Busy when the peer's concurrent-stream budget is exhausted.
     [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream(Http2Stream &stream) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
@@ -169,7 +171,6 @@ protected:
     [[nodiscard]] bool outbound_stopped() const noexcept { return outbound_stopped_; }
     [[nodiscard]] Http2HpackDecoder &inbound_hpack_decoder() noexcept { return inbound_hpack_decoder_; }
     [[nodiscard]] const Http2HpackDecoder &inbound_hpack_decoder() const noexcept { return inbound_hpack_decoder_; }
-    fiber::async::Task<void> stop_and_wait_closed(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 private:
     enum class ParsePhase : std::uint8_t {
@@ -201,17 +202,6 @@ private:
         event::IoEvent wait_event = event::IoEvent::None;
         std::size_t bytes_written = 0;
         bool needs_reschedule = false;
-    };
-
-    struct ClosedAwaiter {
-        Http2Connection *connection = nullptr;
-        std::coroutine_handle<> handle{};
-
-        ~ClosedAwaiter();
-
-        [[nodiscard]] bool await_ready() const noexcept { return connection->close_completion_dispatched_; }
-        bool await_suspend(std::coroutine_handle<> continuation) noexcept;
-        void await_resume() noexcept;
     };
 
     struct InboundStream {
@@ -444,7 +434,6 @@ private:
     void *closed_ctx_ = nullptr;
     CapacityCallback capacity_cb_ = nullptr;
     void *capacity_ctx_ = nullptr;
-    std::coroutine_handle<> closed_waiter_{};
     event::IoEvent outbound_wait_event_ = event::IoEvent::None;
     State state_ = State::Init;
     bool stop_sending_requested_ = false;
