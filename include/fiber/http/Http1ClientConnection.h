@@ -17,7 +17,6 @@
 #include "../net/HappyEyeballs.h"
 #include "../net/SocketAddress.h"
 #include "../net/TcpSocketOptions.h"
-#include "Http1ConnectionPoolAffinity.h"
 #include "HttpClientTlsOptions.h"
 
 namespace fiber::http {
@@ -25,27 +24,32 @@ namespace fiber::http {
 class ClientHttp1Exchange;
 class HttpTransport;
 
-struct Http1ClientConnectionOptions {
-    net::SocketAddress peer_addr{};
-    net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
-    std::optional<HttpClientTlsOptions> tls{};
-    // Non-secret identity for all connection-bound transport settings when
-    // this connection is pooled. It must match the acquiring lease key; zero
-    // preserves the legacy/default pool partition.
-    Http1ConnectionPoolAffinity pool_affinity{};
-};
-
 class Http1ClientConnection : public common::NonCopyable, public common::NonMovable {
 public:
-    Http1ClientConnection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept;
+    explicit Http1ClientConnection(event::EventLoop &loop) noexcept;
     ~Http1ClientConnection();
 
-    // timeout applies to the TCP connect phase. TLS handshake timeout is configured separately.
-    fiber::async::Task<common::IoResult<void>> connect(std::chrono::milliseconds timeout) noexcept;
+    // Dials once and, on success, moves to the connected-idle state for good: a connection is
+    // never re-dialed, so everything below is a parameter of the single connect rather than
+    // retained state. `timeout` covers the TCP phase only; the TLS handshake has its own timeout
+    // in HttpClientTlsOptions.
+    //
+    // Every argument is borrowed until the returned task completes, including the storage behind
+    // `addresses` and behind the views in `tls`.
+    fiber::async::Task<common::IoResult<void>>
+    connect(const net::SocketAddress &peer, std::chrono::milliseconds timeout,
+            const net::TcpSocketOptions &tcp = net::kNoDelayTcpSocketOptions) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    connect(const net::SocketAddress &peer, std::chrono::milliseconds timeout, const HttpClientTlsOptions &tls,
+            const net::TcpSocketOptions &tcp = net::kNoDelayTcpSocketOptions) noexcept;
     // Races an already-resolved address set during the TCP phase. The first TCP success proceeds
-    // through the same socket-option and optional TLS setup as the single-address overload.
-    fiber::async::Task<common::IoResult<void>> connect(std::span<const net::SocketAddress> addresses,
-                                                       net::HappyEyeballsOptions options) noexcept;
+    // through the same socket-option and optional TLS setup as the single-address overloads.
+    fiber::async::Task<common::IoResult<void>>
+    connect(std::span<const net::SocketAddress> addresses, const net::HappyEyeballsOptions &options,
+            const net::TcpSocketOptions &tcp = net::kNoDelayTcpSocketOptions) noexcept;
+    fiber::async::Task<common::IoResult<void>>
+    connect(std::span<const net::SocketAddress> addresses, const net::HappyEyeballsOptions &options,
+            const HttpClientTlsOptions &tls, const net::TcpSocketOptions &tcp = net::kNoDelayTcpSocketOptions) noexcept;
     void close() noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
@@ -56,7 +60,9 @@ public:
     [[nodiscard]] std::uint64_t request_count() const noexcept { return request_count_; }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept;
-    [[nodiscard]] const Http1ClientConnectionOptions &options() const noexcept { return options_; }
+    // The address this connection actually reached, which for a raced address set is the winner
+    // of the TCP phase. Empty until connect() succeeds.
+    [[nodiscard]] const net::SocketAddress &peer_addr() const noexcept { return peer_addr_; }
 
 private:
     using IoTask = fiber::async::Task<common::IoResult<std::size_t>>;
@@ -121,9 +127,14 @@ private:
     };
 
     common::IoErr begin_connect() noexcept;
-    fiber::async::Task<common::IoResult<void>> connect_impl(std::span<const net::SocketAddress> addresses,
+    // An engaged `peer` selects the single-address path; otherwise `addresses` is raced, and an
+    // empty set there is a failure rather than a fallback. The caller-facing overloads copy the
+    // small, trivially copyable parameter structs in so only the pointees stay borrowed.
+    fiber::async::Task<common::IoResult<void>> connect_impl(std::optional<net::SocketAddress> peer,
+                                                            std::span<const net::SocketAddress> addresses,
                                                             net::HappyEyeballsOptions options,
-                                                            bool multiple_addresses) noexcept;
+                                                            net::TcpSocketOptions tcp,
+                                                            std::optional<HttpClientTlsOptions> tls) noexcept;
     void assert_active_loop() const noexcept;
     void mark_unusable() noexcept;
     void record_request_started() noexcept;
@@ -139,7 +150,7 @@ private:
     friend class ClientHttp1Exchange;
 
     event::EventLoop *loop_ = nullptr;
-    Http1ClientConnectionOptions options_{};
+    net::SocketAddress peer_addr_{};
     std::unique_ptr<HttpTransport> transport_;
     event::EventLoop *active_loop_ = nullptr;
     IoAwaiter *reader_ = nullptr;

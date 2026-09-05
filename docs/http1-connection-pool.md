@@ -100,9 +100,6 @@ auto mtls_key = Http1ConnectionGroupKey::from_name(
     443,
     Http1ConnectionGroupKey::Scheme::Https,
     fiber::http::Http1ConnectionPoolAffinity{tls_profile_generation});
-
-fiber::http::Http1ClientConnectionOptions connection_options;
-connection_options.pool_affinity = mtls_key->pool_affinity();
 ```
 
 注意：
@@ -111,9 +108,9 @@ connection_options.pool_affinity = mtls_key->pool_affinity();
 - 域名和 IP 是不同的 host kind，不会混用
 - `http` 和 `https` 永远不会共用连接
 - `example.com:443 + https` 与 `1.2.3.4:443 + https` 不是同组
-- key 和 `Http1ClientConnectionOptions` 的 affinity 都默认为 `0`，因此不传该参数时保持原有分组与建连语义
+- key 的 affinity 默认为 `0`，因此不传该参数时保持原有分组与建连语义
 - 同一 endpoint 的 affinity 不同，本地复用和跨 loop steal 都不会共享连接
-- miss lease 的 `emplace_connection()` 要求 connection options affinity 与 lease key 完全一致；不一致时返回 `IoErr::Invalid`，且不会构造连接
+- affinity 只存在于 key 上：`emplace_connection()` 不接受任何参数，连接本身不持有 affinity 副本
 
 建议：
 
@@ -126,7 +123,7 @@ connection_options.pool_affinity = mtls_key->pool_affinity();
 - affinity 是固定宽度的非敏感 `uint64_t` 标识；不要把证书路径、域名、CA 内容、私钥内容或其它 secret 编码进 key，也不要从 secret 内容直接计算它
 - 凭据或连接级策略轮换时，先创建并初始化新的 `TlsCredential`/`TrustStore`，再发布新的 profile generation/affinity；在旧 profile 的所有 lease 和连接销毁、淘汰或清池前，不要复用其 affinity
 
-连接池不会从 `TlsCredential`、`TrustStore` 或参数内容自动推导 affinity。配置控制层必须把同一个显式 affinity 同时写入 key 和 `Http1ClientConnectionOptions`，并保证它们对应同一个不可变 TLS profile。`emplace_connection()` 能拒绝两处显式 affinity 不一致，但无法判断调用方是否错误地给两组不同的 TLS 配置分配了同一个值。除客户端身份外，信任根、peer verification、SNI、`verify_name`、ALPN 等会固化在已建立连接上的选项也应纳入 profile generation。正在使用旧连接的 lease 可以自然完成；销毁旧 TLS 材料前必须确保借用它们的连接都已释放。
+连接池不会从 `TlsCredential`、`TrustStore` 或参数内容自动推导 affinity。配置控制层必须为每个不可变 TLS profile 指定一个显式 affinity 写入 key，并保证 `connect()` 传入的 TLS 参数与该 profile 一致；连接池无法判断调用方是否错误地给两组不同的 TLS 配置分配了同一个值。除客户端身份外，信任根、peer verification、SNI、`verify_name`、ALPN 等会固化在已建立连接上的选项也应纳入 profile generation。正在使用旧连接的 lease 可以自然完成；销毁旧 TLS 材料前必须确保借用它们的连接都已释放。
 
 ## 4. `Lease` 语义
 
@@ -159,8 +156,8 @@ connection_options.pool_affinity = mtls_key->pool_affinity();
 ```cpp
 auto lease = pool.acquire(key);
 if (!lease.hit()) {
-    auto conn_result = lease.emplace_connection(options);
-    // 然后再 connect()
+    auto conn_result = lease.emplace_connection();
+    // 然后再 connect(peer, timeout)
 }
 ```
 
@@ -225,13 +222,13 @@ if (!pool.init()) {
 auto lease = pool.acquire(key);
 
 if (!lease.hit()) {
-    auto conn_result = lease.emplace_connection(client_options);
+    auto conn_result = lease.emplace_connection();
     if (!conn_result) {
         // 处理 NoMem / Invalid
     }
 
     auto &conn = **conn_result;
-    auto connect_result = co_await conn.connect(std::chrono::seconds(5));
+    auto connect_result = co_await conn.connect(peer, std::chrono::seconds(5));
     if (!connect_result) {
         // 处理 connect 失败
     }
@@ -339,12 +336,12 @@ fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
     auto lease = pool_set.acquire(key);
 
     if (!lease.hit()) {
-        auto conn_result = lease.emplace_connection(client_options);
+        auto conn_result = lease.emplace_connection();
         if (!conn_result) {
             co_return;
         }
 
-        auto connect_result = co_await lease.connection().connect(std::chrono::seconds(5));
+        auto connect_result = co_await lease.connection().connect(peer, std::chrono::seconds(5));
         if (!connect_result) {
             co_return;
         }
@@ -457,12 +454,12 @@ fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
     auto lease = co_await pool_set.acquire(key);
 
     if (!lease.hit()) {
-        auto conn_result = lease.emplace_connection(client_options);
+        auto conn_result = lease.emplace_connection();
         if (!conn_result) {
             co_return;
         }
 
-        auto connect_result = co_await lease.connection().connect(std::chrono::seconds(5));
+        auto connect_result = co_await lease.connection().connect(peer, std::chrono::seconds(5));
         if (!connect_result) {
             co_return;
         }
@@ -598,15 +595,13 @@ fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
 
     auto lease = pool_set.acquire(key);
     if (!lease.hit()) {
-        fiber::http::Http1ClientConnectionOptions options;
-        options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 8080);
-
-        auto conn_result = lease.emplace_connection(options);
+        auto conn_result = lease.emplace_connection();
         if (!conn_result) {
             co_return;
         }
 
-        auto connect_result = co_await lease.connection().connect();
+        const fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 8080);
+        auto connect_result = co_await lease.connection().connect(peer, 5s);
         if (!connect_result) {
             co_return;
         }
@@ -632,15 +627,13 @@ fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
 
     auto lease = co_await pool_set.acquire(key);
     if (!lease.hit()) {
-        fiber::http::Http1ClientConnectionOptions options;
-        options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 8080);
-
-        auto conn_result = lease.emplace_connection(options);
+        auto conn_result = lease.emplace_connection();
         if (!conn_result) {
             co_return;
         }
 
-        auto connect_result = co_await lease.connection().connect();
+        const fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 8080);
+        auto connect_result = co_await lease.connection().connect(peer, 5s);
         if (!connect_result) {
             co_return;
         }

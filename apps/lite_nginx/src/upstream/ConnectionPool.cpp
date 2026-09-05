@@ -102,12 +102,12 @@ fiber::http::Http1ClientConnection *ConnectionPool::ConnectionLease::get() noexc
 }
 
 fiber::common::IoResult<fiber::http::Http1ClientConnection *>
-ConnectionPool::ConnectionLease::emplace_connection(fiber::http::Http1ClientConnectionOptions options) noexcept {
+ConnectionPool::ConnectionLease::emplace_connection() noexcept {
     switch (kind_) {
         case Kind::Local:
-            return local_.emplace_connection(std::move(options));
+            return local_.emplace_connection();
         case Kind::Stealable:
-            return stealable_.emplace_connection(std::move(options));
+            return stealable_.emplace_connection();
         case Kind::Empty:
             return std::unexpected(fiber::common::IoErr::Invalid);
     }

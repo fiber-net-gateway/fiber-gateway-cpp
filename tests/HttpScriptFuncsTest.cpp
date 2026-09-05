@@ -161,10 +161,9 @@ struct ClientRequest {
 DetachedTask run_http1_client(fiber::event::EventLoop *loop, std::uint16_t port, ClientRequest req,
                               std::promise<ClientResult> *promise) {
     ClientResult result;
-    fiber::http::Http1ClientConnectionOptions options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    fiber::http::Http1ClientConnection connection(*loop, options);
-    auto connect_result = co_await connection.connect(std::chrono::seconds(5));
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result = co_await connection.connect(
+            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), std::chrono::seconds(5));
     if (!connect_result) {
         result.err = connect_result.error();
         promise->set_value(std::move(result));

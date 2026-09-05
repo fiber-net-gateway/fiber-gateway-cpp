@@ -40,9 +40,9 @@ private:
     friend class Http1ConnectionPoolCore;
     friend class StealableHttp1ConnectionPoolSet;
 
-    void construct_connection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept {
+    void construct_connection(event::EventLoop &loop) noexcept {
         FIBER_ASSERT(!has_connection_);
-        std::construct_at(connection_storage(), loop, std::move(options));
+        std::construct_at(connection_storage(), loop);
         has_connection_ = true;
     }
 

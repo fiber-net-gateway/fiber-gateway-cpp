@@ -30,21 +30,19 @@ namespace {
 
 void assign_view(std::string &dst, std::string_view src) { dst.assign(src.data(), src.size()); }
 
-http::Http2ClientConnection::Options make_connection_options(GrpcClient::Options &options) noexcept {
-    http::Http2ClientConnection::Options conn_options;
-    conn_options.peer_addr = std::move(options.peer_addr);
-    conn_options.tcp = options.tcp;
-    conn_options.tls = std::move(options.tls);
-    conn_options.h2 = std::move(options.h2);
-    return conn_options;
-}
-
 } // namespace
 
 GrpcClient::GrpcClient(event::EventLoop &loop, Options options) noexcept :
-    loop_(&loop), conn_(loop, make_connection_options(options)) {
+    loop_(&loop), conn_(loop, std::move(options.h2)), peer_addr_(std::move(options.peer_addr)), tcp_(options.tcp) {
     assign_view(authority_, options.authority);
     assign_view(scheme_, options.scheme);
+    if (options.tls) {
+        tls_ = *options.tls;
+        assign_view(tls_server_name_, options.tls->server_name);
+        assign_view(tls_verify_name_, options.tls->verify_name);
+        tls_->server_name = tls_server_name_;
+        tls_->verify_name = tls_verify_name_;
+    }
 }
 
 GrpcClient::~GrpcClient() { FIBER_ASSERT(state_ == State::Created || state_ == State::Stopped); }
@@ -54,7 +52,8 @@ fiber::async::Task<common::IoResult<void>> GrpcClient::connect(std::chrono::mill
     if (state_ != State::Created) {
         co_return std::unexpected(common::IoErr::Busy);
     }
-    auto connect_result = co_await conn_.connect(timeout);
+    auto connect_result = tls_ ? co_await conn_.connect(peer_addr_, timeout, *tls_, tcp_)
+                               : co_await conn_.connect(peer_addr_, timeout, tcp_);
     if (!connect_result) {
         if (conn_.http2().state() != http::Http2Connection::State::Init) {
             state_ = State::Stopped;

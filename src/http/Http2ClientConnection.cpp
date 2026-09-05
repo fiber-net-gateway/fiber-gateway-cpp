@@ -24,17 +24,30 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
     return options;
 }
 
-Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Options options) noexcept :
-    loop_(&loop), peer_addr_(std::move(options.peer_addr)), tcp_options_(options.tcp),
-    tls_options_(std::move(options.tls)),
-    conn_(normalize_h2_options(std::move(options.h2)), nullptr, ClientHttp2Request::factory_ops()) {}
+Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Http2Connection::Options h2) noexcept :
+    loop_(&loop), conn_(normalize_h2_options(std::move(h2)), nullptr, ClientHttp2Request::factory_ops()) {}
 
 Http2ClientConnection::~Http2ClientConnection() {
     FIBER_ASSERT(!close_pending_);
     FIBER_ASSERT(close_wg_.empty());
 }
 
-fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(const net::SocketAddress &peer,
+                                                                          std::chrono::milliseconds timeout,
+                                                                          const net::TcpSocketOptions &tcp) noexcept {
+    return connect_impl(peer, timeout, tcp, std::nullopt);
+}
+
+fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(const net::SocketAddress &peer,
+                                                                          std::chrono::milliseconds timeout,
+                                                                          const HttpClientTlsOptions &tls,
+                                                                          const net::TcpSocketOptions &tcp) noexcept {
+    return connect_impl(peer, timeout, tcp, tls);
+}
+
+fiber::async::Task<common::IoResult<void>>
+Http2ClientConnection::connect_impl(net::SocketAddress peer, std::chrono::milliseconds timeout,
+                                    net::TcpSocketOptions tcp, std::optional<HttpClientTlsOptions> tls) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     if (!loop_->in_loop()) {
         co_return std::unexpected(common::IoErr::NotSupported);
@@ -43,7 +56,7 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
         co_return std::unexpected(common::IoErr::Busy);
     }
 
-    auto connect_result = co_await net::TcpStream::connect(*loop_, peer_addr_, timeout);
+    auto connect_result = co_await net::TcpStream::connect(*loop_, peer, timeout);
     if (!connect_result) {
         co_return std::unexpected(connect_result.error());
     }
@@ -61,15 +74,15 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
 
     net::AcceptResult accept(connect_result->release_fd(), connect_result->take_peer());
     std::unique_ptr<HttpTransport> transport;
-    if (tls_options_) {
-        auto tls_param = make_http2_client_tls_param(*tls_options_);
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tcp_options_);
+    if (tls) {
+        auto tls_param = make_http2_client_tls_param(*tls);
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
         auto tls_transport = std::move(*transport_result);
 
-        auto handshake_result = co_await tls_transport->handshake(tls_param, tls_options_->handshake_timeout);
+        auto handshake_result = co_await tls_transport->handshake(tls_param, tls->handshake_timeout);
         if (!handshake_result) {
             co_return std::unexpected(handshake_result.error());
         }
@@ -79,7 +92,7 @@ fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(std::c
         }
         transport = std::move(tls_transport);
     } else {
-        auto transport_result = TcpTransport::create(*loop_, std::move(accept), tcp_options_);
+        auto transport_result = TcpTransport::create(*loop_, std::move(accept), tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }

@@ -61,11 +61,9 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop, std:
                                              std::atomic<bool> *stop_flag,
                                              std::promise<fiber::common::IoErr> *result_promise,
                                              std::promise<bool> *opened_promise, std::promise<bool> *no_delay_promise) {
-    fiber::http::Http2ClientConnection::Options options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http2ClientConnection connection(*loop, std::move(options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http2ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         opened_promise->set_value(false);
         no_delay_promise->set_value(false);

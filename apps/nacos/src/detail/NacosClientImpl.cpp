@@ -25,12 +25,6 @@ namespace {
 constexpr std::string_view kLoginTarget = "/nacos/v1/auth/users/login";
 constexpr std::chrono::seconds kRefreshFailureDelay{5};
 
-http::Http1ClientConnectionOptions make_connection_options(const net::SocketAddress &endpoint) {
-    http::Http1ClientConnectionOptions result;
-    result.peer_addr = endpoint;
-    return result;
-}
-
 std::chrono::seconds refresh_delay(std::int64_t token_ttl) noexcept {
     return std::chrono::seconds(std::max<std::int64_t>(kRefreshFailureDelay.count(), token_ttl * 9 / 10));
 }
@@ -276,8 +270,8 @@ NacosClientImpl::login(const net::SocketAddress &endpoint, std::string_view auth
         co_return std::unexpected(common::IoErr::Canceled);
     }
 
-    http::Http1ClientConnection connection(*loop_, make_connection_options(endpoint));
-    auto connect_result = co_await connection.connect(options_.connect_timeout);
+    http::Http1ClientConnection connection(*loop_);
+    auto connect_result = co_await connection.connect(endpoint, options_.connect_timeout);
     if (!running()) {
         co_return std::unexpected(common::IoErr::Canceled);
     }

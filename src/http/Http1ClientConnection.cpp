@@ -126,8 +126,7 @@ void Http1ClientConnection::IoAwaiter::on_cancel_resume(IoAwaiter *awaiter) noex
     }
 }
 
-Http1ClientConnection::Http1ClientConnection(event::EventLoop &loop, Http1ClientConnectionOptions options) noexcept :
-    loop_(&loop), options_(std::move(options)) {}
+Http1ClientConnection::Http1ClientConnection(event::EventLoop &loop) noexcept : loop_(&loop) {}
 
 Http1ClientConnection::~Http1ClientConnection() {
     FIBER_ASSERT(loop_ != nullptr);
@@ -158,20 +157,40 @@ common::IoErr Http1ClientConnection::begin_connect() noexcept {
     return common::IoErr::None;
 }
 
-fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::chrono::milliseconds timeout) noexcept {
+fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(const net::SocketAddress &peer,
+                                                                          std::chrono::milliseconds timeout,
+                                                                          const net::TcpSocketOptions &tcp) noexcept {
     net::HappyEyeballsOptions options;
     options.total_timeout = timeout;
-    return connect_impl({}, options, false);
+    return connect_impl(peer, {}, options, tcp, std::nullopt);
+}
+
+fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(const net::SocketAddress &peer,
+                                                                          std::chrono::milliseconds timeout,
+                                                                          const HttpClientTlsOptions &tls,
+                                                                          const net::TcpSocketOptions &tcp) noexcept {
+    net::HappyEyeballsOptions options;
+    options.total_timeout = timeout;
+    return connect_impl(peer, {}, options, tcp, tls);
 }
 
 fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::span<const net::SocketAddress> addresses,
-                                                                          net::HappyEyeballsOptions options) noexcept {
-    return connect_impl(addresses, options, true);
+                                                                          const net::HappyEyeballsOptions &options,
+                                                                          const net::TcpSocketOptions &tcp) noexcept {
+    return connect_impl(std::nullopt, addresses, options, tcp, std::nullopt);
+}
+
+fiber::async::Task<common::IoResult<void>> Http1ClientConnection::connect(std::span<const net::SocketAddress> addresses,
+                                                                          const net::HappyEyeballsOptions &options,
+                                                                          const HttpClientTlsOptions &tls,
+                                                                          const net::TcpSocketOptions &tcp) noexcept {
+    return connect_impl(std::nullopt, addresses, options, tcp, tls);
 }
 
 fiber::async::Task<common::IoResult<void>>
-Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresses, net::HappyEyeballsOptions options,
-                                    bool multiple_addresses) noexcept {
+Http1ClientConnection::connect_impl(std::optional<net::SocketAddress> peer,
+                                    std::span<const net::SocketAddress> addresses, net::HappyEyeballsOptions options,
+                                    net::TcpSocketOptions tcp, std::optional<HttpClientTlsOptions> tls) noexcept {
     common::IoErr begin_error = begin_connect();
     if (begin_error != common::IoErr::None) {
         co_return std::unexpected(begin_error);
@@ -179,14 +198,14 @@ Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresse
     ConnectStateGuard state_guard(*this);
 
     std::optional<net::TcpStream::ConnectInfant> infant;
-    if (multiple_addresses) {
+    if (!peer) {
         auto connect_result = co_await net::TcpConnector::connect(*loop_, addresses, options);
         if (!connect_result) {
             co_return std::unexpected(connect_result.error().code);
         }
         infant.emplace(std::move(*connect_result));
     } else {
-        auto connect_result = co_await net::TcpStream::connect(*loop_, options_.peer_addr, options.total_timeout);
+        auto connect_result = co_await net::TcpStream::connect(*loop_, *peer, options.total_timeout);
         if (!connect_result) {
             co_return std::unexpected(connect_result.error());
         }
@@ -199,15 +218,15 @@ Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresse
 
     net::AcceptResult accept(infant->release_fd(), infant->take_peer());
     std::unique_ptr<HttpTransport> transport;
-    if (options_.tls) {
-        auto tls_param = make_http1_client_tls_param(*options_.tls);
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), options_.tcp);
+    if (tls) {
+        auto tls_param = make_http1_client_tls_param(*tls);
+        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
         auto tls_transport = std::move(*transport_result);
 
-        auto handshake_result = co_await tls_transport->handshake(tls_param, options_.tls->handshake_timeout);
+        auto handshake_result = co_await tls_transport->handshake(tls_param, tls->handshake_timeout);
         if (!handshake_result) {
             tls_transport->close();
             co_return std::unexpected(handshake_result.error());
@@ -219,7 +238,7 @@ Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresse
         }
         transport = std::move(tls_transport);
     } else {
-        auto transport_result = TcpTransport::create(*loop_, std::move(accept), options_.tcp);
+        auto transport_result = TcpTransport::create(*loop_, std::move(accept), tcp);
         if (!transport_result) {
             co_return std::unexpected(transport_result.error());
         }
@@ -230,7 +249,7 @@ Http1ClientConnection::connect_impl(std::span<const net::SocketAddress> addresse
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    options_.peer_addr = std::move(connected_peer);
+    peer_addr_ = std::move(connected_peer);
     transport_ = std::move(transport);
     state_ = State::ConnectedIdle;
     keepalive_usable_ = true;

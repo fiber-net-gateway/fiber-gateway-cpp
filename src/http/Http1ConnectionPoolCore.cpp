@@ -49,16 +49,12 @@ const Http1ConnectionGroupKey &Http1ConnectionPoolCore::Lease::key() const noexc
     return *key_;
 }
 
-common::IoResult<Http1ClientConnection *>
-Http1ConnectionPoolCore::Lease::emplace_connection(Http1ClientConnectionOptions options) noexcept {
+common::IoResult<Http1ClientConnection *> Http1ConnectionPoolCore::Lease::emplace_connection() noexcept {
     if (!pool_ || !key_.has_value()) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (pool_->shutdown_effective()) {
         return std::unexpected(common::IoErr::Canceled);
-    }
-    if (options.pool_affinity != key_->pool_affinity()) {
-        return std::unexpected(common::IoErr::Invalid);
     }
     if (!entry_) {
         entry_ = pool_->allocate_entry();
@@ -69,7 +65,7 @@ Http1ConnectionPoolCore::Lease::emplace_connection(Http1ClientConnectionOptions 
     if (entry_->has_connection()) {
         return entry_->connection();
     }
-    entry_->construct_connection(pool_->loop(), std::move(options));
+    entry_->construct_connection(pool_->loop());
     return entry_->connection();
 }
 

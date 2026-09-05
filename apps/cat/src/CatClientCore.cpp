@@ -1063,10 +1063,8 @@ async::Task<std::optional<std::string>> CatClientCore::fetch_router_body(const C
     }
 
     for (const net::SocketAddress &endpoint: *endpoints) {
-        http::Http1ClientConnectionOptions connection_options;
-        connection_options.peer_addr = endpoint;
-        http::Http1ClientConnection connection(*loop_, std::move(connection_options));
-        auto connected = co_await connection.connect(options_.router_connect_timeout);
+        http::Http1ClientConnection connection(*loop_);
+        auto connected = co_await connection.connect(endpoint, options_.router_connect_timeout);
         if (!connected) {
             continue;
         }

@@ -41,10 +41,10 @@ public:
         // True when the lease carries an already-connected idle connection (a pool hit).
         [[nodiscard]] bool has_connection() const noexcept;
         [[nodiscard]] fiber::http::Http1ClientConnection *get() noexcept;
-        // Create + insert a fresh connection into the pool slot. Only valid when !has_connection().
-        // On Stealable, this lands on the Local fallback lease that acquire returned on a steal miss.
-        [[nodiscard]] fiber::common::IoResult<fiber::http::Http1ClientConnection *>
-        emplace_connection(fiber::http::Http1ClientConnectionOptions options) noexcept;
+        // Create + insert a fresh, unconnected connection into the pool slot. Only valid when
+        // !has_connection(). On Stealable, this lands on the Local fallback lease that acquire
+        // returned on a steal miss.
+        [[nodiscard]] fiber::common::IoResult<fiber::http::Http1ClientConnection *> emplace_connection() noexcept;
         void reset() noexcept;
 
     private:

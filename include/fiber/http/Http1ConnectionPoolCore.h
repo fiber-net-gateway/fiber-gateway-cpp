@@ -39,8 +39,10 @@ public:
 
         [[nodiscard]] Http1ClientConnection &connection() noexcept;
         [[nodiscard]] const Http1ConnectionGroupKey &key() const noexcept;
-        [[nodiscard]] common::IoResult<Http1ClientConnection *>
-        emplace_connection(Http1ClientConnectionOptions options) noexcept;
+        // Creates the unconnected connection this lease's slot will hold. The caller dials it
+        // through one of Http1ClientConnection::connect's overloads; the lease's key already
+        // fixes the transport profile, so nothing about it is passed in here.
+        [[nodiscard]] common::IoResult<Http1ClientConnection *> emplace_connection() noexcept;
         void reset() noexcept;
 
     private:

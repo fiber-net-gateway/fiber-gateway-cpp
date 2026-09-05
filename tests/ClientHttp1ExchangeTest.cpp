@@ -522,11 +522,9 @@ DetachedTask run_raw_stream_server(fiber::event::EventLoop *loop, std::promise<s
 DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                        std::promise<ContentLengthWriteOutcome> *result_promise) {
     ContentLengthWriteOutcome outcome;
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.body_error = connect_result.error();
         result_promise->set_value(outcome);
@@ -598,11 +596,9 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
 DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                 std::promise<fiber::common::IoErr> *result_promise,
                                 std::promise<bool> *request_done_promise) {
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         result_promise->set_value(connect_result.error());
         request_done_promise->set_value(false);
@@ -655,11 +651,9 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t por
 DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::uint16_t port,
                                            std::promise<fiber::common::IoErr> *result_promise,
                                            std::promise<bool> *request_done_promise) {
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         result_promise->set_value(connect_result.error());
         request_done_promise->set_value(false);
@@ -718,11 +712,9 @@ DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::u
 DetachedTask run_partial_chunked_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                         std::promise<PartialChunkedWriteOutcome> *result_promise) {
     PartialChunkedWriteOutcome outcome;
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.error = connect_result.error();
         result_promise->set_value(outcome);
@@ -798,11 +790,9 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
                                       std::promise<fiber::common::IoErr> *result_promise,
                                       std::promise<bool> *request_done_promise,
                                       std::promise<fiber::common::IoErr> *duplicate_completion_promise) {
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         result_promise->set_value(connect_result.error());
         request_done_promise->set_value(false);
@@ -845,11 +835,9 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
 
 DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                        std::promise<HeaderCountOutcome> *result_promise) {
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         result_promise->set_value({.error = connect_result.error(), .request_count = connection.request_count()});
         co_return;
@@ -880,11 +868,9 @@ DetachedTask run_read_header_client(fiber::event::EventLoop *loop, std::uint16_t
                                     std::promise<ReadHeaderOutcome> *result_promise) {
     ReadHeaderOutcome outcome;
 
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.err = connect_result.error();
         result_promise->set_value(std::move(outcome));
@@ -932,11 +918,9 @@ DetachedTask run_expect_continue_client(fiber::event::EventLoop *loop, std::uint
                                         std::promise<ReadHeaderOutcome> *result_promise) {
     ReadHeaderOutcome outcome;
 
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.err = connect_result.error();
         result_promise->set_value(std::move(outcome));
@@ -1002,11 +986,9 @@ DetachedTask run_read_header_small_buffer_client(fiber::event::EventLoop *loop, 
                                                  std::promise<ReadHeaderOutcome> *result_promise) {
     ReadHeaderOutcome outcome;
 
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.err = connect_result.error();
         result_promise->set_value(std::move(outcome));
@@ -1058,11 +1040,9 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
                                                  std::promise<ReadBodyOutcome> *result_promise) {
     ReadBodyOutcome outcome;
 
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.err = connect_result.error();
         result_promise->set_value(std::move(outcome));
@@ -1191,11 +1171,9 @@ DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *
                                                        std::promise<ReadBodyOutcome> *result_promise) {
     ReadBodyOutcome outcome;
 
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.err = connect_result.error();
         result_promise->set_value(std::move(outcome));
@@ -1254,11 +1232,9 @@ DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoo
                                                           std::promise<ReadBodyOutcome> *result_promise) {
     ReadBodyOutcome outcome;
 
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.err = connect_result.error();
         result_promise->set_value(std::move(outcome));
@@ -1313,10 +1289,9 @@ DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoo
 DetachedTask run_raw_stream_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                    std::promise<RawStreamOutcome> *result_promise) {
     RawStreamOutcome outcome;
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    fiber::http::Http1ClientConnection connection(*loop, std::move(conn_options));
-    auto connect_result = co_await connection.connect(5s);
+    fiber::http::Http1ClientConnection connection(*loop);
+    auto connect_result =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s);
     if (!connect_result) {
         outcome.err = connect_result.error();
         result_promise->set_value(std::move(outcome));
@@ -1815,19 +1790,18 @@ TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnecti
     const std::uint16_t port = port_future.get();
     ASSERT_NE(port, 0);
 
-    fiber::http::Http1ClientConnectionOptions conn_options;
-    conn_options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
+    const fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), port);
     fiber::http::Http1ClientConnection *connection = nullptr;
 
     std::promise<fiber::common::IoErr> connect_promise;
     auto connect_future = connect_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        connection = new (std::nothrow) fiber::http::Http1ClientConnection(group.at(0), std::move(conn_options));
+        connection = new (std::nothrow) fiber::http::Http1ClientConnection(group.at(0));
         if (!connection) {
             connect_promise.set_value(fiber::common::IoErr::NoMem);
             co_return;
         }
-        auto connect_result = co_await connection->connect(5s);
+        auto connect_result = co_await connection->connect(peer, 5s);
         connect_promise.set_value(connect_result ? fiber::common::IoErr::None : connect_result.error());
     });
     ASSERT_EQ(connect_future.get(), fiber::common::IoErr::None);

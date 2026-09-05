@@ -1153,13 +1153,12 @@ std::string chain_to_string(fiber::mem::IoBufChain chain) {
 fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                                       std::promise<Http2WebSocketOutcome> *promise) {
     Http2WebSocketOutcome outcome;
-    fiber::http::Http2ClientConnection::Options options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.emplace();
-    options.tls->server_name = "localhost";
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
 
-    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
-    auto connect_result = co_await connection->connect(5s);
+    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop);
+    auto connect_result = co_await connection->connect(
+            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s, tls);
     if (!connect_result) {
         outcome.error = connect_result.error();
         promise->set_value(std::move(outcome));
@@ -1247,13 +1246,12 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
 fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, std::uint16_t port,
                                                  std::promise<Http2GzipOutcome> *promise) {
     Http2GzipOutcome outcome;
-    fiber::http::Http2ClientConnection::Options options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.tls.emplace();
-    options.tls->server_name = "localhost";
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
 
-    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop, std::move(options));
-    auto connect_result = co_await connection->connect(5s);
+    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop);
+    auto connect_result = co_await connection->connect(
+            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s, tls);
     if (!connect_result) {
         outcome.error = connect_result.error();
         promise->set_value(std::move(outcome));

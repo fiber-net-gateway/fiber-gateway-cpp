@@ -32,7 +32,8 @@ public:
 
     struct Options {
         net::SocketAddress peer_addr{};
-        net::TcpSocketOptions tcp{.no_delay = net::TcpOptionMode::Enabled};
+        net::TcpSocketOptions tcp{net::kNoDelayTcpSocketOptions};
+        // Views are copied into client-owned storage; they need only outlive this constructor.
         std::optional<http::HttpClientTlsOptions> tls{};
         http::Http2Connection::Options h2{};
         std::string_view authority{};
@@ -80,6 +81,13 @@ private:
 
     event::EventLoop *loop_;
     http::Http2ClientConnection conn_;
+    // Dial parameters, owned here because connect() runs long after construction. tls_'s views
+    // point into tls_server_name_/tls_verify_name_.
+    net::SocketAddress peer_addr_{};
+    net::TcpSocketOptions tcp_{};
+    std::optional<http::HttpClientTlsOptions> tls_{};
+    std::string tls_server_name_;
+    std::string tls_verify_name_;
     State state_ = State::Created;
     std::string authority_;
     std::string scheme_;

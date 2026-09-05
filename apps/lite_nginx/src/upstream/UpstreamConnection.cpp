@@ -50,21 +50,22 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
     }
     const std::span<const fiber::net::SocketAddress> peer_span(peers.data(), addresses.size());
 
-    fiber::http::Http1ClientConnectionOptions connection_options;
-    connection_options.peer_addr = peers[0];
-    connection_options.pool_affinity = key.pool_affinity();
-    if (key.scheme() == fiber::http::Http1ConnectionGroupKey::Scheme::Https) {
-        connection_options.tls.emplace();
-        connection_options.tls->server_name = std::string(tls_server_name);
-    }
-
     fiber::net::HappyEyeballsOptions connect_options;
     connect_options.total_timeout = connect_timeout;
 
+    // Borrowed by connect() for the whole dial: `tls_server_name` is the caller's, and `peers`
+    // lives in this frame, which the co_awaits below keep alive.
+    const bool https = key.scheme() == fiber::http::Http1ConnectionGroupKey::Scheme::Https;
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = tls_server_name;
+    auto dial = [&](fiber::http::Http1ClientConnection &connection) {
+        return https ? connection.connect(peer_span, connect_options, tls)
+                     : connection.connect(peer_span, connect_options);
+    };
+
     if (!out.lease.valid()) {
-        out.transient = std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current(),
-                                                                             std::move(connection_options));
-        auto connect_result = co_await out.transient->connect(peer_span, connect_options);
+        out.transient = std::make_unique<fiber::http::Http1ClientConnection>(fiber::event::EventLoop::current());
+        auto connect_result = co_await dial(*out.transient);
         if (!connect_result) {
             co_return std::unexpected(connect_result.error());
         }
@@ -75,13 +76,13 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
     // A pool miss keeps one lease through the TCP race and optional TLS handshake. The connection
     // is exposed only after the full connect path succeeds; reset recycles a failed, non-reusable
     // entry.
-    auto emplace = out.lease.emplace_connection(std::move(connection_options));
+    auto emplace = out.lease.emplace_connection();
     if (!emplace) {
         fiber::common::IoErr error = emplace.error();
         out.lease.reset();
         co_return std::unexpected(error);
     }
-    auto connect_result = co_await (*emplace)->connect(peer_span, connect_options);
+    auto connect_result = co_await dial(**emplace);
     if (!connect_result) {
         fiber::common::IoErr error = connect_result.error();
         out.lease.reset();

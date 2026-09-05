@@ -34,12 +34,8 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
-fiber::http::Http1ClientConnectionOptions client_options(std::uint16_t port,
-                                                         fiber::http::Http1ConnectionPoolAffinity pool_affinity = {}) {
-    fiber::http::Http1ClientConnectionOptions options;
-    options.peer_addr = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
-    options.pool_affinity = pool_affinity;
-    return options;
+fiber::net::SocketAddress loopback_peer(std::uint16_t port) {
+    return fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port);
 }
 
 struct HoldServerState {
@@ -99,12 +95,12 @@ ensure_connected(fiber::http::Http1ConnectionPoolCore::Lease &lease, std::uint16
         co_return std::unexpected(fiber::common::IoErr::NoMem);
     }
     if (!lease.has_connection()) {
-        auto conn_result = lease.emplace_connection(client_options(port, lease.key().pool_affinity()));
+        auto conn_result = lease.emplace_connection();
         if (!conn_result) {
             co_return std::unexpected(conn_result.error());
         }
         auto &conn = **conn_result;
-        auto connect_result = co_await conn.connect(5s);
+        auto connect_result = co_await conn.connect(loopback_peer(port), 5s);
         if (!connect_result) {
             co_return std::unexpected(connect_result.error());
         }
@@ -390,8 +386,6 @@ DetachedTask run_closed_scenario(fiber::event::EventLoop *loop, std::uint16_t po
 
 struct AffinityScenarioResult {
     fiber::common::IoErr err = fiber::common::IoErr::None;
-    bool mismatched_options_rejected = false;
-    bool matching_options_recorded = false;
     bool different_identity_missed = false;
     bool original_identity_reused = false;
 };
@@ -419,10 +413,6 @@ DetachedTask run_affinity_scenario(fiber::event::EventLoop *loop, std::uint16_t 
             fiber::http::Http1ConnectionPoolAffinity{42});
 
     auto first_lease = pool.acquire(first_key);
-    auto mismatched_options = first_lease.emplace_connection(client_options(port, second_key.pool_affinity()));
-    out.mismatched_options_rejected = !mismatched_options &&
-                                      mismatched_options.error() == fiber::common::IoErr::Invalid &&
-                                      !first_lease.has_connection();
     auto connection_result = co_await ensure_connected(first_lease, port);
     if (!connection_result) {
         out.err = connection_result.error();
@@ -430,7 +420,6 @@ DetachedTask run_affinity_scenario(fiber::event::EventLoop *loop, std::uint16_t 
         co_return;
     }
     auto *first_connection = *connection_result;
-    out.matching_options_recorded = first_connection->options().pool_affinity == first_key.pool_affinity();
     first_lease.reset();
 
     auto other_identity = pool.acquire(second_key);
@@ -505,8 +494,6 @@ TEST(Http1ConnectionPoolTest, PoolAffinityRejectsMismatchedOptionsAndPreventsCro
 
     const auto result = result_future.get();
     EXPECT_EQ(result.err, fiber::common::IoErr::None);
-    EXPECT_TRUE(result.mismatched_options_rejected);
-    EXPECT_TRUE(result.matching_options_recorded);
     EXPECT_TRUE(result.different_identity_missed);
     EXPECT_TRUE(result.original_identity_reused);
 
