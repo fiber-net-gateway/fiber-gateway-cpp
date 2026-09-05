@@ -30,6 +30,7 @@
 #include <fiber/http/ClientHttp2Exchange.h>
 #include <fiber/http/Http2HpackDecoder.h>
 #include <fiber/http/Http2HpackStaticTable.h>
+#include <fiber/http/Http2LocalStreamGate.h>
 #include <fiber/http/Http2Stream.h>
 #include <fiber/http/ServerRequestFactory.h>
 #include "Http2TestSupport.h"
@@ -1338,6 +1339,9 @@ public:
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
+    // Exchanges attach through the gate, so the fixture owns one.
+    [[nodiscard]] fiber::http::Http2LocalStreamGate &gate() noexcept { return gate_; }
+
     fiber::common::IoErr submit_bytes(std::string_view data) noexcept {
         return alloc_and_enqueue_control(data.size(),
                                          [data](std::uint8_t *dst) { std::memcpy(dst, data.data(), data.size()); });
@@ -1357,6 +1361,7 @@ public:
     }
 
 private:
+    fiber::http::Http2LocalStreamGate gate_{*this};
     FakeHttpTransport *fake_transport_ = nullptr;
 };
 
@@ -1370,7 +1375,7 @@ DetachedTask run_client_request_header_send(std::shared_ptr<std::promise<ClientR
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     fiber::http::HttpHeaders headers(pool);
     if (headers.set("user-agent", "fiber-test") == nullptr) {
         outcome.result = std::unexpected(fiber::common::IoErr::NoMem);
@@ -1411,7 +1416,7 @@ DetachedTask run_client_exchange_abort(std::shared_ptr<std::promise<ClientAbortR
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Post,
@@ -1455,7 +1460,7 @@ run_client_extended_connect_header_send(std::shared_ptr<std::promise<ClientExten
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     fiber::http::HttpHeaders headers(pool);
     if (headers.set("sec-websocket-version", "13") == nullptr) {
         outcome.header_result = std::unexpected(fiber::common::IoErr::NoMem);
@@ -1501,7 +1506,7 @@ DetachedTask run_client_request_body_send(std::shared_ptr<std::promise<ClientReq
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Post,
@@ -1534,7 +1539,7 @@ DetachedTask run_client_body_cancel_before_write(std::shared_ptr<std::promise<Cl
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Post,
@@ -1572,7 +1577,7 @@ DetachedTask run_client_partial_request_body_send(std::shared_ptr<std::promise<C
     options.initial_connection_send_window = 2;
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Post,
@@ -1618,7 +1623,7 @@ run_client_body_waiting_for_connection_window(std::shared_ptr<std::promise<Clien
     options.initial_connection_send_window = 0;
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Post,
@@ -1660,7 +1665,7 @@ DetachedTask run_client_request_trailer_send(std::shared_ptr<std::promise<Client
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Post,
@@ -1715,7 +1720,7 @@ DetachedTask run_client_response_body_read(std::shared_ptr<std::promise<ClientRe
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
@@ -1769,7 +1774,7 @@ run_client_response_headers_and_trailers_read(std::shared_ptr<std::promise<Clien
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
@@ -1826,7 +1831,7 @@ run_client_response_header_end_stream_read(std::shared_ptr<std::promise<ClientRe
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
@@ -1871,7 +1876,7 @@ run_client_response_read_after_rst_stream(std::shared_ptr<std::promise<ClientRes
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool pool;
-    fiber::http::ClientHttp2Exchange exchange(connection, pool);
+    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
     outcome.header_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
@@ -1911,7 +1916,7 @@ DetachedTask run_client_exchange_open_after_goaway(std::shared_ptr<std::promise<
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
 
     fiber::mem::BufPool first_pool;
-    fiber::http::ClientHttp2Exchange first_exchange(connection, first_pool);
+    fiber::http::ClientHttp2Exchange first_exchange(connection.gate(), first_pool);
     auto first_send_result = co_await first_exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
@@ -1947,7 +1952,7 @@ DetachedTask run_client_exchange_open_after_goaway(std::shared_ptr<std::promise<
     outcome.state = connection.state();
     if (outcome.state == fiber::http::Http2Connection::State::Draining) {
         fiber::mem::BufPool pool;
-        fiber::http::ClientHttp2Exchange exchange(connection, pool);
+        fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
         outcome.send_result = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
@@ -1980,6 +1985,9 @@ public:
         fake_transport_(fake_transport) {
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
+
+    // Exchanges attach through the gate, so the fixture owns one.
+    [[nodiscard]] fiber::http::Http2LocalStreamGate &gate() noexcept { return gate_; }
 
     fiber::http::Http2Stream *open_stream() noexcept {
         auto *owner = TestHttp2StreamOwner::create_owner();
@@ -2021,6 +2029,7 @@ public:
     [[nodiscard]] const std::string &written() const noexcept { return fake_transport_->written(); }
 
 private:
+    fiber::http::Http2LocalStreamGate gate_{*this};
     FakeHttpTransport *fake_transport_ = nullptr;
 };
 
@@ -2467,14 +2476,13 @@ struct LocalAttachWaitOutcome {
     std::uint32_t stream_id = 0;
     std::uint32_t next_stream_id = 0;
     std::size_t waiter_count = 0;
-    std::size_t granted_count = 0;
     bool wait_observed = false;
 };
 
 DetachedTask run_local_attach_wake_action(ControlHttp2Connection *connection, fiber::http::Http2Stream *first_stream,
                                           LocalAttachWakeAction action, bool *wait_observed, bool *action_done) {
     co_await fiber::async::sleep(std::chrono::milliseconds(2));
-    *wait_observed = connection->local_stream_attach_waiter_count_ == 1;
+    *wait_observed = connection->gate().waiter_count() == 1;
 
     switch (action) {
         case LocalAttachWakeAction::None:
@@ -2530,7 +2538,7 @@ DetachedTask run_local_attach_wait(std::shared_ptr<std::promise<LocalAttachWaitO
         });
     }
 
-    auto attached = co_await connection.attach_local_stream(pending->stream, timeout);
+    auto attached = co_await connection.gate().attach(pending->stream, timeout);
     fiber::http::Http2Stream::Lease second;
     LocalAttachWaitOutcome outcome;
     if (attached) {
@@ -2546,8 +2554,7 @@ DetachedTask run_local_attach_wait(std::shared_ptr<std::promise<LocalAttachWaitO
     }
 
     outcome.wait_observed = wait_observed;
-    outcome.waiter_count = connection.local_stream_attach_waiter_count_;
-    outcome.granted_count = connection.local_stream_attach_granted_count_;
+    outcome.waiter_count = connection.gate().waiter_count();
     outcome.next_stream_id = connection.next_local_stream_id_;
     outcome.state = connection.state();
 
@@ -2600,7 +2607,6 @@ struct LocalAttachFifoOutcome {
     std::array<std::size_t, 2> completion_order{};
     fiber::common::IoErr barging_result = fiber::common::IoErr::Unknown;
     std::size_t waiter_count = 0;
-    std::size_t granted_count = 0;
     bool both_queued = false;
     bool first_granted_alone = false;
 };
@@ -2612,7 +2618,7 @@ DetachedTask run_fifo_local_attach(ControlHttp2Connection *connection, std::size
     std::unique_ptr<TestHttp2StreamOwner> owner(TestHttp2StreamOwner::create_owner());
     FIBER_ASSERT(owner != nullptr);
 
-    auto attached = co_await connection->attach_local_stream(owner->stream, std::chrono::seconds(1));
+    auto attached = co_await connection->gate().attach(owner->stream, std::chrono::seconds(1));
     if (attached) {
         (*leases)[index] = std::move(*attached);
         (void) owner.release();
@@ -2644,15 +2650,15 @@ DetachedTask run_local_attach_fifo(std::shared_ptr<std::promise<LocalAttachFifoO
     fiber::async::spawn(
             [&]() { return run_fifo_local_attach(&connection, 1, &outcome, &leases, &done, &completion_count); });
 
-    for (int i = 0; i < 50 && connection.local_stream_attach_waiter_count_ != 2; ++i) {
+    for (int i = 0; i < 50 && connection.gate().waiter_count() != 2; ++i) {
         co_await fiber::async::sleep(std::chrono::milliseconds(1));
     }
-    outcome.both_queued = connection.local_stream_attach_waiter_count_ == 2;
+    outcome.both_queued = connection.gate().waiter_count() == 2;
 
     FIBER_ASSERT(connection.apply_settings_parameter(0x3, 1) == fiber::common::IoErr::None);
     std::unique_ptr<TestHttp2StreamOwner> barging_owner(TestHttp2StreamOwner::create_owner());
     FIBER_ASSERT(barging_owner != nullptr);
-    auto barging = connection.try_attach_local_stream(barging_owner->stream);
+    auto barging = connection.gate().try_attach(barging_owner->stream);
     outcome.barging_result = barging ? fiber::common::IoErr::None : barging.error();
     if (barging) {
         (void) barging_owner.release();
@@ -2663,7 +2669,7 @@ DetachedTask run_local_attach_fifo(std::shared_ptr<std::promise<LocalAttachFifoO
     for (int i = 0; i < 50 && !done[0] && !done[1]; ++i) {
         co_await fiber::async::sleep(std::chrono::milliseconds(1));
     }
-    outcome.first_granted_alone = done[0] && !done[1] && connection.local_stream_attach_waiter_count_ == 1;
+    outcome.first_granted_alone = done[0] && !done[1] && connection.gate().waiter_count() == 1;
 
     if (leases[0]) {
         leases[0]->close(fiber::common::IoErr::Canceled);
@@ -2685,8 +2691,7 @@ DetachedTask run_local_attach_fifo(std::shared_ptr<std::promise<LocalAttachFifoO
         co_await fiber::async::sleep(std::chrono::milliseconds(1));
     }
 
-    outcome.waiter_count = connection.local_stream_attach_waiter_count_;
-    outcome.granted_count = connection.local_stream_attach_granted_count_;
+    outcome.waiter_count = connection.gate().waiter_count();
     promise->set_value(outcome);
     fiber::event::EventLoop::current().stop();
     co_return;
@@ -2726,7 +2731,7 @@ DetachedTask release_client_exchange_stream(ControlHttp2Connection *connection,
                                             fiber::http::ClientHttp2Exchange *exchange, bool *wait_observed,
                                             bool *action_done) {
     co_await fiber::async::sleep(std::chrono::milliseconds(2));
-    *wait_observed = connection->local_stream_attach_waiter_count_ == 1;
+    *wait_observed = connection->gate().waiter_count() == 1;
     (void) exchange->abort();
     *action_done = true;
     co_return;
@@ -2744,7 +2749,7 @@ DetachedTask run_client_exchange_attach_wait(std::shared_ptr<std::promise<Client
 
     ClientExchangeAttachWaitOutcome outcome;
     fiber::mem::BufPool first_pool;
-    fiber::http::ClientHttp2Exchange first_exchange(connection, first_pool);
+    fiber::http::ClientHttp2Exchange first_exchange(connection.gate(), first_pool);
     outcome.first_result = co_await first_exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
@@ -2763,7 +2768,7 @@ DetachedTask run_client_exchange_attach_wait(std::shared_ptr<std::promise<Client
     }
 
     fiber::mem::BufPool second_pool;
-    fiber::http::ClientHttp2Exchange second_exchange(connection, second_pool);
+    fiber::http::ClientHttp2Exchange second_exchange(connection.gate(), second_pool);
     outcome.second_result = co_await second_exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
@@ -2778,7 +2783,7 @@ DetachedTask run_client_exchange_attach_wait(std::shared_ptr<std::promise<Client
     }
 
     outcome.next_stream_id = connection.next_local_stream_id_;
-    outcome.waiter_count = connection.local_stream_attach_waiter_count_;
+    outcome.waiter_count = connection.gate().waiter_count();
     if (second_exchange.stream()) {
         (void) second_exchange.abort();
     }
@@ -3649,7 +3654,6 @@ TEST(Http2ConnectionTest, AwaitedLocalStreamAttachResumesAfterActiveStreamDetach
     EXPECT_EQ(outcome.stream_id, 3U);
     EXPECT_EQ(outcome.next_stream_id, 5U);
     EXPECT_EQ(outcome.waiter_count, 0U);
-    EXPECT_EQ(outcome.granted_count, 0U);
 }
 
 TEST(Http2ConnectionTest, AwaitedLocalStreamAttachResumesAfterPeerIncreasesLimit) {
@@ -3661,7 +3665,6 @@ TEST(Http2ConnectionTest, AwaitedLocalStreamAttachResumesAfterPeerIncreasesLimit
     EXPECT_EQ(outcome.stream_id, 1U);
     EXPECT_EQ(outcome.next_stream_id, 3U);
     EXPECT_EQ(outcome.waiter_count, 0U);
-    EXPECT_EQ(outcome.granted_count, 0U);
 }
 
 TEST(Http2ConnectionTest, AwaitedLocalStreamAttachTimesOutWithoutConsumingStreamId) {
@@ -3672,7 +3675,6 @@ TEST(Http2ConnectionTest, AwaitedLocalStreamAttachTimesOutWithoutConsumingStream
     EXPECT_EQ(outcome.stream_id, 0U);
     EXPECT_EQ(outcome.next_stream_id, 1U);
     EXPECT_EQ(outcome.waiter_count, 0U);
-    EXPECT_EQ(outcome.granted_count, 0U);
 }
 
 TEST(Http2ConnectionTest, AwaitedLocalStreamAttachIsCanceledByShutdown) {
@@ -3684,7 +3686,6 @@ TEST(Http2ConnectionTest, AwaitedLocalStreamAttachIsCanceledByShutdown) {
     EXPECT_EQ(outcome.stream_id, 0U);
     EXPECT_EQ(outcome.next_stream_id, 1U);
     EXPECT_EQ(outcome.waiter_count, 0U);
-    EXPECT_EQ(outcome.granted_count, 0U);
 }
 
 TEST(Http2ConnectionTest, AwaitedLocalStreamAttachIsCanceledByPeerGoaway) {
@@ -3696,7 +3697,6 @@ TEST(Http2ConnectionTest, AwaitedLocalStreamAttachIsCanceledByPeerGoaway) {
     EXPECT_EQ(outcome.stream_id, 0U);
     EXPECT_EQ(outcome.next_stream_id, 1U);
     EXPECT_EQ(outcome.waiter_count, 0U);
-    EXPECT_EQ(outcome.granted_count, 0U);
 }
 
 TEST(Http2ConnectionTest, AwaitedLocalStreamAttachGrantsCapacityInFifoOrder) {
@@ -3712,7 +3712,6 @@ TEST(Http2ConnectionTest, AwaitedLocalStreamAttachGrantsCapacityInFifoOrder) {
     EXPECT_EQ(outcome.completion_order[1], 2U);
     EXPECT_EQ(outcome.barging_result, fiber::common::IoErr::Busy);
     EXPECT_EQ(outcome.waiter_count, 0U);
-    EXPECT_EQ(outcome.granted_count, 0U);
 }
 
 TEST(Http2ConnectionTest, TryAttachLocalStreamFollowsPeerLimitNotTableCapacity) {

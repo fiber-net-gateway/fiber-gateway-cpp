@@ -10,6 +10,7 @@
 #include <fiber/http/ClientHttp2Request.h>
 #include <fiber/http/Http2ClientConnection.h>
 #include <fiber/http/Http2Connection.h>
+#include <fiber/http/Http2LocalStreamGate.h>
 
 namespace fiber::http {
 
@@ -40,18 +41,18 @@ std::chrono::milliseconds remaining_timeout(TimePoint deadline) noexcept {
 
 } // namespace
 
-ClientHttp2Exchange::ClientHttp2Exchange(Http2Connection &conn, mem::BufPool &pool) noexcept :
-    conn_(&conn), pool_(&pool) {}
+ClientHttp2Exchange::ClientHttp2Exchange(Http2LocalStreamGate &gate, mem::BufPool &pool) noexcept :
+    gate_(&gate), pool_(&pool) {}
 
 ClientHttp2Exchange::ClientHttp2Exchange(Http2ClientConnection &conn, mem::BufPool &pool) noexcept :
-    ClientHttp2Exchange(conn.http2(), pool) {}
+    ClientHttp2Exchange(conn.stream_gate(), pool) {}
 
 ClientHttp2Exchange::ClientHttp2Exchange(Http2Stream::Lease stream, mem::BufPool &pool) noexcept :
     pool_(&pool), stream_(std::move(stream)) {}
 
 ClientHttp2Exchange::ClientHttp2Exchange(ClientHttp2Exchange &&other) noexcept :
-    conn_(other.conn_), pool_(other.pool_), stream_(std::move(other.stream_)) {
-    other.conn_ = nullptr;
+    gate_(other.gate_), pool_(other.pool_), stream_(std::move(other.stream_)) {
+    other.gate_ = nullptr;
     other.pool_ = nullptr;
 }
 
@@ -59,10 +60,10 @@ ClientHttp2Exchange &ClientHttp2Exchange::operator=(ClientHttp2Exchange &&other)
     if (this == &other) {
         return *this;
     }
-    conn_ = other.conn_;
+    gate_ = other.gate_;
     pool_ = other.pool_;
     stream_ = std::move(other.stream_);
-    other.conn_ = nullptr;
+    other.gate_ = nullptr;
     other.pool_ = nullptr;
     return *this;
 }
@@ -191,7 +192,7 @@ ClientHttp2Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
 
 common::IoResult<void> ClientHttp2Exchange::abort(common::IoErr reason) noexcept {
     if (!stream_) {
-        conn_ = nullptr;
+        gate_ = nullptr;
         return std::unexpected(common::IoErr::Invalid);
     }
     const common::IoErr err = stream_->close_rst(Http2ErrorCode::Cancel, reason);
@@ -207,11 +208,11 @@ Http2ExtendedConnectSupport ClientHttp2Exchange::extended_connect_support() cons
     if (const ClientHttp2Request *req = request()) {
         return req->extended_connect_support();
     }
-    if (!conn_ || !conn_->peer_settings_received()) {
+    if (!gate_ || !gate_->connection().peer_settings_received()) {
         return Http2ExtendedConnectSupport::Unknown;
     }
-    return conn_->peer_enable_connect_protocol() ? Http2ExtendedConnectSupport::Enabled
-                                                 : Http2ExtendedConnectSupport::Disabled;
+    return gate_->connection().peer_enable_connect_protocol() ? Http2ExtendedConnectSupport::Enabled
+                                                              : Http2ExtendedConnectSupport::Disabled;
 }
 
 fiber::async::Task<common::IoResult<ClientHttp2Request *>>
@@ -223,18 +224,18 @@ ClientHttp2Exchange::ensure_request_opened(std::chrono::steady_clock::time_point
         }
         co_return req;
     }
-    if (!conn_) {
+    if (!gate_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (!pool_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::unique_ptr<ClientHttp2Request> pending(ClientHttp2Request::create(*conn_, *pool_));
+    std::unique_ptr<ClientHttp2Request> pending(ClientHttp2Request::create(gate_->connection(), *pool_));
     if (!pending) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
-    auto attach_result = co_await conn_->attach_local_stream(pending->stream(), remaining_timeout(deadline));
+    auto attach_result = co_await gate_->attach(pending->stream(), remaining_timeout(deadline));
     if (!attach_result) {
         co_return std::unexpected(attach_result.error());
     }
