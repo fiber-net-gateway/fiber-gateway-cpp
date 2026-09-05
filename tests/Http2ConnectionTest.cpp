@@ -28,6 +28,7 @@
 #undef private
 
 #include <fiber/http/ClientHttp2Exchange.h>
+#include <fiber/http/Http2CloseGate.h>
 #include <fiber/http/Http2HpackDecoder.h>
 #include <fiber/http/Http2HpackStaticTable.h>
 #include <fiber/http/Http2LocalStreamGate.h>
@@ -493,11 +494,18 @@ class RecordingHttp2Connection final : public fiber::http::Http2Connection {
 public:
     RecordingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, Options options) :
         fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()) {
+        close_gate_.arm(*this);
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
+    // Closure is reported through one callback; everyone joins this gate.
+    [[nodiscard]] fiber::http::Http2CloseGate &close_gate() noexcept { return close_gate_; }
+
     const std::vector<ObservedChunk> &chunks() const noexcept { return chunks_; }
-    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_wait_closed(); }
+    fiber::async::Task<void> stop_and_join() noexcept {
+        shutdown();
+        (void) co_await close_gate_.join();
+    }
 
     void set_payload_error(fiber::common::IoErr err) noexcept { payload_error_ = err; }
 
@@ -521,6 +529,7 @@ protected:
 private:
     std::vector<ObservedChunk> chunks_;
     fiber::common::IoErr payload_error_ = fiber::common::IoErr::None;
+    fiber::http::Http2CloseGate close_gate_{};
 };
 
 struct RunOutcome {
@@ -657,11 +666,11 @@ struct ClientGoawayRunOutcome {
     std::string written;
 };
 
-DetachedTask run_http2_connection_capture_task(fiber::http::Http2Connection *connection,
+DetachedTask run_http2_connection_capture_task(fiber::http::Http2CloseGate *close_gate,
                                                std::shared_ptr<fiber::common::IoResult<void>> result,
                                                std::shared_ptr<std::atomic_bool> done) {
-    if (connection) {
-        *result = co_await connection->wait_closed();
+    if (close_gate) {
+        *result = co_await close_gate->join();
     }
     if (done) {
         done->store(true, std::memory_order_release);
@@ -1133,7 +1142,7 @@ DetachedTask run_http2_connection(std::shared_ptr<std::promise<RunOutcome>> prom
     connection.set_payload_error(payload_error);
 
     RunOutcome outcome;
-    outcome.result = co_await connection.wait_closed();
+    outcome.result = co_await connection.close_gate().join();
     outcome.chunks = connection.chunks();
     outcome.wait_readable_call_count = transport_impl->wait_readable_call_count();
     outcome.read_into_call_count = transport_impl->read_into_call_count();
@@ -1186,6 +1195,8 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
     };
     fiber::http::ServerRequestFactory factory(http_options, wrapped_handler);
     fiber::http::Http2Connection connection(options, &factory, fiber::http::ServerRequestFactory::ops());
+    fiber::http::Http2CloseGate close_gate;
+    close_gate.arm(connection);
     ServerHeaderRunOutcome outcome;
     fiber::common::IoErr start_err = connection.start(std::move(transport));
     if (start_err != fiber::common::IoErr::None) {
@@ -1195,7 +1206,7 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
         co_return;
     }
 
-    outcome.result = co_await connection.wait_closed();
+    outcome.result = co_await close_gate.join();
     outcome.written = fake_transport->written();
     promise->set_value(std::move(outcome));
 
@@ -1281,6 +1292,8 @@ run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSe
         auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, false);
         fiber::http::ServerRequestFactory factory(http_options, handler);
         fiber::http::Http2Connection connection(options, &factory, fiber::http::ServerRequestFactory::ops());
+        fiber::http::Http2CloseGate close_gate;
+        close_gate.arm(connection);
         fiber::common::IoErr start_err = connection.start(std::move(transport));
         if (start_err != fiber::common::IoErr::None) {
             outcome.run_result = std::unexpected(start_err);
@@ -1289,7 +1302,7 @@ run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSe
             co_return;
         }
 
-        outcome.run_result = co_await connection.wait_closed();
+        outcome.run_result = co_await close_gate.join();
     }
 
     for (int i = 0; i < 100 && !delayed_send_completed->load(std::memory_order_acquire); ++i) {
@@ -1336,8 +1349,12 @@ public:
                            Options options = {}) :
         fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()),
         fake_transport_(fake_transport) {
+        close_gate_.arm(*this);
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
+
+    // Closure is reported through one callback; everyone joins this gate.
+    [[nodiscard]] fiber::http::Http2CloseGate &close_gate() noexcept { return close_gate_; }
 
     // Exchanges attach through the gate, so the fixture owns one.
     [[nodiscard]] fiber::http::Http2LocalStreamGate &gate() noexcept { return gate_; }
@@ -1350,7 +1367,10 @@ public:
     void request_stop(fiber::common::IoErr reason = fiber::common::IoErr::Canceled) noexcept { shutdown(reason); }
 
     [[nodiscard]] std::int32_t current_connection_send_window() const noexcept { return connection_send_window(); }
-    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_wait_closed(); }
+    fiber::async::Task<void> stop_and_join() noexcept {
+        shutdown();
+        (void) co_await close_gate_.join();
+    }
 
     SendOutcome snapshot() const {
         SendOutcome outcome;
@@ -1363,6 +1383,7 @@ public:
 private:
     fiber::http::Http2LocalStreamGate gate_{*this};
     FakeHttpTransport *fake_transport_ = nullptr;
+    fiber::http::Http2CloseGate close_gate_{};
 };
 
 DetachedTask run_client_request_header_send(std::shared_ptr<std::promise<ClientRequestHeaderRunOutcome>> promise) {
@@ -1484,7 +1505,7 @@ run_client_extended_connect_header_send(std::shared_ptr<std::promise<ClientExten
             false);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.wait_closed();
+        outcome.run_result = co_await connection.close_gate().join();
         outcome.support_after = exchange.extended_connect_support();
     }
 
@@ -1731,7 +1752,7 @@ DetachedTask run_client_response_body_read(std::shared_ptr<std::promise<ClientRe
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.wait_closed();
+        outcome.run_result = co_await connection.close_gate().join();
         outcome.body_result = co_await exchange.read_body(64);
     }
 
@@ -1785,7 +1806,7 @@ run_client_response_headers_and_trailers_read(std::shared_ptr<std::promise<Clien
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.wait_closed();
+        outcome.run_result = co_await connection.close_gate().join();
     }
     if (outcome.run_result) {
         outcome.informational_result = co_await exchange.read_header();
@@ -1842,7 +1863,7 @@ run_client_response_header_end_stream_read(std::shared_ptr<std::promise<ClientRe
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.wait_closed();
+        outcome.run_result = co_await connection.close_gate().join();
     }
     if (outcome.run_result) {
         outcome.final_result = co_await exchange.read_header();
@@ -1887,7 +1908,7 @@ run_client_response_read_after_rst_stream(std::shared_ptr<std::promise<ClientRes
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
-        outcome.run_result = co_await connection.wait_closed();
+        outcome.run_result = co_await connection.close_gate().join();
         outcome.read_header_result = co_await exchange.read_header();
         outcome.read_body_result = co_await exchange.read_body(64);
     }
@@ -1939,8 +1960,8 @@ DetachedTask run_client_exchange_open_after_goaway(std::shared_ptr<std::promise<
 
     auto run_result = std::make_shared<fiber::common::IoResult<void>>();
     auto run_done = std::make_shared<std::atomic_bool>(false);
-    fiber::async::spawn([connection = &connection, run_result, run_done]() {
-        return run_http2_connection_capture_task(connection, run_result, run_done);
+    fiber::async::spawn([close_gate = &connection.close_gate(), run_result, run_done]() {
+        return run_http2_connection_capture_task(close_gate, run_result, run_done);
     });
 
     for (int i = 0; i < 50 && connection.state() != fiber::http::Http2Connection::State::Draining &&
@@ -1983,8 +2004,12 @@ public:
                            Options options = {}) :
         fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()),
         fake_transport_(fake_transport) {
+        close_gate_.arm(*this);
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
+
+    // Closure is reported through one callback; everyone joins this gate.
+    [[nodiscard]] fiber::http::Http2CloseGate &close_gate() noexcept { return close_gate_; }
 
     // Exchanges attach through the gate, so the fixture owns one.
     [[nodiscard]] fiber::http::Http2LocalStreamGate &gate() noexcept { return gate_; }
@@ -2025,12 +2050,16 @@ public:
         return stream ? stream->remote_rst() : false;
     }
     void request_stop(fiber::common::IoErr reason = fiber::common::IoErr::Canceled) noexcept { shutdown(reason); }
-    fiber::async::Task<void> stop_and_join() noexcept { co_await stop_and_wait_closed(); }
+    fiber::async::Task<void> stop_and_join() noexcept {
+        shutdown();
+        (void) co_await close_gate_.join();
+    }
     [[nodiscard]] const std::string &written() const noexcept { return fake_transport_->written(); }
 
 private:
     fiber::http::Http2LocalStreamGate gate_{*this};
     FakeHttpTransport *fake_transport_ = nullptr;
+    fiber::http::Http2CloseGate close_gate_{};
 };
 
 class KeepaliveHttp2Connection final : public fiber::http::Http2Connection {
@@ -2039,8 +2068,12 @@ public:
                              ScriptedReadTransport *transport_impl, Options options = {}) :
         fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()),
         transport_impl_(transport_impl) {
+        close_gate_.arm(*this);
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
+
+    // Closure is reported through one callback; everyone joins this gate.
+    [[nodiscard]] fiber::http::Http2CloseGate &close_gate() noexcept { return close_gate_; }
 
     [[nodiscard]] const std::string &written() const noexcept { return transport_impl_->written(); }
     [[nodiscard]] std::size_t transport_close_count() const noexcept { return transport_impl_->close_count(); }
@@ -2049,18 +2082,19 @@ public:
 
 private:
     ScriptedReadTransport *transport_impl_ = nullptr;
+    fiber::http::Http2CloseGate close_gate_{};
 };
 
 using SendScript = std::function<fiber::common::IoErr(SendingHttp2Connection &)>;
 using ControlScript =
         std::function<void(ControlHttp2Connection &, fiber::http::Http2Stream *, fiber::http::Http2Stream *)>;
 
-DetachedTask run_http2_connection_task(fiber::http::Http2Connection *connection,
+DetachedTask run_http2_connection_task(fiber::http::Http2CloseGate *close_gate,
                                        std::shared_ptr<std::atomic_bool> done = nullptr) {
-    if (!connection) {
+    if (!close_gate) {
         co_return;
     }
-    (void) co_await connection->wait_closed();
+    (void) co_await close_gate->join();
     if (done) {
         done->store(true, std::memory_order_release);
     }
@@ -2150,8 +2184,9 @@ DetachedTask run_send_connection(std::shared_ptr<std::promise<SendOutcome>> prom
     auto *fake_transport = transport.get();
     SendingHttp2Connection connection(std::move(transport), fake_transport, options);
     auto run_done = std::make_shared<std::atomic_bool>(false);
-    fiber::async::spawn(
-            [connection = &connection, run_done]() { return run_http2_connection_task(connection, run_done); });
+    fiber::async::spawn([close_gate = &connection.close_gate(), run_done]() {
+        return run_http2_connection_task(close_gate, run_done);
+    });
     co_await fiber::async::sleep(std::chrono::milliseconds(1));
 
     SendOutcome outcome;
@@ -2283,7 +2318,7 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
                                       local_stream3.get()};
         fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
 
-        outcome.result = co_await connection.wait_closed();
+        outcome.result = co_await connection.close_gate().join();
         promise->set_value(std::move(outcome));
         fiber::event::EventLoop::current().stop();
         co_return;
@@ -2305,7 +2340,7 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
                                       local_stream1.get(),
                                       local_stream3.get()};
         fiber::async::spawn([setup_ctx]() mutable { return run_control_setup_task(std::move(setup_ctx)); });
-        outcome.result = co_await connection.wait_closed();
+        outcome.result = co_await connection.close_gate().join();
     } else {
         if (setup) {
             setup(connection, local_stream1.get(), local_stream3.get());
@@ -2314,7 +2349,7 @@ DetachedTask run_control_connection(std::shared_ptr<std::promise<ControlRunOutco
             stream1_id = local_stream1->stream_id();
             stream3_id = local_stream3->stream_id();
         }
-        outcome.result = co_await connection.wait_closed();
+        outcome.result = co_await connection.close_gate().join();
     }
     co_await fiber::async::sleep(std::chrono::milliseconds(1));
     capture_outcome();
@@ -2836,7 +2871,7 @@ DetachedTask run_keepalive_connection(std::shared_ptr<std::promise<KeepaliveRunO
         outcome.read_buffer_released = !connection.read_buffer_allocated();
         connection.shutdown(fiber::common::IoErr::None);
     }
-    outcome.result = co_await connection.wait_closed();
+    outcome.result = co_await connection.close_gate().join();
     outcome.written = options.role == fiber::http::Http2Connection::ConnectionRole::Client
                               ? strip_client_initial_flight(connection.written())
                               : connection.written();
@@ -2901,7 +2936,7 @@ DetachedTask run_retained_stream_connection(std::shared_ptr<std::promise<Retaine
     });
 
     RetainedStreamOutcome outcome;
-    outcome.result = co_await connection.wait_closed();
+    outcome.result = co_await connection.close_gate().join();
     co_await fiber::async::sleep(std::chrono::milliseconds(1));
 
     outcome.stream_opened = retained_stream.has_value();
@@ -3017,7 +3052,8 @@ TEST(Http2ConnectionTest, StartDrivesIoAndNotifiesClosureWithoutRunCoroutine) {
             event_loop.stop();
         };
         auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{});
-        fiber::common::IoErr err = connection->start(std::move(transport), on_closed, &callback_ctx);
+        connection->set_closed_callback(on_closed, &callback_ctx);
+        fiber::common::IoErr err = connection->start(std::move(transport));
         if (err != fiber::common::IoErr::None) {
             delete connection;
             callback_ctx.promise->set_value(std::unexpected(err));
@@ -3056,7 +3092,7 @@ TEST(Http2ConnectionTest, ReadinessCallbackDrainsTransportUntilWouldBlock) {
         outcome.chunks = connection.chunks();
         outcome.read_into_call_count = transport_impl->read_into_call_count();
         connection.shutdown();
-        outcome.result = co_await connection.wait_closed();
+        outcome.result = co_await connection.close_gate().join();
         promise->set_value(std::move(outcome));
         fiber::event::EventLoop::current().stop();
     });
@@ -3787,6 +3823,87 @@ struct ReentrantCapacityObserver {
 };
 
 } // namespace
+
+namespace {
+
+struct CloseGateObserverOutcome {
+    bool observer_ran = false;
+    bool observer_ran_before_joiner_resumed = false;
+    bool joiner_saw_close = false;
+    fiber::common::IoErr observer_reason = fiber::common::IoErr::Unknown;
+    std::size_t hook_still_linked = 0;
+};
+
+struct CloseGateObserverContext {
+    CloseGateObserverOutcome *outcome = nullptr;
+    const bool *joiner_resumed = nullptr;
+    const fiber::http::Http2CloseGate::ObserverHook *hook = nullptr;
+};
+
+void on_close_observed(void *ctx, fiber::http::Http2Connection &, fiber::common::IoErr reason) noexcept {
+    auto *observer = static_cast<CloseGateObserverContext *>(ctx);
+    observer->outcome->observer_ran = true;
+    observer->outcome->observer_reason = reason;
+    observer->outcome->observer_ran_before_joiner_resumed = !*observer->joiner_resumed;
+}
+
+DetachedTask run_close_gate_observer(std::shared_ptr<std::promise<CloseGateObserverOutcome>> promise) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    auto transport =
+            std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, true, false);
+    auto *fake_transport = transport.get();
+    ControlHttp2Connection connection(std::move(transport), fake_transport, options);
+
+    CloseGateObserverOutcome outcome;
+    bool joiner_resumed = false;
+    fiber::http::Http2CloseGate::ObserverHook hook;
+    CloseGateObserverContext observer_ctx{&outcome, &joiner_resumed, &hook};
+    connection.close_gate().add_observer(hook, &on_close_observed, &observer_ctx);
+
+    connection.request_stop();
+    auto close_result = co_await connection.close_gate().join();
+    joiner_resumed = true;
+    outcome.joiner_saw_close = close_result.has_value();
+    // Dispatch drops every observer, so nothing dangles once the frame goes.
+    outcome.hook_still_linked = hook.linked ? 1 : 0;
+
+    promise->set_value(outcome);
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+CloseGateObserverOutcome execute_close_gate_observer() {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<CloseGateObserverOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [promise]() mutable { return run_close_gate_observer(std::move(promise)); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        ADD_FAILURE() << "Timed out waiting for the HTTP/2 close gate";
+        return {};
+    }
+
+    CloseGateObserverOutcome outcome = future.get();
+    group.join();
+    return outcome;
+}
+
+} // namespace
+
+TEST(Http2ConnectionTest, CloseGateRunsObserversBeforeResumingJoiners) {
+    CloseGateObserverOutcome outcome = execute_close_gate_observer();
+
+    EXPECT_TRUE(outcome.observer_ran);
+    EXPECT_TRUE(outcome.observer_ran_before_joiner_resumed);
+    EXPECT_TRUE(outcome.joiner_saw_close);
+    EXPECT_EQ(outcome.observer_reason, fiber::common::IoErr::None);
+    EXPECT_EQ(outcome.hook_still_linked, 0U);
+}
 
 TEST(Http2ConnectionTest, CapacityCallbackFiresWhenStreamDetachFreesSlot) {
     CapacityObserver observer;

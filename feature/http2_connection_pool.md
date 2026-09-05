@@ -173,7 +173,9 @@ class Http2CloseGate {                       // 无 mutex，侵入式 waiter 链
 
 细节：`start()` 失败路径会就地置 `close_completion_dispatched_` 并清掉回调，所以 `arm()` 必须能识别「连接已经关掉了」并让 `join()` 立即返回。
 
-迁移成本：`HttpServer.cpp:455` 1 处 + `Http2ConnectionTest.cpp` 19 处（机械改动，测试加个 fixture helper 即可）。`Http3Connection` / `Http3ClientConnection` 也各有一份自己的 `wait_closed`，后续可复用同一个 helper，本次不动。
+迁移成本：`HttpServer.cpp` 1 处 + `Http2ConnectionTest.cpp` 20 余处 + nacos 的 3 个测试服务端。`Http3Connection` / `Http3ClientConnection` 也各有一份自己的 `wait_closed`，后续可复用同一个 helper，本次不动。
+
+实现补充（已落地）：`start()` 不再接收回调参数，回调只能通过 `set_closed_callback()` 安装，避免「两个入口设同一个槽位」。gate 记录自己是否仍是已安装的那个回调，析构时只在仍安装时清除；`arm()` 断言连接尚无回调（**一条连接同时只能有一个 gate**，测试 fixture 因此各自持有一个而不是每次 await 临时建）。`ObserverHook` 自带析构反注册，观察者可以先于连接销毁。
 
 ### 4.6 池侧的单连接容量口径
 

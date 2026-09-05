@@ -5,7 +5,6 @@
 #include <optional>
 
 #include "../async/Task.h"
-#include "../async/WaitGroup.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -13,6 +12,7 @@
 #include "../net/SocketAddress.h"
 #include "../net/TcpSocketOptions.h"
 #include "ClientHttp2Request.h"
+#include "Http2CloseGate.h"
 #include "Http2Connection.h"
 #include "Http2LocalStreamGate.h"
 #include "HttpClientTlsOptions.h"
@@ -39,6 +39,9 @@ public:
     connect(const net::SocketAddress &peer, std::chrono::milliseconds timeout, const HttpClientTlsOptions &tls,
             const net::TcpSocketOptions &tcp = net::kNoDelayTcpSocketOptions) noexcept;
     fiber::async::Task<Http2Connection::CloseResult> wait_closed() noexcept;
+    // Closure reaches every subscriber through here; observers run before any
+    // wait_closed() joiner resumes.
+    [[nodiscard]] Http2CloseGate &close_gate() noexcept { return close_gate_; }
 
     [[nodiscard]] ClientHttp2Exchange open_exchange(mem::BufPool &pool) noexcept;
 
@@ -54,7 +57,6 @@ public:
 
 private:
     static Http2Connection::Options normalize_h2_options(Http2Connection::Options options) noexcept;
-    static void on_http2_closed(void *ctx, Http2Connection &connection, Http2Connection::CloseResult result) noexcept;
 
     fiber::async::Task<common::IoResult<void>> connect_impl(net::SocketAddress peer, std::chrono::milliseconds timeout,
                                                             net::TcpSocketOptions tcp,
@@ -62,11 +64,9 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     std::optional<net::SocketAddress> local_addr_;
-    fiber::async::WaitGroup close_wg_;
     Http2Connection conn_;
     Http2LocalStreamGate stream_gate_;
-    common::IoErr terminal_error_ = common::IoErr::None;
-    bool close_pending_ = false;
+    Http2CloseGate close_gate_;
 };
 
 } // namespace fiber::http

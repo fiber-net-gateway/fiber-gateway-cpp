@@ -148,8 +148,17 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
     FIBER_ASSERT(inbound_hpack_decoder_.init(kDefaultHeaderTableSize, options_.max_hpack_string_size));
 }
 
-common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport, ClosedCallback on_closed,
-                                     void *closed_ctx) noexcept {
+void Http2Connection::set_closed_callback(ClosedCallback cb, void *ctx) noexcept {
+    on_closed_ = cb;
+    closed_ctx_ = cb != nullptr ? ctx : nullptr;
+}
+
+void Http2Connection::clear_closed_callback() noexcept {
+    on_closed_ = nullptr;
+    closed_ctx_ = nullptr;
+}
+
+common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) noexcept {
     FIBER_ASSERT(state_ == State::Init);
     FIBER_ASSERT(transport_ == nullptr);
     if (!transport || !transport->valid()) {
@@ -162,8 +171,6 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport, C
     transport_ = std::move(transport);
     bind_outbound_chain(control_hook_.encoded_);
     bind_outbound_chain(inflight_outbound_chain_);
-    on_closed_ = on_closed;
-    closed_ctx_ = on_closed ? closed_ctx : nullptr;
     inbound_io_.phase = options_.role == ConnectionRole::Server ? ParsePhase::Preface : ParsePhase::FrameHeader;
     inbound_io_.last_inbound_at = transport_->loop().now();
     prefer_write_ = options_.role == ConnectionRole::Client;
@@ -176,8 +183,6 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport, C
         state_ = State::Closed;
         close_finished_ = true;
         close_completion_dispatched_ = true;
-        on_closed_ = nullptr;
-        closed_ctx_ = nullptr;
         return start_err;
     }
 
@@ -223,44 +228,7 @@ Http2Connection::~Http2Connection() {
         transport_->close();
     }
     close_finished_ = true;
-    FIBER_ASSERT(!closed_waiter_);
     FIBER_ASSERT(!close_completion_posted_);
-}
-
-fiber::async::Task<Http2Connection::CloseResult> Http2Connection::wait_closed() noexcept {
-    if (state_ == State::Init) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
-    if (closed_waiter_ || on_closed_) {
-        co_return std::unexpected(common::IoErr::Busy);
-    }
-    co_await ClosedAwaiter{this};
-    if (terminal_error_ != common::IoErr::None) {
-        co_return std::unexpected(terminal_error_);
-    }
-    co_return CloseResult{};
-}
-
-Http2Connection::ClosedAwaiter::~ClosedAwaiter() {
-    if (connection && handle && connection->closed_waiter_ == handle) {
-        connection->closed_waiter_ = {};
-    }
-}
-
-bool Http2Connection::ClosedAwaiter::await_suspend(std::coroutine_handle<> continuation) noexcept {
-    FIBER_ASSERT(connection != nullptr);
-    FIBER_ASSERT(!connection->closed_waiter_);
-    if (connection->close_completion_dispatched_) {
-        return false;
-    }
-    handle = continuation;
-    connection->closed_waiter_ = continuation;
-    return true;
-}
-
-void Http2Connection::ClosedAwaiter::await_resume() noexcept {
-    connection = nullptr;
-    handle = {};
 }
 
 common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget, std::size_t &byte_budget) noexcept {
@@ -751,7 +719,7 @@ void Http2Connection::finish_connection() noexcept {
             transport_->close();
         }
     }
-    if (streams_.size() != 0) {
+    if (!streams_.empty()) {
         return;
     }
     state_ = State::Closed;
@@ -782,27 +750,12 @@ void Http2Connection::dispatch_closed_completion() noexcept {
         return;
     }
     close_completion_dispatched_ = true;
-    std::coroutine_handle<> waiter = std::exchange(closed_waiter_, {});
-    if (waiter) {
-        FIBER_ASSERT(on_closed_ == nullptr);
-        waiter.resume();
-        return;
-    }
     ClosedCallback callback = std::exchange(on_closed_, nullptr);
     void *callback_ctx = std::exchange(closed_ctx_, nullptr);
     if (callback) {
         CloseResult result =
                 terminal_error_ == common::IoErr::None ? CloseResult{} : CloseResult(std::unexpected(terminal_error_));
         callback(callback_ctx, *this, std::move(result));
-    }
-}
-
-fiber::async::Task<void> Http2Connection::stop_and_wait_closed(common::IoErr reason) noexcept {
-    if (state_ != State::Init && state_ != State::Closed) {
-        enter_closing(reason, false);
-    }
-    if (state_ != State::Init) {
-        (void) co_await wait_closed();
     }
 }
 
@@ -2274,7 +2227,7 @@ void Http2Connection::maybe_enter_closing_from_draining() noexcept {
     if (stop_sending_requested_ || state_ != State::Draining) {
         return;
     }
-    if (streams_.size() != 0) {
+    if (!streams_.empty()) {
         return;
     }
     if (!local_goaway_sent_) {
