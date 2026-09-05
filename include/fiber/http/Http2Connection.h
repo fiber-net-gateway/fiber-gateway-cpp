@@ -97,11 +97,6 @@ public:
     fiber::async::Task<CloseResult> wait_closed() noexcept;
     // Immediate fast path. Returns Busy when the peer's concurrent-stream budget is exhausted.
     [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream(Http2Stream &stream) noexcept;
-    // Suspends on this connection's EventLoop while capacity is exhausted. Waiters are FIFO;
-    // timeout zero is a poll and timeout max waits indefinitely. Draining or closure cancels the wait.
-    [[nodiscard]] fiber::async::Task<common::IoResult<Http2Stream::Lease>>
-    attach_local_stream(Http2Stream &stream,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
@@ -126,10 +121,14 @@ public:
     // the slots handed to resumed attach waiters.
     [[nodiscard]] std::size_t available_local_stream_slots() const noexcept;
     [[nodiscard]] bool peer_goaway_received() const noexcept { return peer_goaway_received_; }
-    // False once the connection is draining, closing, out of local stream ids,
-    // or out of peer budget, i.e. when try_attach_local_stream cannot succeed.
+    // What try_attach_local_stream would return right now: None when a stream
+    // can be attached, Busy while the peer budget is full, Canceled once the
+    // connection is draining, closing, or out of local stream ids, Invalid
+    // before the session starts. Waiting callers use this to tell "retry later"
+    // apart from "never again"; see Http2LocalStreamGate.
+    [[nodiscard]] common::IoErr local_stream_attach_status() const noexcept;
     [[nodiscard]] bool accepts_new_local_stream() const noexcept {
-        return local_stream_attach_gate() == common::IoErr::None;
+        return local_stream_attach_status() == common::IoErr::None;
     }
     [[nodiscard]] event::EventLoop &loop() noexcept {
         FIBER_ASSERT(transport_ != nullptr);
@@ -173,8 +172,6 @@ protected:
     fiber::async::Task<void> stop_and_wait_closed(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 private:
-    class LocalStreamAttachAwaiter;
-
     enum class ParsePhase : std::uint8_t {
         Preface,
         FrameHeader,
@@ -260,14 +257,6 @@ private:
     void detach_stream(Http2Stream &stream) noexcept;
     void try_release_stream(Http2Stream &stream) noexcept;
     bool can_accept_peer_stream(std::uint32_t stream_id) const noexcept;
-    [[nodiscard]] common::IoErr local_stream_attach_gate() const noexcept;
-    [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream_impl(Http2Stream &stream,
-                                                                                    bool consume_grant) noexcept;
-    void enqueue_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
-    void unlink_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
-    void finish_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter, bool transfer_grant) noexcept;
-    void grant_local_stream_attach_waiters() noexcept;
-    void cancel_local_stream_attach_waiters(common::IoErr result) noexcept;
     void on_local_stream_attach_capacity_changed() noexcept;
     void apply_local_stream_attach_capacity_change() noexcept;
     void apply_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
@@ -412,10 +401,6 @@ private:
     std::uint32_t next_local_stream_id_ = 0;
     std::size_t peer_active_stream_count_ = 0;
     std::size_t local_active_stream_count_ = 0;
-    common::IntrusiveListHook *local_stream_attach_wait_head_ = nullptr;
-    common::IntrusiveListHook *local_stream_attach_wait_tail_ = nullptr;
-    std::size_t local_stream_attach_waiter_count_ = 0;
-    std::size_t local_stream_attach_granted_count_ = 0;
     std::int32_t conn_recv_window_remaining_ = 65535;
     std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;

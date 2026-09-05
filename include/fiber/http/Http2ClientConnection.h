@@ -14,6 +14,7 @@
 #include "../net/TcpSocketOptions.h"
 #include "ClientHttp2Request.h"
 #include "Http2Connection.h"
+#include "Http2LocalStreamGate.h"
 #include "HttpClientTlsOptions.h"
 
 namespace fiber::http {
@@ -47,6 +48,8 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept;
     [[nodiscard]] Http2Connection &http2() noexcept;
     [[nodiscard]] const Http2Connection &http2() const noexcept;
+    // FIFO admission for locally initiated streams on this connection.
+    [[nodiscard]] Http2LocalStreamGate &stream_gate() noexcept { return stream_gate_; }
     [[nodiscard]] const std::optional<net::SocketAddress> &local_addr() const noexcept { return local_addr_; }
 
 private:
@@ -61,6 +64,7 @@ private:
     std::optional<net::SocketAddress> local_addr_;
     fiber::async::WaitGroup close_wg_;
     Http2Connection conn_;
+    Http2LocalStreamGate stream_gate_;
     common::IoErr terminal_error_ = common::IoErr::None;
     bool close_pending_ = false;
 };

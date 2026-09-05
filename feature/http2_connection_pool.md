@@ -149,6 +149,8 @@ void set_capacity_callback(CapacityCallback cb, void *ctx) noexcept;
 
 同理，**不需要**引入 `Http2StreamSlot` 之类的预留 token：池 → gate 是串联而非竞争关系，池准入过的请求到 gate 时队列必然为空。
 
+实现补充（已落地）：waiter 被唤醒后**仍留在队列里**直到真正 attach 成功，`try_attach` 只要看到队列非空就返回 Busy —— 这就是「公平性是策略而非预留」的具体形态，比原来「授予即出队 + 计数预留」还多一个好处：抢跑失败的 waiter 保持原位，不会像旧实现那样退到队尾。另外 gate 占用了连接唯一的 capacity 回调槽位，因此它自身再暴露一个 `set_capacity_callback` 供上层（池）串接，在 gate 处理完之后回调。
+
 ### 4.5 close 通知统一
 
 现状三层重复：

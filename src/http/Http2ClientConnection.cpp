@@ -25,7 +25,8 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 }
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Http2Connection::Options h2) noexcept :
-    loop_(&loop), conn_(normalize_h2_options(std::move(h2)), nullptr, ClientHttp2Request::factory_ops()) {}
+    loop_(&loop), conn_(normalize_h2_options(std::move(h2)), nullptr, ClientHttp2Request::factory_ops()),
+    stream_gate_(conn_) {}
 
 Http2ClientConnection::~Http2ClientConnection() {
     FIBER_ASSERT(!close_pending_);
