@@ -351,6 +351,7 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport, C
 
 Http2Connection::~Http2Connection() {
     FIBER_ASSERT(!io_pump_running_);
+    FIBER_ASSERT(!capacity_dispatch_running_);
     FIBER_ASSERT(local_stream_attach_wait_head_ == nullptr);
     FIBER_ASSERT(local_stream_attach_wait_tail_ == nullptr);
     FIBER_ASSERT(local_stream_attach_waiter_count_ == 0);
@@ -366,6 +367,8 @@ Http2Connection::~Http2Connection() {
     FIBER_ASSERT(!io_pump_posted_);
     on_closed_ = nullptr;
     closed_ctx_ = nullptr;
+    capacity_cb_ = nullptr;
+    capacity_ctx_ = nullptr;
     if (transport_ && transport_->loop().in_loop()) {
         cancel_io_timers();
         clear_transport_callbacks();
@@ -1813,7 +1816,7 @@ common::IoErr Http2Connection::local_stream_attach_gate() const noexcept {
     if (peer_goaway_received_ || local_stream_ids_exhausted_) {
         return common::IoErr::Canceled;
     }
-    if (available_local_stream_attach_slots() == 0) {
+    if (available_local_stream_slots() == 0) {
         return common::IoErr::Busy;
     }
     return common::IoErr::None;
@@ -1821,7 +1824,7 @@ common::IoErr Http2Connection::local_stream_attach_gate() const noexcept {
 
 // The stream table grows on demand, so the peer's SETTINGS_MAX_CONCURRENT_STREAMS
 // is the only ceiling on locally initiated streams.
-std::size_t Http2Connection::available_local_stream_attach_slots() const noexcept {
+std::size_t Http2Connection::available_local_stream_slots() const noexcept {
     const std::size_t peer_limit = static_cast<std::size_t>(peer_advertised_max_concurrent_streams_);
     const std::size_t used = local_active_stream_count_ + local_stream_attach_granted_count_;
     return peer_limit > used ? peer_limit - used : 0;
@@ -1888,7 +1891,7 @@ void Http2Connection::grant_local_stream_attach_waiters() noexcept {
         return;
     }
 
-    std::size_t available = available_local_stream_attach_slots();
+    std::size_t available = available_local_stream_slots();
     while (available != 0 && local_stream_attach_wait_head_ != nullptr) {
         LocalStreamAttachAwaiter *awaiter = LocalStreamAttachAwaiter::from_wait_link(local_stream_attach_wait_head_);
         FIBER_ASSERT(awaiter != nullptr);
@@ -1910,6 +1913,34 @@ void Http2Connection::cancel_local_stream_attach_waiters(common::IoErr result) n
 }
 
 void Http2Connection::on_local_stream_attach_capacity_changed() noexcept {
+    // A capacity change raised from inside the callback is folded into one more
+    // pass so an observer that reacts by closing or retiring cannot recurse.
+    if (capacity_dispatch_running_) {
+        capacity_dispatch_again_ = true;
+        return;
+    }
+    capacity_dispatch_running_ = true;
+    do {
+        capacity_dispatch_again_ = false;
+        apply_local_stream_attach_capacity_change();
+        if (capacity_cb_ != nullptr) {
+            capacity_cb_(capacity_ctx_, *this);
+        }
+    } while (capacity_dispatch_again_);
+    capacity_dispatch_running_ = false;
+}
+
+void Http2Connection::set_capacity_callback(CapacityCallback cb, void *ctx) noexcept {
+    capacity_cb_ = cb;
+    capacity_ctx_ = cb != nullptr ? ctx : nullptr;
+}
+
+void Http2Connection::clear_capacity_callback() noexcept {
+    capacity_cb_ = nullptr;
+    capacity_ctx_ = nullptr;
+}
+
+void Http2Connection::apply_local_stream_attach_capacity_change() noexcept {
     if (state_ == State::Running || (options_.role == ConnectionRole::Client && state_ == State::Start)) {
         if (peer_goaway_received_ || local_stream_ids_exhausted_) {
             cancel_local_stream_attach_waiters(common::IoErr::Canceled);
@@ -1932,6 +1963,14 @@ bool Http2Connection::is_next_peer_stream_id(std::uint32_t stream_id) const noex
 }
 
 void Http2Connection::handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept {
+    apply_peer_goaway(last_stream_id, error_code);
+    // The GOAWAY path cancels attach waiters directly instead of going through
+    // the capacity hook, so notify once the connection has finished reacting:
+    // refusing new local streams is exactly what an observer needs to hear.
+    on_local_stream_attach_capacity_changed();
+}
+
+void Http2Connection::apply_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept {
     peer_goaway_received_ = true;
     peer_last_stream_id_ = last_stream_id;
     peer_goaway_error_code_ = error_code;
