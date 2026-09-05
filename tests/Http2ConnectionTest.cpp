@@ -3755,6 +3755,145 @@ TEST(Http2ConnectionTest, TryAttachLocalStreamFollowsPeerLimitNotTableCapacity) 
     connection.close_all_streams(fiber::common::IoErr::Canceled);
 }
 
+namespace {
+
+struct CapacityObserver {
+    std::size_t calls = 0;
+    std::size_t last_slots = 0;
+    bool last_accepts = false;
+    bool last_goaway = false;
+
+    static void on_capacity(void *ctx, fiber::http::Http2Connection &connection) noexcept {
+        auto *self = static_cast<CapacityObserver *>(ctx);
+        ++self->calls;
+        self->last_slots = connection.available_local_stream_slots();
+        self->last_accepts = connection.accepts_new_local_stream();
+        self->last_goaway = connection.peer_goaway_received();
+    }
+};
+
+struct ReentrantCapacityObserver {
+    std::size_t calls = 0;
+    bool retriggered = false;
+
+    static void on_capacity(void *ctx, fiber::http::Http2Connection &connection) noexcept {
+        auto *self = static_cast<ReentrantCapacityObserver *>(ctx);
+        ++self->calls;
+        if (self->retriggered) {
+            return;
+        }
+        self->retriggered = true;
+        (void) connection.apply_settings_parameter(0x3, 7);
+    }
+};
+
+} // namespace
+
+TEST(Http2ConnectionTest, CapacityCallbackFiresWhenStreamDetachFreesSlot) {
+    CapacityObserver observer;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    options.max_peer_concurrent_streams = 1;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+    connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
+
+    auto *owner1 = TestHttp2StreamOwner::create_owner();
+    ASSERT_NE(owner1, nullptr);
+    auto stream1 = connection.try_attach_local_stream(owner1->stream);
+    ASSERT_TRUE(stream1.has_value());
+    EXPECT_EQ(connection.local_active_stream_count(), 1u);
+    EXPECT_EQ(connection.available_local_stream_slots(), 0u);
+    EXPECT_FALSE(connection.accepts_new_local_stream());
+    EXPECT_EQ(observer.calls, 0u);
+
+    (*stream1)->close(fiber::common::IoErr::Canceled);
+    connection.try_release_stream(**stream1);
+    stream1->reset();
+
+    EXPECT_EQ(observer.calls, 1u);
+    EXPECT_EQ(observer.last_slots, 1u);
+    EXPECT_TRUE(observer.last_accepts);
+    EXPECT_EQ(connection.local_active_stream_count(), 0u);
+    EXPECT_EQ(connection.available_local_stream_slots(), 1u);
+
+    connection.close_all_streams(fiber::common::IoErr::Canceled);
+}
+
+TEST(Http2ConnectionTest, CapacityCallbackFiresWhenPeerSettingsChangeStreamBudget) {
+    CapacityObserver observer;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    options.max_peer_concurrent_streams = 2;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+    connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
+
+    ASSERT_EQ(connection.apply_settings_parameter(0x3, 5), fiber::common::IoErr::None);
+    EXPECT_EQ(observer.calls, 1u);
+    EXPECT_EQ(observer.last_slots, 5u);
+    EXPECT_TRUE(observer.last_accepts);
+    EXPECT_EQ(connection.peer_max_concurrent_streams(), 5u);
+
+    ASSERT_EQ(connection.apply_settings_parameter(0x3, 0), fiber::common::IoErr::None);
+    EXPECT_EQ(observer.calls, 2u);
+    EXPECT_EQ(observer.last_slots, 0u);
+    EXPECT_FALSE(observer.last_accepts);
+    EXPECT_FALSE(connection.accepts_new_local_stream());
+
+    connection.clear_capacity_callback();
+    ASSERT_EQ(connection.apply_settings_parameter(0x3, 3), fiber::common::IoErr::None);
+    EXPECT_EQ(observer.calls, 2u);
+}
+
+TEST(Http2ConnectionTest, CapacityCallbackFiresOnPeerGoaway) {
+    CapacityObserver observer;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    options.max_peer_concurrent_streams = 4;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+    // This fixture has no transport, so pretend our own GOAWAY already went out
+    // and keep one stream attached: both encoding a GOAWAY and draining to
+    // Closing would need a loop to pump.
+    connection.local_goaway_sent_ = true;
+
+    auto *owner1 = TestHttp2StreamOwner::create_owner();
+    ASSERT_NE(owner1, nullptr);
+    auto stream1 = connection.try_attach_local_stream(owner1->stream);
+    ASSERT_TRUE(stream1.has_value());
+
+    connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
+    connection.handle_peer_goaway(1, fiber::http::Http2ErrorCode::NoError);
+
+    EXPECT_EQ(observer.calls, 1u);
+    EXPECT_TRUE(observer.last_goaway);
+    EXPECT_FALSE(observer.last_accepts);
+    EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Draining);
+    EXPECT_TRUE(connection.peer_goaway_received());
+    EXPECT_FALSE(connection.accepts_new_local_stream());
+    // The surviving stream is untouched by the peer's last-stream-id.
+    EXPECT_EQ(connection.local_active_stream_count(), 1u);
+}
+
+TEST(Http2ConnectionTest, CapacityCallbackCoalescesChangeRaisedFromInsideTheCallback) {
+    ReentrantCapacityObserver observer;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    options.max_peer_concurrent_streams = 2;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+    connection.set_capacity_callback(&ReentrantCapacityObserver::on_capacity, &observer);
+
+    ASSERT_EQ(connection.apply_settings_parameter(0x3, 5), fiber::common::IoErr::None);
+
+    // One extra pass for the nested change, not a recursive dispatch.
+    EXPECT_EQ(observer.calls, 2u);
+    EXPECT_EQ(connection.peer_max_concurrent_streams(), 7u);
+    EXPECT_FALSE(connection.capacity_dispatch_running_);
+    EXPECT_FALSE(connection.capacity_dispatch_again_);
+}
+
 TEST(Http2ConnectionTest, ReducedPeerLimitWaitsForActiveStreamCountToFallBelowIt) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
