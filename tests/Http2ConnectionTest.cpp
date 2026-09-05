@@ -3715,26 +3715,32 @@ TEST(Http2ConnectionTest, AwaitedLocalStreamAttachGrantsCapacityInFifoOrder) {
     EXPECT_EQ(outcome.granted_count, 0U);
 }
 
-TEST(Http2ConnectionTest, TryAttachLocalStreamRespectsFixedStreamTableCapacity) {
+TEST(Http2ConnectionTest, TryAttachLocalStreamFollowsPeerLimitNotTableCapacity) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
     options.local_max_concurrent_streams = 0;
     options.max_peer_concurrent_streams = 2;
     fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
+    // The stream table grows on demand, so a peer budget above the configured
+    // pre-SETTINGS guess is usable in full.
     ASSERT_EQ(connection.apply_settings_parameter(0x3, 3), fiber::common::IoErr::None);
 
     auto *owner1 = TestHttp2StreamOwner::create_owner();
     auto *owner3 = TestHttp2StreamOwner::create_owner();
+    auto *owner5 = TestHttp2StreamOwner::create_owner();
     auto *blocked_owner = TestHttp2StreamOwner::create_owner();
     ASSERT_NE(owner1, nullptr);
     ASSERT_NE(owner3, nullptr);
+    ASSERT_NE(owner5, nullptr);
     ASSERT_NE(blocked_owner, nullptr);
 
     auto stream1 = connection.try_attach_local_stream(owner1->stream);
     auto stream3 = connection.try_attach_local_stream(owner3->stream);
+    auto stream5 = connection.try_attach_local_stream(owner5->stream);
     ASSERT_TRUE(stream1.has_value());
     ASSERT_TRUE(stream3.has_value());
+    ASSERT_TRUE(stream5.has_value());
     auto blocked = connection.try_attach_local_stream(blocked_owner->stream);
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error(), fiber::common::IoErr::Busy);
@@ -3742,9 +3748,9 @@ TEST(Http2ConnectionTest, TryAttachLocalStreamRespectsFixedStreamTableCapacity) 
     (*stream1)->close(fiber::common::IoErr::Canceled);
     connection.try_release_stream(**stream1);
     stream1->reset();
-    auto stream5 = connection.try_attach_local_stream(blocked_owner->stream);
-    ASSERT_TRUE(stream5.has_value());
-    EXPECT_EQ((*stream5)->stream_id(), 5U);
+    auto stream7 = connection.try_attach_local_stream(blocked_owner->stream);
+    ASSERT_TRUE(stream7.has_value());
+    EXPECT_EQ((*stream7)->stream_id(), 7U);
 
     connection.close_all_streams(fiber::common::IoErr::Canceled);
 }

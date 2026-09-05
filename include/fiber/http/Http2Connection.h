@@ -94,7 +94,7 @@ public:
 
     // Waits for close completion; this does not drive I/O.
     fiber::async::Task<CloseResult> wait_closed() noexcept;
-    // Immediate fast path. Returns Busy when peer or stream-table capacity is exhausted.
+    // Immediate fast path. Returns Busy when the peer's concurrent-stream budget is exhausted.
     [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream(Http2Stream &stream) noexcept;
     // Suspends on this connection's EventLoop while capacity is exhausted. Waiters are FIFO;
     // timeout zero is a poll and timeout max waits indefinitely. Draining or closure cancels the wait.
@@ -254,7 +254,6 @@ private:
     [[nodiscard]] bool is_idle_stream(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_local_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_peer_stream_id(std::uint32_t stream_id) const noexcept;
-    [[nodiscard]] std::size_t configured_max_active_streams() const noexcept;
     template<typename T>
     static constexpr bool kAlwaysFalse = false;
 
