@@ -13,7 +13,7 @@ namespace fiber::lite_nginx::upstream {
 
 fiber::async::Task<fiber::common::IoResult<AcquiredUpstreamConnection>>
 acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService &dns,
-                    const fiber::http::Http1ConnectionGroupKey &key, std::string_view tls_server_name,
+                    const fiber::http::HttpConnectionGroupKey &key, std::string_view tls_server_name,
                     std::chrono::milliseconds connect_timeout, ConnectionReusePolicy reuse_policy) noexcept {
     AcquiredUpstreamConnection out;
     if (reuse_policy == ConnectionReusePolicy::Pooled) {
@@ -55,7 +55,7 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
 
     // Borrowed by connect() for the whole dial: `tls_server_name` is the caller's, and `peers`
     // lives in this frame, which the co_awaits below keep alive.
-    const bool https = key.scheme() == fiber::http::Http1ConnectionGroupKey::Scheme::Https;
+    const bool https = key.scheme() == fiber::http::HttpConnectionGroupKey::Scheme::Https;
     fiber::http::HttpClientTlsOptions tls;
     tls.server_name = tls_server_name;
     auto dial = [&](fiber::http::Http1ClientConnection &connection) {

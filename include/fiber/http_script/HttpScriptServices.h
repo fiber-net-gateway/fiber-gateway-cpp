@@ -6,7 +6,7 @@
 #include "../async/Task.h"
 #include "../common/IoError.h"
 #include "../http/Http1ClientConnection.h"
-#include "../http/Http1ConnectionGroupKey.h"
+#include "../http/HttpConnectionGroupKey.h"
 #include "../net/IpAddress.h"
 #include "../net/SocketAddress.h"
 

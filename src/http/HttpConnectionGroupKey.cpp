@@ -1,4 +1,4 @@
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 
 #include <cstring>
 
@@ -45,10 +45,10 @@ bool ip_equal(const net::IpAddress &left, const net::IpAddress &right) noexcept 
     return left.scope_id() == right.scope_id() && left.v6_bytes() == right.v6_bytes();
 }
 
-std::uint64_t compute_name_hash(std::string_view host, std::uint16_t port, Http1ConnectionGroupKey::Scheme scheme,
-                                Http1ConnectionPoolAffinity affinity) noexcept {
+std::uint64_t compute_name_hash(std::string_view host, std::uint16_t port, HttpConnectionGroupKey::Scheme scheme,
+                                HttpConnectionPoolAffinity affinity) noexcept {
     std::uint64_t hash = kFnvOffsetBasis;
-    hash_byte(hash, static_cast<std::uint8_t>(Http1ConnectionGroupKey::HostKind::Name));
+    hash_byte(hash, static_cast<std::uint8_t>(HttpConnectionGroupKey::HostKind::Name));
     hash_byte(hash, static_cast<std::uint8_t>(scheme));
     hash_be16(hash, port);
     hash_be64(hash, affinity.value());
@@ -58,10 +58,10 @@ std::uint64_t compute_name_hash(std::string_view host, std::uint16_t port, Http1
     return hash;
 }
 
-std::uint64_t compute_ip_hash(const net::IpAddress &ip, std::uint16_t port, Http1ConnectionGroupKey::Scheme scheme,
-                              Http1ConnectionPoolAffinity affinity) noexcept {
+std::uint64_t compute_ip_hash(const net::IpAddress &ip, std::uint16_t port, HttpConnectionGroupKey::Scheme scheme,
+                              HttpConnectionPoolAffinity affinity) noexcept {
     std::uint64_t hash = kFnvOffsetBasis;
-    hash_byte(hash, static_cast<std::uint8_t>(Http1ConnectionGroupKey::HostKind::Ip));
+    hash_byte(hash, static_cast<std::uint8_t>(HttpConnectionGroupKey::HostKind::Ip));
     hash_byte(hash, static_cast<std::uint8_t>(scheme));
     hash_be16(hash, port);
     hash_be64(hash, affinity.value());
@@ -81,14 +81,14 @@ std::uint64_t compute_ip_hash(const net::IpAddress &ip, std::uint16_t port, Http
 
 } // namespace
 
-std::optional<Http1ConnectionGroupKey>
-Http1ConnectionGroupKey::from_name(std::string_view host, std::uint16_t port, Scheme scheme,
-                                   Http1ConnectionPoolAffinity affinity) noexcept {
+std::optional<HttpConnectionGroupKey> HttpConnectionGroupKey::from_name(std::string_view host, std::uint16_t port,
+                                                                        Scheme scheme,
+                                                                        HttpConnectionPoolAffinity affinity) noexcept {
     if (host.empty() || host.size() > kMaxHostNameSize) {
         return std::nullopt;
     }
 
-    Http1ConnectionGroupKey key;
+    HttpConnectionGroupKey key;
     key.host_kind_ = HostKind::Name;
     key.scheme_ = scheme;
     key.port_ = port;
@@ -101,9 +101,9 @@ Http1ConnectionGroupKey::from_name(std::string_view host, std::uint16_t port, Sc
     return key;
 }
 
-Http1ConnectionGroupKey Http1ConnectionGroupKey::from_ip(net::IpAddress ip, std::uint16_t port, Scheme scheme,
-                                                         Http1ConnectionPoolAffinity affinity) noexcept {
-    Http1ConnectionGroupKey key;
+HttpConnectionGroupKey HttpConnectionGroupKey::from_ip(net::IpAddress ip, std::uint16_t port, Scheme scheme,
+                                                       HttpConnectionPoolAffinity affinity) noexcept {
+    HttpConnectionGroupKey key;
     key.host_kind_ = HostKind::Ip;
     key.scheme_ = scheme;
     key.port_ = port;
@@ -113,13 +113,13 @@ Http1ConnectionGroupKey Http1ConnectionGroupKey::from_ip(net::IpAddress ip, std:
     return key;
 }
 
-bool operator==(const Http1ConnectionGroupKey &left, const Http1ConnectionGroupKey &right) noexcept {
+bool operator==(const HttpConnectionGroupKey &left, const HttpConnectionGroupKey &right) noexcept {
     if (left.hash_ != right.hash_ || left.host_kind_ != right.host_kind_ || left.scheme_ != right.scheme_ ||
         left.port_ != right.port_ || left.affinity_ != right.affinity_) {
         return false;
     }
 
-    if (left.host_kind_ == Http1ConnectionGroupKey::HostKind::Name) {
+    if (left.host_kind_ == HttpConnectionGroupKey::HostKind::Name) {
         return left.host_name_size_ == right.host_name_size_ &&
                std::memcmp(left.host_name_.data(), right.host_name_.data(), left.host_name_size_) == 0;
     }
