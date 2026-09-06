@@ -180,14 +180,14 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         fiber::http::HttpHeaders headers(pool);
         headers.set("content-length", "17");
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
-        fiber::http::Http3RequestHead head{
+        fiber::http::ClientRequestHead head{
                 .method = fiber::http::HttpMethod::Post,
                 .scheme = "https",
                 .authority = "localhost",
                 .path = "/http3/echo",
                 .headers = &headers,
         };
-        auto sent_head = co_await exchange.send_request_header(head, false, 2s);
+        auto sent_head = co_await exchange.send_header(head, false, 2s);
         if (!sent_head) {
             observation.error = sent_head.error();
         } else {
@@ -199,7 +199,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
             } else {
                 fiber::http::HttpHeaders trailers(pool);
                 trailers.set("digest", "request-trailer");
-                auto sent_trailer = co_await exchange.write_trailer(trailers, 2s);
+                auto sent_trailer = co_await exchange.send_trailer(trailers, 2s);
                 if (!sent_trailer) {
                     observation.error = sent_trailer.error();
                 }
@@ -242,13 +242,13 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         }
 
         fiber::http::ClientHttp3Exchange head_exchange = connected->open_exchange(pool);
-        fiber::http::Http3RequestHead head_request{
+        fiber::http::ClientRequestHead head_request{
                 .method = fiber::http::HttpMethod::Head,
                 .scheme = "https",
                 .authority = "localhost",
                 .path = "/http3/head",
         };
-        auto sent_head_request = co_await head_exchange.send_request_header(head_request, true, 2s);
+        auto sent_head_request = co_await head_exchange.send_header(head_request, true, 2s);
         if (!sent_head_request) {
             observation.error = sent_head_request.error();
         }
@@ -316,13 +316,13 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
     {
         fiber::mem::BufPool pool;
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
-        fiber::http::Http3RequestHead head{
+        fiber::http::ClientRequestHead head{
                 .method = fiber::http::HttpMethod::Get,
                 .scheme = "https",
                 .authority = "localhost",
                 .path = "/",
         };
-        auto sent_head = co_await exchange.send_request_header(head, true, 2s);
+        auto sent_head = co_await exchange.send_header(head, true, 2s);
         if (!sent_head) {
             observation.error = sent_head.error();
         }
@@ -404,14 +404,14 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         const std::string content_length = std::to_string(body.size());
         headers.set("content-length", content_length);
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
-        fiber::http::Http3RequestHead head{
+        fiber::http::ClientRequestHead head{
                 .method = fiber::http::HttpMethod::Post,
                 .scheme = "https",
                 .authority = "localhost",
                 .path = "/http3/partial",
                 .headers = &headers,
         };
-        auto sent_head = co_await exchange.send_request_header(head, false, 2s);
+        auto sent_head = co_await exchange.send_header(head, false, 2s);
         if (!sent_head) {
             observation.error = sent_head.error();
         } else {

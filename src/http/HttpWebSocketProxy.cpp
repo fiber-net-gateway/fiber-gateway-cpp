@@ -177,7 +177,7 @@ bool prepare_upstream_websocket_headers(const HttpExchange &exchange, WebSocketH
     return build_expected_websocket_accept(key, handshake.expected_accept);
 }
 
-bool valid_websocket_upgrade_response(const Http1ResponseHead &head, const WebSocketHandshake &handshake) noexcept {
+bool valid_websocket_upgrade_response(const ClientResponseHead &head, const WebSocketHandshake &handshake) noexcept {
     static constexpr std::uint64_t kConnectionHash = http_header_name_hash("connection");
     static constexpr std::uint64_t kUpgradeHash = http_header_name_hash("upgrade");
     static constexpr std::uint64_t kAcceptHash = http_header_name_hash("sec-websocket-accept");
@@ -187,7 +187,7 @@ bool valid_websocket_upgrade_response(const Http1ResponseHead &head, const WebSo
            trim_lws(head.headers.get("sec-websocket-accept", kAcceptHash)) == handshake.expected_accept;
 }
 
-void build_downstream_websocket_headers(const Http1ResponseHead &upstream_head, HttpHeaders &headers,
+void build_downstream_websocket_headers(const ClientResponseHead &upstream_head, HttpHeaders &headers,
                                         const WebSocketHandshake &handshake) noexcept {
     static constexpr std::uint64_t kAcceptHash = http_header_name_hash("sec-websocket-accept");
 

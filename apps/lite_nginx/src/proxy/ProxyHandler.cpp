@@ -253,7 +253,7 @@ bool build_upstream_request_headers(const runtime::LocationRuntime &location, co
     return true;
 }
 
-void build_downstream_response_headers(const fiber::http::Http1ResponseHead &upstream_head,
+void build_downstream_response_headers(const fiber::http::ClientResponseHead &upstream_head,
                                        fiber::http::HttpHeaders &headers, const runtime::ListenerRuntime &listener) {
     for (auto it = upstream_head.headers.begin(); it != upstream_head.headers.end(); ++it) {
         const auto &field = *it;
@@ -294,9 +294,9 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, fiber::http::HttpResp
         request_end_stream = true;
     }
 
-    fiber::http::Http1RequestHead request_head;
+    fiber::http::ClientRequestHead request_head;
     request_head.method = websocket.active() ? fiber::http::HttpMethod::Get : exchange.method();
-    request_head.target = request_target;
+    request_head.path = request_target;
     request_head.headers = &request_headers;
     request_head.body = request_body;
 
@@ -341,13 +341,20 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, fiber::http::HttpResp
         }
     }
 
-    const fiber::http::Http1ResponseHead *upstream_head = nullptr;
+    const fiber::http::ClientResponseHead *upstream_head = nullptr;
     while (true) {
         auto read_header_result = co_await upstream_exchange.read_header(location.read_timeout);
         if (!read_header_result) {
             record_upstream_error(log_context, read_header_result.error(), "read_header");
             co_await send_plain_response(exchange, response, map_upstream_error_status(read_header_result.error()),
                                          map_upstream_error_body(read_header_result.error()), listener);
+            co_return;
+        }
+        // A null head means the upstream ran out of header blocks before sending a final one.
+        if (*read_header_result == nullptr) {
+            record_upstream_error(log_context, fiber::common::IoErr::ConnReset, "read_header");
+            co_await send_plain_response(exchange, response, map_upstream_error_status(fiber::common::IoErr::ConnReset),
+                                         map_upstream_error_body(fiber::common::IoErr::ConnReset), listener);
             co_return;
         }
         if ((*read_header_result)->status_code == 101 || !(*read_header_result)->is_informational()) {

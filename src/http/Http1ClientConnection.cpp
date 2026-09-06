@@ -6,17 +6,15 @@
 #include <utility>
 
 #include <fiber/common/Assert.h>
+#include <fiber/http/HttpClientDialer.h>
 #include <fiber/http/HttpTransport.h>
-#include <fiber/net/TcpConnector.h>
-#include <fiber/net/TcpListener.h>
-#include <fiber/net/TcpStream.h>
-#include "http/TlsAlpn.h"
 
 namespace fiber::http {
 
 namespace {
 
 constexpr std::string_view kHttp11Alpn = "http/1.1";
+constexpr std::string_view kHttp1AlpnList[] = {kHttp11Alpn};
 
 bool supports_http1_alpn(std::string_view alpn) noexcept { return alpn.empty() || alpn == kHttp11Alpn; }
 
@@ -197,63 +195,63 @@ Http1ClientConnection::connect_impl(std::optional<net::SocketAddress> peer,
     }
     ConnectStateGuard state_guard(*this);
 
-    std::optional<net::TcpStream::ConnectInfant> infant;
-    if (!peer) {
-        auto connect_result = co_await net::TcpConnector::connect(*loop_, addresses, options);
-        if (!connect_result) {
-            co_return std::unexpected(connect_result.error().code);
-        }
-        infant.emplace(std::move(*connect_result));
-    } else {
-        auto connect_result = co_await net::TcpStream::connect(*loop_, *peer, options.total_timeout);
-        if (!connect_result) {
-            co_return std::unexpected(connect_result.error());
-        }
-        infant.emplace(std::move(*connect_result));
+    HttpClientDialRequest request;
+    request.peer = peer;
+    request.addresses = addresses;
+    request.happy = options;
+    request.tcp = tcp;
+    if (tls) {
+        request.tls = &*tls;
+        request.alpn = kHttp1AlpnList;
+    }
+    auto dial_result = co_await http_client_dial(*loop_, std::move(request));
+    if (!dial_result) {
+        co_return std::unexpected(dial_result.error());
     }
 
     FIBER_ASSERT(state_ == State::Connecting);
-    FIBER_ASSERT(infant.has_value());
-    net::SocketAddress connected_peer = infant->peer();
-
-    net::AcceptResult accept(infant->release_fd(), infant->take_peer());
-    std::unique_ptr<HttpTransport> transport;
-    if (tls) {
-        auto tls_param = make_http1_client_tls_param(*tls);
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tcp);
-        if (!transport_result) {
-            co_return std::unexpected(transport_result.error());
-        }
-        auto tls_transport = std::move(*transport_result);
-
-        auto handshake_result = co_await tls_transport->handshake(tls_param, tls->handshake_timeout);
-        if (!handshake_result) {
-            tls_transport->close();
-            co_return std::unexpected(handshake_result.error());
-        }
-
-        if (!supports_http1_alpn(tls_transport->negotiated_alpn())) {
-            tls_transport->close();
-            co_return std::unexpected(common::IoErr::NotSupported);
-        }
-        transport = std::move(tls_transport);
-    } else {
-        auto transport_result = TcpTransport::create(*loop_, std::move(accept), tcp);
-        if (!transport_result) {
-            co_return std::unexpected(transport_result.error());
-        }
-        transport = std::move(*transport_result);
+    common::IoErr adopt_error = adopt_transport(std::move(dial_result->transport), std::move(dial_result->peer));
+    if (adopt_error != common::IoErr::None) {
+        co_return std::unexpected(adopt_error);
     }
+    co_return common::IoResult<void>{};
+}
 
+common::IoErr Http1ClientConnection::adopt(std::unique_ptr<HttpTransport> transport, net::SocketAddress peer) noexcept {
+    common::IoErr begin_error = begin_connect();
+    if (begin_error != common::IoErr::None) {
+        if (transport) {
+            transport->close();
+        }
+        return begin_error;
+    }
+    ConnectStateGuard state_guard(*this);
+    return adopt_transport(std::move(transport), std::move(peer));
+}
+
+common::IoErr Http1ClientConnection::adopt_transport(std::unique_ptr<HttpTransport> transport,
+                                                     net::SocketAddress peer) noexcept {
+    FIBER_ASSERT(state_ == State::Connecting);
     if (!transport || !transport->valid()) {
-        co_return std::unexpected(common::IoErr::Invalid);
+        if (transport) {
+            transport->close();
+        }
+        return common::IoErr::Invalid;
+    }
+    if (&transport->loop() != loop_) {
+        transport->close();
+        return common::IoErr::Invalid;
+    }
+    if (!supports_http1_alpn(transport->negotiated_alpn())) {
+        transport->close();
+        return common::IoErr::NotSupported;
     }
 
-    peer_addr_ = std::move(connected_peer);
+    peer_addr_ = std::move(peer);
     transport_ = std::move(transport);
     state_ = State::ConnectedIdle;
     keepalive_usable_ = true;
-    co_return common::IoResult<void>{};
+    return common::IoErr::None;
 }
 
 void Http1ClientConnection::assert_active_loop() const noexcept {

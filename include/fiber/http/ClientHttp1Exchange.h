@@ -30,7 +30,7 @@ public:
     ~ClientHttp1Exchange();
 
     fiber::async::Task<common::IoResult<void>>
-    send_header(const Http1RequestHead &head, bool end_stream,
+    send_header(const ClientRequestHead &head, bool end_stream,
                 std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     // write_all accepts the complete payload before returning. write returns
     // after the first payload batch and consumes an IoBufChain in place; retry
@@ -50,7 +50,10 @@ public:
     send_trailer(const HttpHeaders &trailers,
                  std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
-    fiber::async::Task<common::IoResult<const Http1ResponseHead *>>
+    // Returns each header block of the response in order: any informational blocks, then the
+    // final one, then a trailer block when the peer sent one. A successful null head means every
+    // block has been delivered, which is the same end-of-headers signal HTTP/2 and HTTP/3 use.
+    fiber::async::Task<common::IoResult<const ClientResponseHead *>>
     read_header(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::async::Task<common::IoResult<mem::IoBufChain>>
     read_body(std::size_t max_bytes = 64 * 1024,
@@ -61,7 +64,9 @@ public:
     common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
     common::IoResult<void> switch_to_raw_stream() noexcept;
 
-    [[nodiscard]] const HttpHeaders &response_trailers() const noexcept { return response_trailers_; }
+    // The trailer block's headers, empty when the response carried none. Equivalent to the
+    // trailer head read_header() hands back; kept for callers that only want the fields.
+    [[nodiscard]] const HttpHeaders &response_trailers() const noexcept;
     [[nodiscard]] const Http1ClientExchangeOptions &options() const noexcept { return options_; }
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool raw_stream_active() const noexcept { return raw_stream_active_; }
@@ -86,7 +91,7 @@ private:
         static void operator delete(void *ptr, mem::BufPool &) noexcept {}
         static void operator delete(void *ptr) noexcept {}
 
-        Http1ResponseHead head;
+        ClientResponseHead head;
         mem::IoBufChain owner_bufs;
         ResponseHeaderNode *next = nullptr;
     };
@@ -118,9 +123,13 @@ private:
     Http1ClientConnection &conn_;
     mem::BufPool &pool_;
     Http1ClientExchangeOptions options_{};
-    HttpHeaders response_trailers_;
+    // Permanently empty: what response_trailers() answers when no trailer block arrived.
+    HttpHeaders no_trailers_;
     mem::IoBuf pending_buf_;
     ResponseHeaderNode *response_headers_head_ = nullptr;
+    // Owned by response_headers_head_'s list; held separately so response_trailers() and the
+    // one-shot trailer delivery in read_header() can find it without walking the list.
+    ResponseHeaderNode *response_trailer_node_ = nullptr;
     BodyParser response_body_parser_{};
     bool active_ = false;
     bool response_complete_ = false;
@@ -129,6 +138,7 @@ private:
     bool saw_connection_close_ = false;
     bool saw_connection_keep_alive_ = false;
     bool response_eof_delimited_ = false;
+    bool response_trailer_pending_ = false;
     bool raw_stream_active_ = false;
     bool raw_stream_write_complete_ = false;
     bool chunk_write_active_ = false;

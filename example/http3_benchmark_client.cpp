@@ -1103,7 +1103,7 @@ private:
         const auto started_at = fiber::event::EventLoop::current().now();
         result.started_at = started_at;
         const auto request_deadline = std::min(started_at + options_.request_timeout, drain_end_);
-        fiber::http::Http3RequestHead head{
+        fiber::http::ClientRequestHead head{
                 .method = options_.method,
                 .scheme = "https",
                 .authority = options_.target.authority,
@@ -1111,7 +1111,7 @@ private:
                 .headers = has_request_body ? &headers : nullptr,
         };
 
-        auto sent_head = co_await exchange.send_request_header(
+        auto sent_head = co_await exchange.send_header(
                 head, !has_request_body, remaining_timeout(request_deadline, fiber::event::EventLoop::current().now()));
         if (!sent_head) {
             result.error = sent_head.error();
