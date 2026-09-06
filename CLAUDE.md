@@ -37,7 +37,6 @@ Build outputs: `fiber_lib` (static library), `fiber_tests`, examples (e.g., `htt
 |--------|---------|-------------|
 | `FIBER_USE_JEMALLOC` | OFF | Link executables against jemalloc |
 | `FIBER_USE_LIBCXX` | OFF | Use libc++ (Clang only) |
-| `FIBER_ENABLE_HTTP3` | ON | Build in-tree HTTP/3 (QUIC) support |
 | `FIBER_ENABLE_LTO` | ON | Enable LTO/IPO for fiber targets |
 | `FIBER_ALLOW_GCC_LTO` | OFF | Allow LTO with GCC (disabled by default due to instability) |
 | `FIBER_BUILD_EXAMPLES` | ON | Build single-file examples under `example/` |
