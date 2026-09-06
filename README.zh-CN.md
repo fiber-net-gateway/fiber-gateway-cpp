@@ -152,7 +152,6 @@ build/apps/lite_nginx
 | `FIBER_BUILD_PROMETHEUS_BENCHMARK` | `OFF` | 构建 Prometheus 记录路径 benchmark。 |
 | `FIBER_FETCH_DEPS` | `ON` | 允许获取缺失的 GoogleTest、jemalloc 等可选依赖。 |
 | `FIBER_USE_JEMALLOC` | `OFF` | 最终可执行程序链接 jemalloc。 |
-| `FIBER_ENABLE_HTTP3` | `ON` | 已声明的 HTTP/3 开关；当前源码列表不受该值影响，仍会包含 HTTP/3。 |
 | `FIBER_ENABLE_LTO` | `ON` | 工具链支持时启用 IPO/LTO。 |
 | `FIBER_ALLOW_GCC_LTO` | `OFF` | 显式启用 GCC LTO；出于稳定性考虑默认关闭。 |
 | `FIBER_ENABLE_UDP_GSO` | `ON` | 系统头文件支持时编译 Linux UDP GSO。 |
