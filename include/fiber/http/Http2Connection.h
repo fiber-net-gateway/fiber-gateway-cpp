@@ -211,6 +211,7 @@ private:
         std::size_t payload_end = 0;
         bool header_block_open = false;
         bool end_stream_pending = false;
+        bool discard_closed_stream_block = false;
     };
 
     common::IoErr consume_incoming_frame_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,

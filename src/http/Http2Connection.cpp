@@ -819,7 +819,25 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
         }
         Http2Stream *stream = find_stream(fhr.stream_id);
         if (!stream) {
-            return common::IoErr::Invalid;
+            // A peer may already have DATA queued when the local endpoint
+            // cancels a stream. The stream is removed from `streams_` as soon
+            // as its RST_STREAM is queued, so such DATA must not turn into a
+            // connection error. It is a STREAM_CLOSED stream error. Consume
+            // the connection window before discarding the frame, otherwise a
+            // burst of late DATA could permanently reduce connection credit.
+            if (is_idle_stream(fhr.stream_id)) {
+                return common::IoErr::Invalid;
+            }
+            if (conn_recv_window_remaining_ < static_cast<std::int32_t>(fhr.length)) {
+                return common::IoErr::Invalid;
+            }
+            conn_recv_window_remaining_ -= static_cast<std::int32_t>(fhr.length);
+            const common::IoErr conn_err = maybe_replenish_connection_recv_window();
+            if (conn_err != common::IoErr::None) {
+                return conn_err;
+            }
+            handle_stream_error(fhr.stream_id, Http2ErrorCode::StreamClosed, common::IoErr::Invalid);
+            return common::IoErr::None;
         }
 
         std::uint8_t pad_length = 0;
@@ -854,8 +872,24 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
         }
     }
 
+    if (inbound_stream_.discard_closed_stream_block) {
+        if (inbound_stream_.stream_id != fhr.stream_id) {
+            return common::IoErr::Invalid;
+        }
+        if (offset + length >= fhr.length) {
+            clear_inbound_stream();
+        }
+        return common::IoErr::None;
+    }
+
     Http2Stream *stream = inbound_stream_.lease.get();
     if (!stream || inbound_stream_.stream_id != fhr.stream_id) {
+        // The stream may be released by cancellation while a DATA frame is
+        // being delivered in chunks. The frame header was already accepted,
+        // so discard its remaining payload instead of failing the connection.
+        if (offset != 0 && !is_idle_stream(fhr.stream_id)) {
+            return common::IoErr::None;
+        }
         return common::IoErr::Invalid;
     }
 
@@ -880,7 +914,16 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
         common::IoErr err = stream->on_data_payload_recv(std::move(payload), data_offset, logical_total, end_stream);
         if (err != common::IoErr::None) {
             handle_stream_error(fhr.stream_id, Http2ErrorCode::StreamClosed, err);
-            clear_inbound_stream();
+            inbound_stream_.lease.reset();
+            inbound_stream_.stream_id = fhr.stream_id;
+            inbound_stream_.payload_begin = 0;
+            inbound_stream_.payload_end = fhr.length;
+            inbound_stream_.header_block_open = false;
+            inbound_stream_.end_stream_pending = false;
+            inbound_stream_.discard_closed_stream_block = true;
+            if (frame_end >= fhr.length) {
+                clear_inbound_stream();
+            }
             return common::IoErr::None;
         }
         try_release_stream(*stream);
@@ -912,7 +955,22 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
         Http2Stream *stream = find_stream(fhr.stream_id);
         if (!stream) {
             if (!is_idle_stream(fhr.stream_id)) {
-                return common::IoErr::Invalid;
+                // A response HEADERS frame can already be queued when the
+                // caller resets the local stream. Discard the complete header
+                // block, including CONTINUATION frames, and report a stream
+                // error without tearing down the connection.
+                handle_stream_error(fhr.stream_id, Http2ErrorCode::StreamClosed, common::IoErr::Invalid);
+                inbound_stream_.lease.reset();
+                inbound_stream_.stream_id = fhr.stream_id;
+                inbound_stream_.payload_begin = 0;
+                inbound_stream_.payload_end = 0;
+                inbound_stream_.header_block_open = (fhr.flags & kFlagEndHeaders) == 0;
+                inbound_stream_.end_stream_pending = false;
+                inbound_stream_.discard_closed_stream_block = true;
+                if (!inbound_stream_.header_block_open) {
+                    clear_inbound_stream();
+                }
+                return common::IoErr::None;
             }
             stream = create_peer_stream(fhr.stream_id);
             if (!stream) {
@@ -930,6 +988,15 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
         inbound_stream_.payload_end = fhr.length - pad_length;
         inbound_stream_.header_block_open = (fhr.flags & kFlagEndHeaders) == 0;
         inbound_stream_.end_stream_pending = (fhr.flags & kFlagEndStream) != 0;
+        inbound_stream_.discard_closed_stream_block = false;
+    }
+
+    if (inbound_stream_.discard_closed_stream_block) {
+        const std::size_t frame_end = offset + length;
+        if (frame_end >= fhr.length && (fhr.flags & kFlagEndHeaders) != 0) {
+            clear_inbound_stream();
+        }
+        return common::IoErr::None;
     }
 
     Http2Stream *stream = inbound_stream_.lease.get();
@@ -978,12 +1045,24 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
 common::IoErr Http2Connection::handle_continuation_payload(const FrameHeader &fhr, const mem::IoBuf &buf,
                                                            std::size_t offset, std::size_t length) noexcept {
     if (offset == 0) {
-        if (!inbound_stream_.header_block_open || fhr.stream_id != inbound_stream_.stream_id ||
-            !inbound_stream_.lease) {
+        if (!inbound_stream_.header_block_open || fhr.stream_id != inbound_stream_.stream_id) {
             return common::IoErr::Invalid;
+        }
+        if (inbound_stream_.discard_closed_stream_block) {
+            if ((fhr.flags & kFlagEndHeaders) != 0) {
+                clear_inbound_stream();
+            }
+            return common::IoErr::None;
         }
         inbound_stream_.payload_begin = 0;
         inbound_stream_.payload_end = fhr.length;
+    }
+
+    if (inbound_stream_.discard_closed_stream_block) {
+        if (offset + length >= fhr.length && (fhr.flags & kFlagEndHeaders) != 0) {
+            clear_inbound_stream();
+        }
+        return common::IoErr::None;
     }
 
     Http2Stream *stream = inbound_stream_.lease.get();
@@ -2219,6 +2298,7 @@ void Http2Connection::clear_inbound_stream() noexcept {
     inbound_stream_.payload_end = 0;
     inbound_stream_.header_block_open = false;
     inbound_stream_.end_stream_pending = false;
+    inbound_stream_.discard_closed_stream_block = false;
 }
 
 Http2Stream::Lease Http2Connection::alloc_peer_stream(std::uint32_t stream_id) noexcept {
