@@ -3,32 +3,11 @@
 #include <limits>
 #include <new>
 
+#include <fiber/common/Assert.h>
+
 namespace fiber::http {
 
 Http2StreamTable::~Http2StreamTable() { clear(); }
-
-bool Http2StreamTable::init(std::size_t max_active_streams) noexcept {
-    clear();
-    buckets_.reset();
-    bucket_count_ = 0;
-    max_active_streams_ = max_active_streams;
-
-    if (max_active_streams == 0) {
-        return true;
-    }
-    if (max_active_streams > (std::numeric_limits<std::size_t>::max() / 2)) {
-        return false;
-    }
-
-    bucket_count_ = next_pow2(max_active_streams * 2);
-    buckets_.reset(new (std::nothrow) Bucket[bucket_count_]{});
-    if (!buckets_) {
-        bucket_count_ = 0;
-        max_active_streams_ = 0;
-        return false;
-    }
-    return true;
-}
 
 void Http2StreamTable::clear() noexcept {
     if (buckets_) {
@@ -42,7 +21,6 @@ void Http2StreamTable::clear() noexcept {
     buckets_.reset();
     bucket_count_ = 0;
     size_ = 0;
-    max_active_streams_ = 0;
 }
 
 Http2Stream *Http2StreamTable::find(std::uint32_t stream_id) noexcept {
@@ -62,11 +40,11 @@ const Http2Stream *Http2StreamTable::find(std::uint32_t stream_id) const noexcep
 }
 
 bool Http2StreamTable::insert(Http2Stream::Lease &&lease) noexcept {
-    if (!buckets_ || bucket_count_ == 0 || size_ >= max_active_streams_) {
-        return false;
-    }
     Http2Stream *stream = lease.get();
     if (!stream) {
+        return false;
+    }
+    if (!ensure_capacity_for_insert()) {
         return false;
     }
 
@@ -89,6 +67,52 @@ bool Http2StreamTable::insert(Http2Stream::Lease &&lease) noexcept {
     return false;
 }
 
+// Kept below half load so the insert probe above always terminates on a hole.
+bool Http2StreamTable::ensure_capacity_for_insert() noexcept {
+    if (bucket_count_ == 0) {
+        return rehash(kInitialBucketCount);
+    }
+    if ((size_ + 1) * 2 <= bucket_count_) {
+        return true;
+    }
+    if (bucket_count_ > (std::numeric_limits<std::size_t>::max() / 2)) {
+        return false;
+    }
+    return rehash(bucket_count_ * 2);
+}
+
+bool Http2StreamTable::rehash(std::size_t new_bucket_count) noexcept {
+    FIBER_ASSERT(new_bucket_count >= kInitialBucketCount);
+    FIBER_ASSERT((new_bucket_count & (new_bucket_count - 1)) == 0);
+
+    auto *fresh = new (std::nothrow) Bucket[new_bucket_count]{};
+    if (!fresh) {
+        return false;
+    }
+
+    const std::size_t new_mask = new_bucket_count - 1;
+    for (std::size_t i = 0; i < bucket_count_; ++i) {
+        Bucket &src = buckets_[i];
+        if (!src.stream) {
+            continue;
+        }
+        std::size_t idx = hash_stream_id(src.stream_id) & new_mask;
+        while (fresh[idx].stream) {
+            idx = (idx + 1) & new_mask;
+        }
+        fresh[idx] = src;
+    }
+
+    buckets_.reset(fresh);
+    bucket_count_ = new_bucket_count;
+    return true;
+}
+
+void Http2StreamTable::release_buckets() noexcept {
+    buckets_.reset();
+    bucket_count_ = 0;
+}
+
 Http2Stream::Lease Http2StreamTable::erase(std::uint32_t stream_id) noexcept {
     std::size_t slot = find_slot(stream_id);
     if (slot == bucket_count_) {
@@ -98,18 +122,6 @@ Http2Stream::Lease Http2StreamTable::erase(std::uint32_t stream_id) noexcept {
     Http2Stream *stream = buckets_[slot].stream;
     erase_at(slot);
     return Http2Stream::Lease::adopt(stream);
-}
-
-std::size_t Http2StreamTable::next_pow2(std::size_t value) noexcept {
-    if (value <= 1) {
-        return 1;
-    }
-
-    std::size_t out = 1;
-    while (out < value) {
-        out <<= 1;
-    }
-    return out;
 }
 
 std::size_t Http2StreamTable::hash_stream_id(std::uint32_t stream_id) noexcept {
@@ -165,6 +177,11 @@ void Http2StreamTable::erase_at(std::size_t index) noexcept {
 
     buckets_[hole] = Bucket{};
     --size_;
+    // A table that never grew keeps its buckets: a client running one request
+    // at a time would otherwise reallocate on every stream.
+    if (size_ == 0 && bucket_count_ > kInitialBucketCount) {
+        release_buckets();
+    }
 }
 
 } // namespace fiber::http

@@ -180,8 +180,8 @@ fiber::http::HeaderMap<std::uint8_t>::Builder make_default_skip_headers_builder(
 std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config::SourceLocation &location,
                                                                    std::string host, std::uint16_t port,
                                                                    std::uint32_t weight, bool tls) {
-    const auto scheme = tls ? fiber::http::Http1ConnectionGroupKey::Scheme::Https
-                            : fiber::http::Http1ConnectionGroupKey::Scheme::Http;
+    const auto scheme = tls ? fiber::http::HttpConnectionGroupKey::Scheme::Https
+                            : fiber::http::HttpConnectionGroupKey::Scheme::Http;
 
     UpstreamPeerRuntime peer;
     peer.host = host;
@@ -193,13 +193,13 @@ std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config:
         // IP-literal peer: config-time dial target, no runtime DNS.
         peer.ip = ip;
         peer.address = fiber::net::SocketAddress(ip, port);
-        peer.connection_key = fiber::http::Http1ConnectionGroupKey::from_ip(ip, port, scheme);
+        peer.connection_key = fiber::http::HttpConnectionGroupKey::from_ip(ip, port, scheme);
         return peer;
     }
 
     // Hostname peer: pool identity is the name; the dial target is resolved at runtime
     // via DnsService on the worker loop that needs a fresh connection.
-    auto key = fiber::http::Http1ConnectionGroupKey::from_name(host, port, scheme);
+    auto key = fiber::http::HttpConnectionGroupKey::from_name(host, port, scheme);
     if (!key) {
         return std::unexpected(make_error(location, "upstream host name too long: " + host));
     }

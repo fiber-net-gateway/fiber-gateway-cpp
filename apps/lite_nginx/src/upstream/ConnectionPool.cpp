@@ -180,7 +180,7 @@ void ConnectionPool::shutdown() noexcept {
 }
 
 fiber::async::Task<ConnectionPool::ConnectionLease>
-ConnectionPool::acquire(const fiber::http::Http1ConnectionGroupKey &key) noexcept {
+ConnectionPool::acquire(const fiber::http::HttpConnectionGroupKey &key) noexcept {
     // Empty impl_ => no pool configured; return an empty lease so the caller uses a transient
     // connection. Keep this synchronous (co_return) to avoid suspending on nothing.
     if (std::holds_alternative<std::unique_ptr<fiber::http::LocalHttp1ConnectionPoolSet>>(impl_)) {

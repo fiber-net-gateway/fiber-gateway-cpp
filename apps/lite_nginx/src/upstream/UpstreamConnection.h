@@ -9,7 +9,7 @@
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>
 #include <fiber/http/Http1ClientConnection.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TlsParams.h>
@@ -48,7 +48,7 @@ struct AcquiredUpstreamConnection {
 // `tls_server_name` is forwarded as SNI for HTTPS keys; ignored for HTTP.
 [[nodiscard]] fiber::async::Task<fiber::common::IoResult<AcquiredUpstreamConnection>>
 acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService &dns,
-                    const fiber::http::Http1ConnectionGroupKey &key, std::string_view tls_server_name,
+                    const fiber::http::HttpConnectionGroupKey &key, std::string_view tls_server_name,
                     std::chrono::milliseconds connect_timeout,
                     ConnectionReusePolicy reuse_policy = ConnectionReusePolicy::Pooled) noexcept;
 

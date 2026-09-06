@@ -45,18 +45,23 @@ fiber::http::Http2Stream::Lease make_stream(std::uint32_t stream_id) {
 
 } // namespace
 
-TEST(Http2StreamTableTest, InitializesFixedCapacityFromMaxActiveStreams) {
+TEST(Http2StreamTableTest, AllocatesBucketsLazilyOnFirstInsert) {
     fiber::http::Http2StreamTable table;
 
-    ASSERT_TRUE(table.init(3));
-    EXPECT_EQ(table.max_active_streams(), 3u);
-    EXPECT_EQ(table.bucket_count(), 8u);
+    EXPECT_EQ(table.bucket_count(), 0u);
     EXPECT_TRUE(table.empty());
+    EXPECT_EQ(table.find(1), nullptr);
+    EXPECT_FALSE(table.erase(1));
+
+    fiber::http::Http2Stream::Lease stream1 = make_stream(1);
+    ASSERT_TRUE(stream1);
+    ASSERT_TRUE(table.insert(std::move(stream1)));
+    EXPECT_EQ(table.bucket_count(), fiber::http::Http2StreamTable::kInitialBucketCount);
+    EXPECT_EQ(table.size(), 1u);
 }
 
 TEST(Http2StreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
     fiber::http::Http2StreamTable table;
-    ASSERT_TRUE(table.init(4));
 
     fiber::http::Http2Stream::Lease stream1 = make_stream(1);
     fiber::http::Http2Stream::Lease stream3 = make_stream(3);
@@ -76,28 +81,57 @@ TEST(Http2StreamTableTest, InsertsFindsAndRejectsDuplicateStreamIds) {
     EXPECT_EQ(table.find(5), nullptr);
 }
 
-TEST(Http2StreamTableTest, RejectsInsertPastConfiguredMaxActiveStreams) {
+TEST(Http2StreamTableTest, GrowsBeyondInitialBucketCountAndKeepsEveryStreamReachable) {
     fiber::http::Http2StreamTable table;
-    ASSERT_TRUE(table.init(2));
+    constexpr std::uint32_t kStreamCount = 64;
 
-    fiber::http::Http2Stream::Lease stream1 = make_stream(1);
-    fiber::http::Http2Stream::Lease stream3 = make_stream(3);
-    fiber::http::Http2Stream::Lease stream5 = make_stream(5);
-    ASSERT_TRUE(stream1);
-    ASSERT_TRUE(stream3);
-    ASSERT_TRUE(stream5);
+    for (std::uint32_t i = 0; i < kStreamCount; ++i) {
+        fiber::http::Http2Stream::Lease stream = make_stream(i * 2 + 1);
+        ASSERT_TRUE(stream);
+        ASSERT_TRUE(table.insert(std::move(stream)));
+    }
 
-    EXPECT_TRUE(table.insert(std::move(stream1)));
-    EXPECT_TRUE(table.insert(std::move(stream3)));
-    EXPECT_FALSE(table.insert(std::move(stream5)));
-    EXPECT_EQ(table.size(), 2u);
+    EXPECT_EQ(table.size(), kStreamCount);
+    EXPECT_GE(table.bucket_count(), kStreamCount * 2);
+    for (std::uint32_t i = 0; i < kStreamCount; ++i) {
+        EXPECT_NE(table.find(i * 2 + 1), nullptr);
+    }
+    EXPECT_EQ(table.find(kStreamCount * 2 + 1), nullptr);
+}
+
+TEST(Http2StreamTableTest, ReleasesGrownBucketsOnceDrainedButKeepsInitialOnes) {
+    fiber::http::Http2StreamTable table;
+    constexpr std::uint32_t kStreamCount = 64;
+
+    for (std::uint32_t i = 0; i < kStreamCount; ++i) {
+        fiber::http::Http2Stream::Lease stream = make_stream(i * 2 + 1);
+        ASSERT_TRUE(stream);
+        ASSERT_TRUE(table.insert(std::move(stream)));
+    }
+    ASSERT_GT(table.bucket_count(), fiber::http::Http2StreamTable::kInitialBucketCount);
+
+    for (std::uint32_t i = 0; i < kStreamCount; ++i) {
+        EXPECT_TRUE(table.erase(i * 2 + 1));
+    }
+    EXPECT_TRUE(table.empty());
+    EXPECT_EQ(table.bucket_count(), 0u);
+
+    // A table that never grew past the initial allocation keeps its buckets, so
+    // a client running one request at a time does not reallocate per stream.
+    fiber::http::Http2Stream::Lease single = make_stream(1);
+    ASSERT_TRUE(single);
+    ASSERT_TRUE(table.insert(std::move(single)));
+    EXPECT_EQ(table.bucket_count(), fiber::http::Http2StreamTable::kInitialBucketCount);
+    EXPECT_TRUE(table.erase(1));
+    EXPECT_TRUE(table.empty());
+    EXPECT_EQ(table.bucket_count(), fiber::http::Http2StreamTable::kInitialBucketCount);
 }
 
 TEST(Http2StreamTableTest, EraseKeepsLaterCollisionsReachable) {
     fiber::http::Http2StreamTable table;
-    ASSERT_TRUE(table.init(4));
 
-    auto ids = find_colliding_stream_ids(table.bucket_count());
+    // Three colliding streams stay below half load, so no rehash reshuffles them.
+    auto ids = find_colliding_stream_ids(fiber::http::Http2StreamTable::kInitialBucketCount);
     fiber::http::Http2Stream::Lease stream_a = make_stream(ids[0]);
     fiber::http::Http2Stream::Lease stream_b = make_stream(ids[1]);
     fiber::http::Http2Stream::Lease stream_c = make_stream(ids[2]);

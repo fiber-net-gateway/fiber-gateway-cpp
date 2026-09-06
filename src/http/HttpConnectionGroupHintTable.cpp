@@ -1,4 +1,4 @@
-#include <fiber/http/Http1ConnectionGroupHintTable.h>
+#include <fiber/http/HttpConnectionGroupHintTable.h>
 
 #include <algorithm>
 
@@ -14,7 +14,7 @@ constexpr std::uint64_t kGenerationMask = 0xffffffULL;
 
 } // namespace
 
-void Http1ConnectionGroupHintTable::clear() noexcept {
+void HttpConnectionGroupHintTable::clear() noexcept {
     for (auto &set: sets_) {
         for (auto &slot: set.slots) {
             slot.word.store(0, std::memory_order_release);
@@ -23,7 +23,7 @@ void Http1ConnectionGroupHintTable::clear() noexcept {
     next_generation_ = 1;
 }
 
-void Http1ConnectionGroupHintTable::note_idle_add(const Http1ConnectionGroupKey &key) noexcept {
+void HttpConnectionGroupHintTable::note_idle_add(const HttpConnectionGroupKey &key) noexcept {
     const std::uint64_t hash = key.hash();
     const std::uint32_t fp = fingerprint(hash);
     Set &set = sets_[set_index(hash)];
@@ -56,7 +56,7 @@ void Http1ConnectionGroupHintTable::note_idle_add(const Http1ConnectionGroupKey 
     set.slots[target_index].word.store(pack(fp, 1, next_generation()), std::memory_order_release);
 }
 
-void Http1ConnectionGroupHintTable::note_idle_remove(const Http1ConnectionGroupKey &key) noexcept {
+void HttpConnectionGroupHintTable::note_idle_remove(const HttpConnectionGroupKey &key) noexcept {
     const std::uint64_t hash = key.hash();
     const std::uint32_t fp = fingerprint(hash);
     Set &set = sets_[set_index(hash)];
@@ -73,8 +73,8 @@ void Http1ConnectionGroupHintTable::note_idle_remove(const Http1ConnectionGroupK
     }
 }
 
-Http1ConnectionGroupHintTable::ProbeResult
-Http1ConnectionGroupHintTable::probe(const Http1ConnectionGroupKey &key) const noexcept {
+HttpConnectionGroupHintTable::ProbeResult
+HttpConnectionGroupHintTable::probe(const HttpConnectionGroupKey &key) const noexcept {
     const std::uint64_t hash = key.hash();
     const std::uint32_t fp = fingerprint(hash);
     const Set &set = sets_[set_index(hash)];
@@ -91,33 +91,33 @@ Http1ConnectionGroupHintTable::probe(const Http1ConnectionGroupKey &key) const n
     return ProbeResult{.approx_count = best_count};
 }
 
-std::uint32_t Http1ConnectionGroupHintTable::set_index(std::uint64_t hash) noexcept {
+std::uint32_t HttpConnectionGroupHintTable::set_index(std::uint64_t hash) noexcept {
     return static_cast<std::uint32_t>((hash >> 32U) & (kSetCount - 1U));
 }
 
-std::uint32_t Http1ConnectionGroupHintTable::fingerprint(std::uint64_t hash) noexcept {
+std::uint32_t HttpConnectionGroupHintTable::fingerprint(std::uint64_t hash) noexcept {
     return static_cast<std::uint32_t>(hash ^ (hash >> 32U));
 }
 
-std::uint64_t Http1ConnectionGroupHintTable::pack(std::uint32_t fp, std::uint8_t count,
-                                                  std::uint32_t generation) noexcept {
+std::uint64_t HttpConnectionGroupHintTable::pack(std::uint32_t fp, std::uint8_t count,
+                                                 std::uint32_t generation) noexcept {
     return static_cast<std::uint64_t>(fp) | (static_cast<std::uint64_t>(count) << kCountShift) |
            ((static_cast<std::uint64_t>(generation) & kGenerationMask) << kGenerationShift);
 }
 
-std::uint32_t Http1ConnectionGroupHintTable::unpack_fp(std::uint64_t word) noexcept {
+std::uint32_t HttpConnectionGroupHintTable::unpack_fp(std::uint64_t word) noexcept {
     return static_cast<std::uint32_t>(word & kFingerprintMask);
 }
 
-std::uint8_t Http1ConnectionGroupHintTable::unpack_count(std::uint64_t word) noexcept {
+std::uint8_t HttpConnectionGroupHintTable::unpack_count(std::uint64_t word) noexcept {
     return static_cast<std::uint8_t>((word >> kCountShift) & kCountMask);
 }
 
-std::uint32_t Http1ConnectionGroupHintTable::unpack_generation(std::uint64_t word) noexcept {
+std::uint32_t HttpConnectionGroupHintTable::unpack_generation(std::uint64_t word) noexcept {
     return static_cast<std::uint32_t>((word >> kGenerationShift) & kGenerationMask);
 }
 
-std::uint32_t Http1ConnectionGroupHintTable::next_generation() noexcept {
+std::uint32_t HttpConnectionGroupHintTable::next_generation() noexcept {
     const std::uint32_t generation = next_generation_;
     ++next_generation_;
     if (next_generation_ == 0) {

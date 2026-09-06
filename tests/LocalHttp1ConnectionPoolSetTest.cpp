@@ -5,7 +5,7 @@
 
 #include <fiber/async/Spawn.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/http/LocalHttp1ConnectionPoolSet.h>
 
 TEST(LocalHttp1ConnectionPoolSetTest, CreatesOnePoolPerLoopAndInitializesThem) {
@@ -34,8 +34,8 @@ TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
     auto loop0_future = loop0_promise.get_future();
     auto loop1_future = loop1_promise.get_future();
 
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), 80,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), 80,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     group.start();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {

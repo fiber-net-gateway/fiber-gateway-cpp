@@ -4,16 +4,13 @@
 #include <array>
 #include <chrono>
 #include <concepts>
-#include <coroutine>
 #include <cstddef>
-#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <type_traits>
 #include <utility>
 
-#include "../async/Task.h"
 #include "../common/Assert.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IoError.h"
@@ -51,6 +48,7 @@ public:
     using FrameHeader = Http2FrameHeader;
     using CloseResult = common::IoResult<void>;
     using ClosedCallback = void (*)(void *ctx, Http2Connection &connection, CloseResult result) noexcept;
+    using CapacityCallback = void (*)(void *ctx, Http2Connection &connection) noexcept;
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
@@ -86,26 +84,54 @@ public:
                     const Http2StreamFactoryOps &peer_stream_factory_ops);
 
     // Must be called on transport->loop(). A successful start owns and drives
-    // transport I/O until closure; no run coroutine is required. on_closed is
-    // invoked on the loop after all connection state is closed and may destroy
-    // the connection. Use either on_closed or wait_closed(), not both.
-    common::IoErr start(std::unique_ptr<HttpTransport> transport, ClosedCallback on_closed = nullptr,
-                        void *closed_ctx = nullptr) noexcept;
+    // transport I/O until closure; no run coroutine is required.
+    common::IoErr start(std::unique_ptr<HttpTransport> transport) noexcept;
 
-    // Waits for close completion; this does not drive I/O.
-    fiber::async::Task<CloseResult> wait_closed() noexcept;
-    // Immediate fast path. Returns Busy when peer or stream-table capacity is exhausted.
+    // Fires once on the loop after all connection state is closed, and may
+    // destroy the connection. There is one slot: Http2CloseGate takes it and
+    // fans closure out to as many observers and coroutines as needed.
+    void set_closed_callback(ClosedCallback cb, void *ctx) noexcept;
+    void clear_closed_callback() noexcept;
+    // True once the close callback has run (or was skipped because the
+    // connection never started), i.e. no notification is still coming.
+    [[nodiscard]] bool has_closed_callback() const noexcept { return on_closed_ != nullptr; }
+    [[nodiscard]] bool close_dispatched() const noexcept { return close_completion_dispatched_; }
+    [[nodiscard]] common::IoErr terminal_error() const noexcept { return terminal_error_; }
+    // Immediate fast path. Returns Busy when the peer's concurrent-stream budget is exhausted.
     [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream(Http2Stream &stream) noexcept;
-    // Suspends on this connection's EventLoop while capacity is exhausted. Waiters are FIFO;
-    // timeout zero is a poll and timeout max waits indefinitely. Draining or closure cancels the wait.
-    [[nodiscard]] fiber::async::Task<common::IoResult<Http2Stream::Lease>>
-    attach_local_stream(Http2Stream &stream,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
     [[nodiscard]] bool peer_settings_received() const noexcept { return peer_settings_received_; }
     [[nodiscard]] bool peer_enable_connect_protocol() const noexcept { return peer_enable_connect_protocol_; }
+
+    // Fires on this connection's loop whenever anything gating locally initiated
+    // streams changes: a stream detaching, the peer's
+    // SETTINGS_MAX_CONCURRENT_STREAMS, a peer GOAWAY, local stream id
+    // exhaustion, or a state transition. It runs inline, so it must only touch
+    // memory: no I/O, and it must never destroy this connection. A change the
+    // callback itself triggers is coalesced into one more pass instead of
+    // recursing, so the callback must not keep changing capacity forever.
+    void set_capacity_callback(CapacityCallback cb, void *ctx) noexcept;
+    void clear_capacity_callback() noexcept;
+
+    [[nodiscard]] std::uint32_t peer_max_concurrent_streams() const noexcept {
+        return peer_advertised_max_concurrent_streams_;
+    }
+    [[nodiscard]] std::size_t local_active_stream_count() const noexcept { return local_active_stream_count_; }
+    // Locally initiated streams that can be attached right now, already net of
+    // the slots handed to resumed attach waiters.
+    [[nodiscard]] std::size_t available_local_stream_slots() const noexcept;
+    [[nodiscard]] bool peer_goaway_received() const noexcept { return peer_goaway_received_; }
+    // What try_attach_local_stream would return right now: None when a stream
+    // can be attached, Busy while the peer budget is full, Canceled once the
+    // connection is draining, closing, or out of local stream ids, Invalid
+    // before the session starts. Waiting callers use this to tell "retry later"
+    // apart from "never again"; see Http2LocalStreamGate.
+    [[nodiscard]] common::IoErr local_stream_attach_status() const noexcept;
+    [[nodiscard]] bool accepts_new_local_stream() const noexcept {
+        return local_stream_attach_status() == common::IoErr::None;
+    }
     [[nodiscard]] event::EventLoop &loop() noexcept {
         FIBER_ASSERT(transport_ != nullptr);
         return transport_->loop();
@@ -136,9 +162,6 @@ protected:
     void stop_sending(common::IoErr reason = common::IoErr::Canceled) noexcept;
     [[nodiscard]] std::int32_t connection_send_window() const noexcept { return conn_send_window_; }
     [[nodiscard]] std::uint32_t peer_max_outbound_frame_size() const noexcept { return peer_max_outbound_frame_size_; }
-    [[nodiscard]] std::uint32_t peer_max_concurrent_streams() const noexcept {
-        return peer_advertised_max_concurrent_streams_;
-    }
     [[nodiscard]] ConnectionRole role() const noexcept { return options_.role; }
     [[nodiscard]] bool peer_enable_push() const noexcept { return peer_enable_push_; }
     [[nodiscard]] bool local_enable_connect_protocol() const noexcept { return options_.enable_connect_protocol; }
@@ -148,11 +171,8 @@ protected:
     [[nodiscard]] bool outbound_stopped() const noexcept { return outbound_stopped_; }
     [[nodiscard]] Http2HpackDecoder &inbound_hpack_decoder() noexcept { return inbound_hpack_decoder_; }
     [[nodiscard]] const Http2HpackDecoder &inbound_hpack_decoder() const noexcept { return inbound_hpack_decoder_; }
-    fiber::async::Task<void> stop_and_wait_closed(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
 private:
-    class LocalStreamAttachAwaiter;
-
     enum class ParsePhase : std::uint8_t {
         Preface,
         FrameHeader,
@@ -184,17 +204,6 @@ private:
         bool needs_reschedule = false;
     };
 
-    struct ClosedAwaiter {
-        Http2Connection *connection = nullptr;
-        std::coroutine_handle<> handle{};
-
-        ~ClosedAwaiter();
-
-        [[nodiscard]] bool await_ready() const noexcept { return connection->close_completion_dispatched_; }
-        bool await_suspend(std::coroutine_handle<> continuation) noexcept;
-        void await_resume() noexcept;
-    };
-
     struct InboundStream {
         Http2Stream::Lease lease{};
         std::uint32_t stream_id = 0;
@@ -202,6 +211,7 @@ private:
         std::size_t payload_end = 0;
         bool header_block_open = false;
         bool end_stream_pending = false;
+        bool discard_closed_stream_block = false;
     };
 
     common::IoErr consume_incoming_frame_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
@@ -238,23 +248,15 @@ private:
     void detach_stream(Http2Stream &stream) noexcept;
     void try_release_stream(Http2Stream &stream) noexcept;
     bool can_accept_peer_stream(std::uint32_t stream_id) const noexcept;
-    [[nodiscard]] common::IoErr local_stream_attach_gate() const noexcept;
-    [[nodiscard]] std::size_t available_local_stream_attach_slots() const noexcept;
-    [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream_impl(Http2Stream &stream,
-                                                                                    bool consume_grant) noexcept;
-    void enqueue_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
-    void unlink_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
-    void finish_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter, bool transfer_grant) noexcept;
-    void grant_local_stream_attach_waiters() noexcept;
-    void cancel_local_stream_attach_waiters(common::IoErr result) noexcept;
     void on_local_stream_attach_capacity_changed() noexcept;
+    void apply_local_stream_attach_capacity_change() noexcept;
+    void apply_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
     bool is_next_peer_stream_id(std::uint32_t stream_id) const noexcept;
     void handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
     void close_streams_after_goaway(std::uint32_t last_stream_id) noexcept;
     [[nodiscard]] bool is_idle_stream(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_local_stream_id(std::uint32_t stream_id) const noexcept;
     [[nodiscard]] bool is_peer_stream_id(std::uint32_t stream_id) const noexcept;
-    [[nodiscard]] std::size_t configured_max_active_streams() const noexcept;
     template<typename T>
     static constexpr bool kAlwaysFalse = false;
 
@@ -390,10 +392,6 @@ private:
     std::uint32_t next_local_stream_id_ = 0;
     std::size_t peer_active_stream_count_ = 0;
     std::size_t local_active_stream_count_ = 0;
-    common::IntrusiveListHook *local_stream_attach_wait_head_ = nullptr;
-    common::IntrusiveListHook *local_stream_attach_wait_tail_ = nullptr;
-    std::size_t local_stream_attach_waiter_count_ = 0;
-    std::size_t local_stream_attach_granted_count_ = 0;
     std::int32_t conn_recv_window_remaining_ = 65535;
     std::uint32_t conn_recv_window_target_ = 65535;
     std::int32_t peer_initial_stream_send_window_ = 65535;
@@ -435,7 +433,8 @@ private:
     std::chrono::steady_clock::time_point write_blocked_at_{};
     ClosedCallback on_closed_ = nullptr;
     void *closed_ctx_ = nullptr;
-    std::coroutine_handle<> closed_waiter_{};
+    CapacityCallback capacity_cb_ = nullptr;
+    void *capacity_ctx_ = nullptr;
     event::IoEvent outbound_wait_event_ = event::IoEvent::None;
     State state_ = State::Init;
     bool stop_sending_requested_ = false;
@@ -444,6 +443,8 @@ private:
     bool io_pump_posted_ = false;
     bool io_pump_running_ = false;
     bool io_pump_again_ = false;
+    bool capacity_dispatch_running_ = false;
+    bool capacity_dispatch_again_ = false;
     bool prefer_write_ = false;
     bool outbound_ready_hint_ = false;
     bool inbound_eof_ = false;

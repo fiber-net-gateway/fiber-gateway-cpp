@@ -1,5 +1,5 @@
-#ifndef FIBER_HTTP_HTTP1_CONNECTION_GROUP_HINT_TABLE_H
-#define FIBER_HTTP_HTTP1_CONNECTION_GROUP_HINT_TABLE_H
+#ifndef FIBER_HTTP_HTTP_CONNECTION_GROUP_HINT_TABLE_H
+#define FIBER_HTTP_HTTP_CONNECTION_GROUP_HINT_TABLE_H
 
 #include <array>
 #include <atomic>
@@ -8,11 +8,11 @@
 
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
-#include "Http1ConnectionGroupKey.h"
+#include "HttpConnectionGroupKey.h"
 
 namespace fiber::http {
 
-class Http1ConnectionGroupHintTable : public common::NonCopyable, public common::NonMovable {
+class HttpConnectionGroupHintTable : public common::NonCopyable, public common::NonMovable {
 public:
     static constexpr std::uint32_t kWays = 4;
     static constexpr std::uint32_t kSetCount = 64;
@@ -25,12 +25,12 @@ public:
         [[nodiscard]] bool may_have() const noexcept { return approx_count != 0; }
     };
 
-    Http1ConnectionGroupHintTable() noexcept = default;
+    HttpConnectionGroupHintTable() noexcept = default;
 
     void clear() noexcept;
-    void note_idle_add(const Http1ConnectionGroupKey &key) noexcept;
-    void note_idle_remove(const Http1ConnectionGroupKey &key) noexcept;
-    [[nodiscard]] ProbeResult probe(const Http1ConnectionGroupKey &key) const noexcept;
+    void note_idle_add(const HttpConnectionGroupKey &key) noexcept;
+    void note_idle_remove(const HttpConnectionGroupKey &key) noexcept;
+    [[nodiscard]] ProbeResult probe(const HttpConnectionGroupKey &key) const noexcept;
 
 private:
     struct Slot {
@@ -55,4 +55,4 @@ private:
 
 } // namespace fiber::http
 
-#endif // FIBER_HTTP_HTTP1_CONNECTION_GROUP_HINT_TABLE_H
+#endif // FIBER_HTTP_HTTP_CONNECTION_GROUP_HINT_TABLE_H
