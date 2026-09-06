@@ -8,7 +8,6 @@ set(FIBER_DEPS_DIR "${CMAKE_CURRENT_LIST_DIR}/temp/_deps" CACHE PATH "Shared dep
 set(FETCHCONTENT_BASE_DIR "${FIBER_DEPS_DIR}" CACHE PATH "FetchContent base directory")
 option(FIBER_FETCH_DEPS "Allow CMake to download third-party dependencies" ON)
 option(FIBER_USE_JEMALLOC "Link final executables against jemalloc" OFF)
-option(FIBER_ENABLE_HTTP3 "Build in-tree HTTP/3 support" ON)
 option(FIBER_ENABLE_UDP_GSO "Compile Linux UDP GSO support when available" ON)
 option(FIBER_FORCE_TIMERFD_POLLER "Force the Linux Poller to use timerfd timeouts" OFF)
 option(FIBER_ENABLE_BENCHMARK_TRACE "Enable benchmark-only hot-path trace counters" OFF)

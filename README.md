@@ -189,7 +189,6 @@ benchmark invocation.
 | `FIBER_BUILD_PROMETHEUS_BENCHMARK` | `OFF` | Build the Prometheus record-path benchmark. |
 | `FIBER_FETCH_DEPS` | `ON` | Allow fetching missing optional dependencies such as GoogleTest and jemalloc. |
 | `FIBER_USE_JEMALLOC` | `OFF` | Link final executables against jemalloc. |
-| `FIBER_ENABLE_HTTP3` | `ON` | Declared HTTP/3 switch; the current source list includes HTTP/3 regardless of this value. |
 | `FIBER_ENABLE_LTO` | `ON` | Enable IPO/LTO when supported. |
 | `FIBER_ALLOW_GCC_LTO` | `OFF` | Opt in to GCC LTO, which is disabled by default for stability. |
 | `FIBER_ENABLE_UDP_GSO` | `ON` | Compile Linux UDP GSO support when system headers provide it. |
