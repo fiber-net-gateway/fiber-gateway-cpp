@@ -2,6 +2,8 @@
 #define FIBER_HTTP_HTTP2_CONNECTION_POOL_CORE_H
 
 #include <atomic>
+#include <optional>
+
 #include <fiber/http/ClientHttp2Exchange.h>
 #include <fiber/http/Http2ConnectionPoolEntry.h>
 #include <fiber/http/HttpConnectionBucketIndex.h>
@@ -19,6 +21,11 @@ public:
         std::size_t max_concurrent_dials_per_group = 1;
         std::size_t max_idle_total = 16;
         std::chrono::milliseconds idle_timeout{60000};
+        // Backoff a group waits after a failed dial before anyone retries it.
+        // Doubles per consecutive failure up to max_dial_retry_backoff, and
+        // resets on the first success.
+        std::chrono::milliseconds dial_retry_backoff{10};
+        std::chrono::milliseconds max_dial_retry_backoff{1000};
         std::size_t initial_group_capacity = 0;
         Http2Connection::Options h2{};
     };
@@ -31,6 +38,11 @@ public:
     };
     using ConnCountChangedCallback = void (*)(void *ctx, const HttpConnectionGroupKey &key, std::size_t total,
                                               std::size_t ready) noexcept;
+    // Reports every failed dial, including those an unbounded acquire will
+    // silently retry. retry_after is the backoff before the group dials again.
+    using DialFailedCallback = void (*)(void *ctx, const HttpConnectionGroupKey &key, common::IoErr error,
+                                        std::size_t consecutive_failures,
+                                        std::chrono::milliseconds retry_after) noexcept;
     class Lease : public common::NonCopyable {
     public:
         Lease() noexcept = default;
@@ -59,6 +71,11 @@ public:
     [[nodiscard]] async::Task<common::IoResult<Lease>>
     acquire(HttpConnectionGroupKey key, Connector connector,
             std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    // Synchronous reuse-only fast path: takes a slot on an already usable
+    // connection, or nothing. It never dials, waits, yields to queued waiters,
+    // or creates a group, so it borrows the key and builds no coroutine frame.
+    // Fall back to acquire() when it comes back empty.
+    [[nodiscard]] std::optional<Lease> try_acquire(const HttpConnectionGroupKey &key) noexcept;
     void clear() noexcept;
     void shutdown() noexcept;
     // Wait for all entries, dials and acquires to leave; release leases first.
@@ -73,6 +90,15 @@ public:
     void clear_conn_count_changed_callback() noexcept {
         count_cb_ = nullptr;
         count_ctx_ = nullptr;
+    }
+    // Synchronous, observation-only callback. The key is borrowed for the call.
+    void set_dial_failed_callback(DialFailedCallback cb, void *ctx) noexcept {
+        dial_failed_cb_ = cb;
+        dial_failed_ctx_ = ctx;
+    }
+    void clear_dial_failed_callback() noexcept {
+        dial_failed_cb_ = nullptr;
+        dial_failed_ctx_ = nullptr;
     }
     [[nodiscard]] event::EventLoop &loop() const noexcept { return *loop_; }
     [[nodiscard]] const Options &options() const noexcept { return options_; }
@@ -96,6 +122,8 @@ private:
     void release_slot(Http2ConnectionPoolEntry &entry) noexcept;
     void refresh_capacity(Http2ConnectionPoolEntry &entry) noexcept;
     void set_ready(Http2ConnectionPoolEntry &entry, bool ready) noexcept;
+    void set_awaiting_settings(Http2ConnectionPoolEntry &entry, bool awaiting) noexcept;
+    std::chrono::milliseconds note_dial_failure(Http2ConnectionPoolGroupBucket &bucket, common::IoErr error) noexcept;
     void remove_idle(Http2ConnectionPoolEntry &entry) noexcept;
     void park_idle(Http2ConnectionPoolEntry &entry) noexcept;
     void retire(Http2ConnectionPoolEntry &entry) noexcept;
@@ -126,6 +154,8 @@ private:
     const std::atomic<bool> *external_shutdown_flag_ = nullptr;
     ConnCountChangedCallback count_cb_ = nullptr;
     void *count_ctx_ = nullptr;
+    DialFailedCallback dial_failed_cb_ = nullptr;
+    void *dial_failed_ctx_ = nullptr;
     bool shutdown_ = false;
 };
 

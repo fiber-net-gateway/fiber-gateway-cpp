@@ -195,6 +195,8 @@ Http2ConnectionPoolCore::Options Http2ConnectionPoolCore::normalize_options(Opti
     FIBER_ASSERT(options.max_connections_total >= 1);
     FIBER_ASSERT(options.max_concurrent_dials_per_group >= 1);
     FIBER_ASSERT(options.max_idle_total <= options.max_connections_total);
+    FIBER_ASSERT(options.dial_retry_backoff > std::chrono::milliseconds::zero());
+    FIBER_ASSERT(options.max_dial_retry_backoff >= options.dial_retry_backoff);
     return options;
 }
 Http2ConnectionPoolCore::Http2ConnectionPoolCore(event::EventLoop &loop) noexcept :
@@ -233,6 +235,7 @@ Http2ConnectionPoolGroupBucket *Http2ConnectionPoolCore::get_bucket(const HttpCo
         return nullptr;
     bucket->pool_ = this;
     bucket->next_free_ = nullptr;
+    bucket->dial_failures_ = 0;
     if (bucket_index_.insert(key, *bucket) != IoErr::None) {
         bucket->next_free_ = free_bucket_head_;
         free_bucket_head_ = bucket;
@@ -244,6 +247,7 @@ void Http2ConnectionPoolCore::maybe_recycle_bucket(Http2ConnectionPoolGroupBucke
     if (bucket.total_count_ || bucket.connecting_count_ || bucket.wait_head_)
         return;
     FIBER_ASSERT(bucket.all_.empty() && bucket.ready_.empty());
+    FIBER_ASSERT(bucket.awaiting_settings_count_ == 0);
     if (bucket.retry_timer_.is_in_heap()) {
         loop_->cancel<Http2ConnectionPoolGroupBucket, &Http2ConnectionPoolGroupBucket::retry_timer_>(bucket);
     }
@@ -265,6 +269,7 @@ PoolEntry *Http2ConnectionPoolCore::allocate_entry(Http2ConnectionPoolGroupBucke
     entry->state_ = EntryState::Connecting;
     entry->dialing_ = true;
     entry->abort_connection_ = false;
+    entry->awaiting_settings_ = false;
     entry->served_streams_ = 0;
     entry->capacity_cache_ = 0;
     entry->construct_connection(*loop_, options_.h2);
@@ -278,9 +283,29 @@ PoolEntry *Http2ConnectionPoolCore::allocate_entry(Http2ConnectionPoolGroupBucke
     return entry;
 }
 bool Http2ConnectionPoolCore::can_dial(const Http2ConnectionPoolGroupBucket &bucket) const noexcept {
-    return !bucket.retry_timer_.is_in_heap() && bucket.total_count_ < options_.max_connections_per_group &&
+    // A group already holding a connection that only lacks capacity until the
+    // peer's SETTINGS arrives waits for it rather than fanning out more dials.
+    return !bucket.retry_timer_.is_in_heap() && bucket.awaiting_settings_count_ == 0 &&
+           bucket.total_count_ < options_.max_connections_per_group &&
            bucket.connecting_count_ < options_.max_concurrent_dials_per_group &&
            conn_total_ < options_.max_connections_total;
+}
+
+std::optional<Http2ConnectionPoolCore::Lease>
+Http2ConnectionPoolCore::try_acquire(const HttpConnectionGroupKey &key) noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    if (shutdown_requested())
+        return std::nullopt;
+    auto ref = bucket_index_.find(key);
+    if (!ref)
+        return std::nullopt;
+    auto &bucket = *static_cast<Http2ConnectionPoolGroupBucket *>(ref.bucket);
+    // Queued waiters own the capacity that is about to be freed.
+    if (bucket.wait_head_)
+        return std::nullopt;
+    if (auto *entry = take_slot(bucket))
+        return Lease(*entry);
+    return std::nullopt;
 }
 
 async::Task<common::IoResult<Http2ConnectionPoolCore::Lease>>
@@ -334,12 +359,19 @@ Http2ConnectionPoolCore::acquire(HttpConnectionGroupKey key, Connector connector
                         [&]() { return connector.connect(connector.ctx, entry->connection(), key).select(); },
                         [&]() { return waiter.wait(); });
                 waiter.dialing_ = false;
-                bool success = result.is<0>() && result.get<0>().has_value() && waiter.result_ == IoErr::None &&
-                               !shutdown_requested() && entry->state_ == EntryState::Connecting;
+                IoErr dial_error = IoErr::None;
+                if (!result.is<0>())
+                    dial_error = waiter.result_ != IoErr::None ? waiter.result_ : IoErr::Canceled;
+                else if (!result.get<0>())
+                    dial_error = result.get<0>().error();
+                bool success = dial_error == IoErr::None && waiter.result_ == IoErr::None && !shutdown_requested() &&
+                               entry->state_ == EntryState::Connecting;
                 // A connector must actually start the client session before returning success.
                 const auto state = entry->connection().http2().state();
-                success =
-                        success && (state == Http2Connection::State::Start || state == Http2Connection::State::Running);
+                if (success && state != Http2Connection::State::Start && state != Http2Connection::State::Running) {
+                    success = false;
+                    dial_error = IoErr::Invalid;
+                }
                 guard.finish(success);
                 if (success) {
                     // The dial owner gets first use; queued callers share the remainder.
@@ -347,11 +379,14 @@ Http2ConnectionPoolCore::acquire(HttpConnectionGroupKey key, Connector connector
                         co_return Lease(*taken);
                     if (entry->state_ == EntryState::Ready)
                         park_idle(*entry);
-                } else if (waiter.result_ == IoErr::None && !shutdown_requested() &&
-                           !bucket->retry_timer_.is_in_heap()) {
-                    loop_->post_at<Http2ConnectionPoolGroupBucket, &Http2ConnectionPoolGroupBucket::retry_timer_,
-                                   &Http2ConnectionPoolCore::on_retry>(loop_->now() + std::chrono::milliseconds(10),
-                                                                       *bucket);
+                } else if (waiter.result_ == IoErr::None && !shutdown_requested()) {
+                    // Nobody is going to see this error otherwise: an unbounded
+                    // acquire just keeps retrying behind the backoff.
+                    const auto retry_after = note_dial_failure(*bucket, dial_error);
+                    if (!bucket->retry_timer_.is_in_heap()) {
+                        loop_->post_at<Http2ConnectionPoolGroupBucket, &Http2ConnectionPoolGroupBucket::retry_timer_,
+                                       &Http2ConnectionPoolCore::on_retry>(loop_->now() + retry_after, *bucket);
+                    }
                 }
                 continue;
             }
@@ -367,6 +402,7 @@ void Http2ConnectionPoolCore::finish_dial(PoolEntry &entry, bool success) noexce
     entry.dialing_ = false;
     --entry.bucket_->connecting_count_;
     if (success) {
+        entry.bucket_->dial_failures_ = 0;
         entry.state_ = EntryState::Ready;
         refresh_capacity(entry);
     } else {
@@ -388,6 +424,28 @@ void Http2ConnectionPoolCore::set_ready(PoolEntry &entry, bool ready) noexcept {
     }
     notify_count(bucket);
 }
+void Http2ConnectionPoolCore::set_awaiting_settings(PoolEntry &entry, bool awaiting) noexcept {
+    if (awaiting == entry.awaiting_settings_)
+        return;
+    entry.awaiting_settings_ = awaiting;
+    if (awaiting)
+        ++entry.bucket_->awaiting_settings_count_;
+    else
+        --entry.bucket_->awaiting_settings_count_;
+}
+std::chrono::milliseconds Http2ConnectionPoolCore::note_dial_failure(Http2ConnectionPoolGroupBucket &bucket,
+                                                                     IoErr error) noexcept {
+    auto backoff = options_.dial_retry_backoff;
+    for (std::size_t i = 0; i < bucket.dial_failures_ && backoff < options_.max_dial_retry_backoff; ++i)
+        backoff *= 2;
+    backoff = std::min(backoff, options_.max_dial_retry_backoff);
+    ++bucket.dial_failures_;
+    if (dial_failed_cb_) {
+        dial_failed_cb_(dial_failed_ctx_, *bucket_index_.key_at(bucket.slot_index()), error, bucket.dial_failures_,
+                        backoff);
+    }
+    return backoff;
+}
 void Http2ConnectionPoolCore::refresh_capacity(PoolEntry &entry) noexcept {
     if (entry.state_ != EntryState::Ready)
         return;
@@ -402,10 +460,14 @@ void Http2ConnectionPoolCore::refresh_capacity(PoolEntry &entry) noexcept {
     if (options_.max_streams_per_connection)
         capacity = std::min(capacity, options_.max_streams_per_connection);
     entry.capacity_cache_ = capacity;
+    set_awaiting_settings(entry, capacity == 0 && !conn.peer_settings_received());
     set_ready(entry, entry.active_leases_ < capacity && conn.accepts_new_local_stream());
 }
 PoolEntry *Http2ConnectionPoolCore::take_slot(Http2ConnectionPoolGroupBucket &bucket) noexcept {
     while (auto *entry = bucket.ready_.front()) {
+        // refresh_capacity() is the only writer of ready_, and it only ever
+        // links a Ready entry, so it always makes progress on this list.
+        FIBER_ASSERT(entry->state_ == EntryState::Ready);
         refresh_capacity(*entry);
         if (!entry->ready_hook_.linked())
             continue;
@@ -456,6 +518,7 @@ void Http2ConnectionPoolCore::park_idle(PoolEntry &entry) noexcept {
 }
 void Http2ConnectionPoolCore::retire(PoolEntry &entry) noexcept {
     set_ready(entry, false);
+    set_awaiting_settings(entry, false);
     remove_idle(entry);
     if (entry.state_ != EntryState::Closed)
         entry.state_ = EntryState::Draining;
@@ -502,20 +565,25 @@ void Http2ConnectionPoolCore::on_closed(void *ctx, Http2Connection &, IoErr) noe
 }
 void Http2ConnectionPoolCore::destroy_entry(PoolEntry &entry) noexcept {
     FIBER_ASSERT(entry.state_ == EntryState::Closed && !entry.active_leases_ && !entry.dialing_);
+    FIBER_ASSERT(!entry.awaiting_settings_);
     auto &bucket = *entry.bucket_;
     entry.connection().stream_gate().clear_capacity_callback();
     entry.destroy_connection();
     bucket.all_.erase(entry);
     --bucket.total_count_;
+    const bool global_limit_was_binding = conn_total_ >= options_.max_connections_total;
     --conn_total_;
     entry.bucket_ = nullptr;
     entry.state_ = EntryState::Free;
     entry.next_free_ = free_entry_head_;
     free_entry_head_ = &entry;
     notify_count(bucket);
+    wake_waiters(bucket);
     maybe_recycle_bucket(bucket);
-    // A global connection limit may have blocked a completely different key.
-    wake_all_groups();
+    // Scanning every group only pays off when the global limit is what was
+    // holding other keys back; the common case is a plain per-group release.
+    if (global_limit_was_binding)
+        wake_all_groups();
     notify_drained();
 }
 void Http2ConnectionPoolCore::wake_waiters(Http2ConnectionPoolGroupBucket &bucket) noexcept {

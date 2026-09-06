@@ -36,9 +36,15 @@ public:
             std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept {
         return current_core().acquire(std::move(key), connector, timeout);
     }
+    [[nodiscard]] std::optional<Lease> try_acquire(const HttpConnectionGroupKey &key) noexcept {
+        return current_core().try_acquire(key);
+    }
     [[nodiscard]] std::size_t connection_total() const noexcept { return current_core().connection_total(); }
     void set_conn_count_changed_callback(Http2ConnectionPoolCore::ConnCountChangedCallback cb, void *ctx) noexcept {
         current_core().set_conn_count_changed_callback(cb, ctx);
+    }
+    void set_dial_failed_callback(Http2ConnectionPoolCore::DialFailedCallback cb, void *ctx) noexcept {
+        current_core().set_dial_failed_callback(cb, ctx);
     }
 
     [[nodiscard]] std::size_t size() const noexcept { return group_->size(); }

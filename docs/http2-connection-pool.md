@@ -25,6 +25,8 @@ acquire 按值持有 key 和 Connector，因此支持临时参数，也不会在
 
 ## 4. Lease 与 PooledExchange
 
+`try_acquire(key)` 是同步的纯复用快路径：命中已有可用连接就返回 Lease，否则返回 `std::nullopt`。它不拨号、不挂起、不创建分组，也不会抢占已排队的等待者，因此按引用取 key、不构造协程帧。稳态复用可以先走它，miss 再 `co_await acquire()`。
+
 `acquire()` 成功后返回可移动、不可复制的 Lease。`connection()` 返回共享连接，`key()` 从所属 bucket 获取 key；该引用只应在当前同步操作内使用，其他组插入、删除或扩容会使引用失效。
 
 每个 Lease 对应一个 exchange。不要在同一 Lease 上创建多个并行 exchange，也不要绕过池在该连接上额外创建请求。使用裸 `Lease::open_exchange()` 时，须在响应完成或请求取消后先销毁 exchange，再 reset Lease。
@@ -76,19 +78,21 @@ async::Task<common::IoResult<void>> request(
 | 选项 | 默认值 | 含义 |
 |---|---:|---|
 | `max_streams_per_connection` | 0 | 每连接软上限，0 表示不限 |
-| `pre_settings_max_streams` | 16 | 首次完整 SETTINGS 前的保守上限，可配置为 0 以等待 SETTINGS |
+| `pre_settings_max_streams` | 16 | 首次完整 SETTINGS 前的保守上限，0 表示不发名额、等待 SETTINGS |
 | `max_streams_lifetime` | 0 | 累计归还名额数达到该值后退休，0 表示不限 |
 | `max_connections_per_group` | 4 | 单组全部存活连接上限，含连接中和 draining |
 | `max_connections_total` | 64 | 全部组的存活连接上限 |
 | `max_concurrent_dials_per_group` | 1 | 单组同时拨号数，默认单飞 |
 | `max_idle_total` | 16 | active leases 为 0 的连接上限，0 表示不缓存空闲连接 |
 | `idle_timeout` | 60 秒 | 空闲连接退休期限，必须大于 0 |
+| `dial_retry_backoff` | 10ms | 拨号失败后该组的重试退避起点，必须大于 0 |
+| `max_dial_retry_backoff` | 1s | 退避上限，每次连续失败翻倍直到该值，不得小于起点 |
 | `initial_group_capacity` | 0 | bucket index 初始分组容量 |
 | `h2` | 默认 H2 options | 每条连接的 HTTP/2 配置 |
 
-`max_connections_total`、`max_connections_per_group` 和 `max_concurrent_dials_per_group` 必须至少为 1，`max_idle_total` 必须不超过总连接上限。
+`max_connections_total`、`max_connections_per_group` 和 `max_concurrent_dials_per_group` 必须至少为 1，`max_idle_total` 必须不超过总连接上限，`max_dial_retry_backoff` 必须不小于 `dial_retry_backoff`。
 
-收到 SETTINGS 后，容量为对端宣告值与池软上限的较小值。首次 SETTINGS 完成会通知池切换容量口径。对端缩小上限时，已发出的 Lease 不会被撤销；其尚未 attach 的请求由 stream gate 等待，使用请求头发送超时限制等待时间。
+收到 SETTINGS 后，容量为对端宣告值与池软上限的较小值。首次 SETTINGS 完成会通知池切换容量口径。`pre_settings_max_streams` 为 0 时，已就绪但尚未收到 SETTINGS 的连接容量为 0，该组在此期间不再拨新连接，请求等待这条连接的 SETTINGS 到达；这与配置非 0 值时「先按保守上限发名额」是两种取舍。对端缩小上限时，已发出的 Lease 不会被撤销；其尚未 attach 的请求由 stream gate 等待，使用请求头发送超时限制等待时间。
 
 ### 5.2 等待、超时与错误
 
@@ -102,7 +106,9 @@ async::Task<common::IoResult<void>> request(
 | bucket/entry 分配失败 | `NoMem` |
 | 需要拨号但 Connector 函数为空 | `Invalid` |
 
-等待者保持 FIFO 顺序直到实际取得名额，新请求不会抢占已唤醒的等待者。拨号成功时，拨号请求先取得一个名额，其余等待者共享剩余容量。拨号失败不会将错误广播给其他请求；失败请求也继续等待，按组退避 10ms 后重试，直到成功、取消或超时。
+等待者保持 FIFO 顺序直到实际取得名额，新请求不会抢占已唤醒的等待者。拨号成功时，拨号请求先取得一个名额，其余等待者共享剩余容量。
+
+拨号失败不会将错误广播给其他请求；失败请求也继续等待，按组退避后重试，直到成功、取消或超时。退避从 `dial_retry_backoff` 起，每次连续失败翻倍到 `max_dial_retry_backoff`，一次成功即清零。**`timeout` 取默认的 `milliseconds::max()` 时，持续失败的 endpoint 会一直重试而不返回**，因此必须用 `set_dial_failed_callback(cb, ctx)` 观测；回调在每次拨号失败时同步触发，参数为 key、错误码、该组连续失败次数和下次重试的退避时长。
 
 Connector 的挂起操作必须支持协程帧析构取消：池会在 deadline、clear、shutdown 或调用方销毁 acquire 协程时销毁未完成的拨号协程。仓库的 TCP/TLS connect 和 sleep awaiter 支持这种生命周期。不要让 Connector 启动脱离 acquire 生命周期、继续使用借用参数的后台任务。
 
@@ -120,6 +126,8 @@ Connector 的挂起操作必须支持协程帧析构取消：池会在 deadline�
 
 `connection_total()`、`idle_total()`、`group_count()` 在所属 loop 读取。`set_conn_count_changed_callback(cb, ctx)` 在连接总数或 ready 连接数发生变化时同步调用，参数为 key、total、ready。ready 是可分配连接数，不是 stream 槽位数。
 
+`set_dial_failed_callback(cb, ctx)` 在每次拨号失败时同步调用，参数为 key、拨号错误、该组连续失败次数和下次重试退避。这是无限等待的 acquire 唯一的错误暴露渠道。
+
 回调只能观察状态，不能重入池进行 acquire、clear、销毁或其他修改。回调 key 仅在回调期间借用。
 
 ## 6. LocalHttp2ConnectionPoolSet
@@ -132,7 +140,7 @@ if (!connections.init()) {
 }
 ```
 
-`acquire(key, connector, timeout)` 和观测方法根据当前 loop 路由。每个 shard 独立执行 Options 中的上限，因此进程总连接数最多为 shard 数乘以 `max_connections_total`。
+`acquire(key, connector, timeout)`、`try_acquire(key)` 和观测方法根据当前 loop 路由。每个 shard 独立执行 Options 中的上限，因此进程总连接数最多为 shard 数乘以 `max_connections_total`。
 
 `clear_async()` 和 `shutdown_async()` 向每个 loop 派发清理，并等待各 core 的 join。多个并发 shutdown 调用者共享完成结果。先释放业务请求的 Lease，再等待 shutdown_async，最后停止 EventLoopGroup 并销毁 set；不要持有自己的 Lease 等待池 shutdown。
 
