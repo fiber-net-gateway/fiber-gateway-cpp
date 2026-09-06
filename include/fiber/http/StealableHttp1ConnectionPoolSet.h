@@ -16,8 +16,8 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../event/EventLoopGroup.h"
-#include "Http1ConnectionGroupHintTable.h"
 #include "Http1ConnectionPoolCore.h"
+#include "HttpConnectionGroupHintTable.h"
 
 namespace fiber::http {
 
@@ -42,7 +42,7 @@ public:
         [[nodiscard]] const Http1ClientConnection *get() const noexcept;
 
         [[nodiscard]] Http1ClientConnection &connection() noexcept;
-        [[nodiscard]] const Http1ConnectionGroupKey &key() const noexcept;
+        [[nodiscard]] const HttpConnectionGroupKey &key() const noexcept;
         [[nodiscard]] common::IoResult<Http1ClientConnection *> emplace_connection() noexcept;
         void reset() noexcept;
 
@@ -53,13 +53,13 @@ public:
 
         explicit Lease(Http1ConnectionPoolCore::Lease &&local) noexcept;
         Lease(Http1ConnectionPoolCore &home_core, Http1ConnectionPoolEntry &entry,
-              const Http1ConnectionGroupKey &key) noexcept;
+              const HttpConnectionGroupKey &key) noexcept;
 
         Kind kind_ = Kind::Empty;
         Http1ConnectionPoolCore::Lease local_{};
         Http1ConnectionPoolEntry *entry_ = nullptr;
         Http1ConnectionPoolCore *home_core_ = nullptr;
-        std::optional<Http1ConnectionGroupKey> key_{};
+        std::optional<HttpConnectionGroupKey> key_{};
     };
 
     explicit StealableHttp1ConnectionPoolSet(event::EventLoopGroup &group) noexcept;
@@ -69,7 +69,7 @@ public:
     [[nodiscard]] bool init() noexcept;
     [[nodiscard]] async::Task<void> clear_async() noexcept;
     [[nodiscard]] async::Task<void> shutdown_async() noexcept;
-    [[nodiscard]] AcquireAwaiter acquire(const Http1ConnectionGroupKey &key) noexcept;
+    [[nodiscard]] AcquireAwaiter acquire(const HttpConnectionGroupKey &key) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return group_->size(); }
     [[nodiscard]] event::EventLoopGroup &group() noexcept { return *group_; }
@@ -86,14 +86,14 @@ private:
 
         ~Shard() { core.clear_idle_count_changed_callback(); }
 
-        static void on_idle_count_changed(void *ctx, const Http1ConnectionGroupKey &key,
+        static void on_idle_count_changed(void *ctx, const HttpConnectionGroupKey &key,
                                           std::size_t idle_count) noexcept {
             auto *self = static_cast<Shard *>(ctx);
             FIBER_ASSERT(self != nullptr);
             const std::size_t target =
-                    idle_count < static_cast<std::size_t>(Http1ConnectionGroupHintTable::kMaxApproxCount)
+                    idle_count < static_cast<std::size_t>(HttpConnectionGroupHintTable::kMaxApproxCount)
                             ? idle_count
-                            : static_cast<std::size_t>(Http1ConnectionGroupHintTable::kMaxApproxCount);
+                            : static_cast<std::size_t>(HttpConnectionGroupHintTable::kMaxApproxCount);
             std::size_t current = self->hint.probe(key).approx_count;
             while (current < target) {
                 self->hint.note_idle_add(key);
@@ -106,7 +106,7 @@ private:
         }
 
         Http1ConnectionPoolCore core;
-        Http1ConnectionGroupHintTable hint;
+        HttpConnectionGroupHintTable hint;
     };
 
     struct alignas(Shard) ShardSlot {
@@ -146,7 +146,7 @@ private:
 
 class StealableHttp1ConnectionPoolSet::AcquireAwaiter : public common::NonCopyable {
 public:
-    AcquireAwaiter(StealableHttp1ConnectionPoolSet &set, const Http1ConnectionGroupKey &key) noexcept;
+    AcquireAwaiter(StealableHttp1ConnectionPoolSet &set, const HttpConnectionGroupKey &key) noexcept;
     AcquireAwaiter(AcquireAwaiter &&) = delete;
     AcquireAwaiter &operator=(AcquireAwaiter &&) = delete;
     ~AcquireAwaiter() noexcept;
@@ -166,7 +166,7 @@ private:
     [[nodiscard]] bool advance_to_candidate() noexcept;
 
     StealableHttp1ConnectionPoolSet *set_ = nullptr;
-    std::optional<Http1ConnectionGroupKey> key_{};
+    std::optional<HttpConnectionGroupKey> key_{};
     Http1ConnectionPoolCore::Lease local_fallback_{};
     Lease result_{};
     ShardSlot *home_slot_ = nullptr;

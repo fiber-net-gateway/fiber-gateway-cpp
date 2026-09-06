@@ -3,22 +3,31 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <fiber/http/Http1ConnectionPoolEntry.h>
+#include <fiber/http/Http2ConnectionPoolEntry.h>
+#include <type_traits>
 
-#include <fiber/http/Http1ConnectionBucketIndex.h>
+#include <fiber/http/HttpConnectionBucketIndex.h>
+
+static_assert(
+        std::is_base_of_v<fiber::http::HttpConnectionPoolBucketBase, fiber::http::Http1ConnectionPoolGroupBucket>);
+static_assert(
+        std::is_base_of_v<fiber::http::HttpConnectionPoolBucketBase, fiber::http::Http2ConnectionPoolGroupBucket>);
+static_assert(!std::is_polymorphic_v<fiber::http::HttpConnectionPoolBucketBase>);
 
 namespace {
 
 using fiber::common::IoErr;
-using fiber::http::Http1ConnectionBucketIndex;
-using fiber::http::Http1ConnectionGroupKey;
-using fiber::http::Http1ConnectionPoolGroupBucket;
+using fiber::http::HttpConnectionBucketIndex;
+using fiber::http::HttpConnectionGroupKey;
+using fiber::http::HttpConnectionPoolBucketBase;
 
-Http1ConnectionGroupKey make_ip_key(std::uint8_t last_octet, std::uint16_t port = 80,
-                                    Http1ConnectionGroupKey::Scheme scheme = Http1ConnectionGroupKey::Scheme::Http) {
-    return Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, last_octet}), port, scheme);
+HttpConnectionGroupKey make_ip_key(std::uint8_t last_octet, std::uint16_t port = 80,
+                                   HttpConnectionGroupKey::Scheme scheme = HttpConnectionGroupKey::Scheme::Http) {
+    return HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, last_octet}), port, scheme);
 }
 
-std::size_t home_bucket(const Http1ConnectionGroupKey &key, std::size_t slot_capacity) {
+std::size_t home_bucket(const HttpConnectionGroupKey &key, std::size_t slot_capacity) {
     return static_cast<std::size_t>(key.hash()) & (slot_capacity - 1U);
 }
 
@@ -40,23 +49,23 @@ std::array<std::uint8_t, 3> find_colliding_ip_suffixes(std::size_t slot_capacity
 
 } // namespace
 
-TEST(Http1ConnectionBucketIndexTest, InitializesRequestedCapacityAsPowerOfTwo) {
-    Http1ConnectionBucketIndex index;
+TEST(HttpConnectionBucketIndexTest, InitializesRequestedCapacityAsPowerOfTwo) {
+    HttpConnectionBucketIndex index;
 
     ASSERT_TRUE(index.init(3));
     EXPECT_EQ(index.slot_capacity(), 8u);
     EXPECT_TRUE(index.empty());
 }
 
-TEST(Http1ConnectionBucketIndexTest, InsertsFindsAndRejectsDuplicateKeys) {
-    Http1ConnectionPoolGroupBucket bucket1;
-    Http1ConnectionPoolGroupBucket bucket2;
-    Http1ConnectionPoolGroupBucket duplicate_bucket;
-    Http1ConnectionBucketIndex index;
+TEST(HttpConnectionBucketIndexTest, InsertsFindsAndRejectsDuplicateKeys) {
+    HttpConnectionPoolBucketBase bucket1;
+    HttpConnectionPoolBucketBase bucket2;
+    HttpConnectionPoolBucketBase duplicate_bucket;
+    HttpConnectionBucketIndex index;
     ASSERT_TRUE(index.init(2));
 
-    const auto key1 = make_ip_key(1, 80, Http1ConnectionGroupKey::Scheme::Http);
-    const auto key2 = make_ip_key(2, 443, Http1ConnectionGroupKey::Scheme::Https);
+    const auto key1 = make_ip_key(1, 80, HttpConnectionGroupKey::Scheme::Http);
+    const auto key2 = make_ip_key(2, 443, HttpConnectionGroupKey::Scheme::Https);
 
     EXPECT_EQ(index.insert(key1, bucket1), IoErr::None);
     EXPECT_EQ(index.insert(key2, bucket2), IoErr::None);
@@ -73,11 +82,11 @@ TEST(Http1ConnectionBucketIndexTest, InsertsFindsAndRejectsDuplicateKeys) {
     EXPECT_FALSE(index.find(make_ip_key(3)));
 }
 
-TEST(Http1ConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdatesSlotIndices) {
-    Http1ConnectionPoolGroupBucket bucket_a;
-    Http1ConnectionPoolGroupBucket bucket_b;
-    Http1ConnectionPoolGroupBucket bucket_c;
-    Http1ConnectionBucketIndex index;
+TEST(HttpConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdatesSlotIndices) {
+    HttpConnectionPoolBucketBase bucket_a;
+    HttpConnectionPoolBucketBase bucket_b;
+    HttpConnectionPoolBucketBase bucket_c;
+    HttpConnectionBucketIndex index;
     ASSERT_TRUE(index.init(4));
 
     const auto octets = find_colliding_ip_suffixes(index.slot_capacity());
@@ -92,7 +101,7 @@ TEST(Http1ConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdate
     const std::uint32_t removed_slot = bucket_a.slot_index();
     index.erase(removed_slot);
 
-    EXPECT_EQ(bucket_a.slot_index(), Http1ConnectionPoolGroupBucket::kInvalidSlotIndex);
+    EXPECT_EQ(bucket_a.slot_index(), HttpConnectionPoolBucketBase::kInvalidSlotIndex);
 
     auto entry_b = index.find(key_b);
     auto entry_c = index.find(key_c);
@@ -107,9 +116,9 @@ TEST(Http1ConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdate
     EXPECT_EQ(index.size(), 2u);
 }
 
-TEST(Http1ConnectionBucketIndexTest, GrowsAndRewritesBucketSlotIndices) {
-    std::array<Http1ConnectionPoolGroupBucket, 5> buckets{};
-    Http1ConnectionBucketIndex index;
+TEST(HttpConnectionBucketIndexTest, GrowsAndRewritesBucketSlotIndices) {
+    std::array<HttpConnectionPoolBucketBase, 5> buckets{};
+    HttpConnectionBucketIndex index;
     ASSERT_TRUE(index.init(0));
     EXPECT_EQ(index.slot_capacity(), 0u);
 
@@ -129,7 +138,7 @@ TEST(Http1ConnectionBucketIndexTest, GrowsAndRewritesBucketSlotIndices) {
     EXPECT_EQ(index.slot_capacity(), 16u);
     EXPECT_EQ(index.size(), 5u);
 
-    const std::array<Http1ConnectionGroupKey, 5> keys = {key1, key2, key3, key4, key5};
+    const std::array<HttpConnectionGroupKey, 5> keys = {key1, key2, key3, key4, key5};
     for (std::size_t i = 0; i < keys.size(); ++i) {
         auto entry = index.find(keys[i]);
         ASSERT_TRUE(entry);

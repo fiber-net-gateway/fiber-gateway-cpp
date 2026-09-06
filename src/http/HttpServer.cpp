@@ -17,6 +17,7 @@
 #include <fiber/common/Assert.h>
 #include <fiber/common/IoError.h>
 #include <fiber/http/Http1Connection.h>
+#include <fiber/http/Http2CloseGate.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/TcpStream.h>
 #include "http/TlsAlpn.h"
@@ -437,6 +438,10 @@ fiber::async::Task<void> HttpServer::serve_http2(std::shared_ptr<Runtime> runtim
     if (!connection) {
         co_return;
     }
+    // Armed before start so a connection that closes immediately still resolves
+    // the join below.
+    Http2CloseGate close_gate;
+    close_gate.arm(*connection);
     if (connection->start(std::move(transport)) != common::IoErr::None) {
         co_return;
     }
@@ -452,7 +457,7 @@ fiber::async::Task<void> HttpServer::serve_http2(std::shared_ptr<Runtime> runtim
         runtime->request_shutdown();
     }
 
-    auto close_result = co_await connection->wait_closed();
+    auto close_result = co_await close_gate.join();
     (void) close_result;
 
     {

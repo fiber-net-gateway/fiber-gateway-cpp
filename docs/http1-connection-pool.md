@@ -8,8 +8,8 @@
 
 相关头文件：
 
-- `include/fiber/http/Http1ConnectionGroupKey.h`
-- `include/fiber/http/Http1ConnectionPoolAffinity.h`
+- `include/fiber/http/HttpConnectionGroupKey.h`
+- `include/fiber/http/HttpConnectionPoolAffinity.h`
 - `include/fiber/http/Http1ConnectionPoolCore.h`
 - `include/fiber/http/LocalHttp1ConnectionPoolSet.h`
 - `include/fiber/http/StealableHttp1ConnectionPoolSet.h`
@@ -56,7 +56,7 @@
 
 ### 2.3 `StealableHttp1ConnectionPoolSet`
 
-`StealableHttp1ConnectionPoolSet` 也是一个 facade。它同样为每个 loop 持有一个 `Http1ConnectionPoolCore`，但额外维护每个 loop 的 `Http1ConnectionGroupHintTable`，并在本地 miss 时按 hint 逐个向后探测其它 loop，尝试 steal 对应组的 idle 连接。
+`StealableHttp1ConnectionPoolSet` 也是一个 facade。它同样为每个 loop 持有一个 `Http1ConnectionPoolCore`，但额外维护每个 loop 的 `HttpConnectionGroupHintTable`，并在本地 miss 时按 hint 逐个向后探测其它 loop，尝试 steal 对应组的 idle 连接。
 
 适用场景：
 
@@ -64,9 +64,9 @@
 - 同一组连接分散在多个 loop 上
 - 可以接受一次跨 loop 探测和借用的开销
 
-## 3. `Http1ConnectionGroupKey`
+## 3. `HttpConnectionGroupKey`
 
-连接分组由 `Http1ConnectionGroupKey` 决定。
+连接分组由 `HttpConnectionGroupKey` 决定。
 
 当前分组条件：
 
@@ -77,29 +77,29 @@
 
 其中 `scheme` 只有：
 
-- `Http1ConnectionGroupKey::Scheme::Http`
-- `Http1ConnectionGroupKey::Scheme::Https`
+- `HttpConnectionGroupKey::Scheme::Http`
+- `HttpConnectionGroupKey::Scheme::Https`
 
 创建方式：
 
 ```cpp
-using fiber::http::Http1ConnectionGroupKey;
+using fiber::http::HttpConnectionGroupKey;
 
-auto name_key = Http1ConnectionGroupKey::from_name(
+auto name_key = HttpConnectionGroupKey::from_name(
     "example.com",
     443,
-    Http1ConnectionGroupKey::Scheme::Https);
+    HttpConnectionGroupKey::Scheme::Https);
 
-auto ip_key = Http1ConnectionGroupKey::from_ip(
+auto ip_key = HttpConnectionGroupKey::from_ip(
     fiber::net::IpAddress::loopback_v4(),
     8080,
-    Http1ConnectionGroupKey::Scheme::Http);
+    HttpConnectionGroupKey::Scheme::Http);
 
-auto mtls_key = Http1ConnectionGroupKey::from_name(
+auto mtls_key = HttpConnectionGroupKey::from_name(
     "example.com",
     443,
-    Http1ConnectionGroupKey::Scheme::Https,
-    fiber::http::Http1ConnectionPoolAffinity{tls_profile_generation});
+    HttpConnectionGroupKey::Scheme::Https,
+    fiber::http::HttpConnectionPoolAffinity{tls_profile_generation});
 ```
 
 注意：
@@ -430,7 +430,7 @@ auto lease = co_await pool_set.acquire(key);
 2. 如果本地 hit，立即返回，不挂起协程
 3. 如果本地 miss，保留一个当前 loop 的 miss lease 作为 fallback
 4. 从当前 loop 的下一个 shard 开始，沿环形链表依次向后探测
-5. 先读取该 shard 的 `Http1ConnectionGroupHintTable`
+5. 先读取该 shard 的 `HttpConnectionGroupHintTable`
 6. 只有 `approx_count > 0` 时，才真正向那个 loop 提交 steal 请求
 7. 某个远端命中后，返回 remote borrowed lease
 8. 如果所有其它 loop 都没有候选或 steal 失败，返回最开始保留的本地 miss lease
@@ -512,7 +512,7 @@ remote borrowed 连接释放时：
 
 ### 7.8 hint 表
 
-每个 shard 维护一张 `Http1ConnectionGroupHintTable`。
+每个 shard 维护一张 `HttpConnectionGroupHintTable`。
 
 作用：
 
@@ -588,10 +588,10 @@ FIBER_ASSERT(pool_set.init());
 
 group.start();
 fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-    auto key = fiber::http::Http1ConnectionGroupKey::from_ip(
+    auto key = fiber::http::HttpConnectionGroupKey::from_ip(
         fiber::net::IpAddress::loopback_v4(),
         8080,
-        fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+        fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     auto lease = pool_set.acquire(key);
     if (!lease.hit()) {
@@ -620,10 +620,10 @@ FIBER_ASSERT(pool_set.init());
 
 group.start();
 fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
-    auto key = fiber::http::Http1ConnectionGroupKey::from_ip(
+    auto key = fiber::http::HttpConnectionGroupKey::from_ip(
         fiber::net::IpAddress::loopback_v4(),
         8080,
-        fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+        fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     auto lease = co_await pool_set.acquire(key);
     if (!lease.hit()) {
@@ -658,5 +658,5 @@ fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
 - `tests/Http1ConnectionPoolTest.cpp`
 - `tests/LocalHttp1ConnectionPoolSetTest.cpp`
 - `tests/StealableHttp1ConnectionPoolSetTest.cpp`
-- `tests/Http1ConnectionGroupKeyTest.cpp`
-- `tests/Http1ConnectionGroupHintTableTest.cpp`
+- `tests/HttpConnectionGroupKeyTest.cpp`
+- `tests/HttpConnectionGroupHintTableTest.cpp`

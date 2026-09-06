@@ -10,7 +10,7 @@
 #include <fiber/common/NonMovable.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Http1ClientConnection.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/http/LocalHttp1ConnectionPoolSet.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
 
@@ -21,7 +21,7 @@ namespace fiber::lite_nginx::upstream {
 // The global keepalive pool abstraction. Backed by either a per-loop LocalHttp1ConnectionPoolSet
 // (steal=false: N independent per-loop pools, no cross-loop reuse) or a StealableHttp1ConnectionPoolSet
 // (steal=true: one pool whose idle connections can be borrowed across worker loops). Both are keyed
-// by Http1ConnectionGroupKey (peer identity = host/ip + port + scheme + pool affinity). The selection
+// by HttpConnectionGroupKey (peer identity = host/ip + port + scheme + pool affinity). The selection
 // is fixed at construction from ConnectionPoolRuntime::steal.
 //
 // Callers drive the lifecycle: acquire(key) -> ConnectionLease; if !has_connection(), the caller
@@ -69,7 +69,7 @@ public:
 
     // Acquire a lease for the peer key. The lease is a pool hit (has_connection) when an idle
     // connection exists; otherwise the caller must emplace+connect.
-    [[nodiscard]] fiber::async::Task<ConnectionLease> acquire(const fiber::http::Http1ConnectionGroupKey &key) noexcept;
+    [[nodiscard]] fiber::async::Task<ConnectionLease> acquire(const fiber::http::HttpConnectionGroupKey &key) noexcept;
 
     [[nodiscard]] bool stealable() const noexcept {
         return std::holds_alternative<std::unique_ptr<fiber::http::StealableHttp1ConnectionPoolSet>>(impl_);

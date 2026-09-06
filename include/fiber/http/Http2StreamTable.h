@@ -13,10 +13,15 @@ namespace fiber::http {
 
 class Http2StreamTable : public common::NonCopyable, public common::NonMovable {
 public:
+    // Buckets are allocated on the first insert and doubled whenever the table
+    // would pass half load. A table that has grown past this size releases its
+    // buckets again once it drains; a table still at this size keeps them, so a
+    // client running one request at a time never churns the allocation.
+    static constexpr std::size_t kInitialBucketCount = 8;
+
     Http2StreamTable() noexcept = default;
     ~Http2StreamTable();
 
-    [[nodiscard]] bool init(std::size_t max_active_streams) noexcept;
     void clear() noexcept;
 
     [[nodiscard]] Http2Stream *find(std::uint32_t stream_id) noexcept;
@@ -27,7 +32,6 @@ public:
 
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] std::size_t bucket_count() const noexcept { return bucket_count_; }
-    [[nodiscard]] std::size_t max_active_streams() const noexcept { return max_active_streams_; }
     [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
 
     template<typename Fn>
@@ -54,8 +58,10 @@ private:
         Http2Stream *stream = nullptr;
     };
 
-    [[nodiscard]] static std::size_t next_pow2(std::size_t value) noexcept;
     [[nodiscard]] static std::size_t hash_stream_id(std::uint32_t stream_id) noexcept;
+    [[nodiscard]] bool ensure_capacity_for_insert() noexcept;
+    [[nodiscard]] bool rehash(std::size_t new_bucket_count) noexcept;
+    void release_buckets() noexcept;
     [[nodiscard]] std::size_t mask() const noexcept;
     [[nodiscard]] std::size_t probe_distance(std::size_t from, std::size_t to) const noexcept;
     [[nodiscard]] std::size_t find_slot(std::uint32_t stream_id) const noexcept;
@@ -65,7 +71,6 @@ private:
     std::unique_ptr<Bucket[]> buckets_;
     std::size_t bucket_count_ = 0;
     std::size_t size_ = 0;
-    std::size_t max_active_streams_ = 0;
 };
 
 } // namespace fiber::http

@@ -19,14 +19,16 @@
 
 namespace fiber::http {
 
-class Http2Connection;
 class Http2ClientConnection;
+class Http2LocalStreamGate;
 class ClientHttp2Request;
 
 class ClientHttp2Exchange : public common::NonCopyable, public common::NonMovable {
 public:
     ClientHttp2Exchange() noexcept = default;
-    ClientHttp2Exchange(Http2Connection &conn, mem::BufPool &pool) noexcept;
+    // Opening a stream goes through the connection's admission gate, so an
+    // exchange is bound to that gate rather than to the connection itself.
+    ClientHttp2Exchange(Http2LocalStreamGate &gate, mem::BufPool &pool) noexcept;
     ClientHttp2Exchange(Http2ClientConnection &conn, mem::BufPool &pool) noexcept;
     ClientHttp2Exchange(Http2Stream::Lease stream, mem::BufPool &pool) noexcept;
     ClientHttp2Exchange(ClientHttp2Exchange &&other) noexcept;
@@ -63,7 +65,7 @@ public:
     common::IoResult<void> abort(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void cancel(common::IoErr reason = common::IoErr::Canceled) noexcept;
 
-    [[nodiscard]] bool valid() const noexcept { return conn_ != nullptr || static_cast<bool>(stream_); }
+    [[nodiscard]] bool valid() const noexcept { return gate_ != nullptr || static_cast<bool>(stream_); }
     [[nodiscard]] Http2ExtendedConnectSupport extended_connect_support() const noexcept;
     [[nodiscard]] std::uint32_t stream_id() const noexcept { return stream_ ? stream_->stream_id() : 0; }
     [[nodiscard]] Http2Stream *stream() noexcept { return stream_.get(); }
@@ -75,7 +77,7 @@ private:
     [[nodiscard]] ClientHttp2Request *request() noexcept;
     [[nodiscard]] const ClientHttp2Request *request() const noexcept;
 
-    Http2Connection *conn_ = nullptr;
+    Http2LocalStreamGate *gate_ = nullptr;
     mem::BufPool *pool_ = nullptr;
     Http2Stream::Lease stream_{};
 };

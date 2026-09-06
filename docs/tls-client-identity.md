@@ -90,6 +90,6 @@ callback state 及其选择的 `TlsCredential`、`TrustStore` 必须活到同步
 
 客户端身份、信任根、peer verification、SNI、`verify_name` 和 ALPN 都属于有效 TLS profile。
 不同 profile 不得共用 HTTP/1 keep-alive 连接，应映射到不同的
-`Http1ConnectionPoolAffinity`。轮换时先完整创建新 `TlsCredential`/`TrustStore`，再与新的 profile
+`HttpConnectionPoolAffinity`。轮换时先完整创建新 `TlsCredential`/`TrustStore`，再与新的 profile
 generation 一起发布；旧连接退役前不要复用旧 generation。不要从证书路径、私钥或 secret 内容推导
 affinity。

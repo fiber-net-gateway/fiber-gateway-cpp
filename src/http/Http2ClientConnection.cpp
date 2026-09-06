@@ -25,11 +25,14 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 }
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Http2Connection::Options h2) noexcept :
-    loop_(&loop), conn_(normalize_h2_options(std::move(h2)), nullptr, ClientHttp2Request::factory_ops()) {}
+    loop_(&loop), conn_(normalize_h2_options(std::move(h2)), nullptr, ClientHttp2Request::factory_ops()),
+    stream_gate_(conn_) {
+    close_gate_.arm(conn_);
+}
 
 Http2ClientConnection::~Http2ClientConnection() {
-    FIBER_ASSERT(!close_pending_);
-    FIBER_ASSERT(close_wg_.empty());
+    FIBER_ASSERT(conn_.state() == Http2Connection::State::Init || close_gate_.closed());
+    FIBER_ASSERT(!close_gate_.has_joiners());
 }
 
 fiber::async::Task<common::IoResult<void>> Http2ClientConnection::connect(const net::SocketAddress &peer,
@@ -99,13 +102,8 @@ Http2ClientConnection::connect_impl(net::SocketAddress peer, std::chrono::millis
         transport = std::move(*transport_result);
     }
 
-    close_wg_.add();
-    close_pending_ = true;
-    common::IoErr start_err = conn_.start(std::move(transport), &Http2ClientConnection::on_http2_closed, this);
+    common::IoErr start_err = conn_.start(std::move(transport));
     if (start_err != common::IoErr::None) {
-        terminal_error_ = start_err;
-        close_pending_ = false;
-        close_wg_.done();
         co_return std::unexpected(start_err);
     }
     co_return common::IoResult<void>{};
@@ -115,11 +113,7 @@ fiber::async::Task<Http2Connection::CloseResult> Http2ClientConnection::wait_clo
     if (conn_.state() == Http2Connection::State::Init) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    co_await close_wg_.join();
-    if (terminal_error_ != common::IoErr::None) {
-        co_return std::unexpected(terminal_error_);
-    }
-    co_return Http2Connection::CloseResult{};
+    co_return co_await close_gate_.join();
 }
 
 ClientHttp2Exchange Http2ClientConnection::open_exchange(mem::BufPool &pool) noexcept {
@@ -134,16 +128,6 @@ fiber::async::Task<Http2Connection::CloseResult> Http2ClientConnection::graceful
     }
     conn_.graceful_shutdown();
     co_return co_await wait_closed();
-}
-
-void Http2ClientConnection::on_http2_closed(void *ctx, Http2Connection &,
-                                            Http2Connection::CloseResult result) noexcept {
-    auto *connection = static_cast<Http2ClientConnection *>(ctx);
-    FIBER_ASSERT(connection != nullptr);
-    FIBER_ASSERT(connection->close_pending_);
-    connection->terminal_error_ = result ? common::IoErr::None : result.error();
-    connection->close_pending_ = false;
-    connection->close_wg_.done();
 }
 
 event::EventLoop &Http2ClientConnection::loop() const noexcept {
