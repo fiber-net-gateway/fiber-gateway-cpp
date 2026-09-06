@@ -10,15 +10,15 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../event/EventLoop.h"
-#include "Http1ConnectionBucketIndex.h"
-#include "Http1ConnectionGroupKey.h"
 #include "Http1ConnectionPoolEntry.h"
+#include "HttpConnectionBucketIndex.h"
+#include "HttpConnectionGroupKey.h"
 
 namespace fiber::http {
 
 class Http1ConnectionPoolCore : public common::NonCopyable, public common::NonMovable {
 public:
-    using IdleCountChangedCallback = void (*)(void *ctx, const Http1ConnectionGroupKey &key,
+    using IdleCountChangedCallback = void (*)(void *ctx, const HttpConnectionGroupKey &key,
                                               std::size_t idle_count) noexcept;
 
     class Lease : public common::NonCopyable {
@@ -38,7 +38,7 @@ public:
         }
 
         [[nodiscard]] Http1ClientConnection &connection() noexcept;
-        [[nodiscard]] const Http1ConnectionGroupKey &key() const noexcept;
+        [[nodiscard]] const HttpConnectionGroupKey &key() const noexcept;
         // Creates the unconnected connection this lease's slot will hold. The caller dials it
         // through one of Http1ClientConnection::connect's overloads; the lease's key already
         // fixes the transport profile, so nothing about it is passed in here.
@@ -48,12 +48,12 @@ public:
     private:
         friend class Http1ConnectionPoolCore;
 
-        Lease(Http1ConnectionPoolCore &pool, Http1ConnectionPoolEntry *entry, const Http1ConnectionGroupKey &key,
+        Lease(Http1ConnectionPoolCore &pool, Http1ConnectionPoolEntry *entry, const HttpConnectionGroupKey &key,
               bool hit) noexcept;
 
         Http1ConnectionPoolCore *pool_ = nullptr;
         Http1ConnectionPoolEntry *entry_ = nullptr;
-        std::optional<Http1ConnectionGroupKey> key_{};
+        std::optional<HttpConnectionGroupKey> key_{};
         bool hit_ = false;
     };
 
@@ -69,9 +69,9 @@ public:
     ~Http1ConnectionPoolCore();
 
     [[nodiscard]] bool init() noexcept;
-    [[nodiscard]] Lease acquire(const Http1ConnectionGroupKey &key) noexcept;
-    [[nodiscard]] Http1ConnectionPoolEntry *try_steal_idle_entry(const Http1ConnectionGroupKey &key) noexcept;
-    void accept_returned_entry(Http1ConnectionPoolEntry &entry, const Http1ConnectionGroupKey &key) noexcept;
+    [[nodiscard]] Lease acquire(const HttpConnectionGroupKey &key) noexcept;
+    [[nodiscard]] Http1ConnectionPoolEntry *try_steal_idle_entry(const HttpConnectionGroupKey &key) noexcept;
+    void accept_returned_entry(Http1ConnectionPoolEntry &entry, const HttpConnectionGroupKey &key) noexcept;
     void shutdown() noexcept;
     void clear() noexcept;
     void set_idle_count_changed_callback(IdleCountChangedCallback cb, void *ctx) noexcept {
@@ -111,7 +111,7 @@ private:
     void cancel_expiry_timer() noexcept;
     void on_expiry_timer_fired() noexcept;
     void evict_expired_entries(std::chrono::steady_clock::time_point now) noexcept;
-    void park_entry(Http1ConnectionPoolEntry &entry, const Http1ConnectionGroupKey &key) noexcept;
+    void park_entry(Http1ConnectionPoolEntry &entry, const HttpConnectionGroupKey &key) noexcept;
     void release_lease(Lease &lease) noexcept;
     void detach_idle_entry(Http1ConnectionPoolEntry &entry) noexcept;
     void evict_entry(Http1ConnectionPoolEntry &entry) noexcept;
@@ -120,7 +120,7 @@ private:
 
     event::EventLoop *loop_ = nullptr;
     Options options_{};
-    Http1ConnectionBucketIndex bucket_index_{};
+    HttpConnectionBucketIndex bucket_index_{};
     Http1ConnectionPoolGlobalList global_idle_entries_{};
     event::EventLoop::TimerEntry expiry_timer_{};
     Http1ConnectionPoolGroupBucket *free_bucket_head_ = nullptr;

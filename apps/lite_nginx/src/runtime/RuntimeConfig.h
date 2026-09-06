@@ -12,8 +12,8 @@
 
 #include <fiber/common/util/RoutePathMatcher.h>
 #include <fiber/http/HeaderMap.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
 #include <fiber/http/HttpBodyPipe.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/script/Script.h>
@@ -50,7 +50,7 @@ struct AccessLogRuntime {
 };
 
 // Global keepalive connection pool shared across all upstreams. Configured once under
-// http.connection_pool; keyed by peer (Http1ConnectionGroupKey). `steal` is the build-time
+// http.connection_pool; keyed by peer (HttpConnectionGroupKey). `steal` is the build-time
 // resolution of PoolSteal::Auto (true when worker_processes > 1): true -> StealableHttp1ConnectionPoolSet
 // (idle connections shared across worker loops), false -> LocalHttp1ConnectionPoolSet (per-loop).
 struct ConnectionPoolRuntime {
@@ -95,7 +95,7 @@ struct UpstreamPeerRuntime {
     std::uint32_t weight = 1;
     fiber::net::IpAddress ip{}; // valid only when connection_key.is_ip()
     fiber::net::SocketAddress address{}; // IP peers: config-time dial target; name peers: filled at runtime after DNS
-    std::optional<fiber::http::Http1ConnectionGroupKey> connection_key{};
+    std::optional<fiber::http::HttpConnectionGroupKey> connection_key{};
 };
 
 struct UpstreamRuntime {

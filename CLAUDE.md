@@ -69,7 +69,7 @@ All stream types are coroutine-aware. Low-level fd wrappers live in `src/net/det
 
 ### HTTP (`src/http/`)
 
-**HTTP/1**: Zero-copy parser (`Http1Parser`) operating on `IoBuf`. Server (`Http1Server`, `HttpServer`) and client (`Http1ClientConnection`) with connection pooling (`Http1ConnectionPoolCore`, `LocalHttp1ConnectionPoolSet`, `StealableHttp1ConnectionPoolSet`). Connection group hinting via `Http1ConnectionGroupKey`/`Http1ConnectionGroupHintTable`/`Http1ConnectionBucketIndex`.
+**HTTP/1**: Zero-copy parser (`Http1Parser`) operating on `IoBuf`. Server (`Http1Server`, `HttpServer`) and client (`Http1ClientConnection`) with connection pooling (`Http1ConnectionPoolCore`, `LocalHttp1ConnectionPoolSet`, `StealableHttp1ConnectionPoolSet`). Connection group hinting via `HttpConnectionGroupKey`/`HttpConnectionGroupHintTable`/`HttpConnectionBucketIndex`.
 
 **HTTP/2**: Full implementation — HPACK encoder/decoder with static/dynamic tables and Huffman coding, stream multiplexing (`Http2Connection`, `Http2Stream`, `Http2StreamTable`), connection-owned outbound scheduling, frame encoding. Both server (`ServerHttp2Request`, `ServerHttp2Push`) and client (`ClientHttp2Request`, `ClientHttp2Push`, `Http2ClientConnection`).
 

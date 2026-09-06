@@ -352,7 +352,7 @@ private:
     StealableHttp1ConnectionPoolSet *set_ = nullptr;
     event::EventLoop *caller_loop_ = nullptr;
     std::coroutine_handle<> handle_{};
-    Http1ConnectionGroupKey key_;
+    HttpConnectionGroupKey key_;
     Http1ConnectionPoolCore::Lease local_fallback_{};
     ShardSlot *home_slot_ = nullptr;
     ShardSlot *cursor_ = nullptr;
@@ -368,7 +368,7 @@ StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore::Lease &&l
     kind_(Kind::Local), local_(std::move(local)) {}
 
 StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore &home_core, Http1ConnectionPoolEntry &entry,
-                                              const Http1ConnectionGroupKey &key) noexcept :
+                                              const HttpConnectionGroupKey &key) noexcept :
     kind_(Kind::Remote), entry_(&entry), home_core_(&home_core), key_(key) {}
 
 StealableHttp1ConnectionPoolSet::Lease::Lease(Lease &&other) noexcept :
@@ -465,7 +465,7 @@ Http1ClientConnection &StealableHttp1ConnectionPoolSet::Lease::connection() noex
     return *conn;
 }
 
-const Http1ConnectionGroupKey &StealableHttp1ConnectionPoolSet::Lease::key() const noexcept {
+const HttpConnectionGroupKey &StealableHttp1ConnectionPoolSet::Lease::key() const noexcept {
     switch (kind_) {
         case Kind::Local:
             return local_.key();
@@ -598,7 +598,7 @@ async::Task<void> StealableHttp1ConnectionPoolSet::shutdown_async() noexcept {
 }
 
 StealableHttp1ConnectionPoolSet::AcquireAwaiter::AcquireAwaiter(StealableHttp1ConnectionPoolSet &set,
-                                                                const Http1ConnectionGroupKey &key) noexcept :
+                                                                const HttpConnectionGroupKey &key) noexcept :
     set_(&set), key_(key) {}
 
 StealableHttp1ConnectionPoolSet::AcquireAwaiter::~AcquireAwaiter() noexcept {
@@ -714,7 +714,7 @@ bool StealableHttp1ConnectionPoolSet::AcquireAwaiter::advance_to_candidate() noe
 }
 
 StealableHttp1ConnectionPoolSet::AcquireAwaiter
-StealableHttp1ConnectionPoolSet::acquire(const Http1ConnectionGroupKey &key) noexcept {
+StealableHttp1ConnectionPoolSet::acquire(const HttpConnectionGroupKey &key) noexcept {
     return AcquireAwaiter(*this, key);
 }
 

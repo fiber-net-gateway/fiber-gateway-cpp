@@ -57,15 +57,15 @@ HttpScriptServicesImpl::acquire(const fiber::http_script::HttpTargetSpec &target
 
     // Url target: build a key from host:port:scheme. IP-literal host -> from_ip; hostname -> from_name.
     const std::uint16_t port = target.port != 0 ? target.port : static_cast<std::uint16_t>(target.tls ? 443 : 80);
-    const auto scheme = target.tls ? fiber::http::Http1ConnectionGroupKey::Scheme::Https
-                                   : fiber::http::Http1ConnectionGroupKey::Scheme::Http;
+    const auto scheme = target.tls ? fiber::http::HttpConnectionGroupKey::Scheme::Https
+                                   : fiber::http::HttpConnectionGroupKey::Scheme::Http;
 
     fiber::net::IpAddress ip;
-    std::optional<fiber::http::Http1ConnectionGroupKey> key;
+    std::optional<fiber::http::HttpConnectionGroupKey> key;
     if (fiber::net::IpAddress::parse(target.name, ip)) {
-        key = fiber::http::Http1ConnectionGroupKey::from_ip(ip, port, scheme);
+        key = fiber::http::HttpConnectionGroupKey::from_ip(ip, port, scheme);
     } else {
-        key = fiber::http::Http1ConnectionGroupKey::from_name(target.name, port, scheme);
+        key = fiber::http::HttpConnectionGroupKey::from_name(target.name, port, scheme);
         if (!key) {
             co_return std::unexpected(fiber::common::IoErr::Invalid);
         }

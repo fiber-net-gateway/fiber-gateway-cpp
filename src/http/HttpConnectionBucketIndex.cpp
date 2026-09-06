@@ -1,4 +1,4 @@
-#include <fiber/http/Http1ConnectionBucketIndex.h>
+#include <fiber/http/HttpConnectionBucketIndex.h>
 
 #include <limits>
 #include <memory>
@@ -14,9 +14,9 @@ constexpr std::size_t kMinSlotCapacity = 8;
 
 } // namespace
 
-Http1ConnectionBucketIndex::~Http1ConnectionBucketIndex() { clear(); }
+HttpConnectionBucketIndex::~HttpConnectionBucketIndex() { clear(); }
 
-bool Http1ConnectionBucketIndex::init(std::size_t initial_group_capacity) noexcept {
+bool HttpConnectionBucketIndex::init(std::size_t initial_group_capacity) noexcept {
     clear();
     if (initial_group_capacity == 0) {
         return true;
@@ -24,7 +24,7 @@ bool Http1ConnectionBucketIndex::init(std::size_t initial_group_capacity) noexce
     return rehash(target_slot_capacity(initial_group_capacity));
 }
 
-void Http1ConnectionBucketIndex::clear() noexcept {
+void HttpConnectionBucketIndex::clear() noexcept {
     if (slots_) {
         for (std::size_t i = 0; i < slot_capacity_; ++i) {
             Slot &slot = slots_[i];
@@ -32,7 +32,7 @@ void Http1ConnectionBucketIndex::clear() noexcept {
                 continue;
             }
             if (slot.bucket) {
-                slot.bucket->slot_index_ = Http1ConnectionPoolGroupBucket::kInvalidSlotIndex;
+                slot.bucket->slot_index_ = HttpConnectionPoolBucketBase::kInvalidSlotIndex;
             }
             destroy_slot(slot);
         }
@@ -42,7 +42,7 @@ void Http1ConnectionBucketIndex::clear() noexcept {
     size_ = 0;
 }
 
-Http1ConnectionBucketIndex::EntryRef Http1ConnectionBucketIndex::find(const Http1ConnectionGroupKey &key) noexcept {
+HttpConnectionBucketIndex::EntryRef HttpConnectionBucketIndex::find(const HttpConnectionGroupKey &key) noexcept {
     const std::size_t slot_index = find_slot(key);
     if (slot_index == slot_capacity_) {
         return {};
@@ -53,9 +53,9 @@ Http1ConnectionBucketIndex::EntryRef Http1ConnectionBucketIndex::find(const Http
     };
 }
 
-common::IoErr Http1ConnectionBucketIndex::insert(const Http1ConnectionGroupKey &key,
-                                                 Http1ConnectionPoolGroupBucket &bucket) noexcept {
-    if (bucket.slot_index_ != Http1ConnectionPoolGroupBucket::kInvalidSlotIndex) {
+common::IoErr HttpConnectionBucketIndex::insert(const HttpConnectionGroupKey &key,
+                                                HttpConnectionPoolBucketBase &bucket) noexcept {
+    if (bucket.slot_index_ != HttpConnectionPoolBucketBase::kInvalidSlotIndex) {
         return common::IoErr::Busy;
     }
     if (find_slot(key) != slot_capacity_) {
@@ -77,36 +77,36 @@ common::IoErr Http1ConnectionBucketIndex::insert(const Http1ConnectionGroupKey &
     return common::IoErr::None;
 }
 
-void Http1ConnectionBucketIndex::erase(std::uint32_t slot_index) noexcept {
+void HttpConnectionBucketIndex::erase(std::uint32_t slot_index) noexcept {
     if (!slots_ || slot_index >= slot_capacity_ || !slots_[slot_index].occupied()) {
         return;
     }
     erase_at(slot_index);
 }
 
-const Http1ConnectionGroupKey *Http1ConnectionBucketIndex::key_at(std::uint32_t slot_index) const noexcept {
+const HttpConnectionGroupKey *HttpConnectionBucketIndex::key_at(std::uint32_t slot_index) const noexcept {
     if (!slots_ || slot_index >= slot_capacity_ || !slots_[slot_index].occupied()) {
         return nullptr;
     }
     return slots_[slot_index].key();
 }
 
-Http1ConnectionPoolGroupBucket *Http1ConnectionBucketIndex::bucket_at(std::uint32_t slot_index) noexcept {
+HttpConnectionPoolBucketBase *HttpConnectionBucketIndex::bucket_at(std::uint32_t slot_index) noexcept {
     if (!slots_ || slot_index >= slot_capacity_ || !slots_[slot_index].occupied()) {
         return nullptr;
     }
     return slots_[slot_index].bucket;
 }
 
-Http1ConnectionGroupKey *Http1ConnectionBucketIndex::Slot::key() noexcept {
-    return std::launder(reinterpret_cast<Http1ConnectionGroupKey *>(key_storage));
+HttpConnectionGroupKey *HttpConnectionBucketIndex::Slot::key() noexcept {
+    return std::launder(reinterpret_cast<HttpConnectionGroupKey *>(key_storage));
 }
 
-const Http1ConnectionGroupKey *Http1ConnectionBucketIndex::Slot::key() const noexcept {
-    return std::launder(reinterpret_cast<const Http1ConnectionGroupKey *>(key_storage));
+const HttpConnectionGroupKey *HttpConnectionBucketIndex::Slot::key() const noexcept {
+    return std::launder(reinterpret_cast<const HttpConnectionGroupKey *>(key_storage));
 }
 
-std::size_t Http1ConnectionBucketIndex::next_pow2(std::size_t value) noexcept {
+std::size_t HttpConnectionBucketIndex::next_pow2(std::size_t value) noexcept {
     if (value <= 1) {
         return 1;
     }
@@ -118,7 +118,7 @@ std::size_t Http1ConnectionBucketIndex::next_pow2(std::size_t value) noexcept {
     return out;
 }
 
-std::size_t Http1ConnectionBucketIndex::target_slot_capacity(std::size_t min_group_capacity) noexcept {
+std::size_t HttpConnectionBucketIndex::target_slot_capacity(std::size_t min_group_capacity) noexcept {
     if (min_group_capacity == 0) {
         return 0;
     }
@@ -129,16 +129,16 @@ std::size_t Http1ConnectionBucketIndex::target_slot_capacity(std::size_t min_gro
     return target < kMinSlotCapacity ? kMinSlotCapacity : target;
 }
 
-std::size_t Http1ConnectionBucketIndex::mask() const noexcept { return slot_capacity_ - 1U; }
+std::size_t HttpConnectionBucketIndex::mask() const noexcept { return slot_capacity_ - 1U; }
 
-std::size_t Http1ConnectionBucketIndex::probe_distance(std::size_t from, std::size_t to) const noexcept {
+std::size_t HttpConnectionBucketIndex::probe_distance(std::size_t from, std::size_t to) const noexcept {
     if (to >= from) {
         return to - from;
     }
     return slot_capacity_ - from + to;
 }
 
-std::size_t Http1ConnectionBucketIndex::find_slot(const Http1ConnectionGroupKey &key) const noexcept {
+std::size_t HttpConnectionBucketIndex::find_slot(const HttpConnectionGroupKey &key) const noexcept {
     if (!slots_ || slot_capacity_ == 0) {
         return slot_capacity_;
     }
@@ -157,12 +157,12 @@ std::size_t Http1ConnectionBucketIndex::find_slot(const Http1ConnectionGroupKey 
     return slot_capacity_;
 }
 
-bool Http1ConnectionBucketIndex::should_shift_bucket(std::size_t hole, std::size_t current,
-                                                     std::size_t home) const noexcept {
+bool HttpConnectionBucketIndex::should_shift_bucket(std::size_t hole, std::size_t current,
+                                                    std::size_t home) const noexcept {
     return probe_distance(home, hole) < probe_distance(home, current);
 }
 
-bool Http1ConnectionBucketIndex::ensure_capacity_for_insert() noexcept {
+bool HttpConnectionBucketIndex::ensure_capacity_for_insert() noexcept {
     if (slot_capacity_ == 0) {
         return rehash(kMinSlotCapacity);
     }
@@ -175,7 +175,7 @@ bool Http1ConnectionBucketIndex::ensure_capacity_for_insert() noexcept {
     return rehash(slot_capacity_ * 2U);
 }
 
-bool Http1ConnectionBucketIndex::rehash(std::size_t new_slot_capacity) noexcept {
+bool HttpConnectionBucketIndex::rehash(std::size_t new_slot_capacity) noexcept {
     if (new_slot_capacity == 0) {
         clear();
         return true;
@@ -218,8 +218,8 @@ bool Http1ConnectionBucketIndex::rehash(std::size_t new_slot_capacity) noexcept 
     return true;
 }
 
-std::size_t Http1ConnectionBucketIndex::find_insert_slot(const Slot *slots, std::size_t slot_capacity,
-                                                         const Http1ConnectionGroupKey &key) const noexcept {
+std::size_t HttpConnectionBucketIndex::find_insert_slot(const Slot *slots, std::size_t slot_capacity,
+                                                        const HttpConnectionGroupKey &key) const noexcept {
     FIBER_ASSERT(slots != nullptr);
     FIBER_ASSERT(slot_capacity > 0);
     const std::size_t mask = slot_capacity - 1U;
@@ -233,7 +233,7 @@ std::size_t Http1ConnectionBucketIndex::find_insert_slot(const Slot *slots, std:
     return slot_capacity;
 }
 
-void Http1ConnectionBucketIndex::destroy_slot(Slot &slot) noexcept {
+void HttpConnectionBucketIndex::destroy_slot(Slot &slot) noexcept {
     if (!slot.occupied()) {
         return;
     }
@@ -242,7 +242,7 @@ void Http1ConnectionBucketIndex::destroy_slot(Slot &slot) noexcept {
     slot.bucket = nullptr;
 }
 
-void Http1ConnectionBucketIndex::move_slot(Slot &dst, std::size_t dst_index, Slot &src) noexcept {
+void HttpConnectionBucketIndex::move_slot(Slot &dst, std::size_t dst_index, Slot &src) noexcept {
     FIBER_ASSERT(!dst.occupied());
     FIBER_ASSERT(src.occupied());
     std::construct_at(dst.key(), *src.key());
@@ -254,11 +254,11 @@ void Http1ConnectionBucketIndex::move_slot(Slot &dst, std::size_t dst_index, Slo
     destroy_slot(src);
 }
 
-void Http1ConnectionBucketIndex::erase_at(std::size_t slot_index) noexcept {
+void HttpConnectionBucketIndex::erase_at(std::size_t slot_index) noexcept {
     Slot &removed = slots_[slot_index];
     FIBER_ASSERT(removed.occupied());
     if (removed.bucket) {
-        removed.bucket->slot_index_ = Http1ConnectionPoolGroupBucket::kInvalidSlotIndex;
+        removed.bucket->slot_index_ = HttpConnectionPoolBucketBase::kInvalidSlotIndex;
     }
     destroy_slot(removed);
 

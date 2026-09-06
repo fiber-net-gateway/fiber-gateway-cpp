@@ -19,7 +19,7 @@ namespace fiber::lite_nginx::upstream {
 // Pure upstream *selector*. Each upstream block carries ip:port/host + weight (+ scheme via the
 // peer's connection_key); this class performs smooth weighted round-robin peer selection only.
 // Connection pooling lives in ConnectionPool (global, keyed by the selected peer's
-// Http1ConnectionGroupKey); DNS resolution for name peers happens at connect time in the unified
+// HttpConnectionGroupKey); DNS resolution for name peers happens at connect time in the unified
 // acquire_and_connect path. This split keeps upstream = "pick a peer", pool = "reuse / create".
 class UpstreamRegistry {
 public:

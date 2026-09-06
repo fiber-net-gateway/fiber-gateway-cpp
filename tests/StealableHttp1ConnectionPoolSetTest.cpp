@@ -27,7 +27,7 @@
 #include <fiber/common/mem/BufPool.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp1Exchange.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/http/HttpHeaders.h>
 #include <fiber/http/StealableHttp1ConnectionPoolSet.h>
 #include <fiber/net/TcpListener.h>
@@ -386,12 +386,12 @@ ensure_connected(fiber::http::StealableHttp1ConnectionPoolSet::Lease &lease, std
 }
 
 fiber::async::Task<fiber::http::StealableHttp1ConnectionPoolSet::Lease>
-acquire_in_task(fiber::http::StealableHttp1ConnectionPoolSet *set, const fiber::http::Http1ConnectionGroupKey *key) {
+acquire_in_task(fiber::http::StealableHttp1ConnectionPoolSet *set, const fiber::http::HttpConnectionGroupKey *key) {
     co_return co_await set->acquire(*key);
 }
 
 DetachedTask run_https_home_connect(fiber::http::StealableHttp1ConnectionPoolSet *set,
-                                    const fiber::http::Http1ConnectionGroupKey *key, std::uint16_t port,
+                                    const fiber::http::HttpConnectionGroupKey *key, std::uint16_t port,
                                     const fiber::net::TlsClientSecurity *tls,
                                     std::atomic<fiber::http::Http1ClientConnection *> *home_conn,
                                     std::atomic_bool *done) {
@@ -404,8 +404,8 @@ DetachedTask run_https_home_connect(fiber::http::StealableHttp1ConnectionPoolSet
 }
 
 DetachedTask run_https_profile_isolation_and_borrow(fiber::http::StealableHttp1ConnectionPoolSet *set,
-                                                    const fiber::http::Http1ConnectionGroupKey *key,
-                                                    const fiber::http::Http1ConnectionGroupKey *different_key,
+                                                    const fiber::http::HttpConnectionGroupKey *key,
+                                                    const fiber::http::HttpConnectionGroupKey *different_key,
                                                     fiber::http::Http1ClientConnection *expected_conn,
                                                     fiber::event::EventLoop *expected_home_loop, std::atomic_bool *ok,
                                                     std::atomic_bool *done) {
@@ -430,7 +430,7 @@ DetachedTask run_https_profile_isolation_and_borrow(fiber::http::StealableHttp1C
 }
 
 DetachedTask run_https_reacquire_and_close(fiber::http::StealableHttp1ConnectionPoolSet *set,
-                                           const fiber::http::Http1ConnectionGroupKey *key,
+                                           const fiber::http::HttpConnectionGroupKey *key,
                                            fiber::http::Http1ClientConnection *expected_conn, std::atomic_bool *ok,
                                            std::atomic_bool *done) {
     co_await fiber::async::sleep(10ms);
@@ -503,8 +503,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, StealsIdleConnectionFromOtherLoopAndRe
     fiber::http::StealableHttp1ConnectionPoolSet set(group, options);
     ASSERT_TRUE(set.init());
 
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     std::promise<fiber::http::Http1ClientConnection *> home_conn_promise;
     auto home_conn_future = home_conn_promise.get_future();
@@ -574,12 +574,12 @@ TEST(StealableHttp1ConnectionPoolSetTest, DifferentPoolAffinityDoesNotStealIdent
     fiber::event::EventLoopGroup group(2);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    const auto first_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-            fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Https,
-            fiber::http::Http1ConnectionPoolAffinity{71});
-    const auto second_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-            fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Https,
-            fiber::http::Http1ConnectionPoolAffinity{72});
+    const auto first_key = fiber::http::HttpConnectionGroupKey::from_ip(
+            fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Https,
+            fiber::http::HttpConnectionPoolAffinity{71});
+    const auto second_key = fiber::http::HttpConnectionGroupKey::from_ip(
+            fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Https,
+            fiber::http::HttpConnectionPoolAffinity{72});
 
     std::promise<fiber::http::Http1ClientConnection *> home_ready_promise;
     auto home_ready_future = home_ready_promise.get_future();
@@ -646,8 +646,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, WhenAnyCancellationKeepsRemoteAcquireS
     auto *borrower_loop = &group.at(1);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     std::promise<fiber::http::Http1ClientConnection *> home_ready_promise;
     auto home_ready_future = home_ready_promise.get_future();
@@ -828,8 +828,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, LocalMissReturnsCallerLoopLeaseWhenNoR
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
 
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), 80,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), 80,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     std::promise<bool> result_promise;
     auto result_future = result_promise.get_future();
@@ -873,9 +873,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, ClearAllowsBorrowedConnectionToReturnH
     auto *loop1 = &group.at(1);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http,
-                                                                   fiber::http::Http1ConnectionPoolAffinity{81});
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http,
+                                                                  fiber::http::HttpConnectionPoolAffinity{81});
 
     std::promise<fiber::http::Http1ClientConnection *> home_conn_promise;
     auto home_conn_future = home_conn_promise.get_future();
@@ -959,9 +959,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, ShutdownDropsBorrowedConnectionOnRetur
     auto *loop1 = &group.at(1);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http,
-                                                                   fiber::http::Http1ConnectionPoolAffinity{82});
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http,
+                                                                  fiber::http::HttpConnectionPoolAffinity{82});
 
     std::promise<void> home_ready_promise;
     auto home_ready_future = home_ready_promise.get_future();
@@ -1037,8 +1037,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionHeldByOneLoopMakesOt
     fiber::event::EventLoopGroup group(3);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     std::promise<void> home_ready_promise;
     auto home_ready_future = home_ready_promise.get_future();
@@ -1124,8 +1124,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
     fiber::event::EventLoopGroup group(2);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     std::promise<void> home_ready_promise;
     auto home_ready_future = home_ready_promise.get_future();
@@ -1209,8 +1209,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadAndWriteBeforeReturnin
     fiber::event::EventLoopGroup group(2);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     std::promise<bool> home_ready_promise;
     std::promise<AbortBlockedReadOutcome> borrower_promise;
@@ -1314,8 +1314,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbandonedReadTaskInvalidatesExchangeBe
     fiber::event::EventLoopGroup group(2);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     std::promise<bool> home_ready_promise;
     std::promise<AbandonedReadOutcome> borrower_promise;
@@ -1423,14 +1423,14 @@ TEST(StealableHttp1ConnectionPoolSetTest, HttpsTransportProfilesStayIsolatedAcro
     auto *loop1 = &group.at(1);
     fiber::http::StealableHttp1ConnectionPoolSet set(group);
     ASSERT_TRUE(set.init());
-    auto key_result = fiber::http::Http1ConnectionGroupKey::from_name(
-            "localhost", port, fiber::http::Http1ConnectionGroupKey::Scheme::Https,
-            fiber::http::Http1ConnectionPoolAffinity{91});
+    auto key_result = fiber::http::HttpConnectionGroupKey::from_name("localhost", port,
+                                                                     fiber::http::HttpConnectionGroupKey::Scheme::Https,
+                                                                     fiber::http::HttpConnectionPoolAffinity{91});
     ASSERT_TRUE(key_result.has_value());
     const auto key = *key_result;
-    auto different_key_result = fiber::http::Http1ConnectionGroupKey::from_name(
-            "localhost", port, fiber::http::Http1ConnectionGroupKey::Scheme::Https,
-            fiber::http::Http1ConnectionPoolAffinity{92});
+    auto different_key_result = fiber::http::HttpConnectionGroupKey::from_name(
+            "localhost", port, fiber::http::HttpConnectionGroupKey::Scheme::Https,
+            fiber::http::HttpConnectionPoolAffinity{92});
     ASSERT_TRUE(different_key_result.has_value());
     const auto different_key = *different_key_result;
 

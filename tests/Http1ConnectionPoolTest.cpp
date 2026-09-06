@@ -12,8 +12,8 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/common/IoError.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http1ConnectionGroupKey.h>
 #include <fiber/http/Http1ConnectionPoolCore.h>
+#include <fiber/http/HttpConnectionGroupKey.h>
 #include <fiber/net/TcpListener.h>
 
 namespace {
@@ -136,8 +136,8 @@ DetachedTask run_lifo_scenario(fiber::event::EventLoop *loop, std::uint16_t port
         co_return;
     }
 
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     auto lease1 = pool.acquire(key);
     auto conn1_result = co_await ensure_connected(lease1, port);
@@ -198,8 +198,8 @@ DetachedTask run_per_group_eviction_scenario(fiber::event::EventLoop *loop, std:
         co_return;
     }
 
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     auto lease1 = pool.acquire(key);
     auto conn1_result = co_await ensure_connected(lease1, port);
@@ -254,10 +254,10 @@ DetachedTask run_global_eviction_scenario(fiber::event::EventLoop *loop, std::ui
         co_return;
     }
 
-    const auto key1 = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port1,
-                                                                    fiber::http::Http1ConnectionGroupKey::Scheme::Http);
-    const auto key2 = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port2,
-                                                                    fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key1 = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port1,
+                                                                   fiber::http::HttpConnectionGroupKey::Scheme::Http);
+    const auto key2 = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port2,
+                                                                   fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     auto lease1 = pool.acquire(key1);
     auto conn1_result = co_await ensure_connected(lease1, port1);
@@ -322,8 +322,8 @@ DetachedTask run_expire_scenario(fiber::event::EventLoop *loop, std::uint16_t po
         co_return;
     }
 
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
     auto lease = pool.acquire(key);
     auto conn_result = co_await ensure_connected(lease, port);
     if (!conn_result) {
@@ -364,8 +364,8 @@ DetachedTask run_closed_scenario(fiber::event::EventLoop *loop, std::uint16_t po
         co_return;
     }
 
-    const auto key = fiber::http::Http1ConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
-                                                                   fiber::http::Http1ConnectionGroupKey::Scheme::Http);
+    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), port,
+                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
     auto lease = pool.acquire(key);
     auto conn_result = co_await ensure_connected(lease, port);
     if (!conn_result) {
@@ -405,12 +405,12 @@ DetachedTask run_affinity_scenario(fiber::event::EventLoop *loop, std::uint16_t 
         co_return;
     }
 
-    const auto first_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-            fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http,
-            fiber::http::Http1ConnectionPoolAffinity{41});
-    const auto second_key = fiber::http::Http1ConnectionGroupKey::from_ip(
-            fiber::net::IpAddress::loopback_v4(), port, fiber::http::Http1ConnectionGroupKey::Scheme::Http,
-            fiber::http::Http1ConnectionPoolAffinity{42});
+    const auto first_key = fiber::http::HttpConnectionGroupKey::from_ip(
+            fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Http,
+            fiber::http::HttpConnectionPoolAffinity{41});
+    const auto second_key = fiber::http::HttpConnectionGroupKey::from_ip(
+            fiber::net::IpAddress::loopback_v4(), port, fiber::http::HttpConnectionGroupKey::Scheme::Http,
+            fiber::http::HttpConnectionPoolAffinity{42});
 
     auto first_lease = pool.acquire(first_key);
     auto connection_result = co_await ensure_connected(first_lease, port);
