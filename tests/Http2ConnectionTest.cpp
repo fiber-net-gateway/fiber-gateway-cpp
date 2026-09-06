@@ -638,11 +638,11 @@ struct ResponseHeadSnapshot {
 struct ClientResponseHeaderRunOutcome {
     fiber::common::IoResult<void> header_result;
     fiber::common::IoResult<void> run_result;
-    fiber::common::IoResult<const fiber::http::Http2ResponseHead *> informational_result;
-    fiber::common::IoResult<const fiber::http::Http2ResponseHead *> final_result;
+    fiber::common::IoResult<const fiber::http::ClientResponseHead *> informational_result;
+    fiber::common::IoResult<const fiber::http::ClientResponseHead *> final_result;
     fiber::common::IoResult<fiber::mem::IoBufChain> body_result;
-    fiber::common::IoResult<const fiber::http::Http2ResponseHead *> trailer_result;
-    fiber::common::IoResult<const fiber::http::Http2ResponseHead *> end_result;
+    fiber::common::IoResult<const fiber::http::ClientResponseHead *> trailer_result;
+    fiber::common::IoResult<const fiber::http::ClientResponseHead *> end_result;
     ResponseHeadSnapshot informational;
     ResponseHeadSnapshot final;
     ResponseHeadSnapshot trailer;
@@ -653,7 +653,7 @@ struct ClientResponseHeaderRunOutcome {
 struct ClientResponseAbortRunOutcome {
     fiber::common::IoResult<void> header_result;
     fiber::common::IoResult<void> run_result;
-    fiber::common::IoResult<const fiber::http::Http2ResponseHead *> read_header_result;
+    fiber::common::IoResult<const fiber::http::ClientResponseHead *> read_header_result;
     fiber::common::IoResult<fiber::mem::IoBufChain> read_body_result;
     std::string written;
     std::uint32_t stream_id = 0;
@@ -720,7 +720,7 @@ std::string iobuf_to_string(const fiber::mem::IoBuf &buf) {
     return std::string(reinterpret_cast<const char *>(buf.readable_data()), buf.readable());
 }
 
-ResponseHeadSnapshot snapshot_response_head(const fiber::http::Http2ResponseHead *head) {
+ResponseHeadSnapshot snapshot_response_head(const fiber::http::ClientResponseHead *head) {
     ResponseHeadSnapshot snapshot;
     if (!head) {
         return snapshot;
@@ -1407,7 +1407,7 @@ DetachedTask run_client_request_header_send(std::shared_ptr<std::promise<ClientR
         co_return;
     }
 
-    outcome.result = co_await exchange.send_request_header(
+    outcome.result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
                     .scheme = "https",
@@ -1438,7 +1438,7 @@ DetachedTask run_client_exchange_abort(std::shared_ptr<std::promise<ClientAbortR
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
                     .scheme = "https",
@@ -1493,7 +1493,7 @@ run_client_extended_connect_header_send(std::shared_ptr<std::promise<ClientExten
     }
 
     outcome.support_before = exchange.extended_connect_support();
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Connect,
                     .scheme = "https",
@@ -1528,7 +1528,7 @@ DetachedTask run_client_request_body_send(std::shared_ptr<std::promise<ClientReq
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
                     .scheme = "https",
@@ -1561,7 +1561,7 @@ DetachedTask run_client_body_cancel_before_write(std::shared_ptr<std::promise<Cl
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
                     .scheme = "https",
@@ -1599,7 +1599,7 @@ DetachedTask run_client_partial_request_body_send(std::shared_ptr<std::promise<C
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
                     .scheme = "https",
@@ -1645,7 +1645,7 @@ run_client_body_waiting_for_connection_window(std::shared_ptr<std::promise<Clien
     SendingHttp2Connection connection(std::move(fake_transport), fake_transport_ptr, options);
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
                     .scheme = "https",
@@ -1687,7 +1687,7 @@ DetachedTask run_client_request_trailer_send(std::shared_ptr<std::promise<Client
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
                     .scheme = "https",
@@ -1704,7 +1704,7 @@ DetachedTask run_client_request_trailer_send(std::shared_ptr<std::promise<Client
         if (trailers.set("digest", "sha-256=xyz") == nullptr) {
             outcome.trailer_result = std::unexpected(fiber::common::IoErr::NoMem);
         } else {
-            outcome.trailer_result = co_await exchange.write_trailer(trailers);
+            outcome.trailer_result = co_await exchange.send_trailer(trailers);
         }
     }
     outcome.stream_id = exchange.stream_id();
@@ -1742,7 +1742,7 @@ DetachedTask run_client_response_body_read(std::shared_ptr<std::promise<ClientRe
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
                     .scheme = "https",
@@ -1796,7 +1796,7 @@ run_client_response_headers_and_trailers_read(std::shared_ptr<std::promise<Clien
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
                     .scheme = "https",
@@ -1853,7 +1853,7 @@ run_client_response_header_end_stream_read(std::shared_ptr<std::promise<ClientRe
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
                     .scheme = "https",
@@ -1898,7 +1898,7 @@ run_client_response_read_after_rst_stream(std::shared_ptr<std::promise<ClientRes
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-    outcome.header_result = co_await exchange.send_request_header(
+    outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
                     .scheme = "https",
@@ -1938,7 +1938,7 @@ DetachedTask run_client_exchange_open_after_goaway(std::shared_ptr<std::promise<
 
     fiber::mem::BufPool first_pool;
     fiber::http::ClientHttp2Exchange first_exchange(connection.gate(), first_pool);
-    auto first_send_result = co_await first_exchange.send_request_header(
+    auto first_send_result = co_await first_exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
                     .scheme = "https",
@@ -1974,7 +1974,7 @@ DetachedTask run_client_exchange_open_after_goaway(std::shared_ptr<std::promise<
     if (outcome.state == fiber::http::Http2Connection::State::Draining) {
         fiber::mem::BufPool pool;
         fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
-        outcome.send_result = co_await exchange.send_request_header(
+        outcome.send_result = co_await exchange.send_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
                         .scheme = "https",
@@ -2785,7 +2785,7 @@ DetachedTask run_client_exchange_attach_wait(std::shared_ptr<std::promise<Client
     ClientExchangeAttachWaitOutcome outcome;
     fiber::mem::BufPool first_pool;
     fiber::http::ClientHttp2Exchange first_exchange(connection.gate(), first_pool);
-    outcome.first_result = co_await first_exchange.send_request_header(
+    outcome.first_result = co_await first_exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
                     .scheme = "https",
@@ -2804,7 +2804,7 @@ DetachedTask run_client_exchange_attach_wait(std::shared_ptr<std::promise<Client
 
     fiber::mem::BufPool second_pool;
     fiber::http::ClientHttp2Exchange second_exchange(connection.gate(), second_pool);
-    outcome.second_result = co_await second_exchange.send_request_header(
+    outcome.second_result = co_await second_exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
                     .scheme = "https",

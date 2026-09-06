@@ -17,9 +17,9 @@ namespace fiber::http::detail {
 class Http2HeaderBlockQueue : public common::NonCopyable, public common::NonMovable {
 public:
     struct HeaderNode {
-        explicit HeaderNode(mem::BufPool &pool) noexcept : head(pool) {}
+        explicit HeaderNode(mem::BufPool &pool) noexcept : head(pool, HttpVersion::HTTP_2_0) {}
 
-        Http2ResponseHead head;
+        ClientResponseHead head;
         HeaderNode *next = nullptr;
     };
 
@@ -31,7 +31,7 @@ public:
     void close_input() noexcept;
     void abort(common::IoErr reason) noexcept;
 
-    fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+    fiber::async::Task<common::IoResult<const ClientResponseHead *>>
     read_header(std::chrono::milliseconds timeout) noexcept;
 
 private:

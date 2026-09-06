@@ -307,9 +307,9 @@ DetachedTask run_http1_client_no_body(fiber::event::EventLoop *loop, std::uint16
     headers.set("host", "localhost");
 
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
-    fiber::http::Http1RequestHead head;
+    fiber::http::ClientRequestHead head;
     head.method = fiber::http::HttpMethod::Get;
-    head.target = kTarget;
+    head.path = kTarget;
     head.headers = &headers;
 
     auto send_result = co_await exchange.send_header(head, true);
@@ -358,9 +358,9 @@ DetachedTask run_http1_client_no_body_target(fiber::event::EventLoop *loop, std:
     headers.set("host", "localhost");
 
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
-    fiber::http::Http1RequestHead head;
+    fiber::http::ClientRequestHead head;
     head.method = fiber::http::HttpMethod::Get;
-    head.target = target;
+    head.path = target;
     head.headers = &headers;
 
     auto send_result = co_await exchange.send_header(head, true);
@@ -411,9 +411,9 @@ DetachedTask run_http1_client_with_body(fiber::event::EventLoop *loop, std::uint
 
     constexpr std::string_view kBody = "http1-client-body";
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
-    fiber::http::Http1RequestHead head;
+    fiber::http::ClientRequestHead head;
     head.method = fiber::http::HttpMethod::Post;
-    head.target = "/interop/http1/with-body";
+    head.path = "/interop/http1/with-body";
     head.headers = &headers;
     head.body = fiber::http::HttpBodySpec::ContentLength(kBody.size());
 
@@ -471,7 +471,7 @@ DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection, pool);
-    auto send_result = co_await exchange.send_request_header(
+    auto send_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
                     .scheme = "https",
@@ -539,7 +539,7 @@ DetachedTask run_http2_client_with_body(fiber::event::EventLoop *loop, std::uint
     constexpr std::string_view kBody = "http2-client-body";
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection, pool);
-    auto send_result = co_await exchange.send_request_header(
+    auto send_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
                     .scheme = "https",

@@ -195,14 +195,14 @@ void Http2HeaderBlockQueue::abort(common::IoErr reason) noexcept {
     notify_waiter();
 }
 
-fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+fiber::async::Task<common::IoResult<const ClientResponseHead *>>
 Http2HeaderBlockQueue::read_header(std::chrono::milliseconds timeout) noexcept {
     PollResult state = co_await HeaderReadAwaiter(*this, timeout);
     switch (state.kind) {
         case PollResult::Kind::Readable:
             break;
         case PollResult::Kind::End:
-            co_return static_cast<const Http2ResponseHead *>(nullptr);
+            co_return static_cast<const ClientResponseHead *>(nullptr);
         case PollResult::Kind::TimedOut:
             co_return std::unexpected(common::IoErr::TimedOut);
         case PollResult::Kind::Closed:

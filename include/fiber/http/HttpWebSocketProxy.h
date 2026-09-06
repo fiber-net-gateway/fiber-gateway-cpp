@@ -12,7 +12,7 @@ namespace fiber::http {
 class ClientHttp1Exchange;
 class HttpExchange;
 class HttpHeaders;
-struct Http1ResponseHead;
+struct ClientResponseHead;
 
 namespace proxy_core {
 
@@ -43,12 +43,12 @@ struct WebSocketHandshake {
 [[nodiscard]] bool prepare_upstream_websocket_headers(const HttpExchange &exchange, WebSocketHandshake &handshake,
                                                       HttpHeaders &headers) noexcept;
 
-[[nodiscard]] bool valid_websocket_upgrade_response(const Http1ResponseHead &head,
+[[nodiscard]] bool valid_websocket_upgrade_response(const ClientResponseHead &head,
                                                     const WebSocketHandshake &handshake) noexcept;
 
 // Copies the successful upstream handshake to the downstream protocol. HTTP/1.1 receives
 // a 101-style Upgrade header block; Extended CONNECT receives an HTTP/2/3-safe header block.
-void build_downstream_websocket_headers(const Http1ResponseHead &upstream_head, HttpHeaders &headers,
+void build_downstream_websocket_headers(const ClientResponseHead &upstream_head, HttpHeaders &headers,
                                         const WebSocketHandshake &handshake) noexcept;
 
 // Reasserts protocol-required response fields after caller-specific response overrides.

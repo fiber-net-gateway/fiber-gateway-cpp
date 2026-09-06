@@ -203,7 +203,7 @@ TEST(Http2ConnectionPoolTest, ConcurrentRequestsShareSingleDialAndConnection) {
                 if (lease) {
                     mem::BufPool buffers;
                     http::Http2PooledExchange ex(std::move(*lease), buffers);
-                    auto sent = co_await ex->send_request_header(
+                    auto sent = co_await ex->send_header(
                             {.method = http::HttpMethod::Get, .scheme = "http", .authority = "localhost", .path = "/"},
                             true, 1s);
                     EXPECT_TRUE(sent);
@@ -397,7 +397,7 @@ TEST(Http2ConnectionPoolTest, PeerGoawayDrainsInFlightRequestAndAllowsReplacemen
         mem::BufPool buffers;
         h.hold_responses = true;
         http::Http2PooledExchange ex(std::move(*lease), buffers);
-        auto sent = co_await ex->send_request_header(
+        auto sent = co_await ex->send_header(
                 {.method = http::HttpMethod::Get, .scheme = "http", .authority = "localhost", .path = "/"}, true, 1s);
         EXPECT_TRUE(sent);
         while (!h.requests)
@@ -843,7 +843,7 @@ TEST(Http2ConnectionPoolTest, AbandonedPooledExchangeCancelsStreamBeforeReturnin
                 h.hold_responses = true;
                 {
                     http::Http2PooledExchange ex(std::move(*lease), buffers);
-                    auto sent = co_await ex->send_request_header(
+                    auto sent = co_await ex->send_header(
                             {.method = http::HttpMethod::Get, .scheme = "http", .authority = "localhost", .path = "/"},
                             true, 1s);
                     EXPECT_TRUE(sent);

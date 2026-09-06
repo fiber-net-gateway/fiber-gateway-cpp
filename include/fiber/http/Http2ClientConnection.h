@@ -2,6 +2,7 @@
 #define FIBER_HTTP_HTTP2_CLIENT_CONNECTION_H
 
 #include <chrono>
+#include <memory>
 #include <optional>
 
 #include "../async/Task.h"
@@ -38,6 +39,14 @@ public:
     fiber::async::Task<common::IoResult<void>>
     connect(const net::SocketAddress &peer, std::chrono::milliseconds timeout, const HttpClientTlsOptions &tls,
             const net::TcpSocketOptions &tcp = net::kNoDelayTcpSocketOptions) noexcept;
+    // Takes over an already-established transport and starts the HTTP/2 session on it, which is
+    // how a caller that negotiated the protocol itself (see http_client_dial) skips dialing. Same
+    // one-shot rule as connect(): only valid while the owned Http2Connection is still in its
+    // initial state, and `transport` must already live on this connection's loop and speak HTTP/2
+    // (an "h2" ALPN, or an empty one for a prior-knowledge cleartext connection). On any failure
+    // the transport is closed here rather than handed back.
+    [[nodiscard]] common::IoErr adopt(std::unique_ptr<HttpTransport> transport,
+                                      std::optional<net::SocketAddress> local = std::nullopt) noexcept;
     fiber::async::Task<Http2Connection::CloseResult> wait_closed() noexcept;
     // Closure reaches every subscriber through here; observers run before any
     // wait_closed() joiner resumes.

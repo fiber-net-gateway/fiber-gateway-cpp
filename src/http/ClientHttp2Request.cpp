@@ -42,7 +42,7 @@ bool is_terminal_request_write_error(common::IoErr error) noexcept {
 struct ClientHttp2Request::SendRequestHeaderOp {
     using SuccessType = void;
 
-    SendRequestHeaderOp(const Http2RequestHead &head, bool end_stream) noexcept :
+    SendRequestHeaderOp(const ClientRequestHead &head, bool end_stream) noexcept :
         method_(head.method), scheme_(head.scheme), authority_(head.authority), path_(head.path),
         protocol_(head.protocol), headers_(head.headers), end_stream_(end_stream) {}
 
@@ -201,7 +201,7 @@ Http2ExtendedConnectSupport ClientHttp2Request::extended_connect_support() const
 }
 
 fiber::async::Task<common::IoResult<void>>
-ClientHttp2Request::send_request_header(const Http2RequestHead &head, bool end_stream,
+ClientHttp2Request::send_request_header(const ClientRequestHead &head, bool end_stream,
                                         std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -327,7 +327,7 @@ ClientHttp2Request::read_body(std::size_t max_bytes, std::chrono::milliseconds t
     co_return co_await response_body_recv_.read_body(stream_, max_bytes, timeout);
 }
 
-fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+fiber::async::Task<common::IoResult<const ClientResponseHead *>>
 ClientHttp2Request::read_header(std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);

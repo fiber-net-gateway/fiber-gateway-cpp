@@ -48,6 +48,11 @@ net::TlsClientParam make_http2_client_tls_param(const HttpClientTlsOptions &opti
     return make_http_client_tls_param(options, kHttp2AlpnList);
 }
 
+net::TlsClientParam make_negotiating_client_tls_param(const HttpClientTlsOptions &options,
+                                                      std::span<const std::string_view> alpn) noexcept {
+    return make_http_client_tls_param(options, alpn);
+}
+
 net::TlsServerParam make_http1_server_tls_param(const HttpServerTlsOptions &options) noexcept {
     return make_server_tls_param(options, kHttp1AlpnList);
 }

@@ -36,8 +36,8 @@ public:
     ~ClientHttp2Exchange() = default;
 
     fiber::async::Task<common::IoResult<void>>
-    send_request_header(const Http2RequestHead &head, bool end_stream,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    send_header(const ClientRequestHead &head, bool end_stream,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     // write_all accepts the complete payload before returning. write returns
     // after the first flow-controlled DATA batch and consumes an IoBufChain in
     // place; retry the remaining suffix with the same end_stream value. A
@@ -53,10 +53,10 @@ public:
     write(const std::uint8_t *buf, std::size_t len, bool end_stream,
           std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::async::Task<common::IoResult<void>>
-    write_trailer(const HttpHeaders &headers,
-                  std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    send_trailer(const HttpHeaders &headers,
+                 std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
-    fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+    fiber::async::Task<common::IoResult<const ClientResponseHead *>>
     read_header(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::async::Task<common::IoResult<mem::IoBufChain>>
     read_body(std::size_t max_bytes = 64 * 1024,

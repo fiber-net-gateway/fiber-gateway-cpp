@@ -535,12 +535,12 @@ Task<IoErr> Shard::request(mem::BufPool &buffers, std::size_t key_id, std::uint6
     std::string_view path = hold ? "/slow.bin" : std::string_view(o.path);
     if (o.mixed && !hold)
         path = random % 100 == 0 ? "/slow.bin" : random % 100 < 10 ? "/medium.bin" : "/small.bin";
-    auto sent = co_await exchange->send_request_header({.method = http::HttpMethod::Get,
-                                                        .scheme = o.tls ? "https" : "http",
-                                                        .authority = "localhost",
-                                                        .path = path,
-                                                        .headers = &headers},
-                                                       true, remaining(deadline));
+    auto sent = co_await exchange->send_header({.method = http::HttpMethod::Get,
+                                                .scheme = o.tls ? "https" : "http",
+                                                .authority = "localhost",
+                                                .path = path,
+                                                .headers = &headers},
+                                               true, remaining(deadline));
     if (!sent)
         co_return request_error(sent.error(), "send_header", id, record.generation, exchange->stream_id());
     auto &h2 = connection.http2();
