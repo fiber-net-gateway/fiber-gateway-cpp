@@ -50,6 +50,13 @@ public:
     fiber::async::Task<common::IoResult<void>>
     connect(std::span<const net::SocketAddress> addresses, const net::HappyEyeballsOptions &options,
             const HttpClientTlsOptions &tls, const net::TcpSocketOptions &tcp = net::kNoDelayTcpSocketOptions) noexcept;
+    // Takes over an already-established transport, which is how a caller that negotiated the
+    // protocol itself (see http_client_dial) reaches the connected-idle state without dialing
+    // again. Same one-shot rule as connect(): only valid on a connection still in its initial
+    // state, and `transport` must already live on this connection's loop and speak HTTP/1 (an
+    // empty or "http/1.1" ALPN). On any failure the transport is closed here rather than handed
+    // back, so the caller never has to decide who owns a rejected connection.
+    [[nodiscard]] common::IoErr adopt(std::unique_ptr<HttpTransport> transport, net::SocketAddress peer) noexcept;
     void close() noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
@@ -135,6 +142,8 @@ private:
                                                             net::HappyEyeballsOptions options,
                                                             net::TcpSocketOptions tcp,
                                                             std::optional<HttpClientTlsOptions> tls) noexcept;
+    // Shared tail of connect() and adopt(): both arrive here in State::Connecting.
+    common::IoErr adopt_transport(std::unique_ptr<HttpTransport> transport, net::SocketAddress peer) noexcept;
     void assert_active_loop() const noexcept;
     void mark_unusable() noexcept;
     void record_request_started() noexcept;

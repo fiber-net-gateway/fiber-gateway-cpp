@@ -308,7 +308,7 @@ ClientHttp3Request::write_data_frame_header(std::size_t payload_len, std::chrono
 }
 
 async::Task<common::IoResult<void>>
-ClientHttp3Request::send_request_header(const Http3RequestHead &head, bool end_stream,
+ClientHttp3Request::send_request_header(const ClientRequestHead &head, bool end_stream,
                                         std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr || !stream_.stream_id_assigned() || !request_entry_.link.linked()) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -805,11 +805,11 @@ common::IoErr ClientHttp3Request::begin_header_block(bool trailer) noexcept {
     if (current_head_ != nullptr || pool_ == nullptr) {
         return fail_response(Http3ErrorCode::InternalError);
     }
-    void *storage = pool_->alloc(sizeof(Http3ResponseHead), alignof(Http3ResponseHead));
+    void *storage = pool_->alloc(sizeof(ClientResponseHead), alignof(ClientResponseHead));
     if (storage == nullptr) {
         return fail_response(Http3ErrorCode::InternalError, common::IoErr::NoMem);
     }
-    current_head_ = new (storage) Http3ResponseHead(*pool_);
+    current_head_ = new (storage) ClientResponseHead(*pool_, HttpVersion::HTTP_3_0);
     current_block_trailer_ = trailer;
     current_block_has_status_ = false;
     saw_regular_header_ = false;
@@ -1085,7 +1085,7 @@ std::string_view ClientHttp3Request::copy_to_pool(std::string_view value) noexce
     return pool_ == nullptr ? std::string_view{} : detail::copy_to_pool(*pool_, value);
 }
 
-async::Task<common::IoResult<const Http3ResponseHead *>>
+async::Task<common::IoResult<const ClientResponseHead *>>
 ClientHttp3Request::read_header(std::chrono::milliseconds timeout) noexcept {
     if (conn_ == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -1095,12 +1095,12 @@ ClientHttp3Request::read_header(std::chrono::milliseconds timeout) noexcept {
     }
     BoolOperationGuard guard(reading_);
     if (pending_head_ != nullptr) {
-        const Http3ResponseHead *head = pending_head_;
+        const ClientResponseHead *head = pending_head_;
         pending_head_ = nullptr;
         co_return head;
     }
     if (recv_state_ == RecvState::Complete) {
-        co_return static_cast<const Http3ResponseHead *>(nullptr);
+        co_return static_cast<const ClientResponseHead *>(nullptr);
     }
     if (recv_state_ == RecvState::Error) {
         co_return std::unexpected(terminal_error_ == common::IoErr::None ? common::IoErr::Canceled : terminal_error_);
@@ -1117,11 +1117,11 @@ ClientHttp3Request::read_header(std::chrono::milliseconds timeout) noexcept {
                     co_return std::unexpected(finished.error());
                 }
                 if (pending_head_ != nullptr) {
-                    const Http3ResponseHead *head = pending_head_;
+                    const ClientResponseHead *head = pending_head_;
                     pending_head_ = nullptr;
                     co_return head;
                 }
-                co_return static_cast<const Http3ResponseHead *>(nullptr);
+                co_return static_cast<const ClientResponseHead *>(nullptr);
             }
             auto read = co_await read_more_input(timeout);
             if (!read) {
@@ -1143,7 +1143,7 @@ ClientHttp3Request::read_header(std::chrono::milliseconds timeout) noexcept {
                 if (!finished) {
                     co_return std::unexpected(finished.error());
                 }
-                co_return static_cast<const Http3ResponseHead *>(nullptr);
+                co_return static_cast<const ClientResponseHead *>(nullptr);
             }
             auto read = co_await read_more_input(timeout);
             if (!read) {
@@ -1178,7 +1178,7 @@ ClientHttp3Request::read_header(std::chrono::milliseconds timeout) noexcept {
             } else if (trailer) {
                 recv_state_ = RecvState::WaitFin;
             }
-            const Http3ResponseHead *head = pending_head_;
+            const ClientResponseHead *head = pending_head_;
             pending_head_ = nullptr;
             co_return head;
         }

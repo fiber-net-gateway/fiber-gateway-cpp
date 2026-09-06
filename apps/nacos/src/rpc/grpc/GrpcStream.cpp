@@ -156,7 +156,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::open() noexcept {
         headers.set("grpc-timeout", std::string_view(grpc_timeout_));
     }
 
-    const http::Http2RequestHead head{
+    const http::ClientRequestHead head{
             .method = http::HttpMethod::Post,
             .scheme = std::string_view(scheme_),
             .authority = std::string_view(authority_),
@@ -164,7 +164,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::open() noexcept {
             .headers = &headers,
     };
 
-    auto send_result = co_await exchange_.send_request_header(head, false, remaining_timeout());
+    auto send_result = co_await exchange_.send_header(head, false, remaining_timeout());
     if (!send_result) {
         fail(send_result.error());
         co_return std::unexpected(send_result.error());
@@ -239,7 +239,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::ensure_response_header() 
     if (!header_result) {
         co_return std::unexpected(header_result.error());
     }
-    const http::Http2ResponseHead *resp = *header_result;
+    const http::ClientResponseHead *resp = *header_result;
     if (resp->status_code != 200) {
         co_return std::unexpected(common::IoErr::Unknown);
     }
@@ -363,7 +363,7 @@ fiber::async::Task<common::IoResult<GrpcStatus>> GrpcStream::finish() noexcept {
                 fail(trailer_result.error());
                 co_return std::unexpected(trailer_result.error());
             }
-            const http::Http2ResponseHead *trailer = *trailer_result;
+            const http::ClientResponseHead *trailer = *trailer_result;
             if (auto s = trailer->headers.get("grpc-status", kGrpcStatusHash); !s.empty()) {
                 grpc_code_ = parse_grpc_status(s);
             }

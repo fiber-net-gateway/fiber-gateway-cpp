@@ -1,21 +1,19 @@
 #include <fiber/http/Http2ClientConnection.h>
 
-#include <cerrno>
 #include <memory>
 #include <string_view>
-#include <sys/socket.h>
+#include <utility>
 
 #include <fiber/http/ClientHttp2Exchange.h>
+#include <fiber/http/HttpClientDialer.h>
 #include <fiber/http/HttpTransport.h>
-#include <fiber/net/TcpListener.h>
-#include <fiber/net/TcpStream.h>
-#include "http/TlsAlpn.h"
 
 namespace fiber::http {
 
 namespace {
 
 constexpr std::string_view kH2Alpn = "h2";
+constexpr std::string_view kHttp2AlpnList[] = {kH2Alpn};
 
 } // namespace
 
@@ -59,54 +57,59 @@ Http2ClientConnection::connect_impl(net::SocketAddress peer, std::chrono::millis
         co_return std::unexpected(common::IoErr::Busy);
     }
 
-    auto connect_result = co_await net::TcpStream::connect(*loop_, peer, timeout);
-    if (!connect_result) {
-        co_return std::unexpected(connect_result.error());
-    }
-
-    sockaddr_storage local_storage{};
-    socklen_t local_len = sizeof(local_storage);
-    if (::getsockname(connect_result->fd(), reinterpret_cast<sockaddr *>(&local_storage), &local_len) != 0) {
-        co_return std::unexpected(common::io_err_from_errno(errno));
-    }
-    net::SocketAddress local;
-    if (!net::SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&local_storage), local_len, local)) {
-        co_return std::unexpected(common::IoErr::NotSupported);
-    }
-    local_addr_ = local;
-
-    net::AcceptResult accept(connect_result->release_fd(), connect_result->take_peer());
-    std::unique_ptr<HttpTransport> transport;
+    HttpClientDialRequest request;
+    request.peer = peer;
+    request.happy.total_timeout = timeout;
+    request.tcp = tcp;
+    request.default_protocol = HttpProtocol::Http2;
+    request.need_local_addr = true;
     if (tls) {
-        auto tls_param = make_http2_client_tls_param(*tls);
-        auto transport_result = TlsTransport::create(*loop_, std::move(accept), tcp);
-        if (!transport_result) {
-            co_return std::unexpected(transport_result.error());
-        }
-        auto tls_transport = std::move(*transport_result);
-
-        auto handshake_result = co_await tls_transport->handshake(tls_param, tls->handshake_timeout);
-        if (!handshake_result) {
-            co_return std::unexpected(handshake_result.error());
-        }
-        if (tls_transport->negotiated_alpn() != kH2Alpn) {
-            tls_transport->close();
-            co_return std::unexpected(common::IoErr::NotSupported);
-        }
-        transport = std::move(tls_transport);
-    } else {
-        auto transport_result = TcpTransport::create(*loop_, std::move(accept), tcp);
-        if (!transport_result) {
-            co_return std::unexpected(transport_result.error());
-        }
-        transport = std::move(*transport_result);
+        request.tls = &*tls;
+        request.alpn = kHttp2AlpnList;
+    }
+    auto dial_result = co_await http_client_dial(*loop_, std::move(request));
+    if (!dial_result) {
+        co_return std::unexpected(dial_result.error());
     }
 
-    common::IoErr start_err = conn_.start(std::move(transport));
-    if (start_err != common::IoErr::None) {
-        co_return std::unexpected(start_err);
+    common::IoErr adopt_error = adopt(std::move(dial_result->transport), std::move(dial_result->local));
+    if (adopt_error != common::IoErr::None) {
+        co_return std::unexpected(adopt_error);
     }
     co_return common::IoResult<void>{};
+}
+
+common::IoErr Http2ClientConnection::adopt(std::unique_ptr<HttpTransport> transport,
+                                           std::optional<net::SocketAddress> local) noexcept {
+    auto reject = [&](common::IoErr error) noexcept {
+        if (transport) {
+            transport->close();
+        }
+        return error;
+    };
+
+    FIBER_ASSERT(loop_ != nullptr);
+    if (!loop_->in_loop()) {
+        return reject(common::IoErr::NotSupported);
+    }
+    if (conn_.state() != Http2Connection::State::Init) {
+        return reject(common::IoErr::Busy);
+    }
+    if (!transport || !transport->valid()) {
+        return reject(common::IoErr::Invalid);
+    }
+    if (&transport->loop() != loop_) {
+        return reject(common::IoErr::Invalid);
+    }
+    // An empty ALPN is a cleartext prior-knowledge connection; anything else must be "h2".
+    const std::string_view alpn = transport->negotiated_alpn();
+    if (!alpn.empty() && alpn != kH2Alpn) {
+        return reject(common::IoErr::NotSupported);
+    }
+
+    local_addr_ = std::move(local);
+    // start() owns the transport from here on, including closing it on a failed handshake flight.
+    return conn_.start(std::move(transport));
 }
 
 fiber::async::Task<Http2Connection::CloseResult> Http2ClientConnection::wait_closed() noexcept {

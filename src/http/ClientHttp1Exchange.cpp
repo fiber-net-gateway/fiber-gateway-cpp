@@ -26,6 +26,8 @@ constexpr std::string_view kContentLengthPrefix = "Content-Length: ";
 constexpr std::string_view kChunkedHeader = "Transfer-Encoding: chunked\r\n";
 constexpr std::string_view kChunkedFinal = "0\r\n\r\n";
 constexpr std::string_view kChunkedLastPrefix = "0\r\n";
+constexpr std::string_view kHostPrefix = "Host: ";
+constexpr std::uint64_t kHostHeaderHash = http_header_name_hash("host");
 constexpr std::size_t kMaxContentLengthDigits = 20;
 constexpr std::size_t kMaxChunkSizeHexDigits = sizeof(std::size_t) * 2;
 constexpr std::size_t kMaxDirectBodyRead = 64 * 1024;
@@ -277,18 +279,33 @@ std::size_t append_hex(char *dst, std::size_t value) noexcept {
     return len;
 }
 
+// A non-empty ClientRequestHead::authority is authoritative for HTTP/1, so any host field the
+// caller left in `headers` is dropped rather than emitted alongside it.
+bool host_field_overridden_by_authority(const ClientRequestHead &head, const HttpHeaders::HeaderField &field) noexcept {
+    return !head.authority.empty() && field.name_hash == kHostHeaderHash &&
+           http_header_name_equals_ci(field.lowcase_view(), "host");
+}
+
 void append_bytes(char *&dst, std::string_view value) noexcept {
     std::memcpy(dst, value.data(), value.size());
     dst += value.size();
 }
 
-common::IoResult<std::size_t> estimate_header_bytes(const Http1RequestHead &head) noexcept {
+common::IoResult<std::size_t> estimate_header_bytes(const ClientRequestHead &head) noexcept {
     std::string_view method = http_method_name(head.method);
-    if (method.empty() || head.target.empty()) {
+    if (method.empty() || head.path.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::size_t total = method.size() + 1 + head.target.size() + kHttp11Suffix.size();
+    if (!head.protocol.empty()) {
+        // Extended CONNECT is an HTTP/2 and HTTP/3 mechanism; HTTP/1 has no wire form for it.
+        return std::unexpected(common::IoErr::NotSupported);
+    }
+
+    std::size_t total = method.size() + 1 + head.path.size() + kHttp11Suffix.size();
+    if (!head.authority.empty()) {
+        total += kHostPrefix.size() + head.authority.size() + kLineTerminator.size();
+    }
     switch (head.body.kind()) {
         case HttpBodySpec::Kind::Auto:
             return std::unexpected(common::IoErr::Invalid);
@@ -309,6 +326,9 @@ common::IoResult<std::size_t> estimate_header_bytes(const Http1RequestHead &head
 
     if (head.headers) {
         for (const auto &field: *head.headers) {
+            if (host_field_overridden_by_authority(head, field)) {
+                continue;
+            }
             if (field.name_len > std::numeric_limits<std::size_t>::max() - total - kHeaderNameValueSep.size() -
                                          field.value_len - kLineTerminator.size()) {
                 return std::unexpected(common::IoErr::NoMem);
@@ -323,18 +343,26 @@ common::IoResult<std::size_t> estimate_header_bytes(const Http1RequestHead &head
     return total;
 }
 
-common::IoResult<void> encode_request_header(mem::IoBuf &buf, const Http1RequestHead &head) noexcept {
+common::IoResult<void> encode_request_header(mem::IoBuf &buf, const ClientRequestHead &head) noexcept {
     std::string_view method = http_method_name(head.method);
-    if (method.empty() || head.target.empty()) {
+    if (method.empty() || head.path.empty()) {
         return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!head.protocol.empty()) {
+        return std::unexpected(common::IoErr::NotSupported);
     }
 
     char *out = reinterpret_cast<char *>(buf.writable_data());
     char *ptr = out;
     append_bytes(ptr, method);
     *ptr++ = ' ';
-    append_bytes(ptr, head.target);
+    append_bytes(ptr, head.path);
     append_bytes(ptr, kHttp11Suffix);
+    if (!head.authority.empty()) {
+        append_bytes(ptr, kHostPrefix);
+        append_bytes(ptr, head.authority);
+        append_bytes(ptr, kLineTerminator);
+    }
 
     switch (head.body.kind()) {
         case HttpBodySpec::Kind::Auto:
@@ -355,6 +383,9 @@ common::IoResult<void> encode_request_header(mem::IoBuf &buf, const Http1Request
 
     if (head.headers) {
         for (const auto &field: *head.headers) {
+            if (host_field_overridden_by_authority(head, field)) {
+                continue;
+            }
             append_bytes(ptr, field.name_view());
             append_bytes(ptr, kHeaderNameValueSep);
             append_bytes(ptr, field.value_view());
@@ -441,7 +472,7 @@ ClientHttp1Exchange::write_chunk_suffix(HttpTransport *transport, bool end_strea
 
 ClientHttp1Exchange::ClientHttp1Exchange(Http1ClientConnection &conn, mem::BufPool &pool,
                                          Http1ClientExchangeOptions options) noexcept :
-    conn_(conn), pool_(pool), options_(std::move(options)), response_trailers_(pool) {
+    conn_(conn), pool_(pool), options_(std::move(options)), no_trailers_(pool) {
     active_ = conn.acquire_exchange();
 }
 
@@ -463,6 +494,10 @@ ClientHttp1Exchange::~ClientHttp1Exchange() {
 
 bool ClientHttp1Exchange::valid() const noexcept { return active_ && conn_.exchange_active(); }
 
+const HttpHeaders &ClientHttp1Exchange::response_trailers() const noexcept {
+    return response_trailer_node_ ? response_trailer_node_->head.headers : no_trailers_;
+}
+
 void ClientHttp1Exchange::clear_response_header_nodes() noexcept {
     ResponseHeaderNode *node = response_headers_head_;
     while (node) {
@@ -472,6 +507,8 @@ void ClientHttp1Exchange::clear_response_header_nodes() noexcept {
         node = next;
     }
     response_headers_head_ = nullptr;
+    response_trailer_node_ = nullptr;
+    response_trailer_pending_ = false;
 }
 
 bool ClientHttp1Exchange::ensure_active() noexcept {
@@ -648,6 +685,21 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
     }
     HttpTransport *transport = conn_.transport_.get();
 
+    // Trailer fields are copied into the node's arena, so unlike the response header block this
+    // one retains no transport buffers. The node is linked and marked deliverable only if the
+    // peer actually sent fields: a bare terminating chunk carries no trailer block.
+    FIBER_ASSERT(response_trailer_node_ == nullptr);
+    auto *trailer_node = new (pool_) ResponseHeaderNode(pool_, event::EventLoop::current().io_buf_node_pool());
+    if (!trailer_node) {
+        co_return std::unexpected(common::IoErr::NoMem);
+    }
+    trailer_node->head.kind = OutgoingHeaderKind::Trailer;
+    trailer_node->head.end_stream = true;
+    if (response_headers_head_) {
+        trailer_node->head.version = response_headers_head_->head.version;
+    }
+    std::size_t trailer_field_count = 0;
+
     Http1HeaderParseBuffer header_buffer(response_header_buffer_options(options_));
     auto init_result = header_buffer.ensure_init();
     if (!init_result) {
@@ -719,11 +771,12 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
                 lowcase_name = reinterpret_cast<const char *>(line.lowcase_header);
             }
             HttpHeaders::HeaderField *field =
-                    lowcase_name ? response_trailers_.add(name, value, lowcase_name, line.header_hash)
-                                 : response_trailers_.add_prehashed(name, value, line.header_hash);
+                    lowcase_name ? trailer_node->head.headers.add(name, value, lowcase_name, line.header_hash)
+                                 : trailer_node->head.headers.add_prehashed(name, value, line.header_hash);
             if (!field) {
                 co_return std::unexpected(common::IoErr::NoMem);
             }
+            ++trailer_field_count;
             continue;
         }
 
@@ -737,6 +790,12 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
             }
             response_body_parser_.finish_chunked_trailers();
             response_complete_ = true;
+            if (trailer_field_count != 0) {
+                trailer_node->next = response_headers_head_;
+                response_headers_head_ = trailer_node;
+                response_trailer_node_ = trailer_node;
+                response_trailer_pending_ = true;
+            }
             co_return common::IoResult<void>{};
         }
 
@@ -745,7 +804,7 @@ ClientHttp1Exchange::read_response_trailers(mem::IoBuf &read_buf, std::chrono::m
 }
 
 fiber::async::Task<common::IoResult<void>>
-ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
+ClientHttp1Exchange::send_header(const ClientRequestHead &head, bool end_stream,
                                  std::chrono::milliseconds timeout) noexcept {
     if (request_write_error_ != common::IoErr::None) {
         co_return std::unexpected(request_write_error_);
@@ -822,7 +881,6 @@ ClientHttp1Exchange::send_header(const Http1RequestHead &head, bool end_stream,
     request_write_error_ = common::IoErr::None;
     pending_buf_ = {};
     clear_response_header_nodes();
-    response_trailers_.clear();
     response_body_parser_.reset();
     request_state_ = end_stream ? RequestState::RequestDone : RequestState::SendingBody;
     co_return common::IoResult<void>{};
@@ -1529,7 +1587,7 @@ ClientHttp1Exchange::send_trailer(const HttpHeaders &trailers, std::chrono::mill
     co_return common::IoResult<void>{};
 }
 
-fiber::async::Task<common::IoResult<const Http1ResponseHead *>>
+fiber::async::Task<common::IoResult<const ClientResponseHead *>>
 ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     if (!ensure_active()) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -1545,13 +1603,16 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
         co_return std::unexpected(common::IoErr::Invalid);
     }
     if (final_response_received_) {
-        if (!response_headers_head_) {
-            co_return std::unexpected(common::IoErr::Invalid);
+        if (response_trailer_pending_) {
+            FIBER_ASSERT(response_trailer_node_ != nullptr);
+            response_trailer_pending_ = false;
+            co_return &response_trailer_node_->head;
         }
-        co_return &response_headers_head_->head;
+        // Every header block for this response has been handed over. HTTP/2 and HTTP/3 report the
+        // same end with a null head, so a protocol-agnostic caller can loop on all three.
+        co_return static_cast<const ClientResponseHead *>(nullptr);
     }
 
-    response_trailers_.clear();
     response_body_parser_.reset();
     saw_connection_close_ = false;
     saw_connection_keep_alive_ = false;
@@ -1568,7 +1629,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     bool have_status_line = false;
     ResponseHeaderParseState header_parse_state{};
 
-    auto fail_exchange = [&](common::IoErr err) -> common::IoResult<const Http1ResponseHead *> {
+    auto fail_exchange = [&](common::IoErr err) -> common::IoResult<const ClientResponseHead *> {
         header_node->~ResponseHeaderNode();
         ResponseHeaderNode::operator delete(header_node);
         fail_active_exchange(err);
@@ -1634,6 +1695,9 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
             const auto &line = response_line_parser.state();
             header_node->head.version = to_http_version(line.http_version);
             header_node->head.status_code = line.status_code;
+            header_node->head.kind = line.status_code >= 100 && line.status_code < 200
+                                             ? OutgoingHeaderKind::Informational
+                                             : OutgoingHeaderKind::Final;
             if (line.reason_start && line.reason_end && line.reason_end >= line.reason_start) {
                 header_node->head.reason =
                         std::string_view(reinterpret_cast<const char *>(line.reason_start),
@@ -1768,6 +1832,11 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
             response_eof_delimited_ = true;
             keepalive_on_release_ = false;
         }
+
+        // The only end_stream HTTP/1 can prove from the header block alone: framing already says
+        // no body follows. Anything chunked or EOF-delimited stays false and is settled by
+        // read_body()'s completion instead.
+        header_node->head.end_stream = response_complete_;
 
         if (response_header_buffer.buf().readable() > 0) {
             auto pending_body_result = response_header_buffer.retain_suffix();
@@ -1993,7 +2062,6 @@ common::IoResult<void> ClientHttp1Exchange::switch_to_raw_stream() noexcept {
     response_eof_delimited_ = true;
     keepalive_on_release_ = false;
     response_body_parser_.reset();
-    response_trailers_.clear();
     raw_stream_active_ = true;
     raw_stream_write_complete_ = false;
     return {};

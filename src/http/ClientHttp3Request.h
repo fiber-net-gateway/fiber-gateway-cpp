@@ -32,7 +32,7 @@ public:
 
     [[nodiscard]] common::IoResult<void> register_attached() noexcept;
 
-    async::Task<common::IoResult<void>> send_request_header(const Http3RequestHead &head, bool end_stream,
+    async::Task<common::IoResult<void>> send_request_header(const ClientRequestHead &head, bool end_stream,
                                                             std::chrono::milliseconds timeout) noexcept;
     async::Task<common::IoResult<std::size_t>> write_all(mem::IoBufChain chunk,
                                                          std::chrono::milliseconds timeout) noexcept;
@@ -42,7 +42,7 @@ public:
                                                      std::chrono::milliseconds timeout) noexcept;
     async::Task<common::IoResult<void>> write_trailer(const HttpHeaders &headers,
                                                       std::chrono::milliseconds timeout) noexcept;
-    async::Task<common::IoResult<const Http3ResponseHead *>> read_header(std::chrono::milliseconds timeout) noexcept;
+    async::Task<common::IoResult<const ClientResponseHead *>> read_header(std::chrono::milliseconds timeout) noexcept;
     async::Task<common::IoResult<mem::IoBufChain>> read_body(std::size_t max_bytes,
                                                              std::chrono::milliseconds timeout) noexcept;
 
@@ -113,8 +113,8 @@ private:
     Http3FrameHeaderParser frame_parser_{};
     Http3FrameHeader current_frame_{};
     Http3QpackDecoder qpack_decoder_{};
-    Http3ResponseHead *current_head_ = nullptr;
-    Http3ResponseHead *pending_head_ = nullptr;
+    ClientResponseHead *current_head_ = nullptr;
+    ClientResponseHead *pending_head_ = nullptr;
     std::string_view pending_name_{};
     std::uint64_t pending_name_hash_ = 0;
     std::uint64_t frame_payload_remaining_ = 0;

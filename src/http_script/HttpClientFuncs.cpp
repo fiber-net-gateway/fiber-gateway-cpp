@@ -530,9 +530,9 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
 
     std::string target = build_request_target(*heap, options, "/");
 
-    fiber::http::Http1RequestHead head;
+    fiber::http::ClientRequestHead head;
     head.method = method;
-    head.target = target;
+    head.path = target;
     head.headers = &req_headers;
     head.body = body_spec;
 
@@ -548,10 +548,10 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
         }
     }
 
-    const fiber::http::Http1ResponseHead *resp_head = nullptr;
+    const fiber::http::ClientResponseHead *resp_head = nullptr;
     for (;;) {
         auto read_result = co_await upstream.read_header(timeout);
-        if (!read_result) {
+        if (!read_result || *read_result == nullptr) {
             co_return error_exn(*heap, "http.request: read header failed");
         }
         if (!(*read_result)->is_informational()) {
@@ -707,9 +707,9 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         req_end_stream = true;
     }
 
-    fiber::http::Http1RequestHead head;
+    fiber::http::ClientRequestHead head;
     head.method = method;
-    head.target = target;
+    head.path = target;
     head.headers = &req_headers;
     head.body = req_body;
 
@@ -743,10 +743,10 @@ AsyncTask http_proxy_pass_fn(void *userdata, const Library::HostCallFrame &frame
         }
     }
 
-    const fiber::http::Http1ResponseHead *resp_head = nullptr;
+    const fiber::http::ClientResponseHead *resp_head = nullptr;
     for (;;) {
         auto read_result = co_await upstream.read_header(timeout);
-        if (!read_result) {
+        if (!read_result || *read_result == nullptr) {
             co_return error_exn(*heap, "http.proxyPass: read response header failed");
         }
         if ((*read_result)->status_code == 101 || !(*read_result)->is_informational()) {

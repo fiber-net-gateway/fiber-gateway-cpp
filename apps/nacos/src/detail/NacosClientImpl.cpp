@@ -288,9 +288,9 @@ NacosClientImpl::login(const net::SocketAddress &endpoint, std::string_view auth
         co_return std::unexpected(common::IoErr::NoMem);
     }
 
-    http::Http1RequestHead request;
+    http::ClientRequestHead request;
     request.method = http::HttpMethod::Post;
-    request.target = target;
+    request.path = target;
     request.headers = &headers;
     request.body = http::HttpBodySpec::ContentLength(auth_body.size());
 
@@ -313,7 +313,7 @@ NacosClientImpl::login(const net::SocketAddress &endpoint, std::string_view auth
         }
     }
 
-    const http::Http1ResponseHead *response = nullptr;
+    const http::ClientResponseHead *response = nullptr;
     for (;;) {
         auto header_result = co_await exchange.read_header(options_.request_timeout);
         if (!running()) {
@@ -323,6 +323,10 @@ NacosClientImpl::login(const net::SocketAddress &endpoint, std::string_view auth
             co_return std::unexpected(header_result.error());
         }
         response = *header_result;
+        // A null head means the peer ran out of header blocks before sending a final one.
+        if (response == nullptr) {
+            co_return std::unexpected(common::IoErr::ConnReset);
+        }
         if (!response->is_informational()) {
             break;
         }

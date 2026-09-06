@@ -1078,16 +1078,16 @@ async::Task<std::optional<std::string>> CatClientCore::fetch_router_body(const C
                 co_return std::optional<std::string>{};
             }
             http::ClientHttp1Exchange exchange(connection, pool);
-            http::Http1RequestHead request{
+            http::ClientRequestHead request{
                     .method = http::HttpMethod::Get,
-                    .target = target,
+                    .path = target,
                     .headers = &headers,
                     .body = http::HttpBodySpec::None(),
             };
             auto sent = co_await exchange.send_header(request, true, options_.router_request_timeout);
             if (sent) {
                 auto response = co_await exchange.read_header(options_.router_request_timeout);
-                if (response && (*response)->status_code == 200) {
+                if (response && *response != nullptr && (*response)->status_code == 200) {
                     std::string collected;
                     bool failed = false;
                     for (;;) {

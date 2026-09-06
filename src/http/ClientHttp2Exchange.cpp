@@ -69,8 +69,8 @@ ClientHttp2Exchange &ClientHttp2Exchange::operator=(ClientHttp2Exchange &&other)
 }
 
 fiber::async::Task<common::IoResult<void>>
-ClientHttp2Exchange::send_request_header(const Http2RequestHead &head, bool end_stream,
-                                         std::chrono::milliseconds timeout) noexcept {
+ClientHttp2Exchange::send_header(const ClientRequestHead &head, bool end_stream,
+                                 std::chrono::milliseconds timeout) noexcept {
     const TimePoint deadline = deadline_after(timeout);
     auto request_result = co_await ensure_request_opened(deadline);
     if (!request_result) {
@@ -155,7 +155,7 @@ fiber::async::Task<common::IoResult<size_t>> ClientHttp2Exchange::write(const st
 }
 
 fiber::async::Task<common::IoResult<void>>
-ClientHttp2Exchange::write_trailer(const HttpHeaders &headers, std::chrono::milliseconds timeout) noexcept {
+ClientHttp2Exchange::send_trailer(const HttpHeaders &headers, std::chrono::milliseconds timeout) noexcept {
     if (!stream_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -166,7 +166,7 @@ ClientHttp2Exchange::write_trailer(const HttpHeaders &headers, std::chrono::mill
     co_return co_await req->write_trailer(headers, timeout);
 }
 
-fiber::async::Task<common::IoResult<const Http2ResponseHead *>>
+fiber::async::Task<common::IoResult<const ClientResponseHead *>>
 ClientHttp2Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     if (!stream_) {
         co_return std::unexpected(common::IoErr::Invalid);

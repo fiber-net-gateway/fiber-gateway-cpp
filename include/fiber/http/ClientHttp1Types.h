@@ -6,9 +6,7 @@
 #include <cstdint>
 #include <string_view>
 
-#include "HttpBodySpec.h"
-#include "HttpCommon.h"
-#include "HttpHeaders.h"
+#include "ClientHttpTypes.h"
 
 namespace fiber::http {
 
@@ -16,24 +14,6 @@ struct Http1ClientExchangeOptions {
     std::size_t response_header_init_size = 8 * 1024;
     std::size_t response_header_large_size = 32 * 1024;
     std::size_t response_header_large_num = 4;
-};
-
-struct Http1RequestHead {
-    HttpMethod method = HttpMethod::Unknown;
-    std::string_view target{};
-    const HttpHeaders *headers = nullptr;
-    HttpBodySpec body = HttpBodySpec::None();
-};
-
-struct Http1ResponseHead {
-    HttpVersion version = HttpVersion::HTTP_1_1;
-    int status_code = 0;
-    std::string_view reason{};
-    HttpHeaders headers;
-
-    explicit Http1ResponseHead(mem::BufPool &pool) : headers(pool) {}
-
-    [[nodiscard]] bool is_informational() const noexcept { return status_code >= 100 && status_code < 200; }
 };
 
 } // namespace fiber::http

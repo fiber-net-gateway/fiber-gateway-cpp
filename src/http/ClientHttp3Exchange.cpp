@@ -35,9 +35,8 @@ ClientHttp3Exchange &ClientHttp3Exchange::operator=(ClientHttp3Exchange &&other)
     return *this;
 }
 
-async::Task<common::IoResult<void>>
-ClientHttp3Exchange::send_request_header(const Http3RequestHead &head, bool end_stream,
-                                         std::chrono::milliseconds timeout) noexcept {
+async::Task<common::IoResult<void>> ClientHttp3Exchange::send_header(const ClientRequestHead &head, bool end_stream,
+                                                                     std::chrono::milliseconds timeout) noexcept {
     auto opened = co_await ensure_request_opened(timeout);
     if (!opened) {
         co_return std::unexpected(opened.error());
@@ -105,8 +104,8 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write(const std:
     co_return co_await req->write(buf, len, end_stream, timeout);
 }
 
-async::Task<common::IoResult<void>> ClientHttp3Exchange::write_trailer(const HttpHeaders &headers,
-                                                                       std::chrono::milliseconds timeout) noexcept {
+async::Task<common::IoResult<void>> ClientHttp3Exchange::send_trailer(const HttpHeaders &headers,
+                                                                      std::chrono::milliseconds timeout) noexcept {
     ClientHttp3Request *req = request();
     if (req == nullptr) {
         co_return std::unexpected(common::IoErr::Invalid);
@@ -114,7 +113,7 @@ async::Task<common::IoResult<void>> ClientHttp3Exchange::write_trailer(const Htt
     co_return co_await req->write_trailer(headers, timeout);
 }
 
-async::Task<common::IoResult<const Http3ResponseHead *>>
+async::Task<common::IoResult<const ClientResponseHead *>>
 ClientHttp3Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     ClientHttp3Request *req = request();
     if (req == nullptr) {
