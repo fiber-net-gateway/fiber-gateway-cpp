@@ -292,7 +292,9 @@ common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget
                 std::min({read_buf.readable(), static_cast<std::size_t>(inbound_io_.payload_remaining), byte_budget});
         common::IoErr err = consume_incoming_frame_payload(inbound_io_.current_header, read_buf,
                                                            inbound_io_.payload_offset, chunk_len);
-        if (err != common::IoErr::None) {
+        // Processing GOAWAY or the final stream payload can finish a draining
+        // connection and release read_buf. Do not touch that storage afterwards.
+        if (err != common::IoErr::None || state_ == State::Closing || state_ == State::Closed) {
             return err;
         }
         read_buf.consume(chunk_len);
@@ -1066,7 +1068,13 @@ common::IoErr Http2Connection::handle_settings_payload(const FrameHeader &fhr, c
         if (settings_scratch_used_ != 0) {
             return common::IoErr::Invalid;
         }
+        const bool first_settings = !peer_settings_received_;
         peer_settings_received_ = true;
+        // Pools switch from their pre-SETTINGS limit to the advertised budget
+        // only after the complete frame, including an empty initial SETTINGS.
+        if (first_settings) {
+            on_local_stream_attach_capacity_changed();
+        }
         return send_settings_ack();
     }
 
@@ -1475,7 +1483,11 @@ common::IoResult<Http2Stream::Lease> Http2Connection::try_attach_local_stream(Ht
         next_local_stream_id_ += 2U;
     }
     ++local_active_stream_count_;
-    return stream.lease();
+    auto result = stream.lease();
+    if (local_stream_ids_exhausted_) {
+        on_local_stream_attach_capacity_changed();
+    }
+    return result;
 }
 
 void Http2Connection::detach_stream(Http2Stream &stream) noexcept {
