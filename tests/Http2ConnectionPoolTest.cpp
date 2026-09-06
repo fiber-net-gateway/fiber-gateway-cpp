@@ -861,3 +861,102 @@ TEST(Http2ConnectionPoolTest, AbandonedPooledExchangeCancelsStreamBeforeReturnin
             single_connection());
 }
 } // namespace
+
+TEST(Http2ConnectionPoolTest, DialFailuresAreReportedAndBackOffExponentially) {
+    struct Report {
+        std::vector<std::chrono::milliseconds> backoffs;
+        std::vector<std::size_t> counts;
+        IoErr last = IoErr::None;
+    };
+    Http2ConnectionPoolCore::Options options;
+    options.dial_retry_backoff = 10ms;
+    options.max_dial_retry_backoff = 40ms;
+    run_case(
+            [](PoolHarness &h) -> Task<void> {
+                Report report;
+                h.pool.set_dial_failed_callback(
+                        [](void *ctx, const HttpConnectionGroupKey &, IoErr error, std::size_t failures,
+                           std::chrono::milliseconds retry_after) noexcept {
+                            auto &report = *static_cast<Report *>(ctx);
+                            report.last = error;
+                            report.counts.push_back(failures);
+                            report.backoffs.push_back(retry_after);
+                        },
+                        &report);
+                h.fail_dials = 4;
+                auto lease = co_await h.acquire(5s);
+                EXPECT_TRUE(lease);
+                EXPECT_EQ(report.last, IoErr::ConnRefused);
+                EXPECT_EQ(report.counts, (std::vector<std::size_t>{1, 2, 3, 4}));
+                // Doubles from the configured base and saturates at the cap.
+                EXPECT_EQ(report.backoffs, (std::vector<std::chrono::milliseconds>{10ms, 20ms, 40ms, 40ms}));
+                // A success clears the group's failure streak.
+                if (lease)
+                    lease->reset();
+                h.fail_dials = 1;
+                h.pool.clear();
+                co_await h.pool.join();
+                auto again = co_await h.acquire(5s);
+                EXPECT_TRUE(again);
+                EXPECT_EQ(report.counts.back(), 1u);
+                h.pool.clear_dial_failed_callback();
+            },
+            options);
+}
+
+TEST(Http2ConnectionPoolTest, PreSettingsZeroWaitsForSettingsInsteadOfDialingMore) {
+    Http2ConnectionPoolCore::Options options;
+    options.pre_settings_max_streams = 0;
+    options.max_connections_per_group = 4;
+    run_case(
+            [](PoolHarness &h) -> Task<void> {
+                auto lease = co_await h.acquire(5s);
+                EXPECT_TRUE(lease);
+                // The group waits for the first connection's SETTINGS rather
+                // than fanning out a connection per pending request.
+                EXPECT_EQ(h.dials, 1u);
+                EXPECT_EQ(h.pool.connection_total(), 1u);
+                if (lease)
+                    EXPECT_TRUE(lease->connection().http2().peer_settings_received());
+            },
+            options);
+}
+
+TEST(Http2ConnectionPoolTest, TryAcquireReusesWithoutDialingOrBarging) {
+    run_case(
+            [](PoolHarness &h) -> Task<void> {
+                // Nothing pooled yet: no group is created and no dial starts.
+                EXPECT_FALSE(h.pool.try_acquire(h.key()).has_value());
+                EXPECT_EQ(h.dials, 0u);
+                EXPECT_EQ(h.pool.group_count(), 0u);
+
+                auto lease = co_await h.acquire();
+                EXPECT_TRUE(lease);
+                if (!lease)
+                    co_return;
+                co_await h.settled(*lease);
+                lease->reset();
+
+                auto reused = h.pool.try_acquire(h.key());
+                EXPECT_TRUE(reused.has_value());
+                EXPECT_EQ(h.dials, 1u);
+                // Saturated at one stream per connection: no slot, still no dial.
+                EXPECT_FALSE(h.pool.try_acquire(h.key()).has_value());
+                EXPECT_EQ(h.dials, 1u);
+
+                // A queued waiter owns the next slot; try_acquire must not barge.
+                bool queued = false;
+                async::spawn(h.loop, [&]() -> DetachedTask {
+                    auto next = co_await h.acquire();
+                    EXPECT_TRUE(next);
+                    queued = true;
+                });
+                co_await async::sleep(5ms);
+                EXPECT_FALSE(queued);
+                EXPECT_FALSE(h.pool.try_acquire(h.key()).has_value());
+                reused->reset();
+                while (!queued)
+                    co_await async::sleep(1ms);
+            },
+            single_connection());
+}

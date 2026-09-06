@@ -13,14 +13,23 @@ class Http2PoolAcquireWaiter;
 
 // Stable storage shared by all leases on one connection. Three independent
 // hooks represent availability, ownership and idle expiry respectively.
+//
+// The pool core owns every field below; nothing outside it may touch them. They
+// stay public only because IntrusiveList reaches the hooks through offsetof,
+// which needs a standard-layout type, and that forbids mixing access levels.
 class Http2ConnectionPoolEntry {
 public:
     enum class State : std::uint8_t { Free, Connecting, Ready, Draining, Closed };
     ~Http2ConnectionPoolEntry();
-    void construct_connection(event::EventLoop &loop, Http2Connection::Options options) noexcept;
-    void destroy_connection() noexcept;
     [[nodiscard]] Http2ClientConnection &connection() noexcept;
 
+private:
+    friend class Http2ConnectionPoolCore;
+
+    void construct_connection(event::EventLoop &loop, Http2Connection::Options options) noexcept;
+    void destroy_connection() noexcept;
+
+public:
     common::IntrusiveListHook ready_hook_{};
     common::IntrusiveListHook group_hook_{};
     common::IntrusiveListHook idle_hook_{};
@@ -35,6 +44,9 @@ public:
     bool maintenance_posted_ = false;
     bool has_connection_ = false;
     bool abort_connection_ = false;
+    // Ready, but with no capacity purely because the peer's first SETTINGS has
+    // not landed yet. Such a group waits instead of dialing another connection.
+    bool awaiting_settings_ = false;
     event::EventLoop::DeferEntry maintenance_entry_{};
     Http2CloseGate::ObserverHook closed_observer_{};
     Http2ConnectionPoolEntry *next_free_ = nullptr;
@@ -57,9 +69,12 @@ private:
     std::size_t total_count_ = 0;
     std::size_t ready_count_ = 0;
     std::size_t connecting_count_ = 0;
+    std::size_t awaiting_settings_count_ = 0;
+    // Consecutive failed dials, driving the retry backoff. Reset by a success.
+    std::size_t dial_failures_ = 0;
     Http2PoolAcquireWaiter *wait_head_ = nullptr;
     Http2PoolAcquireWaiter *wait_tail_ = nullptr;
-    // A failed dial retries after a short loop timer, never a busy retry loop.
+    // A failed dial retries after a backoff timer, never a busy retry loop.
     event::EventLoop::TimerEntry retry_timer_{};
     Http2ConnectionPoolCore *pool_ = nullptr;
     Http2ConnectionPoolGroupBucket *next_free_ = nullptr;
