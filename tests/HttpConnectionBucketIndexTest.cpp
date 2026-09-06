@@ -4,12 +4,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <fiber/http/Http1ConnectionPoolEntry.h>
+#include <fiber/http/Http2ConnectionPoolEntry.h>
 #include <type_traits>
 
 #include <fiber/http/HttpConnectionBucketIndex.h>
 
 static_assert(
         std::is_base_of_v<fiber::http::HttpConnectionPoolBucketBase, fiber::http::Http1ConnectionPoolGroupBucket>);
+static_assert(
+        std::is_base_of_v<fiber::http::HttpConnectionPoolBucketBase, fiber::http::Http2ConnectionPoolGroupBucket>);
 static_assert(!std::is_polymorphic_v<fiber::http::HttpConnectionPoolBucketBase>);
 
 namespace {
