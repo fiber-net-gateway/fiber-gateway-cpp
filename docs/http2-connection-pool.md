@@ -77,8 +77,7 @@ async::Task<common::IoResult<void>> request(
 
 | 选项 | 默认值 | 含义 |
 |---|---:|---|
-| `max_streams_per_connection` | 0 | 每连接软上限，0 表示不限 |
-| `pre_settings_max_streams` | 16 | 首次完整 SETTINGS 前的保守上限，0 表示不发名额、等待 SETTINGS |
+| `local_concurrent_streams_limit` | 16 | 每连接并发流预算：SETTINGS 前的假设值与 SETTINGS 后的钳制值合一，同时就是每连接 Lease 上限，必须至少为 1 |
 | `max_streams_lifetime` | 0 | 累计归还名额数达到该值后退休，0 表示不限 |
 | `max_connections_per_group` | 4 | 单组全部存活连接上限，含连接中和 draining |
 | `max_connections_total` | 64 | 全部组的存活连接上限 |
@@ -92,7 +91,7 @@ async::Task<common::IoResult<void>> request(
 
 `max_connections_total`、`max_connections_per_group` 和 `max_concurrent_dials_per_group` 必须至少为 1，`max_idle_total` 必须不超过总连接上限，`max_dial_retry_backoff` 必须不小于 `dial_retry_backoff`。
 
-收到 SETTINGS 后，容量为对端宣告值与池软上限的较小值。首次 SETTINGS 完成会通知池切换容量口径。`pre_settings_max_streams` 为 0 时，已就绪但尚未收到 SETTINGS 的连接容量为 0，该组在此期间不再拨新连接，请求等待这条连接的 SETTINGS 到达；这与配置非 0 值时「先按保守上限发名额」是两种取舍。对端缩小上限时，已发出的 Lease 不会被撤销；其尚未 attach 的请求由 stream gate 等待，使用请求头发送超时限制等待时间。
+每条连接的预算为 `min(local_concurrent_streams_limit, 对端宣告值)`，且在收到对端 SETTINGS 之前就等于该上限本身；上限既是对端未宣告前的保守假设，也是宣告后的永久钳制。对端缩小宣告值时，已发出的 Lease 不会被撤销；其尚未 attach 的请求由 stream gate 等待，使用请求头发送超时限制等待时间。
 
 ### 5.2 等待、超时与错误
 

@@ -66,9 +66,12 @@ public:
         std::uint32_t max_frame_size = 16384;
         std::uint32_t max_hpack_string_size = 64 * 1024;
         std::size_t max_free_send_entries = 64;
-        // Initial peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS budget used
-        // for streams we create until the peer sends its own SETTINGS frame.
-        std::uint32_t max_peer_concurrent_streams = 100;
+        // The budget for streams we create, in one knob: it is the assumption
+        // before the peer's SETTINGS arrives and the permanent clamp after —
+        // the live budget is min(this, the peer's
+        // SETTINGS_MAX_CONCURRENT_STREAMS), and a SETTINGS frame without the
+        // entry simply leaves it where it was.
+        std::uint32_t local_concurrent_streams_limit = 512;
         // SETTINGS_MAX_CONCURRENT_STREAMS that we advertise to the peer and
         // enforce for peer-created streams on this connection.
         std::uint32_t local_max_concurrent_streams = 128;
@@ -119,15 +122,27 @@ public:
     [[nodiscard]] bool peer_enable_connect_protocol() const noexcept { return peer_enable_connect_protocol_; }
 
     // Fires on this connection's loop whenever anything gating locally initiated
-    // streams changes: a stream detaching, the peer's
-    // SETTINGS_MAX_CONCURRENT_STREAMS, a peer GOAWAY, local stream id
-    // exhaustion, or a state transition. It runs inline, so it must only touch
-    // memory: no I/O, and it must never destroy this connection. A change the
-    // callback itself triggers is coalesced into one more pass instead of
-    // recursing, so the callback must not keep changing capacity forever.
+    // streams changes: a stream attaching or detaching (either side's streams)
+    // or the effective budget the peer's SETTINGS_MAX_CONCURRENT_STREAMS feeds.
+    // It runs inline, so it must only touch memory: no I/O, and it must never
+    // destroy this connection. A change the callback itself triggers is
+    // coalesced into one more pass instead of recursing, so the callback must
+    // not keep changing capacity forever.
     void set_capacity_callback(CapacityCallback cb, void *ctx) noexcept;
     void clear_capacity_callback() noexcept;
 
+    // Fires on this connection's loop for every state transition, including the
+    // final one into Closed. It runs inline, so it must only touch memory: no
+    // I/O, and it must never destroy this connection — the deferred closed
+    // callback is the only notification allowed to. A transition raised from
+    // inside the callback is coalesced into one more pass instead of recursing.
+    using StateCallback = void (*)(void *ctx, Http2Connection &connection) noexcept;
+    void set_state_callback(StateCallback cb, void *ctx) noexcept;
+    void clear_state_callback() noexcept;
+
+    // The budget attach admission actually uses: the peer's
+    // SETTINGS_MAX_CONCURRENT_STREAMS clamped by local_concurrent_streams_limit,
+    // which is also the assumption before the peer's SETTINGS arrives.
     [[nodiscard]] std::uint32_t peer_max_concurrent_streams() const noexcept {
         return peer_advertised_max_concurrent_streams_;
     }
@@ -136,10 +151,10 @@ public:
     // the slots handed to resumed attach waiters.
     [[nodiscard]] std::size_t available_local_stream_slots() const noexcept;
     [[nodiscard]] bool peer_goaway_received() const noexcept { return peer_goaway_received_; }
-    // What try_attach_local_stream would return right now: None when a stream
     // can be attached, Busy while the peer budget is full, Canceled once the
     // connection is draining, closing, or out of local stream ids, Invalid
     // before the session starts. Waiting callers use this to tell "retry later"
+    // What try_attach_local_stream would return right now: None when a stream
     // apart from "never again"; see Http2LocalStreamGate.
     [[nodiscard]] common::IoErr local_stream_attach_status() const noexcept;
     [[nodiscard]] bool accepts_new_local_stream() const noexcept {
@@ -257,6 +272,10 @@ private:
     bool can_accept_peer_stream(std::uint32_t stream_id) const noexcept;
     void on_local_stream_attach_capacity_changed() noexcept;
     void apply_local_stream_attach_capacity_change() noexcept;
+    // The single funnel for state_ changes in live code: assigns and fires the
+    // state callback. Same-value writes are ignored; the destructor writes
+    // state_ directly because nothing may observe a dying connection.
+    void transition_state(State next) noexcept;
     void apply_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
     bool is_next_peer_stream_id(std::uint32_t stream_id) const noexcept;
     void handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept;
@@ -444,6 +463,8 @@ private:
     void *closed_ctx_ = nullptr;
     CapacityCallback capacity_cb_ = nullptr;
     void *capacity_ctx_ = nullptr;
+    StateCallback state_cb_ = nullptr;
+    void *state_ctx_ = nullptr;
     event::IoEvent outbound_wait_event_ = event::IoEvent::None;
     State state_ = State::Init;
     bool stop_sending_requested_ = false;
@@ -454,6 +475,8 @@ private:
     bool io_pump_again_ = false;
     bool capacity_dispatch_running_ = false;
     bool capacity_dispatch_again_ = false;
+    bool state_dispatch_running_ = false;
+    bool state_dispatch_again_ = false;
     bool prefer_write_ = false;
     bool outbound_ready_hint_ = false;
     bool inbound_eof_ = false;

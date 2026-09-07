@@ -44,9 +44,6 @@ public:
     bool maintenance_posted_ = false;
     bool has_connection_ = false;
     bool abort_connection_ = false;
-    // Ready, but with no capacity purely because the peer's first SETTINGS has
-    // not landed yet. Such a group waits instead of dialing another connection.
-    bool awaiting_settings_ = false;
     event::EventLoop::DeferEntry maintenance_entry_{};
     Http2CloseGate::ObserverHook closed_observer_{};
     Http2ConnectionPoolEntry *next_free_ = nullptr;
@@ -69,7 +66,6 @@ private:
     std::size_t total_count_ = 0;
     std::size_t ready_count_ = 0;
     std::size_t connecting_count_ = 0;
-    std::size_t awaiting_settings_count_ = 0;
     // Consecutive failed dials, driving the retry backoff. Reset by a success.
     std::size_t dial_failures_ = 0;
     Http2PoolAcquireWaiter *wait_head_ = nullptr;

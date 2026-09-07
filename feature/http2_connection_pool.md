@@ -183,12 +183,10 @@ class Http2CloseGate {                       // 无 mutex，侵入式 waiter 链
 
 ```
 capacity(entry) =
-    min(options.max_streams_per_connection,                   // 池的软上限, 0 = 不限
-        peer_settings_received ? peer_max_concurrent_streams  // 对端真实宣告
-                               : options.pre_settings_max_streams)   // 未收到 SETTINGS 前的保守值
+    peer_max_concurrent_streams    // 连接预算: min(local_concurrent_streams_limit, 对端宣告), SETTINGS 前即 limit
 ```
 
-`pre_settings_max_streams` 默认给 16：`Http2Connection` 在收到对端 SETTINGS 前用 `max_peer_concurrent_streams`（默认 100）乐观猜测，若服务端实际宣告 1，池已经发出去的 lease 会造成 attach 排队。16 是「不牺牲首包并发」与「不过度超发」的折中；配 1 会退化成串行，配 100 在小 `MAX_CONCURRENT_STREAMS` 的服务端上会抖动一次。
+`local_concurrent_streams_limit` 默认给 16，作为每条连接转发下去的流预算：它既是对端 SETTINGS 到达前的假设值，也是到达后的永久钳制（连接侧收到宣告即取 `min`）。16 是「不牺牲首包并发」与「不过度超发」的折中；配 1 会退化成串行，配大值在小 `MAX_CONCURRENT_STREAMS` 的服务端上会在收到 SETTINGS 时收缩一次容量。
 
 ## 5. 数据结构
 
@@ -399,8 +397,7 @@ retire(entry):
 ```
 struct Http2ConnectionPoolCore::Options {
     // 每连接
-    std::size_t   max_streams_per_connection   = 0;     // 0 = 只受对端 SETTINGS 限制
-    std::uint32_t pre_settings_max_streams     = 16;    // 收到对端 SETTINGS 前的保守并发
+    std::uint32_t local_concurrent_streams_limit = 16;  // 每连接流预算: SETTINGS 前假设 + SETTINGS 后钳制, 即每连接 Lease 上限
     std::uint64_t max_streams_lifetime         = 0;     // 0 = 不限, 到期优雅退休
 
     // 每组 / 全局
@@ -485,7 +482,7 @@ using ConnCountChangedCallback = void (*)(void *ctx, const HttpConnectionGroupKe
 
 1. **复用**：同 key 连发 N 个并发请求，服务端 `MAX_CONCURRENT_STREAMS = 100` → 只 accept 1 条连接。
 2. **饱和摘链**：`MAX_CONCURRENT_STREAMS = 2`，发 3 个并发 → 第 3 个等待；结束一个后第 3 个立刻被唤醒且复用同一条连接。
-3. **回到头部**：`max_streams_per_connection = 1`，`max_connections_per_group = 3`，制造 A/B/C 三条；结束 A 上的请求后，下一次 `acquire` 必须命中 A（校验 head 语义）。
+3. **回到头部**：`local_concurrent_streams_limit = 1`，`max_connections_per_group = 3`，制造 A/B/C 三条；结束 A 上的请求后，下一次 `acquire` 必须命中 A（校验 head 语义）。
 4. **组上限 + 等待队列 FIFO**：`max_connections_per_group = 1`，并发 5，校验唤醒顺序与全部成功。
 5. **超时**：`acquire(timeout=50ms)` 在名额耗尽时返回 `TimedOut`，且 waiter 已从链表摘除（无悬挂）。
 6. **idle 超时关闭**：所有请求结束 → 推进 loop 时间 → 连接被 GOAWAY 关闭、`conn_total_` 归零、bucket 从 index 摘除。

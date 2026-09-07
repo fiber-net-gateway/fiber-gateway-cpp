@@ -137,7 +137,7 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
     options_(std::move(options)), peer_stream_factory_ctx_(peer_stream_factory_ctx),
     peer_stream_factory_ops_(peer_stream_factory_ops) {
     FIBER_ASSERT(peer_stream_factory_ops_.create_peer_stream != nullptr);
-    peer_advertised_max_concurrent_streams_ = options_.max_peer_concurrent_streams;
+    peer_advertised_max_concurrent_streams_ = options_.local_concurrent_streams_limit;
     peer_initial_stream_send_window_ = options_.initial_stream_send_window;
     conn_recv_window_target_ =
             std::max(options_.initial_connection_recv_window, static_cast<std::uint32_t>(kInitialFlowControlWindow));
@@ -190,9 +190,9 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) n
         terminal_error_ = start_err;
         abort_outbound(start_err);
         transport_->close();
-        state_ = State::Closed;
         close_finished_ = true;
         close_completion_dispatched_ = true;
+        transition_state(State::Closed);
         return start_err;
     }
 
@@ -203,6 +203,7 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) n
 Http2Connection::~Http2Connection() {
     FIBER_ASSERT(!io_pump_running_);
     FIBER_ASSERT(!capacity_dispatch_running_);
+    FIBER_ASSERT(!state_dispatch_running_);
     if (io_pump_posted_ && transport_ && transport_->loop().in_loop()) {
         transport_->loop().cancel<Http2Connection, &Http2Connection::io_pump_entry_>(*this);
         io_pump_posted_ = false;
@@ -216,6 +217,8 @@ Http2Connection::~Http2Connection() {
     closed_ctx_ = nullptr;
     capacity_cb_ = nullptr;
     capacity_ctx_ = nullptr;
+    state_cb_ = nullptr;
+    state_ctx_ = nullptr;
     if (transport_ && transport_->loop().in_loop()) {
         cancel_io_timers();
         clear_transport_callbacks();
@@ -258,7 +261,7 @@ common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget
             if (err != common::IoErr::None) {
                 return err;
             }
-            state_ = State::Running;
+            transition_state(State::Running);
             inbound_io_.phase = ParsePhase::FrameHeader;
             continue;
         }
@@ -407,7 +410,7 @@ void Http2Connection::handle_read_eof() noexcept {
     inbound_eof_ = true;
     inbound_io_.operation_pending = false;
     inbound_io_.wait_event = event::IoEvent::None;
-    state_ = State::Closing;
+    transition_state(State::Closing);
     close_flush_outbound_ = true;
     close_outbound();
 }
@@ -737,11 +740,10 @@ void Http2Connection::finish_connection() noexcept {
     if (!streams_.empty()) {
         return;
     }
-    state_ = State::Closed;
+    transition_state(State::Closed);
     if (!io_pump_running_) {
         schedule_closed_completion();
     }
-    on_local_stream_attach_capacity_changed();
 }
 
 void Http2Connection::on_closed_completion(Http2Connection *connection) noexcept {
@@ -1186,13 +1188,10 @@ common::IoErr Http2Connection::handle_settings_payload(const FrameHeader &fhr, c
         if (settings_scratch_used_ != 0) {
             return common::IoErr::Invalid;
         }
-        const bool first_settings = !peer_settings_received_;
+        // A frame without the MAX_CONCURRENT_STREAMS entry leaves the budget
+        // where it was, so the completion itself has nothing to notify about:
+        // per-entry diffs in apply_settings_parameter cover every change.
         peer_settings_received_ = true;
-        // Pools switch from their pre-SETTINGS limit to the advertised budget
-        // only after the complete frame, including an empty initial SETTINGS.
-        if (first_settings) {
-            on_local_stream_attach_capacity_changed();
-        }
         return send_settings_ack();
     }
 
@@ -1345,10 +1344,16 @@ common::IoErr Http2Connection::apply_settings_parameter(std::uint16_t id, std::u
             }
             peer_enable_push_ = value != 0;
             return common::IoErr::None;
-        case kSettingsMaxConcurrentStreams:
-            peer_advertised_max_concurrent_streams_ = value;
-            on_local_stream_attach_capacity_changed();
+        case kSettingsMaxConcurrentStreams: {
+            // The stored budget is the advertised value clamped by our own
+            // limit, and only a change of that clamped result notifies.
+            const std::uint32_t budget_before = peer_advertised_max_concurrent_streams_;
+            peer_advertised_max_concurrent_streams_ = std::min(options_.local_concurrent_streams_limit, value);
+            if (peer_advertised_max_concurrent_streams_ != budget_before) {
+                on_local_stream_attach_capacity_changed();
+            }
             return common::IoErr::None;
+        }
         case kSettingsInitialWindowSize:
             return apply_peer_initial_stream_window(value);
         case kSettingsMaxFrameSize:
@@ -1556,6 +1561,7 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
 
     last_peer_stream_id_ = stream_id;
     ++peer_active_stream_count_;
+    on_local_stream_attach_capacity_changed();
     return stream_ptr;
 }
 
@@ -1602,9 +1608,7 @@ common::IoResult<Http2Stream::Lease> Http2Connection::try_attach_local_stream(Ht
     }
     ++local_active_stream_count_;
     auto result = stream.lease();
-    if (local_stream_ids_exhausted_) {
-        on_local_stream_attach_capacity_changed();
-    }
+    on_local_stream_attach_capacity_changed();
     return result;
 }
 
@@ -1673,11 +1677,9 @@ common::IoErr Http2Connection::local_stream_attach_status() const noexcept {
     return common::IoErr::None;
 }
 
-// The stream table grows on demand, so the peer's SETTINGS_MAX_CONCURRENT_STREAMS
-// is the only ceiling on locally initiated streams.
 std::size_t Http2Connection::available_local_stream_slots() const noexcept {
-    const std::size_t peer_limit = static_cast<std::size_t>(peer_advertised_max_concurrent_streams_);
-    return peer_limit > local_active_stream_count_ ? peer_limit - local_active_stream_count_ : 0;
+    const std::size_t limit = static_cast<std::size_t>(peer_advertised_max_concurrent_streams_);
+    return limit > local_active_stream_count_ ? limit - local_active_stream_count_ : 0;
 }
 
 void Http2Connection::on_local_stream_attach_capacity_changed() noexcept {
@@ -1708,6 +1710,37 @@ void Http2Connection::clear_capacity_callback() noexcept {
     capacity_ctx_ = nullptr;
 }
 
+void Http2Connection::set_state_callback(StateCallback cb, void *ctx) noexcept {
+    state_cb_ = cb;
+    state_ctx_ = cb != nullptr ? ctx : nullptr;
+}
+
+void Http2Connection::clear_state_callback() noexcept {
+    state_cb_ = nullptr;
+    state_ctx_ = nullptr;
+}
+
+void Http2Connection::transition_state(State next) noexcept {
+    if (state_ == next) {
+        return;
+    }
+    state_ = next;
+    // A transition raised from inside the callback is folded into one more
+    // pass so an observer that reacts by closing or draining cannot recurse.
+    if (state_dispatch_running_) {
+        state_dispatch_again_ = true;
+        return;
+    }
+    state_dispatch_running_ = true;
+    do {
+        state_dispatch_again_ = false;
+        if (state_cb_ != nullptr) {
+            state_cb_(state_ctx_, *this);
+        }
+    } while (state_dispatch_again_);
+    state_dispatch_running_ = false;
+}
+
 // Observers read the new capacity themselves; the connection only has to keep
 // its own close bookkeeping moving.
 void Http2Connection::apply_local_stream_attach_capacity_change() noexcept {
@@ -1725,11 +1758,10 @@ bool Http2Connection::is_next_peer_stream_id(std::uint32_t stream_id) const noex
 }
 
 void Http2Connection::handle_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept {
+    // The Running -> Draining transition inside notifies the state hook, which
+    // is what cancels attach waiters: refusing new local streams is exactly
+    // what an observer needs to hear.
     apply_peer_goaway(last_stream_id, error_code);
-    // The GOAWAY path cancels attach waiters directly instead of going through
-    // the capacity hook, so notify once the connection has finished reacting:
-    // refusing new local streams is exactly what an observer needs to hear.
-    on_local_stream_attach_capacity_changed();
 }
 
 void Http2Connection::apply_peer_goaway(std::uint32_t last_stream_id, Http2ErrorCode error_code) noexcept {
@@ -1737,7 +1769,7 @@ void Http2Connection::apply_peer_goaway(std::uint32_t last_stream_id, Http2Error
     peer_last_stream_id_ = last_stream_id;
     peer_goaway_error_code_ = error_code;
     if (state_ == State::Running) {
-        state_ = State::Draining;
+        transition_state(State::Draining);
     }
     close_streams_after_goaway(last_stream_id);
     if (!local_goaway_sent_ && state_ != State::Closing && state_ != State::Closed) {
@@ -1850,15 +1882,15 @@ common::IoErr Http2Connection::start_client_session() noexcept {
         stop_sending_requested_ = true;
         stop_sending_reason_ = err;
         abort_outbound(err);
-        state_ = State::Closing;
+        transition_state(State::Closing);
         return err;
     }
-    state_ = State::Running;
+    transition_state(State::Running);
     return common::IoErr::None;
 }
 
 common::IoErr Http2Connection::start_server_session() noexcept {
-    state_ = State::Start;
+    transition_state(State::Start);
     return common::IoErr::None;
 }
 
@@ -1886,8 +1918,7 @@ common::IoErr Http2Connection::start_draining() noexcept {
     }
 
     local_goaway_sent_ = true;
-    state_ = State::Draining;
-    on_local_stream_attach_capacity_changed();
+    transition_state(State::Draining);
     maybe_enter_closing_from_draining();
     return common::IoErr::None;
 }
@@ -1905,11 +1936,10 @@ void Http2Connection::enter_closing(common::IoErr reason, bool report_error) noe
         abort_outbound(reason);
         close_finished_ = true;
         close_completion_dispatched_ = true;
-        state_ = State::Closed;
-        on_local_stream_attach_capacity_changed();
+        transition_state(State::Closed);
         return;
     }
-    state_ = State::Closing;
+    transition_state(State::Closing);
     stop_sending_requested_ = true;
     stop_sending_reason_ = reason;
     if (report_error && reason != common::IoErr::None) {
@@ -1923,7 +1953,6 @@ void Http2Connection::enter_closing(common::IoErr reason, bool report_error) noe
     abort_outbound(reason);
     outbound_wait_event_ = event::IoEvent::None;
     finish_connection();
-    on_local_stream_attach_capacity_changed();
 }
 
 void Http2Connection::bind_outbound_chain(mem::IoBufChain &chain) noexcept {
@@ -2369,7 +2398,7 @@ void Http2Connection::maybe_enter_closing_from_draining() noexcept {
         return;
     }
 
-    state_ = State::Closing;
+    transition_state(State::Closing);
     close_flush_outbound_ = true;
     stop_sending_requested_ = true;
     stop_sending_reason_ = common::IoErr::Canceled;
@@ -2377,7 +2406,7 @@ void Http2Connection::maybe_enter_closing_from_draining() noexcept {
     close_all_streams(common::IoErr::Canceled);
     close_outbound();
     schedule_io_pump();
-    on_local_stream_attach_capacity_changed();
+    finish_connection();
 }
 
 } // namespace fiber::http

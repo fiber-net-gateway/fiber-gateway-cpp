@@ -187,7 +187,10 @@ void run_case(Scenario scenario, Http2ConnectionPoolCore::Options options = {}, 
 Http2ConnectionPoolCore::Options single_connection(std::size_t streams = 1) {
     Http2ConnectionPoolCore::Options options;
     options.max_connections_per_group = 1;
-    options.max_streams_per_connection = streams;
+    // Zero keeps the pool's default budget, which is what the old "no
+    // per-connection cap" setting effectively produced.
+    if (streams)
+        options.local_concurrent_streams_limit = static_cast<std::uint32_t>(streams);
     return options;
 }
 
@@ -724,9 +727,9 @@ TEST(Http2ConnectionPoolTest, ParallelDialOptionHonorsConfiguredLimit) {
             options);
 }
 
-TEST(Http2ConnectionPoolTest, PollNeverDialsAndPreSettingsLimitIsConservative) {
+TEST(Http2ConnectionPoolTest, PollNeverDialsAndLocalLimitIsConservative) {
     auto options = single_connection(0);
-    options.pre_settings_max_streams = 1;
+    options.local_concurrent_streams_limit = 1;
     run_case(
             [](PoolHarness &h) -> Task<void> {
                 auto poll = co_await h.acquire(0ms);
@@ -738,12 +741,14 @@ TEST(Http2ConnectionPoolTest, PollNeverDialsAndPreSettingsLimitIsConservative) {
                 EXPECT_TRUE(lease);
                 if (!lease)
                     co_return;
-                if (!lease->connection().http2().peer_settings_received()) {
-                    auto before = co_await h.acquire(0ms);
-                    EXPECT_FALSE(before);
-                    EXPECT_EQ(before.error(), IoErr::Busy);
-                }
+                // The single slot stays taken for the lease's lifetime: the
+                // local limit clamps the peer's budget, before its SETTINGS
+                // and after it alike.
                 co_await h.settled(*lease);
+                auto held = co_await h.acquire(0ms);
+                EXPECT_FALSE(held);
+                EXPECT_EQ(held.error(), IoErr::Busy);
+                lease->reset();
                 auto after = co_await h.acquire(0ms);
                 EXPECT_TRUE(after);
             },
@@ -900,24 +905,6 @@ TEST(Http2ConnectionPoolTest, DialFailuresAreReportedAndBackOffExponentially) {
                 EXPECT_TRUE(again);
                 EXPECT_EQ(report.counts.back(), 1u);
                 h.pool.clear_dial_failed_callback();
-            },
-            options);
-}
-
-TEST(Http2ConnectionPoolTest, PreSettingsZeroWaitsForSettingsInsteadOfDialingMore) {
-    Http2ConnectionPoolCore::Options options;
-    options.pre_settings_max_streams = 0;
-    options.max_connections_per_group = 4;
-    run_case(
-            [](PoolHarness &h) -> Task<void> {
-                auto lease = co_await h.acquire(5s);
-                EXPECT_TRUE(lease);
-                // The group waits for the first connection's SETTINGS rather
-                // than fanning out a connection per pending request.
-                EXPECT_EQ(h.dials, 1u);
-                EXPECT_EQ(h.pool.connection_total(), 1u);
-                if (lease)
-                    EXPECT_TRUE(lease->connection().http2().peer_settings_received());
             },
             options);
 }

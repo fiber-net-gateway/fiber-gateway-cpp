@@ -22,8 +22,8 @@ namespace fiber::http {
 // while anyone is queued.
 //
 // Lives on the connection's EventLoop and is not thread safe. It owns the
-// connection's single capacity callback; chain set_capacity_callback to observe
-// capacity changes alongside it.
+// connection's capacity and state callbacks; chain set_capacity_callback to
+// observe capacity changes alongside it.
 class Http2LocalStreamGate : public common::NonCopyable, public common::NonMovable {
 public:
     explicit Http2LocalStreamGate(Http2Connection &connection) noexcept;
@@ -55,6 +55,7 @@ private:
     class Waiter;
 
     static void on_connection_capacity(void *ctx, Http2Connection &connection) noexcept;
+    static void on_connection_state(void *ctx, Http2Connection &connection) noexcept;
     void handle_capacity_change() noexcept;
     void wake_waiters() noexcept;
     void link_waiter(Waiter &waiter) noexcept;
