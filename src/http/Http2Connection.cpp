@@ -974,7 +974,34 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
             }
             stream = create_peer_stream(fhr.stream_id);
             if (!stream) {
-                return common::IoErr::Invalid;
+                if (!is_peer_stream_id(fhr.stream_id)) {
+                    return common::IoErr::Invalid;
+                }
+                // The factory refused a protocol-legal new stream: we are
+                // draining, the advertised SETTINGS_MAX_CONCURRENT_STREAMS
+                // budget is full, or the factory itself failed. RFC 9113
+                // 6.8/5.1.2 makes that a stream error so the peer can retry on
+                // a fresh connection; only a wrong-parity stream id remains a
+                // connection error. Advance last_peer_stream_id_ so the
+                // refused id is no longer idle: late DATA then consumes the
+                // connection window and is discarded, late RST_STREAM /
+                // WINDOW_UPDATE are ignored, and the header block (including
+                // CONTINUATION frames) is dropped without dispatching a
+                // handler. A later GOAWAY echoing this id is safe because the
+                // RST_STREAM already told the peer this stream was refused.
+                last_peer_stream_id_ = fhr.stream_id;
+                handle_stream_error(fhr.stream_id, Http2ErrorCode::RefusedStream, common::IoErr::Canceled);
+                inbound_stream_.lease.reset();
+                inbound_stream_.stream_id = fhr.stream_id;
+                inbound_stream_.payload_begin = 0;
+                inbound_stream_.payload_end = 0;
+                inbound_stream_.header_block_open = (fhr.flags & kFlagEndHeaders) == 0;
+                inbound_stream_.end_stream_pending = false;
+                inbound_stream_.discard_closed_stream_block = true;
+                if (!inbound_stream_.header_block_open) {
+                    clear_inbound_stream();
+                }
+                return common::IoErr::None;
             }
         } else {
             if (stream->remote_end_stream_) {
