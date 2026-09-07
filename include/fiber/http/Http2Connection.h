@@ -53,12 +53,16 @@ public:
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
         std::size_t read_buffer_size = 64 * 1024;
-        std::chrono::milliseconds read_timeout = std::chrono::seconds(30);
+        // Inbound-idle deadline: while running, expiry sends a keepalive PING and
+        // the peer then has keepalive grace (one third of this, floored at 10s,
+        // scaled down for shorter timeouts) to answer with any inbound bytes
+        // before the connection is closed. Outside the running state, or when the
+        // peer never answers, expiry closes with TimedOut. max() disables.
+        std::chrono::milliseconds read_timeout = std::chrono::seconds(75);
         // Retain an empty unique read buffer for this long after the last
         // successful inbound read. Zero disables idle buffer release.
         std::chrono::milliseconds read_buffer_idle_release_timeout = std::chrono::milliseconds::zero();
         std::chrono::milliseconds write_timeout = std::chrono::seconds(30);
-        std::chrono::milliseconds keepalive_ping_interval = std::chrono::milliseconds::zero();
         std::uint32_t max_frame_size = 16384;
         std::uint32_t max_hpack_string_size = 64 * 1024;
         std::size_t max_free_send_entries = 64;

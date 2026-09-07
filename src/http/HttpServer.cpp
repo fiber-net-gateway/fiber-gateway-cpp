@@ -473,8 +473,6 @@ Http2Connection::Options HttpServer::make_http2_options(const HttpServerOptions 
     options.role = Http2Connection::ConnectionRole::Server;
     options.read_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(http_options.keep_alive_timeout);
     options.write_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(http_options.write_timeout);
-    options.keepalive_ping_interval =
-            std::chrono::duration_cast<std::chrono::milliseconds>(http_options.keep_alive_timeout);
     options.enable_connect_protocol = http_options.enable_extended_connect;
     return options;
 }
