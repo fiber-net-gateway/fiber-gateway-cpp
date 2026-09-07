@@ -17,7 +17,7 @@
 #include <fiber/common/Assert.h>
 #include <fiber/common/IoError.h>
 #include <fiber/http/Http1Connection.h>
-#include <fiber/http/Http2CloseGate.h>
+#include <fiber/http/Http2ServerConnection.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/TcpStream.h>
 #include "http/TlsAlpn.h"
@@ -66,13 +66,6 @@ struct HttpServer::Runtime {
         bool shutdown_posted = false;
     };
 
-    struct Http2Entry {
-        std::mutex mutex{};
-        std::shared_ptr<Http2Connection> connection{};
-        event::EventLoop *loop = nullptr;
-        bool shutdown_posted = false;
-    };
-
     event::EventLoop &owner_loop;
     event::EventLoopGroup *worker_group = nullptr;
     net::TcpListener listener;
@@ -90,15 +83,39 @@ struct HttpServer::Runtime {
     async::WaitGroup tasks{};
     std::mutex connections_mutex{};
     std::vector<std::shared_ptr<Http1Entry>> http1_connections{};
-    std::vector<std::shared_ptr<Http2Entry>> http2_connections{};
+    std::vector<std::shared_ptr<Http2ServerWorker>> workers{};
 
     Runtime(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options,
             event::EventLoopGroup *worker_group) :
         owner_loop(loop), worker_group(worker_group), listener(loop), handler(std::move(handler)),
         options(std::move(options)), http2_request_factory(this->options, this->handler) {
         http1_connections.reserve(16);
-        http2_connections.reserve(16);
+        make_workers();
     }
+
+    ~Runtime() {
+        for (const auto &worker: workers) {
+            FIBER_ASSERT(worker->empty());
+        }
+    }
+
+    // One worker per worker-group loop (or just the owner loop without a
+    // group), matching how accepted connections are distributed.
+    void make_workers() {
+        const std::size_t count = (worker_group != nullptr && worker_group->size() > 0) ? worker_group->size() : 1;
+        workers.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            event::EventLoop &loop =
+                    (worker_group != nullptr && worker_group->size() > 0) ? worker_group->at(index) : owner_loop;
+            workers.push_back(std::make_shared<Http2ServerWorker>(loop));
+        }
+    }
+
+    [[nodiscard]] std::size_t select_worker_index() noexcept {
+        return next_loop_index.fetch_add(1, std::memory_order_relaxed) % workers.size();
+    }
+
+    [[nodiscard]] event::EventLoop &worker_loop(std::size_t index) const noexcept { return workers[index]->loop(); }
 
     bool begin_shutdown() {
         std::lock_guard guard(lifecycle_mutex);
@@ -166,19 +183,6 @@ struct HttpServer::Runtime {
         co_return;
     }
 
-    static fiber::async::DetachedTask shutdown_http2_entry(std::shared_ptr<Http2Entry> entry) {
-        std::shared_ptr<Http2Connection> connection;
-        {
-            std::lock_guard guard(entry->mutex);
-            connection = entry->connection;
-            entry->shutdown_posted = false;
-        }
-        if (connection) {
-            connection->shutdown(common::IoErr::Canceled);
-        }
-        co_return;
-    }
-
     void add_http1(const std::shared_ptr<Http1Entry> &entry) {
         std::lock_guard guard(connections_mutex);
         http1_connections.push_back(entry);
@@ -189,35 +193,31 @@ struct HttpServer::Runtime {
         std::erase(http1_connections, entry);
     }
 
-    void add_http2(const std::shared_ptr<Http2Entry> &entry) {
-        std::lock_guard guard(connections_mutex);
-        http2_connections.push_back(entry);
-    }
-
-    void remove_http2(const std::shared_ptr<Http2Entry> &entry) {
-        std::lock_guard guard(connections_mutex);
-        std::erase(http2_connections, entry);
-    }
-
     void request_shutdown() {
-        std::lock_guard guard(connections_mutex);
-        for (const auto &entry: http1_connections) {
-            std::lock_guard entry_guard(entry->mutex);
-            if (!entry->connection || entry->loop == nullptr || entry->shutdown_posted) {
-                continue;
+        {
+            std::lock_guard guard(connections_mutex);
+            for (const auto &entry: http1_connections) {
+                std::lock_guard entry_guard(entry->mutex);
+                if (!entry->connection || entry->loop == nullptr || entry->shutdown_posted) {
+                    continue;
+                }
+                entry->shutdown_posted = true;
+                async::spawn(*entry->loop,
+                             [entry]() -> fiber::async::DetachedTask { return Runtime::shutdown_http1_entry(entry); });
             }
-            entry->shutdown_posted = true;
-            async::spawn(*entry->loop,
-                         [entry]() -> fiber::async::DetachedTask { return Runtime::shutdown_http1_entry(entry); });
         }
-        for (const auto &entry: http2_connections) {
-            std::lock_guard entry_guard(entry->mutex);
-            if (!entry->connection || entry->loop == nullptr || entry->shutdown_posted) {
+        // HTTP/2 connections are registered per worker loop, so each worker is
+        // handed a walk on its own loop; the worker collapses repeated
+        // request_shutdown() calls into one pending walk per worker.
+        for (const auto &worker: workers) {
+            if (!worker->claim_close_walk()) {
                 continue;
             }
-            entry->shutdown_posted = true;
-            async::spawn(*entry->loop,
-                         [entry]() -> fiber::async::DetachedTask { return Runtime::shutdown_http2_entry(entry); });
+            async::spawn(worker->loop(), [worker]() -> fiber::async::DetachedTask {
+                worker->release_close_walk();
+                worker->shutdown_connections();
+                co_return;
+            });
         }
     }
 };
@@ -319,24 +319,18 @@ fiber::async::DetachedTask HttpServer::serve_loop(std::shared_ptr<Runtime> runti
 
         auto accept = std::move(*accept_result);
         runtime->tasks.add();
-        event::EventLoop &connection_loop = select_connection_loop(runtime);
-        fiber::async::spawn(connection_loop,
-                            [runtime, accept = std::move(accept)]() mutable -> fiber::async::DetachedTask {
-                                return handle_connection(std::move(runtime), std::move(accept));
-                            });
+        const std::size_t worker_index = runtime->select_worker_index();
+        fiber::async::spawn(
+                runtime->worker_loop(worker_index),
+                [runtime, worker_index, accept = std::move(accept)]() mutable -> fiber::async::DetachedTask {
+                    return handle_connection(std::move(runtime), worker_index, std::move(accept));
+                });
     }
     co_return;
 }
 
-event::EventLoop &HttpServer::select_connection_loop(const std::shared_ptr<Runtime> &runtime) noexcept {
-    if (!runtime->worker_group || runtime->worker_group->size() == 0) {
-        return event::EventLoop::current();
-    }
-    const std::size_t index = runtime->next_loop_index.fetch_add(1, std::memory_order_relaxed);
-    return runtime->worker_group->at(index % runtime->worker_group->size());
-}
-
-fiber::async::DetachedTask HttpServer::handle_connection(std::shared_ptr<Runtime> runtime, net::AcceptResult accept) {
+fiber::async::DetachedTask HttpServer::handle_connection(std::shared_ptr<Runtime> runtime, std::size_t worker_index,
+                                                         net::AcceptResult accept) {
     struct TaskGuard {
         std::shared_ptr<Runtime> runtime;
         ~TaskGuard() {
@@ -390,7 +384,7 @@ fiber::async::DetachedTask HttpServer::handle_connection(std::shared_ptr<Runtime
             co_await serve_http1(runtime, std::move(transport));
             co_return;
         case SelectedProtocol::Http2:
-            co_await serve_http2(runtime, std::move(transport));
+            co_await serve_http2(runtime, worker_index, std::move(transport));
             co_return;
         case SelectedProtocol::Unsupported:
             transport->close();
@@ -427,44 +421,32 @@ fiber::async::Task<void> HttpServer::serve_http1(std::shared_ptr<Runtime> runtim
     co_return;
 }
 
-fiber::async::Task<void> HttpServer::serve_http2(std::shared_ptr<Runtime> runtime,
+fiber::async::Task<void> HttpServer::serve_http2(std::shared_ptr<Runtime> runtime, std::size_t worker_index,
                                                  std::unique_ptr<HttpTransport> transport) {
     if (!transport) {
         co_return;
     }
 
-    auto connection = std::make_shared<Http2Connection>(make_http2_options(runtime->options),
-                                                        &runtime->http2_request_factory, ServerRequestFactory::ops());
-    if (!connection) {
-        co_return;
-    }
-    // Armed before start so a connection that closes immediately still resolves
-    // the join below.
-    Http2CloseGate close_gate;
-    close_gate.arm(*connection);
-    if (connection->start(std::move(transport)) != common::IoErr::None) {
+    // Lives on this coroutine's frame for the whole session: no per-connection
+    // heap allocation, and the worker list reaches it through its hook.
+    Http2ServerConnection connection(make_http2_options(runtime->options), runtime->http2_request_factory);
+    if (connection.start(std::move(transport)) != common::IoErr::None) {
         co_return;
     }
 
-    auto entry = std::make_shared<Runtime::Http2Entry>();
-    {
-        std::lock_guard guard(entry->mutex);
-        entry->connection = connection;
-        entry->loop = &connection->loop();
-    }
-    runtime->add_http2(entry);
+    Http2ServerWorker &worker = *runtime->workers[worker_index];
+    worker.link(connection);
+    // Shutdown may have begun while this connection was starting; the pending
+    // walk only reaches connections linked before it ran, so close this one
+    // here. Harmlessly redundant if the walk does reach it.
     if (runtime->closing()) {
-        runtime->request_shutdown();
+        connection.request_shutdown();
     }
 
-    auto close_result = co_await close_gate.join();
+    auto close_result = co_await connection.wait_closed();
     (void) close_result;
 
-    {
-        std::lock_guard guard(entry->mutex);
-        entry->connection.reset();
-    }
-    runtime->remove_http2(entry);
+    worker.unlink(connection);
     co_return;
 }
 
