@@ -83,7 +83,18 @@ Http2CloseGate::ObserverHook::~ObserverHook() {
     }
 }
 
+Http2CloseGate::Http2CloseGate(event::EventLoop &loop, Http2Connection &connection) noexcept :
+    loop_(&loop), connection_(&connection) {
+    if (connection.state() == Http2Connection::State::Closed) {
+        on_connection_closed();
+    }
+}
+
 Http2CloseGate::~Http2CloseGate() {
+    FIBER_ASSERT(phase_ != Phase::Dispatching);
+    if (phase_ == Phase::Pending) {
+        loop_->cancel<Http2CloseGate, &Http2CloseGate::completion_entry_>(*this);
+    }
     while (joiner_head_ != nullptr) {
         Joiner *joiner = joiner_head_;
         unlink_joiner(*joiner);
@@ -92,43 +103,29 @@ Http2CloseGate::~Http2CloseGate() {
     while (observer_head_ != nullptr) {
         remove_observer(*observer_head_);
     }
-    if (installed_) {
-        connection_->clear_closed_callback();
-        installed_ = false;
-    }
-    connection_ = nullptr;
 }
 
-void Http2CloseGate::arm(Http2Connection &connection) noexcept {
-    FIBER_ASSERT(connection_ == nullptr);
-    connection_ = &connection;
-    if (connection_->close_dispatched()) {
-        // Nothing will call back: a failed start reports closure inline.
-        closed_ = true;
-        terminal_error_ = connection_->terminal_error();
+void Http2CloseGate::on_connection_closed() noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(connection_->state() == Http2Connection::State::Closed);
+    if (phase_ != Phase::Open) {
         return;
     }
-    // One gate per connection: the connection has a single callback slot.
-    FIBER_ASSERT(!connection_->has_closed_callback());
-    connection_->set_closed_callback(&Http2CloseGate::on_connection_closed, this);
-    installed_ = true;
+    terminal_error_ = connection_->terminal_error();
+    phase_ = Phase::Pending;
+    loop_->post_local<Http2CloseGate, &Http2CloseGate::completion_entry_, &Http2CloseGate::on_completion>(*this);
 }
 
-bool Http2CloseGate::closed() const noexcept {
-    return closed_ || (connection_ != nullptr && connection_->close_dispatched());
-}
+void Http2CloseGate::on_completion(Http2CloseGate *gate) noexcept { gate->dispatch(); }
+
+bool Http2CloseGate::closed() const noexcept { return phase_ == Phase::Complete; }
 
 common::IoErr Http2CloseGate::terminal_error() const noexcept {
-    if (closed_) {
-        return terminal_error_;
-    }
-    return connection_ != nullptr ? connection_->terminal_error() : common::IoErr::None;
+    return phase_ == Phase::Open ? connection_->terminal_error() : terminal_error_;
 }
 
 fiber::async::Task<Http2CloseGate::CloseResult> Http2CloseGate::join() noexcept {
-    if (connection_ == nullptr) {
-        co_return std::unexpected(common::IoErr::Invalid);
-    }
+    FIBER_ASSERT(loop_->in_loop());
     if (closed()) {
         const common::IoErr reason = terminal_error();
         co_return reason == common::IoErr::None ? CloseResult{} : CloseResult(std::unexpected(reason));
@@ -140,6 +137,7 @@ fiber::async::Task<Http2CloseGate::CloseResult> Http2CloseGate::join() noexcept 
 }
 
 void Http2CloseGate::add_observer(ObserverHook &hook, ObserverCallback callback, void *ctx) noexcept {
+    FIBER_ASSERT(phase_ == Phase::Open || phase_ == Phase::Pending);
     FIBER_ASSERT(!hook.linked);
     FIBER_ASSERT(callback != nullptr);
     hook.gate = this;
@@ -178,39 +176,19 @@ void Http2CloseGate::remove_observer(ObserverHook &hook) noexcept {
     hook.ctx = nullptr;
 }
 
-void Http2CloseGate::on_connection_closed(void *ctx, Http2Connection &, CloseResult result) noexcept {
-    auto *gate = static_cast<Http2CloseGate *>(ctx);
-    FIBER_ASSERT(gate != nullptr);
-    gate->dispatch(result ? common::IoErr::None : result.error());
-}
-
-void Http2CloseGate::dispatch(common::IoErr reason) noexcept {
-    if (closed_) {
-        return;
-    }
-    closed_ = true;
-    terminal_error_ = reason;
-    installed_ = false;
-
-    // Observers run first and inline: they unwind their own references to the
-    // connection before any joiner can resume and tear it down.
-    FIBER_ASSERT(connection_ != nullptr);
-    ObserverHook *hook = observer_head_;
-    while (hook != nullptr) {
-        ObserverHook *next = hook->next;
+void Http2CloseGate::dispatch() noexcept {
+    FIBER_ASSERT(phase_ == Phase::Pending);
+    phase_ = Phase::Dispatching;
+    while (ObserverHook *hook = observer_head_) {
         ObserverCallback callback = hook->callback;
         void *observer_ctx = hook->ctx;
         remove_observer(*hook);
-        if (callback != nullptr) {
-            callback(observer_ctx, *connection_, reason);
-        }
-        hook = next;
+        callback(observer_ctx, *connection_, terminal_error_);
     }
-
-    while (joiner_head_ != nullptr) {
-        Joiner *joiner = joiner_head_;
+    phase_ = Phase::Complete;
+    while (Joiner *joiner = joiner_head_) {
         unlink_joiner(*joiner);
-        joiner->complete(reason);
+        joiner->complete(terminal_error_);
     }
 }
 

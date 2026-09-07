@@ -65,6 +65,9 @@ public:
     [[nodiscard]] const std::optional<net::SocketAddress> &local_addr() const noexcept { return local_addr_; }
 
 private:
+    static const Http2Connection::Ops &connection_ops() noexcept;
+    static void on_state_change(void *ctx, Http2Connection &connection) noexcept;
+    static void on_capacity_change(void *ctx, Http2Connection &connection) noexcept;
     static Http2Connection::Options normalize_h2_options(Http2Connection::Options options) noexcept;
 
     fiber::async::Task<common::IoResult<void>> connect_impl(net::SocketAddress peer, std::chrono::milliseconds timeout,

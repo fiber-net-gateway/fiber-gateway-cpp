@@ -30,7 +30,8 @@ namespace fiber::http {
 class Http2ServerConnection : public common::NonCopyable, public common::NonMovable {
 public:
     // `request_factory` must outlive this connection.
-    Http2ServerConnection(Http2Connection::Options options, ServerRequestFactory &request_factory) noexcept;
+    Http2ServerConnection(event::EventLoop &loop, Http2Connection::Options options,
+                          ServerRequestFactory &request_factory) noexcept;
     ~Http2ServerConnection();
 
     // Starts the session; on success the transport is owned and driven to
@@ -51,6 +52,11 @@ public:
     [[nodiscard]] const Http2Connection &http2() const noexcept { return conn_; }
 
 private:
+    static const Http2Connection::Ops &connection_ops() noexcept;
+    static Http2Stream::Lease create_peer_stream(void *ctx, std::uint32_t id, Http2Connection &conn) noexcept;
+    static void on_state_change(void *ctx, Http2Connection &connection) noexcept;
+    event::EventLoop *loop_;
+    ServerRequestFactory *request_factory_;
     Http2Connection conn_;
     Http2CloseGate close_gate_;
     // Membership slot in the owning worker's list (Http2Stream::owned_hook_

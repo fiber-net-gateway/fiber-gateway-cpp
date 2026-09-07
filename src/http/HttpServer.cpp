@@ -429,8 +429,12 @@ fiber::async::Task<void> HttpServer::serve_http2(std::shared_ptr<Runtime> runtim
 
     // Lives on this coroutine's frame for the whole session: no per-connection
     // heap allocation, and the worker list reaches it through its hook.
-    Http2ServerConnection connection(make_http2_options(runtime->options), runtime->http2_request_factory);
+    Http2ServerConnection connection(runtime->workers[worker_index]->loop(), make_http2_options(runtime->options),
+                                     runtime->http2_request_factory);
     if (connection.start(std::move(transport)) != common::IoErr::None) {
+        if (connection.http2().state() == Http2Connection::State::Closed) {
+            (void) co_await connection.wait_closed();
+        }
         co_return;
     }
 

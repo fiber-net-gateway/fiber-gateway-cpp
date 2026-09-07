@@ -16,8 +16,8 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Timeout.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http2CloseGate.h>
 #include <fiber/http/Http2Connection.h>
+#include <fiber/http/Http2ServerConnection.h>
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
@@ -206,12 +206,12 @@ public:
             }
             fiber::http::Http2Connection::Options options;
             options.role = fiber::http::Http2Connection::ConnectionRole::Server;
-            fiber::http::Http2Connection connection(options, &factory_, fiber::http::ServerRequestFactory::ops());
-            fiber::http::Http2CloseGate close_gate;
-            close_gate.arm(connection);
+            fiber::http::Http2ServerConnection owner(*loop_, options, factory_);
+            auto &connection = owner.http2();
             active_connection_ = &connection;
-            if (connection.start(std::move(*transport)) == fiber::common::IoErr::None) {
-                (void) co_await close_gate.join();
+            if (owner.start(std::move(*transport)) == fiber::common::IoErr::None ||
+                connection.state() == fiber::http::Http2Connection::State::Closed) {
+                (void) co_await owner.wait_closed();
             }
             active_connection_ = nullptr;
         }

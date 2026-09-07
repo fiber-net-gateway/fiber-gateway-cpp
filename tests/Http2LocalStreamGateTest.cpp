@@ -42,10 +42,10 @@ fiber::http::Http2Connection::Options client_options(std::uint32_t peer_streams)
 } // namespace
 
 TEST(Http2LocalStreamGateTest, TryAttachForwardsToTheConnectionWhileNobodyIsQueued) {
-    fiber::http::Http2Connection connection(client_options(1), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    TestHttp2Connection connection(client_options(1), &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     fiber::http::Http2LocalStreamGate gate(connection);
+    connection.observe_stream_gate(gate);
 
     auto *owner1 = TestHttp2StreamOwner::create_owner();
     auto *owner3 = TestHttp2StreamOwner::create_owner();
@@ -73,13 +73,13 @@ TEST(Http2LocalStreamGateTest, TryAttachForwardsToTheConnectionWhileNobodyIsQueu
 }
 
 TEST(Http2LocalStreamGateTest, TryAttachReportsTheConnectionsTerminalStatusAfterPeerGoaway) {
-    fiber::http::Http2Connection connection(client_options(4), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    TestHttp2Connection connection(client_options(4), &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     // No transport here: pretend our own GOAWAY already went out, and keep one
     // stream attached so the connection stays in Draining instead of pumping.
     connection.local_goaway_sent_ = true;
     fiber::http::Http2LocalStreamGate gate(connection);
+    connection.observe_stream_gate(gate);
 
     auto *owner1 = TestHttp2StreamOwner::create_owner();
     auto *owner3 = TestHttp2StreamOwner::create_owner();
@@ -98,10 +98,10 @@ TEST(Http2LocalStreamGateTest, TryAttachReportsTheConnectionsTerminalStatusAfter
 
 TEST(Http2LocalStreamGateTest, ChainedCapacityCallbackSeesEveryConnectionCapacityChange) {
     ChainedCapacityObserver observer;
-    fiber::http::Http2Connection connection(client_options(4), &test_http2_stream_factory(),
-                                            TestHttp2StreamFactory::ops());
+    TestHttp2Connection connection(client_options(4), &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     fiber::http::Http2LocalStreamGate gate(connection);
+    connection.observe_stream_gate(gate);
     gate.set_capacity_callback(&ChainedCapacityObserver::on_capacity, &observer);
 
     ASSERT_EQ(connection.apply_settings_parameter(0x3, 2), fiber::common::IoErr::None);

@@ -21,13 +21,13 @@
 #include "Http2OutboundHook.h"
 #include "Http2Protocol.h"
 #include "Http2Stream.h"
-#include "Http2StreamFactory.h"
 #include "Http2StreamTable.h"
 #include "HttpTransport.h"
 
 namespace fiber::http {
 
 class ServerHttp2Request;
+class Http2HpackDiscardSink;
 
 class Http2Connection : public common::NonCopyable, public common::NonMovable {
 public:
@@ -47,8 +47,19 @@ public:
 
     using FrameHeader = Http2FrameHeader;
     using CloseResult = common::IoResult<void>;
-    using ClosedCallback = void (*)(void *ctx, Http2Connection &connection, CloseResult result) noexcept;
     using CapacityCallback = void (*)(void *ctx, Http2Connection &connection) noexcept;
+
+    // Constructed with one borrowed owner context. Notifications run inline and
+    // must not destroy the owner/connection or drive a nested event loop.
+    struct Ops {
+        // Required for servers and rejected for clients: server push is not
+        // supported, so a client announces ENABLE_PUSH=0 and treats an
+        // unsolicited peer-initiated stream as a connection error.
+        Http2Stream::Lease (*create_peer_stream)(void *ctx, std::uint32_t stream_id,
+                                                 Http2Connection &connection) noexcept = nullptr;
+        void (*on_state_change)(void *ctx, Http2Connection &connection) noexcept = nullptr;
+        void (*on_capacity_change)(void *ctx, Http2Connection &connection) noexcept = nullptr;
+    };
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
@@ -87,8 +98,7 @@ public:
 
     ~Http2Connection();
 
-    Http2Connection(Options options, void *peer_stream_factory_ctx,
-                    const Http2StreamFactoryOps &peer_stream_factory_ops);
+    Http2Connection(Options options, void *ctx, const Ops &ops);
 
     // Must be called on transport->loop(). A successful start owns and drives
     // transport I/O until closure; no run coroutine is required.
@@ -103,15 +113,6 @@ public:
     void set_frame_payload_hook(FramePayloadHook hook, void *ctx) noexcept;
     void clear_frame_payload_hook() noexcept;
 
-    // Fires once on the loop after all connection state is closed, and may
-    // destroy the connection. There is one slot: Http2CloseGate takes it and
-    // fans closure out to as many observers and coroutines as needed.
-    void set_closed_callback(ClosedCallback cb, void *ctx) noexcept;
-    void clear_closed_callback() noexcept;
-    // True once the close callback has run (or was skipped because the
-    // connection never started), i.e. no notification is still coming.
-    [[nodiscard]] bool has_closed_callback() const noexcept { return on_closed_ != nullptr; }
-    [[nodiscard]] bool close_dispatched() const noexcept { return close_completion_dispatched_; }
     [[nodiscard]] common::IoErr terminal_error() const noexcept { return terminal_error_; }
     // Immediate fast path. Returns Busy when the peer's concurrent-stream budget is exhausted.
     [[nodiscard]] common::IoResult<Http2Stream::Lease> try_attach_local_stream(Http2Stream &stream) noexcept;
@@ -121,24 +122,9 @@ public:
     [[nodiscard]] bool peer_settings_received() const noexcept { return peer_settings_received_; }
     [[nodiscard]] bool peer_enable_connect_protocol() const noexcept { return peer_enable_connect_protocol_; }
 
-    // Fires on this connection's loop whenever anything gating locally initiated
-    // streams changes: a stream attaching or detaching (either side's streams)
-    // or the effective budget the peer's SETTINGS_MAX_CONCURRENT_STREAMS feeds.
-    // It runs inline, so it must only touch memory: no I/O, and it must never
-    // destroy this connection. A change the callback itself triggers is
-    // coalesced into one more pass instead of recursing, so the callback must
-    // not keep changing capacity forever.
-    void set_capacity_callback(CapacityCallback cb, void *ctx) noexcept;
-    void clear_capacity_callback() noexcept;
-
-    // Fires on this connection's loop for every state transition, including the
-    // final one into Closed. It runs inline, so it must only touch memory: no
-    // I/O, and it must never destroy this connection — the deferred closed
-    // callback is the only notification allowed to. A transition raised from
-    // inside the callback is coalesced into one more pass instead of recursing.
-    using StateCallback = void (*)(void *ctx, Http2Connection &connection) noexcept;
-    void set_state_callback(StateCallback cb, void *ctx) noexcept;
-    void clear_state_callback() noexcept;
+    // Ops notifications run inline and coalesce reentrant changes independently.
+    // Closed reports protocol closure, not permission to destroy this object:
+    // owners defer completion through Http2CloseGate until this stack unwinds.
 
     // The budget attach admission actually uses: the peer's
     // SETTINGS_MAX_CONCURRENT_STREAMS clamped by local_concurrent_streams_limit,
@@ -226,6 +212,11 @@ private:
         bool needs_reschedule = false;
     };
 
+    // Governs the rest of the current frame's payload, header block or DATA.
+    // Discarded header blocks still run through the HPACK decoder, so the
+    // dynamic table stays in sync with the peer.
+    enum class PayloadMode : std::uint8_t { Deliver, Discard };
+
     struct InboundStream {
         Http2Stream::Lease lease{};
         std::uint32_t stream_id = 0;
@@ -233,9 +224,23 @@ private:
         std::size_t payload_end = 0;
         bool header_block_open = false;
         bool end_stream_pending = false;
-        bool discard_closed_stream_block = false;
+        PayloadMode payload_mode = PayloadMode::Deliver;
+        // Non-zero only for a PUSH_PROMISE being discarded: RST_STREAM(CANCEL)
+        // goes to this id once its header block has been decoded. This is what
+        // distinguishes a promise discard from any other discarded block.
+        std::uint32_t promised_stream_id = 0;
     };
 
+    common::IoErr handle_push_promise_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
+                                              std::size_t length) noexcept;
+    common::IoErr begin_discard_headers() noexcept;
+    common::IoErr discard_headers(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
+                                  std::size_t length) noexcept;
+    // Records the wire error code and returns `reason`; drive_io() turns the
+    // unwound error into the GOAWAY-and-close below. Handlers must return the
+    // value straight out instead of continuing on a doomed connection.
+    common::IoErr raise_connection_error(Http2ErrorCode code, common::IoErr reason = common::IoErr::Invalid) noexcept;
+    void close_after_connection_error(common::IoErr reason) noexcept;
     common::IoErr consume_incoming_frame_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
                                                  std::size_t length) noexcept;
     common::IoErr handle_data_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
@@ -386,7 +391,6 @@ private:
     static void on_read_timer(Http2Connection *connection) noexcept;
     static void on_write_timer(Http2Connection *connection) noexcept;
     static void on_read_buffer_idle_timer(Http2Connection *connection) noexcept;
-    static void on_closed_completion(Http2Connection *connection) noexcept;
     void handle_transport_ready(event::IoEvent event, common::IoErr err) noexcept;
     void schedule_io_pump() noexcept;
     void drive_io() noexcept;
@@ -397,8 +401,6 @@ private:
     void arm_read_buffer_idle_timer() noexcept;
     void cancel_io_timers() noexcept;
     void finish_connection() noexcept;
-    void schedule_closed_completion() noexcept;
-    void dispatch_closed_completion() noexcept;
     common::IoErr start_draining() noexcept;
     void maybe_enter_closing_from_draining() noexcept;
     void enter_closing(common::IoErr reason, bool report_error = true) noexcept;
@@ -408,10 +410,11 @@ private:
 
     std::unique_ptr<HttpTransport> transport_;
     Options options_;
-    void *peer_stream_factory_ctx_ = nullptr;
-    const Http2StreamFactoryOps peer_stream_factory_ops_{};
+    void *ctx_;
+    Ops ops_;
     Http2StreamTable streams_;
     Http2HpackDecoder inbound_hpack_decoder_;
+    std::unique_ptr<Http2HpackDiscardSink> discard_sink_;
     std::uint32_t peer_advertised_max_concurrent_streams_ = 100;
     std::uint32_t last_peer_stream_id_ = 0;
     std::uint32_t last_local_stream_id_ = 0;
@@ -426,6 +429,9 @@ private:
     std::uint32_t peer_max_header_list_size_ = 0xffffffffU;
     bool peer_enable_push_ = true;
     bool peer_settings_received_ = false;
+    bool initial_settings_acked_ = false;
+    bool pending_error_raised_ = false;
+    Http2ErrorCode pending_error_code_ = Http2ErrorCode::NoError;
     bool peer_enable_connect_protocol_ = false;
     bool local_stream_ids_exhausted_ = false;
     bool local_goaway_sent_ = false;
@@ -452,19 +458,12 @@ private:
     InboundIoState inbound_io_{};
     common::IntrusiveList<Http2Stream, offsetof(Http2Stream, owned_hook_)> owned_stream_list_;
     event::EventLoop::DeferEntry io_pump_entry_{};
-    event::EventLoop::DeferEntry close_completion_entry_{};
     event::EventLoop::TimerEntry read_timer_entry_{};
     event::EventLoop::TimerEntry write_timer_entry_{};
     event::EventLoop::TimerEntry read_buffer_idle_timer_entry_{};
     std::chrono::steady_clock::time_point write_blocked_at_{};
     FramePayloadHook frame_payload_hook_ = nullptr;
     void *frame_payload_hook_ctx_ = nullptr;
-    ClosedCallback on_closed_ = nullptr;
-    void *closed_ctx_ = nullptr;
-    CapacityCallback capacity_cb_ = nullptr;
-    void *capacity_ctx_ = nullptr;
-    StateCallback state_cb_ = nullptr;
-    void *state_ctx_ = nullptr;
     event::IoEvent outbound_wait_event_ = event::IoEvent::None;
     State state_ = State::Init;
     bool stop_sending_requested_ = false;
@@ -482,8 +481,6 @@ private:
     bool inbound_eof_ = false;
     bool close_flush_outbound_ = false;
     bool close_finished_ = false;
-    bool close_completion_posted_ = false;
-    bool close_completion_dispatched_ = false;
     bool outbound_closed_ = false;
     bool outbound_stopped_ = false;
     common::IoErr stop_sending_reason_ = common::IoErr::Canceled;

@@ -31,9 +31,20 @@ using Lease = Http2ConnectionPoolCore::Lease;
 struct PoolHarness {
     struct Server {
         Server(http::Http2Connection::Options options, http::ServerRequestFactory &factory) :
-            conn(options, &factory, http::ServerRequestFactory::ops()) {
-            gate.arm(conn);
+            factory(&factory), conn(options, this, ops()), gate(event::EventLoop::current(), conn) {}
+        static const http::Http2Connection::Ops &ops() noexcept {
+            static const http::Http2Connection::Ops ops{
+                    [](void *ctx, std::uint32_t id, http::Http2Connection &conn) noexcept {
+                        return static_cast<Server *>(ctx)->factory->create_peer_stream(id, conn);
+                    },
+                    [](void *ctx, http::Http2Connection &conn) noexcept {
+                        if (conn.state() == http::Http2Connection::State::Closed)
+                            static_cast<Server *>(ctx)->gate.on_connection_closed();
+                    },
+                    nullptr};
+            return ops;
         }
+        http::ServerRequestFactory *factory;
         http::Http2Connection conn;
         http::Http2CloseGate gate;
     };

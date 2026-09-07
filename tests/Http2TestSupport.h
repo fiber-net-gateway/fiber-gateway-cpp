@@ -5,12 +5,72 @@
 #include <new>
 #include <string>
 
+#include <fiber/http/Http2CloseGate.h>
 #include <fiber/http/Http2Connection.h>
-#include <fiber/http/Http2StreamFactory.h>
+#include <fiber/http/Http2LocalStreamGate.h>
 #include <fiber/http/HttpHeaderHash.h>
 #include "http/Huffman.h"
 
 namespace {
+
+// Test owner composes the factory and independently configurable observers into
+// the single context accepted by the production connection.
+class TestHttp2Connection : public fiber::http::Http2Connection {
+public:
+    using Callback = void (*)(void *, fiber::http::Http2Connection &) noexcept;
+    TestHttp2Connection(Options options, void *factory_ctx, const Ops &factory_ops) :
+        Http2Connection(options, this, owner_ops(options.role)), factory_ctx_(factory_ctx), factory_ops_(factory_ops) {}
+    void observe_capacity(Callback callback, void *ctx) noexcept {
+        capacity_ = callback;
+        capacity_ctx_ = ctx;
+    }
+    void clear_capacity_observer() noexcept { capacity_ = nullptr; }
+    void observe_state(Callback callback, void *ctx) noexcept {
+        state_observer_ = callback;
+        state_observer_ctx_ = ctx;
+    }
+    void observe_close_gate(fiber::http::Http2CloseGate &gate) noexcept { close_gate_ = &gate; }
+    void observe_stream_gate(fiber::http::Http2LocalStreamGate &gate) noexcept { stream_gate_ = &gate; }
+
+private:
+    // Clients must not carry a peer-stream factory: they never accept a pushed
+    // stream, so the connection asserts the slot is empty. The factory the
+    // caller passed then stays unused, which keeps every call site uniform.
+    static const Ops &owner_ops(ConnectionRole role) noexcept {
+        static const Ops server_ops{&create, &state_observer_changed, &capacity_changed};
+        static const Ops client_ops{nullptr, &state_observer_changed, &capacity_changed};
+        return role == ConnectionRole::Client ? client_ops : server_ops;
+    }
+    static fiber::http::Http2Stream::Lease create(void *ctx, std::uint32_t id,
+                                                  fiber::http::Http2Connection &conn) noexcept {
+        auto &self = *static_cast<TestHttp2Connection *>(ctx);
+        return self.factory_ops_.create_peer_stream(self.factory_ctx_, id, conn);
+    }
+    static void state_observer_changed(void *ctx, fiber::http::Http2Connection &conn) noexcept {
+        auto &self = *static_cast<TestHttp2Connection *>(ctx);
+        if (self.stream_gate_)
+            self.stream_gate_->on_state_change();
+        if (self.state_observer_)
+            self.state_observer_(self.state_observer_ctx_, conn);
+        if (conn.state() == State::Closed && self.close_gate_)
+            self.close_gate_->on_connection_closed();
+    }
+    static void capacity_changed(void *ctx, fiber::http::Http2Connection &conn) noexcept {
+        auto &self = *static_cast<TestHttp2Connection *>(ctx);
+        if (self.stream_gate_)
+            self.stream_gate_->on_capacity_change();
+        if (self.capacity_)
+            self.capacity_(self.capacity_ctx_, conn);
+    }
+    void *factory_ctx_;
+    Ops factory_ops_;
+    Callback capacity_ = nullptr;
+    void *capacity_ctx_ = nullptr;
+    Callback state_observer_ = nullptr;
+    void *state_observer_ctx_ = nullptr;
+    fiber::http::Http2CloseGate *close_gate_ = nullptr;
+    fiber::http::Http2LocalStreamGate *stream_gate_ = nullptr;
+};
 
 struct TestHttp2StreamOwner {
     TestHttp2StreamOwner() : stream(this, ops()) {}
@@ -170,8 +230,8 @@ struct TestHttp2StreamOwner {
 
 class TestHttp2StreamFactory {
 public:
-    [[nodiscard]] static const fiber::http::Http2StreamFactoryOps &ops() noexcept {
-        static const fiber::http::Http2StreamFactoryOps kOps{
+    [[nodiscard]] static const fiber::http::Http2Connection::Ops &ops() noexcept {
+        static const fiber::http::Http2Connection::Ops kOps{
                 &TestHttp2StreamFactory::create_peer_stream_op,
         };
         return kOps;
