@@ -13,7 +13,6 @@
 #include "ClientHttp2Types.h"
 #include "Http2HpackDecoder.h"
 #include "Http2Stream.h"
-#include "Http2StreamFactory.h"
 #include "detail/Http2BodyRecvState.h"
 #include "detail/Http2HeaderBlockQueue.h"
 #include "detail/Http2SendAwaiter.h"
@@ -30,7 +29,6 @@ class ClientHttp2Request : public common::NonCopyable, public common::NonMovable
 public:
     ~ClientHttp2Request() = default;
 
-    [[nodiscard]] static const Http2StreamFactoryOps &factory_ops() noexcept;
     [[nodiscard]] static ClientHttp2Request *create(Http2Connection &conn, mem::BufPool &pool) noexcept;
 
     fiber::async::Task<common::IoResult<void>> send_request_header(const ClientRequestHead &head, bool end_stream,
@@ -63,8 +61,6 @@ private:
     using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestBodySomeOp>;
     using TrailerSendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestTrailerOp>;
 
-    static Http2Stream::Lease create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept;
-    static Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id, Http2Connection &conn) noexcept;
     explicit ClientHttp2Request(Http2Connection &conn, mem::BufPool &pool) noexcept;
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;

@@ -536,9 +536,6 @@ void Http2ConnectionPoolCore::maintain_entry(PoolEntry *entry) noexcept {
         client.shutdown();
     else
         client.http2().graceful_shutdown();
-    // Init/start failure can mark closure without dispatching the callback.
-    if (client.close_gate().closed())
-        on_closed(entry, client.http2(), client.http2().terminal_error());
 }
 void Http2ConnectionPoolCore::on_capacity(void *ctx, Http2Connection &) noexcept {
     auto &entry = *static_cast<PoolEntry *>(ctx);
@@ -555,6 +552,7 @@ void Http2ConnectionPoolCore::on_closed(void *ctx, Http2Connection &, IoErr) noe
 }
 void Http2ConnectionPoolCore::destroy_entry(PoolEntry &entry) noexcept {
     FIBER_ASSERT(entry.state_ == EntryState::Closed && !entry.active_leases_ && !entry.dialing_);
+    FIBER_ASSERT(entry.connection().close_gate().closed());
     auto &bucket = *entry.bucket_;
     entry.connection().stream_gate().clear_capacity_callback();
     entry.destroy_connection();

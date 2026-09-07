@@ -23,9 +23,24 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 }
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Http2Connection::Options h2) noexcept :
-    loop_(&loop), conn_(normalize_h2_options(std::move(h2)), nullptr, ClientHttp2Request::factory_ops()),
-    stream_gate_(conn_) {
-    close_gate_.arm(conn_);
+    loop_(&loop), conn_(normalize_h2_options(std::move(h2)), this, connection_ops()), stream_gate_(conn_),
+    close_gate_(loop, conn_) {}
+
+const Http2Connection::Ops &Http2ClientConnection::connection_ops() noexcept {
+    static const Http2Connection::Ops ops{nullptr, &on_state_change, &on_capacity_change};
+    return ops;
+}
+
+void Http2ClientConnection::on_state_change(void *ctx, Http2Connection &connection) noexcept {
+    auto &owner = *static_cast<Http2ClientConnection *>(ctx);
+    owner.stream_gate_.on_state_change();
+    if (connection.state() == Http2Connection::State::Closed) {
+        owner.close_gate_.on_connection_closed();
+    }
+}
+
+void Http2ClientConnection::on_capacity_change(void *ctx, Http2Connection &) noexcept {
+    static_cast<Http2ClientConnection *>(ctx)->stream_gate_.on_capacity_change();
 }
 
 Http2ClientConnection::~Http2ClientConnection() {
@@ -74,6 +89,9 @@ Http2ClientConnection::connect_impl(net::SocketAddress peer, std::chrono::millis
 
     common::IoErr adopt_error = adopt(std::move(dial_result->transport), std::move(dial_result->local));
     if (adopt_error != common::IoErr::None) {
+        if (conn_.state() == Http2Connection::State::Closed) {
+            (void) co_await close_gate_.join();
+        }
         co_return std::unexpected(adopt_error);
     }
     co_return common::IoResult<void>{};

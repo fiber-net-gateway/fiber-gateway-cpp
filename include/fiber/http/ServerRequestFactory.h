@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "Http2StreamFactory.h"
+#include "Http2Connection.h"
 #include "HttpExchange.h"
 #include "HttpServerOptions.h"
 
@@ -19,7 +19,7 @@ public:
     ServerRequestFactory(const HttpServerOptions &http_options, const HttpHandler &handler) :
         http_options_(http_options), handler_(std::make_shared<HttpHandler>(handler)) {}
 
-    [[nodiscard]] static const Http2StreamFactoryOps &ops() noexcept;
+    [[nodiscard]] static const Http2Connection::Ops &ops() noexcept;
     [[nodiscard]] Http2Stream::Lease create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept;
 
 private:

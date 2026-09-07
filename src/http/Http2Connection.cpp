@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 #include <string_view>
 #include <utility>
+#include "http/Http2HpackDiscardSink.h"
 
 #include <fiber/common/Assert.h>
 
@@ -132,11 +134,12 @@ common::IoErr prepare_read_buffer(mem::IoBuf &read_buf, std::size_t capacity) no
 
 } // namespace
 
-Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
-                                 const Http2StreamFactoryOps &peer_stream_factory_ops) :
-    options_(std::move(options)), peer_stream_factory_ctx_(peer_stream_factory_ctx),
-    peer_stream_factory_ops_(peer_stream_factory_ops) {
-    FIBER_ASSERT(peer_stream_factory_ops_.create_peer_stream != nullptr);
+Http2Connection::Http2Connection(Options options, void *ctx, const Ops &ops) :
+    options_(std::move(options)), ctx_(ctx), ops_(ops) {
+    // Servers must be able to create peer-initiated streams; clients must not.
+    // Server push is unsupported, so a client has nothing to create a peer
+    // stream for and announces ENABLE_PUSH=0 on that basis.
+    FIBER_ASSERT((options_.role == ConnectionRole::Client) == (ops_.create_peer_stream == nullptr));
     peer_advertised_max_concurrent_streams_ = options_.local_concurrent_streams_limit;
     peer_initial_stream_send_window_ = options_.initial_stream_send_window;
     conn_recv_window_target_ =
@@ -156,16 +159,6 @@ void Http2Connection::set_frame_payload_hook(FramePayloadHook hook, void *ctx) n
 void Http2Connection::clear_frame_payload_hook() noexcept {
     frame_payload_hook_ = nullptr;
     frame_payload_hook_ctx_ = nullptr;
-}
-
-void Http2Connection::set_closed_callback(ClosedCallback cb, void *ctx) noexcept {
-    on_closed_ = cb;
-    closed_ctx_ = cb != nullptr ? ctx : nullptr;
-}
-
-void Http2Connection::clear_closed_callback() noexcept {
-    on_closed_ = nullptr;
-    closed_ctx_ = nullptr;
 }
 
 common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) noexcept {
@@ -191,7 +184,6 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) n
         abort_outbound(start_err);
         transport_->close();
         close_finished_ = true;
-        close_completion_dispatched_ = true;
         transition_state(State::Closed);
         return start_err;
     }
@@ -208,17 +200,9 @@ Http2Connection::~Http2Connection() {
         transport_->loop().cancel<Http2Connection, &Http2Connection::io_pump_entry_>(*this);
         io_pump_posted_ = false;
     }
-    if (close_completion_posted_ && transport_ && transport_->loop().in_loop()) {
-        transport_->loop().cancel<Http2Connection, &Http2Connection::close_completion_entry_>(*this);
-        close_completion_posted_ = false;
-    }
     FIBER_ASSERT(!io_pump_posted_);
-    on_closed_ = nullptr;
-    closed_ctx_ = nullptr;
-    capacity_cb_ = nullptr;
-    capacity_ctx_ = nullptr;
-    state_cb_ = nullptr;
-    state_ctx_ = nullptr;
+    ops_.on_capacity_change = nullptr;
+    ops_.on_state_change = nullptr;
     if (transport_ && transport_->loop().in_loop()) {
         cancel_io_timers();
         clear_transport_callbacks();
@@ -241,7 +225,6 @@ Http2Connection::~Http2Connection() {
         transport_->close();
     }
     close_finished_ = true;
-    FIBER_ASSERT(!close_completion_posted_);
 }
 
 common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget, std::size_t &byte_budget) noexcept {
@@ -301,8 +284,21 @@ common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget
             return common::IoErr::None;
         }
 
+        std::size_t prefix = 0;
+        const auto &frame = inbound_io_.current_header;
+        if (inbound_io_.payload_offset == 0) {
+            if (frame.type == Http2FrameType::Headers) {
+                prefix = ((frame.flags & kFlagPadded) ? 1U : 0U) + ((frame.flags & kFlagPriority) ? 5U : 0U);
+            } else if (frame.type == Http2FrameType::PushPromise) {
+                prefix = 4U + ((frame.flags & kFlagPadded) ? 1U : 0U);
+            }
+            prefix = std::min(prefix, static_cast<std::size_t>(frame.length));
+            if (read_buf.readable() < prefix)
+                return common::IoErr::None;
+        }
         const std::size_t chunk_len =
-                std::min({read_buf.readable(), static_cast<std::size_t>(inbound_io_.payload_remaining), byte_budget});
+                std::min({read_buf.readable(), static_cast<std::size_t>(inbound_io_.payload_remaining),
+                          std::max(byte_budget, prefix)});
         common::IoErr err = consume_incoming_frame_payload(inbound_io_.current_header, read_buf,
                                                            inbound_io_.payload_offset, chunk_len);
         // Processing GOAWAY or the final stream payload can finish a draining
@@ -314,7 +310,7 @@ common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget
         inbound_io_.payload_remaining -= static_cast<std::uint32_t>(chunk_len);
         inbound_io_.payload_offset += chunk_len;
         --operation_budget;
-        byte_budget -= chunk_len;
+        byte_budget -= std::min(byte_budget, chunk_len);
         if (inbound_io_.payload_remaining == 0) {
             inbound_io_.phase = ParsePhase::FrameHeader;
         }
@@ -494,7 +490,11 @@ void Http2Connection::drive_io() noexcept {
         }
         auto result = pump_read(kIoPumpOperationBudget, kIoPumpByteBudget);
         if (!result) {
-            enter_closing(result.error());
+            if (pending_error_raised_) {
+                close_after_connection_error(result.error());
+            } else {
+                enter_closing(result.error());
+            }
             return false;
         }
         read_result = *result;
@@ -556,7 +556,6 @@ void Http2Connection::drive_io() noexcept {
 
     io_pump_running_ = false;
     if (state_ == State::Closed) {
-        schedule_closed_completion();
         return;
     }
     if (state_ != State::Closed && io_pump_again_) {
@@ -741,39 +740,6 @@ void Http2Connection::finish_connection() noexcept {
         return;
     }
     transition_state(State::Closed);
-    if (!io_pump_running_) {
-        schedule_closed_completion();
-    }
-}
-
-void Http2Connection::on_closed_completion(Http2Connection *connection) noexcept {
-    FIBER_ASSERT(connection != nullptr);
-    connection->close_completion_posted_ = false;
-    connection->dispatch_closed_completion();
-}
-
-void Http2Connection::schedule_closed_completion() noexcept {
-    if (close_completion_posted_ || close_completion_dispatched_) {
-        return;
-    }
-    close_completion_posted_ = true;
-    transport_->loop()
-            .post_local<Http2Connection, &Http2Connection::close_completion_entry_,
-                        &Http2Connection::on_closed_completion>(*this);
-}
-
-void Http2Connection::dispatch_closed_completion() noexcept {
-    if (close_completion_dispatched_) {
-        return;
-    }
-    close_completion_dispatched_ = true;
-    ClosedCallback callback = std::exchange(on_closed_, nullptr);
-    void *callback_ctx = std::exchange(closed_ctx_, nullptr);
-    if (callback) {
-        CloseResult result =
-                terminal_error_ == common::IoErr::None ? CloseResult{} : CloseResult(std::unexpected(terminal_error_));
-        callback(callback_ctx, *this, std::move(result));
-    }
 }
 
 void Http2Connection::shutdown(common::IoErr reason) noexcept { enter_closing(reason, false); }
@@ -787,11 +753,11 @@ void Http2Connection::graceful_shutdown() noexcept {
 
 common::IoErr Http2Connection::consume_incoming_frame_payload(const FrameHeader &fhr, const mem::IoBuf &buf,
                                                               std::size_t offset, std::size_t length) noexcept {
-    if (inbound_stream_.header_block_open && fhr.type != Http2FrameType::Continuation) {
-        return common::IoErr::Invalid;
+    if (offset == 0 && inbound_stream_.header_block_open && fhr.type != Http2FrameType::Continuation) {
+        return raise_connection_error(Http2ErrorCode::ProtocolError);
     }
-    if (!inbound_stream_.header_block_open && fhr.type == Http2FrameType::Continuation) {
-        return common::IoErr::Invalid;
+    if (offset == 0 && !inbound_stream_.header_block_open && fhr.type == Http2FrameType::Continuation) {
+        return raise_connection_error(Http2ErrorCode::ProtocolError);
     }
 
     switch (fhr.type) {
@@ -801,6 +767,8 @@ common::IoErr Http2Connection::consume_incoming_frame_payload(const FrameHeader 
             return handle_headers_payload(fhr, buf, offset, length);
         case Http2FrameType::Continuation:
             return handle_continuation_payload(fhr, buf, offset, length);
+        case Http2FrameType::PushPromise:
+            return handle_push_promise_payload(fhr, buf, offset, length);
         case Http2FrameType::Settings:
             return handle_settings_payload(fhr, buf, offset, length);
         case Http2FrameType::Ping:
@@ -886,7 +854,7 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
         }
     }
 
-    if (inbound_stream_.discard_closed_stream_block) {
+    if (inbound_stream_.payload_mode == PayloadMode::Discard) {
         if (inbound_stream_.stream_id != fhr.stream_id) {
             return common::IoErr::Invalid;
         }
@@ -934,7 +902,7 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
             inbound_stream_.payload_end = fhr.length;
             inbound_stream_.header_block_open = false;
             inbound_stream_.end_stream_pending = false;
-            inbound_stream_.discard_closed_stream_block = true;
+            inbound_stream_.payload_mode = PayloadMode::Discard;
             if (frame_end >= fhr.length) {
                 clear_inbound_stream();
             }
@@ -950,6 +918,128 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
     return common::IoErr::None;
 }
 
+// Records the wire error code and returns a real error so the frame stack
+// unwinds immediately. Closing is deliberately left to the single unwind point
+// in drive_io(): a handler that kept working after starting the close would go
+// on touching an outbound queue that is already shutting down, and the salvage
+// path there would abort the GOAWAY before it is flushed.
+common::IoErr Http2Connection::raise_connection_error(Http2ErrorCode code, common::IoErr reason) noexcept {
+    FIBER_ASSERT(reason != common::IoErr::None);
+    if (!pending_error_raised_) {
+        pending_error_raised_ = true;
+        pending_error_code_ = code;
+        if (terminal_error_ == common::IoErr::None) {
+            terminal_error_ = reason;
+        }
+    }
+    return reason;
+}
+
+// Sends GOAWAY with the recorded code, then finishes through the ordinary
+// flush-and-close path so the frame actually reaches the peer.
+void Http2Connection::close_after_connection_error(common::IoErr reason) noexcept {
+    FIBER_ASSERT(pending_error_raised_);
+    const Http2ErrorCode code = pending_error_code_;
+    pending_error_raised_ = false;
+    if (state_ == State::Closed || state_ == State::Closing) {
+        // Already terminating; a second close would only drop the pending
+        // flush. terminal_error_ is set by raise_connection_error().
+        return;
+    }
+    if (state_ == State::Init || !transport_ || local_goaway_sent_ ||
+        send_goaway(last_peer_stream_id_, code) != common::IoErr::None) {
+        enter_closing(reason, false);
+        return;
+    }
+    local_goaway_sent_ = true;
+    local_goaway_last_stream_id_ = last_peer_stream_id_;
+    stop_sending_requested_ = true;
+    stop_sending_reason_ = reason;
+    inbound_io_.operation_pending = false;
+    inbound_io_.wait_event = event::IoEvent::None;
+    clear_inbound_stream();
+    transition_state(State::Closing);
+    if (state_ == State::Closed) {
+        return;
+    }
+    close_flush_outbound_ = true;
+    close_outbound();
+    finish_connection();
+}
+
+common::IoErr Http2Connection::begin_discard_headers() noexcept {
+    if (!discard_sink_) {
+        discard_sink_.reset(new (std::nothrow) Http2HpackDiscardSink(options_.max_hpack_string_size));
+        if (!discard_sink_)
+            return common::IoErr::NoMem;
+    }
+    inbound_hpack_decoder_.begin_block(discard_sink_.get(), &Http2HpackDiscardSink::ops());
+    return common::IoErr::None;
+}
+
+common::IoErr Http2Connection::discard_headers(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
+                                               std::size_t length) noexcept {
+    const auto begin = std::max(offset, inbound_stream_.payload_begin);
+    const auto end = std::min(offset + length, inbound_stream_.payload_end);
+    const bool last = offset + length == fhr.length && (fhr.flags & kFlagEndHeaders);
+    if (end > begin || last) {
+        static const std::uint8_t empty = 0;
+        const auto *data = end > begin ? buf.readable_data() + begin - offset : &empty;
+        const auto err = inbound_hpack_decoder_.decode(data, end > begin ? end - begin : 0, last);
+        if (err != common::IoErr::None) {
+            return raise_connection_error(err == common::IoErr::NoMem ? Http2ErrorCode::InternalError
+                                                                      : Http2ErrorCode::CompressionError,
+                                          err);
+        }
+    }
+    if (last) {
+        const auto promised = inbound_stream_.promised_stream_id;
+        discard_sink_->finish_block();
+        clear_inbound_stream();
+        if (promised)
+            return send_rst_stream(promised, Http2ErrorCode::Cancel);
+    }
+    return common::IoErr::None;
+}
+
+common::IoErr Http2Connection::handle_push_promise_payload(const FrameHeader &fhr, const mem::IoBuf &buf,
+                                                           std::size_t offset, std::size_t length) noexcept {
+    // A server never receives PUSH_PROMISE, and a client only tolerates one the
+    // peer put in flight before acknowledging our ENABLE_PUSH=0.
+    if (options_.role == ConnectionRole::Server || initial_settings_acked_) {
+        return raise_connection_error(Http2ErrorCode::ProtocolError);
+    }
+    if (offset == 0) {
+        const std::size_t prefix = 4 + ((fhr.flags & kFlagPadded) ? 1 : 0);
+        if (fhr.length < prefix || length < prefix)
+            return raise_connection_error(Http2ErrorCode::FrameSizeError);
+        if (!is_local_stream_id(fhr.stream_id) || is_idle_stream(fhr.stream_id)) {
+            return raise_connection_error(Http2ErrorCode::ProtocolError);
+        }
+        auto *associated = find_stream(fhr.stream_id);
+        if (associated && associated->remote_end_stream_)
+            return raise_connection_error(Http2ErrorCode::ProtocolError);
+        const auto padding = (fhr.flags & kFlagPadded) ? buf.readable_data()[0] : 0;
+        if (fhr.length < prefix + padding)
+            return raise_connection_error(Http2ErrorCode::ProtocolError);
+        const auto promised = parse_stream_id(buf.readable_data() + prefix - 4);
+        if (!is_next_peer_stream_id(promised) || find_stream(promised))
+            return raise_connection_error(Http2ErrorCode::ProtocolError);
+        last_peer_stream_id_ = promised;
+        clear_inbound_stream();
+        inbound_stream_.payload_mode = PayloadMode::Discard;
+        inbound_stream_.stream_id = fhr.stream_id;
+        inbound_stream_.promised_stream_id = promised;
+        inbound_stream_.payload_begin = prefix;
+        inbound_stream_.payload_end = fhr.length - padding;
+        inbound_stream_.header_block_open = (fhr.flags & kFlagEndHeaders) == 0;
+        const auto err = begin_discard_headers();
+        if (err != common::IoErr::None)
+            return err;
+    }
+    return discard_headers(fhr, buf, offset, length);
+}
+
 common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
                                                       std::size_t length) noexcept {
     if (offset == 0) {
@@ -958,6 +1048,8 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
         }
         std::uint8_t pad_length = 0;
         if ((fhr.flags & kFlagPadded) != 0) {
+            if (length == 0)
+                return raise_connection_error(Http2ErrorCode::ProtocolError);
             pad_length = buf.readable_data()[0];
         }
         std::size_t frame_prefix =
@@ -969,75 +1061,42 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
         Http2Stream *stream = find_stream(fhr.stream_id);
         if (!stream) {
             if (!is_idle_stream(fhr.stream_id)) {
-                // A response HEADERS frame can already be queued when the
-                // caller resets the local stream. Discard the complete header
-                // block, including CONTINUATION frames, and report a stream
-                // error without tearing down the connection.
                 handle_stream_error(fhr.stream_id, Http2ErrorCode::StreamClosed, common::IoErr::Invalid);
-                inbound_stream_.lease.reset();
-                inbound_stream_.stream_id = fhr.stream_id;
-                inbound_stream_.payload_begin = 0;
-                inbound_stream_.payload_end = 0;
-                inbound_stream_.header_block_open = (fhr.flags & kFlagEndHeaders) == 0;
-                inbound_stream_.end_stream_pending = false;
-                inbound_stream_.discard_closed_stream_block = true;
-                if (!inbound_stream_.header_block_open) {
-                    clear_inbound_stream();
+                inbound_stream_.payload_mode = PayloadMode::Discard;
+            } else {
+                // Only a server opens streams the peer initiates; on a client
+                // this is either an unsolicited push or a stream id it should
+                // have opened itself.
+                if (options_.role == ConnectionRole::Client)
+                    return raise_connection_error(Http2ErrorCode::ProtocolError);
+                stream = create_peer_stream(fhr.stream_id);
+                if (!stream) {
+                    if (!is_peer_stream_id(fhr.stream_id))
+                        return common::IoErr::Invalid;
+                    last_peer_stream_id_ = fhr.stream_id;
+                    handle_stream_error(fhr.stream_id, Http2ErrorCode::RefusedStream, common::IoErr::Canceled);
+                    inbound_stream_.payload_mode = PayloadMode::Discard;
                 }
-                return common::IoErr::None;
             }
-            stream = create_peer_stream(fhr.stream_id);
-            if (!stream) {
-                if (!is_peer_stream_id(fhr.stream_id)) {
-                    return common::IoErr::Invalid;
-                }
-                // The factory refused a protocol-legal new stream: we are
-                // draining, the advertised SETTINGS_MAX_CONCURRENT_STREAMS
-                // budget is full, or the factory itself failed. RFC 9113
-                // 6.8/5.1.2 makes that a stream error so the peer can retry on
-                // a fresh connection; only a wrong-parity stream id remains a
-                // connection error. Advance last_peer_stream_id_ so the
-                // refused id is no longer idle: late DATA then consumes the
-                // connection window and is discarded, late RST_STREAM /
-                // WINDOW_UPDATE are ignored, and the header block (including
-                // CONTINUATION frames) is dropped without dispatching a
-                // handler. A later GOAWAY echoing this id is safe because the
-                // RST_STREAM already told the peer this stream was refused.
-                last_peer_stream_id_ = fhr.stream_id;
-                handle_stream_error(fhr.stream_id, Http2ErrorCode::RefusedStream, common::IoErr::Canceled);
-                inbound_stream_.lease.reset();
-                inbound_stream_.stream_id = fhr.stream_id;
-                inbound_stream_.payload_begin = 0;
-                inbound_stream_.payload_end = 0;
-                inbound_stream_.header_block_open = (fhr.flags & kFlagEndHeaders) == 0;
-                inbound_stream_.end_stream_pending = false;
-                inbound_stream_.discard_closed_stream_block = true;
-                if (!inbound_stream_.header_block_open) {
-                    clear_inbound_stream();
-                }
-                return common::IoErr::None;
-            }
-        } else {
-            if (stream->remote_end_stream_) {
-                return common::IoErr::Invalid;
-            }
+        } else if (stream->remote_end_stream_) {
+            return common::IoErr::Invalid;
         }
-
-        inbound_stream_.lease = stream->lease();
+        if (inbound_stream_.payload_mode == PayloadMode::Discard) {
+            auto err = begin_discard_headers();
+            if (err != common::IoErr::None)
+                return err;
+        }
+        inbound_stream_.lease = stream ? stream->lease() : Http2Stream::Lease{};
         inbound_stream_.stream_id = fhr.stream_id;
         inbound_stream_.payload_begin = frame_prefix;
         inbound_stream_.payload_end = fhr.length - pad_length;
         inbound_stream_.header_block_open = (fhr.flags & kFlagEndHeaders) == 0;
         inbound_stream_.end_stream_pending = (fhr.flags & kFlagEndStream) != 0;
-        inbound_stream_.discard_closed_stream_block = false;
+        inbound_stream_.promised_stream_id = 0;
     }
 
-    if (inbound_stream_.discard_closed_stream_block) {
-        const std::size_t frame_end = offset + length;
-        if (frame_end >= fhr.length && (fhr.flags & kFlagEndHeaders) != 0) {
-            clear_inbound_stream();
-        }
-        return common::IoErr::None;
+    if (inbound_stream_.payload_mode == PayloadMode::Discard) {
+        return discard_headers(fhr, buf, offset, length);
     }
 
     Http2Stream *stream = inbound_stream_.lease.get();
@@ -1087,23 +1146,14 @@ common::IoErr Http2Connection::handle_continuation_payload(const FrameHeader &fh
                                                            std::size_t offset, std::size_t length) noexcept {
     if (offset == 0) {
         if (!inbound_stream_.header_block_open || fhr.stream_id != inbound_stream_.stream_id) {
-            return common::IoErr::Invalid;
-        }
-        if (inbound_stream_.discard_closed_stream_block) {
-            if ((fhr.flags & kFlagEndHeaders) != 0) {
-                clear_inbound_stream();
-            }
-            return common::IoErr::None;
+            return raise_connection_error(Http2ErrorCode::ProtocolError);
         }
         inbound_stream_.payload_begin = 0;
         inbound_stream_.payload_end = fhr.length;
     }
 
-    if (inbound_stream_.discard_closed_stream_block) {
-        if (offset + length >= fhr.length && (fhr.flags & kFlagEndHeaders) != 0) {
-            clear_inbound_stream();
-        }
-        return common::IoErr::None;
+    if (inbound_stream_.payload_mode == PayloadMode::Discard) {
+        return discard_headers(fhr, buf, offset, length);
     }
 
     Http2Stream *stream = inbound_stream_.lease.get();
@@ -1153,6 +1203,7 @@ common::IoErr Http2Connection::handle_settings_payload(const FrameHeader &fhr, c
             if (fhr.length != 0) {
                 return common::IoErr::Invalid;
             }
+            initial_settings_acked_ = true;
             return common::IoErr::None;
         }
         if ((fhr.length % kSettingsParameterSize) != 0) {
@@ -1342,6 +1393,9 @@ common::IoErr Http2Connection::apply_settings_parameter(std::uint16_t id, std::u
             if (value > 1) {
                 return common::IoErr::Invalid;
             }
+            if (options_.role == ConnectionRole::Client && value == 1) {
+                return raise_connection_error(Http2ErrorCode::ProtocolError);
+            }
             peer_enable_push_ = value != 0;
             return common::IoErr::None;
         case kSettingsMaxConcurrentStreams: {
@@ -1407,7 +1461,9 @@ common::IoErr Http2Connection::apply_peer_initial_stream_window(std::uint32_t va
 }
 
 common::IoErr Http2Connection::send_initial_flight() noexcept {
-    const std::size_t settings_count = options_.enable_connect_protocol ? 4 : 3;
+    const bool announce_push_disabled = options_.role == ConnectionRole::Client;
+    const std::size_t settings_count =
+            3 + (options_.enable_connect_protocol ? 1 : 0) + (announce_push_disabled ? 1 : 0);
     const std::size_t settings_payload_size = settings_count * kSettingsParameterSize;
     bool send_client_preface = options_.role == ConnectionRole::Client;
     bool send_conn_window_update =
@@ -1429,6 +1485,10 @@ common::IoErr Http2Connection::send_initial_flight() noexcept {
         encode_http2_frame_header(out, static_cast<std::uint32_t>(settings_payload_size), Http2FrameType::Settings, 0,
                                   0);
         out += kFrameHeaderSize;
+        if (announce_push_disabled) {
+            out = append_u16(out, kSettingsEnablePush);
+            out = append_u32(out, 0);
+        }
         out = append_u16(out, kSettingsMaxConcurrentStreams);
         out = append_u32(out, options_.local_max_concurrent_streams);
         out = append_u16(out, kSettingsInitialWindowSize);
@@ -1693,31 +1753,11 @@ void Http2Connection::on_local_stream_attach_capacity_changed() noexcept {
     do {
         capacity_dispatch_again_ = false;
         apply_local_stream_attach_capacity_change();
-        if (capacity_cb_ != nullptr) {
-            capacity_cb_(capacity_ctx_, *this);
+        if (ops_.on_capacity_change != nullptr) {
+            ops_.on_capacity_change(ctx_, *this);
         }
     } while (capacity_dispatch_again_);
     capacity_dispatch_running_ = false;
-}
-
-void Http2Connection::set_capacity_callback(CapacityCallback cb, void *ctx) noexcept {
-    capacity_cb_ = cb;
-    capacity_ctx_ = cb != nullptr ? ctx : nullptr;
-}
-
-void Http2Connection::clear_capacity_callback() noexcept {
-    capacity_cb_ = nullptr;
-    capacity_ctx_ = nullptr;
-}
-
-void Http2Connection::set_state_callback(StateCallback cb, void *ctx) noexcept {
-    state_cb_ = cb;
-    state_ctx_ = cb != nullptr ? ctx : nullptr;
-}
-
-void Http2Connection::clear_state_callback() noexcept {
-    state_cb_ = nullptr;
-    state_ctx_ = nullptr;
 }
 
 void Http2Connection::transition_state(State next) noexcept {
@@ -1734,8 +1774,8 @@ void Http2Connection::transition_state(State next) noexcept {
     state_dispatch_running_ = true;
     do {
         state_dispatch_again_ = false;
-        if (state_cb_ != nullptr) {
-            state_cb_(state_ctx_, *this);
+        if (ops_.on_state_change != nullptr) {
+            ops_.on_state_change(ctx_, *this);
         }
     } while (state_dispatch_again_);
     state_dispatch_running_ = false;
@@ -1935,17 +1975,18 @@ void Http2Connection::enter_closing(common::IoErr reason, bool report_error) noe
         }
         abort_outbound(reason);
         close_finished_ = true;
-        close_completion_dispatched_ = true;
         transition_state(State::Closed);
         return;
     }
-    transition_state(State::Closing);
     stop_sending_requested_ = true;
     stop_sending_reason_ = reason;
     if (report_error && reason != common::IoErr::None) {
         terminal_error_ = reason;
     }
     close_flush_outbound_ = false;
+    transition_state(State::Closing);
+    if (state_ == State::Closed)
+        return;
     clear_inbound_stream();
     inbound_io_.wait_event = event::IoEvent::None;
     inbound_io_.operation_pending = false;
@@ -2370,11 +2411,13 @@ void Http2Connection::clear_inbound_stream() noexcept {
     inbound_stream_.payload_end = 0;
     inbound_stream_.header_block_open = false;
     inbound_stream_.end_stream_pending = false;
-    inbound_stream_.discard_closed_stream_block = false;
+    inbound_stream_.payload_mode = PayloadMode::Deliver;
+    inbound_stream_.promised_stream_id = 0;
 }
 
 Http2Stream::Lease Http2Connection::alloc_peer_stream(std::uint32_t stream_id) noexcept {
-    return peer_stream_factory_ops_.create_peer_stream(peer_stream_factory_ctx_, stream_id, *this);
+    FIBER_ASSERT(ops_.create_peer_stream != nullptr);
+    return ops_.create_peer_stream(ctx_, stream_id, *this);
 }
 
 void Http2Connection::close_all_streams(common::IoErr result) noexcept {

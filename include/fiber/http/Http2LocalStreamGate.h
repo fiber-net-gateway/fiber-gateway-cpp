@@ -21,9 +21,9 @@ namespace fiber::http {
 // fast path, fairness needs no capacity reservation: try_attach simply yields
 // while anyone is queued.
 //
-// Lives on the connection's EventLoop and is not thread safe. It owns the
-// connection's capacity and state callbacks; chain set_capacity_callback to
-// observe capacity changes alongside it.
+// Lives on the connection's EventLoop and is not thread safe. The
+// owner forwards connection Ops notifications to on_capacity/state_change.
+// Chain set_capacity_callback to observe changes after the gate reacts.
 class Http2LocalStreamGate : public common::NonCopyable, public common::NonMovable {
 public:
     explicit Http2LocalStreamGate(Http2Connection &connection) noexcept;
@@ -42,6 +42,8 @@ public:
     attach(Http2Stream &stream, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
 
     void cancel_all(common::IoErr reason) noexcept;
+    void on_capacity_change() noexcept;
+    void on_state_change() noexcept;
 
     [[nodiscard]] Http2Connection &connection() const noexcept { return *connection_; }
     [[nodiscard]] std::size_t waiter_count() const noexcept { return waiter_count_; }
@@ -54,8 +56,6 @@ public:
 private:
     class Waiter;
 
-    static void on_connection_capacity(void *ctx, Http2Connection &connection) noexcept;
-    static void on_connection_state(void *ctx, Http2Connection &connection) noexcept;
     void handle_capacity_change() noexcept;
     void wake_waiters() noexcept;
     void link_waiter(Waiter &waiter) noexcept;

@@ -11,16 +11,10 @@
 
 namespace fiber::http {
 
-// Fans one connection's single close notification out to everyone who cares.
-//
-// Http2Connection reports closure through one callback that fires once. This
-// gate takes that callback and turns it into any number of subscribers: plain
-// observers, which run inline in registration order, and coroutines parked in
-// join(), which resume afterwards on the loop. Observers therefore always see
-// the closure before a joiner can act on it - a pool has unlinked its entry
-// before anyone awaiting the connection gets a chance to destroy it.
-//
-// Lives on the connection's EventLoop and is not thread safe.
+// The owner forwards Closed to this gate. Completion is deferred until the
+// connection stack unwinds. Observers run before joiners are posted; observers
+// must not destroy the owner/gate or drive a nested event loop.
+// Lives on one EventLoop and is not thread safe.
 class Http2CloseGate : public common::NonCopyable, public common::NonMovable {
 public:
     using CloseResult = Http2Connection::CloseResult;
@@ -42,22 +36,18 @@ public:
         bool linked = false;
     };
 
-    Http2CloseGate() noexcept = default;
+    Http2CloseGate(event::EventLoop &loop, Http2Connection &connection) noexcept;
     // Resolves outstanding joiners with Canceled; their coroutines resume on the
     // loop after the gate is gone, so this is a teardown-only path.
     ~Http2CloseGate();
 
-    // Installs the gate as the connection's close callback. Safe before or
-    // after start(): a connection that already reported closure resolves
-    // join() immediately.
-    void arm(Http2Connection &connection) noexcept;
+    void on_connection_closed() noexcept;
 
     [[nodiscard]] fiber::async::Task<CloseResult> join() noexcept;
 
     void add_observer(ObserverHook &hook, ObserverCallback callback, void *ctx) noexcept;
     void remove_observer(ObserverHook &hook) noexcept;
 
-    [[nodiscard]] bool armed() const noexcept { return connection_ != nullptr; }
     [[nodiscard]] bool closed() const noexcept;
     [[nodiscard]] common::IoErr terminal_error() const noexcept;
     [[nodiscard]] bool has_joiners() const noexcept { return joiner_head_ != nullptr; }
@@ -66,20 +56,22 @@ public:
 private:
     class Joiner;
 
-    static void on_connection_closed(void *ctx, Http2Connection &connection, CloseResult result) noexcept;
-    void dispatch(common::IoErr reason) noexcept;
+    enum class Phase : std::uint8_t { Open, Pending, Dispatching, Complete };
+    static void on_completion(Http2CloseGate *gate) noexcept;
+    void dispatch() noexcept;
     void link_joiner(Joiner &joiner) noexcept;
     void unlink_joiner(Joiner &joiner) noexcept;
 
-    Http2Connection *connection_ = nullptr;
+    event::EventLoop *loop_;
+    Http2Connection *connection_;
+    event::EventLoop::DeferEntry completion_entry_{};
     Joiner *joiner_head_ = nullptr;
     Joiner *joiner_tail_ = nullptr;
     ObserverHook *observer_head_ = nullptr;
     ObserverHook *observer_tail_ = nullptr;
     std::size_t joiner_count_ = 0;
     common::IoErr terminal_error_ = common::IoErr::None;
-    bool closed_ = false;
-    bool installed_ = false;
+    Phase phase_ = Phase::Open;
 };
 
 } // namespace fiber::http

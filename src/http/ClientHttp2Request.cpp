@@ -9,7 +9,6 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/http/ClientHttp2Exchange.h>
 #include <fiber/http/Http2Connection.h>
-#include "http/ClientHttp2Push.h"
 #include "http/Http2DataFrameEncoder.h"
 #include "http/Http2HeadersFrameEncoder.h"
 #include "http/detail/Http2HeaderDecodeUtil.h"
@@ -141,23 +140,6 @@ struct ClientHttp2Request::SendRequestTrailerOp {
 
     const HttpHeaders *headers_ = nullptr;
 };
-
-const Http2StreamFactoryOps &ClientHttp2Request::factory_ops() noexcept {
-    static const Http2StreamFactoryOps kOps{
-            &ClientHttp2Request::create_peer_stream_op,
-    };
-    return kOps;
-}
-
-Http2Stream::Lease ClientHttp2Request::create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept {
-    (void) stream_id;
-    return ClientHttp2Push::create(stream_id, conn);
-}
-
-Http2Stream::Lease ClientHttp2Request::create_peer_stream_op(void *, std::uint32_t stream_id,
-                                                             Http2Connection &conn) noexcept {
-    return create_peer_stream(stream_id, conn);
-}
 
 const Http2Stream::Ops &ClientHttp2Request::stream_ops() noexcept {
     static const Http2Stream::Ops kOps{
