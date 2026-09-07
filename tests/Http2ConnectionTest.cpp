@@ -3670,6 +3670,174 @@ TEST(Http2ConnectionTest, ServerConnectionPrefaceSendsSettingsAndWindowUpdateAft
     EXPECT_EQ(frames[1].length, 4U);
 }
 
+namespace {
+
+std::uint32_t frame_payload_u32(const EncodedFrame &frame, std::size_t offset = 0) {
+    EXPECT_LE(offset + 4U, frame.payload.size());
+    std::uint32_t value = 0;
+    for (std::size_t i = 0; i < 4U; ++i) {
+        value = (value << 8U) | static_cast<std::uint8_t>(frame.payload[offset + i]);
+    }
+    return value;
+}
+
+const EncodedFrame *find_frame(const std::vector<EncodedFrame> &frames, std::uint8_t type,
+                               std::uint32_t stream_id) noexcept {
+    for (const EncodedFrame &frame: frames) {
+        if (frame.type == type && frame.stream_id == stream_id) {
+            return &frame;
+        }
+    }
+    return nullptr;
+}
+
+struct DrainingRefusalOutcome {
+    fiber::common::IoResult<void> close_result;
+    bool drain_reached = false;
+    bool running_with_stream1 = false;
+    fiber::http::Http2Connection::State state_after_refusal = fiber::http::Http2Connection::State::Init;
+    bool stream1_remote_end = false;
+    std::string written;
+};
+
+DetachedTask run_draining_peer_stream_refusal(std::shared_ptr<std::promise<DrainingRefusalOutcome>> promise) {
+    DrainingRefusalOutcome outcome;
+
+    std::string opening;
+    opening += kClientConnectionPreface;
+    opening += make_frame(0, 0x4, 0x0, 0, {});
+    opening += build_headers_frame_bytes(1, {{":method", "POST"}, {":path", "/"}}, false);
+
+    auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{std::move(opening)},
+                                                         std::vector<size_t>{}, false, true);
+    auto *fake_transport = transport.get();
+
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Server;
+    ControlHttp2Connection connection(std::move(transport), fake_transport, options);
+
+    for (int i = 0; i < 200 && (connection.current_state() != fiber::http::Http2Connection::State::Running ||
+                                !connection.current_has_stream(1));
+         ++i) {
+        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+    }
+    outcome.running_with_stream1 = connection.current_state() == fiber::http::Http2Connection::State::Running &&
+                                   connection.current_has_stream(1);
+
+    connection.request_graceful_close();
+    outcome.drain_reached = connection.current_state() == fiber::http::Http2Connection::State::Draining;
+
+    // A racing peer opens stream 3 after our GOAWAY and even ships body bytes
+    // for the refused stream. Both must be handled as stream-level events.
+    std::string late;
+    late += build_headers_frame_bytes(3, {{":method", "POST"}, {":path", "/late"}}, true);
+    late += make_frame(4, 0x0, 0x0, 3, "body");
+    fake_transport->append_read_chunk(std::move(late));
+    for (int i = 0; i < 50 && !find_frame(parse_frames(connection.written()), 0x3, 3); ++i) {
+        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+    }
+    outcome.state_after_refusal = connection.current_state();
+
+    // The already accepted stream 1 keeps draining normally.
+    fake_transport->append_read_chunk(make_frame(1, 0x0, 0x1, 1, "x"));
+    co_await fiber::async::sleep(std::chrono::milliseconds(5));
+    outcome.stream1_remote_end = connection.current_stream_remote_end_stream(1);
+
+    connection.request_stop();
+    outcome.close_result = co_await connection.close_gate().join();
+    outcome.written = fake_transport->written();
+    promise->set_value(std::move(outcome));
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+DrainingRefusalOutcome execute_draining_peer_stream_refusal() {
+    fiber::event::EventLoopGroup group(1);
+    auto promise = std::make_shared<std::promise<DrainingRefusalOutcome>>();
+    auto future = promise->get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [promise]() mutable { return run_draining_peer_stream_refusal(promise); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        ADD_FAILURE() << "Timed out waiting for the draining peer stream refusal";
+        return {};
+    }
+
+    DrainingRefusalOutcome outcome = future.get();
+    group.join();
+    return outcome;
+}
+
+} // namespace
+
+TEST(Http2ConnectionTest, DrainingConnectionRefusesNewPeerStreamWithRstInsteadOfFailing) {
+    DrainingRefusalOutcome outcome = execute_draining_peer_stream_refusal();
+
+    ASSERT_TRUE(outcome.running_with_stream1);
+    ASSERT_TRUE(outcome.drain_reached);
+
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    // Our GOAWAY promised everything up to stream 1.
+    const EncodedFrame *goaway = find_frame(frames, 0x7, 0);
+    ASSERT_NE(goaway, nullptr) << describe_frames(frames);
+    EXPECT_EQ(goaway->length, 8U);
+    EXPECT_EQ(frame_payload_u32(*goaway, 0) & 0x7fffffffU, 1U);
+    EXPECT_EQ(frame_payload_u32(*goaway, 4), 0U);
+
+    // The racing stream 3 was refused as a stream error, not a connection error.
+    const EncodedFrame *rst = find_frame(frames, 0x3, 3);
+    ASSERT_NE(rst, nullptr) << describe_frames(frames);
+    EXPECT_EQ(frame_payload_u32(*rst), 0x7U); // REFUSED_STREAM
+
+    EXPECT_EQ(outcome.state_after_refusal, fiber::http::Http2Connection::State::Draining);
+    EXPECT_TRUE(outcome.stream1_remote_end);
+    ASSERT_TRUE(outcome.close_result.has_value()) << "connection died instead of draining";
+}
+
+TEST(Http2ConnectionTest, PeerStreamOverConcurrentLimitIsRefusedWithRstStream) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Server;
+    options.local_max_concurrent_streams = 1;
+
+    std::string chunks;
+    chunks += kClientConnectionPreface;
+    chunks += make_frame(0, 0x4, 0x0, 0, {});
+    chunks += build_headers_frame_bytes(1, {{":method", "POST"}, {":path", "/"}}, false);
+    chunks += build_headers_frame_bytes(3, {{":method", "POST"}, {":path", "/overflow"}}, true);
+
+    ControlRunOutcome outcome = execute_control_connection({std::move(chunks)}, {}, options, true, false, false);
+
+    ASSERT_TRUE(outcome.result.has_value()) << "connection failed instead of refusing stream 3";
+    EXPECT_EQ(outcome.state, fiber::http::Http2Connection::State::Closed);
+
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    const EncodedFrame *rst = find_frame(frames, 0x3, 3);
+    ASSERT_NE(rst, nullptr) << describe_frames(frames);
+    EXPECT_EQ(frame_payload_u32(*rst), 0x7U); // REFUSED_STREAM
+}
+
+TEST(Http2ConnectionTest, PeerStreamWithLocalParityIdStillFailsTheConnection) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Server;
+
+    std::string chunks;
+    chunks += kClientConnectionPreface;
+    chunks += make_frame(0, 0x4, 0x0, 0, {});
+    // Stream 2 is even, i.e. server-initiated parity: a protocol error.
+    chunks += build_headers_frame_bytes(2, {{":method", "POST"}, {":path", "/"}}, true);
+
+    ControlRunOutcome outcome = execute_control_connection({std::move(chunks)}, {}, options, true, false, false);
+
+    ASSERT_FALSE(outcome.result.has_value());
+    EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::Invalid);
+
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    EXPECT_EQ(find_frame(frames, 0x3, 2), nullptr) << describe_frames(frames);
+}
+
 TEST(Http2ConnectionTest, ClientLocalStreamsRespectPeerAdvertisedConcurrentLimit) {
     fiber::http::Http2Connection::Options options;
     options.max_peer_concurrent_streams = 100;
@@ -4124,8 +4292,14 @@ TEST(Http2ConnectionTest, ServerRejectsPeerStreamsBeyondAdvertisedConcurrentLimi
 
     ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, options);
 
-    ASSERT_FALSE(outcome.result.has_value());
-    EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::Invalid);
+    // RFC 9113 5.1.2: exceeding the advertised concurrent-stream budget is a
+    // stream error, so stream 3 is refused with RST_STREAM while the accepted
+    // stream 1 completes and the connection closes cleanly.
+    ASSERT_TRUE(outcome.result.has_value()) << "connection failed instead of refusing stream 3";
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    const EncodedFrame *rst = find_frame(frames, 0x3, 3);
+    ASSERT_NE(rst, nullptr) << describe_frames(frames);
+    EXPECT_EQ(frame_payload_u32(*rst), 0x7U); // REFUSED_STREAM
 }
 
 TEST(Http2ConnectionTest, ServerParsesPathQueryAndExtensionFromPseudoPath) {
