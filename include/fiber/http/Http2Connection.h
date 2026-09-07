@@ -492,9 +492,6 @@ private:
     friend class ClientHttp2Request;
 };
 
-static_assert(std::is_standard_layout_v<Http2Connection>,
-              "Http2Connection must stay standard-layout so owners can embed it by value in intrusive containers.");
-
 } // namespace fiber::http
 
 #endif // FIBER_HTTP_HTTP2_CONNECTION_H

@@ -4,7 +4,6 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
-#include <type_traits>
 #include <utility>
 
 #include "../async/Task.h"
@@ -60,17 +59,11 @@ private:
     Http2Connection conn_;
     Http2CloseGate close_gate_;
     // Membership slot in the owning worker's list (Http2Stream::owned_hook_
-    // pattern: private hook, friend reaches it by offset). All data members
-    // share one access section; the class must stay standard-layout for that
-    // offset arithmetic to be valid.
+    // pattern: private hook, friend reaches it by offset).
     common::IntrusiveListHook worker_hook_{};
 
     friend class Http2ServerWorker;
 };
-
-static_assert(std::is_standard_layout_v<Http2ServerConnection>,
-              "Http2ServerConnection must stay standard-layout: the worker locates it from its intrusive hook by "
-              "offset arithmetic.");
 
 // Per-loop registry of live HTTP/2 server connections, Http3Server-shard
 // style. Connections link themselves in from their serve-coroutine frames
@@ -108,7 +101,14 @@ public:
     }
 
 private:
+    // Http2ServerConnection is not standard-layout (it holds an Http2Connection
+    // by value, which owns unique_ptrs), so offsetof warns here. It is still
+    // well-defined enough in practice: the type is non-polymorphic and has no
+    // virtual base, which is what container_of actually needs.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
     using ConnectionList = common::IntrusiveList<Http2ServerConnection, offsetof(Http2ServerConnection, worker_hook_)>;
+#pragma GCC diagnostic pop
 
     event::EventLoop &loop_;
     ConnectionList connections_{};

@@ -41,9 +41,9 @@ class GcRootSet;
 // replaces.
 //
 // The guard itself (not GcRootSource) is the intrusive-list owner type: it must
-// be standard-layout to satisfy IntrusiveList's static_assert, whereas
-// GcRootSource is polymorphic and therefore not standard-layout. The embedded
-// hook carries the linkage; a back-pointer dispatches visit_roots.
+// be non-polymorphic to satisfy IntrusiveList's static_assert, whereas
+// GcRootSource is polymorphic. The embedded hook carries the linkage; a
+// back-pointer dispatches visit_roots.
 //
 // Not copyable or movable: a linked node must keep a stable address, since the
 // list holds pointers to its hook. Hold it as a member or local for the scope of

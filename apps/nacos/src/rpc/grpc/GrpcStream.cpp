@@ -158,9 +158,9 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::open() noexcept {
 
     const http::ClientRequestHead head{
             .method = http::HttpMethod::Post,
+            .path = std::string_view(path_),
             .scheme = std::string_view(scheme_),
             .authority = std::string_view(authority_),
-            .path = std::string_view(path_),
             .headers = &headers,
     };
 

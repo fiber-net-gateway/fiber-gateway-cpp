@@ -474,9 +474,9 @@ DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16
     auto send_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/interop/http2/no-body",
                     .scheme = "https",
                     .authority = "localhost",
-                    .path = "/interop/http2/no-body",
             },
             true);
     if (!send_result) {
@@ -542,9 +542,9 @@ DetachedTask run_http2_client_with_body(fiber::event::EventLoop *loop, std::uint
     auto send_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
+                    .path = "/interop/http2/with-body",
                     .scheme = "https",
                     .authority = "localhost",
-                    .path = "/interop/http2/with-body",
             },
             false);
     if (!send_result) {

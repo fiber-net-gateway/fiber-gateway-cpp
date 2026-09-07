@@ -1187,9 +1187,9 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
         auto send_result = co_await exchange.send_header(
                 {
                         .method = fiber::http::HttpMethod::Connect,
+                        .path = "/chat",
                         .scheme = "https",
                         .authority = "localhost",
-                        .path = "/chat",
                         .protocol = "websocket",
                         .headers = &headers,
                 },
@@ -1268,9 +1268,9 @@ fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, 
     auto send_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/gzip",
                     .scheme = "https",
                     .authority = "localhost",
-                    .path = "/gzip",
                     .headers = &headers,
             },
             true, 2s);
@@ -1364,9 +1364,9 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
         auto send_result = co_await exchange.send_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
+                        .path = "/gzip",
                         .scheme = "https",
                         .authority = "localhost",
-                        .path = "/gzip",
                         .headers = &headers,
                 },
                 true, 2s);

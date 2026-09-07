@@ -82,9 +82,9 @@ DetachedTask run_client_connect_and_shutdown(fiber::event::EventLoop *loop, std:
     auto send_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/",
                     .scheme = "http",
                     .authority = "127.0.0.1",
-                    .path = "/",
             },
             true);
     bool opened = send_result.has_value() && exchange.stream_id() != 0;

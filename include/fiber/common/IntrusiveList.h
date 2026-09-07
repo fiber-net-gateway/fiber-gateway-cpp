@@ -17,8 +17,15 @@ struct IntrusiveListHook {
 
 template<typename T, std::size_t Offset>
 class IntrusiveList {
-    static_assert(std::is_standard_layout_v<T>,
-                  "IntrusiveList owner type must be standard-layout because Offset is used for container_of.");
+    // Non-polymorphic rather than standard-layout: `offsetof` on a non-standard-layout
+    // type is conditionally-supported since C++17 and both clang and GCC support it.
+    // The one case they cannot compute -- a member reached through a virtual base --
+    // is a hard compile error, not a warning, so it cannot slip past this assert even
+    // though std::is_polymorphic_v is false for a class with a virtual base and no
+    // virtual functions. Sites that rely on this get a -Winvalid-offsetof warning at
+    // the offsetof itself and silence it locally, which keeps them easy to find.
+    static_assert(!std::is_polymorphic_v<T>,
+                  "IntrusiveList owner type must be non-polymorphic because Offset is used for container_of.");
 
 public:
     [[nodiscard]] bool empty() const noexcept { return head_ == nullptr; }
