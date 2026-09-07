@@ -534,9 +534,9 @@ Task<IoErr> Shard::request(mem::BufPool &buffers, std::size_t key_id, std::uint6
     if (o.mixed && !hold)
         path = random % 100 == 0 ? "/slow.bin" : random % 100 < 10 ? "/medium.bin" : "/small.bin";
     auto sent = co_await exchange->send_header({.method = http::HttpMethod::Get,
+                                                .path = path,
                                                 .scheme = o.tls ? "https" : "http",
                                                 .authority = "localhost",
-                                                .path = path,
                                                 .headers = &headers},
                                                true, remaining(deadline));
     if (!sent)

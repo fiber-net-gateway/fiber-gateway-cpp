@@ -1105,9 +1105,9 @@ private:
         const auto request_deadline = std::min(started_at + options_.request_timeout, drain_end_);
         fiber::http::ClientRequestHead head{
                 .method = options_.method,
+                .path = options_.target.path,
                 .scheme = "https",
                 .authority = options_.target.authority,
-                .path = options_.target.path,
                 .headers = has_request_body ? &headers : nullptr,
         };
 

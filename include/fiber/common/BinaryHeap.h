@@ -16,15 +16,17 @@ struct BinaryHeapNode {
 };
 
 // Intrusive binary min-heap. Mirrors the IntrusiveRbTree contract:
-//   - T must be standard-layout (Offset is used for container_of).
+//   - T must be non-polymorphic (Offset is used for container_of).
 //   - Offset is offsetof(T, hook_member).
 //   - Compare is default-constructible; compare_(a, b) returns true when owner
 //     a is strictly less than owner b (both pointers are non-null at call sites).
 // The heap never owns nodes and never touches owner state beyond the hook.
 template<typename T, std::size_t Offset, typename Compare>
 class BinaryHeap {
-    static_assert(std::is_standard_layout_v<T>,
-                  "BinaryHeap owner type must be standard-layout because Offset is used for container_of.");
+    // Non-polymorphic rather than standard-layout, for the reasons spelled out on
+    // IntrusiveList's identical assert in IntrusiveList.h.
+    static_assert(!std::is_polymorphic_v<T>,
+                  "BinaryHeap owner type must be non-polymorphic because Offset is used for container_of.");
 
 public:
     BinaryHeap() noexcept = default;

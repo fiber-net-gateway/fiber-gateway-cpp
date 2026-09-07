@@ -15,8 +15,8 @@ class Http2PoolAcquireWaiter;
 // hooks represent availability, ownership and idle expiry respectively.
 //
 // The pool core owns every field below; nothing outside it may touch them. They
-// stay public only because IntrusiveList reaches the hooks through offsetof,
-// which needs a standard-layout type, and that forbids mixing access levels.
+// stay public only because the namespace-scope list aliases below name the hooks
+// in offsetof, which cannot reach a private member from outside the class.
 class Http2ConnectionPoolEntry {
 public:
     enum class State : std::uint8_t { Free, Connecting, Ready, Draining, Closed };

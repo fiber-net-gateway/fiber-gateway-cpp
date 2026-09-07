@@ -26,8 +26,10 @@ struct IntrusiveRbTreeHook {
 
 template<typename T, std::size_t Offset, typename Compare>
 class IntrusiveRbTree {
-    static_assert(std::is_standard_layout_v<T>,
-                  "IntrusiveRbTree owner type must be standard-layout because Offset is used for container_of.");
+    // Non-polymorphic rather than standard-layout, for the reasons spelled out on
+    // IntrusiveList's identical assert in IntrusiveList.h.
+    static_assert(!std::is_polymorphic_v<T>,
+                  "IntrusiveRbTree owner type must be non-polymorphic because Offset is used for container_of.");
 
 public:
     IntrusiveRbTree() noexcept { init_sentinel(); }

@@ -182,9 +182,9 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
         fiber::http::ClientRequestHead head{
                 .method = fiber::http::HttpMethod::Post,
+                .path = "/http3/echo",
                 .scheme = "https",
                 .authority = "localhost",
-                .path = "/http3/echo",
                 .headers = &headers,
         };
         auto sent_head = co_await exchange.send_header(head, false, 2s);
@@ -244,9 +244,9 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         fiber::http::ClientHttp3Exchange head_exchange = connected->open_exchange(pool);
         fiber::http::ClientRequestHead head_request{
                 .method = fiber::http::HttpMethod::Head,
+                .path = "/http3/head",
                 .scheme = "https",
                 .authority = "localhost",
-                .path = "/http3/head",
         };
         auto sent_head_request = co_await head_exchange.send_header(head_request, true, 2s);
         if (!sent_head_request) {
@@ -318,9 +318,9 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
         fiber::http::ClientRequestHead head{
                 .method = fiber::http::HttpMethod::Get,
+                .path = "/",
                 .scheme = "https",
                 .authority = "localhost",
-                .path = "/",
         };
         auto sent_head = co_await exchange.send_header(head, true, 2s);
         if (!sent_head) {
@@ -406,9 +406,9 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
         fiber::http::ClientRequestHead head{
                 .method = fiber::http::HttpMethod::Post,
+                .path = "/http3/partial",
                 .scheme = "https",
                 .authority = "localhost",
-                .path = "/http3/partial",
                 .headers = &headers,
         };
         auto sent_head = co_await exchange.send_header(head, false, 2s);

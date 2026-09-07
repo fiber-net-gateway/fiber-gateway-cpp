@@ -1414,9 +1414,9 @@ DetachedTask run_client_request_header_send(std::shared_ptr<std::promise<ClientR
     outcome.result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
+                    .path = "/submit",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/submit",
                     .headers = &headers,
             },
             true);
@@ -1445,9 +1445,9 @@ DetachedTask run_client_exchange_abort(std::shared_ptr<std::promise<ClientAbortR
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
+                    .path = "/upload",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/upload",
             },
             false);
 
@@ -1500,9 +1500,9 @@ run_client_extended_connect_header_send(std::shared_ptr<std::promise<ClientExten
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Connect,
+                    .path = "/chat",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/chat",
                     .protocol = "websocket",
                     .headers = &headers,
             },
@@ -1535,9 +1535,9 @@ DetachedTask run_client_request_body_send(std::shared_ptr<std::promise<ClientReq
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
+                    .path = "/upload",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/upload",
             },
             false);
     if (outcome.header_result) {
@@ -1568,9 +1568,9 @@ DetachedTask run_client_body_cancel_before_write(std::shared_ptr<std::promise<Cl
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
+                    .path = "/cancel-before-write",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/cancel-before-write",
             },
             false);
     if (outcome.header_result) {
@@ -1606,9 +1606,9 @@ DetachedTask run_client_partial_request_body_send(std::shared_ptr<std::promise<C
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
+                    .path = "/partial-body",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/partial-body",
             },
             false);
     if (outcome.header_result) {
@@ -1652,9 +1652,9 @@ run_client_body_waiting_for_connection_window(std::shared_ptr<std::promise<Clien
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
+                    .path = "/connection-window",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/connection-window",
             },
             false);
 
@@ -1694,9 +1694,9 @@ DetachedTask run_client_request_trailer_send(std::shared_ptr<std::promise<Client
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Post,
+                    .path = "/upload",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/upload",
             },
             false);
     if (outcome.header_result) {
@@ -1749,9 +1749,9 @@ DetachedTask run_client_response_body_read(std::shared_ptr<std::promise<ClientRe
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/download",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/download",
             },
             true);
     outcome.stream_id = exchange.stream_id();
@@ -1803,9 +1803,9 @@ run_client_response_headers_and_trailers_read(std::shared_ptr<std::promise<Clien
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/with-trailers",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/with-trailers",
             },
             true);
     outcome.stream_id = exchange.stream_id();
@@ -1860,9 +1860,9 @@ run_client_response_header_end_stream_read(std::shared_ptr<std::promise<ClientRe
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/no-body",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/no-body",
             },
             true);
     outcome.stream_id = exchange.stream_id();
@@ -1905,9 +1905,9 @@ run_client_response_read_after_rst_stream(std::shared_ptr<std::promise<ClientRes
     outcome.header_result = co_await exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/rst",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/rst",
             },
             true);
     outcome.stream_id = exchange.stream_id();
@@ -1945,9 +1945,9 @@ DetachedTask run_client_exchange_open_after_goaway(std::shared_ptr<std::promise<
     auto first_send_result = co_await first_exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/keep-open",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/keep-open",
             },
             true);
     if (!first_send_result) {
@@ -1981,9 +1981,9 @@ DetachedTask run_client_exchange_open_after_goaway(std::shared_ptr<std::promise<
         outcome.send_result = co_await exchange.send_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
+                        .path = "/after-goaway",
                         .scheme = "https",
                         .authority = "example.com",
-                        .path = "/after-goaway",
                 },
                 true);
     } else {
@@ -2797,9 +2797,9 @@ DetachedTask run_client_exchange_attach_wait(std::shared_ptr<std::promise<Client
     outcome.first_result = co_await first_exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/first",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/first",
             },
             true, std::chrono::seconds(1));
     outcome.first_stream_id = first_exchange.stream_id();
@@ -2816,9 +2816,9 @@ DetachedTask run_client_exchange_attach_wait(std::shared_ptr<std::promise<Client
     outcome.second_result = co_await second_exchange.send_header(
             {
                     .method = fiber::http::HttpMethod::Get,
+                    .path = "/second",
                     .scheme = "https",
                     .authority = "example.com",
-                    .path = "/second",
             },
             true, timeout);
     outcome.second_stream_id = second_exchange.stream_id();
