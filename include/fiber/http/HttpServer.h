@@ -56,11 +56,11 @@ private:
 
     static fiber::async::DetachedTask noop_task();
     static fiber::async::DetachedTask serve_loop(std::shared_ptr<Runtime> runtime);
-    [[nodiscard]] static event::EventLoop &select_connection_loop(const std::shared_ptr<Runtime> &runtime) noexcept;
-    static fiber::async::DetachedTask handle_connection(std::shared_ptr<Runtime> runtime, net::AcceptResult accept);
+    static fiber::async::DetachedTask handle_connection(std::shared_ptr<Runtime> runtime, std::size_t worker_index,
+                                                        net::AcceptResult accept);
     static fiber::async::Task<void> serve_http1(std::shared_ptr<Runtime> runtime,
                                                 std::unique_ptr<HttpTransport> transport);
-    static fiber::async::Task<void> serve_http2(std::shared_ptr<Runtime> runtime,
+    static fiber::async::Task<void> serve_http2(std::shared_ptr<Runtime> runtime, std::size_t worker_index,
                                                 std::unique_ptr<HttpTransport> transport);
     [[nodiscard]] static Http2Connection::Options make_http2_options(const HttpServerOptions &http_options) noexcept;
     static void close_on_owner_loop(const std::shared_ptr<Runtime> &runtime) noexcept;

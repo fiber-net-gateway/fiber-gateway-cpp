@@ -82,7 +82,7 @@ public:
         bool enable_connect_protocol = false;
     };
 
-    virtual ~Http2Connection();
+    ~Http2Connection();
 
     Http2Connection(Options options, void *peer_stream_factory_ctx,
                     const Http2StreamFactoryOps &peer_stream_factory_ops);
@@ -90,6 +90,15 @@ public:
     // Must be called on transport->loop(). A successful start owns and drives
     // transport I/O until closure; no run coroutine is required.
     common::IoErr start(std::unique_ptr<HttpTransport> transport) noexcept;
+
+    // Sink for inbound frame types this connection does not implement; the
+    // built-in behavior is to ignore them. Deliberately not a virtual: the
+    // connection stays free of vtables so it can sit inside intrusive
+    // containers by value.
+    using FramePayloadHook = common::IoErr (*)(void *ctx, const FrameHeader &fhr, const mem::IoBuf &buf,
+                                               std::size_t offset, std::size_t length) noexcept;
+    void set_frame_payload_hook(FramePayloadHook hook, void *ctx) noexcept;
+    void clear_frame_payload_hook() noexcept;
 
     // Fires once on the loop after all connection state is closed, and may
     // destroy the connection. There is one slot: Http2CloseGate takes it and
@@ -154,12 +163,6 @@ public:
     }
 
 protected:
-    // `offset` is the number of payload bytes already delivered for the current
-    // frame. Only the first `length` bytes starting at `buf.readable_data()`
-    // are part of this callback's payload chunk.
-    virtual common::IoErr on_frame_payload(const FrameHeader &fhr, const mem::IoBuf &buf, std::size_t offset,
-                                           std::size_t length) noexcept;
-
     Http2Stream *find_stream(std::uint32_t stream_id) noexcept;
     const Http2Stream *find_stream(std::uint32_t stream_id) const noexcept;
     void update_connection_send_window(std::int32_t delta) noexcept;
@@ -435,6 +438,8 @@ private:
     event::EventLoop::TimerEntry write_timer_entry_{};
     event::EventLoop::TimerEntry read_buffer_idle_timer_entry_{};
     std::chrono::steady_clock::time_point write_blocked_at_{};
+    FramePayloadHook frame_payload_hook_ = nullptr;
+    void *frame_payload_hook_ctx_ = nullptr;
     ClosedCallback on_closed_ = nullptr;
     void *closed_ctx_ = nullptr;
     CapacityCallback capacity_cb_ = nullptr;
@@ -466,6 +471,9 @@ private:
     friend class ServerHttp2Request;
     friend class ClientHttp2Request;
 };
+
+static_assert(std::is_standard_layout_v<Http2Connection>,
+              "Http2Connection must stay standard-layout so owners can embed it by value in intrusive containers.");
 
 } // namespace fiber::http
 

@@ -148,6 +148,16 @@ Http2Connection::Http2Connection(Options options, void *peer_stream_factory_ctx,
     FIBER_ASSERT(inbound_hpack_decoder_.init(kDefaultHeaderTableSize, options_.max_hpack_string_size));
 }
 
+void Http2Connection::set_frame_payload_hook(FramePayloadHook hook, void *ctx) noexcept {
+    frame_payload_hook_ = hook;
+    frame_payload_hook_ctx_ = hook != nullptr ? ctx : nullptr;
+}
+
+void Http2Connection::clear_frame_payload_hook() noexcept {
+    frame_payload_hook_ = nullptr;
+    frame_payload_hook_ctx_ = nullptr;
+}
+
 void Http2Connection::set_closed_callback(ClosedCallback cb, void *ctx) noexcept {
     on_closed_ = cb;
     closed_ctx_ = cb != nullptr ? ctx : nullptr;
@@ -773,11 +783,6 @@ void Http2Connection::graceful_shutdown() noexcept {
     }
 }
 
-common::IoErr Http2Connection::on_frame_payload(const FrameHeader &, const mem::IoBuf &, std::size_t,
-                                                std::size_t) noexcept {
-    return common::IoErr::None;
-}
-
 common::IoErr Http2Connection::consume_incoming_frame_payload(const FrameHeader &fhr, const mem::IoBuf &buf,
                                                               std::size_t offset, std::size_t length) noexcept {
     if (inbound_stream_.header_block_open && fhr.type != Http2FrameType::Continuation) {
@@ -810,7 +815,11 @@ common::IoErr Http2Connection::consume_incoming_frame_payload(const FrameHeader 
             // unsupported extension frame.
             return common::IoErr::None;
         default:
-            return on_frame_payload(fhr, buf, offset, length);
+            // Unimplemented frame types are ignored unless a hook observes
+            // them (tests record extension frames this way).
+            return frame_payload_hook_ != nullptr
+                           ? frame_payload_hook_(frame_payload_hook_ctx_, fhr, buf, offset, length)
+                           : common::IoErr::None;
     }
 }
 

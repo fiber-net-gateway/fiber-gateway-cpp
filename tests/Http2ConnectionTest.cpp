@@ -495,6 +495,7 @@ public:
     RecordingHttp2Connection(std::unique_ptr<fiber::http::HttpTransport> transport, Options options) :
         fiber::http::Http2Connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops()) {
         close_gate_.arm(*this);
+        set_frame_payload_hook(&RecordingHttp2Connection::record_payload, this);
         FIBER_ASSERT(start(std::move(transport)) == fiber::common::IoErr::None);
     }
 
@@ -509,9 +510,12 @@ public:
 
     void set_payload_error(fiber::common::IoErr err) noexcept { payload_error_ = err; }
 
-protected:
-    fiber::common::IoErr on_frame_payload(const FrameHeader &fhr, const fiber::mem::IoBuf &buf, std::size_t offset,
-                                          std::size_t length) noexcept override {
+private:
+    // Hooked in for unimplemented frame types: records each payload chunk
+    // instead of letting the connection ignore it.
+    static fiber::common::IoErr record_payload(void *ctx, const FrameHeader &fhr, const fiber::mem::IoBuf &buf,
+                                               std::size_t offset, std::size_t length) noexcept {
+        auto *self = static_cast<RecordingHttp2Connection *>(ctx);
         ObservedChunk chunk;
         chunk.header = fhr;
         chunk.offset = offset;
@@ -522,11 +526,10 @@ protected:
                 return fiber::common::IoErr::NoMem;
             }
         }
-        chunks_.push_back(std::move(chunk));
-        return payload_error_;
+        self->chunks_.push_back(std::move(chunk));
+        return self->payload_error_;
     }
 
-private:
     std::vector<ObservedChunk> chunks_;
     fiber::common::IoErr payload_error_ = fiber::common::IoErr::None;
     fiber::http::Http2CloseGate close_gate_{};
