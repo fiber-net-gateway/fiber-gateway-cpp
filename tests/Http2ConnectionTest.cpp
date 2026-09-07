@@ -3263,7 +3263,6 @@ TEST(Http2ConnectionTest, PingFrameRepliesWithAckAndSamePayload) {
 TEST(Http2ConnectionTest, ReadTimeoutSendsKeepalivePingAndAckClearsOutstanding) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.keepalive_ping_interval = std::chrono::milliseconds(1);
     options.read_timeout = std::chrono::milliseconds(10);
 
     std::string keepalive_payload(8, '\0');
@@ -3292,7 +3291,6 @@ TEST(Http2ConnectionTest, ReadTimeoutSendsKeepalivePingAndAckClearsOutstanding) 
 TEST(Http2ConnectionTest, SecondReadTimeoutWithoutPingAckClosesConnection) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.keepalive_ping_interval = std::chrono::milliseconds(1);
     options.read_timeout = std::chrono::milliseconds(10);
 
     KeepaliveRunOutcome outcome = execute_keepalive_connection(
@@ -3306,6 +3304,36 @@ TEST(Http2ConnectionTest, SecondReadTimeoutWithoutPingAckClosesConnection) {
     EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::TimedOut);
     EXPECT_EQ(outcome.wait_readable_call_count, 0U);
     EXPECT_EQ(outcome.read_into_call_count, 2U);
+}
+
+// Inbound bytes that are not the PING ACK still settle the outstanding probe:
+// any traffic is proof of life, and the idle window restarts from it, so the
+// connection survives to send a second probe before eventually timing out.
+TEST(Http2ConnectionTest, AnyInboundDataSettlesOutstandingKeepalivePing) {
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    options.read_timeout = std::chrono::milliseconds(5);
+
+    std::string settings_ack = make_frame(0, 0x4, 0x1, 0, {});
+    KeepaliveRunOutcome outcome = execute_keepalive_connection(
+            {
+                    {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
+                    {ScriptedReadTransport::ReadActionKind::Chunk, std::move(settings_ack)},
+                    {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
+            },
+            options);
+
+    ASSERT_FALSE(outcome.result.has_value());
+    EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::TimedOut);
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    ASSERT_EQ(frames.size(), 2U) << describe_frames(frames);
+    EXPECT_EQ(frames[0].type, 0x6);
+    EXPECT_EQ(frames[0].flags, 0x0);
+    EXPECT_EQ(frames[1].type, 0x6);
+    EXPECT_EQ(frames[1].flags, 0x0);
+    EXPECT_EQ(frames[1].payload.back(), '\x02');
+    EXPECT_EQ(outcome.wait_readable_call_count, 0U);
+    EXPECT_EQ(outcome.read_into_call_count, 3U);
 }
 
 TEST(Http2ConnectionTest, IdleReadBufferReleaseTimeoutDoesNotCloseConnection) {

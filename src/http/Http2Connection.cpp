@@ -375,6 +375,9 @@ common::IoResult<Http2Connection::ReadPumpResult> Http2Connection::pump_read(std
         result.bytes_read += bytes_read;
         byte_budget -= std::min(byte_budget, bytes_read);
         inbound_io_.last_inbound_at = transport_->loop().now();
+        // Any inbound bytes are proof of life: they settle an outstanding
+        // keepalive probe and restart the idle window from this timestamp.
+        keepalive_ping_outstanding_ = false;
         if (operation_budget == 0 || byte_budget == 0) {
             result.needs_reschedule = true;
             return result;
@@ -1785,10 +1788,14 @@ bool Http2Connection::is_peer_stream_id(std::uint32_t stream_id) const noexcept 
 
 std::chrono::milliseconds Http2Connection::current_read_timeout() const noexcept {
     if (keepalive_ping_outstanding_) {
-        return options_.read_timeout;
-    }
-    if (state_ == State::Running && options_.keepalive_ping_interval.count() > 0) {
-        return options_.keepalive_ping_interval;
+        // Grace an outstanding keepalive PING grants the peer to prove itself
+        // alive with any inbound bytes. One third of the read timeout, floored
+        // at 10s so a probe never waits sub-RTT noise; the floor itself scales
+        // down with timeouts below 10s so millisecond-scale configurations keep
+        // the two-phase behavior.
+        const std::chrono::milliseconds floor =
+                std::min<std::chrono::milliseconds>(std::chrono::seconds(10), options_.read_timeout);
+        return std::max(floor, options_.read_timeout / 3);
     }
     return options_.read_timeout;
 }
@@ -1801,7 +1808,7 @@ void Http2Connection::update_connection_send_window(std::int32_t delta) noexcept
 }
 
 common::IoErr Http2Connection::handle_read_timeout() noexcept {
-    if (stop_sending_requested_ || state_ != State::Running || options_.keepalive_ping_interval.count() <= 0) {
+    if (stop_sending_requested_ || state_ != State::Running) {
         return common::IoErr::TimedOut;
     }
     if (keepalive_ping_outstanding_) {
