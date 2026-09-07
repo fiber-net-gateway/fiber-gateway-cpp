@@ -13,8 +13,11 @@ namespace fiber::http {
 class Http2ConnectionPoolCore : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
-        std::size_t max_streams_per_connection = 0;
-        std::uint32_t pre_settings_max_streams = 16;
+        // Forwarded into each connection's h2 options as its stream budget:
+        // the pre-SETTINGS assumption and the permanent clamp in one. The
+        // pool's per-connection capacity is exactly this budget, so it is
+        // also the lease limit per connection.
+        std::uint32_t local_concurrent_streams_limit = 16;
         std::uint64_t max_streams_lifetime = 0;
         std::size_t max_connections_per_group = 4;
         std::size_t max_connections_total = 64;
@@ -122,7 +125,6 @@ private:
     void release_slot(Http2ConnectionPoolEntry &entry) noexcept;
     void refresh_capacity(Http2ConnectionPoolEntry &entry) noexcept;
     void set_ready(Http2ConnectionPoolEntry &entry, bool ready) noexcept;
-    void set_awaiting_settings(Http2ConnectionPoolEntry &entry, bool awaiting) noexcept;
     std::chrono::milliseconds note_dial_failure(Http2ConnectionPoolGroupBucket &bucket, common::IoErr error) noexcept;
     void remove_idle(Http2ConnectionPoolEntry &entry) noexcept;
     void park_idle(Http2ConnectionPoolEntry &entry) noexcept;

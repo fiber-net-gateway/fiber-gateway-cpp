@@ -2779,7 +2779,7 @@ DetachedTask run_client_exchange_attach_wait(std::shared_ptr<std::promise<Client
                                              bool release_first, std::chrono::milliseconds timeout) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.max_peer_concurrent_streams = 1;
+    options.local_concurrent_streams_limit = 1;
     auto transport =
             std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, true, false);
     auto *fake_transport = transport.get();
@@ -3870,10 +3870,7 @@ TEST(Http2ConnectionTest, PeerStreamWithLocalParityIdStillFailsTheConnection) {
 }
 
 TEST(Http2ConnectionTest, ClientLocalStreamsRespectPeerAdvertisedConcurrentLimit) {
-    fiber::http::Http2Connection::Options options;
-    options.max_peer_concurrent_streams = 100;
-
-    ClientConcurrentLimitOutcome outcome = execute_client_concurrent_limit(options);
+    ClientConcurrentLimitOutcome outcome = execute_client_concurrent_limit();
 
     EXPECT_TRUE(outcome.first_opened);
     EXPECT_EQ(outcome.second_open_error, fiber::common::IoErr::Busy);
@@ -3949,16 +3946,16 @@ TEST(Http2ConnectionTest, AwaitedLocalStreamAttachGrantsCapacityInFifoOrder) {
     EXPECT_EQ(outcome.waiter_count, 0U);
 }
 
-TEST(Http2ConnectionTest, TryAttachLocalStreamFollowsPeerLimitNotTableCapacity) {
+TEST(Http2ConnectionTest, TryAttachLocalStreamFollowsClampedBudgetNotTableCapacity) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
     options.local_max_concurrent_streams = 0;
-    options.max_peer_concurrent_streams = 2;
+    options.local_concurrent_streams_limit = 3;
     fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
-    // The stream table grows on demand, so a peer budget above the configured
-    // pre-SETTINGS guess is usable in full.
-    ASSERT_EQ(connection.apply_settings_parameter(0x3, 3), fiber::common::IoErr::None);
+    // The stream table grows on demand, and the peer's advertised budget is
+    // clamped by our own limit: 3 usable slots despite the peer offering 5.
+    ASSERT_EQ(connection.apply_settings_parameter(0x3, 5), fiber::common::IoErr::None);
 
     auto *owner1 = TestHttp2StreamOwner::create_owner();
     auto *owner3 = TestHttp2StreamOwner::create_owner();
@@ -4018,6 +4015,17 @@ struct ReentrantCapacityObserver {
         }
         self->retriggered = true;
         (void) connection.apply_settings_parameter(0x3, 7);
+    }
+};
+
+struct StateObserver {
+    std::size_t calls = 0;
+    fiber::http::Http2Connection::State last_state = fiber::http::Http2Connection::State::Init;
+
+    static void on_state(void *ctx, fiber::http::Http2Connection &connection) noexcept {
+        auto *self = static_cast<StateObserver *>(ctx);
+        ++self->calls;
+        self->last_state = connection.state();
     }
 };
 
@@ -4108,7 +4116,7 @@ TEST(Http2ConnectionTest, CapacityCallbackFiresWhenStreamDetachFreesSlot) {
     CapacityObserver observer;
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.max_peer_concurrent_streams = 1;
+    options.local_concurrent_streams_limit = 1;
     fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
@@ -4120,13 +4128,15 @@ TEST(Http2ConnectionTest, CapacityCallbackFiresWhenStreamDetachFreesSlot) {
     EXPECT_EQ(connection.local_active_stream_count(), 1u);
     EXPECT_EQ(connection.available_local_stream_slots(), 0u);
     EXPECT_FALSE(connection.accepts_new_local_stream());
-    EXPECT_EQ(observer.calls, 0u);
+    // Every stream-count change notifies, attach included.
+    EXPECT_EQ(observer.calls, 1u);
+    EXPECT_EQ(observer.last_slots, 0u);
 
     (*stream1)->close(fiber::common::IoErr::Canceled);
     connection.try_release_stream(**stream1);
     stream1->reset();
 
-    EXPECT_EQ(observer.calls, 1u);
+    EXPECT_EQ(observer.calls, 2u);
     EXPECT_EQ(observer.last_slots, 1u);
     EXPECT_TRUE(observer.last_accepts);
     EXPECT_EQ(connection.local_active_stream_count(), 0u);
@@ -4139,7 +4149,6 @@ TEST(Http2ConnectionTest, CapacityCallbackFiresWhenPeerSettingsChangeStreamBudge
     CapacityObserver observer;
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.max_peer_concurrent_streams = 2;
     fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
@@ -4161,11 +4170,12 @@ TEST(Http2ConnectionTest, CapacityCallbackFiresWhenPeerSettingsChangeStreamBudge
     EXPECT_EQ(observer.calls, 2u);
 }
 
-TEST(Http2ConnectionTest, CapacityCallbackFiresOnPeerGoaway) {
-    CapacityObserver observer;
+TEST(Http2ConnectionTest, PeerGoawayNotifiesTheStateCallbackNotCapacity) {
+    CapacityObserver capacity;
+    StateObserver state;
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.max_peer_concurrent_streams = 4;
+    options.local_concurrent_streams_limit = 4;
     fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     // This fixture has no transport, so pretend our own GOAWAY already went out
@@ -4178,12 +4188,15 @@ TEST(Http2ConnectionTest, CapacityCallbackFiresOnPeerGoaway) {
     auto stream1 = connection.try_attach_local_stream(owner1->stream);
     ASSERT_TRUE(stream1.has_value());
 
-    connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
+    connection.set_capacity_callback(&CapacityObserver::on_capacity, &capacity);
+    connection.set_state_callback(&StateObserver::on_state, &state);
     connection.handle_peer_goaway(1, fiber::http::Http2ErrorCode::NoError);
 
-    EXPECT_EQ(observer.calls, 1u);
-    EXPECT_TRUE(observer.last_goaway);
-    EXPECT_FALSE(observer.last_accepts);
+    // Refusing new local streams is a state change, not a capacity change: the
+    // stream population and the budget both stayed put.
+    EXPECT_EQ(capacity.calls, 0u);
+    EXPECT_EQ(state.calls, 1u);
+    EXPECT_EQ(state.last_state, fiber::http::Http2Connection::State::Draining);
     EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Draining);
     EXPECT_TRUE(connection.peer_goaway_received());
     EXPECT_FALSE(connection.accepts_new_local_stream());
@@ -4191,11 +4204,24 @@ TEST(Http2ConnectionTest, CapacityCallbackFiresOnPeerGoaway) {
     EXPECT_EQ(connection.local_active_stream_count(), 1u);
 }
 
+TEST(Http2ConnectionTest, StateCallbackFiresOnClosingFromInit) {
+    StateObserver state;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.set_state_callback(&StateObserver::on_state, &state);
+
+    connection.shutdown(fiber::common::IoErr::Canceled);
+
+    EXPECT_EQ(state.calls, 1u);
+    EXPECT_EQ(state.last_state, fiber::http::Http2Connection::State::Closed);
+    EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Closed);
+}
+
 TEST(Http2ConnectionTest, CapacityCallbackCoalescesChangeRaisedFromInsideTheCallback) {
     ReentrantCapacityObserver observer;
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.max_peer_concurrent_streams = 2;
     fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     connection.set_capacity_callback(&ReentrantCapacityObserver::on_capacity, &observer);
@@ -4209,10 +4235,129 @@ TEST(Http2ConnectionTest, CapacityCallbackCoalescesChangeRaisedFromInsideTheCall
     EXPECT_FALSE(connection.capacity_dispatch_again_);
 }
 
+namespace {
+
+// Delivers a complete non-ACK SETTINGS frame straight to the payload handler.
+// The settings ACK needs a loop and reports Invalid here; state and capacity
+// notifications happen before that, which is all these tests observe.
+fiber::common::IoErr feed_settings_frame(fiber::http::Http2Connection &connection, std::string_view payload) {
+    fiber::http::Http2Connection::FrameHeader header{};
+    header.length = static_cast<std::uint32_t>(payload.size());
+    header.type = fiber::http::Http2FrameType::Settings;
+    header.flags = 0;
+    header.stream_id = 0;
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(std::max<std::size_t>(payload.size(), 1));
+    if (!buf) {
+        return fiber::common::IoErr::NoMem;
+    }
+    std::memcpy(buf.writable_data(), payload.data(), payload.size());
+    buf.commit(payload.size());
+    return connection.handle_settings_payload(header, buf, 0, payload.size());
+}
+
+std::string max_concurrent_entry(std::uint32_t value) {
+    std::string payload;
+    payload.push_back('\0');
+    payload.push_back('\x03');
+    payload.push_back(static_cast<char>((value >> 24) & 0xffU));
+    payload.push_back(static_cast<char>((value >> 16) & 0xffU));
+    payload.push_back(static_cast<char>((value >> 8) & 0xffU));
+    payload.push_back(static_cast<char>(value & 0xffU));
+    return payload;
+}
+
+} // namespace
+
+TEST(Http2ConnectionTest, FirstEmptySettingsLeavesTheBudgetAtTheLocalLimit) {
+    CapacityObserver observer;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+    connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
+
+    (void) feed_settings_frame(connection, {});
+
+    // No entry means no write: the budget stays at the configured limit.
+    EXPECT_TRUE(connection.peer_settings_received());
+    EXPECT_EQ(observer.calls, 0u);
+    EXPECT_EQ(connection.peer_max_concurrent_streams(), 512u);
+    EXPECT_EQ(connection.available_local_stream_slots(), 512u);
+}
+
+TEST(Http2ConnectionTest, SettingsReassertingClampedBudgetDoesNotNotifyCapacity) {
+    CapacityObserver observer;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    options.local_concurrent_streams_limit = 100;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+    connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
+
+    (void) feed_settings_frame(connection, max_concurrent_entry(100));
+    (void) feed_settings_frame(connection, max_concurrent_entry(100));
+    EXPECT_EQ(observer.calls, 0u);
+    EXPECT_EQ(connection.peer_max_concurrent_streams(), 100u);
+
+    // Above the clamp the budget cannot move either, so still no notify.
+    (void) feed_settings_frame(connection, max_concurrent_entry(200));
+    EXPECT_EQ(observer.calls, 0u);
+    EXPECT_EQ(connection.peer_max_concurrent_streams(), 100u);
+
+    (void) feed_settings_frame(connection, max_concurrent_entry(50));
+    EXPECT_EQ(observer.calls, 1u);
+    EXPECT_EQ(observer.last_slots, 50u);
+    EXPECT_EQ(connection.peer_max_concurrent_streams(), 50u);
+}
+
+TEST(Http2ConnectionTest, LocalConcurrentLimitClampsAdvertisedBudget) {
+    CapacityObserver observer;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+    options.local_concurrent_streams_limit = 8;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+    connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
+
+    // Peer budgets at or above the limit leave the budget untouched.
+    (void) feed_settings_frame(connection, max_concurrent_entry(100));
+    (void) feed_settings_frame(connection, max_concurrent_entry(2000));
+    EXPECT_EQ(observer.calls, 0u);
+    EXPECT_EQ(connection.peer_max_concurrent_streams(), 8u);
+    EXPECT_EQ(connection.available_local_stream_slots(), 8u);
+
+    (void) feed_settings_frame(connection, max_concurrent_entry(4));
+    EXPECT_EQ(observer.calls, 1u);
+    EXPECT_EQ(observer.last_slots, 4u);
+    EXPECT_EQ(connection.peer_max_concurrent_streams(), 4u);
+
+    (void) feed_settings_frame(connection, max_concurrent_entry(0));
+    EXPECT_EQ(observer.calls, 2u);
+    EXPECT_EQ(observer.last_slots, 0u);
+    EXPECT_FALSE(connection.accepts_new_local_stream());
+}
+
+TEST(Http2ConnectionTest, PeerStreamPopulationChangesNotifyCapacity) {
+    CapacityObserver observer;
+    fiber::http::Http2Connection::Options options;
+    options.role = fiber::http::Http2Connection::ConnectionRole::Server;
+    fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
+    connection.state_ = fiber::http::Http2Connection::State::Running;
+    connection.set_capacity_callback(&CapacityObserver::on_capacity, &observer);
+
+    fiber::http::Http2Stream *stream = connection.create_peer_stream(1);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_EQ(observer.calls, 1u);
+
+    stream->close(fiber::common::IoErr::Canceled);
+    connection.try_release_stream(*stream);
+    EXPECT_EQ(observer.calls, 2u);
+}
+
 TEST(Http2ConnectionTest, ReducedPeerLimitWaitsForActiveStreamCountToFallBelowIt) {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.max_peer_concurrent_streams = 2;
+    options.local_concurrent_streams_limit = 2;
     fiber::http::Http2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
 
@@ -4300,7 +4445,6 @@ TEST(Http2ConnectionTest, ServerRejectsPeerStreamsBeyondAdvertisedConcurrentLimi
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Server;
     options.local_max_concurrent_streams = 1;
-    options.max_peer_concurrent_streams = 100;
 
     std::string request = std::string(kClientConnectionPreface);
     request += make_frame(0, 0x4, 0x0, 0, {});

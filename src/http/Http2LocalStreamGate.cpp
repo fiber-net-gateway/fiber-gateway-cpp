@@ -133,11 +133,13 @@ public:
 
 Http2LocalStreamGate::Http2LocalStreamGate(Http2Connection &connection) noexcept : connection_(&connection) {
     connection_->set_capacity_callback(&Http2LocalStreamGate::on_connection_capacity, this);
+    connection_->set_state_callback(&Http2LocalStreamGate::on_connection_state, this);
 }
 
 Http2LocalStreamGate::~Http2LocalStreamGate() {
     cancel_all(common::IoErr::Canceled);
     connection_->clear_capacity_callback();
+    connection_->clear_state_callback();
 }
 
 void Http2LocalStreamGate::set_capacity_callback(Http2Connection::CapacityCallback cb, void *ctx) noexcept {
@@ -200,6 +202,14 @@ void Http2LocalStreamGate::cancel_all(common::IoErr reason) noexcept {
 }
 
 void Http2LocalStreamGate::on_connection_capacity(void *ctx, Http2Connection &) noexcept {
+    auto *gate = static_cast<Http2LocalStreamGate *>(ctx);
+    FIBER_ASSERT(gate != nullptr);
+    gate->handle_capacity_change();
+}
+
+// A transition is a capacity event for the gate: Draining and beyond cancels
+// every waiter, and waking back up is what Running is for.
+void Http2LocalStreamGate::on_connection_state(void *ctx, Http2Connection &) noexcept {
     auto *gate = static_cast<Http2LocalStreamGate *>(ctx);
     FIBER_ASSERT(gate != nullptr);
     gate->handle_capacity_change();

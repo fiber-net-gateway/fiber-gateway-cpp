@@ -35,7 +35,7 @@ struct ChainedCapacityObserver {
 fiber::http::Http2Connection::Options client_options(std::uint32_t peer_streams) noexcept {
     fiber::http::Http2Connection::Options options;
     options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-    options.max_peer_concurrent_streams = peer_streams;
+    options.local_concurrent_streams_limit = peer_streams;
     return options;
 }
 
@@ -98,32 +98,33 @@ TEST(Http2LocalStreamGateTest, TryAttachReportsTheConnectionsTerminalStatusAfter
 
 TEST(Http2LocalStreamGateTest, ChainedCapacityCallbackSeesEveryConnectionCapacityChange) {
     ChainedCapacityObserver observer;
-    fiber::http::Http2Connection connection(client_options(2), &test_http2_stream_factory(),
+    fiber::http::Http2Connection connection(client_options(4), &test_http2_stream_factory(),
                                             TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     fiber::http::Http2LocalStreamGate gate(connection);
     gate.set_capacity_callback(&ChainedCapacityObserver::on_capacity, &observer);
 
-    ASSERT_EQ(connection.apply_settings_parameter(0x3, 4), fiber::common::IoErr::None);
+    ASSERT_EQ(connection.apply_settings_parameter(0x3, 2), fiber::common::IoErr::None);
     EXPECT_EQ(observer.calls, 1u);
-    EXPECT_EQ(observer.last_slots, 4u);
+    EXPECT_EQ(observer.last_slots, 2u);
 
     auto *owner1 = TestHttp2StreamOwner::create_owner();
     ASSERT_NE(owner1, nullptr);
     auto stream1 = gate.try_attach(owner1->stream);
     ASSERT_TRUE(stream1.has_value());
-    // Attaching is the caller's own doing, so it raises no capacity change.
-    EXPECT_EQ(observer.calls, 1u);
+    // Every stream-count change notifies, attach included.
+    EXPECT_EQ(observer.calls, 2u);
+    EXPECT_EQ(observer.last_slots, 1u);
 
     (*stream1)->close(fiber::common::IoErr::Canceled);
     connection.try_release_stream(**stream1);
     stream1->reset();
-    EXPECT_EQ(observer.calls, 2u);
-    EXPECT_EQ(observer.last_slots, 4u);
+    EXPECT_EQ(observer.calls, 3u);
+    EXPECT_EQ(observer.last_slots, 2u);
 
     gate.clear_capacity_callback();
     ASSERT_EQ(connection.apply_settings_parameter(0x3, 1), fiber::common::IoErr::None);
-    EXPECT_EQ(observer.calls, 2u);
+    EXPECT_EQ(observer.calls, 3u);
 
     connection.close_all_streams(fiber::common::IoErr::Canceled);
 }

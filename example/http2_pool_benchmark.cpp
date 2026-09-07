@@ -52,7 +52,7 @@ bool parse(int argc, char **argv, Options &o) {
             std::puts("http2_pool_benchmark [--scenario load|lifecycle|fifo] [--host IP] [--port N]\n"
                       "  --loops N --concurrency N (per loop) --keys N --duration-ms N --warmup-ms N\n"
                       "  --connections N (per key) --total-connections N (per loop) --streams N\n"
-                      "  --pre-settings N --dials N --idle N --idle-ms N --lifetime N\n"
+                      "  --dials N --idle N --idle-ms N --lifetime N\n"
                       "  --timeout-ms N --acquire-ms N --dial-delay-ms N --hold-ms N\n"
                       "  --path /small.bin|/medium.bin|/large.bin|/slow.bin --mixed\n"
                       "  --cancel-percent N --cancel-until-ms N --read-delay-ms N --rate N (whole process, bounded "
@@ -149,9 +149,7 @@ bool parse(int argc, char **argv, Options &o) {
         else if (name == "--total-connections")
             o.pool.max_connections_total = n;
         else if (name == "--streams")
-            o.pool.max_streams_per_connection = n;
-        else if (name == "--pre-settings")
-            o.pool.pre_settings_max_streams = n;
+            o.pool.local_concurrent_streams_limit = n;
         else if (name == "--dials")
             o.pool.max_concurrent_dials_per_group = n;
         else if (name == "--idle")
@@ -165,7 +163,7 @@ bool parse(int argc, char **argv, Options &o) {
     }
     if (o.lifecycle || o.fifo) {
         o.pool.max_connections_per_group = 1;
-        o.pool.max_streams_per_connection = 1;
+        o.pool.local_concurrent_streams_limit = 1;
         o.pool.max_connections_total = 2;
         o.pool.max_idle_total = 2;
         o.pool.max_concurrent_dials_per_group = 1;

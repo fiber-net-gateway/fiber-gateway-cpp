@@ -197,6 +197,9 @@ Http2ConnectionPoolCore::Options Http2ConnectionPoolCore::normalize_options(Opti
     FIBER_ASSERT(options.max_idle_total <= options.max_connections_total);
     FIBER_ASSERT(options.dial_retry_backoff > std::chrono::milliseconds::zero());
     FIBER_ASSERT(options.max_dial_retry_backoff >= options.dial_retry_backoff);
+    // A zero limit would park the group's connections with no budget before
+    // the peer's SETTINGS and none after it.
+    FIBER_ASSERT(options.local_concurrent_streams_limit >= 1);
     return options;
 }
 Http2ConnectionPoolCore::Http2ConnectionPoolCore(event::EventLoop &loop) noexcept :
@@ -247,7 +250,6 @@ void Http2ConnectionPoolCore::maybe_recycle_bucket(Http2ConnectionPoolGroupBucke
     if (bucket.total_count_ || bucket.connecting_count_ || bucket.wait_head_)
         return;
     FIBER_ASSERT(bucket.all_.empty() && bucket.ready_.empty());
-    FIBER_ASSERT(bucket.awaiting_settings_count_ == 0);
     if (bucket.retry_timer_.is_in_heap()) {
         loop_->cancel<Http2ConnectionPoolGroupBucket, &Http2ConnectionPoolGroupBucket::retry_timer_>(bucket);
     }
@@ -269,10 +271,14 @@ PoolEntry *Http2ConnectionPoolCore::allocate_entry(Http2ConnectionPoolGroupBucke
     entry->state_ = EntryState::Connecting;
     entry->dialing_ = true;
     entry->abort_connection_ = false;
-    entry->awaiting_settings_ = false;
     entry->served_streams_ = 0;
     entry->capacity_cache_ = 0;
-    entry->construct_connection(*loop_, options_.h2);
+    Http2Connection::Options h2 = options_.h2;
+    // The pool's per-connection stream budget overrides whatever the caller
+    // left in the h2 options: it is the connection's pre-SETTINGS assumption
+    // and its permanent clamp in one.
+    h2.local_concurrent_streams_limit = options_.local_concurrent_streams_limit;
+    entry->construct_connection(*loop_, std::move(h2));
     entry->connection().stream_gate().set_capacity_callback(&Http2ConnectionPoolCore::on_capacity, entry);
     entry->connection().close_gate().add_observer(entry->closed_observer_, &Http2ConnectionPoolCore::on_closed, entry);
     bucket.all_.push_back(*entry);
@@ -283,10 +289,7 @@ PoolEntry *Http2ConnectionPoolCore::allocate_entry(Http2ConnectionPoolGroupBucke
     return entry;
 }
 bool Http2ConnectionPoolCore::can_dial(const Http2ConnectionPoolGroupBucket &bucket) const noexcept {
-    // A group already holding a connection that only lacks capacity until the
-    // peer's SETTINGS arrives waits for it rather than fanning out more dials.
-    return !bucket.retry_timer_.is_in_heap() && bucket.awaiting_settings_count_ == 0 &&
-           bucket.total_count_ < options_.max_connections_per_group &&
+    return !bucket.retry_timer_.is_in_heap() && bucket.total_count_ < options_.max_connections_per_group &&
            bucket.connecting_count_ < options_.max_concurrent_dials_per_group &&
            conn_total_ < options_.max_connections_total;
 }
@@ -424,15 +427,6 @@ void Http2ConnectionPoolCore::set_ready(PoolEntry &entry, bool ready) noexcept {
     }
     notify_count(bucket);
 }
-void Http2ConnectionPoolCore::set_awaiting_settings(PoolEntry &entry, bool awaiting) noexcept {
-    if (awaiting == entry.awaiting_settings_)
-        return;
-    entry.awaiting_settings_ = awaiting;
-    if (awaiting)
-        ++entry.bucket_->awaiting_settings_count_;
-    else
-        --entry.bucket_->awaiting_settings_count_;
-}
 std::chrono::milliseconds Http2ConnectionPoolCore::note_dial_failure(Http2ConnectionPoolGroupBucket &bucket,
                                                                      IoErr error) noexcept {
     auto backoff = options_.dial_retry_backoff;
@@ -455,13 +449,10 @@ void Http2ConnectionPoolCore::refresh_capacity(PoolEntry &entry) noexcept {
         retire(entry);
         return;
     }
-    std::size_t capacity =
-            conn.peer_settings_received() ? conn.peer_max_concurrent_streams() : options_.pre_settings_max_streams;
-    if (options_.max_streams_per_connection)
-        capacity = std::min(capacity, options_.max_streams_per_connection);
-    entry.capacity_cache_ = capacity;
-    set_awaiting_settings(entry, capacity == 0 && !conn.peer_settings_received());
-    set_ready(entry, entry.active_leases_ < capacity && conn.accepts_new_local_stream());
+    // The connection budget already carries the pool's per-connection limit:
+    // it was forwarded into the h2 options at construction.
+    entry.capacity_cache_ = static_cast<std::size_t>(conn.peer_max_concurrent_streams());
+    set_ready(entry, entry.active_leases_ < entry.capacity_cache_ && conn.accepts_new_local_stream());
 }
 PoolEntry *Http2ConnectionPoolCore::take_slot(Http2ConnectionPoolGroupBucket &bucket) noexcept {
     while (auto *entry = bucket.ready_.front()) {
@@ -518,7 +509,6 @@ void Http2ConnectionPoolCore::park_idle(PoolEntry &entry) noexcept {
 }
 void Http2ConnectionPoolCore::retire(PoolEntry &entry) noexcept {
     set_ready(entry, false);
-    set_awaiting_settings(entry, false);
     remove_idle(entry);
     if (entry.state_ != EntryState::Closed)
         entry.state_ = EntryState::Draining;
@@ -565,7 +555,6 @@ void Http2ConnectionPoolCore::on_closed(void *ctx, Http2Connection &, IoErr) noe
 }
 void Http2ConnectionPoolCore::destroy_entry(PoolEntry &entry) noexcept {
     FIBER_ASSERT(entry.state_ == EntryState::Closed && !entry.active_leases_ && !entry.dialing_);
-    FIBER_ASSERT(!entry.awaiting_settings_);
     auto &bucket = *entry.bucket_;
     entry.connection().stream_gate().clear_capacity_callback();
     entry.destroy_connection();
