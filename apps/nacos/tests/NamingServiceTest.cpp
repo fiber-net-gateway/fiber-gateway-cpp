@@ -21,6 +21,7 @@
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpServerOptions.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/http/ServerRequestFactory.h>
 #include <fiber/nacos/NacosClientConfig.h>
@@ -164,8 +165,8 @@ class ScriptedNamingServer {
 public:
     ScriptedNamingServer(fiber::event::EventLoop &loop, bool reconnect) :
         loop_(&loop), reconnect_(reconnect), connections_to_serve_(reconnect ? 2 : 1),
-        handler_([this](fiber::http::HttpExchange &exchange) { return handle(exchange); }),
-        factory_(http_options_, handler_), listener_(loop) {
+        handler_([this](fiber::http::HttpExchange &exchange) { return handle(exchange); }), factory_(handler_),
+        listener_(loop) {
         push_publisher_ = push_watch_.acquire_publisher();
         FIBER_ASSERT(push_publisher_.has_value());
         auto bound = listener_.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});

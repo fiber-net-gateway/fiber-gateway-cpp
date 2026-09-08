@@ -18,6 +18,7 @@
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpServerOptions.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/http/ServerRequestFactory.h>
 #include <fiber/nacos/NacosClientConfig.h>
@@ -138,8 +139,8 @@ public:
                            bool send_connect_reset = false) :
         loop_(&loop), support_ability_negotiation_(support_ability_negotiation),
         send_connect_reset_(send_connect_reset),
-        handler_([this](fiber::http::HttpExchange &exchange) { return handle(exchange); }),
-        factory_(http_options_, handler_), listener_(loop) {
+        handler_([this](fiber::http::HttpExchange &exchange) { return handle(exchange); }), factory_(handler_),
+        listener_(loop) {
         auto bound = listener_.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
         if (!bound) {
             return;

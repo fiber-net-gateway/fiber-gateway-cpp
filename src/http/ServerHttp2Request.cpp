@@ -173,8 +173,7 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
     return handlers;
 }
 
-ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn,
-                                       const HttpServerOptions &http_options, const HttpHandler &handler,
+ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpHandler &handler,
                                        std::shared_ptr<const HttpHandler> handler_owner) noexcept :
     conn_(&conn), handler_(&handler), handler_owner_(std::move(handler_owner)), stream_(this, stream_ops()),
     exchange_(conn.transport().loop().io_buf_node_pool(), conn.transport().remote_addr()),
@@ -185,9 +184,8 @@ ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection 
 }
 
 Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Connection &conn,
-                                              const HttpServerOptions &http_options,
                                               const HttpHandler &handler) noexcept {
-    auto *owner = new (std::nothrow) ServerHttp2Request(stream_id, conn, http_options, handler);
+    auto *owner = new (std::nothrow) ServerHttp2Request(stream_id, conn, handler);
     if (!owner) {
         return {};
     }
@@ -195,14 +193,12 @@ Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Conn
 }
 
 Http2Stream::Lease ServerHttp2Request::create(std::uint32_t stream_id, Http2Connection &conn,
-                                              const HttpServerOptions &http_options,
                                               std::shared_ptr<const HttpHandler> handler) noexcept {
     if (!handler) {
         return {};
     }
     const HttpHandler *handler_ptr = handler.get();
-    auto *owner =
-            new (std::nothrow) ServerHttp2Request(stream_id, conn, http_options, *handler_ptr, std::move(handler));
+    auto *owner = new (std::nothrow) ServerHttp2Request(stream_id, conn, *handler_ptr, std::move(handler));
     if (!owner) {
         return {};
     }

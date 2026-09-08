@@ -104,7 +104,7 @@ struct HttpServer::Runtime {
     Runtime(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options,
             event::EventLoopGroup *worker_group) :
         owner_loop(loop), worker_group(worker_group), listener(loop), handler(std::move(handler)),
-        options(std::move(options)), http2_request_factory(this->options, this->handler) {
+        options(std::move(options)), http2_request_factory(this->handler) {
         http1_connections.reserve(16);
         make_workers();
     }

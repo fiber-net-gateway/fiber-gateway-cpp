@@ -8,6 +8,7 @@ namespace fiber::http {
 namespace {
 
 constexpr std::string_view kHttp1AlpnList[] = {"http/1.1"};
+constexpr std::string_view kHttp2AlpnList[] = {"h2"};
 constexpr std::string_view kHttpServerAlpnList[] = {"h2", "http/1.1"};
 constexpr std::string_view kHttp3AlpnList[] = {"h3"};
 
@@ -44,7 +45,6 @@ net::TlsClientParam make_http1_client_tls_param(const HttpClientTlsOptions &opti
 }
 
 net::TlsClientParam make_http2_client_tls_param(const HttpClientTlsOptions &options) noexcept {
-    static constexpr std::string_view kHttp2AlpnList[] = {"h2"};
     return make_http_client_tls_param(options, kHttp2AlpnList);
 }
 
@@ -55,6 +55,10 @@ net::TlsClientParam make_negotiating_client_tls_param(const HttpClientTlsOptions
 
 net::TlsServerParam make_http1_server_tls_param(const HttpServerTlsOptions &options) noexcept {
     return make_server_tls_param(options, kHttp1AlpnList);
+}
+
+net::TlsServerParam make_http2_server_tls_param(const HttpServerTlsOptions &options) noexcept {
+    return make_server_tls_param(options, kHttp2AlpnList);
 }
 
 net::TlsServerParam make_http_server_tls_param(const HttpServerTlsOptions &options) noexcept {

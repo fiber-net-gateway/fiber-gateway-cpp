@@ -21,6 +21,7 @@
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpServerOptions.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/http/ServerRequestFactory.h>
 #include <fiber/nacos/ConfigService.h>
@@ -169,8 +170,8 @@ public:
     ScriptedConfigServer(fiber::event::EventLoop &loop, bool reset_after_first_listen = false) :
         loop_(&loop), reset_after_first_listen_(reset_after_first_listen),
         connections_to_serve_(reset_after_first_listen ? 2 : 1),
-        handler_([this](fiber::http::HttpExchange &exchange) { return handle(exchange); }),
-        factory_(http_options_, handler_), listener_(loop) {
+        handler_([this](fiber::http::HttpExchange &exchange) { return handle(exchange); }), factory_(handler_),
+        listener_(loop) {
         push_publisher_ = push_watch_.acquire_publisher();
         FIBER_ASSERT(push_publisher_.has_value());
         auto bound = listener_.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});

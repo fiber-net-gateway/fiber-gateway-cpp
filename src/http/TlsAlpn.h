@@ -21,6 +21,9 @@ namespace fiber::http {
 // Each server type advertises a fixed ALPN protocol set; it is not
 // caller-configurable (see HttpServerTlsOptions).
 [[nodiscard]] net::TlsServerParam make_http1_server_tls_param(const HttpServerTlsOptions &options) noexcept;
+// h2 only: a peer that cannot speak it gets no protocol.
+[[nodiscard]] net::TlsServerParam make_http2_server_tls_param(const HttpServerTlsOptions &options) noexcept;
+// h2 preferred, http/1.1 accepted.
 [[nodiscard]] net::TlsServerParam make_http_server_tls_param(const HttpServerTlsOptions &options) noexcept;
 [[nodiscard]] net::TlsServerParam make_http3_server_tls_param(const HttpServerTlsOptions &options) noexcept;
 

@@ -18,7 +18,7 @@ Http2Stream::Lease ServerRequestFactory::create_peer_stream(std::uint32_t stream
     if (!handler_) {
         return {};
     }
-    return ServerHttp2Request::create(stream_id, conn, http_options_, handler_);
+    return ServerHttp2Request::create(stream_id, conn, handler_);
 }
 
 Http2Stream::Lease ServerRequestFactory::create_peer_stream_op(void *ctx, std::uint32_t stream_id,
