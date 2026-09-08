@@ -594,7 +594,11 @@ void QuicUdpEndpoint::close() noexcept {
     if (!initialized_ && (!socket_ || !socket_->valid())) {
         return;
     }
-    if (loop_ != nullptr && socket_ && socket_->valid()) {
+    // Only a started endpoint has callbacks registered with the loop. Before
+    // start() nothing but this object references the socket, so init()'s own
+    // error paths -- and a server whose startup rolls back before the endpoint
+    // ever runs -- may close it from the thread that built it.
+    if (started_ && loop_ != nullptr && socket_ && socket_->valid()) {
         FIBER_ASSERT(loop_->in_loop());
     }
 

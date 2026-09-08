@@ -7,129 +7,60 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/async/WaitGroup.h>
 #include <fiber/common/Assert.h>
-#include "http/ServerHttp3Request.h"
+#include "http/Http3ServerConnection.h"
 #include "http/TlsAlpn.h"
 
 namespace fiber::http {
 
+namespace {
+
+// The facade still carries the catch-all HttpServerOptions; HTTP/3 sessions now
+// take only the fields they read. Both go away with the facade (P5).
+Http3ServerOptions make_http3_options(const HttpServerOptions &options) noexcept {
+    Http3ServerOptions http3{};
+    http3.max_connections_per_shard = options.http3.max_connections_per_shard;
+    http3.retained_storage_limit = options.http3.retained_storage_limit;
+    http3.udp = options.http3.udp;
+    http3.send = options.http3.send;
+    http3.transport = options.http3.transport;
+    http3.recv_flow = options.http3.recv_flow;
+    http3.settings = options.http3.settings;
+    http3.keepalive_interval = options.http3.keepalive_interval;
+    http3.max_ack_delay = options.http3.max_ack_delay;
+    http3.body_timeout = options.body_timeout;
+    http3.header_large_size = options.header_large_size;
+    http3.ack_delay_exponent = options.http3.ack_delay_exponent;
+    http3.enable_connect_protocol = options.enable_extended_connect;
+    http3.retry = options.http3.retry;
+    http3.issue_new_token = options.http3.issue_new_token;
+    http3.enable_early_data = options.http3.enable_early_data;
+    return http3;
+}
+
+} // namespace
+
 struct Http3Server::Runtime {
-    explicit Runtime(HttpHandler handler) : handler(std::make_shared<HttpHandler>(std::move(handler))) {}
+    explicit Runtime(HttpHandler handler, const HttpServerOptions &options) :
+        handler(std::make_shared<HttpHandler>(std::move(handler))), http3_options(make_http3_options(options)) {}
+
+    static void on_connection_closed(void *owner, Http3ServerConnection &) noexcept {
+        static_cast<Runtime *>(owner)->connections.done();
+    }
+
+    static const Http3ServerConnection::Ops &connection_ops() noexcept {
+        static const Http3ServerConnection::Ops ops{&Runtime::on_connection_closed};
+        return ops;
+    }
 
     std::shared_ptr<const HttpHandler> handler{};
+    Http3ServerOptions http3_options{};
     std::atomic<bool> shutting_down{false};
     async::WaitGroup connections{};
 };
 
-class Http3Server::ServerConnection final : public common::NonCopyable, public common::NonMovable {
-public:
-    ServerConnection(const quic::QuicConnection::Options &quic_options, std::shared_ptr<const HttpHandler> handler,
-                     const HttpServerOptions &http_options, std::shared_ptr<Runtime> runtime) noexcept :
-        runtime_(std::move(runtime)), handler_(std::move(handler)), http_options_(http_options),
-        quic_(make_quic_options(quic_options, this)), h3_(quic_, make_http3_options(this)) {
-        prepared_ = h3_.prepare().has_value();
-    }
-
-    [[nodiscard]] quic::QuicConnection &quic() noexcept { return quic_; }
-
-    void start() noexcept {
-        if (!prepared_) {
-            h3_.close(Http3ErrorCode::InternalError);
-            return;
-        }
-        event::EventLoop *loop = quic_.loop();
-        FIBER_ASSERT(loop != nullptr);
-        tasks_.add();
-        async::spawn(*loop, [this]() -> async::DetachedTask { return run_start(this); });
-    }
-
-private:
-    [[nodiscard]] static quic::QuicConnection::Options make_quic_options(const quic::QuicConnection::Options &base,
-                                                                         ServerConnection *owner) noexcept {
-        quic::QuicConnection::Options options = base;
-        options.destroy_owner = owner;
-        options.on_destroy = &ServerConnection::destroy_connection;
-        return options;
-    }
-
-    [[nodiscard]] static Http3Connection::Options make_http3_options(ServerConnection *owner) noexcept {
-        Http3Connection::Options options{};
-        options.local_settings = owner->http_options_.http3.settings;
-        options.local_settings.enable_connect_protocol =
-                options.local_settings.enable_connect_protocol || owner->http_options_.enable_extended_connect;
-        options.owner = owner;
-        options.ops.create_server_request = &ServerConnection::create_server_request;
-        return options;
-    }
-
-    [[nodiscard]] static quic::QuicStream::Lease create_server_request(void *owner, std::uint64_t stream_id,
-                                                                       Http3Connection &conn) noexcept {
-        auto *server_conn = static_cast<ServerConnection *>(owner);
-        if (server_conn == nullptr) {
-            return {};
-        }
-        return ServerHttp3Request::create(stream_id, conn, server_conn->http_options_, server_conn->handler_);
-    }
-
-    static void destroy_connection(void *owner, quic::QuicConnection &connection) noexcept {
-        auto *server_conn = static_cast<ServerConnection *>(owner);
-        if (server_conn == nullptr || server_conn->cleanup_started_) {
-            return;
-        }
-
-        server_conn->cleanup_started_ = true;
-        event::EventLoop *loop = connection.loop();
-        if (loop == nullptr) {
-            if (server_conn->runtime_) {
-                server_conn->runtime_->connections.done();
-            }
-            delete server_conn;
-            return;
-        }
-
-        async::spawn(*loop, [server_conn]() -> async::DetachedTask { return run_cleanup(server_conn); });
-    }
-
-    static async::DetachedTask run_start(ServerConnection *server_conn) noexcept {
-        if (server_conn == nullptr) {
-            co_return;
-        }
-
-        auto started = co_await server_conn->h3_.start();
-        if (!started && started.error() != common::IoErr::Canceled) {
-            server_conn->h3_.close(Http3ErrorCode::InternalError);
-        }
-        server_conn->tasks_.done();
-        co_return;
-    }
-
-    static async::DetachedTask run_cleanup(ServerConnection *server_conn) noexcept {
-        if (server_conn == nullptr) {
-            co_return;
-        }
-
-        std::shared_ptr<Runtime> runtime = server_conn->runtime_;
-        co_await server_conn->tasks_.join();
-        co_await server_conn->h3_.wait_closed();
-        if (runtime) {
-            runtime->connections.done();
-        }
-        delete server_conn;
-        co_return;
-    }
-
-    std::shared_ptr<Runtime> runtime_;
-    std::shared_ptr<const HttpHandler> handler_{};
-    HttpServerOptions http_options_;
-    quic::QuicConnection quic_;
-    Http3Connection h3_;
-    async::WaitGroup tasks_{};
-    bool cleanup_started_ = false;
-    bool prepared_ = false;
-};
-
 Http3Server::Http3Server(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options,
                          event::EventLoopGroup *worker_group) :
-    loop_(loop), worker_group_(worker_group), runtime_(std::make_shared<Runtime>(std::move(handler))),
+    loop_(loop), worker_group_(worker_group), runtime_(std::make_shared<Runtime>(std::move(handler), options)),
     options_(std::move(options)) {}
 
 Http3Server::~Http3Server() { close(); }
@@ -245,7 +176,8 @@ quic::QuicConnection::Lease Http3Server::create_connection(const quic::QuicConne
         return {};
     }
     runtime_->connections.add();
-    auto *connection = new (std::nothrow) ServerConnection(options, runtime_->handler, options_, runtime_);
+    Http3ServerConnection *connection = Http3ServerConnection::create(
+            options, runtime_->handler, runtime_->http3_options, runtime_.get(), Runtime::connection_ops());
     if (connection == nullptr) {
         runtime_->connections.done();
         return {};
