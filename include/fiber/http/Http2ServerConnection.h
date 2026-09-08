@@ -43,8 +43,13 @@ public:
     // that fails to start or closes immediately.
     fiber::async::Task<Http2Connection::CloseResult> wait_closed() noexcept;
 
-    // Hard teardown for server shutdown: aborts every stream and the transport.
-    // Idempotent and safe on a connection that is already closing or closed.
+    // Graceful shutdown: sends GOAWAY so the peer opens no new streams, and
+    // lets the streams already running finish. The connection closes itself
+    // once the last one ends. Idempotent.
+    void request_drain() noexcept;
+
+    // Hard teardown: aborts every stream and the transport. Idempotent and safe
+    // on a connection that is already closing or closed.
     void request_shutdown() noexcept;
 
     [[nodiscard]] Http2Connection &http2() noexcept { return conn_; }
@@ -63,6 +68,7 @@ private:
     common::IntrusiveListHook worker_hook_{};
 
     friend class Http2ServerWorker;
+    friend class Http2ConnectionRegistry;
 };
 
 // Per-loop registry of live HTTP/2 server connections, Http3Server-shard

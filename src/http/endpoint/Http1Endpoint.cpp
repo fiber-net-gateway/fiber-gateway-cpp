@@ -39,7 +39,7 @@ async::Task<void> Http1Endpoint::serve_connection(TcpEndpointWorkerBase &base_wo
     // The session lives on this coroutine's frame: no per-connection heap
     // allocation, and the worker reaches it through its intrusive hook.
     Http1Connection connection(std::move(transport), *handler_, options_.http1, handler_);
-    worker.link(connection);
+    worker.connections().link(connection);
     // drain() may have walked the list before this connection joined it.
     if (worker.draining()) {
         connection.request_drain();
@@ -47,7 +47,7 @@ async::Task<void> Http1Endpoint::serve_connection(TcpEndpointWorkerBase &base_wo
 
     co_await connection.run();
 
-    worker.unlink(connection);
+    worker.connections().unlink(connection);
     co_return;
 }
 

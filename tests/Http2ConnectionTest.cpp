@@ -1183,7 +1183,6 @@ RunOutcome execute_connection(std::vector<std::string> chunks, fiber::http::Http
 
 DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderRunOutcome>> promise,
                                       std::vector<std::string> chunks, fiber::http::HttpHandler handler,
-                                      fiber::http::HttpServerOptions http_options,
                                       fiber::http::Http2Connection::Options options, bool hold_eof = true) {
     auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, hold_eof);
     FakeHttpTransport *fake_transport = transport.get();
@@ -1196,7 +1195,7 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
         }
         co_return;
     };
-    fiber::http::ServerRequestFactory factory(http_options, wrapped_handler);
+    fiber::http::ServerRequestFactory factory(wrapped_handler);
     TestHttp2Connection connection(options, &factory, fiber::http::ServerRequestFactory::ops());
     fiber::http::Http2CloseGate close_gate(fiber::event::EventLoop::current(), connection);
     connection.observe_close_gate(close_gate);
@@ -1218,7 +1217,6 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
 }
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks, fiber::http::HttpHandler handler,
-                                              fiber::http::HttpServerOptions http_options,
                                               fiber::http::Http2Connection::Options options = {},
                                               bool hold_eof = true) {
     fiber::event::EventLoopGroup group(1);
@@ -1227,9 +1225,8 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks, f
 
     group.start();
     fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks),
-                                      handler = std::move(handler), http_options, options, hold_eof]() mutable {
-        return run_http2_server_request(std::move(promise), std::move(chunks), std::move(handler), http_options,
-                                        options, hold_eof);
+                                      handler = std::move(handler), options, hold_eof]() mutable {
+        return run_http2_server_request(std::move(promise), std::move(chunks), std::move(handler), options, hold_eof);
     });
 
     auto status = future.wait_for(std::chrono::seconds(2));
@@ -1243,13 +1240,6 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks, f
     ServerHeaderRunOutcome outcome = future.get();
     group.join();
     return outcome;
-}
-
-ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks, fiber::http::HttpHandler handler,
-                                              fiber::http::Http2Connection::Options options = {},
-                                              bool hold_eof = true) {
-    return execute_server_request(std::move(chunks), std::move(handler), fiber::http::HttpServerOptions{}, options,
-                                  hold_eof);
 }
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
@@ -1274,7 +1264,7 @@ ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks,
 
 DetachedTask
 run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSendAfterCloseOutcome>> promise,
-                                    std::vector<std::string> chunks, fiber::http::HttpServerOptions http_options,
+                                    std::vector<std::string> chunks,
                                     fiber::http::Http2Connection::Options options = {}) {
     auto delayed_send_result = std::make_shared<fiber::common::IoResult<void>>();
     auto delayed_send_completed = std::make_shared<std::atomic<bool>>(false);
@@ -1293,7 +1283,7 @@ run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSe
     ServerDelayedSendAfterCloseOutcome outcome;
     {
         auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, false);
-        fiber::http::ServerRequestFactory factory(http_options, handler);
+        fiber::http::ServerRequestFactory factory(handler);
         TestHttp2Connection connection(options, &factory, fiber::http::ServerRequestFactory::ops());
         fiber::http::Http2CloseGate close_gate(fiber::event::EventLoop::current(), connection);
         connection.observe_close_gate(close_gate);
@@ -1321,16 +1311,14 @@ run_server_delayed_send_after_close(std::shared_ptr<std::promise<ServerDelayedSe
 
 ServerDelayedSendAfterCloseOutcome
 execute_server_delayed_send_after_close(std::vector<std::string> chunks,
-                                        fiber::http::HttpServerOptions http_options = {},
                                         fiber::http::Http2Connection::Options options = {}) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<ServerDelayedSendAfterCloseOutcome>>();
     auto future = promise->get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks), http_options,
-                                      options]() mutable {
-        return run_server_delayed_send_after_close(std::move(promise), std::move(chunks), http_options, options);
+    fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks), options]() mutable {
+        return run_server_delayed_send_after_close(std::move(promise), std::move(chunks), options);
     });
 
     auto status = future.wait_for(std::chrono::seconds(2));
@@ -5586,8 +5574,8 @@ TEST(Http2ConnectionTest, ServerHandlerResumesBodySendAfterStreamWindowUpdate) {
         co_return;
     };
 
-    ServerHeaderRunOutcome outcome = execute_server_request({std::move(first), std::move(second)}, std::move(handler),
-                                                            fiber::http::HttpServerOptions{}, options);
+    ServerHeaderRunOutcome outcome =
+            execute_server_request({std::move(first), std::move(second)}, std::move(handler), options);
 
     ASSERT_TRUE(outcome.result.has_value());
     ASSERT_TRUE(header_result->has_value());
@@ -5646,8 +5634,7 @@ TEST(Http2ConnectionTest, ServerWriteReturnsAfterFirstFlowControlledDataBatch) {
         co_return;
     };
 
-    ServerHeaderRunOutcome outcome =
-            execute_server_request({std::move(first)}, std::move(handler), fiber::http::HttpServerOptions{}, options);
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(first)}, std::move(handler), options);
 
     ASSERT_TRUE(outcome.result.has_value());
     ASSERT_TRUE(first_result->has_value());
@@ -5708,8 +5695,7 @@ TEST(Http2ConnectionTest, ServerWriteTimeoutResetsStreamAndRejectsRetry) {
         co_return;
     };
 
-    ServerHeaderRunOutcome outcome =
-            execute_server_request({std::move(request)}, std::move(handler), fiber::http::HttpServerOptions{}, options);
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler), options);
 
     ASSERT_TRUE(outcome.result.has_value());
     ASSERT_FALSE(first_result->has_value());
@@ -6018,15 +6004,13 @@ TEST(Http2ConnectionTest, ServerReadBodyTimesOutWhileWaitingForMoreBody) {
                                          },
                                          false);
 
-    fiber::http::HttpServerOptions http_options;
-
     auto read_result = std::make_shared<fiber::common::IoResult<fiber::mem::IoBufChain>>();
     fiber::http::HttpHandler handler = [read_result](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         *read_result = co_await exchange.read_body(64, std::chrono::seconds(0));
         co_return;
     };
 
-    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler), http_options);
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
 
     ASSERT_TRUE(outcome.result.has_value());
     ASSERT_FALSE(read_result->has_value());

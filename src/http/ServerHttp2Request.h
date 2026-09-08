@@ -15,7 +15,6 @@
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpExchangeIo.h>
 #include <fiber/http/HttpHeaderHash.h>
-#include <fiber/http/HttpServerOptions.h>
 #include <fiber/http/detail/Http2BodyRecvState.h>
 #include <fiber/http/detail/Http2SendAwaiter.h>
 
@@ -26,10 +25,8 @@ class Http2Connection;
 class ServerHttp2Request final : public HttpExchangeIo, public common::NonCopyable, public common::NonMovable {
 public:
     [[nodiscard]] static Http2Stream::Lease create(std::uint32_t stream_id, Http2Connection &conn,
-                                                   const HttpServerOptions &http_options,
                                                    const HttpHandler &handler) noexcept;
     [[nodiscard]] static Http2Stream::Lease create(std::uint32_t stream_id, Http2Connection &conn,
-                                                   const HttpServerOptions &http_options,
                                                    std::shared_ptr<const HttpHandler> handler) noexcept;
 
     [[nodiscard]] Http2Stream &stream() noexcept { return stream_; }
@@ -72,8 +69,8 @@ private:
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
     static const HeaderMap<PseudoHeaderHandler> &pseudo_header_handler_map() noexcept;
-    ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpServerOptions &http_options,
-                       const HttpHandler &handler, std::shared_ptr<const HttpHandler> handler_owner = {}) noexcept;
+    ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpHandler &handler,
+                       std::shared_ptr<const HttpHandler> handler_owner = {}) noexcept;
     static common::IoErr on_header_block_start(void *owner, Http2HpackDecoder::Sink &sink) noexcept;
     static common::IoErr on_header_block_complete(void *owner, bool end_stream) noexcept;
     static common::IoErr on_body(void *owner, mem::IoBuf &&buf, bool end_stream) noexcept;

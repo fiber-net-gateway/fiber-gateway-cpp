@@ -4,45 +4,26 @@
 #include <cstddef>
 #include <memory>
 
-#include "../../common/IntrusiveList.h"
-#include "../Http1Connection.h"
 #include "../Http1ServerOptions.h"
+#include "Http1ConnectionRegistry.h"
 #include "TcpEndpointBase.h"
 
 namespace fiber::http {
 
-// Per-loop registry of live HTTP/1 sessions. Connections link themselves in
-// from their serve coroutine frames through their intrusive hooks, so
-// registration allocates nothing and the list is only ever touched on its own
-// loop -- no lock, unlike the mutex-guarded shared_ptr vector this replaces.
+// One HTTP/1 endpoint's presence on a single worker loop.
 class Http1EndpointWorker final : public TcpEndpointWorkerBase {
 public:
     using TcpEndpointWorkerBase::TcpEndpointWorkerBase;
 
-    void link(Http1Connection &connection) noexcept { connections_.push_back(connection); }
-    void unlink(Http1Connection &connection) noexcept { connections_.erase(connection); }
+    [[nodiscard]] Http1ConnectionRegistry &connections() noexcept { return connections_; }
 
-    // Idle connections close immediately; busy ones finish the request they
-    // are serving, answer with Connection: close, and then close. Nothing here
-    // cuts a request short: a session ends when HTTP/1 says it is done, bounded
-    // by the connection's own header/keep-alive/write timeouts.
     void drain() noexcept override {
         TcpEndpointWorkerBase::drain();
-        for (Http1Connection *connection = connections_.front(); connection != nullptr;
-             connection = connections_.next_of(*connection)) {
-            connection->request_drain();
-        }
+        connections_.drain_all();
     }
 
 private:
-    // Http1Connection is not standard-layout (it holds unique_ptr members), but
-    // it is non-polymorphic, which is what container_of actually needs.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
-    using ConnectionList = common::IntrusiveList<Http1Connection, offsetof(Http1Connection, worker_hook_)>;
-#pragma GCC diagnostic pop
-
-    ConnectionList connections_{};
+    Http1ConnectionRegistry connections_{};
 };
 
 // Plaintext or TLS HTTP/1.1 endpoint. With TLS configured it offers only

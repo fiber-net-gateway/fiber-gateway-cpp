@@ -33,6 +33,7 @@
 | D5 | 配置结构 | **每个 endpoint 定义自己的 options，只保留自己关心的字段；不存在 server 级 options**。现有的大杂烩 `HttpServerOptions` 拆散（§7.1） |
 | D6 | 明文 HTTP/2 | **不支持 `Upgrade: h2c`**，只支持 prior-knowledge h2c |
 | D7 | `HttpServer` 兼容门面 | **只作为迁移期脚手架，P7 直接删除**，不保留版本周期 |
+| D8 | h2 / h2+h1 是否两个类 | **合成一个 `Http2Endpoint`，用 `Options::allow_http1` 决定是否协商降级**。两者只差 ALPN 集合和 worker 要跑哪种会话，拆成两个类会把 accept 路径、request factory、drain walk 都复制一遍 |
 
 ---
 
@@ -50,7 +51,7 @@
    ┌───────────────────────────────────┐   ┌──────────────────────────────────┐
    │ Endpoint(虚接口)                   │   │ Server::Worker                    │
    │  Http1Endpoint / Http2Endpoint    │   │  slots_ : vector<unique_ptr<      │
-   │  Http21Endpoint / Http3Endpoint   │   │             EndpointWorker>>      │
+   │  Http2Endpoint  / Http3Endpoint   │   │             EndpointWorker>>      │
    │  - listener / QUIC shards         │   │  slots_[i] 属于 endpoints_[i]     │
    │  - options(tls/timeout) + handler │   │  notify_stop() / run_wait_stop()  │
    └───────────────────────────────────┘   └──────────────────────────────────┘
@@ -90,9 +91,11 @@ include/fiber/http/
   Http1ServerOptions.h        // 由 HttpServerOptions 拆出：H1/H2/H3 各一份（§7.1）
   Http2ServerOptions.h
   Http3ServerOptions.h
+  endpoint/TcpEndpointBase.h          // listener + accept loop + TLS 握手
+  endpoint/Http1ConnectionRegistry.h  // per-loop 连接表，H1/H2 endpoint 共用
+  endpoint/Http2ConnectionRegistry.h
   endpoint/Http1Endpoint.h
-  endpoint/Http2Endpoint.h
-  endpoint/Http21Endpoint.h   // ALPN 协商 h2 / http/1.1
+  endpoint/Http2Endpoint.h    // h2，allow_http1 决定是否协商降级到 http/1.1
   endpoint/Http3Endpoint.h
   HttpServer.h                // 保留：薄兼容门面，实现改为委托 Server（见 §10）
 
@@ -102,7 +105,6 @@ src/http/
   endpoint/TcpEndpointBase.cpp  // accept loop / TLS 握手 / 分发，H1/H2/H21 共用
   endpoint/Http1Endpoint.cpp
   endpoint/Http2Endpoint.cpp
-  endpoint/Http21Endpoint.cpp
   endpoint/Http3Endpoint.cpp
 ```
 
@@ -479,15 +481,11 @@ struct Http1Endpoint::Options {
     HttpHandler handler{};                  // 空则取 Server 的默认 handler
 };
 
-struct Http2Endpoint::Options {            // 同上，把 http1 换成 http2
+struct Http2Endpoint::Options {            // 同上，加 http2 与协商开关
     ...
     Http2ServerOptions http2{};
-};
-
-struct Http21Endpoint::Options {           // ALPN 协商，两套都要
-    ...
-    Http1ServerOptions http1{};
-    Http2ServerOptions http2{};
+    Http1ServerOptions http1{};            // 仅协商降级到 H1 的会话会用到
+    bool allow_http1 = true;               // 见 §7.4
 };
 
 struct Http3Endpoint::Options {
@@ -598,25 +596,35 @@ void Http1Connection::request_drain() noexcept {
 
 **响应头**：`Http1ExchangeIo::compute_close_conn()` 已经读 `connection_->stopping()`，所以 drain 期间新完成的响应会自动带 `Connection: close`——这一条现状就是对的，改造后语义不变（`stopping()` 的实现从「查 server 原子标志」变成「读本地 bool」）。
 
-### 7.4 Http2Endpoint / Http21Endpoint
+### 7.4 Http2Endpoint（含 h2 / h1 协商，D8）
 
-复用现有的 `Http2ServerConnection` + `Http2ServerWorker`：`Http2EndpointWorker` 就是把 `Http2ServerWorker` 换成继承 `EndpointWorker`，并补上两点：
+一个类覆盖「只跑 h2」和「h2 优先、可降级到 http/1.1」两种形态，由 `Options::allow_http1` 切换。二者的差别只有两处——TLS 提供的 ALPN 集合，以及 worker 上要跑哪种会话——为一个 bool 拆两个类会把 accept 路径、request factory、drain walk 全复制一遍。
+
+| | `allow_http1 = true`（默认） | `allow_http1 = false` |
+|---|---|---|
+| TLS | ALPN 报 `{h2, http/1.1}`，按对端选择分派；对端不带 ALPN 时走 HTTP/1 | ALPN 只报 `{h2}`，落到别的协议上就关连接 |
+| 明文 | HTTP/1 | h2c **prior-knowledge**（对端必须直接发 connection preface） |
+
+明文口没有可协商的东西，而 `Upgrade: h2c` 明确不支持（D6），所以 `allow_http1` 在明文下就是直接选协议。这一条写进了 `Http2Endpoint::Options::allow_http1` 的字段注释，避免后来者当成漏实现。
+
+`Http2EndpointWorker` 同时持有 H2 和 H1 两张连接表（`Http2ConnectionRegistry` / `Http1ConnectionRegistry`，后者与 `Http1Endpoint` 共用同一个类），`drain()` 依次作用于两者：
 
 ```cpp
 void drain() noexcept override {
-    draining_ = true;
-    for (auto *c = connections_.front(); c; c = connections_.next_of(*c)) {
-        c->request_drain();     // 新增：conn_.graceful_shutdown() —— 发 GOAWAY，已开流跑完
-    }
+    TcpEndpointWorkerBase::drain();
+    http2_.drain_all();   // 每条会话 request_drain() -> graceful_shutdown() -> GOAWAY
+    http1_.drain_all();   // 空闲立刻关，忙的跑完当前 exchange
 }
 ```
 
-`Http2ServerConnection` 新增 `request_drain()`（调 `Http2Connection::graceful_shutdown()`，该函数已存在）。`ServerRequestFactory` 同步瘦身：`ServerHttp2Request` 压根没读过 `HttpServerOptions` 的任何字段，构造参数和 `http_options_` 成员一起删掉，只留 handler。`claim_close_walk()/release_close_walk()` 这套「合并重复 walk」的机制可以删掉——新设计里 drain 每个 worker 只走一次（由 `Worker::stop_posted_` 保证），不再有重复投递。
+`wait_stopped()` 继续用基类的 `tasks_`（一条连接协程一个计数，覆盖握手 + 会话），所以两种会话不需要各自计数。
 
-- `Http2Endpoint`：TLS 时 ALPN 只报 `h2`；明文时按 **h2c prior-knowledge** 处理——直接把 transport 喂给 `Http2Connection`，由它校验 connection preface。**不支持 `Upgrade: h2c`（D6）**：明文端口上收到带 `Upgrade: h2c` 的 HTTP/1 请求，就按普通 HTTP/1 请求处理（忽略该头），不做协议升级。这一条要写进 `Http2Endpoint` 的类注释，避免后来者误以为是漏实现。
-- `Http21Endpoint`：TLS ALPN 报 `{h2, http/1.1}`，按协商结果分派到 H1 或 H2 的 worker slot；明文时走 HTTP/1。这就是今天 `HttpServer` 的行为，`select_protocol()` 逻辑原样搬过来。
+对现有代码的复用与改造：
+- `Http2ServerConnection` 新增 `request_drain()` → `Http2Connection::graceful_shutdown()`（该函数已存在，只是服务端从来没用过）。
+- `ServerRequestFactory` 瘦身：`ServerHttp2Request` 压根没读过 `HttpServerOptions` 的任何字段，构造参数与 `http_options_` 成员一并删掉，只留 handler。
+- `Http2ServerWorker` 的 `claim_close_walk()/release_close_walk()`（合并重复 walk）在新设计里没有用武之地——drain 每个 worker 只走一次，由 `Worker::stop_posted_` 保证。它随 `HttpServer` 门面一起在 P7 删除。
 
-`Http21EndpointWorker` 内部同时持有 H1 和 H2 两张连接表，`drain`/`wait_stopped` 依次作用于两者。
+**实现期确认的一点行为**：没有活跃流的 h2 会话在 GOAWAY 之后会立刻 Closing→Closed（`maybe_enter_closing_from_draining()`），也就是说「空闲 h2 会话」等价于「空闲 H1 keep-alive 连接」，停机不会等一个只是还连着的客户端。有流在跑时连接才停在 Draining，等流结束再关。两种情况各有一个测试。
 
 ### 7.5 Http3Endpoint
 
@@ -645,7 +653,7 @@ class Http3EndpointWorker final : public EndpointWorker {
 今天由 `HttpServer::bind()` 内部隐式建 `Http3Server` 保证「TCP 和 UDP 用同一个端口」；拆成两个 endpoint 后要显式表达，尤其是端口 0（测试里普遍用）：
 
 ```cpp
-auto *tcp = server.add_endpoint<Http21Endpoint>(Http21Endpoint::Options{
+auto *tcp = server.add_endpoint<Http2Endpoint>(Http2Endpoint::Options{
     .address = {ip, 0}, .tls = tls_options, ...});
 auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
     .address = {ip, 0},
@@ -709,7 +717,7 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 
 现存直接依赖（`src/` 之外）：`HttpServer.h` 12 处（tests 5 / example 3 / apps 4）、`Http1Server.h` 3 处（tests 1 / example 2）、`Http3Server.h` 2 处（tests 1 / lite_nginx test 1），去重后 16 个文件。一次性全改风险大，因此 `HttpServer` 作为**迁移期脚手架**保留到 P6 结束，P7 连同它的头文件一起删除（D7）——它不进入长期 API。
 
-**P5 起 `HttpServer` 变成薄门面**（内部就是 `Server` + 一个 `Http21Endpoint`，`options.http3.enabled` 时再加一个 `inherit_port_from` 的 `Http3Endpoint`）。因为 `HttpServerOptions` 在 §7.1 被拆掉，门面自己保留一份等价的旧字段结构，在 `bind()` 里翻译成各 endpoint 的 options：
+**P5 起 `HttpServer` 变成薄门面**（内部就是 `Server` + 一个 `allow_http1 = true` 的 `Http2Endpoint`，`options.http3.enabled` 时再加一个 `inherit_port_from` 的 `Http3Endpoint`）。因为 `HttpServerOptions` 在 §7.1 被拆掉，门面自己保留一份等价的旧字段结构，在 `bind()` 里翻译成各 endpoint 的 options：
 
 
 
@@ -731,7 +739,7 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 |------|------|------|
 | P1 | `Server`/`Endpoint`/`EndpointWorker`/`Worker` 骨架 + 状态机；测试用的假 endpoint | `ServerLifecycleTest` 全绿 |
 | P2 | `TcpEndpointBase` + `Http1Endpoint`；`Http1Connection` drain 改造；拆出 `Http1ServerOptions` | `Http1EndpointTest`（真实 H1 流量 + drain）全绿；`Http1Server`/`HttpServer` 走桥接保持不变 |
-| P3 | `Http2Endpoint` + `Http21Endpoint`；H2 GOAWAY drain | `Http2ConnectionTest`/`HttpClientServerInteropTest` 全绿 |
+| P3 | `Http2Endpoint`（含 `allow_http1` 协商，D8）；H2 GOAWAY drain；拆出 `Http2ServerOptions` | `Http2EndpointTest`（真实 h2 客户端 + ALPN + GOAWAY）全绿；`Http2ConnectionTest`/`HttpClientServerInteropTest` 全绿 |
 | P4 | `Http3Endpoint`（吸收 `Http3Server`）+ H3 GOAWAY drain + 端口继承 | `Http3ClientTest`/`Http3ConnectionTest` 全绿 |
 | P5 | `HttpServer` 门面切到 `Server`；删 `Http1Server`/`Http3Server`（迁移其 5 处调用点）；`HttpServerOptions` 余下部分拆分落地 | 全量 `ctest` 绿 |
 | P6 | lite_nginx 收敛为「1 个 `Server` + N 个 endpoint」，删 `ServerLauncher::close()` 的 promise 兜底 | `lite_nginx_tests` 全绿 + 一轮基准回归 |
@@ -754,7 +762,8 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 **优雅 drain**
 - H1：请求处理中（handler 里挂 500ms）触发 `stop()` → 响应完整送达且带 `Connection: close`，之后连接关闭
 - H1：空闲 keep-alive 连接在 `stop()` 后 <10ms 内被关闭（不等 `keep_alive_timeout`）
-- H2：`stop()` 后客户端收到 GOAWAY；已开流的响应完整；新建流被拒
+- H2：有流在跑时 `stop()` → 该流的响应完整送达，之后才 Stopped；空闲会话 `stop()` → 立刻关，不等客户端
+- H2 ALPN：`allow_http1=true` 时 h2 客户端走 h2、h1 客户端走 h1（同一 endpoint、同一 handler）；明文口按 `allow_http1` 分别走 HTTP/1 与 h2c prior-knowledge
 - H3：`stop()` 后新连接握手被拒；已有连接的 in-flight 请求完成
 - 停机不截断：客户端只发请求头 → handler 阻塞在读 body → `stop()` → 200ms 后客户端才补发 body → 响应完整送达（`Connection: close`），`serve()` 随后返回
 - 慢 drain 不被打断：假 endpoint 延迟 150ms 才释放连接 → `stop_and_wait()` 等满 150ms 才返回
@@ -796,6 +805,7 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 | handler 是 server 级还是 endpoint 级 | endpoint 级，server 的作默认值（D4） | §5.3、§7.1 |
 | 配置结构 | 每个 endpoint 自己的 options，拆散 `HttpServerOptions`，无 server 级 options（D5） | §7.1 |
 | 明文 H2 是否支持 `Upgrade: h2c` | 不支持，只做 prior-knowledge（D6） | §7.4 |
+| h2 与 h2+h1 是否两个 endpoint 类 | 合成一个 `Http2Endpoint` + `allow_http1`（D8） | §7.4 |
 | `HttpServer` 门面保留多久 | 仅迁移期脚手架，P7 直接删（D7） | §10 |
 
 当前无待确认项。实现期若发现新的取舍，在此追加行。

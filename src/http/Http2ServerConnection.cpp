@@ -40,6 +40,8 @@ fiber::async::Task<Http2Connection::CloseResult> Http2ServerConnection::wait_clo
     co_return co_await close_gate_.join();
 }
 
+void Http2ServerConnection::request_drain() noexcept { conn_.graceful_shutdown(); }
+
 void Http2ServerConnection::request_shutdown() noexcept { conn_.shutdown(common::IoErr::Canceled); }
 
 } // namespace fiber::http

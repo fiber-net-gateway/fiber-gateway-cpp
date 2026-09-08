@@ -49,7 +49,7 @@ struct PoolHarness {
         http::Http2CloseGate gate;
     };
     PoolHarness(event::EventLoop &loop, Http2ConnectionPoolCore::Options options, std::uint32_t server_max) :
-        loop(loop), pool(loop, options), listener(loop), factory({}, [this](http::HttpExchange &ex) -> Task<void> {
+        loop(loop), pool(loop, options), listener(loop), factory([this](http::HttpExchange &ex) -> Task<void> {
             ++requests;
             while (hold_responses)
                 co_await async::sleep(1ms);

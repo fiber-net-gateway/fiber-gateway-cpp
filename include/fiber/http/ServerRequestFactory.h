@@ -6,7 +6,6 @@
 
 #include "Http2Connection.h"
 #include "HttpExchange.h"
-#include "HttpServerOptions.h"
 
 namespace fiber::http {
 
@@ -14,10 +13,11 @@ class Http2Connection;
 
 class ServerRequestFactory {
 public:
-    // The factory owns the request configuration so protocol connections may
-    // safely outlive the HttpServer facade during asynchronous shutdown.
-    ServerRequestFactory(const HttpServerOptions &http_options, const HttpHandler &handler) :
-        http_options_(http_options), handler_(std::make_shared<HttpHandler>(handler)) {}
+    // The factory owns the handler so protocol connections may safely outlive
+    // the endpoint facade during asynchronous shutdown. ServerHttp2Request
+    // needs nothing else from the server configuration.
+    explicit ServerRequestFactory(const HttpHandler &handler) : handler_(std::make_shared<HttpHandler>(handler)) {}
+    explicit ServerRequestFactory(std::shared_ptr<const HttpHandler> handler) : handler_(std::move(handler)) {}
 
     [[nodiscard]] static const Http2Connection::Ops &ops() noexcept;
     [[nodiscard]] Http2Stream::Lease create_peer_stream(std::uint32_t stream_id, Http2Connection &conn) noexcept;
@@ -25,7 +25,6 @@ public:
 private:
     static Http2Stream::Lease create_peer_stream_op(void *ctx, std::uint32_t stream_id, Http2Connection &conn) noexcept;
 
-    HttpServerOptions http_options_{};
     std::shared_ptr<const HttpHandler> handler_{};
 };
 

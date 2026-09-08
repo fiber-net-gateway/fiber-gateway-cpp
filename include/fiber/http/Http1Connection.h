@@ -21,7 +21,7 @@ namespace fiber::http {
 template<typename V>
 class HeaderMap;
 
-class Http1EndpointWorker;
+class Http1ConnectionRegistry;
 class HttpTransport;
 
 class Http1Connection : public common::NonCopyable, public common::NonMovable {
@@ -60,7 +60,7 @@ private:
     std::size_t drain_inbound(mem::IoBuf &buffer) noexcept;
     void finish() noexcept;
 
-    friend class Http1EndpointWorker;
+    friend class Http1ConnectionRegistry;
 
     const std::atomic<bool> *shutdown_flag_ = nullptr;
     event::EventLoop &loop_;
@@ -69,8 +69,9 @@ private:
     std::shared_ptr<const HttpHandler> handler_owner_;
     Http1ServerOptions options_;
     mem::IoBufChain inbound_bufs_;
-    // Membership slot in the owning Http1EndpointWorker's list. Private hook
-    // reached by offset, same pattern as Http2ServerConnection::worker_hook_.
+    // Membership slot in the owning Http1ConnectionRegistry's list. Private
+    // hook reached by offset, same pattern as
+    // Http2ServerConnection::worker_hook_.
     common::IntrusiveListHook worker_hook_{};
 
     // Loop-affine state: every mutation happens on loop_.
