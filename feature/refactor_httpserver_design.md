@@ -401,6 +401,8 @@ async::DetachedTask Server::finish_shutdown(Server *self) noexcept {
 }
 ```
 
+**drain_timeout 的边界（实现期确认）**：`abort()` 能兜住的是**阻塞的 I/O**——关掉 transport 后 handler 挂起的读写立刻失败并返回。它兜不住「handler 因为自身原因永不返回」（纯定时器、死循环）：C++ 协程没有取消机制，这类连接协程仍会拖住 `wait_stopped()`。这与现状一致（今天 `HttpServer` 的 `tasks` WaitGroup 同样会无限等），不是本次重写引入的退化，但必须在 `EndpointWorker::abort()` 的注释里写明，避免被当成「预算一定生效」的强保证。
+
 **顺序保证**：`slots_` 先于 `endpoints_` 析构。`EndpointWorker` 可能持有指向 `Endpoint` 的裸指针（读 options/handler），这个顺序保证了指针始终有效。`Endpoint` 持有的 `std::vector<XxxEndpointWorker *>` 在第 8 步时已全部悬空，但那之后不再有人 accept，不会被解引用（`on_stop()` 之后 accept loop 已退出）。
 
 ### 6.4 与 EventLoopGroup 的关系
@@ -722,8 +724,9 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 - `src/http/Server.cpp`、`src/http/endpoint/*.cpp`
 
 **修改**
-- `Http1Connection`：删 `server_`/`shutdown_flag_`，`finished_` 去原子化，新增 `worker_hook_`、`idle_`、`draining_`、`request_drain()`；`stopping()` 改为读本地 bool。
-- `Http1ExchangeIo`：无需改（`compute_close_conn` 已经读 `connection_->stopping()`）。
+- `Http1Connection`：删 `server_`（P2 完成），`finished_` 去原子化，新增 `worker_hook_`、`idle_`、`draining_`、`request_drain()`；handler 改为 `const HttpHandler *` + 可选 `shared_ptr` owner（去掉每连接一次 `std::function` 拷贝）。`shutdown_flag_` 保留到 P7——`HttpServer` 门面仍靠它驱动 H1 停机，`stopping()` 期间读 `draining_ || flag`。
+- `Http1ExchangeIo`：逻辑无需改（`compute_close_conn` 已经读 `connection_->stopping()`），只跟随 options 类型替换。
+- `Http1Parser`：`RequestLineParser`/`HeaderLineParser` 的 `HttpServerOptions` 参数是死参数（一个存了指针从未读，一个直接忽略），P2 顺手删掉。
 - `Http2ServerConnection`：新增 `request_drain()` → `graceful_shutdown()`。
 - `Http2ServerWorker`：改名 `Http2EndpointWorker` 并实现 `EndpointWorker`；删 `claim_close_walk/release_close_walk`。
 - `ServerRequestFactory` / `ServerHttp2Request`：删掉从不读取的 `HttpServerOptions` 参数与成员，只留 handler。
@@ -768,10 +771,10 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 | 阶段 | 内容 | 验收 |
 |------|------|------|
 | P1 | `Server`/`Endpoint`/`EndpointWorker`/`Worker` 骨架 + 状态机；测试用的假 endpoint | `ServerLifecycleTest` 全绿 |
-| P2 | `TcpEndpointBase` + `Http1Endpoint`；`Http1Connection` drain 改造 | H1 drain/abort 测试；`Http1ServerTest` 迁移后全绿 |
+| P2 | `TcpEndpointBase` + `Http1Endpoint`；`Http1Connection` drain 改造；拆出 `Http1ServerOptions` | `Http1EndpointTest`（真实 H1 流量 + drain/abort）全绿；`Http1Server`/`HttpServer` 走桥接保持不变 |
 | P3 | `Http2Endpoint` + `Http21Endpoint`；H2 GOAWAY drain | `Http2ConnectionTest`/`HttpClientServerInteropTest` 全绿 |
 | P4 | `Http3Endpoint`（吸收 `Http3Server`）+ H3 GOAWAY drain + 端口继承 | `Http3ClientTest`/`Http3ConnectionTest` 全绿 |
-| P5 | `HttpServer` 门面切到 `Server`；删 `Http1Server`/`Http3Server`；`HttpServerOptions` 拆分落地 | 全量 `ctest` 绿 |
+| P5 | `HttpServer` 门面切到 `Server`；删 `Http1Server`/`Http3Server`（迁移其 5 处调用点）；`HttpServerOptions` 余下部分拆分落地 | 全量 `ctest` 绿 |
 | P6 | lite_nginx 收敛为「1 个 `Server` + N 个 endpoint」，删 `ServerLauncher::close()` 的 promise 兜底 | `lite_nginx_tests` 全绿 + 一轮基准回归 |
 | P7 | 12 处 `HttpServer` 调用点改写为 `Server + Endpoint`；删 `HttpServer.h/.cpp`（D7） | 全量 `ctest` 绿；仓库内不再有 `HttpServer` 引用 |
 
@@ -794,7 +797,7 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 - H1：空闲 keep-alive 连接在 `stop()` 后 <10ms 内被关闭（不等 `keep_alive_timeout`）
 - H2：`stop()` 后客户端收到 GOAWAY；已开流的响应完整；新建流被拒
 - H3：`stop()` 后新连接握手被拒；已有连接的 in-flight 请求完成
-- `drain_timeout` = 50ms + handler 永不返回 → 50ms 后连接被 abort，`serve()` 返回
+- `drain_timeout` = 100ms + handler 阻塞在读请求体（客户端声明 Content-Length 但不发） → 到期后 abort 关 transport，读失败返回，`serve()` 在预算内返回
 - `drain_timeout` = 0 → 等价硬停，行为与今天的 `HttpServer::close()` 一致
 
 **多 endpoint**

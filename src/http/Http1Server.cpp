@@ -5,11 +5,30 @@
 #include <fiber/common/Assert.h>
 #include <fiber/common/IoError.h>
 #include <fiber/http/Http1Connection.h>
+#include <fiber/http/Http1ServerOptions.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/TcpStream.h>
 #include "http/TlsAlpn.h"
 
 namespace fiber::http {
+
+namespace {
+
+// Http1Server still takes the catch-all HttpServerOptions; the connection now
+// takes only the fields it reads. Both go away when this class does (P5).
+Http1ServerOptions make_http1_options(const HttpServerOptions &options) noexcept {
+    return Http1ServerOptions{
+            .keep_alive_timeout = options.keep_alive_timeout,
+            .header_timeout = options.header_timeout,
+            .write_timeout = options.write_timeout,
+            .header_init_size = options.header_init_size,
+            .header_large_size = options.header_large_size,
+            .header_large_num = options.header_large_num,
+            .drain_unread_body = options.drain_unread_body,
+    };
+}
+
+} // namespace
 
 Http1Server::Http1Server(event::EventLoop &loop, HttpHandler handler, HttpServerOptions options,
                          event::EventLoopGroup *worker_group) :
@@ -74,7 +93,10 @@ fiber::async::DetachedTask Http1Server::serve() {
                         transport = std::move(*tcp_result);
                     }
 
-                    Http1Connection connection(this, std::move(transport), handler_, options_);
+                    // shutdown_ is this server's cancellation flag; it lives as
+                    // long as the server, which outlives its connections.
+                    Http1Connection connection(std::move(transport), handler_, make_http1_options(options_), nullptr,
+                                               &shutdown_);
                     co_await connection.run();
                 });
     }
