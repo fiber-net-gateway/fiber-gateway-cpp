@@ -650,7 +650,7 @@ class Http3EndpointWorker final : public EndpointWorker {
 
 2. **「请求完成」的时点必须取到流被 retire，而不是读循环返回。** 第一版把计数放在 `run_read_loop` 的 scope guard 上，测试直接失败：读循环返回时响应只是交给了流，还没上网；紧接着的 `close_application()` 是 RFC 9000 的 Immediate Close，会把它丢掉。改成在 `~ServerHttp3Request` 里结算——流被 QUIC retire（数据确认完）才算数。
 
-3. **代价是「对端直接消失」时停机要等 QUIC idle timeout。** 客户端不发 CONNECTION_CLOSE 就跑路，服务端无从知道响应是否送达，只能等 `Http3ServerOptions::transport` 的 idle timeout。这与 D3 一致（协议自己决定），但要知道这条：H3 endpoint 的停机时间下界由 idle timeout 决定，不是 0。
+3. **代价是「对端直接消失」时停机要等 QUIC idle timeout**，H3 endpoint 的停机时间下界由它决定、不是 0。刻意接受，详见 §13-A。
 
 `Http3ServerConnection`（原 `Http3Server::ServerConnection`）抽到了 `src/http/Http3ServerConnection.h`，由新旧两条路径共用，P5 删 `Http3Server` 时不会留下重复代码。它通过 `Ops::on_closed` 回调告诉 owner「会话结束了」——`Http3Server` 用它减 WaitGroup，`Http3EndpointWorker` 用它从连接表摘除并减 `live_`。
 
@@ -786,15 +786,15 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 
 ## 12. 风险与后续
 
-| 风险 | 缓解 |
-|------|------|
-| P4 的 `Http3Server` 吸收改动最大，QUIC 侧 drain 是新行为 | 已在 P4 落地并单测覆盖：drain 期间保持 endpoint 打开、只拒新连接，`wait_stopped()` 结束后才 `close()` |
-| H3 对端消失时停机要等 QUIC idle timeout | 这是「不截断响应」的必然代价（§7.5）。需要更快停机的部署可以调小 `Http3ServerOptions::transport` 的 idle timeout |
-| 无停机预算：某条连接不结束就停不下来 | 责任落到协议层超时（H1 header/keep-alive/write、H2 read/write、H3 idle）。需要观测时可在 §12「后续可做」的 `stats()` 上暴露「仍在 drain 的连接数」 |
-| 握手中连接与 worker 停机的竞态 | §7.2 的 per-worker 握手 WaitGroup + dispatch 前二次检查 `draining_`；补一个「drain 与 accept 并发」的压力测试 |
-| `Endpoint` 析构晚于 `EndpointWorker` 的顺序依赖 | 在 `finish_shutdown` 里用注释固化，并在 `~Endpoint()` 断言自己的 worker 指针数组已清空 |
-| 门面期 `HttpServer` 与 `Server` 并存造成理解成本 | P5 起在 `HttpServer.h` 顶部标注「迁移期脚手架，新代码请用 `Server`，将于 P7 删除」；P7 必须真的删掉，不留长期双轨（D7） |
-| 拆 `HttpServerOptions` 会横扫 `Http1Connection`/`ServerHttp{2,3}Request`/lite_nginx | 字段归属已逐个核对（§7.1 表格）；拆分放在 P5 一次做完，且是纯机械替换——字段值语义不变，只有 `keep_alive_timeout`→`Http2ServerOptions::read_timeout` 改了名 |
+| 风险 | 缓解 | 状态 |
+|------|------|------|
+| P4 的 `Http3Server` 吸收改动最大，QUIC 侧 drain 是新行为 | drain 期间保持 endpoint 打开、只拒新连接，`wait_stopped()` 结束后才 `close()` | ✅ P4 落地，单测覆盖 |
+| 握手中连接与 worker 停机的竞态 | §7.2 的 per-worker 握手计数（`tasks_`，覆盖握手 + 会话）+ dispatch 前二次检查 `draining_`；accept 侧靠 §6.3 的发布顺序不变式 | ⚠️ 机制已实现，**并发压力测试未补**（§14-G） |
+| `Endpoint` 析构晚于 `EndpointWorker` 的顺序依赖 | `finish_shutdown` 里 `workers_.clear()` 先于 `endpoints_.clear()`，并用注释固化 | ⚠️ 顺序已保证，**`~Endpoint()` 的防御性断言未加**（§14-H） |
+| 门面期 `HttpServer` 与 `Server` 并存造成理解成本 | P5 起在 `HttpServer.h` 顶部标注「迁移期脚手架，新代码请用 `Server`，将于 P7 删除」；P7 必须真的删掉，不留长期双轨（D7） | ⏳ 待 P5/P7 |
+| 拆 `HttpServerOptions` 会横扫 `Http1Connection`/`ServerHttp{2,3}Request`/lite_nginx | 字段归属逐个核对（§7.1 表格），分阶段拆：H1 在 P2、H2 在 P3、H3 在 P4 | ✅ 三份已拆完，只剩门面用的旧结构等 P7 |
+
+实现期发现、当前仍未修复的问题集中记在 **§13 已知未修复项**（每条注明是刻意接受还是后续阶段解决）。
 
 **后续可做（本次不做）**
 - 把 `Server/Endpoint/EndpointWorker` 抽到 `fiber::server`，供非 HTTP 协议复用
@@ -803,7 +803,58 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 
 ---
 
-## 13. 评审记录
+## 13. 已知未修复项
+
+实现期发现、但**当前代码里仍然存在**的问题。每条注明是「刻意接受」还是「后续阶段解决」，避免只活在对话里。
+
+### A. H3 对端直接消失时，停机要等 QUIC idle timeout —— 刻意接受
+
+客户端不发 CONNECTION_CLOSE 就跑路时，服务端无法知道最后的响应是否送达，`ServerHttp3Request` 的流迟迟不被 retire，`live_.join()` 一直挂着，直到 `Http3ServerOptions::transport` 的 idle timeout（默认 30s）踢掉连接。
+
+这是「不截断响应」的必然代价：另一端的极端是读循环一返回就关连接，而那样会丢响应（§7.5 发现 2 有实测）。需要更快停机的部署把 idle timeout 调小即可。**不打算修**。
+
+### B. 遗留 `HttpServer` 门面仍是硬停机 —— P5 解决
+
+P2/P3/P4 的优雅 drain 只作用于新的 `Server` + endpoint 路径。`HttpServer` 门面仍走自己的老路：
+
+- `Runtime::request_shutdown()` → `Http1Connection::shutdown()`，直接关 transport，**打断 in-flight 请求**；
+- → `Http2ServerConnection::request_shutdown()` → `conn_.shutdown(Canceled)`，**abort 所有流**，不发 GOAWAY。
+
+也就是说，在 P6 把 lite_nginx 迁过去之前，它的停机行为**没有任何改善**。这是刻意的——迁移期不动老路径以保持零风险——但不能误以为「优雅停机已经全局生效」。
+
+### C. 遗留 `Http3Server` 仍在 close 时强杀会话 —— P5 解决
+
+`Http3Server::on_close_shard()` 直接 `shard->endpoint.close()`，`QuicUdpEndpoint::close()` 会 `force_detach_connection` 掉所有连接。新的 `Http3EndpointWorker` 已经改成「先 GOAWAY、等 `live_` 归零、再 close」，但老类没跟着改。P5 删除 `Http3Server` 时一并消失。
+
+### D. `Http1Connection::shutdown_flag_` 仍在 —— P7 解决
+
+`stopping()` 现在读 `draining_ || (shutdown_flag_ && flag->load())`。第二个分支只为 `HttpServer` 门面存在（它靠一个 `std::atomic<bool>` 驱动 H1 停机）。门面删除后，这个成员和那次原子读一并删掉。
+
+### E. `Http2ServerWorker::claim_close_walk()/release_close_walk()` 仍在 —— P7 解决
+
+「合并重复 close walk」的机制只有旧门面在用；新设计里每个 worker 只 drain 一次（`Worker::stop_posted_` 保证）。随 `Http2ServerWorker` 一起在 P7 删除。
+
+### F. `~Http3Connection` 对未结算的 server request 做了兜底 —— 防御性，可在测试改造后收紧
+
+`server_request_group_` 的计数由 `ServerHttp3Request` 的析构结算。生产路径上请求一定先于连接销毁（请求持有 `QuicConnection` lease），但 `Http3ConnectionTest` 的 harness 把 `QuicConnection`/`Http3Connection` 建在栈上、请求还活着就整体析构，会撞上 `~WaitGroup` 的 `count_ == 0` 断言。
+
+现在 `~Http3Connection` 用 `live_server_requests_` 把剩余计数强行归零来容忍这种顺序。如果将来把那个 harness 改成按生产顺序析构，这段兜底可以换成断言。
+
+### G. 「drain 与 accept 并发」的压力测试未补
+
+机制是有的（§7.2 的 `tasks_` 计数 + dispatch 前二次检查 + §6.3 的发布顺序不变式），但目前只有功能级单测，没有「一边高频建连一边 stop()」的压测来真正压这条竞态路径。
+
+### H. `~Endpoint()` 没有断言自己的 worker 指针数组已清空
+
+`TcpEndpointBase::workers_` / `Http3Endpoint::workers_` 都是借用指针，靠 `finish_shutdown()` 里 `workers_.clear()` 先于 `endpoints_.clear()` 来保证不悬空。顺序是对的，但没有在析构函数里加防御性断言把这条不变式钉死。`~TcpEndpointBase` 目前是 `= default`。
+
+### I. nacos 测试仍保留 `HttpServerOptions http_options_` —— P7 顺带清理
+
+`apps/nacos/tests/{ConfigService,NamingService,NacosRpc}Test.cpp` 里这个成员现在只为 `options.tcp` 一个字段存在（`ServerRequestFactory` 已经不要它了）。等 `HttpServerOptions` 整体删除时换成 `net::TcpSocketOptions`。
+
+---
+
+## 14. 评审记录
 
 | 议题 | 结论 | 落点 |
 |------|------|------|
