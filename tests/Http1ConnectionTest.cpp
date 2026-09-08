@@ -179,7 +179,7 @@ fiber::async::DetachedTask run_pipelined_http1_connection(fiber::event::EventLoo
                            "GET /two HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n";
     auto transport = std::make_unique<RecordingHttp1Transport>(*loop, *metrics, std::move(requests));
 
-    fiber::http::HttpServerOptions options;
+    fiber::http::Http1ServerOptions options;
     options.keep_alive_timeout = 2s;
     options.header_timeout = 1s;
 
@@ -196,7 +196,7 @@ fiber::async::DetachedTask run_pipelined_http1_connection(fiber::event::EventLoo
         co_return;
     };
 
-    fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), options);
+    fiber::http::Http1Connection connection(std::move(transport), handler, options);
     co_await connection.run();
     done->set_value();
     co_return;
@@ -255,7 +255,7 @@ TEST(Http1ConnectionTest, ResponseChannelWaitUsesTransportTerminalCallback) {
             co_return;
         };
 
-        fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+        fiber::http::Http1Connection connection(std::move(transport), handler, {});
         fiber::async::spawn([transport_ptr]() -> fiber::async::DetachedTask {
             while (!transport_ptr->response_wait_registered()) {
                 co_await fiber::async::sleep(1ms);
@@ -326,7 +326,7 @@ TEST(Http1ConnectionTest, ChunkedWriteReturnsAfterPayloadProgressAndPreservesCal
             co_return;
         };
 
-        fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+        fiber::http::Http1Connection connection(std::move(transport), handler, {});
         co_await connection.run();
         done_promise.set_value();
         co_return;
@@ -397,7 +397,7 @@ TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
             co_return;
         };
 
-        fiber::http::Http1Connection connection(nullptr, std::move(transport), std::move(handler), {});
+        fiber::http::Http1Connection connection(std::move(transport), handler, {});
         co_await connection.run();
         done_promise.set_value();
         co_return;

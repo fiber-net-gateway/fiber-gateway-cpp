@@ -16,7 +16,6 @@
 
 namespace fiber::http {
 
-struct HttpServerOptions;
 class HttpExchange;
 
 enum class ParseCode : int {
@@ -57,7 +56,7 @@ public:
     };
 
 public:
-    RequestLineParser(const HttpServerOptions &options);
+    RequestLineParser() noexcept;
 
     void reset();
 
@@ -99,7 +98,6 @@ public:
 private:
     static constexpr size_t kInvalidPos = std::numeric_limits<size_t>::max();
 
-    const HttpServerOptions *options_ = nullptr;
     State state_ = State::Start;
     RequestLineState line_{};
 };
@@ -163,7 +161,6 @@ public:
     };
 
     HeaderLineParser() noexcept;
-    explicit HeaderLineParser(const HttpServerOptions &options) noexcept;
 
     void reset() noexcept;
 

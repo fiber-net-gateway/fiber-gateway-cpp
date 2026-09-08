@@ -197,7 +197,7 @@ fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *tr
     co_return common::IoResult<void>{};
 }
 
-Http1HeaderParseBufferOptions header_parse_buffer_options(const HttpServerOptions &options) noexcept {
+Http1HeaderParseBufferOptions header_parse_buffer_options(const Http1ServerOptions &options) noexcept {
     return Http1HeaderParseBufferOptions{
             .init_size = options.header_init_size,
             .large_size = options.header_large_size,
@@ -614,7 +614,7 @@ Http1ExchangeIo::read_request_trailers(HttpExchange &exchange, std::chrono::mill
         co_return std::unexpected(init_result.error());
     }
 
-    HeaderLineParser parser(connection_->options());
+    HeaderLineParser parser;
     for (;;) {
         ParseCode code = parser.execute(&header_buffer.buf());
         if (code == ParseCode::Again) {

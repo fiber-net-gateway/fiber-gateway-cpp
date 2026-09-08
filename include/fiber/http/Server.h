@@ -47,6 +47,12 @@ public:
 
     // Hard teardown once the endpoint's drain budget is spent: abort every
     // stream and close the transport. Idempotent, and legal after drain().
+    //
+    // This bounds blocked I/O, not arbitrary handler code: closing the
+    // transport makes a handler's pending reads and writes fail, but a handler
+    // that never returns for its own reasons (a pure timer, a busy loop) cannot
+    // be unwound -- C++ coroutines have no cancellation -- and still holds up
+    // wait_stopped().
     virtual void abort() noexcept = 0;
 
     // Completes once every resource this worker holds for the endpoint is

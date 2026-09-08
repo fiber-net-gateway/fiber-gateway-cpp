@@ -17,6 +17,7 @@
 #include <fiber/common/Assert.h>
 #include <fiber/common/IoError.h>
 #include <fiber/http/Http1Connection.h>
+#include <fiber/http/Http1ServerOptions.h>
 #include <fiber/http/Http2ServerConnection.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/net/TcpStream.h>
@@ -40,6 +41,21 @@ SelectedProtocol select_protocol(std::string_view alpn) noexcept {
         return SelectedProtocol::Http2;
     }
     return SelectedProtocol::Unsupported;
+}
+
+// The legacy facade still carries the catch-all HttpServerOptions; HTTP/1
+// sessions now take only the fields they read. Both go away in P7 with the
+// facade itself.
+Http1ServerOptions make_http1_options(const HttpServerOptions &options) noexcept {
+    return Http1ServerOptions{
+            .keep_alive_timeout = options.keep_alive_timeout,
+            .header_timeout = options.header_timeout,
+            .write_timeout = options.write_timeout,
+            .header_init_size = options.header_init_size,
+            .header_large_size = options.header_large_size,
+            .header_large_num = options.header_large_num,
+            .drain_unread_body = options.drain_unread_body,
+    };
 }
 
 common::IoResult<net::SocketAddress> resolve_local_addr(int fd) noexcept {
@@ -399,8 +415,9 @@ fiber::async::Task<void> HttpServer::serve_http1(std::shared_ptr<Runtime> runtim
     }
 
     auto entry = std::make_shared<Runtime::Http1Entry>();
-    auto connection = std::make_shared<Http1Connection>(nullptr, std::move(transport), runtime->handler,
-                                                        runtime->options, &runtime->shutting_down_flag);
+    auto connection = std::make_shared<Http1Connection>(std::move(transport), runtime->handler,
+                                                        make_http1_options(runtime->options), nullptr,
+                                                        &runtime->shutting_down_flag);
     {
         std::lock_guard guard(entry->mutex);
         entry->connection = connection;

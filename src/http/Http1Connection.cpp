@@ -9,7 +9,6 @@
 
 #include <fiber/http/HeaderMap.h>
 #include <fiber/http/Http1HeaderParseBuffer.h>
-#include <fiber/http/Http1Server.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/http/HttpUriParse.h>
 #include "http/Http1ExchangeIo.h"
@@ -72,7 +71,7 @@ void for_each_token(std::string_view value, F &&fn) {
     }
 }
 
-Http1HeaderParseBufferOptions header_parse_buffer_options(const HttpServerOptions &options) noexcept {
+Http1HeaderParseBufferOptions header_parse_buffer_options(const Http1ServerOptions &options) noexcept {
     return Http1HeaderParseBufferOptions{
             .init_size = options.header_init_size,
             .large_size = options.header_large_size,
@@ -82,10 +81,11 @@ Http1HeaderParseBufferOptions header_parse_buffer_options(const HttpServerOption
 
 } // namespace
 
-Http1Connection::Http1Connection(Http1Server *server, std::unique_ptr<HttpTransport> transport, HttpHandler handler,
-                                 HttpServerOptions options, const std::atomic<bool> *shutdown_flag) :
-    server_(server), shutdown_flag_(shutdown_flag), loop_(event::EventLoop::current()),
-    transport_(std::move(transport)), handler_(std::move(handler)), options_(std::move(options)),
+Http1Connection::Http1Connection(std::unique_ptr<HttpTransport> transport, const HttpHandler &handler,
+                                 Http1ServerOptions options, std::shared_ptr<const HttpHandler> handler_owner,
+                                 const std::atomic<bool> *shutdown_flag) :
+    shutdown_flag_(shutdown_flag), loop_(event::EventLoop::current()), transport_(std::move(transport)),
+    handler_(&handler), handler_owner_(std::move(handler_owner)), options_(std::move(options)),
     inbound_bufs_(loop_.io_buf_node_pool()) {}
 
 Http1Connection::~Http1Connection() {
@@ -175,7 +175,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
     }
 
     {
-        RequestLineParser req_parser(options_);
+        RequestLineParser req_parser;
         for (;;) {
             ParseCode code = req_parser.execute(&header_buffer.buf());
             if (code == ParseCode::Again) {
@@ -238,7 +238,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
     }
 
     {
-        HeaderLineParser hdr_parser(options_);
+        HeaderLineParser hdr_parser;
         for (;;) {
             ParseCode code = hdr_parser.execute(&header_buffer.buf());
             if (code == ParseCode::Again) {
@@ -348,7 +348,12 @@ fiber::async::Task<void> Http1Connection::run() {
         }
 
         if (inbound_bufs_.readable_bytes() == 0) {
+            // Between requests: request_drain() may close the transport from
+            // under this wait, which is exactly how an idle keep-alive
+            // connection is woken during shutdown.
+            idle_ = true;
             auto wait_result = co_await transport_->wait_readable(options_.keep_alive_timeout);
+            idle_ = false;
             if (!wait_result) {
                 break;
             }
@@ -367,7 +372,7 @@ fiber::async::Task<void> Http1Connection::run() {
             Http1ExchangeIo io(*this, exchange);
             exchange.set_io(&io);
 
-            co_await handler_(exchange);
+            co_await (*handler_)(exchange);
 
             if (io.raw_stream_active()) {
                 exchange.set_io(nullptr);
@@ -413,15 +418,29 @@ void Http1Connection::shutdown() noexcept {
     finish();
 }
 
+void Http1Connection::request_drain() noexcept {
+    FIBER_ASSERT(loop_.in_loop());
+    if (draining_) {
+        return;
+    }
+    draining_ = true;
+    if (idle_) {
+        // Nothing in flight to protect: closing the transport wakes the
+        // pending keep-alive read and run() unwinds.
+        finish();
+    }
+    // Otherwise run() sees stopping() once the current exchange completes.
+}
+
 bool Http1Connection::stopping() const noexcept {
-    return (server_ && server_->shutting_down()) ||
-           (shutdown_flag_ != nullptr && shutdown_flag_->load(std::memory_order_acquire));
+    return draining_ || (shutdown_flag_ != nullptr && shutdown_flag_->load(std::memory_order_acquire));
 }
 
 void Http1Connection::finish() noexcept {
-    if (finished_.exchange(true, std::memory_order_acq_rel)) {
+    if (finished_) {
         return;
     }
+    finished_ = true;
     if (transport_) {
         transport_->close();
     }

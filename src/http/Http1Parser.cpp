@@ -161,7 +161,7 @@ HttpVersion to_http_version(int version) {
 
 } // namespace detail
 
-RequestLineParser::RequestLineParser(const HttpServerOptions &options) : options_(&options) {}
+RequestLineParser::RequestLineParser() noexcept { reset(); }
 
 void RequestLineParser::reset() {
     state_ = State::Start;
@@ -943,8 +943,6 @@ done:
 }
 
 HeaderLineParser::HeaderLineParser() noexcept { reset(); }
-
-HeaderLineParser::HeaderLineParser(const HttpServerOptions &) noexcept : HeaderLineParser() {}
 
 void HeaderLineParser::reset() noexcept {
     line_ = HeaderLineState{};
