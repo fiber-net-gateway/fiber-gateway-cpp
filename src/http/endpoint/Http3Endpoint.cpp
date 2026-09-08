@@ -1,5 +1,6 @@
 #include <fiber/http/endpoint/Http3Endpoint.h>
 
+#include <algorithm>
 #include <new>
 #include <utility>
 
@@ -24,6 +25,14 @@ public:
         // Either wait_stopped() already closed it on this loop, or the endpoint
         // never started and closing here is safe (see QuicUdpEndpoint::close).
         endpoint_.close();
+        if (owner_) {
+            owner_->workers_[index_] = nullptr;
+        }
+    }
+
+    void attach(Http3Endpoint &owner, std::size_t index) noexcept {
+        owner_ = &owner;
+        index_ = index;
     }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
@@ -127,6 +136,8 @@ private:
         self->live_.done();
     }
 
+    Http3Endpoint *owner_ = nullptr;
+    std::size_t index_ = 0;
     event::EventLoop &loop_;
     std::shared_ptr<const HttpHandler> handler_;
     const Http3ServerOptions *options_;
@@ -140,6 +151,7 @@ private:
 Http3Endpoint::Http3Endpoint(Options options) noexcept : options_(std::move(options)) { serve_gate_.add(); }
 
 Http3Endpoint::~Http3Endpoint() {
+    FIBER_ASSERT(std::all_of(workers_.begin(), workers_.end(), [](auto *worker) { return worker == nullptr; }));
     if (!gate_opened_) {
         serve_gate_.done();
     }
@@ -149,7 +161,13 @@ common::IoResult<void> Http3Endpoint::on_start(Server &server) noexcept {
     if (!options_.tls.enabled()) {
         return std::unexpected(common::IoErr::Invalid); // HTTP/3 is TLS-only
     }
-    FIBER_ASSERT(pending_workers_.empty() && workers_.empty());
+    FIBER_ASSERT(std::all_of(workers_.begin(), workers_.end(), [](auto *worker) { return worker == nullptr; }));
+    workers_.clear();
+    pending_workers_.clear();
+    if (gate_opened_) {
+        serve_gate_.add();
+        gate_opened_ = false;
+    }
 
     const HttpHandler &handler = options_.handler ? options_.handler : server.default_handler();
     handler_ = std::make_shared<const HttpHandler>(handler);
@@ -199,12 +217,16 @@ EndpointWorker *Http3Endpoint::create_worker(event::EventLoop &loop, std::size_t
     FIBER_ASSERT(&pending_workers_[index]->loop() == &loop);
     Http3EndpointWorker *worker = pending_workers_[index].release();
     workers_.push_back(worker);
+    worker->attach(*this, index);
     return worker;
 }
 
 async::Task<void> Http3Endpoint::on_serve() noexcept {
     // No accept loop: QUIC admission runs inside each shard's receive path.
     // Kick the shards off on their own loops and then wait for on_stop().
+    if (gate_opened_) {
+        co_return;
+    }
     for (Http3EndpointWorker *worker: workers_) {
         worker->post_start();
     }
@@ -217,6 +239,7 @@ void Http3Endpoint::on_stop() noexcept {
     if (gate_opened_) {
         return;
     }
+    pending_workers_.clear();
     gate_opened_ = true;
     serve_gate_.done();
 }

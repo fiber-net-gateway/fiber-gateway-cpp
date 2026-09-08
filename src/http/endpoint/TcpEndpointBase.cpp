@@ -1,5 +1,6 @@
 #include <fiber/http/endpoint/TcpEndpointBase.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <new>
 #include <sys/socket.h>
@@ -32,10 +33,27 @@ TcpEndpointBase::TcpEndpointBase(net::SocketAddress address, net::ListenOptions 
                                  HttpServerTlsOptions tls) noexcept :
     address_(std::move(address)), listen_(listen), tcp_(tcp), tls_(tls) {}
 
-TcpEndpointBase::~TcpEndpointBase() = default;
+void TcpEndpointWorkerBase::attach(TcpEndpointBase &endpoint, std::size_t index) noexcept {
+    endpoint_ = &endpoint;
+    index_ = index;
+}
+
+TcpEndpointWorkerBase::~TcpEndpointWorkerBase() {
+    if (endpoint_) {
+        endpoint_->workers_[index_] = nullptr;
+    }
+}
+
+TcpEndpointBase::~TcpEndpointBase() {
+    FIBER_ASSERT(std::all_of(workers_.begin(), workers_.end(), [](auto *worker) { return worker == nullptr; }));
+}
 
 common::IoResult<void> TcpEndpointBase::on_start(Server &server) noexcept {
-    FIBER_ASSERT(listener_ == nullptr);
+    FIBER_ASSERT(!listener_ || !listener_->valid());
+    FIBER_ASSERT(std::all_of(workers_.begin(), workers_.end(), [](auto *worker) { return worker == nullptr; }));
+    listener_.reset();
+    workers_.clear();
+    next_worker_ = 0;
     server_ = &server;
 
     auto listener = std::unique_ptr<net::TcpListener>(new (std::nothrow) net::TcpListener(server.owner_loop()));
@@ -71,11 +89,12 @@ EndpointWorker *TcpEndpointBase::create_worker(event::EventLoop &loop, std::size
         workers_.resize(index + 1, nullptr);
     }
     workers_[index] = worker;
+    worker->attach(*this, index);
     return worker;
 }
 
 async::Task<void> TcpEndpointBase::on_serve() noexcept {
-    if (!listener_ || workers_.empty()) {
+    if (server_->draining() || !listener_ || workers_.empty()) {
         co_return;
     }
     FIBER_ASSERT(listener_->loop().in_loop());

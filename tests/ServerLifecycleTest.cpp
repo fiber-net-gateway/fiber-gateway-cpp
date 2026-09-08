@@ -17,7 +17,13 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http1Endpoint.h>
+#include <fiber/http/endpoint/Http3Endpoint.h>
 #include <fiber/net/SocketAddress.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/quic/QuicUdpEndpoint.h>
+#include "QuicTestTlsCertificate.h"
 
 namespace {
 
@@ -57,6 +63,7 @@ public:
     struct Config {
         EndpointTrace *trace = nullptr;
         IoErr start_error = IoErr::None;
+        bool fail_worker = false;
         std::size_t live_per_worker = 0;
         std::chrono::milliseconds release_delay{0};
     };
@@ -93,6 +100,9 @@ public:
     }
 
     EndpointWorker *create_worker(fiber::event::EventLoop &loop, std::size_t index) noexcept override {
+        if (config_.fail_worker) {
+            return nullptr;
+        }
         auto *worker = new (std::nothrow) TestWorker(config_, loop, index);
         if (worker == nullptr) {
             return nullptr;
@@ -104,6 +114,8 @@ public:
         }
         return worker;
     }
+
+    void allow_workers() noexcept { config_.fail_worker = false; }
 
     const fiber::net::SocketAddress &local_addr() const noexcept override { return local_addr_; }
 
@@ -579,6 +591,53 @@ TEST(ServerLifecycleTest, ServeAndStopAndWaitAllComplete) {
     EXPECT_EQ(server.state(), Server::State::Stopped);
     EXPECT_EQ(trace.stop_calls.load(), 1);
 
+    group.stop();
+    group.join();
+}
+
+
+TEST(ServerLifecycleTest, WorkerAllocationFailureRollsBackTcpAndUdpAndAllowsRetry) {
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+    EndpointTrace trace;
+    run_on_loop(group, [&]() -> fiber::async::Task<void> {
+        fiber::net::TlsCredentialOptions credentials{};
+        credentials.certificate_chain = fiber::net::TlsPemSource::from_content(fiber::test::kQuicTestCertificatePem);
+        credentials.private_key = fiber::net::TlsPemSource::from_content(fiber::test::kQuicTestPrivateKeyPem);
+        auto credential = fiber::net::TlsCredential::create(credentials);
+        EXPECT_TRUE(credential);
+        if (!credential) {
+            co_return;
+        }
+        Server server(group.at(0), {}, &group);
+        fiber::http::Http1Endpoint::Options tcp{};
+        tcp.address = {fiber::net::IpAddress::loopback_v4(), 0};
+        auto *endpoint = server.add_endpoint<fiber::http::Http1Endpoint>(tcp);
+        fiber::http::Http3Endpoint::Options h3{};
+        h3.address = tcp.address;
+        h3.inherit_port_from = endpoint;
+        h3.tls.configure_callback = &fiber::net::configure_tls_with_credential;
+        h3.tls.configure_ctx = credential->get();
+        EXPECT_NE(server.add_endpoint<fiber::http::Http3Endpoint>(h3), nullptr);
+        auto *failing = server.add_endpoint<TestEndpoint>(TestEndpoint::Config{.trace = &trace, .fail_worker = true});
+        EXPECT_NE(failing, nullptr);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            auto result = server.start();
+            EXPECT_FALSE(result);
+            EXPECT_EQ(result.error(), IoErr::NoMem);
+            EXPECT_EQ(server.state(), Server::State::Created);
+            EXPECT_EQ(endpoint->listener_fd(), -1);
+            // Every UDP shard must have released the inherited port too.
+            fiber::quic::QuicUdpEndpoint probe;
+            fiber::quic::QuicUdpEndpoint::EndpointOptions opts{};
+            opts.bind_addr = endpoint->local_addr();
+            EXPECT_TRUE(probe.init(group.at(0), opts));
+            probe.close();
+        }
+        failing->allow_workers();
+        EXPECT_TRUE(server.start());
+        co_await server.stop_and_wait();
+    });
     group.stop();
     group.join();
 }

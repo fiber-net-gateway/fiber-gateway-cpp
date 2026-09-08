@@ -82,11 +82,9 @@ Http1HeaderParseBufferOptions header_parse_buffer_options(const Http1ServerOptio
 } // namespace
 
 Http1Connection::Http1Connection(std::unique_ptr<HttpTransport> transport, const HttpHandler &handler,
-                                 Http1ServerOptions options, std::shared_ptr<const HttpHandler> handler_owner,
-                                 const std::atomic<bool> *shutdown_flag) :
-    shutdown_flag_(shutdown_flag), loop_(event::EventLoop::current()), transport_(std::move(transport)),
-    handler_(&handler), handler_owner_(std::move(handler_owner)), options_(std::move(options)),
-    inbound_bufs_(loop_.io_buf_node_pool()) {}
+                                 Http1ServerOptions options, std::shared_ptr<const HttpHandler> handler_owner) :
+    loop_(event::EventLoop::current()), transport_(std::move(transport)), handler_(&handler),
+    handler_owner_(std::move(handler_owner)), options_(std::move(options)), inbound_bufs_(loop_.io_buf_node_pool()) {}
 
 Http1Connection::~Http1Connection() {
     if (transport_ && transport_->valid() && loop_.in_loop()) {
@@ -432,9 +430,7 @@ void Http1Connection::request_drain() noexcept {
     // Otherwise run() sees stopping() once the current exchange completes.
 }
 
-bool Http1Connection::stopping() const noexcept {
-    return draining_ || (shutdown_flag_ != nullptr && shutdown_flag_->load(std::memory_order_acquire));
-}
+bool Http1Connection::stopping() const noexcept { return draining_; }
 
 void Http1Connection::finish() noexcept {
     if (finished_) {

@@ -16,7 +16,9 @@
 #include <fiber/http/ClientHttp2Exchange.h>
 #include <fiber/http/Http2ClientConnection.h>
 #include <fiber/http/HttpClientTlsOptions.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http2Endpoint.h>
+#include <fiber/http/endpoint/Http3Endpoint.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
@@ -80,7 +82,7 @@ RB6SahiCZEhAtLq/9Q/O1bL5
 struct BindObservation {
     fiber::common::IoErr error = fiber::common::IoErr::None;
     int fd = -1;
-    fiber::http::HttpServer::State state = fiber::http::HttpServer::State::Created;
+    fiber::http::Server::State state = fiber::http::Server::State::Created;
 };
 
 fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
@@ -103,16 +105,19 @@ TEST(HttpServerLifecycleTest, FailedHttp3WithoutTlsBindRollsBackListener) {
     std::promise<BindObservation> observation_promise;
     auto observation_future = observation_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
-        fiber::http::HttpServerOptions options;
-        options.http3.enabled = true;
-        fiber::http::HttpServer server(group.at(0), {}, std::move(options));
+        fiber::http::Http2Endpoint::Options options;
+        fiber::http::Server server(group.at(0), {});
 
-        auto result = server.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
+        fiber::http::Http2Endpoint::Options endpoint_options{};
+        endpoint_options.address = {fiber::net::IpAddress::loopback_v4(), 0};
+        auto *endpoint = server.add_endpoint<fiber::http::Http2Endpoint>(endpoint_options);
+        EXPECT_NE(server.add_endpoint<fiber::http::Http3Endpoint>(fiber::http::Http3Endpoint::Options{}), nullptr);
+        auto result = server.start();
         BindObservation observation;
         observation.error = result ? fiber::common::IoErr::None : result.error();
-        observation.fd = server.fd();
+        observation.fd = endpoint->listener_fd();
         observation.state = server.state();
-        co_await server.shutdown_and_wait();
+        co_await server.stop_and_wait();
         observation_promise.set_value(observation);
         co_return;
     });
@@ -123,32 +128,35 @@ TEST(HttpServerLifecycleTest, FailedHttp3WithoutTlsBindRollsBackListener) {
 
     EXPECT_NE(observation.error, fiber::common::IoErr::None);
     EXPECT_EQ(observation.fd, -1);
-    EXPECT_EQ(observation.state, fiber::http::HttpServer::State::Created);
+    EXPECT_EQ(observation.state, fiber::http::Server::State::Created);
 }
 
 TEST(HttpServerLifecycleTest, RequestCloseCanBeIssuedOffOwnerLoop) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::http::HttpServer server(group.at(0), {});
+    fiber::http::Server server(group.at(0), {});
     std::promise<bool> bound_promise;
     auto bound_future = bound_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
-        auto result = server.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
+        fiber::http::Http2Endpoint::Options endpoint_options{};
+        endpoint_options.address = {fiber::net::IpAddress::loopback_v4(), 0};
+        auto *endpoint = server.add_endpoint<fiber::http::Http2Endpoint>(endpoint_options);
+        auto result = server.start();
         if (result) {
-            fiber::async::spawn(group.at(0), [&]() { return server.serve(); });
+            fiber::async::spawn(group.at(0), [&]() -> DetachedTask { co_await server.serve(); });
         }
         bound_promise.set_value(result.has_value());
         co_return;
     });
 
     EXPECT_TRUE(bound_future.get());
-    server.request_close();
+    server.stop();
 
-    std::promise<fiber::http::HttpServer::State> closed_promise;
+    std::promise<fiber::http::Server::State> closed_promise;
     auto closed_future = closed_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
-        co_await server.shutdown_and_wait();
+        co_await server.stop_and_wait();
         closed_promise.set_value(server.state());
         co_return;
     });
@@ -156,11 +164,11 @@ TEST(HttpServerLifecycleTest, RequestCloseCanBeIssuedOffOwnerLoop) {
     const bool closed = closed_future.wait_for(5s) == std::future_status::ready;
     EXPECT_TRUE(closed);
     if (closed) {
-        EXPECT_EQ(closed_future.get(), fiber::http::HttpServer::State::Closed);
+        EXPECT_EQ(closed_future.get(), fiber::http::Server::State::Stopped);
     }
     group.stop();
     group.join();
-    EXPECT_EQ(server.fd(), -1);
+    EXPECT_EQ(server.state(), fiber::http::Server::State::Stopped);
 }
 
 TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp1Connection) {
@@ -182,19 +190,22 @@ TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp1Connection) {
         }
         co_return;
     };
-    fiber::http::HttpServer server(group.at(0), std::move(handler));
+    fiber::http::Server server(group.at(0), std::move(handler));
 
     std::promise<std::uint16_t> port_promise;
     auto port_future = port_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
-        auto result = server.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
+        fiber::http::Http2Endpoint::Options endpoint_options{};
+        endpoint_options.address = {fiber::net::IpAddress::loopback_v4(), 0};
+        auto *endpoint = server.add_endpoint<fiber::http::Http2Endpoint>(endpoint_options);
+        auto result = server.start();
         if (!result) {
             port_promise.set_value(0);
             co_return;
         }
-        auto port = resolve_port(server.fd());
+        auto port = resolve_port(endpoint->listener_fd());
         port_promise.set_value(port ? *port : 0);
-        fiber::async::spawn(group.at(0), [&]() { return server.serve(); });
+        fiber::async::spawn(group.at(0), [&]() -> DetachedTask { co_await server.serve(); });
         co_return;
     });
 
@@ -214,7 +225,7 @@ TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp1Connection) {
     std::promise<void> closed_promise;
     auto closed_future = closed_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
-        co_await server.shutdown_and_wait();
+        co_await server.stop_and_wait();
         closed_promise.set_value();
         co_return;
     });
@@ -317,23 +328,26 @@ TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp2Connection) {
     credential_options.private_key = fiber::net::TlsPemSource::from_content(kSelfSignedKeyPem);
     auto credential = fiber::net::TlsCredential::create(credential_options);
     ASSERT_TRUE(credential);
-    fiber::http::HttpServerOptions server_options;
+    fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
 
-    fiber::http::HttpServer server(group.at(0), std::move(handler), std::move(server_options), &group);
+    fiber::http::Server server(group.at(0), std::move(handler), &group);
 
     std::promise<std::uint16_t> port_promise;
     auto port_future = port_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
-        auto result = server.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
+        auto endpoint_options = server_options;
+        endpoint_options.address = {fiber::net::IpAddress::loopback_v4(), 0};
+        auto *endpoint = server.add_endpoint<fiber::http::Http2Endpoint>(endpoint_options);
+        auto result = server.start();
         if (!result) {
             port_promise.set_value(0);
             co_return;
         }
-        auto port = resolve_port(server.fd());
+        auto port = resolve_port(endpoint->listener_fd());
         port_promise.set_value(port ? *port : 0);
-        fiber::async::spawn(group.at(0), [&]() { return server.serve(); });
+        fiber::async::spawn(group.at(0), [&]() -> DetachedTask { co_await server.serve(); });
         co_return;
     });
 
@@ -351,7 +365,7 @@ TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp2Connection) {
     std::promise<void> closed_promise;
     auto closed_future = closed_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
-        co_await server.shutdown_and_wait();
+        co_await server.stop_and_wait();
         closed_promise.set_value();
         co_return;
     });

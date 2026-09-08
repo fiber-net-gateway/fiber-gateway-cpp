@@ -21,13 +21,13 @@
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
-#include <fiber/http/HttpServerOptions.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/http/ServerRequestFactory.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/nacos/NamingService.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
+#include <fiber/net/TcpSocketOptions.h>
 #include "rpc/grpc/GrpcFraming.h"
 #include "rpc/grpc/ProtoCodec.h"
 
@@ -198,7 +198,7 @@ public:
             if (!accepted) {
                 break;
             }
-            auto transport = fiber::http::TcpTransport::create(*loop_, std::move(*accepted), http_options_.tcp);
+            auto transport = fiber::http::TcpTransport::create(*loop_, std::move(*accepted), tcp_options_);
             if (!transport) {
                 break;
             }
@@ -440,7 +440,7 @@ private:
     fiber::event::EventLoop *loop_ = nullptr;
     bool reconnect_ = false;
     std::size_t connections_to_serve_ = 1;
-    fiber::http::HttpServerOptions http_options_;
+    fiber::net::TcpSocketOptions tcp_options_{.no_delay = fiber::net::TcpOptionMode::Enabled};
     fiber::http::HttpHandler handler_;
     fiber::http::ServerRequestFactory factory_;
     fiber::net::TcpListener listener_;

@@ -1,7 +1,6 @@
 #ifndef FIBER_HTTP_HTTP1_CONNECTION_H
 #define FIBER_HTTP_HTTP1_CONNECTION_H
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -27,11 +26,9 @@ class HttpTransport;
 class Http1Connection : public common::NonCopyable, public common::NonMovable {
 public:
     // `handler` must outlive the connection; pass `handler_owner` when the
-    // caller wants the connection to keep it alive itself. shutdown_flag is an
-    // optional externally-owned cancellation flag with the same requirement.
+    // caller wants the connection to keep it alive itself.
     Http1Connection(std::unique_ptr<HttpTransport> transport, const HttpHandler &handler, Http1ServerOptions options,
-                    std::shared_ptr<const HttpHandler> handler_owner = nullptr,
-                    const std::atomic<bool> *shutdown_flag = nullptr);
+                    std::shared_ptr<const HttpHandler> handler_owner = nullptr);
     ~Http1Connection();
 
     fiber::async::Task<void> run();
@@ -62,7 +59,6 @@ private:
 
     friend class Http1ConnectionRegistry;
 
-    const std::atomic<bool> *shutdown_flag_ = nullptr;
     event::EventLoop &loop_;
     std::unique_ptr<HttpTransport> transport_;
     const HttpHandler *handler_;

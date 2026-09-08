@@ -18,12 +18,12 @@
 #include <fiber/http/HttpBodySpec.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
-#include <fiber/http/HttpServerOptions.h>
 #include <fiber/http/HttpTransport.h>
 #include <fiber/http/ServerRequestFactory.h>
 #include <fiber/nacos/NacosClientConfig.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TcpListener.h>
+#include <fiber/net/TcpSocketOptions.h>
 #include "../src/dto/JsonCodec.h"
 #include "rpc/grpc/GrpcFraming.h"
 #include "rpc/grpc/ProtoCodec.h"
@@ -174,7 +174,7 @@ public:
     DetachedTask serve(std::shared_ptr<std::promise<void>> finished) {
         auto accepted = co_await listener_.accept();
         if (accepted) {
-            auto transport = fiber::http::TcpTransport::create(*loop_, std::move(*accepted), http_options_.tcp);
+            auto transport = fiber::http::TcpTransport::create(*loop_, std::move(*accepted), tcp_options_);
             if (transport) {
                 fiber::http::Http2Connection::Options options;
                 options.role = fiber::http::Http2Connection::ConnectionRole::Server;
@@ -434,7 +434,7 @@ private:
     fiber::event::EventLoop *loop_ = nullptr;
     bool support_ability_negotiation_ = false;
     bool send_connect_reset_ = false;
-    fiber::http::HttpServerOptions http_options_;
+    fiber::net::TcpSocketOptions tcp_options_{.no_delay = fiber::net::TcpOptionMode::Enabled};
     fiber::http::HttpHandler handler_;
     fiber::http::ServerRequestFactory factory_;
     fiber::net::TcpListener listener_;

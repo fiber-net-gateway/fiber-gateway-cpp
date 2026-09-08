@@ -404,6 +404,8 @@ int DatagramFd::fd() const noexcept { return rwfd_.fd(); }
 
 const SocketAddress &DatagramFd::local_addr() const noexcept { return local_addr_; }
 
+int DatagramFd::release_fd() noexcept { return rwfd_.release_fd(); }
+
 void DatagramFd::close() { rwfd_.close(); }
 
 fiber::common::IoResult<void> DatagramFd::refresh_local_addr() noexcept {

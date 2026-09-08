@@ -21,10 +21,12 @@ common::IoResult<void> Http2Endpoint::on_start(Server &server) noexcept {
     const HttpHandler &handler = options_.handler ? options_.handler : server.default_handler();
     handler_ = std::make_shared<const HttpHandler>(handler);
     if (!handler_) {
+        TcpEndpointBase::on_stop();
         return std::unexpected(common::IoErr::NoMem);
     }
     request_factory_ = std::unique_ptr<ServerRequestFactory>(new (std::nothrow) ServerRequestFactory(handler_));
     if (!request_factory_) {
+        TcpEndpointBase::on_stop();
         return std::unexpected(common::IoErr::NoMem);
     }
     return {};

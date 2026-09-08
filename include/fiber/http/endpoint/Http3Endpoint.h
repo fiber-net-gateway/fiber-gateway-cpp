@@ -24,8 +24,7 @@ class Http3EndpointWorker;
 //
 // Shutdown is graceful: draining stops admitting new connections and GOAWAYs
 // the live ones, but keeps the UDP socket open so those connections can still
-// finish. The socket closes only once the last one is gone. (The old
-// Http3Server closed the socket immediately, cutting every session dead.)
+// finish. The socket closes only once the last one is gone.
 class Http3Endpoint final : public Endpoint {
 public:
     struct Options {
@@ -56,6 +55,7 @@ protected:
     [[nodiscard]] EndpointWorker *create_worker(event::EventLoop &loop, std::size_t index) noexcept override;
 
 private:
+    friend class Http3EndpointWorker;
     Options options_;
     // Stable storage: every shard's ServerAdmissionOptions borrows this for the
     // lifetime of the endpoint, built once from options_.tls at start.

@@ -21,7 +21,8 @@
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http1Server.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http1Endpoint.h>
 #include <fiber/net/SocketAddress.h>
 
 namespace {
@@ -198,8 +199,8 @@ fiber::common::IoResult<uint16_t> resolve_port(int fd) {
 
 DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandler handler,
                           fiber::event::EventLoopGroup *worker_group, std::promise<uint16_t> *port_promise,
-                          std::promise<fiber::http::Http1Server *> *server_promise,
-                          fiber::http::HttpServerOptions http_options = {}) {
+                          std::promise<fiber::http::Server *> *server_promise,
+                          fiber::http::Http1Endpoint::Options http_options = {}) {
     fiber::net::ListenOptions options{};
     constexpr std::uint16_t kFirstTestPort = 20000;
     constexpr std::uint16_t kPortSpan = 20000;
@@ -208,9 +209,13 @@ DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandle
     for (std::size_t i = 0; i < kPortSpan; ++i) {
         std::uint32_t next = next_test_port.fetch_add(1, std::memory_order_relaxed);
         std::uint16_t port = static_cast<std::uint16_t>(kFirstTestPort + ((next - kFirstTestPort) % kPortSpan));
-        auto *server = new fiber::http::Http1Server(*loop, handler, http_options, worker_group);
+        auto *server = new fiber::http::Server(*loop, handler, worker_group);
         fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), port);
-        auto bind_result = server->bind(addr, options);
+        fiber::http::Http1Endpoint::Options endpoint_options = http_options;
+        endpoint_options.address = addr;
+        endpoint_options.listen = options;
+        auto *endpoint = server->add_endpoint<fiber::http::Http1Endpoint>(std::move(endpoint_options));
+        auto bind_result = server->start();
         if (!bind_result) {
             delete server;
             continue;
@@ -218,7 +223,7 @@ DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandle
 
         port_promise->set_value(port);
         server_promise->set_value(server);
-        fiber::async::spawn(*loop, [server]() { return server->serve(); });
+        fiber::async::spawn(*loop, [server]() -> DetachedTask { co_await server->serve(); });
         co_return;
     }
 
@@ -227,16 +232,16 @@ DetachedTask start_server(fiber::event::EventLoop *loop, fiber::http::HttpHandle
     co_return;
 }
 
-DetachedTask stop_server(fiber::event::EventLoop *loop, fiber::http::Http1Server *server) {
+DetachedTask stop_server(fiber::event::EventLoop *loop, fiber::http::Server *server) {
     if (server) {
-        co_await server->shutdown_and_wait();
+        co_await server->stop_and_wait();
     }
     loop->stop();
     co_return;
 }
 
-DetachedTask shutdown_server_and_signal(fiber::http::Http1Server *server, std::promise<void> *done) {
-    co_await server->shutdown_and_wait();
+DetachedTask shutdown_server_and_signal(fiber::http::Server *server, std::promise<void> *done) {
+    co_await server->stop_and_wait();
     done->set_value();
     co_return;
 }
@@ -248,7 +253,7 @@ TEST(Http1ServerTest, BasicGet) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -270,11 +275,6 @@ TEST(Http1ServerTest, BasicGet) {
     auto *server = server_future.get();
     ASSERT_NE(server, nullptr);
     uint16_t port = port_future.get();
-    if (port == 0) {
-        auto retry_port = resolve_port(server->fd());
-        ASSERT_TRUE(retry_port.has_value());
-        port = *retry_port;
-    }
     ASSERT_NE(port, 0);
 
     int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -304,7 +304,7 @@ TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -334,11 +334,6 @@ TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
     auto *server = server_future.get();
     ASSERT_NE(server, nullptr);
     uint16_t port = port_future.get();
-    if (port == 0) {
-        auto retry_port = resolve_port(server->fd());
-        ASSERT_TRUE(retry_port.has_value());
-        port = *retry_port;
-    }
     ASSERT_NE(port, 0);
 
     int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -375,7 +370,7 @@ TEST(Http1ServerTest, CanSendContinueHeaderBeforeFinalResponse) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -394,11 +389,6 @@ TEST(Http1ServerTest, CanSendContinueHeaderBeforeFinalResponse) {
     auto *server = server_future.get();
     ASSERT_NE(server, nullptr);
     uint16_t port = port_future.get();
-    if (port == 0) {
-        auto retry_port = resolve_port(server->fd());
-        ASSERT_TRUE(retry_port.has_value());
-        port = *retry_port;
-    }
     ASSERT_NE(port, 0);
 
     int client = connect_client(port);
@@ -433,7 +423,7 @@ TEST(Http1ServerTest, CloseResponseSkipsConfiguredUnreadBodyDrain) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -442,8 +432,8 @@ TEST(Http1ServerTest, CloseResponseSkipsConfiguredUnreadBodyDrain) {
             (void) co_await send_final_header(exchange, 413, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
                                               fiber::http::ResponseConnectionMode::Close, true);
         };
-        fiber::http::HttpServerOptions options;
-        options.drain_unread_body = true;
+        fiber::http::Http1Endpoint::Options options;
+        options.http1.drain_unread_body = true;
         return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise, options);
     });
 
@@ -483,7 +473,7 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesChunkedForStreaming)
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -531,7 +521,7 @@ TEST(Http1ServerTest, WriteBodyWithoutExplicitHeaderAutoUsesContentLengthForLarg
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -581,7 +571,7 @@ TEST(Http1ServerTest, StreamResponseSwitchesToRawBidirectionalIo) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -654,7 +644,7 @@ TEST(Http1ServerTest, ChunkedPost) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -737,7 +727,7 @@ TEST(Http1ServerTest, WriteBodyAcceptsIoBufChain) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -814,7 +804,7 @@ TEST(Http1ServerTest, ChunkedPostTrailersAreAvailableAfterBody) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -888,7 +878,7 @@ TEST(Http1ServerTest, ChunkedPostWaitsForCompleteTrailersBeforeLastChunk) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -968,7 +958,7 @@ TEST(Http1ServerTest, InvalidChunkedPostReturnsBadRequest) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -1024,7 +1014,7 @@ TEST(Http1ServerTest, ChunkedResponseCanSendTrailers) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
 
@@ -1085,7 +1075,7 @@ TEST(Http1ServerTest, KeepAliveReuse) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     std::atomic<int> request_count{0};
@@ -1136,7 +1126,7 @@ TEST(Http1ServerTest, ChunkedKeepAlivePipelinedNextRequest) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     std::atomic<int> request_count{0};
@@ -1225,7 +1215,7 @@ TEST(Http1ServerTest, EventLoopGroupDispatch) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     std::atomic<bool> saw_worker_loop{false};
@@ -1243,20 +1233,24 @@ TEST(Http1ServerTest, EventLoopGroupDispatch) {
             co_await exchange.write_all(reinterpret_cast<const uint8_t *>("ok"), 2, true);
             co_return;
         };
-        auto *server = new fiber::http::Http1Server(group.at(0), handler, {}, &group);
+        fiber::http::Http1Endpoint::Options http_options{};
+        auto *server = new fiber::http::Server(group.at(0), handler, &group);
         fiber::net::ListenOptions options{};
         fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), 0);
-        auto bind_result = server->bind(addr, options);
+        http_options.address = addr;
+        http_options.listen = options;
+        auto *endpoint = server->add_endpoint<fiber::http::Http1Endpoint>(std::move(http_options));
+        auto bind_result = server->start();
         if (!bind_result) {
             port_promise.set_value(0);
             server_promise.set_value(nullptr);
             delete server;
             co_return;
         }
-        auto port = resolve_port(server->fd());
+        auto port = resolve_port(endpoint->listener_fd());
         port_promise.set_value(port ? *port : 0);
         server_promise.set_value(server);
-        fiber::async::spawn(group.at(0), [server]() { return server->serve(); });
+        fiber::async::spawn(group.at(0), [server]() -> DetachedTask { co_await server->serve(); });
         co_return;
     });
 
@@ -1293,7 +1287,7 @@ TEST(Http1ServerTest, ShutdownAndWait) {
     group.start();
 
     std::promise<uint16_t> port_promise;
-    std::promise<fiber::http::Http1Server *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     std::promise<void> entered_promise;
     std::promise<void> shutdown_promise;
     auto port_future = port_promise.get_future();

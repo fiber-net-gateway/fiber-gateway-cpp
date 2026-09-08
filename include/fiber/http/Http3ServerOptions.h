@@ -12,11 +12,7 @@
 
 namespace fiber::http {
 
-// Everything an HTTP/3 server endpoint reads: the QUIC transport and endpoint
-// knobs, plus the two request-level fields ServerHttp3Request uses. Split out
-// of the old catch-all HttpServerOptions (D5), whose Http3Options member this
-// replaces; body_timeout lived there as a shared field but HTTP/1 never read
-// it, so it belongs here.
+// HTTP/3 endpoint, QUIC transport and request policy.
 struct Http3ServerOptions {
     // One QuicUdpEndpoint is bound per worker loop (SO_REUSEPORT), so this is
     // a per-shard ceiling rather than a server-wide one.

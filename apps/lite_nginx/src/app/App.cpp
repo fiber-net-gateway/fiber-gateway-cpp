@@ -5,9 +5,14 @@
 #include <string>
 #include <string_view>
 
+#include <fiber/async/Signal.h>
+#include <fiber/async/Spawn.h>
+#include <fiber/async/WhenAny.h>
 #include <fiber/dns/DnsResolverConfig.h>
 #include <fiber/event/EventLoop.h>
+#include <fiber/event/SignalService.h>
 #include <fiber/log/Log.h>
+#include <pthread.h>
 #include "config/Config.h"
 #include "config/ConfigLoader.h"
 #include "logging/LoggingBuilder.h"
@@ -167,6 +172,18 @@ int LiteNginxApp::run(int argc, char **argv) {
         return 1;
     }
 
+    // Block before creating logging and worker threads so termination signals
+    // are delivered through the owner's signalfd, which can await the drain.
+    struct TerminationMask {
+        fiber::async::SignalSet signals;
+        sigset_t previous{};
+        TerminationMask() {
+            signals.add(SIGINT).add(SIGTERM);
+            (void) pthread_sigmask(SIG_BLOCK, &signals.native(), &previous);
+        }
+        ~TerminationMask() { (void) pthread_sigmask(SIG_SETMASK, &previous, nullptr); }
+    } termination;
+
     auto log_init_result = fiber::log::LoggerManager::global().initialize(std::move(*log_config_result));
     if (!log_init_result) {
         std::cerr << "failed to initialize logging: " << format_log_init_error(log_init_result.error()) << '\n';
@@ -201,6 +218,18 @@ int LiteNginxApp::run(int argc, char **argv) {
     }
 
     LOG(LOG_LIFECYCLE, INFO) << "reverse proxy runtime started";
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        fiber::event::SignalService signals(loop);
+        if (signals.attach(termination.signals)) {
+            (void) co_await fiber::async::when_any([] { return fiber::async::wait_signal(SIGINT); },
+                                                   [] { return fiber::async::wait_signal(SIGTERM); });
+            signals.detach();
+        } else {
+            LOG(LOG_LIFECYCLE, ERROR) << "failed to attach termination signals";
+        }
+        co_await launcher.stop_and_wait();
+        loop.stop();
+    });
     loop.run();
     launcher.close();
     LOG(LOG_LIFECYCLE, INFO) << "reverse proxy runtime stopped";

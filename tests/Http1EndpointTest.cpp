@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <dirent.h>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -437,6 +439,158 @@ TEST(Http1EndpointTest, ConnectionsAfterStopAreRefused) {
         EXPECT_TRUE(recv_all(client).empty());
         ::close(client);
     }
+
+    group.stop();
+    group.join();
+}
+
+
+TEST(Http1EndpointTest, DrainWaitsForRequestBodyAndHandlerLifetime) {
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+    std::promise<void> reading_body;
+    auto reading = reading_body.get_future();
+    auto lifetime = std::make_shared<int>(1);
+    std::weak_ptr<int> weak = lifetime;
+    Http1Endpoint::Options options{};
+    options.handler = [&, lifetime](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        reading_body.set_value();
+        auto body = co_await exchange.read_body(16);
+        EXPECT_TRUE(body);
+        if (body) {
+            co_await write_text(exchange, 200, "body received");
+        }
+    };
+    auto running = start_server(group, std::move(options), &group);
+    lifetime.reset();
+    ASSERT_TRUE(running.server);
+    int fd = connect_to(running.port);
+    ASSERT_GE(fd, 0);
+    set_recv_timeout(fd, 3s);
+    EXPECT_TRUE(send_all(fd, "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n"));
+    EXPECT_EQ(reading.wait_for(3s), std::future_status::ready);
+    running.server->stop();
+    EXPECT_EQ(running.serve_done.wait_for(200ms), std::future_status::timeout);
+    EXPECT_FALSE(weak.expired());
+    EXPECT_TRUE(send_all(fd, "body"));
+    auto response = recv_all(fd);
+    EXPECT_NE(response.find("body received"), std::string::npos);
+    EXPECT_NE(response.find("Connection: close"), std::string::npos);
+    ::close(fd);
+    running.serve_done.get();
+    EXPECT_TRUE(weak.expired());
+    group.stop();
+    group.join();
+}
+
+// Counts this process's open descriptors (minus the DIR's own fd).
+int count_open_fds() {
+    DIR *dir = ::opendir("/proc/self/fd");
+    if (dir == nullptr) {
+        return -1;
+    }
+    int count = 0;
+    while (::readdir(dir) != nullptr) {
+        ++count;
+    }
+    ::closedir(dir);
+    return count - 1;
+}
+
+// §13-G of the rewrite design: hammer accept with short-lived connections
+// while stop() lands off-loop, then prove the accounting held. A connection
+// that slipped past a destroyed worker would outlive serve() and show up as a
+// leaked descriptor; a drain that cut a response short would show up as a
+// truncated read.
+TEST(Http1EndpointTest, ConcurrentAcceptAndStopReleasesEveryConnection) {
+    fiber::event::EventLoopGroup group(3);
+    group.start();
+
+    constexpr std::string_view kBody = "complete";
+    Http1Endpoint::Options options{};
+    options.handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        co_await fiber::async::sleep(1ms);
+        co_await write_text(exchange, 200, "complete");
+    };
+
+    // Warmup round: one full request/response so lazily-created resources
+    // exist before the descriptor baseline is taken.
+    {
+        auto warmup = start_server(group, options, &group);
+        ASSERT_TRUE(warmup.server);
+        int fd = connect_to(warmup.port);
+        ASSERT_GE(fd, 0);
+        set_recv_timeout(fd, 5s);
+        ASSERT_TRUE(send_all(fd, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"));
+        std::string response = recv_all(fd);
+        ::close(fd);
+        ASSERT_TRUE(response.size() >= kBody.size() &&
+                    std::equal(kBody.begin(), kBody.end(), response.end() - kBody.size()));
+        warmup.stop_and_join();
+    }
+    const int fd_baseline = count_open_fds();
+    ASSERT_GE(fd_baseline, 0);
+    int total_served = 0;
+
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        auto running = start_server(group, options, &group);
+        ASSERT_TRUE(running.server);
+        std::atomic<bool> stopping{false};
+        std::atomic<int> attempts{0};
+        std::atomic<int> served{0};
+        std::atomic<int> dropped{0};
+        std::atomic<int> truncated{0};
+        std::vector<std::thread> clients;
+        for (int i = 0; i < 4; ++i) {
+            clients.emplace_back([&] {
+                while (!stopping.load()) {
+                    attempts.fetch_add(1, std::memory_order_relaxed);
+                    int fd = connect_to(running.port);
+                    if (fd < 0) {
+                        continue;
+                    }
+                    set_recv_timeout(fd, 2s);
+                    constexpr std::string_view request =
+                            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+                    (void) ::send(fd, request.data(), request.size(), MSG_NOSIGNAL);
+                    std::string response = recv_all(fd);
+                    ::close(fd);
+                    // Drain may drop a connection before its request is ever
+                    // read, but it must never cut one off mid-response.
+                    if (response.empty()) {
+                        dropped.fetch_add(1, std::memory_order_relaxed);
+                    } else if (response.size() >= kBody.size() &&
+                               std::equal(kBody.begin(), kBody.end(), response.end() - kBody.size())) {
+                        served.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        truncated.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            });
+        }
+        while (attempts.load() < 8) {
+            std::this_thread::yield();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2 + 3 * (iteration % 5)));
+        running.server->stop(); // off the owner loop, racing the accept path
+        stopping.store(true);
+        for (auto &client: clients) {
+            client.join();
+        }
+        EXPECT_EQ(running.serve_done.wait_for(10s), std::future_status::ready);
+        running.serve_done.get();
+        EXPECT_EQ(running.server->state(), Server::State::Stopped);
+        EXPECT_EQ(truncated.load(), 0);
+        EXPECT_GT(served.load() + dropped.load(), 0);
+        total_served += served.load();
+        // serve() returning means every connection ended; give the last
+        // descriptors a beat to leave /proc/self/fd and require no growth.
+        std::this_thread::sleep_for(20ms);
+        EXPECT_EQ(count_open_fds(), fd_baseline);
+    }
+    // Across the rounds the hammer genuinely exchanged traffic, so the
+    // no-truncation check above was not vacuous.
+    EXPECT_GT(total_served, 0);
 
     group.stop();
     group.join();

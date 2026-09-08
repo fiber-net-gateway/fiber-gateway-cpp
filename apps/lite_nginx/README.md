@@ -49,7 +49,7 @@ Validate a custom config file:
 - Build a runnable reverse-proxy app on top of the existing fiber HTTP stack.
 - Use nginx-style directive/block syntax for configuration files.
 - Keep the first version small, explicit, and easy to validate.
-- Reuse existing `HttpServer`, HTTP/1 client, and connection pool modules.
+- Reuse `Server` with HTTP endpoints, HTTP/1 clients, and connection pool modules.
 
 ## Non-Goals For V1
 
@@ -543,8 +543,10 @@ Default behavior in V1:
 
 - The runtime config should be immutable after load.
 - Config parsing and semantic validation must be separate from request handling.
-- Listener configuration should be centralized at the `http` level so the app
-  can reuse a small number of `HttpServer` instances.
+- Listener configuration is centralized at the `http` level. One `Server` owns
+  all TCP and HTTP/3 endpoints, with a handler and options for each listener.
+- SIGINT and SIGTERM stop admission, await all in-flight requests, then release
+  the runtime and worker loops. Shutdown has no forced timeout.
 - Each worker event loop should own its local upstream client state.
 - Upstream connection reuse should use the existing HTTP/1 keepalive pool model.
 - Request handling should avoid allocation-heavy whole-body buffering on hot

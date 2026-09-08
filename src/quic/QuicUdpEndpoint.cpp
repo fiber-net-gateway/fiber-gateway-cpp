@@ -6,6 +6,7 @@
 #include <cstring>
 #include <expected>
 #include <new>
+#include <unistd.h>
 
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
@@ -611,7 +612,15 @@ void QuicUdpEndpoint::close() noexcept {
     clear_socket_callbacks();
     send_scheduler_.close();
     if (socket_ && socket_->valid()) {
-        socket_->close();
+        if (loop_->in_loop()) {
+            socket_->close();
+        } else {
+            // Startup rollback: no readiness callback or connection has ever
+            // used this fd. RWFd::close() is loop-affine; release the untouched
+            // descriptor before closing it on the constructing thread.
+            FIBER_ASSERT(connections_.empty());
+            (void) ::close(socket_->release_fd());
+        }
     }
 
     while (QuicConnection::EndpointIndex *index = connections_.front()) {

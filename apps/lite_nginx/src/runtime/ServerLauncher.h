@@ -8,7 +8,7 @@
 #include <fiber/dns/DnsResolverConfig.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
 #include <fiber/net/SocketAddress.h>
 
 #include "RuntimeConfig.h"
@@ -37,6 +37,8 @@ public:
 
     std::expected<void, RuntimeError> start(const RuntimeConfig &runtime,
                                             const fiber::dns::SystemResolverConfig &resolver_config);
+    // Await before stopping the accept loop; close() releases the drained runtime.
+    [[nodiscard]] fiber::async::Task<void> stop_and_wait() noexcept;
     void close();
 
     [[nodiscard]] const std::vector<BoundListener> &bound_listeners() const noexcept { return bound_listeners_; }
@@ -49,7 +51,7 @@ private:
     std::unique_ptr<DnsService> dns_{};
     std::unique_ptr<HttpScriptServicesImpl> script_services_{};
     std::unique_ptr<fiber::event::EventLoopGroup> worker_group_;
-    std::vector<std::unique_ptr<fiber::http::HttpServer>> servers_;
+    std::unique_ptr<fiber::http::Server> server_;
     std::vector<std::unique_ptr<ListenerTlsCredentials>> tls_credentials_;
     std::vector<BoundListener> bound_listeners_;
     bool started_ = false;

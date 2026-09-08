@@ -14,7 +14,8 @@
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp3Exchange.h>
 #include <fiber/http/Http3Client.h>
-#include <fiber/http/Http3Server.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http3Endpoint.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
@@ -477,16 +478,18 @@ TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
     credential_options.private_key = fiber::net::TlsPemSource::from_file(key.path());
     auto credential = fiber::net::TlsCredential::create(credential_options);
     ASSERT_TRUE(credential);
-    fiber::http::HttpServerOptions server_options{};
+    fiber::http::Http3Endpoint::Options server_options{};
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
-    server_options.http3.enabled = true;
+
     fiber::http::HttpHandler handler = [server_promise](fiber::http::HttpExchange &exchange) {
         return echo_handler(exchange, server_promise);
     };
-    fiber::http::Http3Server server(group.at(0), std::move(handler), std::move(server_options));
-    ASSERT_TRUE(server.bind({fiber::net::IpAddress::loopback_v4(), 0}));
-    server.serve();
+    fiber::http::Server server(group.at(0), std::move(handler));
+    server_options.address = {fiber::net::IpAddress::loopback_v4(), 0};
+    auto *server_endpoint = server.add_endpoint<fiber::http::Http3Endpoint>(std::move(server_options));
+    ASSERT_TRUE(server.start());
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask { co_await server.serve(); });
 
     fiber::quic::QuicUdpEndpoint client_endpoint;
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
@@ -495,7 +498,7 @@ TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
 
     std::promise<ClientObservation> client_promise;
     auto client_future = client_promise.get_future();
-    const fiber::net::SocketAddress server_addr = server.local_addr();
+    const fiber::net::SocketAddress server_addr = server_endpoint->local_addr();
     const std::string cert_path = cert.path();
     fiber::async::spawn(group.at(0),
                         [&]() { return run_client(&client_endpoint, &server_addr, &cert_path, &client_promise); });
@@ -526,7 +529,7 @@ TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        co_await server.shutdown_and_wait();
+        co_await server.stop_and_wait();
         close_promise.set_value();
         co_return;
     });
@@ -551,18 +554,20 @@ TEST(Http3ClientTest, PartialWriteContinuesDataFrameWithoutRepeatingHeader) {
     credential_options.private_key = fiber::net::TlsPemSource::from_file(key.path());
     auto credential = fiber::net::TlsCredential::create(credential_options);
     ASSERT_TRUE(credential);
-    fiber::http::HttpServerOptions server_options{};
+    fiber::http::Http3Endpoint::Options server_options{};
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
-    server_options.http3.enabled = true;
+
     server_options.http3.recv_flow.stream_buffer_limit = 128;
     server_options.http3.recv_flow.stream_low_water = 64;
     fiber::http::HttpHandler handler = [server_promise](fiber::http::HttpExchange &exchange) {
         return echo_handler(exchange, server_promise);
     };
-    fiber::http::Http3Server server(group.at(0), std::move(handler), std::move(server_options));
-    ASSERT_TRUE(server.bind({fiber::net::IpAddress::loopback_v4(), 0}));
-    server.serve();
+    fiber::http::Server server(group.at(0), std::move(handler));
+    server_options.address = {fiber::net::IpAddress::loopback_v4(), 0};
+    auto *server_endpoint = server.add_endpoint<fiber::http::Http3Endpoint>(std::move(server_options));
+    ASSERT_TRUE(server.start());
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask { co_await server.serve(); });
 
     fiber::quic::QuicUdpEndpoint endpoint;
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
@@ -570,7 +575,7 @@ TEST(Http3ClientTest, PartialWriteContinuesDataFrameWithoutRepeatingHeader) {
     ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
     std::promise<PartialClientObservation> client_promise;
     auto client_future = client_promise.get_future();
-    const fiber::net::SocketAddress server_addr = server.local_addr();
+    const fiber::net::SocketAddress server_addr = server_endpoint->local_addr();
     const std::string cert_path = cert.path();
     fiber::async::spawn(group.at(0),
                         [&]() { return run_partial_client(&endpoint, &server_addr, &cert_path, &client_promise); });
@@ -597,7 +602,7 @@ TEST(Http3ClientTest, PartialWriteContinuesDataFrameWithoutRepeatingHeader) {
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        co_await server.shutdown_and_wait();
+        co_await server.stop_and_wait();
         close_promise.set_value();
         co_return;
     });

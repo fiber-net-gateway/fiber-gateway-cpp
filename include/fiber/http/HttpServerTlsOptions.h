@@ -5,7 +5,7 @@
 
 namespace fiber::http {
 
-// TLS policy shared by HttpServer/Http1Server/Http3Server. ALPN is not
+// TLS policy shared by the HTTP endpoints. ALPN is not
 // configurable here: each server advertises the fixed protocol set it
 // implements (see TlsAlpn.h's make_*_server_tls_param helpers).
 struct HttpServerTlsOptions {

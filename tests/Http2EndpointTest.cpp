@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <dirent.h>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -11,6 +12,7 @@
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
@@ -644,6 +646,181 @@ TEST(Http2EndpointTest, ConnectionsSpreadOverWorkerLoops) {
     workers.join();
     client_group.stop();
     client_group.join();
+}
+
+
+TEST(Http2EndpointTest, DrainWaitsForPendingTlsHandshakeBeforeReleasingWorkers) {
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+    auto credential = make_credential();
+    ASSERT_TRUE(credential);
+    auto running = start_server(group, Http2Endpoint::Options{.tls = tls_options(*credential)}, &group);
+    ASSERT_TRUE(running.server);
+    int fd = connect_to(running.port);
+    ASSERT_GE(fd, 0);
+    // Give accept and the worker handoff time to reach the incomplete TLS read.
+    std::this_thread::sleep_for(50ms);
+    running.server->stop();
+    EXPECT_EQ(running.serve_done.wait_for(100ms), std::future_status::timeout);
+    ::close(fd);
+    EXPECT_EQ(running.serve_done.wait_for(3s), std::future_status::ready);
+    running.serve_done.get();
+    EXPECT_EQ(running.server->state(), Server::State::Stopped);
+    group.stop();
+    group.join();
+}
+
+// Counts this process's open descriptors (minus the DIR's own fd).
+int count_open_fds() {
+    DIR *dir = ::opendir("/proc/self/fd");
+    if (dir == nullptr) {
+        return -1;
+    }
+    int count = 0;
+    while (::readdir(dir) != nullptr) {
+        ++count;
+    }
+    ::closedir(dir);
+    return count - 1;
+}
+
+// Volume variant of the handshake drain race (§13-G of the rewrite design):
+// fresh TLS sessions are established continuously while stop() lands
+// off-loop, so handshakes permanently straddle the drain. Some complete into
+// an already-draining worker and must be dropped at dispatch, some fail
+// mid-read, some serve a full request. The invariants: a response that
+// started always finishes, serve() still returns, and no descriptor
+// outlives the drain.
+TEST(Http2EndpointTest, ConcurrentTlsHandshakesAndStopReleaseEveryConnection) {
+    fiber::event::EventLoopGroup group(2);
+    fiber::event::EventLoopGroup client_group(2);
+    group.start();
+    client_group.start();
+
+    auto credential = make_credential();
+    ASSERT_NE(credential, nullptr);
+
+    constexpr std::string_view kBody = "h2-stress";
+    Http2Endpoint::Options options{};
+    options.tls = tls_options(*credential);
+    options.handler = [](fiber::http::HttpExchange &exchange) { return write_text(exchange, 200, "h2-stress"); };
+
+    // Warmup round: one full session so lazily-created global state (BoringSSL
+    // et al.) exists before the descriptor baseline is taken.
+    {
+        auto warmup = start_server(group, options, &group);
+        ASSERT_TRUE(warmup.server);
+        ClientResult result = http2_round_trip(client_group, warmup.port);
+        ASSERT_EQ(result.err, fiber::common::IoErr::None);
+        ASSERT_EQ(result.status_code, 200);
+        ASSERT_EQ(result.body, kBody);
+        warmup.stop_and_join();
+    }
+    const int fd_baseline = count_open_fds();
+    ASSERT_GE(fd_baseline, 0);
+    int total_served = 0;
+
+    for (int iteration = 0; iteration < 6; ++iteration) {
+        auto running = start_server(group, options, &group);
+        ASSERT_TRUE(running.server);
+        const std::uint16_t port = running.port;
+
+        std::atomic<bool> stopping{false};
+        std::atomic<int> served{0};
+        std::atomic<int> dropped{0};
+        std::atomic<int> bad{0};
+        std::atomic<int> remaining{6};
+        std::promise<void> hammer_done;
+        auto hammer_future = hammer_done.get_future();
+
+        for (int i = 0; i < 6; ++i) {
+            fiber::event::EventLoop &loop = client_group.at(static_cast<std::size_t>(i) % client_group.size());
+            fiber::async::spawn(loop, [&]() -> DetachedTask {
+                while (!stopping.load(std::memory_order_relaxed)) {
+                    fiber::http::HttpClientTlsOptions tls;
+                    tls.server_name = "localhost";
+                    auto connection = std::make_shared<fiber::http::Http2ClientConnection>(loop);
+                    auto connected = co_await connection->connect(
+                            fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 3s, tls);
+                    if (!connected) {
+                        break; // listener is gone: the server is stopping
+                    }
+                    auto state = std::make_shared<Http2RunState>();
+                    fiber::async::spawn(loop,
+                                        [connection, state] { return run_connection(connection.get(), state.get()); });
+
+                    fiber::mem::BufPool pool;
+                    {
+                        fiber::http::ClientHttp2Exchange exchange(*connection, pool);
+                        auto sent = co_await exchange.send_request_header(
+                                {
+                                        .method = fiber::http::HttpMethod::Get,
+                                        .scheme = "https",
+                                        .authority = "localhost",
+                                        .path = "/stress",
+                                },
+                                true);
+                        if (!sent) {
+                            // GOAWAY beat the stream before it was accepted.
+                            dropped.fetch_add(1, std::memory_order_relaxed);
+                        } else {
+                            auto header = co_await exchange.read_header();
+                            if (!header) {
+                                // Refused or reset before any response bytes.
+                                dropped.fetch_add(1, std::memory_order_relaxed);
+                            } else {
+                                auto body = co_await exchange.read_body(64);
+                                if (body) {
+                                    std::string text = chain_to_string(std::move(*body));
+                                    if ((*header)->status_code == 200 && std::string_view{text} == kBody) {
+                                        served.fetch_add(1, std::memory_order_relaxed);
+                                    } else {
+                                        bad.fetch_add(1, std::memory_order_relaxed);
+                                    }
+                                } else {
+                                    // Headers arrived, the body did not: the
+                                    // response was cut short.
+                                    bad.fetch_add(1, std::memory_order_relaxed);
+                                }
+                            }
+                        }
+                    }
+
+                    connection->shutdown();
+                    // Bounded close wait: a wedged session must fail the
+                    // serve() deadline below instead of hanging the hammer.
+                    for (int spin = 0; spin < 3000 && !state->done.load(std::memory_order_acquire); ++spin) {
+                        co_await fiber::async::sleep(1ms);
+                    }
+                }
+                if (remaining.fetch_sub(1) == 1) {
+                    hammer_done.set_value();
+                }
+                co_return;
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10 + 8 * iteration));
+        running.server->stop(); // off the owner loop, racing handshakes
+        stopping.store(true);
+        ASSERT_EQ(hammer_future.wait_for(15s), std::future_status::ready);
+        ASSERT_EQ(running.serve_done.wait_for(10s), std::future_status::ready);
+        running.serve_done.get();
+        EXPECT_EQ(running.server->state(), Server::State::Stopped);
+        EXPECT_EQ(bad.load(), 0);
+        EXPECT_GT(served.load() + dropped.load(), 0);
+        total_served += served.load();
+        std::this_thread::sleep_for(20ms);
+        EXPECT_EQ(count_open_fds(), fd_baseline);
+    }
+    // Across the rounds the hammer genuinely exchanged traffic, so the
+    // no-truncation check above was not vacuous.
+    EXPECT_GT(total_served, 0);
+
+    client_group.stop();
+    client_group.join();
+    group.stop();
+    group.join();
 }
 
 } // namespace

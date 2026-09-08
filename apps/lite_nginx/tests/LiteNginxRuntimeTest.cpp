@@ -36,9 +36,10 @@
 #include <fiber/http/ClientHttp3Exchange.h>
 #include <fiber/http/Http2ClientConnection.h>
 #include <fiber/http/Http3Client.h>
-#include <fiber/http/Http3Server.h>
 #include <fiber/http/HttpResponseWriter.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http2Endpoint.h>
+#include <fiber/http/endpoint/Http3Endpoint.h>
 #include <fiber/log/LoggerManager.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
@@ -224,12 +225,12 @@ struct ShutdownOp {
     fiber::event::EventLoop *loop = nullptr;
 
     static void on_run(ShutdownOp *self) noexcept {
-        if (self->launcher) {
-            self->launcher->close();
-        }
-        if (self->loop) {
+        fiber::async::spawn(*self->loop, [self]() -> fiber::async::DetachedTask {
+            if (self->launcher) {
+                co_await self->launcher->stop_and_wait();
+            }
             self->loop->stop();
-        }
+        });
     }
 };
 
@@ -1035,7 +1036,7 @@ public:
         std::promise<std::uint16_t> ready;
         auto ready_future = ready.get_future();
         fiber::async::spawn(group_.at(0), [this, &ready]() -> fiber::async::DetachedTask {
-            fiber::http::HttpServerOptions options;
+            fiber::http::Http2Endpoint::Options options;
             options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
             options.tls.configure_ctx = tls_credential_.get();
 
@@ -1053,10 +1054,10 @@ public:
                 }
             };
 
-            server_ = new fiber::http::HttpServer(group_.at(0), std::move(handler), std::move(options));
-            fiber::net::ListenOptions listen_options;
-            auto bind_result =
-                    server_->bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), listen_options);
+            server_ = new fiber::http::Server(group_.at(0), std::move(handler));
+            options.address = {fiber::net::IpAddress::loopback_v4(), 0};
+            auto *endpoint = server_->add_endpoint<fiber::http::Http2Endpoint>(std::move(options));
+            auto bind_result = server_->start();
             if (!bind_result) {
                 delete server_;
                 server_ = nullptr;
@@ -1064,17 +1065,8 @@ public:
                 co_return;
             }
 
-            sockaddr_in bound{};
-            socklen_t len = sizeof(bound);
-            if (::getsockname(server_->fd(), reinterpret_cast<sockaddr *>(&bound), &len) != 0) {
-                server_->close();
-                delete server_;
-                server_ = nullptr;
-                ready.set_value(0);
-                co_return;
-            }
-            ready.set_value(ntohs(bound.sin_port));
-            fiber::async::spawn(group_.at(0), [this]() { return server_->serve(); });
+            ready.set_value(endpoint->local_addr().port());
+            fiber::async::spawn(group_.at(0), [this]() -> fiber::async::DetachedTask { co_await server_->serve(); });
         });
         port_ = ready_future.get();
     }
@@ -1088,7 +1080,7 @@ public:
         auto stopped_future = stopped.get_future();
         fiber::async::spawn(group_.at(0), [this, &stopped]() -> fiber::async::DetachedTask {
             if (server_) {
-                co_await server_->shutdown_and_wait();
+                co_await server_->stop_and_wait();
             }
             group_.at(0).stop();
             stopped.set_value();
@@ -1106,7 +1098,7 @@ private:
     TestPemFile key_;
     std::unique_ptr<fiber::net::TlsCredential> tls_credential_;
     fiber::event::EventLoopGroup group_{1};
-    fiber::http::HttpServer *server_ = nullptr;
+    fiber::http::Server *server_ = nullptr;
     std::uint16_t port_ = 0;
 };
 
@@ -3486,10 +3478,10 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
     tls_material.private_key = fiber::net::TlsPemSource::from_file(key.path());
     auto tls_credential = fiber::net::TlsCredential::create(tls_material);
     ASSERT_TRUE(tls_credential);
-    fiber::http::HttpServerOptions server_options;
+    fiber::http::Http3Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = tls_credential->get();
-    server_options.http3.enabled = true;
+
     fiber::http::HttpHandler handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         static const std::vector<std::string> kTypes{"text/plain"};
         auto base = fiber::http::make_http_response_writer(exchange);
@@ -3511,9 +3503,11 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
                                                2s);
         }
     };
-    fiber::http::Http3Server server(group.at(0), std::move(handler), std::move(server_options));
-    ASSERT_TRUE(server.bind({fiber::net::IpAddress::loopback_v4(), 0}));
-    server.serve();
+    fiber::http::Server server(group.at(0), std::move(handler));
+    server_options.address = {fiber::net::IpAddress::loopback_v4(), 0};
+    auto *server_endpoint = server.add_endpoint<fiber::http::Http3Endpoint>(std::move(server_options));
+    ASSERT_TRUE(server.start());
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask { co_await server.serve(); });
 
     fiber::quic::QuicUdpEndpoint client_endpoint;
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options;
@@ -3522,7 +3516,7 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
 
     std::promise<Http3GzipOutcome> client_promise;
     auto client_future = client_promise.get_future();
-    const fiber::net::SocketAddress server_addr = server.local_addr();
+    const fiber::net::SocketAddress server_addr = server_endpoint->local_addr();
     const std::string cert_path = cert.path();
     fiber::async::spawn(group.at(0), [&]() {
         return run_http3_gzip_client(&client_endpoint, &server_addr, &cert_path, &client_promise);
@@ -3537,7 +3531,7 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        co_await server.shutdown_and_wait();
+        co_await server.stop_and_wait();
         close_promise.set_value();
         co_return;
     });

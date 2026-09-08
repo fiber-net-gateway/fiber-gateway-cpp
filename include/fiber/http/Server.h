@@ -117,7 +117,7 @@ public:
     // server has already been started. The returned pointer stays valid until
     // the server reaches Stopped.
     template<class E, class... Args>
-    [[nodiscard]] E *add_endpoint(Args &&...args) {
+    [[nodiscard]] E *add_endpoint(Args &&...args) noexcept {
         static_assert(std::is_base_of_v<Endpoint, E>, "endpoint must derive from fiber::http::Endpoint");
         if (state_.load(std::memory_order_acquire) != State::Created) {
             return nullptr;
