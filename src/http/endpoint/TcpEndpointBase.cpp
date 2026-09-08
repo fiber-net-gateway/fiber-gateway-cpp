@@ -29,8 +29,8 @@ common::IoResult<net::SocketAddress> resolve_local_addr(int fd) noexcept {
 } // namespace
 
 TcpEndpointBase::TcpEndpointBase(net::SocketAddress address, net::ListenOptions listen, net::TcpSocketOptions tcp,
-                                 HttpServerTlsOptions tls, std::chrono::milliseconds drain_timeout) noexcept :
-    address_(std::move(address)), listen_(listen), tcp_(tcp), tls_(tls), drain_timeout_(drain_timeout) {}
+                                 HttpServerTlsOptions tls) noexcept :
+    address_(std::move(address)), listen_(listen), tcp_(tcp), tls_(tls) {}
 
 TcpEndpointBase::~TcpEndpointBase() = default;
 

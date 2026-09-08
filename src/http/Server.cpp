@@ -1,6 +1,5 @@
 #include <fiber/http/Server.h>
 
-#include <chrono>
 #include <utility>
 
 #include <fiber/async/Spawn.h>
@@ -9,8 +8,9 @@
 namespace fiber::http {
 
 // Per-worker orchestration: holds one EndpointWorker slot per endpoint and
-// drives them through drain -> (deadline) -> abort -> wait -> destroy, all on
-// this worker's own event loop.
+// drives them through drain -> wait -> destroy, all on this worker's own event
+// loop. There is no shutdown deadline: each protocol decides when its
+// connections are finished (see EndpointWorker::drain).
 class Server::Worker : public common::NonCopyable, public common::NonMovable {
 public:
     Worker(Server &server, event::EventLoop &loop, std::size_t index) noexcept :
@@ -23,18 +23,8 @@ public:
     [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
     [[nodiscard]] std::size_t index() const noexcept { return index_; }
 
-    // Startup only, in endpoint order. Returns false on allocation failure.
-    bool install(EndpointWorker *worker, std::chrono::milliseconds drain_timeout) noexcept {
-        auto *slot = new (std::nothrow) Slot();
-        if (slot == nullptr) {
-            return false;
-        }
-        slot->owner = this;
-        slot->worker.reset(worker);
-        slot->drain_timeout = drain_timeout;
-        slots_.push_back(std::unique_ptr<Slot>(slot));
-        return true;
-    }
+    // Startup only, in endpoint order. Takes ownership of `worker`.
+    void install(EndpointWorker *worker) noexcept { slots_.push_back(std::unique_ptr<EndpointWorker>(worker)); }
 
     // Only legal before the worker has been asked to stop: a failed start()
     // tears the slots down on the startup thread, where nothing has run on the
@@ -57,43 +47,17 @@ public:
     }
 
 private:
-    // One endpoint's slot on this worker. The deadline timer lives here rather
-    // than on the Worker so that each endpoint gets its own drain budget;
-    // TimerEntry is not movable, hence the indirection.
-    struct Slot {
-        Worker *owner = nullptr;
-        std::unique_ptr<EndpointWorker> worker{};
-        std::chrono::milliseconds drain_timeout{};
-        event::EventLoop::TimerEntry deadline{};
-    };
-
     static void on_stop(Worker *self) noexcept {
         FIBER_ASSERT(self->loop_.in_loop());
         for (const auto &slot: self->slots_) {
-            slot->worker->drain();
-            if (slot->drain_timeout <= std::chrono::milliseconds::zero()) {
-                slot->worker->abort();
-                continue;
-            }
-            if (slot->drain_timeout == std::chrono::milliseconds::max()) {
-                continue;
-            }
-            self->loop_.post_at<Slot, &Slot::deadline, &Worker::on_deadline>(self->loop_.now() + slot->drain_timeout,
-                                                                             *slot);
+            slot->drain();
         }
         async::spawn(self->loop_, [self]() -> async::DetachedTask { return run_wait_stop(self); });
     }
 
-    // The graceful budget is spent: force the endpoint's remaining connections
-    // down. wait_stopped() then completes on its own.
-    static void on_deadline(Slot *slot) noexcept { slot->worker->abort(); }
-
     static async::DetachedTask run_wait_stop(Worker *self) noexcept {
         for (const auto &slot: self->slots_) {
-            co_await slot->worker->wait_stopped();
-            if (slot->deadline.is_in_heap()) {
-                self->loop_.cancel<Slot, &Slot::deadline>(*slot);
-            }
+            co_await slot->wait_stopped();
         }
         // Loop-affine resources are released here, on their own loop.
         self->slots_.clear();
@@ -104,7 +68,7 @@ private:
     Server *server_;
     event::EventLoop &loop_;
     std::size_t index_;
-    std::vector<std::unique_ptr<Slot>> slots_{};
+    std::vector<std::unique_ptr<EndpointWorker>> slots_{};
     event::EventLoop::NotifyEntry stop_entry_{};
     std::atomic<bool> stop_posted_{false};
 };
@@ -173,11 +137,11 @@ common::IoResult<void> Server::start() noexcept {
 
         for (const auto &endpoint: endpoints_) {
             EndpointWorker *slot = endpoint->create_worker(worker->loop(), index);
-            if (slot == nullptr || !worker->install(slot, endpoint->drain_timeout())) {
-                delete slot;
+            if (slot == nullptr) {
                 rollback_start(started);
                 return std::unexpected(common::IoErr::NoMem);
             }
+            worker->install(slot);
         }
     }
     return {};

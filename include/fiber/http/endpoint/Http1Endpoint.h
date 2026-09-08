@@ -1,7 +1,6 @@
 #ifndef FIBER_HTTP_ENDPOINT_HTTP1_ENDPOINT_H
 #define FIBER_HTTP_ENDPOINT_HTTP1_ENDPOINT_H
 
-#include <chrono>
 #include <cstddef>
 #include <memory>
 
@@ -24,21 +23,14 @@ public:
     void unlink(Http1Connection &connection) noexcept { connections_.erase(connection); }
 
     // Idle connections close immediately; busy ones finish the request they
-    // are serving and answer with Connection: close.
+    // are serving, answer with Connection: close, and then close. Nothing here
+    // cuts a request short: a session ends when HTTP/1 says it is done, bounded
+    // by the connection's own header/keep-alive/write timeouts.
     void drain() noexcept override {
         TcpEndpointWorkerBase::drain();
         for (Http1Connection *connection = connections_.front(); connection != nullptr;
              connection = connections_.next_of(*connection)) {
             connection->request_drain();
-        }
-    }
-
-    // Drain budget spent: close the transports out from under whatever is
-    // still running.
-    void abort() noexcept override {
-        for (Http1Connection *connection = connections_.front(); connection != nullptr;
-             connection = connections_.next_of(*connection)) {
-            connection->shutdown();
         }
     }
 
@@ -66,7 +58,6 @@ public:
         Http1ServerOptions http1{};
         // Empty falls back to the Server's default handler.
         HttpHandler handler{};
-        std::chrono::milliseconds drain_timeout{30'000};
     };
 
     explicit Http1Endpoint(Options options) noexcept;
