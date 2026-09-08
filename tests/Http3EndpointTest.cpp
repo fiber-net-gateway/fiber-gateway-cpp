@@ -138,12 +138,12 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
     {
         fiber::mem::BufPool pool;
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
-        auto sent = co_await exchange.send_header(
+        auto sent = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
-                        .path = "/h3",
                         .scheme = "https",
                         .authority = "localhost",
+                        .path = "/h3",
                 },
                 true, 3s);
         if (!sent) {

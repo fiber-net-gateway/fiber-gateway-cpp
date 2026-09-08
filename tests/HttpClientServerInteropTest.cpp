@@ -307,9 +307,9 @@ DetachedTask run_http1_client_no_body(fiber::event::EventLoop *loop, std::uint16
     headers.set("host", "localhost");
 
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
-    fiber::http::ClientRequestHead head;
+    fiber::http::Http1RequestHead head;
     head.method = fiber::http::HttpMethod::Get;
-    head.path = kTarget;
+    head.target = kTarget;
     head.headers = &headers;
 
     auto send_result = co_await exchange.send_header(head, true);
@@ -358,9 +358,9 @@ DetachedTask run_http1_client_no_body_target(fiber::event::EventLoop *loop, std:
     headers.set("host", "localhost");
 
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
-    fiber::http::ClientRequestHead head;
+    fiber::http::Http1RequestHead head;
     head.method = fiber::http::HttpMethod::Get;
-    head.path = target;
+    head.target = target;
     head.headers = &headers;
 
     auto send_result = co_await exchange.send_header(head, true);
@@ -411,9 +411,9 @@ DetachedTask run_http1_client_with_body(fiber::event::EventLoop *loop, std::uint
 
     constexpr std::string_view kBody = "http1-client-body";
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
-    fiber::http::ClientRequestHead head;
+    fiber::http::Http1RequestHead head;
     head.method = fiber::http::HttpMethod::Post;
-    head.path = "/interop/http1/with-body";
+    head.target = "/interop/http1/with-body";
     head.headers = &headers;
     head.body = fiber::http::HttpBodySpec::ContentLength(kBody.size());
 
@@ -471,12 +471,12 @@ DetachedTask run_http2_client_no_body(fiber::event::EventLoop *loop, std::uint16
 
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection, pool);
-    auto send_result = co_await exchange.send_header(
+    auto send_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
-                    .path = "/interop/http2/no-body",
                     .scheme = "https",
                     .authority = "localhost",
+                    .path = "/interop/http2/no-body",
             },
             true);
     if (!send_result) {
@@ -539,12 +539,12 @@ DetachedTask run_http2_client_with_body(fiber::event::EventLoop *loop, std::uint
     constexpr std::string_view kBody = "http2-client-body";
     fiber::mem::BufPool pool;
     fiber::http::ClientHttp2Exchange exchange(connection, pool);
-    auto send_result = co_await exchange.send_header(
+    auto send_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Post,
-                    .path = "/interop/http2/with-body",
                     .scheme = "https",
                     .authority = "localhost",
+                    .path = "/interop/http2/with-body",
             },
             false);
     if (!send_result) {

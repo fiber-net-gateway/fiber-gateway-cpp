@@ -207,12 +207,12 @@ DetachedTask run_http2_client(fiber::event::EventLoop *loop, std::uint16_t port,
     fiber::mem::BufPool pool;
     {
         fiber::http::ClientHttp2Exchange exchange(connection, pool);
-        auto sent = co_await exchange.send_header(
+        auto sent = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
-                        .path = "/first",
                         .scheme = "https",
                         .authority = "localhost",
+                        .path = "/first",
                 },
                 true);
         if (!sent) {
@@ -442,12 +442,12 @@ TEST(Http2EndpointTest, PlaintextWithoutHttp1ServesPriorKnowledgeH2c) {
         fiber::mem::BufPool pool;
         {
             fiber::http::ClientHttp2Exchange exchange(connection, pool);
-            auto sent = co_await exchange.send_header(
+            auto sent = co_await exchange.send_request_header(
                     {
                             .method = fiber::http::HttpMethod::Get,
-                            .path = "/h2c",
                             .scheme = "http",
                             .authority = "localhost",
+                            .path = "/h2c",
                     },
                     true);
             if (!sent) {

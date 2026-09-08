@@ -1155,9 +1155,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
             fiber::http::HttpHeaders headers(pool);
             headers.add_view("host", "example.com");
             fiber::http::ClientHttp1Exchange exchange(borrowed.connection(), pool);
-            fiber::http::ClientRequestHead head;
+            fiber::http::Http1RequestHead head;
             head.method = fiber::http::HttpMethod::Get;
-            head.path = "/drop";
+            head.target = "/drop";
             head.headers = &headers;
 
             auto send_result = co_await exchange.send_header(head, true);
@@ -1241,9 +1241,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbortBlockedReadAndWriteBeforeReturnin
             headers.add_view("host", "example.com");
             std::vector<std::uint8_t> body(32U * 1024U * 1024U, static_cast<std::uint8_t>('x'));
             fiber::http::ClientHttp1Exchange exchange(borrowed.connection(), pool);
-            fiber::http::ClientRequestHead head;
+            fiber::http::Http1RequestHead head;
             head.method = fiber::http::HttpMethod::Post;
-            head.path = "/blocked";
+            head.target = "/blocked";
             head.headers = &headers;
             head.body = fiber::http::HttpBodySpec::ContentLength(body.size());
 
@@ -1346,9 +1346,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, AbandonedReadTaskInvalidatesExchangeBe
                 fiber::http::HttpHeaders headers(pool);
                 headers.add_view("host", "example.com");
                 fiber::http::ClientHttp1Exchange exchange(borrowed.connection(), pool);
-                fiber::http::ClientRequestHead head;
+                fiber::http::Http1RequestHead head;
                 head.method = fiber::http::HttpMethod::Get;
-                head.path = "/abandoned-read";
+                head.target = "/abandoned-read";
                 head.headers = &headers;
 
                 auto send_result = co_await exchange.send_header(head, true);
