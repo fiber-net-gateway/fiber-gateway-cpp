@@ -628,25 +628,31 @@ void drain() noexcept override {
 
 ### 7.5 Http3Endpoint
 
-由 `Http3Server` 改造而来，`Shard` 直接变成 `EndpointWorker`：
+由 `Http3Server` 改造而来，`Shard` 直接变成 `EndpointWorker`（一个 worker loop 一个 `QuicUdpEndpoint`，多 worker 时开 `SO_REUSEPORT`）：
 
 ```cpp
 class Http3EndpointWorker final : public EndpointWorker {
-    quic::QuicUdpEndpoint endpoint_;                 // per-worker，SO_REUSEPORT
-    common::IntrusiveList<Http3ServerConnection, ...> connections_;  // 新增（现在只有计数）
+    quic::QuicUdpEndpoint endpoint_;          // per-worker shard
+    Http3ConnectionRegistry connections_;      // 新增：原来只有计数，没法遍历发 GOAWAY
     async::WaitGroup live_{};
     bool admitting_ = true;
 };
 ```
 
-- `on_start`：为每个 worker 建一个 shard（`endpoint_.init(worker_loop, ...)`）；`worker_count > 1` 时开 `reuse_port`；端口 0 时第一个 shard 绑定后把实际端口回填给其余 shard（沿用 `Http3Server::bind()` 现逻辑）。
-- `on_serve`：给每个 shard 的 loop `post` 一次 `endpoint_.start()`；然后 `co_await` 一个直到 `on_stop()` 才完成的 Signal（H3 没有 accept 循环）。
-- `drain()`：`admitting_ = false`（`create_connection` 回调看到后返回空 lease，QUIC 层拒绝新连接），并遍历连接表逐个 `h3_.graceful_shutdown()` 发 GOAWAY。**保持 UDP socket 打开**，否则现有连接收不到包。
-- `wait_stopped()`：`co_await live_.join()`，然后 `endpoint_.close()` 关掉 UDP socket。QUIC 连接自己的 idle timeout 保证 `live_` 一定会归零。
+- `on_start`：为每个 worker 建一个 shard 并 `init()`（主线程，此时 loop 还没碰过这个 socket）；端口 0 时第一个 shard 绑定后把实际端口回填给其余 shard。
+- `create_worker(loop, index)`：把 `on_start` 建好的 shard 交给 Server；`on_serve` 只负责把 `endpoint_.start()` post 到各自 loop，然后挂在 gate 上等 `on_stop()`（H3 没有 accept 循环）。
+- `drain()`：`admitting_ = false`（admission 回调返回空 lease，QUIC 层拒绝新连接），并遍历连接表逐个 `graceful_shutdown()`。**保持 UDP socket 打开**，否则在跑的会话收不到包。
+- `wait_stopped()`：`co_await live_.join()`，然后才 `endpoint_.close()`。
 
-这是相对现状的实质性行为修正：今天 `Http3Server::close()` 第一时间就 `endpoint.close()`，等于把所有 QUIC 连接就地掐断。
+**实现期的三个发现**
 
-**新增的连接表**：现在 `Http3Server` 只有一个 `WaitGroup connections`，没法遍历发 GOAWAY。给 `ServerConnection` 加一个侵入式钩子挂到所属 shard 上（写法同 `Http2ServerWorker`）。
+1. **`Http3Connection::graceful_shutdown()` 原来只对 client role 有效**——server role 直接走 `close(error)` 硬关。P4 补上了服务端路径 `run_server_graceful_shutdown()`：在控制流上发 GOAWAY（id = 最后一个已受理的 client bidi stream id + 4，即「从这个 id 起不再处理」，RFC 9114 §5.2），然后等 `server_request_group_` 归零再 `close()`。Draining 期间新来的 bidi stream 由既有逻辑回 `RequestRejected`。按 D3，这里不设超时。
+
+2. **「请求完成」的时点必须取到流被 retire，而不是读循环返回。** 第一版把计数放在 `run_read_loop` 的 scope guard 上，测试直接失败：读循环返回时响应只是交给了流，还没上网；紧接着的 `close_application()` 是 RFC 9000 的 Immediate Close，会把它丢掉。改成在 `~ServerHttp3Request` 里结算——流被 QUIC retire（数据确认完）才算数。
+
+3. **代价是「对端直接消失」时停机要等 QUIC idle timeout。** 客户端不发 CONNECTION_CLOSE 就跑路，服务端无从知道响应是否送达，只能等 `Http3ServerOptions::transport` 的 idle timeout。这与 D3 一致（协议自己决定），但要知道这条：H3 endpoint 的停机时间下界由 idle timeout 决定，不是 0。
+
+`Http3ServerConnection`（原 `Http3Server::ServerConnection`）抽到了 `src/http/Http3ServerConnection.h`，由新旧两条路径共用，P5 删 `Http3Server` 时不会留下重复代码。它通过 `Ops::on_closed` 回调告诉 owner「会话结束了」——`Http3Server` 用它减 WaitGroup，`Http3EndpointWorker` 用它从连接表摘除并减 `live_`。
 
 ### 7.6 同端口 TCP + UDP（Alt-Svc 场景）
 
@@ -740,7 +746,7 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 | P1 | `Server`/`Endpoint`/`EndpointWorker`/`Worker` 骨架 + 状态机；测试用的假 endpoint | `ServerLifecycleTest` 全绿 |
 | P2 | `TcpEndpointBase` + `Http1Endpoint`；`Http1Connection` drain 改造；拆出 `Http1ServerOptions` | `Http1EndpointTest`（真实 H1 流量 + drain）全绿；`Http1Server`/`HttpServer` 走桥接保持不变 |
 | P3 | `Http2Endpoint`（含 `allow_http1` 协商，D8）；H2 GOAWAY drain；拆出 `Http2ServerOptions` | `Http2EndpointTest`（真实 h2 客户端 + ALPN + GOAWAY）全绿；`Http2ConnectionTest`/`HttpClientServerInteropTest` 全绿 |
-| P4 | `Http3Endpoint`（吸收 `Http3Server`）+ H3 GOAWAY drain + 端口继承 | `Http3ClientTest`/`Http3ConnectionTest` 全绿 |
+| P4 | `Http3Endpoint`（吸收 `Http3Server`）+ **服务端 GOAWAY 优雅停机**（`Http3Connection` 新增）+ 端口继承；拆出 `Http3ServerOptions` | `Http3EndpointTest`（真实 QUIC 客户端 + drain + 同端口）全绿；`Http3ClientTest`/`Http3ConnectionTest` 全绿 |
 | P5 | `HttpServer` 门面切到 `Server`；删 `Http1Server`/`Http3Server`（迁移其 5 处调用点）；`HttpServerOptions` 余下部分拆分落地 | 全量 `ctest` 绿 |
 | P6 | lite_nginx 收敛为「1 个 `Server` + N 个 endpoint」，删 `ServerLauncher::close()` 的 promise 兜底 | `lite_nginx_tests` 全绿 + 一轮基准回归 |
 | P7 | 12 处 `HttpServer` 调用点改写为 `Server + Endpoint`；删 `HttpServer.h/.cpp`（D7） | 全量 `ctest` 绿；仓库内不再有 `HttpServer` 引用 |
@@ -764,7 +770,8 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 - H1：空闲 keep-alive 连接在 `stop()` 后 <10ms 内被关闭（不等 `keep_alive_timeout`）
 - H2：有流在跑时 `stop()` → 该流的响应完整送达，之后才 Stopped；空闲会话 `stop()` → 立刻关，不等客户端
 - H2 ALPN：`allow_http1=true` 时 h2 客户端走 h2、h1 客户端走 h1（同一 endpoint、同一 handler）；明文口按 `allow_http1` 分别走 HTTP/1 与 h2c prior-knowledge
-- H3：`stop()` 后新连接握手被拒；已有连接的 in-flight 请求完成
+- H3：`stop()` 后已有连接的 in-flight 请求完整送达（不被 Immediate Close 截断）；停机后新连接握手不上
+- H3 同端口：TCP endpoint 绑端口 0，H3 endpoint 用 `inherit_port_from` 跟随，两侧各自应答
 - 停机不截断：客户端只发请求头 → handler 阻塞在读 body → `stop()` → 200ms 后客户端才补发 body → 响应完整送达（`Connection: close`），`serve()` 随后返回
 - 慢 drain 不被打断：假 endpoint 延迟 150ms 才释放连接 → `stop_and_wait()` 等满 150ms 才返回
 - 同一 worker 上快/慢两个 endpoint → worker 等两者都结束才销毁 slot
@@ -781,7 +788,8 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 
 | 风险 | 缓解 |
 |------|------|
-| P4 的 `Http3Server` 吸收改动最大，QUIC 侧 drain 是新行为 | 先在 P4 内单独加 H3 drain 测试；drain 期间保持 endpoint 打开、只拒新连接，`wait_stopped()` 结束后才 `close()` |
+| P4 的 `Http3Server` 吸收改动最大，QUIC 侧 drain 是新行为 | 已在 P4 落地并单测覆盖：drain 期间保持 endpoint 打开、只拒新连接，`wait_stopped()` 结束后才 `close()` |
+| H3 对端消失时停机要等 QUIC idle timeout | 这是「不截断响应」的必然代价（§7.5）。需要更快停机的部署可以调小 `Http3ServerOptions::transport` 的 idle timeout |
 | 无停机预算：某条连接不结束就停不下来 | 责任落到协议层超时（H1 header/keep-alive/write、H2 read/write、H3 idle）。需要观测时可在 §12「后续可做」的 `stats()` 上暴露「仍在 drain 的连接数」 |
 | 握手中连接与 worker 停机的竞态 | §7.2 的 per-worker 握手 WaitGroup + dispatch 前二次检查 `draining_`；补一个「drain 与 accept 并发」的压力测试 |
 | `Endpoint` 析构晚于 `EndpointWorker` 的顺序依赖 | 在 `finish_shutdown` 里用注释固化，并在 `~Endpoint()` 断言自己的 worker 指针数组已清空 |

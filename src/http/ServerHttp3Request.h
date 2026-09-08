@@ -12,9 +12,9 @@
 #include <fiber/common/NonMovable.h>
 #include <fiber/http/Http3Codec.h>
 #include <fiber/http/Http3Protocol.h>
+#include <fiber/http/Http3ServerOptions.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpExchangeIo.h>
-#include <fiber/http/HttpServerOptions.h>
 #include <fiber/quic/QuicConnection.h>
 
 namespace fiber::event {
@@ -28,21 +28,23 @@ class Http3Connection;
 class ServerHttp3Request final : public HttpExchangeIo, public common::NonCopyable, public common::NonMovable {
 public:
     [[nodiscard]] static quic::QuicStream::Lease create(std::uint64_t stream_id, Http3Connection &conn,
-                                                        const HttpServerOptions &http_options,
+                                                        const Http3ServerOptions &http_options,
                                                         const HttpHandler &handler) noexcept;
     [[nodiscard]] static quic::QuicStream::Lease create(std::uint64_t stream_id, Http3Connection &conn,
-                                                        const HttpServerOptions &http_options,
+                                                        const Http3ServerOptions &http_options,
                                                         std::shared_ptr<const HttpHandler> handler) noexcept;
 
     [[nodiscard]] static ServerHttp3Request *from_stream(quic::QuicStream &stream) noexcept;
     [[nodiscard]] static const ServerHttp3Request *from_stream(const quic::QuicStream &stream) noexcept;
+
+    ~ServerHttp3Request();
 
     [[nodiscard]] quic::QuicStream &stream() noexcept { return stream_; }
     [[nodiscard]] const quic::QuicStream &stream() const noexcept { return stream_; }
     [[nodiscard]] HttpExchange &exchange() noexcept { return exchange_; }
     [[nodiscard]] const HttpExchange &exchange() const noexcept { return exchange_; }
 
-    void start_read_loop(event::EventLoop &loop) noexcept;
+    void start_read_loop(event::EventLoop &loop, Http3Connection &conn) noexcept;
 
     [[nodiscard]] bool response_channel_closed() const noexcept override { return stream_.send_aborted(); }
     common::IoErr set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
@@ -72,7 +74,7 @@ private:
     enum class BodyRecvState : std::uint8_t;
     class HeaderBlockParser;
 
-    ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options, const HttpHandler &handler,
+    ServerHttp3Request(Http3Connection &conn, const Http3ServerOptions &http_options, const HttpHandler &handler,
                        std::shared_ptr<const HttpHandler> handler_owner = {}) noexcept;
 
     static void destroy_owner(void *owner, quic::QuicStream &stream) noexcept;
@@ -94,6 +96,9 @@ private:
     async::Task<common::IoResult<void>> write_data_frame_header(std::size_t payload_len,
                                                                 std::chrono::milliseconds timeout) noexcept;
 
+    // Set when the read loop starts; the request's stream lease keeps the
+    // connection alive for as long as the loop runs.
+    Http3Connection *conn_ = nullptr;
     quic::QuicConnection::Lease quic_lease_{};
     quic::QuicStream stream_;
     mem::IoBufChain inbound_buf_;

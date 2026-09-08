@@ -52,8 +52,6 @@ private:
         bool close_completed = false;
     };
 
-    class ServerConnection;
-
     [[nodiscard]] static quic::QuicConnection::Lease
     create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept;

@@ -162,7 +162,7 @@ enum class ServerHttp3Request::BodyRecvState : std::uint8_t {
     Error,
 };
 
-ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOptions &http_options,
+ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const Http3ServerOptions &http_options,
                                        const HttpHandler &handler,
                                        std::shared_ptr<const HttpHandler> handler_owner) noexcept :
     quic_lease_(conn.quic().lease()), stream_(this, &ServerHttp3Request::destroy_owner),
@@ -177,7 +177,7 @@ ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const HttpServerOp
 }
 
 quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3Connection &conn,
-                                                   const HttpServerOptions &http_options,
+                                                   const Http3ServerOptions &http_options,
                                                    const HttpHandler &handler) noexcept {
     (void) stream_id;
     auto *request = new (std::nothrow) ServerHttp3Request(conn, http_options, handler);
@@ -188,7 +188,7 @@ quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http
 }
 
 quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3Connection &conn,
-                                                   const HttpServerOptions &http_options,
+                                                   const Http3ServerOptions &http_options,
                                                    std::shared_ptr<const HttpHandler> handler) noexcept {
     (void) stream_id;
     if (!handler) {
@@ -224,12 +224,24 @@ const ServerHttp3Request *ServerHttp3Request::from_stream(const quic::QuicStream
     return request;
 }
 
-void ServerHttp3Request::start_read_loop(event::EventLoop &loop) noexcept {
+void ServerHttp3Request::start_read_loop(event::EventLoop &loop, Http3Connection &conn) noexcept {
     if (read_loop_started_) {
         return;
     }
     read_loop_started_ = true;
+    conn_ = &conn;
     async::spawn(loop, [this, lease = stream_.lease()]() mutable { return run_read_loop(std::move(lease)); });
+}
+
+ServerHttp3Request::~ServerHttp3Request() {
+    // Balances the connection's accounting from start_read_loop(). Deliberately
+    // here rather than at the end of the read loop: the loop returns once the
+    // response has been handed to the stream, while the stream is retired only
+    // after QUIC has actually delivered it. A draining connection that closed
+    // at the earlier point would discard the response it just produced.
+    if (conn_ != nullptr) {
+        conn_->end_server_request();
+    }
 }
 
 void ServerHttp3Request::destroy_owner(void *owner, quic::QuicStream &) noexcept {

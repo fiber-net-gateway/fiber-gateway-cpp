@@ -65,7 +65,7 @@ struct CapturedHttp3Request {
 };
 
 struct ServerRequestContext {
-    fiber::http::HttpServerOptions options{};
+    fiber::http::Http3ServerOptions options{};
     fiber::http::HttpHandler handler;
 };
 

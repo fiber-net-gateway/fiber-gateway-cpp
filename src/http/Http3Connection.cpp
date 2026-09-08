@@ -35,6 +35,13 @@ Http3Connection::Http3Connection(quic::QuicConnection &quic, const Options &opti
     quic_(quic), options_(options) {}
 
 Http3Connection::~Http3Connection() {
+    // A server request keeps a QuicConnection lease, so in a running server it
+    // always ends before the connection it belongs to. A harness that tears the
+    // connection down out from under one still has to leave the group balanced.
+    while (live_server_requests_ != 0) {
+        --live_server_requests_;
+        server_request_group_.done();
+    }
     FIBER_ASSERT(peer_reader_group_.empty());
     FIBER_ASSERT(peer_readers_.empty());
     FIBER_ASSERT(client_request_group_.empty());
@@ -179,7 +186,9 @@ void Http3Connection::graceful_shutdown(Http3ErrorCode error) noexcept {
     }
     close_error_ = error;
     state_ = Http3ConnectionState::Draining;
-    if (role() != quic::QuicConnectionRole::Client || !local_control_stream_) {
+    // Without a control stream there is nowhere to put the GOAWAY, and the
+    // session has not started serving anything worth preserving.
+    if (!local_control_stream_) {
         close(error);
         return;
     }
@@ -187,7 +196,28 @@ void Http3Connection::graceful_shutdown(Http3ErrorCode error) noexcept {
     event::EventLoop *loop = quic_.loop();
     FIBER_ASSERT(loop != nullptr);
     control_task_group_.add();
-    async::spawn(*loop, [this, error]() -> async::DetachedTask { return run_client_graceful_shutdown(error); });
+    if (role() == quic::QuicConnectionRole::Client) {
+        async::spawn(*loop, [this, error]() -> async::DetachedTask { return run_client_graceful_shutdown(error); });
+        return;
+    }
+    async::spawn(*loop, [this, error]() -> async::DetachedTask { return run_server_graceful_shutdown(error); });
+}
+
+void Http3Connection::end_server_request() noexcept {
+    if (live_server_requests_ == 0) {
+        return; // already released by the destructor
+    }
+    --live_server_requests_;
+    server_request_group_.done();
+}
+
+std::uint64_t Http3Connection::goaway_request_id() const noexcept {
+    // Streams with this id or greater are rejected, so point one past the last
+    // request we took on. Client-initiated bidirectional ids step by four.
+    if (!any_peer_request_seen_) {
+        return 0;
+    }
+    return last_peer_request_stream_id_ + 4;
 }
 
 void Http3Connection::close(Http3ErrorCode error) noexcept {
@@ -227,7 +257,14 @@ void Http3Connection::handle_peer_stream_attached(quic::QuicStream &stream) noex
         }
         event::EventLoop *loop = quic_.loop();
         FIBER_ASSERT(loop != nullptr);
-        request->start_read_loop(*loop);
+        if (!any_peer_request_seen_ || stream.stream_id() > last_peer_request_stream_id_) {
+            last_peer_request_stream_id_ = stream.stream_id();
+            any_peer_request_seen_ = true;
+        }
+        // Balanced by end_server_request() when the request is destroyed.
+        server_request_group_.add();
+        ++live_server_requests_;
+        request->start_read_loop(*loop, *this);
         return;
     }
 
@@ -539,6 +576,34 @@ async::DetachedTask Http3Connection::run_client_graceful_shutdown(Http3ErrorCode
     local_goaway_sent_ = true;
 
     (void) co_await async::timeout_for([this]() { return client_request_group_.join(); }, options_.drain_timeout);
+    if (state_ == Http3ConnectionState::Draining) {
+        close(error);
+    }
+    control_task_group_.done();
+    co_return;
+}
+
+async::DetachedTask Http3Connection::run_server_graceful_shutdown(Http3ErrorCode error) noexcept {
+    auto frame = encode_http3_goaway_frame(goaway_request_id(), quic_.recv_extent_pool());
+    if (!frame) {
+        close(Http3ErrorCode::InternalError);
+        control_task_group_.done();
+        co_return;
+    }
+
+    while (!frame->empty()) {
+        auto written = co_await local_control_stream_->write(*frame);
+        if (!written || (*written == 0 && !frame->empty())) {
+            close(Http3ErrorCode::ClosedCriticalStream);
+            control_task_group_.done();
+            co_return;
+        }
+    }
+    local_goaway_sent_ = true;
+
+    // No deadline: the requests already accepted run to completion, and the
+    // QUIC idle timeout is what bounds a peer that stops talking.
+    co_await server_request_group_.join();
     if (state_ == Http3ConnectionState::Draining) {
         close(error);
     }

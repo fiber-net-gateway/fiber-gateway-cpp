@@ -85,7 +85,14 @@ public:
     common::IoResult<void> apply_peer_settings(const Http3Settings &settings) noexcept;
     common::IoResult<void> register_client_request(Http3ClientRequestEntry &entry) noexcept;
     void unregister_client_request(Http3ClientRequestEntry &entry) noexcept;
+    // Server role: GOAWAY, then let the requests already accepted run to
+    // completion before closing. Client role: GOAWAY, then wait out the
+    // requests this side opened.
     void graceful_shutdown(Http3ErrorCode error = Http3ErrorCode::NoError) noexcept;
+
+    // Called by ServerHttp3Request when its read loop ends, so a draining
+    // connection knows when the last accepted request is done.
+    void end_server_request() noexcept;
     void close(Http3ErrorCode error = Http3ErrorCode::NoError) noexcept;
     void mark_closed() noexcept;
     async::Task<void> wait_closed() noexcept;
@@ -118,6 +125,10 @@ private:
     void reject_client_requests(std::uint64_t goaway_id) noexcept;
     void detach_client_requests(Http3ErrorCode error) noexcept;
     async::DetachedTask run_client_graceful_shutdown(Http3ErrorCode error) noexcept;
+    async::DetachedTask run_server_graceful_shutdown(Http3ErrorCode error) noexcept;
+    // First client-initiated bidirectional stream id this side will not
+    // process, which is what a server's GOAWAY carries (RFC 9114 5.2).
+    [[nodiscard]] std::uint64_t goaway_request_id() const noexcept;
 
     quic::QuicConnection &quic_;
     Options options_{};
@@ -130,6 +141,9 @@ private:
     ClientRequestList client_requests_{};
     async::WaitGroup peer_reader_group_{};
     async::WaitGroup client_request_group_{};
+    // Peer-initiated requests we are serving; drives the server drain.
+    async::WaitGroup server_request_group_{};
+    std::size_t live_server_requests_ = 0;
     async::WaitGroup control_task_group_{};
     Http3ConnectionState state_ = Http3ConnectionState::Init;
     Http3ErrorCode close_error_ = Http3ErrorCode::NoError;
@@ -137,6 +151,8 @@ private:
     bool peer_control_seen_ = false;
     bool peer_qpack_encoder_seen_ = false;
     bool peer_qpack_decoder_seen_ = false;
+    std::uint64_t last_peer_request_stream_id_ = 0;
+    bool any_peer_request_seen_ = false;
     std::uint64_t peer_goaway_id_ = 0;
     bool peer_goaway_received_ = false;
     bool local_goaway_sent_ = false;
