@@ -538,9 +538,9 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
         headers.add_view("x-test", "1");
 
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Post;
-        head.path = "/submit";
+        head.target = "/submit";
         head.headers = &headers;
         head.body = fiber::http::HttpBodySpec::ContentLength(5);
 
@@ -616,9 +616,9 @@ DetachedTask run_chunked_client(fiber::event::EventLoop *loop, std::uint16_t por
         trailers.add_view("x-checksum", "123");
 
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Post;
-        head.path = "/upload";
+        head.target = "/upload";
         head.headers = &headers;
         head.body = fiber::http::HttpBodySpec::Chunked();
 
@@ -671,9 +671,9 @@ DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::u
         trailers.add_view("x-checksum", "123");
 
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Post;
-        head.path = "/upload";
+        head.target = "/upload";
         head.headers = &headers;
         head.body = fiber::http::HttpBodySpec::Chunked();
 
@@ -727,9 +727,9 @@ DetachedTask run_partial_chunked_client(fiber::event::EventLoop *loop, std::uint
         headers.add_view("host", "example.com");
 
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Post;
-        head.path = "/partial";
+        head.target = "/partial";
         head.headers = &headers;
         head.body = fiber::http::HttpBodySpec::Chunked();
 
@@ -810,9 +810,9 @@ DetachedTask run_empty_chunked_client(fiber::event::EventLoop *loop, std::uint16
         headers.add_view("x-test", "1");
 
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Post;
-        head.path = "/empty";
+        head.target = "/empty";
         head.headers = &headers;
         head.body = fiber::http::HttpBodySpec::Chunked();
 
@@ -850,9 +850,9 @@ DetachedTask run_auto_body_spec_client(fiber::event::EventLoop *loop, std::uint1
         headers.add_view("host", "example.com");
 
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Post;
-        head.path = "/auto";
+        head.target = "/auto";
         head.headers = &headers;
         head.body = fiber::http::HttpBodySpec::Auto();
 
@@ -883,9 +883,9 @@ DetachedTask run_read_header_client(fiber::event::EventLoop *loop, std::uint16_t
 
     {
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Get;
-        head.path = "/status";
+        head.target = "/status";
         head.headers = &headers;
 
         auto send_result = co_await exchange.send_header(head, true);
@@ -934,9 +934,9 @@ DetachedTask run_expect_continue_client(fiber::event::EventLoop *loop, std::uint
 
     {
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Post;
-        head.path = "/continue";
+        head.target = "/continue";
         head.headers = &headers;
         head.body = fiber::http::HttpBodySpec::ContentLength(5);
 
@@ -1006,9 +1006,9 @@ DetachedTask run_read_header_small_buffer_client(fiber::event::EventLoop *loop, 
 
     {
         fiber::http::ClientHttp1Exchange exchange(connection, pool, exchange_options);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Get;
-        head.path = "/grow";
+        head.target = "/grow";
         head.headers = &headers;
 
         auto send_result = co_await exchange.send_header(head, true);
@@ -1055,9 +1055,9 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
 
     {
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Get;
-        head.path = "/body";
+        head.target = "/body";
         head.headers = &headers;
 
         auto send_result = co_await exchange.send_header(head, true);
@@ -1119,9 +1119,9 @@ DetachedTask run_read_content_length_body_on_borrowed_connection_client(fiber::h
 
     {
         fiber::http::ClientHttp1Exchange exchange(*connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Get;
-        head.path = "/body";
+        head.target = "/body";
         head.headers = &headers;
 
         auto send_result = co_await exchange.send_header(head, true);
@@ -1186,9 +1186,9 @@ DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *
 
     {
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Get;
-        head.path = "/chunked";
+        head.target = "/chunked";
         head.headers = &headers;
 
         auto send_result = co_await exchange.send_header(head, true);
@@ -1247,9 +1247,9 @@ DetachedTask run_discard_chunked_body_with_trailer_client(fiber::event::EventLoo
 
     {
         fiber::http::ClientHttp1Exchange exchange(connection, pool);
-        fiber::http::ClientRequestHead head;
+        fiber::http::Http1RequestHead head;
         head.method = fiber::http::HttpMethod::Get;
-        head.path = "/discard";
+        head.target = "/discard";
         head.headers = &headers;
 
         auto send_result = co_await exchange.send_header(head, true);
@@ -1309,7 +1309,7 @@ DetachedTask run_raw_stream_client(fiber::event::EventLoop *loop, std::uint16_t 
         auto send_result = co_await exchange.send_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
-                        .path = "/chat",
+                        .target = "/chat",
                         .headers = &headers,
                 },
                 true);

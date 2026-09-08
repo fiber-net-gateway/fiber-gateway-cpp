@@ -217,8 +217,8 @@ TEST(Http2ConnectionPoolTest, ConcurrentRequestsShareSingleDialAndConnection) {
                 if (lease) {
                     mem::BufPool buffers;
                     http::Http2PooledExchange ex(std::move(*lease), buffers);
-                    auto sent = co_await ex->send_header(
-                            {.method = http::HttpMethod::Get, .path = "/", .scheme = "http", .authority = "localhost"},
+                    auto sent = co_await ex->send_request_header(
+                            {.method = http::HttpMethod::Get, .scheme = "http", .authority = "localhost", .path = "/"},
                             true, 1s);
                     EXPECT_TRUE(sent);
                     auto response = co_await ex->read_header(1s);
@@ -411,8 +411,8 @@ TEST(Http2ConnectionPoolTest, PeerGoawayDrainsInFlightRequestAndAllowsReplacemen
         mem::BufPool buffers;
         h.hold_responses = true;
         http::Http2PooledExchange ex(std::move(*lease), buffers);
-        auto sent = co_await ex->send_header(
-                {.method = http::HttpMethod::Get, .path = "/", .scheme = "http", .authority = "localhost"}, true, 1s);
+        auto sent = co_await ex->send_request_header(
+                {.method = http::HttpMethod::Get, .scheme = "http", .authority = "localhost", .path = "/"}, true, 1s);
         EXPECT_TRUE(sent);
         while (!h.requests)
             co_await async::sleep(1ms);
@@ -859,8 +859,8 @@ TEST(Http2ConnectionPoolTest, AbandonedPooledExchangeCancelsStreamBeforeReturnin
                 h.hold_responses = true;
                 {
                     http::Http2PooledExchange ex(std::move(*lease), buffers);
-                    auto sent = co_await ex->send_header(
-                            {.method = http::HttpMethod::Get, .path = "/", .scheme = "http", .authority = "localhost"},
+                    auto sent = co_await ex->send_request_header(
+                            {.method = http::HttpMethod::Get, .scheme = "http", .authority = "localhost", .path = "/"},
                             true, 1s);
                     EXPECT_TRUE(sent);
                     while (!h.requests)

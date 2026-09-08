@@ -1184,12 +1184,12 @@ fiber::async::DetachedTask run_http2_websocket_client(fiber::event::EventLoop *l
         fiber::http::HttpHeaders headers(pool);
         headers.set("Sec-WebSocket-Version", "13");
         headers.set("Sec-WebSocket-Protocol", "chat");
-        auto send_result = co_await exchange.send_header(
+        auto send_result = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Connect,
-                        .path = "/chat",
                         .scheme = "https",
                         .authority = "localhost",
+                        .path = "/chat",
                         .protocol = "websocket",
                         .headers = &headers,
                 },
@@ -1265,12 +1265,12 @@ fiber::async::DetachedTask run_http2_gzip_client(fiber::event::EventLoop *loop, 
     fiber::http::HttpHeaders headers(pool);
     headers.set("Accept-Encoding", "gzip");
     fiber::http::ClientHttp2Exchange exchange(*connection, pool);
-    auto send_result = co_await exchange.send_header(
+    auto send_result = co_await exchange.send_request_header(
             {
                     .method = fiber::http::HttpMethod::Get,
-                    .path = "/gzip",
                     .scheme = "https",
                     .authority = "localhost",
+                    .path = "/gzip",
                     .headers = &headers,
             },
             true, 2s);
@@ -1361,12 +1361,12 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
         fiber::http::HttpHeaders headers(pool);
         headers.set("Accept-Encoding", "gzip");
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
-        auto send_result = co_await exchange.send_header(
+        auto send_result = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
-                        .path = "/gzip",
                         .scheme = "https",
                         .authority = "localhost",
+                        .path = "/gzip",
                         .headers = &headers,
                 },
                 true, 2s);

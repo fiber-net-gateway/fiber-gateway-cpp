@@ -259,12 +259,12 @@ fiber::async::DetachedTask open_idle_http2_client(fiber::event::EventLoop *loop,
     {
         fiber::mem::BufPool pool;
         fiber::http::ClientHttp2Exchange exchange(*connection, pool);
-        auto send_result = co_await exchange.send_header(
+        auto send_result = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
-                        .path = "/idle",
                         .scheme = "https",
                         .authority = "localhost",
+                        .path = "/idle",
                 },
                 true);
         if (!send_result) {

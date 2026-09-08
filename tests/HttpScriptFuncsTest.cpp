@@ -178,9 +178,9 @@ DetachedTask run_http1_client(fiber::event::EventLoop *loop, std::uint16_t port,
     }
 
     fiber::http::ClientHttp1Exchange exchange(connection, pool);
-    fiber::http::ClientRequestHead head;
+    fiber::http::Http1RequestHead head;
     head.method = req.method;
-    head.path = req.target;
+    head.target = req.target;
     head.headers = &headers;
     bool end_stream = true;
     if (req.body) {
