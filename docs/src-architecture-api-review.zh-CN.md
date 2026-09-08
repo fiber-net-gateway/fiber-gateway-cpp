@@ -1,5 +1,7 @@
 # `src` 代码结构与 API 设计评审
 
+> 历史评审记录：HTTP 服务端生命周期与配置部分已由 [Server/Endpoint 设计](../feature/refactor_httpserver_design.md) 取代；旧门面及混合配置已删除，当前 API 见 [Server.h](../include/fiber/http/Server.h)。
+
 > 评审日期：2026-08-18
 >
 > 评审范围：`src/` 实现代码及其对应的 `include/fiber/` 公共头文件
