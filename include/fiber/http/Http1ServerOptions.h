@@ -6,12 +6,8 @@
 
 namespace fiber::http {
 
-// Connection-level knobs an HTTP/1 server session actually reads. Split out of
-// the old catch-all HttpServerOptions so an endpoint carries only the fields
-// its own protocol uses; the HTTP/2 and HTTP/3 halves live in their own
-// structs. Fields that look shared (write_timeout, header sizes) are
-// deliberately duplicated per protocol: they are independent knobs, and
-// sharing one field is what made the old struct impossible to reason about.
+// HTTP/1 session policy. Timeouts and header sizing are independent of the
+// corresponding HTTP/2 and HTTP/3 endpoint settings.
 struct Http1ServerOptions {
     // Idle wait between requests on a kept-alive connection.
     std::chrono::seconds keep_alive_timeout{70};

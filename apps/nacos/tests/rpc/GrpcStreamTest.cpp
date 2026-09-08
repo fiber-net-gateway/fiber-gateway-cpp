@@ -26,7 +26,8 @@
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpExchangeIo.h>
 #include <fiber/http/HttpHeaders.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http2Endpoint.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TlsCredential.h>
@@ -353,28 +354,31 @@ fiber::http::HttpHandler make_grpc_handler() {
 }
 
 DetachedTask start_http_server(fiber::event::EventLoop *loop, fiber::http::HttpHandler handler,
-                               fiber::http::HttpServerOptions options, std::promise<std::uint16_t> *port_promise,
-                               std::promise<fiber::http::HttpServer *> *server_promise) {
-    auto *server = new fiber::http::HttpServer(*loop, std::move(handler), std::move(options), nullptr);
+                               fiber::http::Http2Endpoint::Options options, std::promise<std::uint16_t> *port_promise,
+                               std::promise<fiber::http::Server *> *server_promise) {
+    auto *server = new fiber::http::Server(*loop, std::move(handler), nullptr);
     fiber::net::ListenOptions listen_options{};
     fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), 0);
-    auto bind_result = server->bind(addr, listen_options);
+    options.address = addr;
+    options.listen = listen_options;
+    auto *endpoint = server->add_endpoint<fiber::http::Http2Endpoint>(std::move(options));
+    auto bind_result = server->start();
     if (!bind_result) {
         delete server;
         port_promise->set_value(0);
         server_promise->set_value(nullptr);
         co_return;
     }
-    auto port_result = resolve_port(server->fd());
+    auto port_result = resolve_port(endpoint->listener_fd());
     port_promise->set_value(port_result ? *port_result : 0);
     server_promise->set_value(server);
-    fiber::async::spawn(*loop, [server]() { return server->serve(); });
+    fiber::async::spawn(*loop, [server]() -> DetachedTask { co_await server->serve(); });
     co_return;
 }
 
-DetachedTask close_server_on_loop(fiber::http::HttpServer *server, std::promise<void> *done_promise) {
+DetachedTask close_server_on_loop(fiber::http::Server *server, std::promise<void> *done_promise) {
     if (server) {
-        co_await server->shutdown_and_wait();
+        co_await server->stop_and_wait();
     }
     done_promise->set_value();
     co_return;
@@ -712,7 +716,7 @@ struct ServerCtx {
     TlsCert cert;
     std::unique_ptr<fiber::net::TlsCredential> tls_credential;
     std::uint16_t port = 0;
-    fiber::http::HttpServer *server = nullptr;
+    fiber::http::Server *server = nullptr;
 
     bool start(fiber::event::EventLoop &loop) {
         if (!cert.ok) {
@@ -726,11 +730,11 @@ struct ServerCtx {
             return false;
         }
         tls_credential = std::move(*created_credential);
-        fiber::http::HttpServerOptions server_options;
+        fiber::http::Http2Endpoint::Options server_options;
         server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
         server_options.tls.configure_ctx = tls_credential.get();
         std::promise<std::uint16_t> port_promise;
-        std::promise<fiber::http::HttpServer *> server_promise;
+        std::promise<fiber::http::Server *> server_promise;
         auto port_future = port_promise.get_future();
         auto server_future = server_promise.get_future();
         fiber::async::spawn(loop, [&]() {

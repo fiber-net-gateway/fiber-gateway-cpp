@@ -18,6 +18,8 @@ int UdpSocket::fd() const noexcept { return socket_.fd(); }
 
 const SocketAddress &UdpSocket::local_addr() const noexcept { return socket_.local_addr(); }
 
+int UdpSocket::release_fd() noexcept { return socket_.release_fd(); }
+
 void UdpSocket::close() { socket_.close(); }
 
 UdpSocket::RecvFromTask UdpSocket::recv_from(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {

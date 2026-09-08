@@ -23,7 +23,8 @@
 #include <fiber/http/ClientHttp2Exchange.h>
 #include <fiber/http/Http1ClientConnection.h>
 #include <fiber/http/Http2ClientConnection.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http2Endpoint.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
@@ -251,13 +252,16 @@ fiber::async::Task<void> handle_body_request(fiber::http::HttpExchange &exchange
 }
 
 DetachedTask start_http_server(fiber::event::EventLoop *loop, fiber::http::HttpHandler handler,
-                               fiber::http::HttpServerOptions options, fiber::event::EventLoopGroup *worker_group,
+                               fiber::http::Http2Endpoint::Options options, fiber::event::EventLoopGroup *worker_group,
                                std::promise<std::uint16_t> *port_promise,
-                               std::promise<fiber::http::HttpServer *> *server_promise) {
-    auto *server = new fiber::http::HttpServer(*loop, std::move(handler), std::move(options), worker_group);
+                               std::promise<fiber::http::Server *> *server_promise) {
+    auto *server = new fiber::http::Server(*loop, std::move(handler), worker_group);
     fiber::net::ListenOptions listen_options{};
     fiber::net::SocketAddress addr(fiber::net::IpAddress::loopback_v4(), 0);
-    auto bind_result = server->bind(addr, listen_options);
+    options.address = addr;
+    options.listen = listen_options;
+    auto *endpoint = server->add_endpoint<fiber::http::Http2Endpoint>(std::move(options));
+    auto bind_result = server->start();
     if (!bind_result) {
         delete server;
         port_promise->set_value(0);
@@ -265,16 +269,16 @@ DetachedTask start_http_server(fiber::event::EventLoop *loop, fiber::http::HttpH
         co_return;
     }
 
-    auto port_result = resolve_port(server->fd());
+    auto port_result = resolve_port(endpoint->listener_fd());
     port_promise->set_value(port_result ? *port_result : 0);
     server_promise->set_value(server);
-    fiber::async::spawn(*loop, [server]() { return server->serve(); });
+    fiber::async::spawn(*loop, [server]() -> DetachedTask { co_await server->serve(); });
     co_return;
 }
 
-DetachedTask close_server_on_loop(fiber::http::HttpServer *server, std::promise<void> *done_promise) {
+DetachedTask close_server_on_loop(fiber::http::Server *server, std::promise<void> *done_promise) {
     if (server) {
-        co_await server->shutdown_and_wait();
+        co_await server->stop_and_wait();
     }
     done_promise->set_value();
     co_return;
@@ -594,7 +598,7 @@ TEST(HttpClientServerInteropTest, Http1ClientAndServerRoundTripWithoutBody) {
     group.start();
 
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     auto observed_promise = std::make_shared<std::promise<ObservedRequest>>();
@@ -646,7 +650,7 @@ TEST(HttpClientServerInteropTest, Http1ClientAndServerRoundTripWithBody) {
     group.start();
 
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     auto observed_promise = std::make_shared<std::promise<ObservedRequest>>();
@@ -696,7 +700,7 @@ TEST(HttpClientServerInteropTest, Http1ClientAndServerNormalizeComplexUri) {
     group.start();
 
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     auto observed_promise = std::make_shared<std::promise<ObservedRequest>>();
@@ -760,12 +764,12 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithoutBody) {
     credential_options.private_key = fiber::net::TlsPemSource::from_file(key.path);
     auto credential = fiber::net::TlsCredential::create(credential_options);
     ASSERT_TRUE(credential);
-    fiber::http::HttpServerOptions server_options;
+    fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
 
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     auto observed_promise = std::make_shared<std::promise<ObservedRequest>>();
@@ -827,12 +831,12 @@ TEST(HttpClientServerInteropTest, Http2ClientAndServerRoundTripWithBody) {
     credential_options.private_key = fiber::net::TlsPemSource::from_file(key.path);
     auto credential = fiber::net::TlsCredential::create(credential_options);
     ASSERT_TRUE(credential);
-    fiber::http::HttpServerOptions server_options;
+    fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
 
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     auto observed_promise = std::make_shared<std::promise<ObservedRequest>>();
@@ -892,12 +896,12 @@ TEST(HttpClientServerInteropTest, Http2ServerEventLoopGroupDispatch) {
     credential_options.private_key = fiber::net::TlsPemSource::from_file(key.path);
     auto credential = fiber::net::TlsCredential::create(credential_options);
     ASSERT_TRUE(credential);
-    fiber::http::HttpServerOptions server_options;
+    fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
 
     std::promise<std::uint16_t> port_promise;
-    std::promise<fiber::http::HttpServer *> server_promise;
+    std::promise<fiber::http::Server *> server_promise;
     auto port_future = port_promise.get_future();
     auto server_future = server_promise.get_future();
     std::atomic<bool> saw_worker_loop{false};

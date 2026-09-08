@@ -23,7 +23,7 @@ namespace fiber::http {
 //
 // Intended to live on the frame of a per-connection serve coroutine: the
 // Http2Connection is held by value so a session costs no individual heap
-// allocation, and the owning Http2ServerWorker reaches it through an
+// allocation, and the owning Http2ConnectionRegistry reaches it through an
 // intrusive hook instead of shared ownership. All methods must be called on
 // the transport's event loop.
 class Http2ServerConnection : public common::NonCopyable, public common::NonMovable {
@@ -67,58 +67,7 @@ private:
     // pattern: private hook, friend reaches it by offset).
     common::IntrusiveListHook worker_hook_{};
 
-    friend class Http2ServerWorker;
     friend class Http2ConnectionRegistry;
-};
-
-// Per-loop registry of live HTTP/2 server connections, Http3Server-shard
-// style. Connections link themselves in from their serve-coroutine frames
-// through their intrusive hooks, so registration costs no allocation; the list
-// is only ever walked or mutated on its own loop, so it needs no lock. Held
-// via shared_ptr by the server runtime: a shutdown walk posted to this
-// worker's loop must stay valid even if the runtime itself is destroyed
-// first.
-class Http2ServerWorker : public common::NonCopyable, public common::NonMovable {
-public:
-    explicit Http2ServerWorker(event::EventLoop &loop) noexcept : loop_(loop) {}
-
-    [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
-
-    // Register/unregister from a connection's serve coroutine, on this loop.
-    void link(Http2ServerConnection &connection) noexcept { connections_.push_back(connection); }
-    void unlink(Http2ServerConnection &connection) noexcept { connections_.erase(connection); }
-    [[nodiscard]] bool empty() const noexcept { return connections_.empty(); }
-
-    // Collapses repeated shutdown requests into one pending walk per worker.
-    // A connection that links after the walk ran observes the server closing
-    // and shuts itself down.
-    bool claim_close_walk() noexcept {
-        bool expected = false;
-        return close_walk_posted_.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
-    }
-    void release_close_walk() noexcept { close_walk_posted_.store(false, std::memory_order_release); }
-    // Requests shutdown of every registered connection. Must run on this
-    // worker's loop.
-    void shutdown_connections() noexcept {
-        for (Http2ServerConnection *connection = connections_.front(); connection != nullptr;
-             connection = connections_.next_of(*connection)) {
-            connection->request_shutdown();
-        }
-    }
-
-private:
-    // Http2ServerConnection is not standard-layout (it holds an Http2Connection
-    // by value, which owns unique_ptrs), so offsetof warns here. It is still
-    // well-defined enough in practice: the type is non-polymorphic and has no
-    // virtual base, which is what container_of actually needs.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
-    using ConnectionList = common::IntrusiveList<Http2ServerConnection, offsetof(Http2ServerConnection, worker_hook_)>;
-#pragma GCC diagnostic pop
-
-    event::EventLoop &loop_;
-    ConnectionList connections_{};
-    std::atomic<bool> close_walk_posted_{false};
 };
 
 } // namespace fiber::http

@@ -19,6 +19,8 @@
 
 namespace fiber::http {
 
+class TcpEndpointBase;
+
 // Shared bookkeeping for a TCP endpoint's per-loop worker: it counts the
 // connection coroutines running on this loop (handshake included) and holds
 // the draining flag the accept path checks.
@@ -27,6 +29,9 @@ namespace fiber::http {
 class TcpEndpointWorkerBase : public EndpointWorker {
 public:
     explicit TcpEndpointWorkerBase(event::EventLoop &loop) noexcept : loop_(loop) {}
+
+    ~TcpEndpointWorkerBase() override;
+    void attach(TcpEndpointBase &endpoint, std::size_t index) noexcept;
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
     [[nodiscard]] bool draining() const noexcept { return draining_; }
@@ -46,6 +51,8 @@ public:
     }
 
 private:
+    TcpEndpointBase *endpoint_ = nullptr;
+    std::size_t index_ = 0;
     event::EventLoop &loop_;
     async::WaitGroup tasks_{};
     bool draining_ = false;
@@ -84,6 +91,7 @@ protected:
     [[nodiscard]] const HttpServerTlsOptions &tls() const noexcept { return tls_; }
 
 private:
+    friend class TcpEndpointWorkerBase;
     static async::DetachedTask run_accepted(TcpEndpointBase *self, TcpEndpointWorkerBase *worker,
                                             net::AcceptResult accept) noexcept;
 

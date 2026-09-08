@@ -28,7 +28,8 @@
 #include <fiber/async/Task.h>
 #include <fiber/common/IoError.h>
 #include <fiber/event/EventLoop.h>
-#include <fiber/http/Http1Server.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http1Endpoint.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/detail/StreamFd.h>
 
@@ -1099,19 +1100,23 @@ int main(int argc, char **argv) {
     config->alias_root = std::move(*alias_root);
 
     fiber::event::EventLoop loop;
-    fiber::http::Http1Server server(loop, [config](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+    fiber::http::Server server(loop, [config](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         co_await handle_git_http(config, exchange);
     });
 
+    fiber::http::Http1Endpoint::Options server_options{};
     fiber::net::ListenOptions options{};
     fiber::net::SocketAddress addr = fiber::net::SocketAddress::any_v4(port);
-    auto bind_result = server.bind(addr, options);
+    server_options.address = addr;
+    server_options.listen = options;
+    auto *endpoint = server.add_endpoint<fiber::http::Http1Endpoint>(server_options);
+    auto bind_result = server.start();
     if (!bind_result) {
         std::cerr << "bind failed: " << fiber::common::io_err_name(bind_result.error()) << '\n';
         return 1;
     }
 
-    auto bound_port_result = resolve_port(server.fd());
+    auto bound_port_result = resolve_port(endpoint->listener_fd());
     if (bound_port_result) {
         std::cout << "listening on 0.0.0.0:" << *bound_port_result << " root=" << config->repositories_root
                   << " alias_root=" << config->alias_root.path << " backend=" << config->backend_path << '\n';
@@ -1119,7 +1124,12 @@ int main(int argc, char **argv) {
         std::cout << "listening on 0.0.0.0 root=" << config->repositories_root << '\n';
     }
 
-    fiber::async::spawn(loop, [&]() { return server.serve(); });
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask { co_await server.serve(); });
+    loop.run();
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        co_await server.stop_and_wait();
+        loop.stop();
+    });
     loop.run();
     return 0;
 }

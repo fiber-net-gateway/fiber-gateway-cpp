@@ -5,11 +5,7 @@
 
 namespace fiber::http {
 
-// Connection-level knobs an HTTP/2 server endpoint exposes. Split out of the
-// old catch-all HttpServerOptions, which offered exactly these three for
-// HTTP/2; everything else in Http2Connection::Options keeps its default. Add a
-// field here (and map it in Http2Endpoint::make_connection_options) when a knob
-// turns out to be worth configuring.
+// HTTP/2 endpoint policy; other Http2Connection::Options retain their defaults.
 struct Http2ServerOptions {
     // Inbound-idle deadline. Expiry sends a keepalive PING first and only
     // closes if the peer stays silent (see Http2Connection::Options).

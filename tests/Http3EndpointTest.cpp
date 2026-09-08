@@ -299,7 +299,7 @@ TEST(Http3EndpointTest, ServesHttp3Requests) {
     client_group.join();
 }
 
-// The old Http3Server closed the UDP socket the moment shutdown began, which
+// Closing the UDP socket the moment shutdown begins would
 // killed every session outright. Draining now keeps the socket open until the
 // live sessions finish.
 TEST(Http3EndpointTest, DrainLetsAnInFlightRequestFinish) {

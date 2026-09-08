@@ -49,6 +49,9 @@ public:
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] const SocketAddress &local_addr() const noexcept;
+    // Transfers an unregistered socket on the startup thread; registered I/O
+    // must be detached on its owning loop. No callbacks may remain installed.
+    [[nodiscard]] int release_fd() noexcept;
     void close();
 
     [[nodiscard]] RecvFromTask recv_from(void *buf, size_t len,

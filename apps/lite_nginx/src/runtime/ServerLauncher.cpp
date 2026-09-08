@@ -4,7 +4,6 @@
 #include <cassert>
 #include <cerrno>
 #include <cstring>
-#include <future>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -20,6 +19,8 @@
 #include <fiber/http/HttpExchangeIo.h>
 #include <fiber/http/HttpHeaders.h>
 #include <fiber/http/HttpResponseWriter.h>
+#include <fiber/http/endpoint/Http2Endpoint.h>
+#include <fiber/http/endpoint/Http3Endpoint.h>
 #include <fiber/http_script/ConstPackage.h>
 #include <fiber/http_script/ScriptExchangeCtx.h>
 #include <fiber/log/Log.h>
@@ -285,34 +286,6 @@ std::expected<fiber::net::SocketAddress, RuntimeError> make_socket_address(const
     return fiber::net::SocketAddress(ip, listener.port);
 }
 
-fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
-    sockaddr_storage bound{};
-    socklen_t len = sizeof(bound);
-    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&bound), &len) != 0) {
-        return std::unexpected(fiber::common::io_err_from_errno(errno));
-    }
-    fiber::net::SocketAddress local;
-    if (!fiber::net::SocketAddress::from_sockaddr(reinterpret_cast<sockaddr *>(&bound), len, local)) {
-        return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-    return local.port();
-}
-
-fiber::http::HttpServerOptions make_server_options(const ListenerRuntime &listener,
-                                                   const ListenerTlsCredentials *tls_credentials) {
-    fiber::http::HttpServerOptions options;
-    options.drain_unread_body = true;
-    options.enable_extended_connect = true;
-    options.http3.enabled = listener.http3;
-    if (!listener.tls) {
-        return options;
-    }
-
-    options.tls.configure_callback = &configure_identity_by_server_name;
-    options.tls.configure_ctx = const_cast<ListenerTlsCredentials *>(tls_credentials);
-    return options;
-}
-
 std::string_view strip_host_port(std::string_view host) noexcept {
     if (host.empty()) {
         return {};
@@ -506,7 +479,9 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
     auto dispatcher = std::make_shared<RequestDispatcher>(runtime_, upstreams_, *connection_pool_, *dns_,
                                                           script_services_.get(), std::move(access_logger));
 
-    servers_.reserve(runtime_->listeners.size());
+    server_ = std::make_unique<fiber::http::Server>(accept_loop_, fiber::http::HttpHandler{}, worker_group_.get());
+    std::vector<fiber::http::Http2Endpoint *> tcp_endpoints;
+    tcp_endpoints.reserve(runtime_->listeners.size());
     tls_credentials_.reserve(runtime_->listeners.size());
     bound_listeners_.reserve(runtime_->listeners.size());
 
@@ -527,86 +502,65 @@ std::expected<void, RuntimeError> ServerLauncher::start(const RuntimeConfig &run
             }
             tls_credentials = std::move(*created_credentials);
         }
-        auto options = make_server_options(listener, tls_credentials.get());
-        auto server = std::make_unique<fiber::http::HttpServer>(
-                accept_loop_,
-                [dispatcher, listener_index](fiber::http::HttpExchange &exchange) {
-                    return dispatcher->handle(listener_index, exchange);
-                },
-                std::move(options), worker_group_.get());
-
-        fiber::net::ListenOptions listen_options{};
-        auto bind_result = server->bind(*addr_result, listen_options);
-        if (!bind_result) {
-            close();
-            return std::unexpected(make_error(listener.location,
-                                              "bind failed for listen " + addr_result->to_string() + ": " +
-                                                      std::string(fiber::common::io_err_name(bind_result.error()))));
+        fiber::http::Http2Endpoint::Options options{};
+        options.address = *addr_result;
+        options.http1.drain_unread_body = true;
+        options.http2.enable_connect_protocol = true;
+        if (listener.tls) {
+            options.tls.configure_callback = &configure_identity_by_server_name;
+            options.tls.configure_ctx = tls_credentials.get();
         }
-
-        auto bound_port_result = resolve_port(server->fd());
-        if (!bound_port_result) {
+        options.handler = [dispatcher, listener_index](fiber::http::HttpExchange &exchange) {
+            return dispatcher->handle(listener_index, exchange);
+        };
+        auto *tcp = server_->add_endpoint<fiber::http::Http2Endpoint>(options);
+        if (!tcp) {
             close();
-            return std::unexpected(make_error(listener.location,
-                                              "failed to resolve bound port for listen " + addr_result->to_string()));
+            return std::unexpected(make_error(listener.location, "failed to allocate TCP endpoint"));
         }
-
-        fiber::net::SocketAddress bound_address(addr_result->ip(), *bound_port_result);
-        bound_listeners_.push_back({
-                .address = bound_address,
-                .tls = listener.tls,
-                .http3 = listener.http3,
-        });
-
-        auto *server_ptr = server.get();
-        fiber::async::spawn(accept_loop_, [server_ptr]() { return server_ptr->serve(); });
-        servers_.push_back(std::move(server));
+        tcp_endpoints.push_back(tcp);
+        if (listener.http3) {
+            fiber::http::Http3Endpoint::Options h3{};
+            h3.address = *addr_result;
+            h3.inherit_port_from = tcp;
+            h3.tls = options.tls;
+            h3.handler = options.handler;
+            h3.http3.enable_connect_protocol = true;
+            if (!server_->add_endpoint<fiber::http::Http3Endpoint>(std::move(h3))) {
+                close();
+                return std::unexpected(make_error(listener.location, "failed to allocate HTTP/3 endpoint"));
+            }
+        }
         tls_credentials_.push_back(std::move(tls_credentials));
     }
+
+    auto bound = server_->start();
+    if (!bound) {
+        close();
+        return std::unexpected(
+                make_error({}, "listener start failed: " + std::string(fiber::common::io_err_name(bound.error()))));
+    }
+    for (std::size_t i = 0; i < tcp_endpoints.size(); ++i) {
+        bound_listeners_.push_back({.address = tcp_endpoints[i]->local_addr(),
+                                    .tls = runtime_->listeners[i].tls,
+                                    .http3 = runtime_->listeners[i].http3});
+    }
+    fiber::async::spawn(accept_loop_, [this]() -> fiber::async::DetachedTask { co_await server_->serve(); });
 
     started_ = true;
     return {};
 }
 
+fiber::async::Task<void> ServerLauncher::stop_and_wait() noexcept {
+    if (server_) {
+        co_await server_->stop_and_wait();
+    }
+}
+
 void ServerLauncher::close() {
-    if (accept_loop_.in_loop()) {
-        // A caller on the owner loop cannot synchronously wait without
-        // deadlocking that loop. Leave the facades and dependent loops alive;
-        // the next close (normally the launcher destructor after the loop
-        // stops) completes the barrier and performs the destruction.
-        for (auto &server: servers_) {
-            if (server) {
-                server->request_close();
-            }
-        }
-        return;
-    }
-
-    if (!servers_.empty()) {
-        // HttpServer::close() only requests shutdown. Keep the server facades
-        // and worker loops alive until every owner-loop cleanup has completed;
-        // otherwise the posted close callbacks can never run after the
-        // accept loop has stopped, and loop-affine resources outlive their
-        // owning server.
-        std::promise<void> shutdown_promise;
-        auto shutdown_future = shutdown_promise.get_future();
-        fiber::async::spawn(accept_loop_, [this, &shutdown_promise]() -> fiber::async::DetachedTask {
-            for (auto &server: servers_) {
-                if (server) {
-                    co_await server->shutdown_and_wait();
-                }
-            }
-            shutdown_promise.set_value();
-            accept_loop_.stop();
-            co_return;
-        });
-        if (!accept_loop_.running()) {
-            accept_loop_.run();
-        }
-        shutdown_future.get();
-    }
-
-    servers_.clear();
+    // Server destruction checks that callers have awaited the shutdown barrier.
+    // Failed startup remains Created and is safe to release synchronously.
+    server_.reset();
     tls_credentials_.clear();
     bound_listeners_.clear();
     started_ = false;

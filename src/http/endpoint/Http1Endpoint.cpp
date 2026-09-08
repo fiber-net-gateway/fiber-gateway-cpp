@@ -20,6 +20,7 @@ common::IoResult<void> Http1Endpoint::on_start(Server &server) noexcept {
     const HttpHandler &handler = options_.handler ? options_.handler : server.default_handler();
     handler_ = std::make_shared<const HttpHandler>(handler);
     if (!handler_) {
+        TcpEndpointBase::on_stop();
         return std::unexpected(common::IoErr::NoMem);
     }
     return {};

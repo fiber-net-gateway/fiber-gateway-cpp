@@ -13,7 +13,9 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/HttpExchange.h>
-#include <fiber/http/HttpServer.h>
+#include <fiber/http/Server.h>
+#include <fiber/http/endpoint/Http2Endpoint.h>
+#include <fiber/http/endpoint/Http3Endpoint.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TlsCredential.h>
@@ -208,16 +210,25 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    fiber::http::HttpServerOptions server_options{};
-    server_options.drain_unread_body = true;
+    fiber::http::Http2Endpoint::Options server_options{};
+    server_options.http1.drain_unread_body = true;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
     server_options.tls.configure_ctx = credential->get();
-    server_options.http3.enabled = true;
-    server_options.http3.send.pacing.enabled = pacing_enabled;
-    fiber::http::HttpServer server(accept_loop, handle_request, server_options, &worker_group);
+    fiber::http::Server server(accept_loop, handle_request, &worker_group);
     fiber::net::ListenOptions listen_options{};
     fiber::net::SocketAddress address(fiber::net::IpAddress::loopback_v4(), port);
-    auto bind_result = server.bind(address, listen_options);
+    server_options.address = address;
+    server_options.listen = listen_options;
+    auto *endpoint = server.add_endpoint<fiber::http::Http2Endpoint>(server_options);
+    fiber::http::Http3Endpoint::Options h3_options{};
+    h3_options.address = server_options.address;
+    h3_options.tls = server_options.tls;
+    h3_options.inherit_port_from = endpoint;
+    h3_options.http3.send.pacing.enabled = pacing_enabled;
+    if (!server.add_endpoint<fiber::http::Http3Endpoint>(std::move(h3_options))) {
+        return 1;
+    }
+    auto bind_result = server.start();
     if (!bind_result) {
         std::cerr << "bind failed: " << fiber::common::io_err_name(bind_result.error()) << '\n';
         worker_group.stop();
@@ -227,10 +238,14 @@ int main(int argc, char **argv) {
 
     std::cout << "HTTP/3 benchmark server listening on 127.0.0.1:" << port << " workers=" << workers
               << " pacing=" << (pacing_enabled ? "on" : "off") << '\n';
-    fiber::async::spawn(accept_loop, [&server]() { return server.serve(); });
+    fiber::async::spawn(accept_loop, [&server]() -> fiber::async::DetachedTask { co_await server.serve(); });
     accept_loop.run();
 
-    server.close();
+    fiber::async::spawn(accept_loop, [&]() -> fiber::async::DetachedTask {
+        co_await server.stop_and_wait();
+        accept_loop.stop();
+    });
+    accept_loop.run();
     worker_group.stop();
     worker_group.join();
     return 0;
