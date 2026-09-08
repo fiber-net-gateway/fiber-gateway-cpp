@@ -308,18 +308,17 @@ TEST(Http1EndpointTest, DrainLetsAnInFlightRequestFinishAndMarksConnectionClose)
     group.join();
 }
 
-// The drain budget bounds blocked I/O, which is what real handlers wait on.
-// A handler that never returns for reasons of its own (a pure timer, a busy
-// loop) cannot be unwound -- C++ coroutines have no cancellation -- so abort()
-// closes the transport and lets the failed I/O propagate.
-TEST(Http1EndpointTest, DrainDeadlineAbortsAConnectionStuckOnIo) {
+// Shutdown has no deadline and nothing forces a session down: a request still
+// arriving after stop() runs to completion. This is the case the removed drain
+// budget would have cut off.
+TEST(Http1EndpointTest, DrainWaitsForASlowInFlightRequest) {
     fiber::event::EventLoopGroup group(2);
     group.start();
 
     std::promise<void> in_handler;
     auto in_handler_future = in_handler.get_future();
     std::atomic<bool> entered{false};
-    std::atomic<bool> read_failed{false};
+    std::atomic<bool> body_read{false};
 
     auto running = start_server(
             group, Http1Endpoint::Options{
@@ -327,32 +326,36 @@ TEST(Http1EndpointTest, DrainDeadlineAbortsAConnectionStuckOnIo) {
                                if (!entered.exchange(true)) {
                                    in_handler.set_value();
                                }
-                               // Announced but never sent: with no timeout, only
-                               // the abort's transport close ends this read.
-                               auto body = co_await exchange.read_body(1024);
-                               read_failed.store(!body.has_value());
+                               auto drained = co_await exchange.discard_body();
+                               body_read.store(drained.has_value());
+                               co_await write_text(exchange, 200, "complete");
                                co_return;
                            },
-                           .drain_timeout = 100ms,
                    });
     ASSERT_NE(running.server, nullptr);
 
     int client = connect_to(running.port);
     ASSERT_GE(client, 0);
     set_recv_timeout(client, 10s);
-    ASSERT_TRUE(send_all(client, "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n"));
+    // Head only: the handler blocks reading a body that has not been sent.
+    ASSERT_TRUE(send_all(client, "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n"));
     ASSERT_EQ(in_handler_future.wait_for(5s), std::future_status::ready);
 
-    const auto began = std::chrono::steady_clock::now();
-    running.stop_and_join();
-    const auto elapsed = std::chrono::steady_clock::now() - began;
+    running.server->stop();
+    // The connection is mid-request while the server drains; the rest of the
+    // request only shows up well after that.
+    std::this_thread::sleep_for(200ms);
+    ASSERT_TRUE(send_all(client, "hello"));
 
-    // Drain cannot finish on its own here, so the deadline is what ends it.
-    EXPECT_GE(elapsed, 90ms);
-    EXPECT_LT(elapsed, 5s);
-    EXPECT_TRUE(read_failed.load());
-    EXPECT_EQ(running.server->state(), Server::State::Stopped);
+    std::string response = recv_all(client);
     ::close(client);
+    running.serve_done.get();
+
+    EXPECT_TRUE(body_read.load());
+    EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("complete"), std::string::npos);
+    EXPECT_NE(response.find("Connection: close"), std::string::npos);
+    EXPECT_EQ(running.server->state(), Server::State::Stopped);
 
     group.stop();
     group.join();

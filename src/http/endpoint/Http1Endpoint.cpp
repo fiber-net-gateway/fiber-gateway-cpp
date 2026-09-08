@@ -9,8 +9,7 @@
 namespace fiber::http {
 
 Http1Endpoint::Http1Endpoint(Options options) noexcept :
-    TcpEndpointBase(options.address, options.listen, options.tcp, options.tls, options.drain_timeout),
-    options_(std::move(options)) {}
+    TcpEndpointBase(options.address, options.listen, options.tcp, options.tls), options_(std::move(options)) {}
 
 common::IoResult<void> Http1Endpoint::on_start(Server &server) noexcept {
     auto started = TcpEndpointBase::on_start(server);

@@ -1,7 +1,6 @@
 #ifndef FIBER_HTTP_ENDPOINT_TCP_ENDPOINT_BASE_H
 #define FIBER_HTTP_ENDPOINT_TCP_ENDPOINT_BASE_H
 
-#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -24,7 +23,7 @@ namespace fiber::http {
 // connection coroutines running on this loop (handshake included) and holds
 // the draining flag the accept path checks.
 //
-// Concrete workers add their own connection registry and implement abort().
+// Concrete workers add their own connection registry and drain policy.
 class TcpEndpointWorkerBase : public EndpointWorker {
 public:
     explicit TcpEndpointWorkerBase(event::EventLoop &loop) noexcept : loop_(loop) {}
@@ -58,13 +57,12 @@ private:
 class TcpEndpointBase : public Endpoint {
 public:
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept final { return local_addr_; }
-    [[nodiscard]] std::chrono::milliseconds drain_timeout() const noexcept final { return drain_timeout_; }
     // Listening socket, valid between on_start() and on_stop().
     [[nodiscard]] int listener_fd() const noexcept { return listener_ ? listener_->fd() : -1; }
 
 protected:
     TcpEndpointBase(net::SocketAddress address, net::ListenOptions listen, net::TcpSocketOptions tcp,
-                    HttpServerTlsOptions tls, std::chrono::milliseconds drain_timeout) noexcept;
+                    HttpServerTlsOptions tls) noexcept;
     ~TcpEndpointBase() override;
 
     [[nodiscard]] common::IoResult<void> on_start(Server &server) noexcept override;
@@ -94,7 +92,6 @@ private:
     net::ListenOptions listen_;
     net::TcpSocketOptions tcp_;
     HttpServerTlsOptions tls_;
-    std::chrono::milliseconds drain_timeout_;
 
     std::unique_ptr<net::TcpListener> listener_{};
     net::SocketAddress local_addr_{};

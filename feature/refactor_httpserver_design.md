@@ -12,7 +12,7 @@
 
 1. **一个 Server 管多个 endpoint**：把「监听端口 + 协议 + TLS/超时配置 + handler」收敛成 `Endpoint`，`Server` 只负责 endpoint 生命周期编排、worker 编排、停机屏障。
 2. **统一三套并行的服务端生命周期代码**：现在 `HttpServer`、`Http1Server`、`Http3Server` 各自实现了一遍 bind/serve/close/shutdown_and_wait，语义还不完全一致（见 §3）。重写后只有一套。
-3. **真正的优雅停机**：`stop()` 后 in-flight 请求跑完再关连接（H2/H3 发 GOAWAY，H1 在当前 exchange 结束后关），超过 `drain_timeout` 才硬中断。
+3. **真正的优雅停机**：`stop()` 后 in-flight 请求跑完再关连接（H2/H3 发 GOAWAY，H1 在当前 exchange 结束后关）。不设停机预算——什么时候算结束由协议自己判断。
 4. **消除跨线程共享容器**：per-worker 的连接注册表全部走 loop-affine 的侵入式链表，去掉 `std::mutex + std::vector<std::shared_ptr<Http1Entry>>` 这类全局结构。
 5. **停机后资源归属明确**：`co_await server.serve()` 返回时，所有 listener、连接、per-worker 上下文都已析构，调用方可以安全地 `worker_group->stop(); join();`。
 
@@ -28,9 +28,9 @@
 |---|--------|------|
 | D1 | Endpoint 抽象形式 | **虚接口基类**，不用 `EndpointOps` 函数表 |
 | D2 | TCP accept 模型 | **保持单 accept loop + round-robin 分发到 worker**（不引入 SO_REUSEPORT 分片；HTTP/3 因为是 UDP 无连接，仍保持既有的 per-worker 分片） |
-| D3 | 停机语义 | **优雅 drain + `drain_timeout` 超时硬中断兜底** |
+| D3 | 停机语义 | **优雅 drain，不设超时预算**：由各协议自己决定连接何时结束（见 §6.3）。有些场景必须保证请求执行完，截断比停机慢更糟 |
 | D4 | handler 归属 | **每个 endpoint 自带 handler**，Server 构造时的 handler 作为未设置时的默认值 |
-| D5 | 配置结构 | **每个 endpoint 定义自己的 options，只保留自己关心的字段；不存在 server 级 options**。现有的大杂烩 `HttpServerOptions` 拆散（§7.1），`drain_timeout` 也下沉到每个 endpoint |
+| D5 | 配置结构 | **每个 endpoint 定义自己的 options，只保留自己关心的字段；不存在 server 级 options**。现有的大杂烩 `HttpServerOptions` 拆散（§7.1） |
 | D6 | 明文 HTTP/2 | **不支持 `Upgrade: h2c`**，只支持 prior-knowledge h2c |
 | D7 | `HttpServer` 兼容门面 | **只作为迁移期脚手架，P7 直接删除**，不保留版本周期 |
 
@@ -60,8 +60,8 @@
 ```
 
 - **Endpoint**：主线程对象。一个 endpoint = 一个监听地址 + 一种协议策略 + 一份**只属于该协议**的 options（§7.1）+ 一个 handler。
-- **EndpointWorker**：worker 线程对象。endpoint 在**每个 worker loop 上**的分身，持有该 loop 上属于这个 endpoint 的所有连接，并实现 drain / abort / wait_stopped。
-- **Server::Worker**：worker 线程的编排器，持有 N 个 `EndpointWorker`（N = endpoint 数），只做「统一 drain、统一等待、超时统一 abort」。
+- **EndpointWorker**：worker 线程对象。endpoint 在**每个 worker loop 上**的分身，持有该 loop 上属于这个 endpoint 的所有连接，并实现 drain / wait_stopped。
+- **Server::Worker**：worker 线程的编排器，持有 N 个 `EndpointWorker`（N = endpoint 数），只做「统一 drain、统一等待资源释放」。
 
 `slots_[i]` 与 `endpoints_[i]` 下标严格对齐，这样 accept 路径不需要查表：endpoint 自己记着 `std::vector<Http1EndpointWorker *> workers_`（自己的具体类型），投递连接时直接 `workers_[idx]`，无虚调用。
 
@@ -130,10 +130,11 @@ public:
     //   H2  -> GOAWAY，已开流跑完
     //   H3  -> 拒绝新连接，已有连接 GOAWAY
     // 幂等。
+    //
+    // 没有停机预算，也没有强制拆连接：请求必须跑完的场景下，截断比停机慢更糟。
+    // 因此「什么时候算结束」由协议自己判断，也由协议自己的
+    // 读/写/空闲超时来保证连接一定会结束。
     virtual void drain() noexcept = 0;
-
-    // drain_timeout 到期后的硬中断：abort 所有流 + 关 transport / QUIC endpoint。幂等。
-    virtual void abort() noexcept = 0;
 
     // 该 worker 上属于本 endpoint 的连接全部结束后完成。
     // 必须可重复 co_await（Worker 只 await 一次，但实现不应假设）。
@@ -157,7 +158,7 @@ public:
     // ---- 以下三个函数在 owner loop（主线程）各执行一次 ----
 
     // 绑定监听资源。失败会让整个 Server::start() 失败并回滚已启动的 endpoint。
-    // server 提供 worker 数量/loop、默认 handler、drain_timeout。
+    // server 提供 worker 数量/loop、默认 handler。
     [[nodiscard]] virtual common::IoResult<void> on_start(Server &server) noexcept = 0;
 
     // accept / 收包循环。listener 关闭后返回。
@@ -172,10 +173,6 @@ public:
 
     // 绑定后的本地地址（端口 0 时为内核分配的实际端口）。on_start 成功后有效。
     [[nodiscard]] virtual const net::SocketAddress &local_addr() const noexcept = 0;
-
-    // 本 endpoint 的优雅停机预算，来自自己的 options（D5：没有 server 级配置）。
-    // 0 = 不等待，直接硬停；max() = 无限等待。Server::Worker 按 endpoint 分别计时。
-    [[nodiscard]] virtual std::chrono::milliseconds drain_timeout() const noexcept = 0;
 };
 ```
 
@@ -240,15 +237,13 @@ private:
 
 ### 5.4 Server::Worker
 
-因为 `drain_timeout` 是每个 endpoint 自己的（D5），deadline 定时器挂在 **slot** 上而不是 worker 上：一个 worker 上的 H3 slot 可以等 60s，同一 worker 的 H1 slot 只等 5s，互不影响。
-
 ```cpp
 class Server::Worker : public common::NonCopyable, public common::NonMovable {
 public:
     Worker(Server &server, event::EventLoop &loop, std::size_t index) noexcept;
 
     // 主线程 start() 期间填充，下标与 Server::endpoints_ 对齐。
-    void install(std::unique_ptr<EndpointWorker> worker, std::chrono::milliseconds drain_timeout);
+    void install(EndpointWorker *worker) noexcept;
 
     [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
 
@@ -256,22 +251,13 @@ public:
     void notify_stop() noexcept;
 
 private:
-    // 一个 endpoint 在本 worker 上的槽位。TimerEntry 不可移动，所以按 unique_ptr 持有。
-    struct Slot {
-        Worker *owner = nullptr;
-        std::unique_ptr<EndpointWorker> worker;
-        std::chrono::milliseconds drain_timeout{};
-        event::EventLoop::TimerEntry deadline{};
-    };
-
     static void on_stop(Worker *self) noexcept;       // NotifyEntry trampoline
-    static void on_deadline(Slot *slot) noexcept;     // TimerEntry trampoline
     static async::DetachedTask run_wait_stop(Worker *self) noexcept;
 
     Server *server_;
     event::EventLoop &loop_;
     std::size_t index_;
-    std::vector<std::unique_ptr<Slot>> slots_;
+    std::vector<std::unique_ptr<EndpointWorker>> slots_;
     event::EventLoop::NotifyEntry stop_entry_{};
     std::atomic<bool> stop_posted_{false};
 };
@@ -290,26 +276,15 @@ void Server::Worker::notify_stop() noexcept {
 }
 
 void Server::Worker::on_stop(Worker *self) noexcept {
-    for (auto &slot: self->slots_) {
-        slot->worker->drain();
-        const auto budget = slot->drain_timeout;
-        if (budget == std::chrono::milliseconds::zero()) {
-            slot->worker->abort();   // 不等待，直接硬停
-        } else if (budget != std::chrono::milliseconds::max()) {
-            self->loop_.post_at<Slot, &Slot::deadline, &Worker::on_deadline>(self->loop_.now() + budget, *slot);
-        }
+    for (const auto &slot: self->slots_) {
+        slot->drain();
     }
     async::spawn(self->loop_, [self]() -> async::DetachedTask { return run_wait_stop(self); });
 }
 
-void Server::Worker::on_deadline(Slot *slot) noexcept { slot->worker->abort(); }
-
 async::DetachedTask Server::Worker::run_wait_stop(Worker *self) noexcept {
-    for (auto &slot: self->slots_) {
-        co_await slot->worker->wait_stopped();
-        if (slot->deadline.is_in_heap()) {
-            self->loop_.cancel<Slot, &Slot::deadline>(*slot);
-        }
+    for (const auto &slot: self->slots_) {
+        co_await slot->wait_stopped();
     }
     self->slots_.clear();                // 在自己的 loop 上析构 loop-affine 资源
     self->server_->on_worker_stopped();  // 线程安全：workers_wg_.done()
@@ -317,7 +292,7 @@ async::DetachedTask Server::Worker::run_wait_stop(Worker *self) noexcept {
 }
 ```
 
-**为什么用定时器而不是 `timeout_for(join())`**：`async::timeout_for` 超时时会连同内部 awaiter 一起销毁，而此时内部的 `Task` 协程仍挂起在 `wait_stopped()` 上，销毁语义不安全。用 `TimerEntry` 触发 `abort()`、再让同一个 `wait_stopped()` 自然完成，既没有取消语义问题，也保证「abort 之后一定还会等到资源真正释放」。
+**为什么不做超时兜底**（D3）：网关的停机场景里，把一个正在执行的请求截断，代价通常比停机慢几秒大得多。而且真要做预算，它也兜不住关键情况——`abort()` 顶多关掉 transport 让**阻塞的 I/O** 失败返回，对「handler 自身永不返回」（纯定时器、死循环）无能为力：C++ 协程没有取消机制。所以与其提供一个看起来是强保证、实际有洞的预算，不如把责任交给协议层：H1 有 header/keep-alive/write 超时，H2 有 read/write 超时，H3 有 idle 超时，这些才是真正让连接一定结束的东西。
 
 ---
 
@@ -374,12 +349,10 @@ on_owner_stop()                            [owner loop]
 
 Worker::on_stop()                          [worker loop, 每个 worker 一次]
   5. 逐 slot：worker->drain()                     // GOAWAY / Connection: close / 关空闲连接
-  6. 逐 slot：按该 endpoint 自己的 drain_timeout 挂 deadline 定时器
-  7. spawn run_wait_stop:
-        逐 slot：co_await worker->wait_stopped()；取消该 slot 的定时器
+  6. spawn run_wait_stop:
+        逐 slot：co_await worker->wait_stopped()   // 无上限，等协议自己收尾
         slots_.clear()                            // 在本 loop 析构
         server_->on_worker_stopped()              // workers_wg_.done()
-     某 slot 的 deadline 触发时：该 slot worker->abort()   // 硬中断，wait_stopped 随后完成
 
 on_worker_stopped() / on_serve() 结束      [任意 loop -> 汇聚到 owner loop]
   8. serve_wg_（accept loops）与 workers_wg_ 都空后：
@@ -401,7 +374,7 @@ async::DetachedTask Server::finish_shutdown(Server *self) noexcept {
 }
 ```
 
-**drain_timeout 的边界（实现期确认）**：`abort()` 能兜住的是**阻塞的 I/O**——关掉 transport 后 handler 挂起的读写立刻失败并返回。它兜不住「handler 因为自身原因永不返回」（纯定时器、死循环）：C++ 协程没有取消机制，这类连接协程仍会拖住 `wait_stopped()`。这与现状一致（今天 `HttpServer` 的 `tasks` WaitGroup 同样会无限等），不是本次重写引入的退化，但必须在 `EndpointWorker::abort()` 的注释里写明，避免被当成「预算一定生效」的强保证。
+**停机没有上限**：`stop()` 之后 `serve()` 何时返回，完全取决于协议层什么时候认为连接结束了。一个 handler 永不返回就会一直拖住停机——这与现状一致（今天 `HttpServer` 的 `tasks` WaitGroup 同样无限等），是刻意接受的代价：需要请求跑完的场景下，截断比慢更糟。让连接一定结束是协议层超时配置的职责。
 
 **顺序保证**：`slots_` 先于 `endpoints_` 析构。`EndpointWorker` 可能持有指向 `Endpoint` 的裸指针（读 options/handler），这个顺序保证了指针始终有效。`Endpoint` 持有的 `std::vector<XxxEndpointWorker *>` 在第 8 步时已全部悬空，但那之后不再有人 accept，不会被解引用（`on_stop()` 之后 accept loop 已退出）。
 
@@ -494,7 +467,7 @@ struct Http3ServerOptions {
 };
 ```
 
-各 endpoint 的 options 就是「监听信息 + 自己协议的连接层 options + handler + drain_timeout」：
+各 endpoint 的 options 就是「监听信息 + 自己协议的连接层 options + handler」：
 
 ```cpp
 struct Http1Endpoint::Options {
@@ -504,7 +477,6 @@ struct Http1Endpoint::Options {
     HttpServerTlsOptions tls{};             // 不设即明文
     Http1ServerOptions http1{};
     HttpHandler handler{};                  // 空则取 Server 的默认 handler
-    std::chrono::milliseconds drain_timeout{30'000};
 };
 
 struct Http2Endpoint::Options {            // 同上，把 http1 换成 http2
@@ -524,7 +496,6 @@ struct Http3Endpoint::Options {
     HttpServerTlsOptions tls{};                    // H3 必须有 TLS，on_start 校验
     Http3ServerOptions http3{};
     HttpHandler handler{};
-    std::chrono::milliseconds drain_timeout{30'000};
 };
 ```
 
@@ -590,20 +561,14 @@ public:
             c->request_drain();     // 空闲则立刻关，忙则打标记
         }
     }
-    void abort() noexcept override {
-        aborted_ = true;
-        for (auto *c = connections_.front(); c != nullptr; c = connections_.next_of(*c)) {
-            c->shutdown();          // 硬关 transport
-        }
-    }
-    async::Task<void> wait_stopped() noexcept override {
-        co_await handshakes_.join();
-        co_await connections_.wg().join();
-    }
+    // tasks_ 覆盖「握手中」和「会话中」两种在途连接协程，
+    // 所以不会出现「worker 报告停完、随后又冒出一条新连接」。
+    async::Task<void> wait_stopped() noexcept override { co_await tasks_.join(); }
+
 private:
     common::IntrusiveList<Http1Connection, offsetof(Http1Connection, worker_hook_)> connections_;
-    async::WaitGroup handshakes_{}, live_{};
-    bool draining_ = false, aborted_ = false;
+    async::WaitGroup tasks_{};   // 一条连接协程一个计数，覆盖握手 + 会话
+    bool draining_ = false;
 };
 ```
 
@@ -614,7 +579,7 @@ private:
 | `Http1Server *server_` 反向指针 + `const std::atomic<bool> *shutdown_flag_` | 删除两者，改为 loop-affine 的 `bool draining_` |
 | `stopping()` 读 `server_->shutting_down()` 或原子标志 | `return draining_;`（同 loop，无原子操作） |
 | `std::atomic<bool> finished_` | 普通 `bool finished_`（只在自己的 loop 上访问） |
-| `shutdown()` = 立刻关 transport | 保留为硬中断入口；新增 `request_drain()` |
+| `shutdown()` = 立刻关 transport | 保留（`~Http1Connection`/异常路径用）；新增 `request_drain()` 作为唯一的停机入口 |
 | 无注册表钩子 | 新增私有 `common::IntrusiveListHook worker_hook_`，`friend class Http1EndpointWorker`（照抄 `Http2ServerConnection::worker_hook_` 的写法） |
 
 ```cpp
@@ -644,11 +609,6 @@ void drain() noexcept override {
         c->request_drain();     // 新增：conn_.graceful_shutdown() —— 发 GOAWAY，已开流跑完
     }
 }
-void abort() noexcept override {
-    for (auto *c = connections_.front(); c; c = connections_.next_of(*c)) {
-        c->request_shutdown();  // 现有：conn_.shutdown(Canceled)
-    }
-}
 ```
 
 `Http2ServerConnection` 新增 `request_drain()`（调 `Http2Connection::graceful_shutdown()`，该函数已存在）。`ServerRequestFactory` 同步瘦身：`ServerHttp2Request` 压根没读过 `HttpServerOptions` 的任何字段，构造参数和 `http_options_` 成员一起删掉，只留 handler。`claim_close_walk()/release_close_walk()` 这套「合并重复 walk」的机制可以删掉——新设计里 drain 每个 worker 只走一次（由 `Worker::stop_posted_` 保证），不再有重复投递。
@@ -656,7 +616,7 @@ void abort() noexcept override {
 - `Http2Endpoint`：TLS 时 ALPN 只报 `h2`；明文时按 **h2c prior-knowledge** 处理——直接把 transport 喂给 `Http2Connection`，由它校验 connection preface。**不支持 `Upgrade: h2c`（D6）**：明文端口上收到带 `Upgrade: h2c` 的 HTTP/1 请求，就按普通 HTTP/1 请求处理（忽略该头），不做协议升级。这一条要写进 `Http2Endpoint` 的类注释，避免后来者误以为是漏实现。
 - `Http21Endpoint`：TLS ALPN 报 `{h2, http/1.1}`，按协商结果分派到 H1 或 H2 的 worker slot；明文时走 HTTP/1。这就是今天 `HttpServer` 的行为，`select_protocol()` 逻辑原样搬过来。
 
-`Http21EndpointWorker` 内部同时持有 H1 和 H2 两张连接表，`drain/abort/wait_stopped` 依次作用于两者。
+`Http21EndpointWorker` 内部同时持有 H1 和 H2 两张连接表，`drain`/`wait_stopped` 依次作用于两者。
 
 ### 7.5 Http3Endpoint
 
@@ -674,8 +634,7 @@ class Http3EndpointWorker final : public EndpointWorker {
 - `on_start`：为每个 worker 建一个 shard（`endpoint_.init(worker_loop, ...)`）；`worker_count > 1` 时开 `reuse_port`；端口 0 时第一个 shard 绑定后把实际端口回填给其余 shard（沿用 `Http3Server::bind()` 现逻辑）。
 - `on_serve`：给每个 shard 的 loop `post` 一次 `endpoint_.start()`；然后 `co_await` 一个直到 `on_stop()` 才完成的 Signal（H3 没有 accept 循环）。
 - `drain()`：`admitting_ = false`（`create_connection` 回调看到后返回空 lease，QUIC 层拒绝新连接），并遍历连接表逐个 `h3_.graceful_shutdown()` 发 GOAWAY。**保持 UDP socket 打开**，否则现有连接收不到包。
-- `abort()`：`endpoint_.close()`（会 `force_detach_connection` 掉所有连接并关 socket）。
-- `wait_stopped()`：`co_await live_.join()`；返回前若 socket 仍开着则 `endpoint_.close()`。
+- `wait_stopped()`：`co_await live_.join()`，然后 `endpoint_.close()` 关掉 UDP socket。QUIC 连接自己的 idle timeout 保证 `live_` 一定会归零。
 
 这是相对现状的实质性行为修正：今天 `Http3Server::close()` 第一时间就 `endpoint.close()`，等于把所有 QUIC 连接就地掐断。
 
@@ -771,7 +730,7 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 | 阶段 | 内容 | 验收 |
 |------|------|------|
 | P1 | `Server`/`Endpoint`/`EndpointWorker`/`Worker` 骨架 + 状态机；测试用的假 endpoint | `ServerLifecycleTest` 全绿 |
-| P2 | `TcpEndpointBase` + `Http1Endpoint`；`Http1Connection` drain 改造；拆出 `Http1ServerOptions` | `Http1EndpointTest`（真实 H1 流量 + drain/abort）全绿；`Http1Server`/`HttpServer` 走桥接保持不变 |
+| P2 | `TcpEndpointBase` + `Http1Endpoint`；`Http1Connection` drain 改造；拆出 `Http1ServerOptions` | `Http1EndpointTest`（真实 H1 流量 + drain）全绿；`Http1Server`/`HttpServer` 走桥接保持不变 |
 | P3 | `Http2Endpoint` + `Http21Endpoint`；H2 GOAWAY drain | `Http2ConnectionTest`/`HttpClientServerInteropTest` 全绿 |
 | P4 | `Http3Endpoint`（吸收 `Http3Server`）+ H3 GOAWAY drain + 端口继承 | `Http3ClientTest`/`Http3ConnectionTest` 全绿 |
 | P5 | `HttpServer` 门面切到 `Server`；删 `Http1Server`/`Http3Server`（迁移其 5 处调用点）；`HttpServerOptions` 余下部分拆分落地 | 全量 `ctest` 绿 |
@@ -797,8 +756,9 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 - H1：空闲 keep-alive 连接在 `stop()` 后 <10ms 内被关闭（不等 `keep_alive_timeout`）
 - H2：`stop()` 后客户端收到 GOAWAY；已开流的响应完整；新建流被拒
 - H3：`stop()` 后新连接握手被拒；已有连接的 in-flight 请求完成
-- `drain_timeout` = 100ms + handler 阻塞在读请求体（客户端声明 Content-Length 但不发） → 到期后 abort 关 transport，读失败返回，`serve()` 在预算内返回
-- `drain_timeout` = 0 → 等价硬停，行为与今天的 `HttpServer::close()` 一致
+- 停机不截断：客户端只发请求头 → handler 阻塞在读 body → `stop()` → 200ms 后客户端才补发 body → 响应完整送达（`Connection: close`），`serve()` 随后返回
+- 慢 drain 不被打断：假 endpoint 延迟 150ms 才释放连接 → `stop_and_wait()` 等满 150ms 才返回
+- 同一 worker 上快/慢两个 endpoint → worker 等两者都结束才销毁 slot
 
 **多 endpoint**
 - 一个 Server 上 3 个 endpoint（明文 H1 / TLS H21 / H3），各自独立 handler，请求分别命中正确 handler
@@ -812,7 +772,8 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 
 | 风险 | 缓解 |
 |------|------|
-| P4 的 `Http3Server` 吸收改动最大，QUIC 侧 drain 是新行为 | 先在 P4 内单独加 H3 drain 测试；`abort()` 路径保持与今天的 `close()` 完全一致，最坏情况退化为现状行为 |
+| P4 的 `Http3Server` 吸收改动最大，QUIC 侧 drain 是新行为 | 先在 P4 内单独加 H3 drain 测试；drain 期间保持 endpoint 打开、只拒新连接，`wait_stopped()` 结束后才 `close()` |
+| 无停机预算：某条连接不结束就停不下来 | 责任落到协议层超时（H1 header/keep-alive/write、H2 read/write、H3 idle）。需要观测时可在 §12「后续可做」的 `stats()` 上暴露「仍在 drain 的连接数」 |
 | 握手中连接与 worker 停机的竞态 | §7.2 的 per-worker 握手 WaitGroup + dispatch 前二次检查 `draining_`；补一个「drain 与 accept 并发」的压力测试 |
 | `Endpoint` 析构晚于 `EndpointWorker` 的顺序依赖 | 在 `finish_shutdown` 里用注释固化，并在 `~Endpoint()` 断言自己的 worker 指针数组已清空 |
 | 门面期 `HttpServer` 与 `Server` 并存造成理解成本 | P5 起在 `HttpServer.h` 顶部标注「迁移期脚手架，新代码请用 `Server`，将于 P7 删除」；P7 必须真的删掉，不留长期双轨（D7） |
@@ -831,7 +792,7 @@ auto *h3  = server.add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
 |------|------|------|
 | Endpoint 用虚接口还是 Ops 函数表 | 虚接口（D1） | §5.2 |
 | TCP accept 是否 `SO_REUSEPORT` 分片 | 保持单 accept loop + 分发（D2），分片列入后续 | §7.2、§12 |
-| 停机是否等 in-flight 请求 | 优雅 drain + 超时兜底（D3） | §6.3、§7.3–7.5 |
+| 停机是否等 in-flight 请求 | 优雅 drain，且**不设超时预算**，由协议决定何时退出（D3） | §5.4、§6.3、§7.3–7.5 |
 | handler 是 server 级还是 endpoint 级 | endpoint 级，server 的作默认值（D4） | §5.3、§7.1 |
 | 配置结构 | 每个 endpoint 自己的 options，拆散 `HttpServerOptions`，无 server 级 options（D5） | §7.1 |
 | 明文 H2 是否支持 `Upgrade: h2c` | 不支持，只做 prior-knowledge（D6） | §7.4 |

@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Task.h>
 #include <fiber/async/WaitGroup.h>
@@ -38,7 +39,6 @@ struct EndpointTrace {
     std::atomic<int> workers_created{0};
     std::atomic<int> workers_destroyed{0};
     std::atomic<int> drain_calls{0};
-    std::atomic<int> abort_calls{0};
     std::atomic<int> destroyed_off_own_loop{0};
 
     std::mutex worker_loops_mu{};
@@ -49,17 +49,16 @@ struct EndpointTrace {
 //
 // - on_serve() blocks on a gate that on_stop() opens, imitating an accept loop
 //   that only returns once its listener is closed.
-// - each worker holds `live_per_worker` fake connections; drain() releases
-//   them only when `finish_on_drain` is set, so a test can force the
-//   drain-deadline path by leaving them outstanding until abort().
+// - each worker holds `live_per_worker` fake connections, released `release_delay`
+//   after drain(). A non-zero delay stands in for a protocol that needs time to
+//   wind down: the server must wait it out rather than cut it short.
 class TestEndpoint final : public Endpoint {
 public:
     struct Config {
         EndpointTrace *trace = nullptr;
         IoErr start_error = IoErr::None;
         std::size_t live_per_worker = 0;
-        bool finish_on_drain = true;
-        std::chrono::milliseconds drain_timeout{std::chrono::milliseconds::max()};
+        std::chrono::milliseconds release_delay{0};
     };
 
     explicit TestEndpoint(Config config) noexcept : config_(config) { serve_gate_.add(); }
@@ -108,8 +107,6 @@ public:
 
     const fiber::net::SocketAddress &local_addr() const noexcept override { return local_addr_; }
 
-    std::chrono::milliseconds drain_timeout() const noexcept override { return config_.drain_timeout; }
-
 private:
     class TestWorker final : public EndpointWorker {
     public:
@@ -133,14 +130,17 @@ private:
 
         void drain() noexcept override {
             config_.trace->drain_calls.fetch_add(1, std::memory_order_relaxed);
-            if (config_.finish_on_drain) {
+            if (config_.release_delay <= std::chrono::milliseconds::zero()) {
                 release_all();
+                return;
             }
-        }
-
-        void abort() noexcept override {
-            config_.trace->abort_calls.fetch_add(1, std::memory_order_relaxed);
-            release_all();
+            // Stand-in for a protocol that takes a while to finish: the server
+            // has no deadline and must wait for it.
+            fiber::async::spawn(*loop_, [this]() -> DetachedTask {
+                co_await fiber::async::sleep(config_.release_delay);
+                release_all();
+                co_return;
+            });
         }
 
         fiber::async::Task<void> wait_stopped() noexcept override {
@@ -284,7 +284,6 @@ TEST(ServerLifecycleTest, ServeReturnsAfterStopFromAnotherThread) {
     EXPECT_EQ(trace.stop_calls.load(), 1);
     EXPECT_EQ(trace.serve_returned.load(), 1);
     EXPECT_EQ(trace.drain_calls.load(), 3);
-    EXPECT_EQ(trace.abort_calls.load(), 0);
     EXPECT_EQ(trace.workers_destroyed.load(), 3);
     EXPECT_EQ(trace.destroyed_off_own_loop.load(), 0);
 
@@ -449,7 +448,7 @@ TEST(ServerLifecycleTest, DestroyingAFreshServerIsSafe) {
     group.join();
 }
 
-TEST(ServerLifecycleTest, DrainReleasesConnectionsWithoutHittingTheDeadline) {
+TEST(ServerLifecycleTest, DrainReleasesLiveConnections) {
     fiber::event::EventLoopGroup group(2);
     group.start();
 
@@ -458,8 +457,6 @@ TEST(ServerLifecycleTest, DrainReleasesConnectionsWithoutHittingTheDeadline) {
     ASSERT_NE(server.add_endpoint<TestEndpoint>(TestEndpoint::Config{
                       .trace = &trace,
                       .live_per_worker = 4,
-                      .finish_on_drain = true,
-                      .drain_timeout = 30s,
               }),
               nullptr);
     ASSERT_TRUE(server.start().has_value());
@@ -467,7 +464,6 @@ TEST(ServerLifecycleTest, DrainReleasesConnectionsWithoutHittingTheDeadline) {
     run_on_loop(group, [&] { return server.stop_and_wait(); });
 
     EXPECT_EQ(trace.drain_calls.load(), 2);
-    EXPECT_EQ(trace.abort_calls.load(), 0); // finished well inside the budget
     EXPECT_EQ(trace.workers_destroyed.load(), 2);
     EXPECT_EQ(server.state(), Server::State::Stopped);
 
@@ -475,7 +471,8 @@ TEST(ServerLifecycleTest, DrainReleasesConnectionsWithoutHittingTheDeadline) {
     group.join();
 }
 
-TEST(ServerLifecycleTest, DrainDeadlineAbortsRemainingConnections) {
+// Shutdown has no deadline: an endpoint that needs time to wind down gets it.
+TEST(ServerLifecycleTest, ShutdownWaitsOutASlowDrain) {
     fiber::event::EventLoopGroup group(2);
     group.start();
 
@@ -484,8 +481,7 @@ TEST(ServerLifecycleTest, DrainDeadlineAbortsRemainingConnections) {
     ASSERT_NE(server.add_endpoint<TestEndpoint>(TestEndpoint::Config{
                       .trace = &trace,
                       .live_per_worker = 2,
-                      .finish_on_drain = false, // only abort() lets these go
-                      .drain_timeout = 50ms,
+                      .release_delay = 150ms,
               }),
               nullptr);
     ASSERT_TRUE(server.start().has_value());
@@ -494,27 +490,35 @@ TEST(ServerLifecycleTest, DrainDeadlineAbortsRemainingConnections) {
     run_on_loop(group, [&] { return server.stop_and_wait(); });
     const auto elapsed = std::chrono::steady_clock::now() - began;
 
+    // Nothing cut the drain short, and nothing gave up on it either.
+    EXPECT_GE(elapsed, 140ms);
+    EXPECT_LT(elapsed, 10s);
     EXPECT_EQ(trace.drain_calls.load(), 2);
-    EXPECT_EQ(trace.abort_calls.load(), 2); // one deadline per worker slot
-    EXPECT_GE(elapsed, 45ms);
-    EXPECT_LT(elapsed, 5s);
+    EXPECT_EQ(trace.workers_destroyed.load(), 2);
     EXPECT_EQ(server.state(), Server::State::Stopped);
 
     group.stop();
     group.join();
 }
 
-TEST(ServerLifecycleTest, ZeroDrainTimeoutAbortsImmediately) {
+// Two endpoints sharing one worker loop wind down at their own pace; the
+// worker is done only when both are.
+TEST(ServerLifecycleTest, WaitsForEveryEndpointOnAWorker) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    EndpointTrace trace;
+    EndpointTrace quick;
+    EndpointTrace slow;
     Server server(group.at(0), {}, &group);
     ASSERT_NE(server.add_endpoint<TestEndpoint>(TestEndpoint::Config{
-                      .trace = &trace,
-                      .live_per_worker = 3,
-                      .finish_on_drain = false,
-                      .drain_timeout = 0ms,
+                      .trace = &quick,
+                      .live_per_worker = 1,
+              }),
+              nullptr);
+    ASSERT_NE(server.add_endpoint<TestEndpoint>(TestEndpoint::Config{
+                      .trace = &slow,
+                      .live_per_worker = 1,
+                      .release_delay = 120ms,
               }),
               nullptr);
     ASSERT_TRUE(server.start().has_value());
@@ -523,43 +527,11 @@ TEST(ServerLifecycleTest, ZeroDrainTimeoutAbortsImmediately) {
     run_on_loop(group, [&] { return server.stop_and_wait(); });
     const auto elapsed = std::chrono::steady_clock::now() - began;
 
-    EXPECT_EQ(trace.abort_calls.load(), 1);
-    EXPECT_LT(elapsed, 1s);
-
-    group.stop();
-    group.join();
-}
-
-TEST(ServerLifecycleTest, EachEndpointGetsItsOwnDrainBudget) {
-    fiber::event::EventLoopGroup group(1);
-    group.start();
-
-    EndpointTrace patient;
-    EndpointTrace impatient;
-    Server server(group.at(0), {}, &group);
-    // Same worker loop, very different budgets: the slow endpoint must not
-    // delay the fast one's abort, and the fast one must not cut the slow one
-    // short.
-    ASSERT_NE(server.add_endpoint<TestEndpoint>(TestEndpoint::Config{
-                      .trace = &patient,
-                      .live_per_worker = 1,
-                      .finish_on_drain = true,
-                      .drain_timeout = 30s,
-              }),
-              nullptr);
-    ASSERT_NE(server.add_endpoint<TestEndpoint>(TestEndpoint::Config{
-                      .trace = &impatient,
-                      .live_per_worker = 1,
-                      .finish_on_drain = false,
-                      .drain_timeout = 40ms,
-              }),
-              nullptr);
-    ASSERT_TRUE(server.start().has_value());
-
-    run_on_loop(group, [&] { return server.stop_and_wait(); });
-
-    EXPECT_EQ(patient.abort_calls.load(), 0);
-    EXPECT_EQ(impatient.abort_calls.load(), 1);
+    EXPECT_GE(elapsed, 110ms);
+    EXPECT_EQ(quick.drain_calls.load(), 1);
+    EXPECT_EQ(slow.drain_calls.load(), 1);
+    EXPECT_EQ(quick.workers_destroyed.load(), 1);
+    EXPECT_EQ(slow.workers_destroyed.load(), 1);
     EXPECT_EQ(server.state(), Server::State::Stopped);
 
     group.stop();

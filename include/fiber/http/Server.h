@@ -2,7 +2,6 @@
 #define FIBER_HTTP_SERVER_H
 
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,23 +36,19 @@ class EndpointWorker : public common::NonCopyable, public common::NonMovable {
 public:
     virtual ~EndpointWorker() = default;
 
-    // Stop admitting new work and ask live connections to finish gracefully:
+    // Stop admitting new work and ask live connections to wind down:
     //   HTTP/1 -> close idle connections now; mark busy ones so they close
     //             after the current exchange (response carries Connection: close)
     //   HTTP/2 -> GOAWAY, already-open streams run to completion
     //   HTTP/3 -> refuse new connections, GOAWAY the live ones
     // Idempotent.
-    virtual void drain() noexcept = 0;
-
-    // Hard teardown once the endpoint's drain budget is spent: abort every
-    // stream and close the transport. Idempotent, and legal after drain().
     //
-    // This bounds blocked I/O, not arbitrary handler code: closing the
-    // transport makes a handler's pending reads and writes fail, but a handler
-    // that never returns for its own reasons (a pure timer, a busy loop) cannot
-    // be unwound -- C++ coroutines have no cancellation -- and still holds up
-    // wait_stopped().
-    virtual void abort() noexcept = 0;
+    // There is no shutdown budget and no forced teardown: when a request must
+    // run to completion, cutting it off is worse than shutting down slowly, so
+    // the protocol decides when a connection is finished. Each protocol layer
+    // is therefore responsible for making sure its connections do terminate --
+    // that is what its own read/write/idle timeouts are for.
+    virtual void drain() noexcept = 0;
 
     // Completes once every resource this worker holds for the endpoint is
     // gone. Awaited exactly once by Server::Worker, but implementations should
@@ -88,12 +83,6 @@ public:
     // Valid after a successful on_start(); reflects the kernel-assigned port
     // when the configured port was 0.
     [[nodiscard]] virtual const net::SocketAddress &local_addr() const noexcept = 0;
-
-    // This endpoint's graceful-shutdown budget. Zero means "do not wait, abort
-    // immediately"; milliseconds::max() means "wait forever". Server::Worker
-    // times each endpoint separately, so a slow protocol cannot hold up a fast
-    // one on the same loop.
-    [[nodiscard]] virtual std::chrono::milliseconds drain_timeout() const noexcept = 0;
 };
 
 // Owns a set of endpoints and the shutdown choreography around them.
@@ -107,6 +96,9 @@ public:
 // The server neither owns nor stops the EventLoopGroup it was handed. Once
 // serve() (or stop_and_wait()) has completed, every listener, connection and
 // per-worker context is gone and the caller may stop and join the loops.
+//
+// Shutdown has no deadline: stop() closes the listeners and asks each endpoint
+// to drain, then waits for the protocols to finish on their own terms.
 class Server : public common::NonCopyable, public common::NonMovable {
 public:
     enum class State : std::uint8_t {
