@@ -629,9 +629,22 @@ ClientHttp1Exchange::advance_chunked_body(mem::IoBuf &read_buf, std::size_t max_
         }
 
         if (code == ParseCode::Again) {
-            if (consumed == 0) {
-                co_return std::unexpected(common::IoErr::Invalid);
+            if (consumed > 0) {
+                continue;
             }
+            if (!allow_read) {
+                co_return ParseCode::Again;
+            }
+            // Incomplete framing (a chunk-size line split across transport reads) is
+            // buffered; extend it with one more read instead of failing the exchange.
+            auto more = co_await read_more(read_buf, max_bytes, read_call_used_io, timeout);
+            if (!more) {
+                co_return std::unexpected(more.error());
+            }
+            if (*more == 0) {
+                co_return std::unexpected(common::IoErr::ConnReset);
+            }
+            allow_read = false;
             continue;
         }
         if (code != ParseCode::Ok && code != ParseCode::Done && code != ParseCode::BodyDone) {
@@ -1900,7 +1913,7 @@ ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
                 out.mark_complete();
                 co_return out;
             }
-            if (*parse_result == ParseCode::Again) {
+            if (*parse_result == ParseCode::Again && out.readable_bytes() != 0) {
                 auto stash_result = stash_pending_buf(read_buf);
                 if (!stash_result) {
                     co_return fail_exchange(stash_result.error());
@@ -1910,15 +1923,22 @@ ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
         }
 
         if (read_buf.readable() == 0) {
-            if (read_call_used_io || out.readable_bytes() != 0) {
+            if (out.readable_bytes() != 0) {
                 auto stash_result = stash_pending_buf(read_buf);
                 if (!stash_result) {
                     co_return fail_exchange(stash_result.error());
                 }
                 co_return out;
             }
-            auto more = co_await read_more(read_buf, std::min(remaining_budget, response_body_parser_.remaining()),
-                                           read_call_used_io, timeout);
+            // An empty, non-complete body would violate the read_body contract
+            // (callers such as http::pipe_http_body treat it as a protocol
+            // error), so when nothing has been delivered yet keep reading even
+            // if this call already performed framing I/O — the same policy the
+            // ContentLength branch above uses.
+            const std::size_t want = response_body_parser_.remaining() == 0
+                                             ? remaining_budget
+                                             : std::min(remaining_budget, response_body_parser_.remaining());
+            auto more = co_await read_more(read_buf, want, read_call_used_io, timeout);
             if (!more) {
                 co_return fail_exchange(more.error());
             }

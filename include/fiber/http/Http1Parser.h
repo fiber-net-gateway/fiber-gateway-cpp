@@ -180,6 +180,9 @@ class ChunkedBodyParser : public common::NonCopyable, public common::NonMovable 
 public:
     void reset() noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    // Payload bytes are only available once the chunk-size line has fully parsed; while the
+    // line is still incomplete size_ holds a partial value that must not surface as payload.
+    [[nodiscard]] std::size_t payload_remaining() const noexcept;
     [[nodiscard]] std::size_t length() const noexcept { return length_; }
     void consume(std::size_t n) noexcept;
     ParseCode execute(mem::IoBuf *buffer) noexcept;

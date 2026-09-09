@@ -416,6 +416,38 @@ TEST(Http1ParserTest, ChunkedBodyParserSpansBuffersAndTrailers) {
     EXPECT_EQ(parser.execute(&third), fiber::http::ParseCode::Done);
 }
 
+TEST(Http1ParserTest, ChunkedBodyParserSplitSizeLineDoesNotSurfacePartialSize) {
+    fiber::http::BodyParser parser;
+    parser.set_chunked();
+
+    // Half of the chunk-size line ("2" of "28\r\n") arrives: the digit is consumed and held in
+    // size_, but it must not surface as payload length until the line has fully parsed.
+    fiber::mem::IoBuf first = make_buf("2");
+    ASSERT_TRUE(first);
+    EXPECT_EQ(parser.execute(&first), fiber::http::ParseCode::Again);
+    EXPECT_EQ(first.readable(), 0u);
+    EXPECT_EQ(parser.remaining(), 0u);
+
+    // The size line completes without any payload byte behind it yet.
+    fiber::mem::IoBuf second = make_buf("8\r\n");
+    ASSERT_TRUE(second);
+    EXPECT_EQ(parser.execute(&second), fiber::http::ParseCode::Again);
+    EXPECT_EQ(second.readable(), 0u);
+    EXPECT_EQ(parser.remaining(), 0x28u);
+
+    // Payload flows once it arrives, and the trailing framing still terminates the body.
+    const std::string payload(0x28, 'x');
+    fiber::mem::IoBuf third = make_buf(payload + "\r\n0\r\n\r\n");
+    ASSERT_TRUE(third);
+    EXPECT_EQ(parser.execute(&third), fiber::http::ParseCode::Ok);
+    EXPECT_EQ(parser.remaining(), 0x28u);
+
+    third.consume(payload.size());
+    parser.consume(payload.size());
+    EXPECT_EQ(parser.remaining(), 0u);
+    EXPECT_EQ(parser.execute(&third), fiber::http::ParseCode::BodyDone);
+}
+
 TEST(Http1ParserTest, ResponseLineParserParsesCompleteStatusLine) {
     fiber::http::ResponseLineParser parser;
 
