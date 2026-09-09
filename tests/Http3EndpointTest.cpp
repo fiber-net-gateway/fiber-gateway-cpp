@@ -14,11 +14,14 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Task.h>
 #include <fiber/common/mem/BufPool.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp3Exchange.h>
 #include <fiber/http/Http3Client.h>
+#include <fiber/http/HttpBodyPipe.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpResponseWriter.h>
 #include <fiber/http/Server.h>
 #include <fiber/http/endpoint/Http1Endpoint.h>
 #include <fiber/http/endpoint/Http3Endpoint.h>
@@ -522,6 +525,128 @@ TEST(Http3EndpointTest, InheritsPortFromTcpEndpoint) {
     EXPECT_EQ(result.body, "shared-port");
 
     running.stop_and_join();
+    group.stop();
+    group.join();
+    client_group.stop();
+    client_group.join();
+}
+
+// Pins the h3 side of the pipe contract: an Auto (no Content-Length) response
+// streamed through pipe_http_body in unbuffered mode turns the source's empty
+// terminator into a terminal-only (fin-only) write, whose success must consume
+// the chain's completion marker so the pipe's completion-progress invariant
+// holds. (The h2 sink violated this; see Http2EndpointTest's twin.)
+constexpr std::string_view kStreamedBody = "0123456789abcdefghijklmnopqrstuvwxyz0123";
+
+class FixedBodySource {
+public:
+    explicit FixedBodySource(std::string_view body) : body_(body) {}
+
+    fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
+    read_body(std::size_t /*max_bytes*/, std::chrono::milliseconds /*timeout*/) noexcept {
+        fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+        if (!served_body_) {
+            served_body_ = true;
+            fiber::mem::IoBuf data = fiber::mem::IoBuf::allocate(body_.size());
+            if (!data) {
+                co_return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+            std::memcpy(data.writable_data(), body_.data(), body_.size());
+            data.commit(body_.size());
+            if (!chunk.append(std::move(data))) {
+                co_return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+            co_return chunk; // payload, not complete yet
+        }
+        if (!served_terminator_) {
+            served_terminator_ = true;
+            chunk.mark_complete(); // empty terminator
+            co_return chunk;
+        }
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+
+    fiber::common::IoResult<void> abort(fiber::common::IoErr /*reason*/) noexcept { return {}; }
+
+private:
+    std::string_view body_;
+    bool served_body_ = false;
+    bool served_terminator_ = false;
+};
+
+TEST(Http3EndpointTest, StreamedAutoBodyThroughPipeCompletes) {
+    TestCredential tls;
+    ASSERT_TRUE(tls.init());
+
+    fiber::event::EventLoopGroup group(1);
+    fiber::event::EventLoopGroup client_group(1);
+    group.start();
+    client_group.start();
+
+    std::promise<fiber::http::HttpBodyPipeResult> pipe_promise;
+    auto pipe_future = pipe_promise.get_future();
+
+    RunningServer running;
+    running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
+    running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
+            .address = {fiber::net::IpAddress::loopback_v4(), 0},
+            .tls = tls_options(*tls.credential),
+            .handler = [&pipe_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                fiber::http::HttpHeaders headers(exchange.pool());
+                auto sent = co_await exchange.send_header(
+                        {
+                                .kind = fiber::http::OutgoingHeaderKind::Final,
+                                .status_code = 200,
+                                .headers = &headers,
+                                .body = fiber::http::HttpBodySpec::Auto(),
+                                .end_stream = false,
+                        },
+                        5s);
+                if (!sent) {
+                    pipe_promise.set_value(std::unexpected(fiber::http::HttpBodyPipeError{
+                            .code = sent.error(), .phase = fiber::http::HttpBodyPipePhase::Validate}));
+                    co_return;
+                }
+                FixedBodySource source(kStreamedBody);
+                auto writer = fiber::http::make_http_response_writer(exchange);
+                auto piped =
+                        co_await fiber::http::pipe_http_body(fiber::http::make_http_body_pipe_reader(source),
+                                                             fiber::http::make_http_body_pipe_writer(writer),
+                                                             fiber::event::EventLoop::current().io_buf_node_pool(),
+                                                             {.read_timeout = 5s,
+                                                              .low_water = fiber::http::kUnbufferedBodyPipeLowWater,
+                                                              .write_timeout = 5s});
+                pipe_promise.set_value(std::move(piped));
+                co_return;
+            },
+    });
+    ASSERT_NE(running.endpoint, nullptr);
+    ASSERT_TRUE(running.server->start().has_value());
+    spawn_serve(running, group.at(0));
+
+    const fiber::net::SocketAddress server_addr = running.endpoint->local_addr();
+
+    std::promise<ClientResult> promise;
+    auto future = promise.get_future();
+    const std::string cert_path = tls.cert.path();
+    fiber::async::spawn(client_group.at(0), [&client_group, server_addr, cert_path, &promise]() {
+        return run_http3_client(&client_group.at(0), server_addr, cert_path, &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(15s), std::future_status::ready);
+    ClientResult result = future.get();
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.status, 200);
+    EXPECT_EQ(result.body, kStreamedBody);
+
+    ASSERT_EQ(pipe_future.wait_for(15s), std::future_status::ready);
+    auto piped = pipe_future.get();
+    ASSERT_TRUE(piped.has_value());
+    EXPECT_EQ(piped->bytes_written, kStreamedBody.size());
+
+    running.stop_and_join();
+    EXPECT_EQ(running.server->state(), Server::State::Stopped);
+
     group.stop();
     group.join();
     client_group.stop();

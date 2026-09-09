@@ -18,12 +18,15 @@
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Task.h>
 #include <fiber/common/mem/BufPool.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp2Exchange.h>
 #include <fiber/http/Http2ClientConnection.h>
+#include <fiber/http/HttpBodyPipe.h>
 #include <fiber/http/HttpClientTlsOptions.h>
 #include <fiber/http/HttpExchange.h>
 #include <fiber/http/HttpHeaders.h>
+#include <fiber/http/HttpResponseWriter.h>
 #include <fiber/http/Server.h>
 #include <fiber/http/endpoint/Http2Endpoint.h>
 #include <fiber/net/IpAddress.h>
@@ -867,6 +870,184 @@ TEST(Http2EndpointTest, ConcurrentTlsHandshakesAndStopReleaseEveryConnection) {
     client_group.join();
     group.stop();
     group.join();
+}
+
+// ---- streamed (no Content-Length) body through pipe_http_body ----
+
+constexpr std::string_view kStreamedBody = "0123456789abcdefghijklmnopqrstuvwxyz0123";
+
+// A body source whose payload and terminator arrive as separate reads, the
+// shape an upstream delivers when its final chunked write lands in its own
+// TCP segment. With an unbuffered pipe (low_water = 0) that turns the
+// terminator into a terminal-only write on the sink.
+class FixedBodySource {
+public:
+    explicit FixedBodySource(std::string_view body) : body_(body) {}
+
+    fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
+    read_body(std::size_t /*max_bytes*/, std::chrono::milliseconds /*timeout*/) noexcept {
+        fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+        if (!served_body_) {
+            served_body_ = true;
+            fiber::mem::IoBuf data = fiber::mem::IoBuf::allocate(body_.size());
+            if (!data) {
+                co_return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+            std::memcpy(data.writable_data(), body_.data(), body_.size());
+            data.commit(body_.size());
+            if (!chunk.append(std::move(data))) {
+                co_return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+            co_return chunk; // payload, not complete yet
+        }
+        if (!served_terminator_) {
+            served_terminator_ = true;
+            chunk.mark_complete(); // empty terminator
+            co_return chunk;
+        }
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+
+    fiber::common::IoResult<void> abort(fiber::common::IoErr /*reason*/) noexcept { return {}; }
+
+private:
+    std::string_view body_;
+    bool served_body_ = false;
+    bool served_terminator_ = false;
+};
+
+// Like run_http2_client but reading a length-unknown body to its completion
+// marker instead of one bounded read.
+DetachedTask run_http2_streaming_client(fiber::event::EventLoop *loop, std::uint16_t port,
+                                        std::promise<ClientResult> *promise) {
+    ClientResult result;
+    fiber::http::HttpClientTlsOptions tls;
+    tls.server_name = "localhost";
+
+    fiber::http::Http2ClientConnection connection(*loop);
+    auto connected =
+            co_await connection.connect(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port), 5s, tls);
+    if (!connected) {
+        result.err = connected.error();
+        promise->set_value(std::move(result));
+        co_return;
+    }
+
+    auto run_state = std::make_shared<Http2RunState>();
+    fiber::async::spawn(*loop, [conn = &connection, state = run_state.get()]() { return run_connection(conn, state); });
+
+    fiber::mem::BufPool pool;
+    {
+        fiber::http::ClientHttp2Exchange exchange(connection, pool);
+        auto sent = co_await exchange.send_request_header(
+                {
+                        .method = fiber::http::HttpMethod::Get,
+                        .scheme = "https",
+                        .authority = "localhost",
+                        .path = "/streamed",
+                },
+                true);
+        if (!sent) {
+            result.err = sent.error();
+        } else {
+            auto header = co_await exchange.read_header();
+            if (!header) {
+                result.err = header.error();
+            } else {
+                result.status_code = (*header)->status_code;
+                bool complete = false;
+                while (result.err == fiber::common::IoErr::None && !complete) {
+                    auto chunk = co_await exchange.read_body(64 * 1024);
+                    if (!chunk) {
+                        result.err = chunk.error();
+                        break;
+                    }
+                    complete = chunk->complete();
+                    result.body.append(chain_to_string(std::move(*chunk)));
+                }
+            }
+        }
+    }
+
+    connection.shutdown();
+    for (int i = 0; i < 2500 && !run_state->done.load(std::memory_order_acquire); ++i) {
+        co_await fiber::async::sleep(2ms);
+    }
+    promise->set_value(std::move(result));
+    co_return;
+}
+
+// An Auto (no Content-Length) response streamed through pipe_http_body in
+// unbuffered mode: the source's empty terminator becomes a terminal-only
+// write, whose success must consume the chain's completion marker — otherwise
+// the pipe's completion-progress invariant reports Invalid and the proxy
+// journal records a bogus write_response_body failure for a response the
+// client in fact received intact.
+TEST(Http2EndpointTest, StreamedAutoBodyThroughPipeCompletes) {
+    fiber::event::EventLoopGroup group(1);
+    fiber::event::EventLoopGroup client_group(1);
+    group.start();
+    client_group.start();
+
+    auto credential = make_credential();
+    ASSERT_NE(credential, nullptr);
+
+    std::promise<fiber::http::HttpBodyPipeResult> pipe_promise;
+    auto pipe_future = pipe_promise.get_future();
+
+    auto running = start_server(
+            group, Http2Endpoint::Options{
+                           .tls = tls_options(*credential),
+                           .handler = [&pipe_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                               fiber::http::HttpHeaders headers(exchange.pool());
+                               auto sent = co_await exchange.send_header({
+                                       .kind = fiber::http::OutgoingHeaderKind::Final,
+                                       .status_code = 200,
+                                       .headers = &headers,
+                                       .body = fiber::http::HttpBodySpec::Auto(),
+                                       .end_stream = false,
+                               });
+                               if (!sent) {
+                                   pipe_promise.set_value(std::unexpected(fiber::http::HttpBodyPipeError{
+                                           .code = sent.error(), .phase = fiber::http::HttpBodyPipePhase::Validate}));
+                                   co_return;
+                               }
+                               FixedBodySource source(kStreamedBody);
+                               auto writer = fiber::http::make_http_response_writer(exchange);
+                               auto piped = co_await fiber::http::pipe_http_body(
+                                       fiber::http::make_http_body_pipe_reader(source),
+                                       fiber::http::make_http_body_pipe_writer(writer),
+                                       fiber::event::EventLoop::current().io_buf_node_pool(),
+                                       {.low_water = fiber::http::kUnbufferedBodyPipeLowWater});
+                               pipe_promise.set_value(std::move(piped));
+                               co_return;
+                           },
+                   });
+    ASSERT_NE(running.server, nullptr);
+
+    std::promise<ClientResult> promise;
+    auto client_future = promise.get_future();
+    const std::uint16_t port = running.port;
+    fiber::async::spawn(client_group.at(0), [&client_group, port, &promise]() {
+        return run_http2_streaming_client(&client_group.at(0), port, &promise);
+    });
+
+    ASSERT_EQ(client_future.wait_for(15s), std::future_status::ready);
+    ClientResult result = client_future.get();
+    EXPECT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_EQ(result.status_code, 200);
+    EXPECT_EQ(result.body, kStreamedBody);
+
+    ASSERT_EQ(pipe_future.wait_for(15s), std::future_status::ready);
+    auto piped = pipe_future.get();
+    ASSERT_TRUE(piped.has_value());
+    EXPECT_EQ(piped->bytes_written, kStreamedBody.size());
+
+    running.stop_and_join();
+    group.stop();
+    group.join();
+    client_group.stop();
+    client_group.join();
 }
 
 } // namespace
