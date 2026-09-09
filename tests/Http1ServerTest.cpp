@@ -953,6 +953,96 @@ TEST(Http1ServerTest, ChunkedPostWaitsForCompleteTrailersBeforeLastChunk) {
     delete server;
 }
 
+TEST(Http1ServerTest, ChunkedPostFramingArrivesSeparatelyFromPayload) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            std::string body;
+            for (;;) {
+                auto read_result = co_await exchange.read_body(64);
+                if (!read_result) {
+                    co_await send_final_header(exchange, 400, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
+                                               fiber::http::ResponseConnectionMode::Close, true);
+                    co_return;
+                }
+                const bool last = read_result->complete();
+                if (read_result->readable_bytes() == 0 && !last) {
+                    // read_body must never deliver an empty, non-complete chain: callers such
+                    // as http::pipe_http_body treat that as a protocol error and abort the
+                    // exchange.
+                    co_await send_final_header(exchange, 500, nullptr, fiber::http::ResponseBodySpec::ContentLength(0),
+                                               fiber::http::ResponseConnectionMode::Close, true);
+                    co_return;
+                }
+                if (read_result->readable_bytes() > 0) {
+                    body.append(chain_to_string(std::move(*read_result)));
+                }
+                if (last) {
+                    break;
+                }
+            }
+
+            auto header_result = co_await send_final_header(
+                    exchange, 200, nullptr, fiber::http::ResponseBodySpec::ContentLength(body.size()), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(body.data()), body.size(), true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+
+    int client = connect_client(port);
+    ASSERT_GE(client, 0);
+
+    const char *headers = "POST /split HTTP/1.1\r\n"
+                          "Host: localhost\r\n"
+                          "Transfer-Encoding: chunked\r\n"
+                          "Connection: close\r\n"
+                          "\r\n";
+    ASSERT_EQ(::send(client, headers, std::strlen(headers), 0), static_cast<ssize_t>(std::strlen(headers)));
+
+    std::thread sender([client]() {
+        const char *segments[] = {
+                "2", // half of the chunk-size line
+                "8\r\n", // size line completes, payload not sent yet
+                "0123456789abcdefghijklmnopqrstuvwxyz0123",
+                "\r\n0\r\n\r\n",
+        };
+        for (const char *segment: segments) {
+            std::this_thread::sleep_for(20ms);
+            // MSG_NOSIGNAL: on a regression the server aborts the exchange early and closes
+            // the connection; leftover sends must fail with EPIPE, not kill the process.
+            EXPECT_EQ(::send(client, segment, std::strlen(segment), MSG_NOSIGNAL),
+                      static_cast<ssize_t>(std::strlen(segment)));
+        }
+    });
+
+    std::string response = recv_all(client);
+    sender.join();
+    ::close(client);
+
+    EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("0123456789abcdefghijklmnopqrstuvwxyz0123"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
 TEST(Http1ServerTest, InvalidChunkedPostReturnsBadRequest) {
     fiber::event::EventLoopGroup group(1);
     group.start();

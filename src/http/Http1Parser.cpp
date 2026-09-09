@@ -1022,6 +1022,8 @@ void ChunkedBodyParser::reset() noexcept {
     length_ = 0;
 }
 
+std::size_t ChunkedBodyParser::payload_remaining() const noexcept { return state_ == State::ChunkData ? size_ : 0; }
+
 void ChunkedBodyParser::consume(std::size_t n) noexcept {
     if (n >= size_) {
         size_ = 0;
@@ -1283,7 +1285,7 @@ std::size_t BodyParser::remaining() const noexcept {
         case Type::ContentLength:
             return remaining_;
         case Type::Chunked:
-            return chunked_parser_.size();
+            return chunked_parser_.payload_remaining();
     }
     return 0;
 }
