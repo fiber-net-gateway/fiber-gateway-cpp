@@ -36,6 +36,7 @@ public:
     ReadAwaiter &operator=(ReadAwaiter &&) = delete;
 
     ~ReadAwaiter() {
+        cancel_resume();
         cancel_timer();
         if (queue_ != nullptr) {
             queue_->cancel_read_waiter(this);
@@ -81,6 +82,7 @@ public:
 
     common::IoErr await_resume() noexcept {
         common::IoErr result = result_;
+        cancel_resume();
         cancel_timer();
         if (queue_ != nullptr && queue_->read_waiter_ == this) {
             queue_->read_waiter_ = nullptr;
@@ -145,19 +147,29 @@ private:
         awaiter->complete(common::IoErr::TimedOut);
     }
 
+    // Completions fire on the connection's loop; the cancellable local defer
+    // queue keeps this awaiter safe against hard coroutine destruction while a
+    // resume is queued (an MPSC entry cannot be retracted).
     void post_resume() noexcept {
         if (resume_posted_ || loop_ == nullptr) {
             return;
         }
+        FIBER_ASSERT(loop_->in_loop());
         resume_posted_ = true;
-        loop_->post<ReadAwaiter, &ReadAwaiter::notify_entry_, &ReadAwaiter::on_notify>(*this);
+        loop_->post_local<ReadAwaiter, &ReadAwaiter::resume_entry_, &ReadAwaiter::on_notify>(*this);
+    }
+
+    void cancel_resume() noexcept {
+        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
+            loop_->cancel<ReadAwaiter, &ReadAwaiter::resume_entry_>(*this);
+        }
     }
 
     QuicStreamRecvQueue *queue_ = nullptr;
     std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
     event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
-    event::EventLoop::NotifyEntry notify_entry_{};
+    event::EventLoop::DeferEntry resume_entry_{};
     event::EventLoop::TimerEntry timer_entry_{};
     common::IoErr result_ = common::IoErr::None;
     bool resume_posted_ = false;
