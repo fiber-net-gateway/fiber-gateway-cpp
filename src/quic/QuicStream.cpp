@@ -31,6 +31,7 @@ public:
     WriteAwaiter &operator=(WriteAwaiter &&) = delete;
 
     ~WriteAwaiter() {
+        cancel_resume();
         cancel_timer();
         unlink_connection_window_wait();
         if (stream_ != nullptr) {
@@ -78,6 +79,7 @@ public:
 
     common::IoErr await_resume() noexcept {
         common::IoErr result = result_;
+        cancel_resume();
         cancel_timer();
         unlink_connection_window_wait();
         if (stream_ != nullptr && stream_->write_waiter_ == this) {
@@ -173,19 +175,33 @@ private:
         awaiter->complete(common::IoErr::TimedOut);
     }
 
+    // All completion sources (stream state transitions, timeouts) fire on the
+    // connection's loop, so the resume is queued on the cancellable local defer
+    // queue rather than the MPSC notify queue: a hard-destroyed coroutine (for
+    // example a proxy task discarded by when_any after the response channel
+    // closed) tears this awaiter down while the resume is still queued, and an
+    // MPSC entry cannot be retracted — the loop would later pop and call into
+    // freed memory.
     void post_resume() noexcept {
         if (resume_posted_ || loop_ == nullptr) {
             return;
         }
+        FIBER_ASSERT(loop_->in_loop());
         resume_posted_ = true;
-        loop_->post<WriteAwaiter, &WriteAwaiter::notify_entry_, &WriteAwaiter::on_notify>(*this);
+        loop_->post_local<WriteAwaiter, &WriteAwaiter::resume_entry_, &WriteAwaiter::on_notify>(*this);
+    }
+
+    void cancel_resume() noexcept {
+        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
+            loop_->cancel<WriteAwaiter, &WriteAwaiter::resume_entry_>(*this);
+        }
     }
 
     QuicStream *stream_ = nullptr;
     std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
     event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
-    event::EventLoop::NotifyEntry notify_entry_{};
+    event::EventLoop::DeferEntry resume_entry_{};
     event::EventLoop::TimerEntry timer_entry_{};
     common::IntrusiveListHook peer_data_wait_link_{};
     common::IoErr result_ = common::IoErr::None;

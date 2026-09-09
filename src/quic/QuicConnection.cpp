@@ -438,6 +438,7 @@ public:
     HandshakeAwaiter &operator=(HandshakeAwaiter &&) = delete;
 
     ~HandshakeAwaiter() {
+        cancel_resume();
         cancel_timer();
         if (connection_ != nullptr) {
             connection_->cancel_handshake_wait(*this);
@@ -491,6 +492,7 @@ public:
 
     common::IoErr await_resume() noexcept {
         common::IoErr result = result_;
+        cancel_resume();
         cancel_timer();
         if (connection_ != nullptr) {
             connection_->cancel_handshake_wait(*this);
@@ -554,19 +556,29 @@ private:
         }
     }
 
+    // Completions fire on the connection's loop; the cancellable local defer
+    // queue keeps this awaiter safe against hard coroutine destruction while a
+    // resume is queued (an MPSC entry cannot be retracted).
     void post_resume() noexcept {
         if (resume_posted_ || loop_ == nullptr) {
             return;
         }
+        FIBER_ASSERT(loop_->in_loop());
         resume_posted_ = true;
-        loop_->post<HandshakeAwaiter, &HandshakeAwaiter::notify_entry_, &HandshakeAwaiter::on_notify>(*this);
+        loop_->post_local<HandshakeAwaiter, &HandshakeAwaiter::resume_entry_, &HandshakeAwaiter::on_notify>(*this);
+    }
+
+    void cancel_resume() noexcept {
+        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
+            loop_->cancel<HandshakeAwaiter, &HandshakeAwaiter::resume_entry_>(*this);
+        }
     }
 
     QuicConnection *connection_ = nullptr;
     std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
     event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
-    event::EventLoop::NotifyEntry notify_entry_{};
+    event::EventLoop::DeferEntry resume_entry_{};
     event::EventLoop::TimerEntry timer_entry_{};
     common::IntrusiveListHook wait_link_{};
     common::IoErr result_ = common::IoErr::WouldBlock;
@@ -589,6 +601,7 @@ public:
     LocalStreamAttachAwaiter &operator=(LocalStreamAttachAwaiter &&) = delete;
 
     ~LocalStreamAttachAwaiter() {
+        cancel_resume();
         cancel_timer();
         if (connection_ != nullptr) {
             connection_->cancel_local_stream_attach_wait(*this);
@@ -629,6 +642,7 @@ public:
 
     common::IoErr await_resume() noexcept {
         common::IoErr result = result_;
+        cancel_resume();
         cancel_timer();
         if (connection_ != nullptr) {
             connection_->cancel_local_stream_attach_wait(*this);
@@ -700,13 +714,23 @@ private:
         awaiter->complete(common::IoErr::TimedOut);
     }
 
+    // Completions fire on the connection's loop; the cancellable local defer
+    // queue keeps this awaiter safe against hard coroutine destruction while a
+    // resume is queued (an MPSC entry cannot be retracted).
     void post_resume() noexcept {
         if (resume_posted_ || loop_ == nullptr) {
             return;
         }
+        FIBER_ASSERT(loop_->in_loop());
         resume_posted_ = true;
-        loop_->post<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::notify_entry_,
-                    &LocalStreamAttachAwaiter::on_notify>(*this);
+        loop_->post_local<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::resume_entry_,
+                          &LocalStreamAttachAwaiter::on_notify>(*this);
+    }
+
+    void cancel_resume() noexcept {
+        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
+            loop_->cancel<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::resume_entry_>(*this);
+        }
     }
 
     QuicConnection *connection_ = nullptr;
@@ -714,7 +738,7 @@ private:
     std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
     event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
-    event::EventLoop::NotifyEntry notify_entry_{};
+    event::EventLoop::DeferEntry resume_entry_{};
     event::EventLoop::TimerEntry timer_entry_{};
     common::IntrusiveListHook wait_link_{};
     common::IoErr result_ = common::IoErr::None;
