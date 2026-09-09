@@ -1860,6 +1860,9 @@ void QuicConnection::on_keepalive_timer(QuicConnection *connection) noexcept {
     }
 
     if (connection->has_pending_send_work()) {
+        // Backlog must not reduce the timer to a re-arm loop: give the send pump
+        // another chance to flush stranded work, then keep watching.
+        connection->schedule_send();
         connection->arm_keepalive_timer();
         return;
     }
@@ -3708,6 +3711,14 @@ common::IoResult<void> QuicConnection::on_stream_send_acked(std::uint64_t stream
     auto acked = stream->mark_send_acked(offset, length, fin);
     if (!acked) {
         return std::unexpected(acked.error());
+    }
+    // The acked extents may have been all that held back remaining send work
+    // (e.g. a pending terminal frame); re-queue it here instead of waiting for
+    // unrelated send activity to bail it out. No-op when the stream has no
+    // sendable work or a ticket is already pending.
+    auto queued = queue_stream_frame(*stream);
+    if (!queued) {
+        return std::unexpected(queued.error());
     }
     try_release_stream(*stream);
     return {};
