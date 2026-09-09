@@ -452,16 +452,21 @@ TEST(Http1EndpointTest, DrainWaitsForRequestBodyAndHandlerLifetime) {
     auto reading = reading_body.get_future();
     auto lifetime = std::make_shared<int>(1);
     std::weak_ptr<int> weak = lifetime;
-    Http1Endpoint::Options options{};
-    options.handler = [&, lifetime](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
-        reading_body.set_value();
-        auto body = co_await exchange.read_body(16);
-        EXPECT_TRUE(body);
-        if (body) {
-            co_await write_text(exchange, 200, "body received");
-        }
-    };
-    auto running = start_server(group, std::move(options), &group);
+    // `options` must not outlive the server: on libc++ a moved-from
+    // std::function stays engaged (the move copies small closures), so a
+    // lingering local would keep the handler alive past the final assertion.
+    auto running = [&] {
+        Http1Endpoint::Options options{};
+        options.handler = [&, lifetime](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            reading_body.set_value();
+            auto body = co_await exchange.read_body(16);
+            EXPECT_TRUE(body);
+            if (body) {
+                co_await write_text(exchange, 200, "body received");
+            }
+        };
+        return start_server(group, std::move(options), &group);
+    }();
     lifetime.reset();
     ASSERT_TRUE(running.server);
     int fd = connect_to(running.port);
