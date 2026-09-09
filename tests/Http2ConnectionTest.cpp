@@ -3986,6 +3986,7 @@ struct CapacityObserver {
     std::size_t last_slots = 0;
     bool last_accepts = false;
     bool last_goaway = false;
+    bool last_has_streams = false;
 
     static void on_capacity(void *ctx, fiber::http::Http2Connection &connection) noexcept {
         auto *self = static_cast<CapacityObserver *>(ctx);
@@ -3993,6 +3994,7 @@ struct CapacityObserver {
         self->last_slots = connection.available_local_stream_slots();
         self->last_accepts = connection.accepts_new_local_stream();
         self->last_goaway = connection.peer_goaway_received();
+        self->last_has_streams = connection.has_active_streams();
     }
 };
 
@@ -4337,14 +4339,22 @@ TEST(Http2ConnectionTest, PeerStreamPopulationChangesNotifyCapacity) {
     TestHttp2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
     connection.state_ = fiber::http::Http2Connection::State::Running;
     connection.observe_capacity(&CapacityObserver::on_capacity, &observer);
+    EXPECT_FALSE(connection.has_active_streams());
 
     fiber::http::Http2Stream *stream = connection.create_peer_stream(1);
     ASSERT_NE(stream, nullptr);
     EXPECT_EQ(observer.calls, 1u);
+    EXPECT_TRUE(observer.last_has_streams);
+    EXPECT_EQ(connection.local_active_stream_count(), 0u);
+
+    auto retained = stream->lease();
 
     stream->close(fiber::common::IoErr::Canceled);
     connection.try_release_stream(*stream);
     EXPECT_EQ(observer.calls, 2u);
+    EXPECT_FALSE(observer.last_has_streams);
+    EXPECT_FALSE(connection.has_active_streams());
+    EXPECT_TRUE(retained);
 }
 
 TEST(Http2ConnectionTest, ReducedPeerLimitWaitsForActiveStreamCountToFallBelowIt) {

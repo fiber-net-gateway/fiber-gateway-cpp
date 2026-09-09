@@ -2,6 +2,7 @@
 #define FIBER_HTTP_HTTP2_SERVER_CONNECTION_H
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <utility>
@@ -14,6 +15,7 @@
 #include "../event/EventLoop.h"
 #include "Http2CloseGate.h"
 #include "Http2Connection.h"
+#include "Http2ServerOptions.h"
 #include "HttpTransport.h"
 #include "ServerRequestFactory.h"
 
@@ -30,7 +32,8 @@ class Http2ServerConnection : public common::NonCopyable, public common::NonMova
 public:
     // `request_factory` must outlive this connection.
     Http2ServerConnection(event::EventLoop &loop, Http2Connection::Options options,
-                          ServerRequestFactory &request_factory) noexcept;
+                          ServerRequestFactory &request_factory,
+                          std::chrono::milliseconds idle_timeout = Http2ServerOptions{}.idle_timeout) noexcept;
     ~Http2ServerConnection();
 
     // Starts the session; on success the transport is owned and driven to
@@ -59,10 +62,16 @@ private:
     static const Http2Connection::Ops &connection_ops() noexcept;
     static Http2Stream::Lease create_peer_stream(void *ctx, std::uint32_t id, Http2Connection &conn) noexcept;
     static void on_state_change(void *ctx, Http2Connection &connection) noexcept;
+    static void on_capacity_change(void *ctx, Http2Connection &connection) noexcept;
+    static void on_idle_timer(Http2ServerConnection *connection) noexcept;
+    void sync_idle_timer() noexcept;
+    void cancel_idle_timer() noexcept;
     event::EventLoop *loop_;
     ServerRequestFactory *request_factory_;
     Http2Connection conn_;
     Http2CloseGate close_gate_;
+    const std::chrono::milliseconds idle_timeout_;
+    event::EventLoop::TimerEntry idle_timer_entry_{};
     // Membership slot in the owning worker's list (Http2Stream::owned_hook_
     // pattern: private hook, friend reaches it by offset).
     common::IntrusiveListHook worker_hook_{};

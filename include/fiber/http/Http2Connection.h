@@ -58,6 +58,9 @@ public:
         Http2Stream::Lease (*create_peer_stream)(void *ctx, std::uint32_t stream_id,
                                                  Http2Connection &connection) noexcept = nullptr;
         void (*on_state_change)(void *ctx, Http2Connection &connection) noexcept = nullptr;
+        // Reports updated capacity and attachment changes for streams in either
+        // direction. Reentrant notifications may coalesce. Closing may omit
+        // detach notifications; owners must also observe on_state_change.
         void (*on_capacity_change)(void *ctx, Http2Connection &connection) noexcept = nullptr;
     };
 
@@ -119,6 +122,9 @@ public:
     void shutdown(common::IoErr reason = common::IoErr::Canceled) noexcept;
     void graceful_shutdown() noexcept;
     [[nodiscard]] State state() const noexcept { return state_; }
+    // Includes locally and remotely initiated, and half-closed, streams.
+    // Query on the owning event loop; detached leases do not count.
+    [[nodiscard]] bool has_active_streams() const noexcept { return !streams_.empty(); }
     [[nodiscard]] bool peer_settings_received() const noexcept { return peer_settings_received_; }
     [[nodiscard]] bool peer_enable_connect_protocol() const noexcept { return peer_enable_connect_protocol_; }
 

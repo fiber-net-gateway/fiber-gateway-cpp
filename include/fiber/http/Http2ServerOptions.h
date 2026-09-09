@@ -14,6 +14,10 @@ struct Http2ServerOptions {
     // Advertise SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 8441), which WebSocket
     // over HTTP/2 needs.
     bool enable_connect_protocol = false;
+    // Maximum continuous time with no attached streams while Running.
+    // Control frames do not refresh this deadline. max() disables it;
+    // zero schedules immediate graceful retirement. Negative values are invalid.
+    std::chrono::milliseconds idle_timeout{std::chrono::seconds(70)};
 };
 
 } // namespace fiber::http

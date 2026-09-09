@@ -487,6 +487,52 @@ TEST(Http2EndpointTest, PlaintextWithoutHttp1ServesPriorKnowledgeH2c) {
     client_group.join();
 }
 
+TEST(Http2EndpointTest, ConfiguredIdleTimeoutClosesWithoutAnyRequest) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    Http2Endpoint::Options options;
+    options.allow_http1 = false;
+    options.http2.read_timeout = std::chrono::milliseconds::max();
+    options.http2.idle_timeout = 100ms;
+    auto running = start_server(group, options);
+    ASSERT_NE(running.server, nullptr);
+
+    int fd = connect_to(running.port);
+    ASSERT_GE(fd, 0);
+    timeval timeout{2, 0};
+    ASSERT_EQ(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+    std::string preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    preface.append("\0\0\0\x04\0\0\0\0\0", 9);
+    EXPECT_EQ(::send(fd, preface.data(), preface.size(), MSG_NOSIGNAL), static_cast<ssize_t>(preface.size()));
+    const std::string received = recv_all(fd);
+    std::string goaway(17, '\0');
+    fiber::http::encode_http2_frame_header(reinterpret_cast<std::uint8_t *>(goaway.data()), 8,
+                                           fiber::http::Http2FrameType::Goaway, 0, 0);
+    EXPECT_NE(received.find(goaway), std::string::npos);
+    char byte = 0;
+    EXPECT_EQ(::recv(fd, &byte, 1, 0), 0);
+    ::close(fd);
+
+    running.stop_and_join();
+    group.stop();
+    group.join();
+}
+
+TEST(Http2EndpointTest, RejectsNegativeIdleTimeoutBeforeListening) {
+    fiber::event::EventLoopGroup group(1);
+    Server server(group.at(0), fiber::http::HttpHandler{});
+    Http2Endpoint::Options options;
+    options.address = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0);
+    options.http2.idle_timeout = -1ms;
+    auto *endpoint = server.add_endpoint<Http2Endpoint>(options);
+    ASSERT_NE(endpoint, nullptr);
+    auto started = server.start();
+    ASSERT_FALSE(started);
+    EXPECT_EQ(started.error(), fiber::common::IoErr::Invalid);
+    EXPECT_EQ(endpoint->local_addr().port(), 0);
+    EXPECT_EQ(server.state(), Server::State::Created);
+}
+
 // An h2 session with no streams in flight is the HTTP/2 equivalent of an idle
 // keep-alive connection: GOAWAY closes it out immediately, so shutdown does not
 // wait on a client that is merely still connected.
