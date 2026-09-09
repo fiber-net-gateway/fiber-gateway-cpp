@@ -704,6 +704,13 @@ common::IoErr ClientHttp2Request::SendRequestBodySomeOp::on_encode(ClientHttp2Re
         if (err != common::IoErr::None) {
             return err;
         }
+        // The terminal-only batch (empty complete chain) consumed the borrowed
+        // chain's completion marker, same as the data branch below: callers
+        // (http::pipe_http_body) require a successful terminal write to flip
+        // complete() to false or their completion-progress invariant trips.
+        if (chunk_ != nullptr) {
+            chunk_->clear_complete();
+        }
         result.flow_controlled_bytes = 0;
         result.operation_final_batch = true;
         return common::IoErr::None;
