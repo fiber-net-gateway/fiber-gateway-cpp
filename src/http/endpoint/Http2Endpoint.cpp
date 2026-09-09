@@ -13,6 +13,9 @@ Http2Endpoint::Http2Endpoint(Options options) noexcept :
     TcpEndpointBase(options.address, options.listen, options.tcp, options.tls), options_(std::move(options)) {}
 
 common::IoResult<void> Http2Endpoint::on_start(Server &server) noexcept {
+    if (options_.http2.idle_timeout < std::chrono::milliseconds::zero()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
     auto started = TcpEndpointBase::on_start(server);
     if (!started) {
         return started;
@@ -99,7 +102,8 @@ async::Task<void> Http2Endpoint::serve_http1(Http2EndpointWorker &worker,
 
 async::Task<void> Http2Endpoint::serve_http2(Http2EndpointWorker &worker,
                                              std::unique_ptr<HttpTransport> transport) noexcept {
-    Http2ServerConnection connection(worker.loop(), make_connection_options(), *request_factory_);
+    Http2ServerConnection connection(worker.loop(), make_connection_options(), *request_factory_,
+                                     options_.http2.idle_timeout);
     if (connection.start(std::move(transport)) != common::IoErr::None) {
         // A connection that reached Closed still has to be awaited so its
         // teardown completes before the frame goes away.
