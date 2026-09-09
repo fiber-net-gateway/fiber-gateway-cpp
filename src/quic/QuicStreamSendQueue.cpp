@@ -171,7 +171,14 @@ QuicStreamSendQueue::encode_stream_frame(std::uint64_t stream_id, std::uint8_t *
     mem::IoBufNode *cur = ready_head_;
 
     if (cur == nullptr) {
-        if (!has_pending_fin() || buffered_bytes() > 0) {
+        // A fin-only STREAM frame at offset = final_size is deliverable while earlier
+        // extents are still inflight: offsets are absolute and the peer reassembles
+        // out of order, so the FIN must not wait for the body's ACK. Requiring
+        // buffered_bytes() == 0 stranded the terminal frame on connections with no
+        // further send activity after that ACK (response body never ends for the
+        // client). Pending *ready* data still holds the FIN back so the final
+        // extent can carry it instead (encode path below).
+        if (!has_pending_fin() || ready_bytes_ > 0) {
             return result;
         }
 
