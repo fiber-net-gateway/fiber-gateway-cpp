@@ -1520,23 +1520,22 @@ void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
     if (connection->loop_ == nullptr || !connection->loop_->in_loop()) {
         return;
     }
-    connection->cancel_all_timers();
-
-    // RFC 9000 §10.1: idle timeout is silent — discard state without sending CC.
-    connection->idle_send_timer_set_ = false;
+    // RFC 9000 §10.1: idle timeout is silent -- discard state without sending a
+    // CONNECTION_CLOSE. enter_closed() is that silent path; enter_closing() is
+    // the one that queues CC frames. Keep it that way: this caller depends on
+    // enter_closed() never putting anything on the wire.
+    //
+    // Streams still in flight are torn down like any other close. QuicStream::
+    // close() reports Canceled to readers and writers whatever error code it is
+    // given, and the connection is already Closed by then, so no STOP_SENDING or
+    // RESET_STREAM goes out either.
     connection->close_info_ = QuicCloseInfo{
             .source = QuicCloseSource::IdleTimeout,
             .frame_kind = QuicCloseFrameKind::Transport,
             .error_code = static_cast<std::uint64_t>(QuicErrorCode::NoError),
             .frame_type = 0,
     };
-    connection->transition_state(QuicConnectionState::Closed);
-    connection->close_all_streams(connection->close_info_.error_code);
-    connection->streams_.clear();
-
-    if (connection->endpoint_ != nullptr) {
-        connection->endpoint_->detach_connection(*connection);
-    }
+    connection->enter_closed();
 }
 
 void QuicConnection::on_close_timer(QuicConnection *connection) noexcept {
