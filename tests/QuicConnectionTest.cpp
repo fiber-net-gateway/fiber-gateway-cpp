@@ -230,6 +230,22 @@ fiber::async::DetachedTask mark_closed_after_delay(fiber::quic::QuicConnection *
     closed->store(true, std::memory_order_relaxed);
 }
 
+fiber::async::DetachedTask wait_established_into(fiber::quic::QuicConnection *conn, std::chrono::milliseconds timeout,
+                                                 std::promise<fiber::common::IoErr> *done) {
+    auto result = co_await conn->wait_established(timeout);
+    done->set_value(result ? fiber::common::IoErr::None : result.error());
+    fiber::event::EventLoop::current().stop();
+}
+
+fiber::async::DetachedTask wait_established_through_idle_timeout(fiber::quic::QuicConnection *conn,
+                                                                 std::chrono::milliseconds timeout,
+                                                                 std::promise<fiber::common::IoErr> *done) {
+    conn->arm_idle_timer();
+    auto result = co_await conn->wait_established(timeout);
+    done->set_value(result ? fiber::common::IoErr::None : result.error());
+    fiber::event::EventLoop::current().stop();
+}
+
 fiber::async::DetachedTask grant_max_stream_data_after_delay(fiber::quic::QuicConnection *conn, std::uint64_t stream_id,
                                                              std::uint64_t limit, std::atomic<bool> *started) {
     co_await fiber::async::sleep(std::chrono::milliseconds(20));
@@ -1144,6 +1160,54 @@ TEST(QuicConnectionTest, IdleTimerMarksClosed) {
 
     ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_EQ(future.get(), fiber::quic::QuicConnectionState::Closed);
+    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
+
+    group.join();
+}
+
+// Both closes below reach Closed without going through enter_closed(), which
+// used to be the only path that woke handshake waiters. transition_state() is
+// what makes them equivalent: a waiter must not sit out its own timeout just
+// because the connection died on a less-travelled path.
+TEST(QuicConnectionTest, IdleTimerWakesHandshakeWaiters) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.loop = &group.at(0);
+    options.transport.max_idle_timeout = std::chrono::milliseconds(5);
+    fiber::quic::QuicConnection conn(options);
+
+    std::promise<fiber::common::IoErr> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return wait_established_through_idle_timeout(&conn, std::chrono::seconds(5), &done); });
+
+    // Far below the waiter's own 5s timeout: only the idle close can resume it.
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_EQ(future.get(), fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
+
+    group.join();
+}
+
+TEST(QuicConnectionTest, MarkClosedWakesHandshakeWaiters) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.loop = &group.at(0);
+    fiber::quic::QuicConnection conn(options);
+
+    std::promise<fiber::common::IoErr> done;
+    auto future = done.get_future();
+    std::atomic<bool> closed{false};
+    fiber::async::spawn(group.at(0), [&]() { return wait_established_into(&conn, std::chrono::seconds(5), &done); });
+    fiber::async::spawn(group.at(0), [&]() { return mark_closed_after_delay(&conn, &closed); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(closed.load(std::memory_order_relaxed));
+    EXPECT_EQ(future.get(), fiber::common::IoErr::Canceled);
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
 
     group.join();

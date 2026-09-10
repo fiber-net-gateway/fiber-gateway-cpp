@@ -890,6 +890,12 @@ private:
     void close_all_streams(std::uint64_t error_code) noexcept;
     void clear_frames_for_detach() noexcept;
     void clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept;
+    // The single writer of state_. Every party that parks on connection state
+    // is re-evaluated here, so a new transition site cannot forget to wake one.
+    // Waiters resume through the loop, never inline, so a caller may keep
+    // working after the transition. Set close_info_ before transitioning:
+    // handshake_wait_result() reads it.
+    void transition_state(QuicConnectionState next) noexcept;
     void enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept;
     void enter_closing(QuicCloseInfo info, bool immediate = false) noexcept;
     void enter_draining(QuicCloseInfo info) noexcept;
@@ -913,13 +919,23 @@ private:
     [[nodiscard]] common::IoErr handshake_wait_result(bool confirmed = false) const noexcept;
     void wait_for_handshake(HandshakeAwaiter &awaiter) noexcept;
     void cancel_handshake_wait(HandshakeAwaiter &awaiter) noexcept;
+    // WouldBlock means "conditions changed, re-evaluate": each waiter is
+    // completed only once handshake_wait_result() gives it a terminal answer.
+    // Any other value completes every waiter with it.
     void notify_handshake_waiters(common::IoErr result) noexcept;
     void reset_after_retry() noexcept;
     [[nodiscard]] common::IoResult<void> start_preferred_path_validation() noexcept;
     void wait_for_local_stream_attach(LocalStreamAttachAwaiter &awaiter) noexcept;
     void cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
-    void notify_local_stream_attach_waiters(QuicStreamType type, common::IoErr result = common::IoErr::None) noexcept;
-    void notify_all_local_stream_attach_waiters(common::IoErr result = common::IoErr::None) noexcept;
+    // None once a stream of this type can be attached, Canceled once it never
+    // can be again, WouldBlock while the waiter should stay parked.
+    [[nodiscard]] common::IoErr local_stream_attach_wait_result(QuicStreamType type) const noexcept;
+    // As with notify_handshake_waiters, WouldBlock re-evaluates per waiter
+    // through local_stream_attach_wait_result() and is the default: callers
+    // report that conditions moved, not what each waiter should conclude.
+    void notify_local_stream_attach_waiters(QuicStreamType type,
+                                            common::IoErr result = common::IoErr::WouldBlock) noexcept;
+    void notify_all_local_stream_attach_waiters(common::IoErr result = common::IoErr::WouldBlock) noexcept;
     void attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept;
     void detach_from_endpoint() noexcept;
     void retain() noexcept;
