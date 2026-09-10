@@ -21,6 +21,7 @@
 #include "QuicCongestion.h"
 #include "QuicConnectionId.h"
 #include "QuicFrame.h"
+#include "QuicHandshakeGate.h"
 #include "QuicPacer.h"
 #include "QuicPacketNumberSpace.h"
 #include "QuicPath.h"
@@ -828,8 +829,6 @@ public:
     SendQueueEntry send_queue_entry{};
 
 private:
-    class HandshakeAwaiter;
-
     struct PeerStreamLimitWindow {
         std::uint64_t concurrent_limit = 0;
         std::uint64_t opened_count = 0;
@@ -950,13 +949,6 @@ private:
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
     void cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) noexcept;
     void notify_peer_data_waiters(common::IoErr result = common::IoErr::None) noexcept;
-    [[nodiscard]] common::IoErr handshake_wait_result(bool confirmed = false) const noexcept;
-    void wait_for_handshake(HandshakeAwaiter &awaiter) noexcept;
-    void cancel_handshake_wait(HandshakeAwaiter &awaiter) noexcept;
-    // WouldBlock means "conditions changed, re-evaluate": each waiter is
-    // completed only once handshake_wait_result() gives it a terminal answer.
-    // Any other value completes every waiter with it.
-    void notify_handshake_waiters(common::IoErr result) noexcept;
     void reset_after_retry() noexcept;
     [[nodiscard]] common::IoResult<void> start_preferred_path_validation() noexcept;
     void attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept;
@@ -1031,10 +1023,9 @@ private:
     std::uint64_t peer_max_data_ = 0;
     std::uint64_t peer_data_reserved_ = 0;
     std::uint64_t last_data_blocked_limit_ = 0;
+    QuicHandshakeGate handshake_gate_{*this};
     common::IntrusiveListHook *peer_data_wait_head_ = nullptr;
     common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
-    common::IntrusiveListHook *handshake_wait_head_ = nullptr;
-    common::IntrusiveListHook *handshake_wait_tail_ = nullptr;
     bool data_blocked_reported_ = false;
     bool idle_send_timer_set_ = false;
     bool has_server_initial_source_connection_id_ = false;
