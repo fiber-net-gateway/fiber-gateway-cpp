@@ -223,6 +223,13 @@ void Http3Connection::end_server_request() noexcept {
     }
     --live_server_requests_;
     server_request_group_.done();
+    notify_active_request_count_change();
+}
+
+void Http3Connection::notify_active_request_count_change() noexcept {
+    if (options_.ops.on_active_request_count_change != nullptr) {
+        options_.ops.on_active_request_count_change(options_.owner, *this);
+    }
 }
 
 std::uint64_t Http3Connection::goaway_request_id() const noexcept {
@@ -278,6 +285,7 @@ void Http3Connection::handle_peer_stream_attached(quic::QuicStream &stream) noex
         // Balanced by end_server_request() when the request is destroyed.
         server_request_group_.add();
         ++live_server_requests_;
+        notify_active_request_count_change();
         request->start_read_loop(*loop, *this);
         return;
     }
