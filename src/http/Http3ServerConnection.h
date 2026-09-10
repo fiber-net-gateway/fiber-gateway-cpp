@@ -42,6 +42,8 @@ public:
     // Starts the HTTP/3 side (control streams, SETTINGS). Loop-affine.
     void start() noexcept;
 
+    [[nodiscard]] bool idle_timer_armed() const noexcept { return idle_timer_.is_in_heap(); }
+
     // GOAWAY: the peer opens no new requests and the ones already running
     // finish, after which the session closes itself.
     void graceful_shutdown() noexcept { h3_.graceful_shutdown(); }
@@ -56,6 +58,12 @@ private:
     [[nodiscard]] static quic::QuicStream::Lease create_server_request(void *owner, std::uint64_t stream_id,
                                                                        Http3Connection &conn) noexcept;
     static void destroy_connection(void *owner, quic::QuicConnection &connection) noexcept;
+    // Http3Connection reports every change in the number of running requests;
+    // the session is retired once it has had none for idle_connection_timeout.
+    static void on_active_request_count_change(void *owner, Http3Connection &conn) noexcept;
+    static void on_idle_timeout(Http3ServerConnection *connection) noexcept;
+    void update_idle_timer() noexcept;
+    void cancel_idle_timer() noexcept;
     static async::DetachedTask run_start(Http3ServerConnection *connection) noexcept;
     static async::DetachedTask run_cleanup(Http3ServerConnection *connection) noexcept;
 
@@ -66,6 +74,7 @@ private:
     quic::QuicConnection quic_;
     Http3Connection h3_;
     async::WaitGroup tasks_{};
+    event::EventLoop::TimerEntry idle_timer_{};
     // Membership slot in the owning Http3ConnectionRegistry's list.
     common::IntrusiveListHook worker_hook_{};
     bool cleanup_started_ = false;

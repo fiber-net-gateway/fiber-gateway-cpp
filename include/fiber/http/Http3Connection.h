@@ -41,6 +41,17 @@ public:
     struct Ops {
         quic::QuicStream::Lease (*create_server_request)(void *owner, std::uint64_t stream_id,
                                                          Http3Connection &conn) noexcept = nullptr;
+        // The number of requests this connection is serving changed. Read the
+        // new value from active_server_request_count().
+        //
+        // QUIC cannot raise this: a healthy HTTP/3 session always holds four
+        // long-lived control streams, so its own stream count never reaches
+        // zero and never distinguishes a request from a control stream.
+        //
+        // Runs inline on the connection's loop and must not destroy the owner or
+        // the connection. Teardown does not report the requests it abandons, so
+        // an owner must not treat "count reached zero" as its only signal.
+        void (*on_active_request_count_change)(void *owner, Http3Connection &conn) noexcept = nullptr;
     };
 
     struct Options {
@@ -75,6 +86,9 @@ public:
     [[nodiscard]] bool peer_control_stream_seen() const noexcept { return peer_control_seen_; }
     [[nodiscard]] bool peer_qpack_encoder_stream_seen() const noexcept { return peer_qpack_encoder_seen_; }
     [[nodiscard]] bool peer_qpack_decoder_stream_seen() const noexcept { return peer_qpack_decoder_seen_; }
+    // Requests accepted from the peer that are still running. Control and QPACK
+    // streams are not counted: this is the connection's application load.
+    [[nodiscard]] std::size_t active_server_request_count() const noexcept { return live_server_requests_; }
     [[nodiscard]] bool peer_goaway_received() const noexcept { return peer_goaway_received_; }
     [[nodiscard]] std::uint64_t peer_goaway_id() const noexcept { return peer_goaway_id_; }
     [[nodiscard]] bool accepting_requests() const noexcept {
@@ -131,6 +145,7 @@ private:
     void close_from_reader(Http3ErrorCode error) noexcept;
     [[nodiscard]] common::IoResult<void> apply_peer_goaway(std::uint64_t id) noexcept;
     void reject_client_requests(std::uint64_t goaway_id) noexcept;
+    void notify_active_request_count_change() noexcept;
     void detach_client_requests(Http3ErrorCode error) noexcept;
     async::DetachedTask run_client_graceful_shutdown(Http3ErrorCode error) noexcept;
     async::DetachedTask run_server_graceful_shutdown(Http3ErrorCode error) noexcept;
