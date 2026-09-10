@@ -1453,6 +1453,68 @@ TEST(QuicConnectionTest, IdleTimeoutClosesSilentlyAndAbortsLiveStreams) {
     group.join();
 }
 
+// A keepalive PING is only useful if the peer's answer beats the idle timeout,
+// so the configured interval is capped at half of it. Only the upper end: a
+// shorter interval is a legitimate request, since a NAT binding can expire long
+// before an idle timeout measured in minutes.
+TEST(QuicConnectionTest, KeepaliveDelayIsCappedAtHalfTheIdleTimeout) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.transport.max_idle_timeout = std::chrono::milliseconds(400);
+
+    {
+        // Under the cap: honoured as configured.
+        options.keepalive_interval = std::chrono::milliseconds(50);
+        fiber::quic::QuicConnection conn(options);
+        EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(50));
+    }
+    {
+        // Between half and the whole timeout: capped. This is the case the old
+        // one-sided clamp let through, leaving no room for the answer.
+        options.keepalive_interval = std::chrono::milliseconds(300);
+        fiber::quic::QuicConnection conn(options);
+        EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(200));
+    }
+    {
+        // At or beyond the timeout: capped just the same.
+        options.keepalive_interval = std::chrono::milliseconds(4000);
+        fiber::quic::QuicConnection conn(options);
+        EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(200));
+    }
+    {
+        // Zero means off, and stays off whatever the idle timeout is.
+        options.keepalive_interval = std::chrono::milliseconds::zero();
+        fiber::quic::QuicConnection conn(options);
+        EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds::zero());
+    }
+}
+
+TEST(QuicConnectionTest, KeepaliveDelayWithoutAnIdleTimeoutIsUncapped) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.transport.max_idle_timeout = std::chrono::milliseconds::zero();
+    options.keepalive_interval = std::chrono::milliseconds(4000);
+    fiber::quic::QuicConnection conn(options);
+    EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(4000));
+}
+
+// The cap follows the negotiated timeout, so a peer that advertises a shorter
+// one tightens a keepalive that was fine against the local value.
+TEST(QuicConnectionTest, KeepaliveDelayFollowsThePeerNegotiatedIdleTimeout) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
+    options.transport.max_idle_timeout = std::chrono::milliseconds(30000);
+    options.keepalive_interval = std::chrono::milliseconds(5000);
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(5000));
+
+    auto params = valid_server_peer_params(options);
+    params.max_idle_timeout = 6000;
+    auto applied = conn.apply_peer_transport_params(params);
+    ASSERT_TRUE(applied.has_value()) << static_cast<int>(applied.error());
+
+    ASSERT_EQ(conn.effective_idle_timeout(), std::chrono::milliseconds(6000));
+    EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(3000));
+}
+
 TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
     fiber::event::EventLoopGroup group(1);
     group.start();

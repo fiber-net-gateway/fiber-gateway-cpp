@@ -1269,19 +1269,28 @@ void QuicConnection::cancel_close_timer() noexcept {
 }
 
 std::chrono::milliseconds QuicConnection::keepalive_delay() const noexcept {
-    std::chrono::milliseconds delay = options_.keepalive_interval;
+    const std::chrono::milliseconds delay = options_.keepalive_interval;
     if (delay.count() <= 0) {
-        return std::chrono::milliseconds{0};
+        return std::chrono::milliseconds{0}; // keepalive disabled
     }
 
     const std::chrono::milliseconds idle = effective_idle_timeout();
-    if (idle.count() > 0 && delay >= idle) {
-        delay = idle / 2;
-        if (delay.count() <= 0) {
-            delay = idle;
-        }
+    if (idle.count() <= 0) {
+        return delay; // no idle timeout to stay ahead of
     }
-    return delay;
+
+    // A PING only earns its keep if the peer's answer can arrive before the idle
+    // timeout expires, so cap at half the negotiated timeout however it was
+    // configured -- and note that timeout is negotiated, so the peer's transport
+    // parameters can lower it under a value that was fine when it was set.
+    //
+    // Only the upper end is capped. Asking for something shorter is legitimate:
+    // a NAT binding can expire long before an idle timeout measured in minutes.
+    std::chrono::milliseconds cap = idle / 2;
+    if (cap.count() <= 0) {
+        cap = idle; // a 1ms idle timeout halves to zero, which would read as "off"
+    }
+    return delay < cap ? delay : cap;
 }
 
 void QuicConnection::arm_keepalive_timer() noexcept {

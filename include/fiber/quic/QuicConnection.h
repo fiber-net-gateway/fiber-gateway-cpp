@@ -712,6 +712,11 @@ public:
     void on_packet_processed() noexcept;
     void on_ack_eliciting_packet_sent() noexcept;
     [[nodiscard]] std::chrono::milliseconds effective_idle_timeout() const noexcept;
+    // How long the connection stays silent before it sends a keepalive PING.
+    // Zero when keepalive is off, which is the default: RFC 9000 10.1.2 leaves
+    // deferring the idle timeout to the application, and warns that doing it for
+    // a connection unlikely to be used again wastes both endpoints' resources.
+    [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool idle_timer_armed() const noexcept { return idle_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool close_timer_armed() const noexcept { return close_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool keepalive_timer_armed() const noexcept { return keepalive_timer_entry_.is_in_heap(); }
@@ -960,7 +965,6 @@ private:
     void cancel_all_timers_quiesced() noexcept;
     [[nodiscard]] bool has_pending_send_work() const noexcept;
     [[nodiscard]] bool has_pacing_exempt_send_work() const noexcept;
-    [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
     [[nodiscard]] std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const noexcept;
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
