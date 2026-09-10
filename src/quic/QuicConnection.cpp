@@ -1663,6 +1663,9 @@ common::IoResult<QuicStream *> QuicConnection::attach_stream(QuicStream::Lease &
         stream->detach_from_connection();
         return std::unexpected(common::IoErr::Invalid);
     }
+    // Deliberately silent. Both callers still have bookkeeping to finish that an
+    // on_capacity_change observer reads -- the local stream id counter here, the
+    // peer's attach hook there -- so each notifies once it is done.
     return stream;
 }
 
@@ -1708,6 +1711,7 @@ QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamTy
     }
 
     next += kStreamIncrement;
+    dispatch_capacity_change();
     return *attached;
 }
 
@@ -1795,6 +1799,7 @@ common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t 
     if (options_.ops.on_peer_stream_attached != nullptr) {
         options_.ops.on_peer_stream_attached(options_.owner, **attached);
     }
+    dispatch_capacity_change();
     return *attached;
 }
 
@@ -3160,6 +3165,11 @@ void QuicConnection::retire_stream(QuicStream &stream) noexcept {
         on_peer_stream_retired(stream_id);
     }
     lease->detach_from_connection();
+
+    // After on_peer_stream_retired: any MAX_STREAMS it queued has already
+    // extended the peer's advertised limit, so the observer sees the settled
+    // state and that extension needs no notification of its own.
+    dispatch_capacity_change();
 
     maybe_finish_graceful_close();
 }
