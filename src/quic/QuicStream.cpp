@@ -8,6 +8,7 @@
 #include <limits>
 #include <utility>
 
+#include <fiber/async/WaitAwaiter.h>
 #include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/quic/QuicConnection.h>
@@ -20,20 +21,13 @@ constexpr std::uint64_t kStreamTypeMask = 0x02;
 
 } // namespace
 
-class QuicStream::WriteAwaiter {
+class QuicStream::WriteAwaiter : public async::WaitAwaiter {
 public:
     WriteAwaiter(QuicStream &stream, std::chrono::steady_clock::time_point deadline) noexcept :
-        stream_(&stream), deadline_(deadline) {}
-
-    WriteAwaiter(const WriteAwaiter &) = delete;
-    WriteAwaiter &operator=(const WriteAwaiter &) = delete;
-    WriteAwaiter(WriteAwaiter &&) = delete;
-    WriteAwaiter &operator=(WriteAwaiter &&) = delete;
+        WaitAwaiter(deadline, &WriteAwaiter::detach_from_connection_window), stream_(&stream) {}
 
     ~WriteAwaiter() {
-        cancel_resume();
-        cancel_timer();
-        unlink_connection_window_wait();
+        detach();
         if (stream_ != nullptr) {
             stream_->cancel_write_waiter(this);
         }
@@ -44,8 +38,8 @@ public:
             return true;
         }
         if (timed_out(std::chrono::steady_clock::now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
+            set_result(common::IoErr::TimedOut);
+            mark_completed();
             return true;
         }
         return false;
@@ -55,43 +49,36 @@ public:
         if (stream_ == nullptr || should_resume()) {
             return false;
         }
-        loop_ = event::EventLoop::current_or_null();
-        FIBER_ASSERT(loop_ != nullptr);
-        if (timed_out(loop_->now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
-            loop_ = nullptr;
+        event::EventLoop *loop = event::EventLoop::current_or_null();
+        FIBER_ASSERT(loop != nullptr);
+        if (timed_out(loop->now())) {
+            set_result(common::IoErr::TimedOut);
+            mark_completed();
             return false;
         }
         if (stream_->write_waiter_ != nullptr) {
-            result_ = common::IoErr::Busy;
-            completed_ = true;
-            loop_ = nullptr;
+            set_result(common::IoErr::Busy);
+            mark_completed();
             return false;
         }
 
-        handle_ = handle;
         stream_->write_waiter_ = this;
         maybe_wait_for_connection_window();
-        arm_timer();
+        begin_wait(handle, *loop);
         return true;
     }
 
     common::IoErr await_resume() noexcept {
-        common::IoErr result = result_;
-        cancel_resume();
-        cancel_timer();
-        unlink_connection_window_wait();
+        const common::IoErr outcome = result();
+        end_wait();
+        detach();
         if (stream_ != nullptr && stream_->write_waiter_ == this) {
             stream_->write_waiter_ = nullptr;
         }
         stream_ = nullptr;
-        loop_ = nullptr;
-        handle_ = {};
-        result_ = common::IoErr::None;
-        resume_posted_ = false;
-        completed_ = false;
-        return result;
+        set_result(common::IoErr::None);
+        reset_completed();
+        return outcome;
     }
 
     [[nodiscard]] bool should_resume() const noexcept {
@@ -99,36 +86,29 @@ public:
                stream_->write_available() > 0;
     }
 
-    void complete(common::IoErr result) noexcept {
-        if (completed_) {
-            return;
-        }
-        completed_ = true;
-        result_ = result;
-        cancel_timer();
-        unlink_connection_window_wait();
-        post_resume();
-    }
-
     void maybe_wait_for_connection_window() noexcept {
         if (stream_ == nullptr) {
             return;
         }
         if (!stream_->blocked_by_connection_window()) {
-            unlink_connection_window_wait();
+            detach();
             return;
         }
         stream_->conn_->wait_for_peer_data(*this);
     }
 
-    void unlink_connection_window_wait() noexcept {
-        if (stream_ == nullptr || stream_->conn_ == nullptr || !peer_data_wait_link_.linked()) {
+private:
+    // The connection-wide send window queue is the only link this awaiter can
+    // still be on once it completes; the stream's single write_waiter_ slot is
+    // released by await_resume or the destructor, whichever the caller reaches.
+    static void detach_from_connection_window(async::WaitAwaiter &base) noexcept {
+        auto &self = static_cast<WriteAwaiter &>(base);
+        if (self.stream_ == nullptr || self.stream_->conn_ == nullptr || !self.peer_data_wait_link_.linked()) {
             return;
         }
-        stream_->conn_->cancel_peer_data_wait(*this);
+        self.stream_->conn_->cancel_peer_data_wait(self);
     }
 
-private:
     [[nodiscard]] static WriteAwaiter *from_peer_data_wait_link(common::IntrusiveListHook *hook) noexcept {
         if (hook == nullptr) {
             return nullptr;
@@ -137,76 +117,8 @@ private:
                                                 offsetof(WriteAwaiter, peer_data_wait_link_));
     }
 
-    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
-
-    [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
-        return has_timer() && now >= deadline_;
-    }
-
-    void arm_timer() noexcept {
-        if (!has_timer() || loop_ == nullptr) {
-            return;
-        }
-        loop_->post_at<WriteAwaiter, &WriteAwaiter::timer_entry_, &WriteAwaiter::on_timeout>(deadline_, *this);
-    }
-
-    void cancel_timer() noexcept {
-        if (loop_ != nullptr && timer_entry_.is_in_heap()) {
-            loop_->cancel<WriteAwaiter, &WriteAwaiter::timer_entry_>(*this);
-        }
-    }
-
-    static void on_notify(WriteAwaiter *awaiter) noexcept {
-        if (awaiter == nullptr) {
-            return;
-        }
-        awaiter->resume_posted_ = false;
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    static void on_timeout(WriteAwaiter *awaiter) noexcept {
-        if (awaiter == nullptr) {
-            return;
-        }
-        awaiter->complete(common::IoErr::TimedOut);
-    }
-
-    // All completion sources (stream state transitions, timeouts) fire on the
-    // connection's loop, so the resume is queued on the cancellable local defer
-    // queue rather than the MPSC notify queue: a hard-destroyed coroutine (for
-    // example a proxy task discarded by when_any after the response channel
-    // closed) tears this awaiter down while the resume is still queued, and an
-    // MPSC entry cannot be retracted — the loop would later pop and call into
-    // freed memory.
-    void post_resume() noexcept {
-        if (resume_posted_ || loop_ == nullptr) {
-            return;
-        }
-        FIBER_ASSERT(loop_->in_loop());
-        resume_posted_ = true;
-        loop_->post_local<WriteAwaiter, &WriteAwaiter::resume_entry_, &WriteAwaiter::on_notify>(*this);
-    }
-
-    void cancel_resume() noexcept {
-        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
-            loop_->cancel<WriteAwaiter, &WriteAwaiter::resume_entry_>(*this);
-        }
-    }
-
     QuicStream *stream_ = nullptr;
-    std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::DeferEntry resume_entry_{};
-    event::EventLoop::TimerEntry timer_entry_{};
     common::IntrusiveListHook peer_data_wait_link_{};
-    common::IoErr result_ = common::IoErr::None;
-    bool resume_posted_ = false;
-    bool completed_ = false;
 
     friend class QuicConnection;
 };
@@ -251,10 +163,10 @@ void QuicConnection::cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) no
 
 void QuicConnection::notify_peer_data_waiters(common::IoErr result) noexcept {
     FIBER_ASSERT((peer_data_wait_head_ == nullptr) == (peer_data_wait_tail_ == nullptr));
+    // complete() detaches, so the head always moves on: a linked waiter is by
+    // construction one that has not completed yet.
     while (peer_data_wait_head_ != nullptr) {
-        QuicStream::WriteAwaiter *awaiter = QuicStream::WriteAwaiter::from_peer_data_wait_link(peer_data_wait_head_);
-        cancel_peer_data_wait(*awaiter);
-        awaiter->complete(result);
+        QuicStream::WriteAwaiter::from_peer_data_wait_link(peer_data_wait_head_)->complete(result);
     }
     FIBER_ASSERT(peer_data_wait_head_ == nullptr);
     FIBER_ASSERT(peer_data_wait_tail_ == nullptr);

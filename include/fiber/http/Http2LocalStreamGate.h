@@ -5,6 +5,7 @@
 #include <cstddef>
 
 #include "../async/Task.h"
+#include "../async/WaitAwaiter.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"

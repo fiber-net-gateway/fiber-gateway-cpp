@@ -10,6 +10,7 @@
 
 #include <openssl/mem.h>
 
+#include <fiber/async/WaitAwaiter.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/quic/QuicPacketProcessor.h>
 #include <fiber/quic/QuicProtocol.h>
@@ -426,38 +427,29 @@ QuicReadKeyEpoch QuicCryptoState::select_application_read_epoch(bool wire_phase,
     return QuicReadKeyEpoch::Next;
 }
 
-class QuicConnection::HandshakeAwaiter {
+class QuicConnection::HandshakeAwaiter : public async::WaitAwaiter {
 public:
     HandshakeAwaiter(QuicConnection &connection, std::chrono::steady_clock::time_point deadline,
                      bool wait_confirmed = false) noexcept :
-        connection_(&connection), deadline_(deadline), wait_confirmed_(wait_confirmed) {}
+        WaitAwaiter(deadline, &HandshakeAwaiter::detach_from_connection, common::IoErr::WouldBlock),
+        connection_(&connection), wait_confirmed_(wait_confirmed) {}
 
-    HandshakeAwaiter(const HandshakeAwaiter &) = delete;
-    HandshakeAwaiter &operator=(const HandshakeAwaiter &) = delete;
-    HandshakeAwaiter(HandshakeAwaiter &&) = delete;
-    HandshakeAwaiter &operator=(HandshakeAwaiter &&) = delete;
-
-    ~HandshakeAwaiter() {
-        cancel_resume();
-        cancel_timer();
-        if (connection_ != nullptr) {
-            connection_->cancel_handshake_wait(*this);
-        }
-    }
+    ~HandshakeAwaiter() { detach(); }
 
     bool await_ready() noexcept {
         if (connection_ == nullptr) {
-            result_ = common::IoErr::Canceled;
+            set_result(common::IoErr::Canceled);
+            mark_completed();
             return true;
         }
-        result_ = connection_->handshake_wait_result(wait_confirmed_);
-        if (result_ != common::IoErr::WouldBlock) {
-            completed_ = true;
+        set_result(connection_->handshake_wait_result(wait_confirmed_));
+        if (result() != common::IoErr::WouldBlock) {
+            mark_completed();
             return true;
         }
         if (timed_out(std::chrono::steady_clock::now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
+            set_result(common::IoErr::TimedOut);
+            mark_completed();
             return true;
         }
         return false;
@@ -465,125 +457,53 @@ public:
 
     bool await_suspend(std::coroutine_handle<> handle) noexcept {
         if (connection_ == nullptr) {
-            result_ = common::IoErr::Canceled;
-            completed_ = true;
+            set_result(common::IoErr::Canceled);
+            mark_completed();
             return false;
         }
-        result_ = connection_->handshake_wait_result(wait_confirmed_);
-        if (result_ != common::IoErr::WouldBlock) {
-            completed_ = true;
+        set_result(connection_->handshake_wait_result(wait_confirmed_));
+        if (result() != common::IoErr::WouldBlock) {
+            mark_completed();
             return false;
         }
-        loop_ = event::EventLoop::current_or_null();
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(connection_->loop_ == loop_);
-        if (timed_out(loop_->now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
-            loop_ = nullptr;
+        event::EventLoop *loop = event::EventLoop::current_or_null();
+        FIBER_ASSERT(loop != nullptr);
+        FIBER_ASSERT(connection_->loop_ == loop);
+        if (timed_out(loop->now())) {
+            set_result(common::IoErr::TimedOut);
+            mark_completed();
             return false;
         }
 
-        handle_ = handle;
         connection_->wait_for_handshake(*this);
-        arm_timer();
+        begin_wait(handle, *loop);
         return true;
     }
 
     common::IoErr await_resume() noexcept {
-        common::IoErr result = result_;
-        cancel_resume();
-        cancel_timer();
-        if (connection_ != nullptr) {
-            connection_->cancel_handshake_wait(*this);
-        }
+        const common::IoErr outcome = result();
+        end_wait();
+        detach();
         connection_ = nullptr;
-        loop_ = nullptr;
-        handle_ = {};
-        return result == common::IoErr::WouldBlock ? common::IoErr::Canceled : result;
-    }
-
-    void complete(common::IoErr result) noexcept {
-        if (completed_) {
-            return;
-        }
-        completed_ = true;
-        result_ = result;
-        cancel_timer();
-        post_resume();
+        return outcome == common::IoErr::WouldBlock ? common::IoErr::Canceled : outcome;
     }
 
 private:
+    static void detach_from_connection(async::WaitAwaiter &base) noexcept {
+        auto &self = static_cast<HandshakeAwaiter &>(base);
+        if (self.connection_ != nullptr) {
+            self.connection_->cancel_handshake_wait(self);
+        }
+    }
+
     [[nodiscard]] static HandshakeAwaiter *from_wait_link(common::IntrusiveListHook *hook) noexcept {
         return hook == nullptr ? nullptr
                                : reinterpret_cast<HandshakeAwaiter *>(reinterpret_cast<std::uint8_t *>(hook) -
                                                                       offsetof(HandshakeAwaiter, wait_link_));
     }
 
-    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
-    [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
-        return has_timer() && now >= deadline_;
-    }
-
-    void arm_timer() noexcept {
-        if (has_timer() && loop_ != nullptr) {
-            loop_->post_at<HandshakeAwaiter, &HandshakeAwaiter::timer_entry_, &HandshakeAwaiter::on_timeout>(deadline_,
-                                                                                                             *this);
-        }
-    }
-
-    void cancel_timer() noexcept {
-        if (loop_ != nullptr && timer_entry_.is_in_heap()) {
-            loop_->cancel<HandshakeAwaiter, &HandshakeAwaiter::timer_entry_>(*this);
-        }
-    }
-
-    static void on_notify(HandshakeAwaiter *awaiter) noexcept {
-        if (awaiter == nullptr) {
-            return;
-        }
-        awaiter->resume_posted_ = false;
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    static void on_timeout(HandshakeAwaiter *awaiter) noexcept {
-        if (awaiter != nullptr) {
-            awaiter->complete(common::IoErr::TimedOut);
-        }
-    }
-
-    // Completions fire on the connection's loop; the cancellable local defer
-    // queue keeps this awaiter safe against hard coroutine destruction while a
-    // resume is queued (an MPSC entry cannot be retracted).
-    void post_resume() noexcept {
-        if (resume_posted_ || loop_ == nullptr) {
-            return;
-        }
-        FIBER_ASSERT(loop_->in_loop());
-        resume_posted_ = true;
-        loop_->post_local<HandshakeAwaiter, &HandshakeAwaiter::resume_entry_, &HandshakeAwaiter::on_notify>(*this);
-    }
-
-    void cancel_resume() noexcept {
-        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
-            loop_->cancel<HandshakeAwaiter, &HandshakeAwaiter::resume_entry_>(*this);
-        }
-    }
-
     QuicConnection *connection_ = nullptr;
-    std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::DeferEntry resume_entry_{};
-    event::EventLoop::TimerEntry timer_entry_{};
     common::IntrusiveListHook wait_link_{};
-    common::IoErr result_ = common::IoErr::WouldBlock;
-    bool resume_posted_ = false;
-    bool completed_ = false;
     bool wait_confirmed_ = false;
 
     friend class QuicConnection;
@@ -3295,7 +3215,6 @@ void QuicConnection::notify_handshake_waiters(common::IoErr result) noexcept {
         if (waiter_result == common::IoErr::WouldBlock) {
             continue;
         }
-        cancel_handshake_wait(*awaiter);
         awaiter->complete(waiter_result);
     }
 }
