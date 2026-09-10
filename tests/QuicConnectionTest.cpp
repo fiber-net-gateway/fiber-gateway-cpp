@@ -204,6 +204,7 @@ fiber::async::DetachedTask mark_closed_after_delay(fiber::quic::QuicConnection *
 struct OpsObserver {
     std::vector<fiber::quic::QuicConnectionState> states;
     int capacity_calls = 0;
+    std::uint64_t last_bidi_slots = 0;
     // Tracked per kind: each dispatcher folds only its own reentrant changes,
     // so a state notification raised from inside a capacity one legitimately
     // nests. What must never happen is a kind recursing into itself.
@@ -236,12 +237,17 @@ void observe_capacity_change(void *owner, fiber::quic::QuicConnection &conn) noe
         observer->max_capacity_depth = observer->capacity_depth;
     }
     ++observer->capacity_calls;
+    observer->last_bidi_slots = conn.available_local_stream_slots(fiber::quic::QuicStreamType::Bidirectional);
     if (observer->shutdown_on_capacity) {
         observer->shutdown_on_capacity = false;
         conn.shutdown();
     }
     --observer->capacity_depth;
 }
+
+// Peer-stream factory that ignores the owner, so a connection can point its
+// owner at an OpsObserver and still accept peer streams.
+fiber::quic::QuicStream::Lease create_stream_plain(void *, std::uint64_t) noexcept { return make_test_stream(); }
 
 fiber::quic::QuicConnection::Options observed_options(OpsObserver &observer) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
@@ -1231,6 +1237,85 @@ TEST(QuicConnectionTest, OpsCapacityChangeReportsPeerStreamCredit) {
 
     EXPECT_EQ(observer.capacity_calls, 1);
     EXPECT_EQ(conn.local_stream_attach_status(fiber::quic::QuicStreamType::Bidirectional), fiber::common::IoErr::None);
+}
+
+TEST(QuicConnectionTest, OpsCapacityChangeReportsStreamAttachAndDetach) {
+    OpsObserver observer;
+    fiber::quic::QuicConnection conn(observed_options(observer));
+    ASSERT_TRUE(conn.mark_established());
+    ASSERT_EQ(observer.capacity_calls, 0);
+
+    auto owned = make_test_stream();
+    ASSERT_TRUE(owned);
+    auto attached = conn.try_attach_local_stream(std::move(owned), fiber::quic::QuicStreamType::Bidirectional);
+    ASSERT_TRUE(attached);
+    EXPECT_EQ(observer.capacity_calls, 1);
+    // The local stream id counter has already advanced when the observer runs,
+    // so the credit it reads is the settled one.
+    EXPECT_EQ(conn.available_local_stream_slots(fiber::quic::QuicStreamType::Bidirectional), observer.last_bidi_slots);
+
+    // A stream with nothing buffered retires as soon as it is closed.
+    fiber::quic::QuicStream::Lease lease = (*attached)->lease();
+    (*attached)->close(0);
+    EXPECT_EQ(conn.active_stream_count(), 0U);
+    EXPECT_EQ(observer.capacity_calls, 2);
+}
+
+// Extending the peer's credit rides on the retirement that caused it: the
+// MAX_STREAMS frame is queued before the detach notification runs, so it needs
+// no notification of its own.
+TEST(QuicConnectionTest, PeerCreditExtensionRidesOnTheDetachNotification) {
+    OpsObserver observer;
+    fiber::quic::QuicConnection::Options options = observed_options(observer);
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    options.max_peer_bidirectional_streams = 4;
+    options.ops.create_stream = create_stream_plain;
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.mark_established());
+
+    // Client-initiated bidirectional stream 0.
+    auto created = conn.get_or_create_peer_stream(0);
+    ASSERT_TRUE(created);
+    const int after_attach = observer.capacity_calls;
+    EXPECT_GT(after_attach, 0);
+
+    fiber::quic::QuicStream::Lease lease = (*created)->lease();
+    (*created)->close(0);
+    ASSERT_EQ(conn.active_stream_count(), 0U);
+    // Exactly one more notification, not two: retiring the stream extended the
+    // peer's limit on the way through.
+    EXPECT_EQ(observer.capacity_calls, after_attach + 1);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::MaxStreamsBidi), 1U);
+}
+
+// RFC 9000 4.6: a MAX_STREAMS frame that does not raise the limit is ignored,
+// so nothing moved and nobody is told.
+TEST(QuicConnectionTest, NonIncreasingMaxStreamsRaisesNoCapacityChange) {
+    OpsObserver observer;
+    fiber::quic::QuicConnection::Options options = observed_options(observer);
+    options.max_local_bidirectional_streams = 8;
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.mark_established());
+    ASSERT_EQ(observer.capacity_calls, 0);
+
+    fiber::quic::QuicMaxStreamsFrame lower{};
+    lower.bidirectional = true;
+    lower.limit = 4;
+    ASSERT_TRUE(conn.recv_max_streams_frame(lower));
+    EXPECT_EQ(observer.capacity_calls, 0);
+    EXPECT_EQ(conn.available_local_stream_slots(fiber::quic::QuicStreamType::Bidirectional), 8U);
+
+    fiber::quic::QuicMaxStreamsFrame same{};
+    same.bidirectional = true;
+    same.limit = 8;
+    ASSERT_TRUE(conn.recv_max_streams_frame(same));
+    EXPECT_EQ(observer.capacity_calls, 0);
+
+    fiber::quic::QuicMaxStreamsFrame higher{};
+    higher.bidirectional = true;
+    higher.limit = 9;
+    ASSERT_TRUE(conn.recv_max_streams_frame(higher));
+    EXPECT_EQ(observer.capacity_calls, 1);
 }
 
 // An owner is allowed to close the connection from inside a notification. The

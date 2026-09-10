@@ -154,8 +154,14 @@ void QuicLocalStreamGate::handle_change(QuicStreamType type) noexcept {
 }
 
 void QuicLocalStreamGate::wake_waiters(QuicStreamType type) noexcept {
+    Queue &queue = queue_for(type);
+    // Every stream attach and detach reaches the gate now, and almost none of
+    // them find anyone queued.
+    if (queue.head == nullptr) {
+        return;
+    }
     std::uint64_t available = connection_->available_local_stream_slots(type);
-    for (Waiter *waiter = queue_for(type).head; waiter != nullptr && available != 0; waiter = waiter->next_) {
+    for (Waiter *waiter = queue.head; waiter != nullptr && available != 0; waiter = waiter->next_) {
         // An already woken waiter still owes an attach, so its credit is spoken
         // for: count it, but do not wake anyone twice for the same stream id.
         if (!waiter->signaled()) {

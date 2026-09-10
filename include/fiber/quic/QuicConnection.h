@@ -427,12 +427,29 @@ public:
         void (*on_early_data_rejected)(void *owner) noexcept = nullptr;
         // state() moved. Read the new state from the connection.
         void (*on_state_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
-        // Peer stream credit moved (MAX_STREAMS, or the peer's initial transport
-        // parameters). Deliberately carries no stream type: an owner re-reads
-        // local_stream_attach_status() for each type it cares about. Credit only
-        // ever grows, so retiring a stream raises nothing here; reaching
-        // Established raises on_state_change instead. An owner tracking
-        // admission must observe both.
+        // The number of live streams changed in either direction, or the peer
+        // granted us more stream credit (MAX_STREAMS, or its initial transport
+        // parameters). Deliberately carries no stream type or direction: an
+        // owner re-reads what it actually tracks -- local_stream_attach_status()
+        // per type, or its own count of application streams. QUIC cannot tell an
+        // application stream from a protocol one, so an owner that cares about
+        // that distinction must keep its own count.
+        //
+        // Not raised when we extend the peer's credit: that only ever happens as
+        // a consequence of a peer stream retiring, and the extension is applied
+        // before that retirement's notification runs.
+        //
+        // Not raised for a MAX_STREAMS frame that does not raise our limit --
+        // RFC 9000 4.6 requires ignoring those, so nothing moved.
+        //
+        // A close tears every stream down without detach notifications, since it
+        // clears the stream table rather than retiring stream by stream. Owners
+        // must also observe on_state_change. So must an owner tracking admission:
+        // reaching Established is a state change, not a credit change.
+        //
+        // Raised from inside retire_stream(), which runs in the middle of the
+        // packet frame loop. Arming a timer there is fine; closing the connection
+        // is the hazard maybe_finish_graceful_close() defers around.
         void (*on_capacity_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
     };
 
