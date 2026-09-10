@@ -32,7 +32,7 @@ constexpr std::size_t kHttp3ReadChunkSize = 4096;
 Http3Connection::Http3Connection(quic::QuicConnection &quic) noexcept : Http3Connection(quic, Options{}) {}
 
 Http3Connection::Http3Connection(quic::QuicConnection &quic, const Options &options) noexcept :
-    quic_(quic), options_(options) {}
+    quic_(quic), local_stream_gate_(quic), options_(options) {}
 
 Http3Connection::~Http3Connection() {
     // A server request keeps a QuicConnection lease, so in a running server it
@@ -53,6 +53,8 @@ const quic::QuicConnection::Ops &Http3Connection::quic_ops() noexcept {
     static const quic::QuicConnection::Ops kOps{
             .create_stream = &Http3Connection::create_peer_stream,
             .on_peer_stream_attached = &Http3Connection::on_peer_stream_attached,
+            .on_state_change = &Http3Connection::on_quic_state_change,
+            .on_capacity_change = &Http3Connection::on_quic_capacity_change,
     };
     return kOps;
 }
@@ -78,6 +80,18 @@ void Http3Connection::on_peer_stream_attached(void *owner, quic::QuicStream &str
     auto *conn = static_cast<Http3Connection *>(owner);
     FIBER_ASSERT(conn != nullptr);
     conn->handle_peer_stream_attached(stream);
+}
+
+void Http3Connection::on_quic_state_change(void *owner, quic::QuicConnection &) noexcept {
+    auto *conn = static_cast<Http3Connection *>(owner);
+    FIBER_ASSERT(conn != nullptr);
+    conn->local_stream_gate_.on_state_change();
+}
+
+void Http3Connection::on_quic_capacity_change(void *owner, quic::QuicConnection &) noexcept {
+    auto *conn = static_cast<Http3Connection *>(owner);
+    FIBER_ASSERT(conn != nullptr);
+    conn->local_stream_gate_.on_capacity_change();
 }
 
 common::IoResult<void> Http3Connection::prepare() noexcept {
@@ -122,7 +136,7 @@ async::Task<common::IoResult<void>> Http3Connection::start() noexcept {
         co_return std::unexpected(common::IoErr::NoMem);
     }
 
-    auto attached = co_await quic_.attach_local_stream(std::move(control_stream), quic::QuicStreamType::Unidirectional);
+    auto attached = co_await local_stream_gate_.attach(std::move(control_stream), quic::QuicStreamType::Unidirectional);
     if (!attached) {
         close(Http3ErrorCode::StreamCreationError);
         co_return std::unexpected(attached.error());
@@ -534,6 +548,10 @@ common::IoResult<void> Http3Connection::apply_peer_goaway(std::uint64_t id) noex
 }
 
 void Http3Connection::reject_client_requests(std::uint64_t goaway_id) noexcept {
+    // Requests still queued for a stream id have not been sent, and any id they
+    // would get is above the GOAWAY point. QUIC has no idea the peer stopped
+    // accepting requests, so its credit alone would keep them waiting.
+    local_stream_gate_.cancel_all(quic::QuicStreamType::Bidirectional, common::IoErr::Canceled);
     Http3ClientRequestEntry *entry = client_requests_.front();
     while (entry != nullptr) {
         Http3ClientRequestEntry *next = client_requests_.next_of(*entry);

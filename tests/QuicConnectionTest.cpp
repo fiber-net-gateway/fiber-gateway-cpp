@@ -167,43 +167,11 @@ struct WriteResult {
     fiber::common::IoErr error = fiber::common::IoErr::None;
 };
 
-struct AttachResult {
-    bool ok = false;
-    std::uint64_t stream_id = 0;
-    fiber::common::IoErr error = fiber::common::IoErr::None;
-};
-
 WriteResult to_write_result(fiber::common::IoResult<std::size_t> result) {
     if (result) {
         return {.ok = true, .value = *result};
     }
     return {.ok = false, .error = result.error()};
-}
-
-AttachResult to_attach_result(fiber::common::IoResult<fiber::quic::QuicStream *> result) {
-    if (result) {
-        return {.ok = true, .stream_id = (*result)->stream_id()};
-    }
-    return {.ok = false, .error = result.error()};
-}
-
-fiber::async::DetachedTask attach_local_stream(fiber::quic::QuicConnection *conn, fiber::quic::QuicStream::Lease stream,
-                                               fiber::quic::QuicStreamType type, std::chrono::milliseconds timeout,
-                                               std::promise<AttachResult> *done) {
-    auto result = co_await conn->attach_local_stream(std::move(stream), type, timeout);
-    done->set_value(to_attach_result(result));
-    fiber::event::EventLoop::current().stop();
-}
-
-fiber::async::DetachedTask grant_max_streams_after_delay(fiber::quic::QuicConnection *conn,
-                                                         fiber::quic::QuicStreamType type, std::uint64_t limit,
-                                                         std::atomic<bool> *started) {
-    co_await fiber::async::sleep(std::chrono::milliseconds(20));
-    started->store(true, std::memory_order_relaxed);
-    fiber::quic::QuicMaxStreamsFrame frame{};
-    frame.bidirectional = type == fiber::quic::QuicStreamType::Bidirectional;
-    frame.limit = limit;
-    (void) conn->recv_max_streams_frame(frame);
 }
 
 fiber::async::DetachedTask write_one(fiber::quic::QuicStream *stream, std::promise<WriteResult> *done) {
@@ -575,47 +543,6 @@ TEST(QuicConnectionTest, TryAttachLocalStreamQueuesStreamsBlockedAtLimit) {
     EXPECT_FALSE(stream->stream_id_assigned());
     EXPECT_EQ(conn.active_stream_count(), 0U);
     EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 0), 1U);
-}
-
-TEST(QuicConnectionTest, AttachLocalStreamResumesAfterMaxStreams) {
-    fiber::event::EventLoopGroup group(1);
-    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
-    options.role = fiber::quic::QuicConnectionRole::Client;
-    options.max_local_bidirectional_streams = 0;
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
-    ASSERT_TRUE(conn.mark_established());
-
-    std::promise<AttachResult> done;
-    auto future = done.get_future();
-    std::atomic<bool> grant_seen{false};
-    auto stream = make_test_stream();
-    ASSERT_TRUE(stream);
-
-    group.start();
-    fiber::async::spawn(group.at(0), [&conn, stream = std::move(stream), &done]() mutable {
-        return attach_local_stream(&conn, std::move(stream), fiber::quic::QuicStreamType::Bidirectional,
-                                   std::chrono::seconds(1), &done);
-    });
-    fiber::async::spawn(group.at(0), [&conn, &grant_seen]() {
-        return grant_max_streams_after_delay(&conn, fiber::quic::QuicStreamType::Bidirectional, 1, &grant_seen);
-    });
-
-    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
-        group.stop();
-        group.join();
-        FAIL() << "attach did not resume after MAX_STREAMS";
-        return;
-    }
-
-    const AttachResult result = future.get();
-    EXPECT_TRUE(grant_seen.load(std::memory_order_relaxed));
-    EXPECT_TRUE(result.ok);
-    EXPECT_EQ(result.stream_id, 0U);
-    EXPECT_NE(conn.find_stream(0), nullptr);
-    EXPECT_EQ(conn.active_stream_count(), 1U);
-    EXPECT_EQ(count_pending_streams_blocked(conn, fiber::quic::QuicFrameType::StreamsBlockedBidi, 0), 1U);
-    group.join();
 }
 
 TEST(QuicConnectionTest, InitializesThreePacketNumberSpaces) {
