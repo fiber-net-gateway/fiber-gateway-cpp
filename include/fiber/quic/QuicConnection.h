@@ -414,10 +414,25 @@ public:
         QuicConnection *connection_ = nullptr;
     };
 
+    // Notifications run inline on the connection's loop and must not destroy
+    // the owner or the connection, nor drive a nested event loop. Reentrant
+    // changes are folded into one more pass, so an owner that reacts by closing
+    // or shutting down cannot recurse. The two hooks fold independently: a
+    // state change raised from inside on_capacity_change is still reported
+    // immediately, nested.
     struct Ops {
         QuicStream::Lease (*create_stream)(void *owner, std::uint64_t stream_id) noexcept = nullptr;
         void (*on_peer_stream_attached)(void *owner, QuicStream &stream) noexcept = nullptr;
         void (*on_early_data_rejected)(void *owner) noexcept = nullptr;
+        // state() moved. Read the new state from the connection.
+        void (*on_state_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
+        // Peer stream credit moved (MAX_STREAMS, or the peer's initial transport
+        // parameters). Deliberately carries no stream type: an owner re-reads
+        // local_stream_attach_status() for each type it cares about. Credit only
+        // ever grows, so retiring a stream raises nothing here; reaching
+        // Established raises on_state_change instead. An owner tracking
+        // admission must observe both.
+        void (*on_capacity_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
     };
 
     struct EndpointIndex {
@@ -592,6 +607,21 @@ public:
     [[nodiscard]] QuicStream *find_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] const QuicStream *find_stream(std::uint64_t stream_id) const noexcept;
     [[nodiscard]] std::size_t active_stream_count() const noexcept { return streams_.size(); }
+    // What try_attach_local_stream would answer for a fresh stream right now:
+    // None when one can be attached, Busy while the handshake has not reached
+    // the point this early-data mode needs or the peer's stream credit is spent,
+    // Canceled once the connection will never admit another local stream. A
+    // caller waiting for room uses this to tell "retry later" from "never
+    // again". Pure: unlike try_attach_local_stream it queues no STREAMS_BLOCKED
+    // frame, so it cannot stand in for the real attempt.
+    [[nodiscard]] common::IoErr local_stream_attach_status(
+            QuicStreamType type,
+            QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) const noexcept;
+    [[nodiscard]] bool accepts_new_local_stream(
+            QuicStreamType type,
+            QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) const noexcept {
+        return local_stream_attach_status(type, early_data_mode) == common::IoErr::None;
+    }
     [[nodiscard]] common::IoResult<QuicStream *>
     try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamType type,
                             QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
@@ -821,6 +851,9 @@ private:
     [[nodiscard]] std::uint64_t peer_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] bool local_stream_blocked(QuicStreamType type) const noexcept;
     [[nodiscard]] bool local_stream_attach_ready(QuicStreamType type) const noexcept;
+    // Whether this mode may attach before the handshake completes: 0-RTT keys
+    // are installed and this connection actually attempted early data.
+    [[nodiscard]] bool early_attach_ready(QuicStreamEarlyDataMode early_data_mode) const noexcept;
     [[nodiscard]] bool is_gone_peer_stream(std::uint64_t stream_id) const noexcept;
     // RFC 9000 §4.6: a peer-initiated stream whose sequence (id >> 2) reaches or
     // exceeds the advertised max_streams has exceeded the limit advertised via
@@ -896,6 +929,12 @@ private:
     // working after the transition. Set close_info_ before transitioning:
     // handshake_wait_result() reads it.
     void transition_state(QuicConnectionState next) noexcept;
+    void dispatch_state_change() noexcept;
+    // The two peer-credit funnels: wake the parked waiters of the affected
+    // type(s), then tell the owner once.
+    void on_local_stream_capacity_changed(QuicStreamType type) noexcept;
+    void on_local_stream_capacity_changed() noexcept;
+    void dispatch_capacity_change() noexcept;
     void enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept;
     void enter_closing(QuicCloseInfo info, bool immediate = false) noexcept;
     void enter_draining(QuicCloseInfo info) noexcept;
@@ -1026,6 +1065,10 @@ private:
     std::uint64_t early_next_local_bidi_stream_id_ = 0;
     std::uint64_t early_next_local_uni_stream_id_ = 0;
     std::uint64_t early_peer_data_reserved_ = 0;
+    bool state_dispatch_running_ = false;
+    bool state_dispatch_again_ = false;
+    bool capacity_dispatch_running_ = false;
+    bool capacity_dispatch_again_ = false;
     bool attached_to_endpoint_ = false;
     bool detached_from_endpoint_ = false;
     std::uint32_t ref_count_ = 1;
