@@ -1324,6 +1324,50 @@ TEST(QuicConnectionTest, MarkClosedWakesHandshakeWaiters) {
     group.join();
 }
 
+// on_idle_timer goes through enter_closed(), which depends on that path never
+// putting anything on the wire: RFC 9000 10.1 requires the idle timeout to be
+// silent. Streams still open when it fires are aborted, not completed.
+TEST(QuicConnectionTest, IdleTimeoutClosesSilentlyAndAbortsLiveStreams) {
+    fiber::event::EventLoopGroup group(1);
+
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.loop = &group.at(0);
+    options.transport.max_idle_timeout = std::chrono::milliseconds(5);
+    fiber::quic::QuicConnection conn(options);
+    ASSERT_TRUE(conn.mark_established());
+
+    auto owned = make_test_stream();
+    ASSERT_TRUE(owned);
+    auto attached = conn.try_attach_local_stream(std::move(owned), fiber::quic::QuicStreamType::Bidirectional);
+    ASSERT_TRUE(attached);
+    // Outlive streams_.clear() so the stream's own state stays observable.
+    fiber::quic::QuicStream::Lease stream = (*attached)->lease();
+    ASSERT_EQ(conn.active_stream_count(), 1U);
+
+    std::promise<fiber::quic::QuicConnectionState> done;
+    auto future = done.get_future();
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() { return run_idle_timeout(&conn, std::chrono::milliseconds(25), &done); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(future.get(), fiber::quic::QuicConnectionState::Closed);
+
+    // Silent: no CONNECTION_CLOSE, and no per-stream control frames either --
+    // the connection is already Closed when the streams are torn down.
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ConnectionClose), 0U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ConnectionCloseApp), 0U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ResetStream), 0U);
+    EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::StopSending), 0U);
+
+    // Aborted, not finished: a reader must not mistake this for a clean end.
+    EXPECT_EQ(stream->recv_state(), fiber::quic::QuicStreamRecvState::Stopped);
+    EXPECT_TRUE(stream->stop_sending());
+    EXPECT_FALSE(stream->recv_closed());
+
+    group.join();
+}
+
 TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
     fiber::event::EventLoopGroup group(1);
     group.start();
