@@ -181,7 +181,7 @@ ClientHttp3Exchange::ensure_request_opened(std::chrono::milliseconds timeout) no
         co_return std::unexpected(common::IoErr::NoMem);
     }
     auto attached =
-            co_await conn_->quic().attach_local_stream(std::move(owned), quic::QuicStreamType::Bidirectional, timeout);
+            co_await conn_->local_stream_gate().attach(std::move(owned), quic::QuicStreamType::Bidirectional, timeout);
     if (!attached) {
         co_return std::unexpected(attached.error());
     }

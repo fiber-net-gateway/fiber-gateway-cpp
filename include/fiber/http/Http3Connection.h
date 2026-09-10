@@ -13,6 +13,7 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../quic/QuicConnection.h"
+#include "../quic/QuicLocalStreamGate.h"
 #include "Http3Protocol.h"
 
 namespace fiber::http {
@@ -57,6 +58,11 @@ public:
     ~Http3Connection();
 
     [[nodiscard]] quic::QuicConnection &quic() noexcept { return quic_; }
+    // Admission for every locally opened stream on this connection: the control
+    // stream at startup and each client request. Waiters are woken by the QUIC
+    // Ops hooks this connection registers, and cancelled on an HTTP/3 GOAWAY,
+    // which QUIC knows nothing about.
+    [[nodiscard]] quic::QuicLocalStreamGate &local_stream_gate() noexcept { return local_stream_gate_; }
     [[nodiscard]] const quic::QuicConnection &quic() const noexcept { return quic_; }
     [[nodiscard]] quic::QuicConnectionRole role() const noexcept { return quic_.role(); }
     [[nodiscard]] Http3ConnectionState state() const noexcept { return state_; }
@@ -111,6 +117,8 @@ private:
     [[nodiscard]] static quic::QuicStream::Lease create_owned_stream() noexcept;
     [[nodiscard]] static quic::QuicStream::Lease create_peer_stream(void *owner, std::uint64_t stream_id) noexcept;
     static void on_peer_stream_attached(void *owner, quic::QuicStream &stream) noexcept;
+    static void on_quic_state_change(void *owner, quic::QuicConnection &connection) noexcept;
+    static void on_quic_capacity_change(void *owner, quic::QuicConnection &connection) noexcept;
     static void destroy_peer_stream(void *owner, quic::QuicStream &stream) noexcept;
 
     void handle_peer_stream_attached(quic::QuicStream &stream) noexcept;
@@ -131,6 +139,7 @@ private:
     [[nodiscard]] std::uint64_t goaway_request_id() const noexcept;
 
     quic::QuicConnection &quic_;
+    quic::QuicLocalStreamGate local_stream_gate_;
     Options options_{};
     Http3Settings peer_settings_{};
     quic::QuicStream::Lease local_control_stream_{};

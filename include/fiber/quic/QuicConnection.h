@@ -614,6 +614,11 @@ public:
     // caller waiting for room uses this to tell "retry later" from "never
     // again". Pure: unlike try_attach_local_stream it queues no STREAMS_BLOCKED
     // frame, so it cannot stand in for the real attempt.
+    // Locally initiated streams of this type that could still be attached: the
+    // peer's credit for the type minus what this side has already spent. Credit
+    // only ever grows -- QUIC stream ids are monotonic, so retiring a stream
+    // returns nothing here.
+    [[nodiscard]] std::uint64_t available_local_stream_slots(QuicStreamType type) const noexcept;
     [[nodiscard]] common::IoErr local_stream_attach_status(
             QuicStreamType type,
             QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) const noexcept;
@@ -625,10 +630,6 @@ public:
     [[nodiscard]] common::IoResult<QuicStream *>
     try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamType type,
                             QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
-    [[nodiscard]] async::Task<common::IoResult<QuicStream *>>
-    attach_local_stream(QuicStream::Lease stream, QuicStreamType type,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max(),
-                        QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
     [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, mem::IoBuf data) noexcept;
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
@@ -828,7 +829,6 @@ public:
 
 private:
     class HandshakeAwaiter;
-    class LocalStreamAttachAwaiter;
 
     struct PeerStreamLimitWindow {
         std::uint64_t concurrent_limit = 0;
@@ -850,7 +850,6 @@ private:
     [[nodiscard]] std::uint64_t local_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] std::uint64_t peer_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] bool local_stream_blocked(QuicStreamType type) const noexcept;
-    [[nodiscard]] bool local_stream_attach_ready(QuicStreamType type) const noexcept;
     // Whether this mode may attach before the handshake completes: 0-RTT keys
     // are installed and this connection actually attempted early data.
     [[nodiscard]] bool early_attach_ready(QuicStreamEarlyDataMode early_data_mode) const noexcept;
@@ -930,10 +929,6 @@ private:
     // handshake_wait_result() reads it.
     void transition_state(QuicConnectionState next) noexcept;
     void dispatch_state_change() noexcept;
-    // The two peer-credit funnels: wake the parked waiters of the affected
-    // type(s), then tell the owner once.
-    void on_local_stream_capacity_changed(QuicStreamType type) noexcept;
-    void on_local_stream_capacity_changed() noexcept;
     void dispatch_capacity_change() noexcept;
     void enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept;
     void enter_closing(QuicCloseInfo info, bool immediate = false) noexcept;
@@ -964,17 +959,6 @@ private:
     void notify_handshake_waiters(common::IoErr result) noexcept;
     void reset_after_retry() noexcept;
     [[nodiscard]] common::IoResult<void> start_preferred_path_validation() noexcept;
-    void wait_for_local_stream_attach(LocalStreamAttachAwaiter &awaiter) noexcept;
-    void cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
-    // None once a stream of this type can be attached, Canceled once it never
-    // can be again, WouldBlock while the waiter should stay parked.
-    [[nodiscard]] common::IoErr local_stream_attach_wait_result(QuicStreamType type) const noexcept;
-    // As with notify_handshake_waiters, WouldBlock re-evaluates per waiter
-    // through local_stream_attach_wait_result() and is the default: callers
-    // report that conditions moved, not what each waiter should conclude.
-    void notify_local_stream_attach_waiters(QuicStreamType type,
-                                            common::IoErr result = common::IoErr::WouldBlock) noexcept;
-    void notify_all_local_stream_attach_waiters(common::IoErr result = common::IoErr::WouldBlock) noexcept;
     void attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept;
     void detach_from_endpoint() noexcept;
     void retain() noexcept;
@@ -1051,10 +1035,6 @@ private:
     common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
     common::IntrusiveListHook *handshake_wait_head_ = nullptr;
     common::IntrusiveListHook *handshake_wait_tail_ = nullptr;
-    common::IntrusiveListHook *local_bidi_stream_attach_wait_head_ = nullptr;
-    common::IntrusiveListHook *local_bidi_stream_attach_wait_tail_ = nullptr;
-    common::IntrusiveListHook *local_uni_stream_attach_wait_head_ = nullptr;
-    common::IntrusiveListHook *local_uni_stream_attach_wait_tail_ = nullptr;
     bool data_blocked_reported_ = false;
     bool idle_send_timer_set_ = false;
     bool has_server_initial_source_connection_id_ = false;
