@@ -427,88 +427,6 @@ QuicReadKeyEpoch QuicCryptoState::select_application_read_epoch(bool wire_phase,
     return QuicReadKeyEpoch::Next;
 }
 
-class QuicConnection::HandshakeAwaiter : public async::WaitAwaiter {
-public:
-    HandshakeAwaiter(QuicConnection &connection, std::chrono::steady_clock::time_point deadline,
-                     bool wait_confirmed = false) noexcept :
-        WaitAwaiter(deadline, &HandshakeAwaiter::detach_from_connection, common::IoErr::WouldBlock),
-        connection_(&connection), wait_confirmed_(wait_confirmed) {}
-
-    ~HandshakeAwaiter() { detach(); }
-
-    bool await_ready() noexcept {
-        if (connection_ == nullptr) {
-            set_result(common::IoErr::Canceled);
-            mark_completed();
-            return true;
-        }
-        set_result(connection_->handshake_wait_result(wait_confirmed_));
-        if (result() != common::IoErr::WouldBlock) {
-            mark_completed();
-            return true;
-        }
-        if (timed_out(std::chrono::steady_clock::now())) {
-            set_result(common::IoErr::TimedOut);
-            mark_completed();
-            return true;
-        }
-        return false;
-    }
-
-    bool await_suspend(std::coroutine_handle<> handle) noexcept {
-        if (connection_ == nullptr) {
-            set_result(common::IoErr::Canceled);
-            mark_completed();
-            return false;
-        }
-        set_result(connection_->handshake_wait_result(wait_confirmed_));
-        if (result() != common::IoErr::WouldBlock) {
-            mark_completed();
-            return false;
-        }
-        event::EventLoop *loop = event::EventLoop::current_or_null();
-        FIBER_ASSERT(loop != nullptr);
-        FIBER_ASSERT(connection_->loop_ == loop);
-        if (timed_out(loop->now())) {
-            set_result(common::IoErr::TimedOut);
-            mark_completed();
-            return false;
-        }
-
-        connection_->wait_for_handshake(*this);
-        begin_wait(handle, *loop);
-        return true;
-    }
-
-    common::IoErr await_resume() noexcept {
-        const common::IoErr outcome = result();
-        end_wait();
-        detach();
-        connection_ = nullptr;
-        return outcome == common::IoErr::WouldBlock ? common::IoErr::Canceled : outcome;
-    }
-
-private:
-    static void detach_from_connection(async::WaitAwaiter &base) noexcept {
-        auto &self = static_cast<HandshakeAwaiter &>(base);
-        if (self.connection_ != nullptr) {
-            self.connection_->cancel_handshake_wait(self);
-        }
-    }
-
-    [[nodiscard]] static HandshakeAwaiter *from_wait_link(common::IntrusiveListHook *hook) noexcept {
-        return hook == nullptr ? nullptr
-                               : reinterpret_cast<HandshakeAwaiter *>(reinterpret_cast<std::uint8_t *>(hook) -
-                                                                      offsetof(HandshakeAwaiter, wait_link_));
-    }
-
-    QuicConnection *connection_ = nullptr;
-    common::IntrusiveListHook wait_link_{};
-    bool wait_confirmed_ = false;
-
-    friend class QuicConnection;
-};
-
 QuicConnection::Lease::Lease(QuicConnection *connection) noexcept : connection_(connection) {
     if (connection_) {
         connection_->retain();
@@ -636,8 +554,7 @@ QuicConnection::~QuicConnection() {
     // initiate from a possibly quiesced off-loop destructor.
     FIBER_ASSERT(peer_data_wait_head_ == nullptr);
     FIBER_ASSERT(peer_data_wait_tail_ == nullptr);
-    FIBER_ASSERT(handshake_wait_head_ == nullptr);
-    FIBER_ASSERT(handshake_wait_tail_ == nullptr);
+    FIBER_ASSERT(!handshake_gate_.has_waiters());
     if (loop_ != nullptr && loop_->in_loop()) {
         cancel_all_timers();
     } else if (loop_ != nullptr && loop_->group() != nullptr && !loop_->group()->running()) {
@@ -697,7 +614,7 @@ void QuicConnection::confirm_handshake() noexcept {
         return;
     }
     crypto_.epoch().handshake_confirmed = true;
-    notify_handshake_waiters(common::IoErr::WouldBlock);
+    handshake_gate_.notify();
     auto preferred = start_preferred_path_validation();
     if (!preferred) {
         close(QuicErrorCode::InternalError);
@@ -705,31 +622,11 @@ void QuicConnection::confirm_handshake() noexcept {
 }
 
 async::Task<common::IoResult<void>> QuicConnection::wait_established(std::chrono::milliseconds timeout) noexcept {
-    if (timeout < std::chrono::milliseconds::zero()) {
-        timeout = std::chrono::milliseconds::zero();
-    }
-    const std::chrono::steady_clock::time_point deadline = timeout == std::chrono::milliseconds::max()
-                                                                   ? std::chrono::steady_clock::time_point::max()
-                                                                   : event::EventLoop::current().now() + timeout;
-    const common::IoErr result = co_await HandshakeAwaiter(*this, deadline);
-    if (result != common::IoErr::None) {
-        co_return std::unexpected(result);
-    }
-    co_return common::IoResult<void>{};
+    return handshake_gate_.wait(/*confirmed=*/false, timeout);
 }
 
 async::Task<common::IoResult<void>> QuicConnection::wait_confirmed(std::chrono::milliseconds timeout) noexcept {
-    if (timeout < std::chrono::milliseconds::zero()) {
-        timeout = std::chrono::milliseconds::zero();
-    }
-    const std::chrono::steady_clock::time_point deadline = timeout == std::chrono::milliseconds::max()
-                                                                   ? std::chrono::steady_clock::time_point::max()
-                                                                   : event::EventLoop::current().now() + timeout;
-    const common::IoErr result = co_await HandshakeAwaiter(*this, deadline, true);
-    if (result != common::IoErr::None) {
-        co_return std::unexpected(result);
-    }
-    co_return common::IoResult<void>{};
+    return handshake_gate_.wait(/*confirmed=*/true, timeout);
 }
 
 void QuicConnection::begin_draining(QuicErrorCode error) noexcept {
@@ -951,7 +848,7 @@ void QuicConnection::transition_state(QuicConnectionState next) noexcept {
         return;
     }
     state_ = next;
-    notify_handshake_waiters(common::IoErr::WouldBlock);
+    handshake_gate_.notify();
     dispatch_state_change();
 }
 
@@ -3145,80 +3042,6 @@ common::IoErr QuicConnection::local_stream_attach_status(QuicStreamType type,
     return common::IoErr::None;
 }
 
-common::IoErr QuicConnection::handshake_wait_result(bool confirmed) const noexcept {
-    if (state_ == QuicConnectionState::Established && (!confirmed || handshake_confirmed())) {
-        return common::IoErr::None;
-    }
-    if (connect_failure_ != common::IoErr::None) {
-        return connect_failure_;
-    }
-    if (state_ == QuicConnectionState::Init || state_ == QuicConnectionState::Handshaking ||
-        (state_ == QuicConnectionState::Established && confirmed)) {
-        return common::IoErr::WouldBlock;
-    }
-    switch (close_info_.source) {
-        case QuicCloseSource::IdleTimeout:
-            return common::IoErr::TimedOut;
-        case QuicCloseSource::PeerConnectionClose:
-        case QuicCloseSource::StatelessReset:
-            return common::IoErr::ConnReset;
-        case QuicCloseSource::None:
-        case QuicCloseSource::Local:
-            return common::IoErr::Canceled;
-    }
-    return common::IoErr::Canceled;
-}
-
-void QuicConnection::wait_for_handshake(HandshakeAwaiter &awaiter) noexcept {
-    common::IntrusiveListHook &hook = awaiter.wait_link_;
-    if (hook.linked()) {
-        return;
-    }
-    hook.prev = handshake_wait_tail_;
-    hook.next = nullptr;
-    if (handshake_wait_tail_ != nullptr) {
-        handshake_wait_tail_->next = &hook;
-    } else {
-        handshake_wait_head_ = &hook;
-    }
-    handshake_wait_tail_ = &hook;
-    hook.in_list = true;
-}
-
-void QuicConnection::cancel_handshake_wait(HandshakeAwaiter &awaiter) noexcept {
-    common::IntrusiveListHook &hook = awaiter.wait_link_;
-    if (!hook.linked()) {
-        return;
-    }
-    if (hook.prev != nullptr) {
-        hook.prev->next = hook.next;
-    } else {
-        handshake_wait_head_ = hook.next;
-    }
-    if (hook.next != nullptr) {
-        hook.next->prev = hook.prev;
-    } else {
-        handshake_wait_tail_ = hook.prev;
-    }
-    hook.prev = nullptr;
-    hook.next = nullptr;
-    hook.in_list = false;
-}
-
-void QuicConnection::notify_handshake_waiters(common::IoErr result) noexcept {
-    common::IntrusiveListHook *hook = handshake_wait_head_;
-    while (hook != nullptr) {
-        HandshakeAwaiter *awaiter = HandshakeAwaiter::from_wait_link(hook);
-        hook = hook->next;
-        const common::IoErr waiter_result =
-                result == common::IoErr::WouldBlock ? handshake_wait_result(awaiter->wait_confirmed_) : result;
-        if (waiter_result == common::IoErr::WouldBlock) {
-            continue;
-        }
-        awaiter->complete(waiter_result);
-    }
-}
-
 void QuicConnection::attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept {
     FIBER_ASSERT(!attached_to_endpoint_);
     FIBER_ASSERT(on_destroy_ != nullptr);
@@ -3233,7 +3056,7 @@ void QuicConnection::detach_from_endpoint() noexcept {
     }
     FIBER_ASSERT(state_ == QuicConnectionState::Closed);
 
-    notify_handshake_waiters(common::IoErr::Canceled);
+    handshake_gate_.notify(common::IoErr::Canceled);
     notify_peer_data_waiters(common::IoErr::Canceled);
     close_all_streams(close_info_.error_code);
     clear_frames_for_detach();
