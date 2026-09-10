@@ -905,7 +905,7 @@ common::IoResult<void> QuicConnection::start_handshake() noexcept {
     if (state_ != QuicConnectionState::Init) {
         return std::unexpected(common::IoErr::Already);
     }
-    state_ = QuicConnectionState::Handshaking;
+    transition_state(QuicConnectionState::Handshaking);
     return {};
 }
 
@@ -921,7 +921,7 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
     if (state_ != QuicConnectionState::Init && state_ != QuicConnectionState::Handshaking) {
         return std::unexpected(common::IoErr::Already);
     }
-    state_ = QuicConnectionState::Established;
+    transition_state(QuicConnectionState::Established);
     if (endpoint_ != nullptr) {
         auto filled = endpoint_->fill_local_connection_ids(*this);
         if (!filled) {
@@ -929,8 +929,6 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
             return std::unexpected(filled.error());
         }
     }
-    notify_all_local_stream_attach_waiters();
-    notify_handshake_waiters(common::IoErr::WouldBlock);
     return {};
 }
 
@@ -1188,15 +1186,22 @@ void QuicConnection::shutdown_application(std::uint64_t error_code, std::chrono:
     enter_graceful_closing(info, grace);
 }
 
+void QuicConnection::transition_state(QuicConnectionState next) noexcept {
+    if (state_ == next) {
+        return;
+    }
+    state_ = next;
+    notify_handshake_waiters(common::IoErr::WouldBlock);
+    notify_all_local_stream_attach_waiters();
+}
+
 void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept {
     assert_loop_affinity();
     if (state_ == QuicConnectionState::GracefulClosing || terminal_closing()) {
         return;
     }
     close_info_ = info;
-    state_ = QuicConnectionState::GracefulClosing;
-    notify_handshake_waiters(common::IoErr::Canceled);
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    transition_state(QuicConnectionState::GracefulClosing);
 
     const std::chrono::milliseconds delay = grace.count() > 0 ? grace : options_.graceful_shutdown_grace;
     if (delay.count() <= 0) {
@@ -1232,9 +1237,7 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
     cancel_ack_timer();
 
     close_info_ = info;
-    state_ = QuicConnectionState::Closing;
-    notify_handshake_waiters(handshake_wait_result());
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    transition_state(QuicConnectionState::Closing);
 
     enqueue_close_frames_all_levels();
     close_all_streams(close_info_.error_code);
@@ -1260,9 +1263,7 @@ void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
     cancel_ack_timer();
 
     close_info_ = info;
-    state_ = QuicConnectionState::Draining;
-    notify_handshake_waiters(handshake_wait_result());
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    transition_state(QuicConnectionState::Draining);
     clear_pending_frames_all_levels();
     close_all_streams(close_info_.error_code);
 
@@ -1281,9 +1282,7 @@ void QuicConnection::enter_closed() noexcept {
         cancel_all_timers();
     }
 
-    state_ = QuicConnectionState::Closed;
-    notify_handshake_waiters(handshake_wait_result());
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    transition_state(QuicConnectionState::Closed);
     close_all_streams(close_info_.error_code);
     streams_.clear();
 
@@ -1361,8 +1360,7 @@ void QuicConnection::mark_closed() noexcept {
     if (state_ == QuicConnectionState::Closed) {
         return;
     }
-    state_ = QuicConnectionState::Closed;
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    transition_state(QuicConnectionState::Closed);
     close_all_streams(close_info_.error_code);
     streams_.clear();
 }
@@ -1841,8 +1839,7 @@ void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
             .error_code = static_cast<std::uint64_t>(QuicErrorCode::NoError),
             .frame_type = 0,
     };
-    connection->state_ = QuicConnectionState::Closed;
-    connection->notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    connection->transition_state(QuicConnectionState::Closed);
     connection->close_all_streams(connection->close_info_.error_code);
     connection->streams_.clear();
 
@@ -3368,6 +3365,18 @@ bool QuicConnection::local_stream_attach_ready(QuicStreamType type) const noexce
     return state_ == QuicConnectionState::Established && accepting_new_streams() && !local_stream_blocked(type);
 }
 
+common::IoErr QuicConnection::local_stream_attach_wait_result(QuicStreamType type) const noexcept {
+    if (local_stream_attach_ready(type)) {
+        return common::IoErr::None;
+    }
+    if (!accepting_new_streams()) {
+        return common::IoErr::Canceled;
+    }
+    // Still handshaking, or out of peer stream credit: both are answered by a
+    // later transition or a MAX_STREAMS frame, so the waiter keeps its place.
+    return common::IoErr::WouldBlock;
+}
+
 common::IoErr QuicConnection::handshake_wait_result(bool confirmed) const noexcept {
     if (state_ == QuicConnectionState::Established && (!confirmed || handshake_confirmed())) {
         return common::IoErr::None;
@@ -3499,10 +3508,16 @@ void QuicConnection::notify_local_stream_attach_waiters(QuicStreamType type, com
     common::IntrusiveListHook *&head = type == QuicStreamType::Bidirectional ? local_bidi_stream_attach_wait_head_
                                                                              : local_uni_stream_attach_wait_head_;
 
+    const common::IoErr waiter_result =
+            result == common::IoErr::WouldBlock ? local_stream_attach_wait_result(type) : result;
+    if (waiter_result == common::IoErr::WouldBlock) {
+        return;
+    }
+
     while (head != nullptr) {
         LocalStreamAttachAwaiter *awaiter = LocalStreamAttachAwaiter::from_wait_link(head);
         cancel_local_stream_attach_wait(*awaiter);
-        awaiter->complete(result);
+        awaiter->complete(waiter_result);
     }
 }
 
