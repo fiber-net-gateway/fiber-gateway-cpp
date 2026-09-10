@@ -1193,6 +1193,51 @@ void QuicConnection::transition_state(QuicConnectionState next) noexcept {
     state_ = next;
     notify_handshake_waiters(common::IoErr::WouldBlock);
     notify_all_local_stream_attach_waiters();
+    dispatch_state_change();
+}
+
+void QuicConnection::dispatch_state_change() noexcept {
+    // A transition raised from inside the callback is folded into one more pass
+    // so an owner that reacts by closing or shutting down cannot recurse. The
+    // nested transition has already published state_, so the extra pass reports
+    // the latest state rather than the one it superseded.
+    if (state_dispatch_running_) {
+        state_dispatch_again_ = true;
+        return;
+    }
+    state_dispatch_running_ = true;
+    do {
+        state_dispatch_again_ = false;
+        if (options_.ops.on_state_change != nullptr) {
+            options_.ops.on_state_change(options_.owner, *this);
+        }
+    } while (state_dispatch_again_);
+    state_dispatch_running_ = false;
+}
+
+void QuicConnection::on_local_stream_capacity_changed(QuicStreamType type) noexcept {
+    notify_local_stream_attach_waiters(type);
+    dispatch_capacity_change();
+}
+
+void QuicConnection::on_local_stream_capacity_changed() noexcept {
+    notify_all_local_stream_attach_waiters();
+    dispatch_capacity_change();
+}
+
+void QuicConnection::dispatch_capacity_change() noexcept {
+    if (capacity_dispatch_running_) {
+        capacity_dispatch_again_ = true;
+        return;
+    }
+    capacity_dispatch_running_ = true;
+    do {
+        capacity_dispatch_again_ = false;
+        if (options_.ops.on_capacity_change != nullptr) {
+            options_.ops.on_capacity_change(options_.owner, *this);
+        }
+    } while (capacity_dispatch_again_);
+    capacity_dispatch_running_ = false;
 }
 
 void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept {
@@ -1985,10 +2030,7 @@ QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamTy
     if (!accepting_new_streams()) {
         return std::unexpected(common::IoErr::Canceled);
     }
-    const bool early_attach = state_ == QuicConnectionState::Handshaking &&
-                              early_data_mode == QuicStreamEarlyDataMode::ReplaySafe && early_data_attempted_ &&
-                              crypto_.early_write().ready();
-    if (state_ != QuicConnectionState::Established && !early_attach) {
+    if (state_ != QuicConnectionState::Established && !early_attach_ready(early_data_mode)) {
         return std::unexpected(common::IoErr::Busy);
     }
     if (event::EventLoop *current = event::EventLoop::current_or_null()) {
@@ -2000,9 +2042,8 @@ QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamTy
 
     std::uint64_t &next =
             type == QuicStreamType::Bidirectional ? next_local_bidi_stream_id_ : next_local_uni_stream_id_;
-    const std::uint64_t limit = local_stream_limit(type);
-    if (stream_sequence(next) >= limit) {
-        auto queued = queue_streams_blocked_frame(type, limit);
+    if (local_stream_blocked(type)) {
+        auto queued = queue_streams_blocked_frame(type, local_stream_limit(type));
         if (!queued) {
             return std::unexpected(queued.error());
         }
@@ -2436,7 +2477,7 @@ common::IoResult<void> QuicConnection::recv_max_streams_frame(const QuicMaxStrea
     LocalStreamBlockedState &blocked = local_stream_blocked_state(type);
     blocked.reported = false;
     blocked.last_limit = 0;
-    notify_local_stream_attach_waiters(type);
+    on_local_stream_capacity_changed(type);
     return {};
 }
 
@@ -2834,7 +2875,7 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
         stream.on_max_stream_data(initial_stream_send_limit(stream.stream_id()));
     });
     notify_peer_data_waiters();
-    notify_all_local_stream_attach_waiters();
+    on_local_stream_capacity_changed();
     const std::chrono::milliseconds peer_idle_timeout(params.max_idle_timeout);
     if (peer_idle_timeout.count() > 0 &&
         (options_.transport.max_idle_timeout.count() <= 0 || peer_idle_timeout < options_.transport.max_idle_timeout)) {
@@ -3363,6 +3404,28 @@ bool QuicConnection::local_stream_blocked(QuicStreamType type) const noexcept {
 
 bool QuicConnection::local_stream_attach_ready(QuicStreamType type) const noexcept {
     return state_ == QuicConnectionState::Established && accepting_new_streams() && !local_stream_blocked(type);
+}
+
+bool QuicConnection::early_attach_ready(QuicStreamEarlyDataMode early_data_mode) const noexcept {
+    return state_ == QuicConnectionState::Handshaking && early_data_mode == QuicStreamEarlyDataMode::ReplaySafe &&
+           early_data_attempted_ && crypto_.early_write_ready();
+}
+
+common::IoErr QuicConnection::local_stream_attach_status(QuicStreamType type,
+                                                         QuicStreamEarlyDataMode early_data_mode) const noexcept {
+    // Same predicates, in the same order, as try_attach_local_stream's
+    // connection-level admission; that one adds the per-stream checks and the
+    // STREAMS_BLOCKED side effect this query must not have.
+    if (!accepting_new_streams()) {
+        return common::IoErr::Canceled;
+    }
+    if (state_ != QuicConnectionState::Established && !early_attach_ready(early_data_mode)) {
+        return common::IoErr::Busy;
+    }
+    if (local_stream_blocked(type)) {
+        return common::IoErr::Busy;
+    }
+    return common::IoErr::None;
 }
 
 common::IoErr QuicConnection::local_stream_attach_wait_result(QuicStreamType type) const noexcept {
