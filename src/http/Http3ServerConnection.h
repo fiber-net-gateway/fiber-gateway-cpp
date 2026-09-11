@@ -82,9 +82,14 @@ public:
     [[nodiscard]] bool empty() const noexcept { return connections_.empty(); }
 
     void drain_all() noexcept {
-        for (Http3ServerConnection *connection = connections_.front(); connection != nullptr;
-             connection = connections_.next_of(*connection)) {
+        // The callback must not assume the node survives: read the next
+        // pointer first so a connection that unlinks and destroys itself
+        // synchronously cannot leave this traversal reading freed memory.
+        Http3ServerConnection *connection = connections_.front();
+        while (connection != nullptr) {
+            Http3ServerConnection *next = connections_.next_of(*connection);
             connection->graceful_shutdown();
+            connection = next;
         }
     }
 
