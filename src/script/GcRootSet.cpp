@@ -6,27 +6,24 @@
 
 namespace fiber::script {
 
-GcRootRegistration::GcRootRegistration(GcRootSet &set, GcRootSource &source) noexcept : set_(&set), source_(&source) {
-    set_->push(*this);
+GcRootRegistration::GcRootRegistration(GcRootSet &set, GcRootSource &source) noexcept : source_(&source) {
+    set.push(*this);
 }
 
 GcRootRegistration::~GcRootRegistration() { reset(); }
 
 void GcRootRegistration::reset() noexcept {
-    // Only touch the owning set while we are still linked. After the set has
-    // orphaned us (see ~GcRootSet), hook_ is unlinked and set_ may dangle — the
-    // linked() check reads our own hook and avoids dereferencing a destroyed set.
-    if (set_ != nullptr && hook_.linked()) {
-        set_->erase(*this);
-    }
-    set_ = nullptr;
+    // The hook unlinks itself without needing the owning set. After ~GcRootSet
+    // orphaned us, hook_ is unlinked and this is a no-op even though the set
+    // may already be destroyed.
+    hook_.unlink_self();
     source_ = nullptr;
 }
 
 GcRootSet::~GcRootSet() {
     // Orphan every still-registered guard so a guard destroyed after us does not
-    // reach back into this list. erase() flips each hook's in_list to false,
-    // which makes the guard's own reset() a safe no-op.
+    // unlink through this list's dead anchor. Erasing re-links each hook to
+    // itself, which makes the guard's own reset() a safe no-op.
     while (GcRootRegistration *node = list_.front()) {
         list_.erase(*node);
     }

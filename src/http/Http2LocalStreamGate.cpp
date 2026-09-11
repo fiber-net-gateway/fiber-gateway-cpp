@@ -11,119 +11,51 @@ namespace fiber::http {
 // One parked attach request. The waiter stays linked while it waits, including
 // after it has been told that capacity is available: that is what keeps
 // try_attach yielding to it, and it is why the gate needs no reservation
-// counter. A terminal result unlinks immediately so a closing connection leaves
-// no waiter behind, even though the coroutine resumes later on the loop.
-class Http2LocalStreamGate::Waiter {
+// counter. A terminal result unlinks immediately -- WaitAwaiter::complete
+// detaches -- so a closing connection leaves no waiter behind, even though the
+// coroutine resumes later on the loop.
+class Http2LocalStreamGate::Waiter : public fiber::async::WaitAwaiter {
 public:
     Waiter(Http2LocalStreamGate &gate, std::chrono::steady_clock::time_point deadline) noexcept :
-        gate_(&gate), loop_(&event::EventLoop::current()), deadline_(deadline) {
+        WaitAwaiter(deadline, &Waiter::detach_from_gate), gate_(&gate) {
         gate_->link_waiter(*this);
-        arm_timer();
+        begin_wait({}, event::EventLoop::current());
     }
 
-    Waiter(const Waiter &) = delete;
-    Waiter &operator=(const Waiter &) = delete;
-    Waiter(Waiter &&) = delete;
-    Waiter &operator=(Waiter &&) = delete;
+    ~Waiter() { detach(); }
 
-    ~Waiter() {
-        cancel_timer();
-        if (resume_posted_) {
-            loop_->cancel<Waiter, &Waiter::notify_entry_>(*this);
-            resume_posted_ = false;
-        }
-        if (linked_) {
-            gate_->unlink_waiter(*this);
-        }
-    }
-
-    [[nodiscard]] bool await_ready() const noexcept { return result_ != common::IoErr::None || signaled_; }
+    [[nodiscard]] bool await_ready() const noexcept { return result() != common::IoErr::None || signaled_; }
 
     bool await_suspend(std::coroutine_handle<> handle) noexcept {
-        handle_ = handle;
+        begin_wait(handle, *loop());
         return true;
     }
 
-    common::IoErr await_resume() noexcept {
-        signaled_ = false;
-        return result_;
-    }
+    common::IoErr await_resume() noexcept { return result(); }
+
+    void retry_blocked() noexcept { signaled_ = false; }
 
     // Capacity is available; keep the waiter queued until it actually attaches.
     void signal_available() noexcept {
-        if (signaled_ || result_ != common::IoErr::None) {
+        if (signaled_ || result() != common::IoErr::None) {
             return;
         }
         signaled_ = true;
         post_resume();
     }
 
-    // Terminal outcome. The caller unlinks first.
-    void complete(common::IoErr result) noexcept {
-        FIBER_ASSERT(result != common::IoErr::None);
-        if (result_ != common::IoErr::None) {
-            return;
-        }
-        result_ = result;
-        cancel_timer();
-        post_resume();
-    }
-
     [[nodiscard]] bool signaled() const noexcept { return signaled_; }
 
 private:
-    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
-
-    void arm_timer() noexcept {
-        if (!has_timer()) {
-            return;
+    static void detach_from_gate(fiber::async::WaitAwaiter &base) noexcept {
+        auto &self = static_cast<Waiter &>(base);
+        if (self.linked_) {
+            self.gate_->detach_waiter(self);
         }
-        loop_->post_at<Waiter, &Waiter::timer_entry_, &Waiter::on_timeout>(deadline_, *this);
-    }
-
-    void cancel_timer() noexcept {
-        if (timer_entry_.is_in_heap()) {
-            loop_->cancel<Waiter, &Waiter::timer_entry_>(*this);
-        }
-    }
-
-    void post_resume() noexcept {
-        if (resume_posted_) {
-            return;
-        }
-        resume_posted_ = true;
-        loop_->post_local<Waiter, &Waiter::notify_entry_, &Waiter::on_notify>(*this);
-    }
-
-    static void on_notify(Waiter *waiter) noexcept {
-        FIBER_ASSERT(waiter != nullptr);
-        waiter->resume_posted_ = false;
-        std::coroutine_handle<> handle = std::exchange(waiter->handle_, {});
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    static void on_timeout(Waiter *waiter) noexcept {
-        FIBER_ASSERT(waiter != nullptr);
-        if (waiter->result_ != common::IoErr::None) {
-            return;
-        }
-        if (waiter->linked_) {
-            waiter->gate_->unlink_waiter(*waiter);
-        }
-        waiter->complete(common::IoErr::TimedOut);
     }
 
     Http2LocalStreamGate *gate_ = nullptr;
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    std::chrono::steady_clock::time_point deadline_{};
-    event::EventLoop::DeferEntry notify_entry_{};
-    event::EventLoop::TimerEntry timer_entry_{};
-    common::IoErr result_ = common::IoErr::None;
     bool signaled_ = false;
-    bool resume_posted_ = false;
 
 public:
     Waiter *prev_ = nullptr;
@@ -182,6 +114,7 @@ Http2LocalStreamGate::attach(Http2Stream &stream, std::chrono::milliseconds time
         if (attached || attached.error() != common::IoErr::Busy) {
             co_return attached;
         }
+        waiter.retry_blocked();
     }
 }
 
@@ -222,7 +155,7 @@ void Http2LocalStreamGate::wake_waiters() noexcept {
 }
 
 void Http2LocalStreamGate::link_waiter(Waiter &waiter) noexcept {
-    FIBER_ASSERT(!waiter.linked_);
+    FIBER_ASSERT(!waiter.linked_ && !waiter.completed());
     waiter.prev_ = waiter_tail_;
     waiter.next_ = nullptr;
     if (waiter_tail_ != nullptr) {
@@ -233,6 +166,15 @@ void Http2LocalStreamGate::link_waiter(Waiter &waiter) noexcept {
     waiter_tail_ = &waiter;
     waiter.linked_ = true;
     ++waiter_count_;
+}
+
+void Http2LocalStreamGate::detach_waiter(Waiter &waiter) noexcept {
+    unlink_waiter(waiter);
+    // Only individual departures redistribute capacity. Bulk cancellation
+    // pre-unlinks so that completion does not wake the rest of the queue.
+    if (waiter_head_ != nullptr && connection_->local_stream_attach_status() == common::IoErr::None) {
+        wake_waiters();
+    }
 }
 
 void Http2LocalStreamGate::unlink_waiter(Waiter &waiter) noexcept {

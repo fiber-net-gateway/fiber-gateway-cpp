@@ -23,14 +23,14 @@ class EventLoop;
 
 namespace fiber::http {
 
-class Http3Connection;
+class Http3ServerConnection;
 
 class ServerHttp3Request final : public HttpExchangeIo, public common::NonCopyable, public common::NonMovable {
 public:
-    [[nodiscard]] static quic::QuicStream::Lease create(std::uint64_t stream_id, Http3Connection &conn,
+    [[nodiscard]] static quic::QuicStream::Lease create(std::uint64_t stream_id, Http3ServerConnection &conn,
                                                         const Http3ServerOptions &http_options,
                                                         const HttpHandler &handler) noexcept;
-    [[nodiscard]] static quic::QuicStream::Lease create(std::uint64_t stream_id, Http3Connection &conn,
+    [[nodiscard]] static quic::QuicStream::Lease create(std::uint64_t stream_id, Http3ServerConnection &conn,
                                                         const Http3ServerOptions &http_options,
                                                         std::shared_ptr<const HttpHandler> handler) noexcept;
 
@@ -44,7 +44,7 @@ public:
     [[nodiscard]] HttpExchange &exchange() noexcept { return exchange_; }
     [[nodiscard]] const HttpExchange &exchange() const noexcept { return exchange_; }
 
-    void start_read_loop(event::EventLoop &loop, Http3Connection &conn) noexcept;
+    void start_read_loop(event::EventLoop &loop, Http3ServerConnection &conn) noexcept;
 
     [[nodiscard]] bool response_channel_closed() const noexcept override { return stream_.send_aborted(); }
     common::IoErr set_response_channel_closed_callback(ResponseChannelClosedCallback callback,
@@ -74,7 +74,7 @@ private:
     enum class BodyRecvState : std::uint8_t;
     class HeaderBlockParser;
 
-    ServerHttp3Request(Http3Connection &conn, const Http3ServerOptions &http_options, const HttpHandler &handler,
+    ServerHttp3Request(Http3ServerConnection &conn, const Http3ServerOptions &http_options, const HttpHandler &handler,
                        std::shared_ptr<const HttpHandler> handler_owner = {}) noexcept;
 
     static void destroy_owner(void *owner, quic::QuicStream &stream) noexcept;
@@ -98,7 +98,7 @@ private:
 
     // Set when the read loop starts; the request's stream lease keeps the
     // connection alive for as long as the loop runs.
-    Http3Connection *conn_ = nullptr;
+    Http3ServerConnection *conn_ = nullptr;
     quic::QuicConnection::Lease quic_lease_{};
     quic::QuicStream stream_;
     mem::IoBufChain inbound_buf_;

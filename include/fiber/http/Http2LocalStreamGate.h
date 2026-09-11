@@ -5,6 +5,7 @@
 #include <cstddef>
 
 #include "../async/Task.h"
+#include "../async/WaitAwaiter.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -60,6 +61,7 @@ private:
     void wake_waiters() noexcept;
     void link_waiter(Waiter &waiter) noexcept;
     void unlink_waiter(Waiter &waiter) noexcept;
+    void detach_waiter(Waiter &waiter) noexcept;
 
     Http2Connection *connection_ = nullptr;
     Waiter *waiter_head_ = nullptr;

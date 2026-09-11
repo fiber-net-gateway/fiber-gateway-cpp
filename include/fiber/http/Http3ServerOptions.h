@@ -24,6 +24,15 @@ struct Http3ServerOptions {
     quic::QuicRecvFlowControlSettings recv_flow{};
     Http3Settings settings{};
     std::chrono::milliseconds keepalive_interval{0};
+    // How long a session may sit with no request running before the server
+    // retires it with a GOAWAY. Zero disables it, which is the default.
+    //
+    // Distinct from transport.max_idle_timeout: that one is QUIC liveness, and
+    // fires when the peer has stopped answering. This one fires on a perfectly
+    // healthy connection that simply has no work, which is a question only
+    // HTTP/3 can answer -- a session always holds four long-lived control
+    // streams, so QUIC's own stream count never reaches zero.
+    std::chrono::milliseconds idle_connection_timeout{0};
     std::chrono::milliseconds max_ack_delay{25};
     // Budget for reading one request body chunk.
     std::chrono::seconds body_timeout{60};

@@ -21,6 +21,7 @@
 #include "QuicCongestion.h"
 #include "QuicConnectionId.h"
 #include "QuicFrame.h"
+#include "QuicHandshakeGate.h"
 #include "QuicPacer.h"
 #include "QuicPacketNumberSpace.h"
 #include "QuicPath.h"
@@ -414,21 +415,42 @@ public:
         QuicConnection *connection_ = nullptr;
     };
 
+    // Notifications run inline on the connection's loop and must not destroy
+    // the owner or the connection, nor drive a nested event loop. State hooks
+    // may close or shut down; nested state notifications fold into another pass.
     struct Ops {
         QuicStream::Lease (*create_stream)(void *owner, std::uint64_t stream_id) noexcept = nullptr;
         void (*on_peer_stream_attached)(void *owner, QuicStream &stream) noexcept = nullptr;
         void (*on_early_data_rejected)(void *owner) noexcept = nullptr;
-    };
-
-    struct EndpointIndex {
-        QuicConnection *connection = nullptr;
-        Lease lease{};
-        common::IntrusiveListHook link{};
-    };
-
-    struct SendQueueEntry {
-        QuicConnection *connection = nullptr;
-        common::IntrusiveListHook link{};
+        // state() moved and its stream/frame/timer bookkeeping is complete.
+        // Read the new state from the connection. Endpoint detachment, which
+        // can release the last lease, happens after the Closed notification.
+        void (*on_state_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
+        // The number of live streams changed in either direction, or the peer
+        // granted us more stream credit (MAX_STREAMS, or its initial transport
+        // parameters). Deliberately carries no stream type or direction: an
+        // owner re-reads what it actually tracks -- local_stream_attach_status()
+        // per type, or its own count of application streams. QUIC cannot tell an
+        // application stream from a protocol one, so an owner that cares about
+        // that distinction must keep its own count.
+        //
+        // Not raised when we extend the peer's credit: that only ever happens as
+        // a consequence of a peer stream retiring, and the extension is applied
+        // before that retirement's notification runs.
+        //
+        // Not raised for a MAX_STREAMS frame that does not raise our limit --
+        // RFC 9000 4.6 requires ignoring those, so nothing moved.
+        //
+        // A close tears every stream down without detach notifications, since it
+        // clears the stream table rather than retiring stream by stream. Owners
+        // must also observe on_state_change. So must an owner tracking admission:
+        // reaching Established is a state change, not a credit change.
+        //
+        // Runs inside attach/retire and the packet frame loop: observe state,
+        // update a gate, or schedule deferred work only. Do not synchronously
+        // mutate the connection or its streams. In particular, defer closing
+        // until the current packet has finished processing.
+        void (*on_capacity_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
     };
 
     struct Options {
@@ -592,13 +614,29 @@ public:
     [[nodiscard]] QuicStream *find_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] const QuicStream *find_stream(std::uint64_t stream_id) const noexcept;
     [[nodiscard]] std::size_t active_stream_count() const noexcept { return streams_.size(); }
+    // What try_attach_local_stream would answer for a fresh stream right now:
+    // None when one can be attached, Busy while the handshake has not reached
+    // the point this early-data mode needs or the peer's stream credit is spent,
+    // Canceled once the connection will never admit another local stream. A
+    // caller waiting for room uses this to tell "retry later" from "never
+    // again". Pure: unlike try_attach_local_stream it queues no STREAMS_BLOCKED
+    // frame, so it cannot stand in for the real attempt.
+    // Locally initiated streams of this type that could still be attached: the
+    // peer's credit for the type minus what this side has already spent. Credit
+    // only ever grows -- QUIC stream ids are monotonic, so retiring a stream
+    // returns nothing here.
+    [[nodiscard]] std::uint64_t available_local_stream_slots(QuicStreamType type) const noexcept;
+    [[nodiscard]] common::IoErr local_stream_attach_status(
+            QuicStreamType type,
+            QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) const noexcept;
+    [[nodiscard]] bool accepts_new_local_stream(
+            QuicStreamType type,
+            QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) const noexcept {
+        return local_stream_attach_status(type, early_data_mode) == common::IoErr::None;
+    }
     [[nodiscard]] common::IoResult<QuicStream *>
     try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamType type,
                             QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
-    [[nodiscard]] async::Task<common::IoResult<QuicStream *>>
-    attach_local_stream(QuicStream::Lease stream, QuicStreamType type,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds::max(),
-                        QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
     [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, mem::IoBuf data) noexcept;
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
@@ -663,6 +701,11 @@ public:
     void on_packet_processed() noexcept;
     void on_ack_eliciting_packet_sent() noexcept;
     [[nodiscard]] std::chrono::milliseconds effective_idle_timeout() const noexcept;
+    // How long the connection stays silent before it sends a keepalive PING.
+    // Zero when keepalive is off, which is the default: RFC 9000 10.1.2 leaves
+    // deferring the idle timeout to the application, and warns that doing it for
+    // a connection unlikely to be used again wastes both endpoints' resources.
+    [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool idle_timer_armed() const noexcept { return idle_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool close_timer_armed() const noexcept { return close_timer_entry_.is_in_heap(); }
     [[nodiscard]] bool keepalive_timer_armed() const noexcept { return keepalive_timer_entry_.is_in_heap(); }
@@ -792,14 +835,16 @@ public:
     [[nodiscard]] const QuicTransportSettings &local_transport() const noexcept { return options_.transport; }
     [[nodiscard]] const QuicPeerTransportState &peer_transport() const noexcept { return peer_transport_; }
     [[nodiscard]] bool peer_transport_params_received() const noexcept { return peer_transport_.received; }
-    EndpointIndex endpoint_index{};
+    // Registration in the owning endpoint's connection list. The hook is the
+    // list membership; the lease keeps this connection alive while indexed,
+    // until detach moves it out to order its release after unindexing.
+    common::IntrusiveListHook endpoint_link_{};
+    Lease endpoint_lease_{};
     QuicConnectionIdIndex original_dcid_index{};
-    SendQueueEntry send_queue_entry{};
+    // Membership in the endpoint send scheduler's ready ring.
+    common::IntrusiveListHook send_queue_hook_{};
 
 private:
-    class HandshakeAwaiter;
-    class LocalStreamAttachAwaiter;
-
     struct PeerStreamLimitWindow {
         std::uint64_t concurrent_limit = 0;
         std::uint64_t opened_count = 0;
@@ -820,7 +865,9 @@ private:
     [[nodiscard]] std::uint64_t local_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] std::uint64_t peer_stream_limit(QuicStreamType type) const noexcept;
     [[nodiscard]] bool local_stream_blocked(QuicStreamType type) const noexcept;
-    [[nodiscard]] bool local_stream_attach_ready(QuicStreamType type) const noexcept;
+    // Whether this mode may attach before the handshake completes: 0-RTT keys
+    // are installed and this connection actually attempted early data.
+    [[nodiscard]] bool early_attach_ready(QuicStreamEarlyDataMode early_data_mode) const noexcept;
     [[nodiscard]] bool is_gone_peer_stream(std::uint64_t stream_id) const noexcept;
     // RFC 9000 §4.6: a peer-initiated stream whose sequence (id >> 2) reaches or
     // exceeds the advertised max_streams has exceeded the limit advertised via
@@ -890,6 +937,13 @@ private:
     void close_all_streams(std::uint64_t error_code) noexcept;
     void clear_frames_for_detach() noexcept;
     void clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept;
+    // The single writer of state_. Re-evaluates handshake waiters, whose
+    // resumes are deferred. Set close_info_ first. Each transition entry point
+    // must finish its bookkeeping before dispatch_state_change(), and must not
+    // continue that bookkeeping after the synchronous observer has run.
+    void publish_state(QuicConnectionState next) noexcept;
+    void dispatch_state_change() noexcept;
+    void dispatch_capacity_change() noexcept;
     void enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept;
     void enter_closing(QuicCloseInfo info, bool immediate = false) noexcept;
     void enter_draining(QuicCloseInfo info) noexcept;
@@ -904,22 +958,13 @@ private:
     void cancel_all_timers_quiesced() noexcept;
     [[nodiscard]] bool has_pending_send_work() const noexcept;
     [[nodiscard]] bool has_pacing_exempt_send_work() const noexcept;
-    [[nodiscard]] std::chrono::milliseconds keepalive_delay() const noexcept;
     [[nodiscard]] bool reserve_peer_data(std::uint64_t bytes) noexcept;
     [[nodiscard]] std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const noexcept;
     void wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept;
     void cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) noexcept;
     void notify_peer_data_waiters(common::IoErr result = common::IoErr::None) noexcept;
-    [[nodiscard]] common::IoErr handshake_wait_result(bool confirmed = false) const noexcept;
-    void wait_for_handshake(HandshakeAwaiter &awaiter) noexcept;
-    void cancel_handshake_wait(HandshakeAwaiter &awaiter) noexcept;
-    void notify_handshake_waiters(common::IoErr result) noexcept;
     void reset_after_retry() noexcept;
     [[nodiscard]] common::IoResult<void> start_preferred_path_validation() noexcept;
-    void wait_for_local_stream_attach(LocalStreamAttachAwaiter &awaiter) noexcept;
-    void cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept;
-    void notify_local_stream_attach_waiters(QuicStreamType type, common::IoErr result = common::IoErr::None) noexcept;
-    void notify_all_local_stream_attach_waiters(common::IoErr result = common::IoErr::None) noexcept;
     void attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept;
     void detach_from_endpoint() noexcept;
     void retain() noexcept;
@@ -992,14 +1037,12 @@ private:
     std::uint64_t peer_max_data_ = 0;
     std::uint64_t peer_data_reserved_ = 0;
     std::uint64_t last_data_blocked_limit_ = 0;
-    common::IntrusiveListHook *peer_data_wait_head_ = nullptr;
-    common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
-    common::IntrusiveListHook *handshake_wait_head_ = nullptr;
-    common::IntrusiveListHook *handshake_wait_tail_ = nullptr;
-    common::IntrusiveListHook *local_bidi_stream_attach_wait_head_ = nullptr;
-    common::IntrusiveListHook *local_bidi_stream_attach_wait_tail_ = nullptr;
-    common::IntrusiveListHook *local_uni_stream_attach_wait_head_ = nullptr;
-    common::IntrusiveListHook *local_uni_stream_attach_wait_tail_ = nullptr;
+    QuicHandshakeGate handshake_gate_{*this};
+    // Connection-window send waiters, as a hook ring anchored here. The queued
+    // nodes are QuicStream::WriteAwaiter hooks; IntrusiveList<T, Offset> cannot
+    // be named in this header because WriteAwaiter is defined in QuicStream.cpp,
+    // so the ring is driven with IntrusiveListHook primitives instead.
+    common::IntrusiveListHook peer_data_wait_anchor_{};
     bool data_blocked_reported_ = false;
     bool idle_send_timer_set_ = false;
     bool has_server_initial_source_connection_id_ = false;
@@ -1010,6 +1053,10 @@ private:
     std::uint64_t early_next_local_bidi_stream_id_ = 0;
     std::uint64_t early_next_local_uni_stream_id_ = 0;
     std::uint64_t early_peer_data_reserved_ = 0;
+    bool state_dispatch_running_ = false;
+    bool state_dispatch_again_ = false;
+    bool capacity_dispatch_running_ = false;
+    bool capacity_dispatch_again_ = false;
     bool attached_to_endpoint_ = false;
     bool detached_from_endpoint_ = false;
     std::uint32_t ref_count_ = 1;

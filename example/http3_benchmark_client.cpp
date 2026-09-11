@@ -1026,13 +1026,13 @@ private:
                 measured = scheduled >= measurement_start_;
             }
 
-            if (!connection.http3().accepting_requests()) {
+            if (!connection.accepting_requests()) {
                 ++stats_.terminal_lane_stops;
                 break;
             }
             RequestResult result = co_await run_request(connection);
             record_result(result, measured, scheduled);
-            if (!connection.http3().accepting_requests()) {
+            if (!connection.accepting_requests()) {
                 ++stats_.terminal_lane_stops;
                 break;
             }

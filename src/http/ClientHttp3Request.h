@@ -14,9 +14,9 @@
 #include <fiber/common/mem/IoBufChain.h>
 #include <fiber/http/ClientHttp3Types.h>
 #include <fiber/http/Http3Codec.h>
-#include <fiber/http/Http3Connection.h>
 #include <fiber/http/Http3QpackDecoder.h>
 #include <fiber/quic/QuicConnection.h>
+#include "http/Http3ClientConnectionImpl.h"
 
 namespace fiber::http {
 
@@ -26,7 +26,7 @@ class ClientHttp3Request : public common::NonCopyable, public common::NonMovable
 public:
     ~ClientHttp3Request();
 
-    [[nodiscard]] static quic::QuicStream::Lease create(Http3Connection &conn, mem::BufPool &pool) noexcept;
+    [[nodiscard]] static quic::QuicStream::Lease create(Http3ClientConnectionImpl &conn, mem::BufPool &pool) noexcept;
     [[nodiscard]] static ClientHttp3Request *from_stream(quic::QuicStream &stream) noexcept;
     [[nodiscard]] static const ClientHttp3Request *from_stream(const quic::QuicStream &stream) noexcept;
 
@@ -64,7 +64,7 @@ private:
         Error,
     };
 
-    ClientHttp3Request(Http3Connection &conn, mem::BufPool &pool) noexcept;
+    ClientHttp3Request(Http3ClientConnectionImpl &conn, mem::BufPool &pool) noexcept;
 
     static void destroy_owner(void *owner, quic::QuicStream &stream) noexcept;
     static void on_rejected(void *owner, std::uint64_t goaway_id) noexcept;
@@ -105,7 +105,7 @@ private:
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
 
     quic::QuicConnection::Lease quic_lease_{};
-    Http3Connection *conn_ = nullptr;
+    Http3ClientConnectionImpl *conn_ = nullptr;
     quic::QuicStream stream_;
     mem::BufPool *pool_ = nullptr;
     mem::IoBufChain inbound_buf_;
