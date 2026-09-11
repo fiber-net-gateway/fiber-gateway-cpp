@@ -735,10 +735,12 @@ TEST(Http3EndpointTest, IdleConnectionTimeoutDisabledKeepsTheSession) {
     std::atomic<int> handled{0};
     RunningServer running;
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
-    // Default Http3ServerOptions: idle_connection_timeout is zero, meaning off.
+    // Explicit zero: idle_connection_timeout defaults to 70s now, but this
+    // case pins the disabled behavior.
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
             .tls = tls_options(*tls.credential),
+            .http3 = {.idle_connection_timeout = 0ms},
             .handler =
                     [&handled](fiber::http::HttpExchange &exchange) {
                         handled.fetch_add(1, std::memory_order_relaxed);
