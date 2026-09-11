@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <memory>
 #include <new>
+#include <thread>
 
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
@@ -346,4 +348,160 @@ TEST(QuicLocalStreamGateTest, ReplaySafeAttachDoesNotWaitForHandshake) {
 
     group.stop();
     group.join();
+}
+
+namespace {
+
+template<class T>
+auto start_pending_task(fiber::async::Task<T> &task) {
+    auto handle = task.operator co_await().handle;
+    handle.promise().set_continuation(std::noop_coroutine());
+    handle.resume();
+    return handle;
+}
+
+void exercise_cancelled_waiter(bool cancel_head) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto options = client_options(&loop);
+        options.max_local_bidirectional_streams = 0;
+        QuicConnection conn(options);
+        QuicLocalStreamGate gate(conn);
+        wire_gate(conn, gate);
+        EXPECT_TRUE(conn.mark_established());
+        auto first = gate.attach(make_test_stream(), QuicStreamType::Bidirectional);
+        auto second = gate.attach(make_test_stream(), QuicStreamType::Bidirectional);
+        auto third = gate.attach(make_test_stream(), QuicStreamType::Bidirectional);
+        auto h1 = start_pending_task(first);
+        auto h2 = start_pending_task(second);
+        auto h3 = start_pending_task(third);
+        EXPECT_EQ(gate.waiter_count(), 3U);
+        EXPECT_TRUE(conn.recv_max_streams_frame({.limit = 2, .bidirectional = true}));
+        // Destroy a waiter already assigned credit, before any posted resume runs.
+        if (cancel_head) {
+            first = {};
+        } else {
+            second = {};
+        }
+        co_await fiber::async::sleep(std::chrono::milliseconds(10));
+        auto survivor = cancel_head ? h2 : h1;
+        EXPECT_TRUE(survivor.done());
+        EXPECT_TRUE(h3.done());
+        if (survivor.done() && h3.done()) {
+            auto earlier = survivor.promise().result();
+            auto later = h3.promise().result();
+            EXPECT_TRUE(earlier);
+            EXPECT_TRUE(later);
+            if (earlier && later) {
+                EXPECT_EQ((*earlier)->stream_id(), 0U);
+                EXPECT_EQ((*later)->stream_id(), 4U);
+            }
+        }
+        EXPECT_EQ(gate.waiter_count(), 0U);
+        loop.stop();
+    });
+    loop.run();
+}
+
+} // namespace
+
+TEST(QuicLocalStreamGateTest, DestroyingSignaledHeadRedistributesCreditInFifoOrder) { exercise_cancelled_waiter(true); }
+
+TEST(QuicLocalStreamGateTest, DestroyingSignaledMiddleRedistributesCreditInFifoOrder) {
+    exercise_cancelled_waiter(false);
+}
+
+TEST(QuicLocalStreamGateTest, CancelAllOverridesQueuedSignalsWithoutAttachingStreams) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto options = client_options(&loop);
+        options.max_local_bidirectional_streams = 0;
+        QuicConnection conn(options);
+        QuicLocalStreamGate gate(conn);
+        wire_gate(conn, gate);
+        EXPECT_TRUE(conn.mark_established());
+        auto first = gate.attach(make_test_stream(), QuicStreamType::Bidirectional);
+        auto second = gate.attach(make_test_stream(), QuicStreamType::Bidirectional);
+        auto h1 = start_pending_task(first);
+        auto h2 = start_pending_task(second);
+        EXPECT_TRUE(conn.recv_max_streams_frame({.limit = 2, .bidirectional = true}));
+        gate.cancel_all(IoErr::Canceled);
+        EXPECT_FALSE(gate.has_waiters());
+        co_await fiber::async::sleep(std::chrono::milliseconds(10));
+        EXPECT_TRUE(h1.done());
+        EXPECT_TRUE(h2.done());
+        if (h1.done() && h2.done()) {
+            EXPECT_EQ(h1.promise().result().error(), IoErr::Canceled);
+            EXPECT_EQ(h2.promise().result().error(), IoErr::Canceled);
+        }
+        EXPECT_EQ(conn.active_stream_count(), 0U);
+        loop.stop();
+    });
+    loop.run();
+}
+
+TEST(QuicLocalStreamGateTest, TimedOutHeadRedistributesCreditBeforeItsQueuedResume) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto options = client_options(&loop);
+        options.max_local_bidirectional_streams = 0;
+        QuicConnection conn(options);
+        QuicLocalStreamGate gate(conn);
+        wire_gate(conn, gate);
+        EXPECT_TRUE(conn.mark_established());
+        // Expire both timers in one loop turn, with credit granted first.
+        // The timeout must replace the queued signal and transfer its credit.
+        struct Grant {
+            fiber::event::EventLoop::TimerEntry timer{};
+            QuicConnection *conn;
+            static void fire(Grant *self) noexcept {
+                EXPECT_TRUE(self->conn->recv_max_streams_frame({.limit = 1, .bidirectional = true}));
+            }
+        } grant{.conn = &conn};
+        const auto deadline = loop.now() + std::chrono::milliseconds(20);
+        loop.post_at<Grant, &Grant::timer, &Grant::fire>(deadline - std::chrono::milliseconds(1), grant);
+        auto first = gate.attach(make_test_stream(), QuicStreamType::Bidirectional, std::chrono::milliseconds(20));
+        auto second = gate.attach(make_test_stream(), QuicStreamType::Bidirectional);
+        auto h1 = start_pending_task(first);
+        auto h2 = start_pending_task(second);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        co_await fiber::async::sleep(std::chrono::milliseconds(30));
+        EXPECT_TRUE(h1.done());
+        EXPECT_TRUE(h2.done());
+        if (h1.done() && h2.done()) {
+            EXPECT_EQ(h1.promise().result().error(), IoErr::TimedOut);
+            EXPECT_TRUE(h2.promise().result());
+        }
+        loop.stop();
+    });
+    loop.run();
+}
+
+TEST(QuicLocalStreamGateTest, DestroyingGateCancelsQueuedResumesWithoutAccessingDestroyedOwner) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto options = client_options(&loop);
+        options.max_local_bidirectional_streams = 0;
+        QuicConnection conn(options);
+        auto gate = std::make_unique<QuicLocalStreamGate>(conn);
+        wire_gate(conn, *gate);
+        EXPECT_TRUE(conn.mark_established());
+        auto first = gate->attach(make_test_stream(), QuicStreamType::Bidirectional);
+        auto second = gate->attach(make_test_stream(), QuicStreamType::Bidirectional);
+        auto h1 = start_pending_task(first);
+        auto h2 = start_pending_task(second);
+        EXPECT_TRUE(conn.recv_max_streams_frame({.limit = 1, .bidirectional = true}));
+        gate.reset();
+        EXPECT_TRUE(conn.set_app_ops(nullptr, {}));
+        co_await fiber::async::sleep(std::chrono::milliseconds(10));
+        EXPECT_TRUE(h1.done());
+        EXPECT_TRUE(h2.done());
+        if (h1.done() && h2.done()) {
+            EXPECT_EQ(h1.promise().result().error(), IoErr::Canceled);
+            EXPECT_EQ(h2.promise().result().error(), IoErr::Canceled);
+        }
+        EXPECT_EQ(conn.active_stream_count(), 0U);
+        loop.stop();
+    });
+    loop.run();
 }

@@ -31,10 +31,9 @@ public:
         return true;
     }
 
-    common::IoErr await_resume() noexcept {
-        signaled_ = false;
-        return result();
-    }
+    common::IoErr await_resume() noexcept { return result(); }
+
+    void retry_blocked() noexcept { signaled_ = false; }
 
     // Credit is available; keep the waiter queued until it actually attaches.
     void signal_available() noexcept {
@@ -52,7 +51,7 @@ private:
     static void detach_from_gate(async::WaitAwaiter &base) noexcept {
         auto &self = static_cast<Waiter &>(base);
         if (self.linked_) {
-            self.gate_->unlink_waiter(self);
+            self.gate_->detach_waiter(self);
         }
     }
 
@@ -116,6 +115,7 @@ QuicLocalStreamGate::attach(QuicStream::Lease stream, QuicStreamType type, std::
         if (attached || attached.error() != common::IoErr::Busy) {
             co_return attached;
         }
+        waiter.retry_blocked();
     }
 }
 
@@ -128,7 +128,9 @@ void QuicLocalStreamGate::cancel_all(QuicStreamType type, common::IoErr reason) 
     FIBER_ASSERT(reason != common::IoErr::None);
     Queue &queue = queue_for(type);
     while (queue.head != nullptr) {
-        queue.head->complete(reason);
+        Waiter *waiter = queue.head;
+        unlink_waiter(*waiter);
+        waiter->complete(reason);
     }
 }
 
@@ -172,7 +174,7 @@ void QuicLocalStreamGate::wake_waiters(QuicStreamType type) noexcept {
 }
 
 void QuicLocalStreamGate::link_waiter(Waiter &waiter) noexcept {
-    FIBER_ASSERT(!waiter.linked_);
+    FIBER_ASSERT(!waiter.linked_ && !waiter.completed());
     Queue &queue = queue_for(waiter.type());
     waiter.prev_ = queue.tail;
     waiter.next_ = nullptr;
@@ -184,6 +186,16 @@ void QuicLocalStreamGate::link_waiter(Waiter &waiter) noexcept {
     queue.tail = &waiter;
     waiter.linked_ = true;
     ++queue.count;
+}
+
+void QuicLocalStreamGate::detach_waiter(Waiter &waiter) noexcept {
+    const QuicStreamType type = waiter.type();
+    unlink_waiter(waiter);
+    // A single departure may release credit assigned to a signaled waiter.
+    // Batch cancellation pre-unlinks instead, so it never schedules successors.
+    if (queue_for(type).head != nullptr && connection_->local_stream_attach_status(type) == common::IoErr::None) {
+        wake_waiters(type);
+    }
 }
 
 void QuicLocalStreamGate::unlink_waiter(Waiter &waiter) noexcept {
