@@ -210,7 +210,7 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
 // parses first is a race.
 DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber::net::SocketAddress server_addr,
                                            std::string cert_path, std::chrono::milliseconds wait,
-                                           std::promise<ClientResult> *promise) {
+                                           std::promise<ClientResult> *promise, bool send_first_request = true) {
     ClientResult result{};
     fiber::quic::QuicUdpEndpoint endpoint;
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
@@ -263,7 +263,7 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
     }
     result.connected = true;
 
-    {
+    if (send_first_request) {
         fiber::mem::BufPool pool;
         fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
         auto sent = co_await exchange.send_request_header(
@@ -601,6 +601,120 @@ TEST(Http3EndpointTest, IdleConnectionTimeoutRetiresASessionWithNoRequests) {
     // Retired while idle: the second request has nowhere to go.
     EXPECT_NE(result.second_request_error, fiber::common::IoErr::None);
     EXPECT_EQ(handled.load(), 1);
+
+    running.stop_and_join();
+    group.stop();
+    group.join();
+    client_group.stop();
+    client_group.join();
+}
+
+TEST(Http3EndpointTest, IdleConnectionTimeoutRetiresASessionThatNeverSentARequest) {
+    TestCredential tls;
+    ASSERT_TRUE(tls.init());
+
+    fiber::event::EventLoopGroup group(1);
+    fiber::event::EventLoopGroup client_group(1);
+    group.start();
+    client_group.start();
+
+    std::atomic<int> handled{0};
+    fiber::http::Http3ServerOptions http3_options{};
+    http3_options.idle_connection_timeout = 300ms;
+
+    RunningServer running;
+    running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
+    running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
+            .address = {fiber::net::IpAddress::loopback_v4(), 0},
+            .tls = tls_options(*tls.credential),
+            .http3 = http3_options,
+            .handler =
+                    [&handled](fiber::http::HttpExchange &exchange) {
+                        handled.fetch_add(1, std::memory_order_relaxed);
+                        return write_text(exchange, 200, "h3-ok");
+                    },
+    });
+    ASSERT_NE(running.endpoint, nullptr);
+    ASSERT_TRUE(running.server->start().has_value());
+    spawn_serve(running, group.at(0));
+
+    const fiber::net::SocketAddress server_addr = running.endpoint->local_addr();
+    ASSERT_NE(server_addr.port(), 0);
+
+    std::promise<ClientResult> promise;
+    auto future = promise.get_future();
+    const std::string cert_path = tls.cert.path();
+    fiber::async::spawn(client_group.at(0), [&client_group, server_addr, cert_path, &promise]() {
+        return run_http3_client_idle_reclaim(&client_group.at(0), server_addr, cert_path, 900ms, &promise, false);
+    });
+
+    ASSERT_EQ(future.wait_for(15s), std::future_status::ready);
+    ClientResult result = future.get();
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_TRUE(result.connected);
+
+    // Retired while idle: the second request has nowhere to go.
+    EXPECT_NE(result.second_request_error, fiber::common::IoErr::None);
+    EXPECT_EQ(handled.load(), 0);
+
+    running.stop_and_join();
+    group.stop();
+    group.join();
+    client_group.stop();
+    client_group.join();
+}
+
+TEST(Http3EndpointTest, IdleConnectionTimeoutPreservesLongRequestsAndRestartsAfterCompletion) {
+    TestCredential tls;
+    ASSERT_TRUE(tls.init());
+
+    fiber::event::EventLoopGroup group(1);
+    fiber::event::EventLoopGroup client_group(1);
+    group.start();
+    client_group.start();
+
+    std::atomic<int> handled{0};
+    fiber::http::Http3ServerOptions http3_options{};
+    http3_options.idle_connection_timeout = 300ms;
+
+    RunningServer running;
+    running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
+    running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
+            .address = {fiber::net::IpAddress::loopback_v4(), 0},
+            .tls = tls_options(*tls.credential),
+            .http3 = http3_options,
+            .handler = [&handled](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+                handled.fetch_add(1, std::memory_order_relaxed);
+                co_await fiber::async::sleep(600ms);
+                co_await write_text(exchange, 200, "h3-ok");
+            },
+    });
+    ASSERT_NE(running.endpoint, nullptr);
+    ASSERT_TRUE(running.server->start().has_value());
+    spawn_serve(running, group.at(0));
+
+    const fiber::net::SocketAddress server_addr = running.endpoint->local_addr();
+    ASSERT_NE(server_addr.port(), 0);
+
+    std::promise<ClientResult> promise;
+    auto future = promise.get_future();
+    const std::string cert_path = tls.cert.path();
+    fiber::async::spawn(client_group.at(0), [&client_group, server_addr, cert_path, &promise]() {
+        return run_http3_client_idle_reclaim(&client_group.at(0), server_addr, cert_path, 100ms, &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(15s), std::future_status::ready);
+    ClientResult result = future.get();
+    EXPECT_EQ(result.error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.status, 200);
+    EXPECT_EQ(result.body, "h3-ok");
+    EXPECT_EQ(handled.load(), 2);
+
+    // Each response takes longer than the idle budget. After the first
+    // completes, a short idle period must still leave a fresh request budget.
+    EXPECT_EQ(result.second_request_error, fiber::common::IoErr::None);
+    EXPECT_EQ(result.second_status, 200);
+    EXPECT_EQ(handled.load(), 2);
 
     running.stop_and_join();
     group.stop();
