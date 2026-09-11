@@ -123,7 +123,9 @@ class QuicClient : public common::NonCopyable, public common::NonMovable {
 public:
     struct Options {
         void *connection_owner = nullptr;
-        QuicConnection::Lease (*create_connection)(void *owner,
+        // Must construct the connection on the given endpoint (the one this
+        // client was initialized with) and return an owning lease.
+        QuicConnection::Lease (*create_connection)(void *owner, QuicUdpEndpoint &endpoint,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
         QuicClientCacheOps cache{};
         net::TlsAlpnList alpn{};

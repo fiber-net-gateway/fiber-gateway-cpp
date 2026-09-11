@@ -2,8 +2,7 @@
 
 TEST(Http3ControlStreamsTest, AppliesPeerSettingsOnce) {
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &fiber::test::quic_loop();
-    ControlFixture h3(quic_options);
+    ControlFixture h3(fiber::test::quic_endpoint(), quic_options);
     auto &quic = h3.quic();
     fiber::http::Http3Settings settings{};
     settings.qpack_blocked_streams = 8;
@@ -22,8 +21,8 @@ TEST(Http3ControlStreamsTest, ReadsPeerControlSettingsStream) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -51,8 +50,8 @@ TEST(Http3ControlStreamsTest, RejectsSecondControlStream) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -78,8 +77,8 @@ TEST(Http3ControlStreamsTest, ClosingControlStreamIsCriticalStreamError) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -109,8 +108,8 @@ TEST(Http3ControlStreamsTest, ReadsQpackEncoderStreamCapacityZero) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -137,8 +136,8 @@ TEST(Http3ControlStreamsTest, ReadsQpackDecoderStreamUntilShutdown) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -164,8 +163,8 @@ TEST(Http3ControlStreamsTest, ReadsQpackDecoderStreamCancellationUntilShutdown) 
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -192,8 +191,8 @@ TEST(Http3ControlStreamsTest, RejectsSecondQpackEncoderStream) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -218,8 +217,8 @@ TEST(Http3ControlStreamsTest, StopBeforeScheduledReaderStartsJoinsWithoutClosing
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
-    ControlFixture h3(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), options);
     ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
     std::promise<void> done;
     auto future = done.get_future();
@@ -241,8 +240,8 @@ TEST(Http3ControlStreamsTest, FirstControlFrameMustBeSettings) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -268,8 +267,8 @@ TEST(Http3ControlStreamsTest, RejectsSecondSettingsFrame) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -296,8 +295,8 @@ TEST(Http3ControlStreamsTest, IgnoresUnknownUniStreamTypeSplitAcrossReads) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -336,8 +335,8 @@ TEST(Http3ControlStreamsTest, ResetControlStreamIsClosedCriticalStreamError) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -371,8 +370,8 @@ TEST(Http3ControlStreamsTest, RejectsSecondQpackDecoderStream) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);
@@ -398,8 +397,8 @@ TEST(Http3ControlStreamsTest, AcceptedPushStreamKeepsControlStreamsAlive) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ControlFixture h3(quic_options, fiber::http::Http3ErrorCode::NoError);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ControlFixture h3(endpoint.get(), quic_options, fiber::http::Http3ErrorCode::NoError);
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
     ASSERT_TRUE(start.ok) << static_cast<int>(start.error);

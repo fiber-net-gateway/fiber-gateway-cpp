@@ -38,13 +38,15 @@ common::IoResult<void> Http3Client::init() noexcept {
     return {};
 }
 
-quic::QuicConnection::Lease Http3Client::create_connection_op(void *owner,
+quic::QuicConnection::Lease Http3Client::create_connection_op(void *owner, quic::QuicUdpEndpoint &endpoint,
                                                               const quic::QuicConnection::Options &options) noexcept {
     auto *client = static_cast<Http3Client *>(owner);
-    return client == nullptr ? quic::QuicConnection::Lease{} : client->create_connection(options);
+    return client == nullptr ? quic::QuicConnection::Lease{} : client->create_connection(endpoint, options);
 }
 
-quic::QuicConnection::Lease Http3Client::create_connection(const quic::QuicConnection::Options &options) noexcept {
+quic::QuicConnection::Lease Http3Client::create_connection(quic::QuicUdpEndpoint &endpoint,
+                                                           const quic::QuicConnection::Options &options) noexcept {
+    FIBER_ASSERT(&endpoint == endpoint_);
     Http3ClientConnectionImpl::Options h3_options{};
     h3_options.local_settings = options_.local_settings;
     if (h3_options.local_settings.max_field_section_size == 0) {
@@ -53,7 +55,7 @@ quic::QuicConnection::Lease Http3Client::create_connection(const quic::QuicConne
     h3_options.drain_timeout = options_.drain_timeout;
     h3_options.max_qpack_string_size = options_.max_qpack_string_size;
     h3_options.max_field_section_size = options_.max_field_section_size;
-    auto *session = Http3ClientConnectionImpl::create(options, h3_options);
+    auto *session = Http3ClientConnectionImpl::create(endpoint, options, h3_options);
     if (session == nullptr) {
         return {};
     }

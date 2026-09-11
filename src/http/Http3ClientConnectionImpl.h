@@ -19,7 +19,8 @@ public:
         std::uint32_t max_qpack_string_size = 64 * 1024;
         std::size_t max_field_section_size = 128 * 1024;
     };
-    static Http3ClientConnectionImpl *create(const quic::QuicConnection::Options &, const Options &) noexcept;
+    static Http3ClientConnectionImpl *create(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &,
+                                             const Options &) noexcept;
     Http3ClientConnection make_handle(quic::QuicConnection::Lease lease) noexcept;
     quic::QuicConnection &quic() noexcept { return quic_; }
     const quic::QuicConnection &quic() const noexcept { return quic_; }
@@ -44,7 +45,7 @@ public:
     async::Task<void> wait_closed() noexcept;
 
 private:
-    Http3ClientConnectionImpl(const quic::QuicConnection::Options &, const Options &) noexcept;
+    Http3ClientConnectionImpl(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &, const Options &) noexcept;
     ~Http3ClientConnectionImpl();
     static quic::QuicConnection::Options make_quic_options(const quic::QuicConnection::Options &,
                                                            Http3ClientConnectionImpl *) noexcept;

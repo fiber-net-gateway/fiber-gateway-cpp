@@ -69,8 +69,10 @@ public:
 
 private:
     [[nodiscard]] static quic::QuicConnection::Lease
-    create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept;
-    [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept;
+    create_connection_op(void *owner, quic::QuicUdpEndpoint &endpoint,
+                         const quic::QuicConnection::Options &options) noexcept;
+    [[nodiscard]] quic::QuicConnection::Lease create_connection(quic::QuicUdpEndpoint &endpoint,
+                                                                const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] static Http3ClientConnectError make_error(Http3ClientConnectPhase phase,
                                                             common::IoErr error) noexcept;
 

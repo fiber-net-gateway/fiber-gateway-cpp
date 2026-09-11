@@ -3,9 +3,10 @@
 #include <fiber/common/Assert.h>
 #include <new>
 namespace fiber::http {
-Http3ClientConnectionImpl::Http3ClientConnectionImpl(const quic::QuicConnection::Options &quic_options,
+Http3ClientConnectionImpl::Http3ClientConnectionImpl(quic::QuicUdpEndpoint &endpoint,
+                                                     const quic::QuicConnection::Options &quic_options,
                                                      const Options &options) noexcept :
-    quic_(make_quic_options(quic_options, this)), local_stream_gate_(quic_),
+    quic_(endpoint, make_quic_options(quic_options, this)), local_stream_gate_(quic_),
     control_(quic_, local_stream_gate_, options.local_settings, this, control_ops()),
     drain_timeout_(options.drain_timeout), max_qpack_string_size_(options.max_qpack_string_size),
     max_field_section_size_(options.max_field_section_size) {}
@@ -13,12 +14,13 @@ Http3ClientConnectionImpl::~Http3ClientConnectionImpl() {
     FIBER_ASSERT(client_requests_.empty() && client_request_group_.empty());
     FIBER_ASSERT(start_tasks_.empty() && drain_tasks_.empty());
 }
-Http3ClientConnectionImpl *Http3ClientConnectionImpl::create(const quic::QuicConnection::Options &quic_options,
+Http3ClientConnectionImpl *Http3ClientConnectionImpl::create(quic::QuicUdpEndpoint &endpoint,
+                                                             const quic::QuicConnection::Options &quic_options,
                                                              const Options &options) noexcept {
     if (quic_options.role != quic::QuicConnectionRole::Client) {
         return nullptr;
     }
-    return new (std::nothrow) Http3ClientConnectionImpl(quic_options, options);
+    return new (std::nothrow) Http3ClientConnectionImpl(endpoint, quic_options, options);
 }
 Http3ClientConnection Http3ClientConnectionImpl::make_handle(quic::QuicConnection::Lease lease) noexcept {
     FIBER_ASSERT(lease.get() == &quic_);
@@ -114,7 +116,7 @@ void Http3ClientConnectionImpl::graceful_shutdown(Http3ErrorCode error) noexcept
         return;
     }
     drain_tasks_.add();
-    async::spawn(*quic_.loop(), [this, error]() { return run_graceful_shutdown(error); });
+    async::spawn(quic_.loop(), [this, error]() { return run_graceful_shutdown(error); });
 }
 async::DetachedTask Http3ClientConnectionImpl::run_graceful_shutdown(Http3ErrorCode error) noexcept {
     co_await start_tasks_.join();
@@ -151,11 +153,7 @@ void Http3ClientConnectionImpl::destroy_connection(void *owner, quic::QuicConnec
     auto *self = static_cast<Http3ClientConnectionImpl *>(owner);
     FIBER_ASSERT(!self->cleanup_started_);
     self->cleanup_started_ = true;
-    if (quic.loop() == nullptr) {
-        delete self;
-        return;
-    }
-    async::spawn(*quic.loop(), [self]() -> async::DetachedTask {
+    async::spawn(quic.loop(), [self]() -> async::DetachedTask {
         co_await self->join_protocol_tasks();
         delete self;
     });

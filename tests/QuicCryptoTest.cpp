@@ -171,7 +171,7 @@ TEST(QuicCryptoTest, AppliesAndRemovesInitialHeaderProtection) {
 TEST(QuicCryptoTest, DecryptsInitialPacketAndUpdatesOnlyInitialPacketNumberSpace) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection connection(options);
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), options);
     auto dcid = cid_from_hex("8394c8f03e515708");
     ASSERT_TRUE(connection.init_initial_crypto(dcid));
 
@@ -215,7 +215,7 @@ TEST(QuicCryptoTest, DecryptsInitialPacketAndUpdatesOnlyInitialPacketNumberSpace
 TEST(QuicCryptoTest, FailedInitialDecryptDoesNotUpdatePacketNumberSpace) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection connection(options);
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), options);
     auto dcid = cid_from_hex("8394c8f03e515708");
     ASSERT_TRUE(connection.init_initial_crypto(dcid));
 
@@ -380,7 +380,7 @@ TEST(QuicCryptoTest, ConnectionKeepsCryptoContextsOutOfLine) {
 
 TEST(QuicCryptoTest, ProactivelyUpdatesApplicationKeysNearConfidentialityLimit) {
     const auto secret = hex("9ac72ae2655b796a2e76aeee5ac549a70bc028b7b5ee39ed6add81c59e5a5f06");
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(
             connection.crypto(), fiber::quic::QuicEncryptionLevel::Application, false,
             fiber::quic::QuicCryptoSuite::Aes128GcmSha256, secret.data(), secret.size()));
@@ -422,7 +422,7 @@ TEST(QuicCryptoTest, EnforcesCipherDependentAeadLimits) {
 
 TEST(QuicCryptoTest, ClosesWhenAeadUsageCannotBeUpdated) {
     const auto secret = hex("9ac72ae2655b796a2e76aeee5ac549a70bc028b7b5ee39ed6add81c59e5a5f06");
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(
             connection.crypto(), fiber::quic::QuicEncryptionLevel::Application, false,
             fiber::quic::QuicCryptoSuite::Aes128GcmSha256, secret.data(), secret.size()));
@@ -438,7 +438,7 @@ TEST(QuicCryptoTest, ClosesWhenAeadUsageCannotBeUpdated) {
 
 TEST(QuicCryptoTest, ClosesAtConnectionLifetimeAuthenticationFailureLimit) {
     const auto secret = hex("9ac72ae2655b796a2e76aeee5ac549a70bc028b7b5ee39ed6add81c59e5a5f06");
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(
             connection.crypto(), fiber::quic::QuicEncryptionLevel::Application, false,
             fiber::quic::QuicCryptoSuite::Aes128GcmSha256, secret.data(), secret.size()));
