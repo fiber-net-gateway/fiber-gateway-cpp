@@ -12,12 +12,12 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/http/HeaderMap.h>
 #include <fiber/http/Http3Codec.h>
-#include <fiber/http/Http3Connection.h>
 #include <fiber/http/Http3QpackDecoder.h>
 #include <fiber/http/HttpHeaderHash.h>
 #include <fiber/http/HttpUriParse.h>
 #include "http/Http3FrameWriter.h"
 #include "http/Http3QpackEncoderIoBufWriter.h"
+#include "http/Http3ServerConnection.h"
 #include "http/Huffman.h"
 
 namespace fiber::http {
@@ -162,7 +162,7 @@ enum class ServerHttp3Request::BodyRecvState : std::uint8_t {
     Error,
 };
 
-ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const Http3ServerOptions &http_options,
+ServerHttp3Request::ServerHttp3Request(Http3ServerConnection &conn, const Http3ServerOptions &http_options,
                                        const HttpHandler &handler,
                                        std::shared_ptr<const HttpHandler> handler_owner) noexcept :
     quic_lease_(conn.quic().lease()), stream_(this, &ServerHttp3Request::destroy_owner),
@@ -176,7 +176,7 @@ ServerHttp3Request::ServerHttp3Request(Http3Connection &conn, const Http3ServerO
     exchange_.request_body_spec_ = HttpBodySpec::Stream();
 }
 
-quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3Connection &conn,
+quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3ServerConnection &conn,
                                                    const Http3ServerOptions &http_options,
                                                    const HttpHandler &handler) noexcept {
     (void) stream_id;
@@ -187,7 +187,7 @@ quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http
     return quic::QuicStream::Lease::adopt(&request->stream_);
 }
 
-quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3Connection &conn,
+quic::QuicStream::Lease ServerHttp3Request::create(std::uint64_t stream_id, Http3ServerConnection &conn,
                                                    const Http3ServerOptions &http_options,
                                                    std::shared_ptr<const HttpHandler> handler) noexcept {
     (void) stream_id;
@@ -224,7 +224,7 @@ const ServerHttp3Request *ServerHttp3Request::from_stream(const quic::QuicStream
     return request;
 }
 
-void ServerHttp3Request::start_read_loop(event::EventLoop &loop, Http3Connection &conn) noexcept {
+void ServerHttp3Request::start_read_loop(event::EventLoop &loop, Http3ServerConnection &conn) noexcept {
     if (read_loop_started_) {
         return;
     }

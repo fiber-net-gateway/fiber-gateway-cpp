@@ -16,7 +16,6 @@
 #include "../quic/QuicClient.h"
 #include "../quic/QuicUdpEndpoint.h"
 #include "Http3ClientConnection.h"
-#include "Http3Connection.h"
 
 namespace fiber::http {
 
@@ -69,19 +68,16 @@ public:
     [[nodiscard]] const net::TrustStore *trust_store() const noexcept { return options_.tls.trust_store; }
 
 private:
-    class Session;
-
     [[nodiscard]] static quic::QuicConnection::Lease
     create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept;
-    [[nodiscard]] Http3Connection::Options make_h3_options() const noexcept;
     [[nodiscard]] static Http3ClientConnectError make_error(Http3ClientConnectPhase phase,
                                                             common::IoErr error) noexcept;
 
     quic::QuicUdpEndpoint *endpoint_ = nullptr;
     Options options_{};
     quic::QuicClient quic_client_{};
-    Session *last_created_session_ = nullptr;
+    Http3ClientConnectionImpl *last_created_connection_ = nullptr;
     bool initialized_ = false;
 };
 
