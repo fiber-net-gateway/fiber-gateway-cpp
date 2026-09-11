@@ -5,7 +5,7 @@
 **状态:扫描完成。1 处测试自身 teardown 泄露(库稳态无泄露)——**已修**;
 Http1 registry drain UAF——**已修**(含 H2/H3 同形循环预防性加固);
 H3/QUIC 析构顺序契约未修;2 个命中项归属既有已知缺陷文档;1 个测试
-harness UAF 待查。**
+harness UAF——**已修**(2026-09-11 定位为 harness lifetime bug,见下)。**
 
 ## 构建与规模
 
@@ -47,7 +47,7 @@ LeakSanitizer 报告(覆盖 server/连接池/DNS/QUIC/script 全模块)。
 | Http1 registry drain UAF | 7 | **产品缺陷(已修)** |
 | H3/QUIC 析构顺序 stack-use-after-scope | 6 | **产品缺陷(未修)** |
 | QuicCryptoBlockPool::release UAF | 2 | 既有已知,见 `fiber-lib-h3-client-teardown-uaf.md`(暂不修) |
-| 池测试协程帧 UAF | 1 | 测试 harness lifetime,待查 |
+| 池测试协程帧 UAF | 1 | 测试 harness lifetime,**已修** |
 | ASan 时序 flaky(断言失败,无内存错误) | 2 | 非内存问题 |
 
 ## 内存泄露:结论与唯一命中
@@ -325,7 +325,7 @@ StoppedEndpointRefusesNewConnections 命中的:
 生命周期错配(该文档标注 `QuicCryptoBlockPool::release` 100% 复现),
 状态:已定稿方案、暂不实施。本次扫描不改变该结论。
 
-## 待查:池测试协程帧 UAF
+## 池测试协程帧 UAF(2026-09-11 已定位并修复)
 
 Http2ConnectionPoolTest.AbandonedPooledExchangeCancelsStreamBeforeReturningSlot:
 
@@ -336,9 +336,46 @@ READ ... #0 PoolHarness 构造 lambda (.resume)   tests/Http2ConnectionPoolTest.
 freed by: run_scenario 协程帧析构(同文件)
 ```
 
-定时器到点 resume 了一个其帧已随 `run_scenario` 析构的协程。归属
-(test harness 自身 lifetime bug vs Sleep/Task 的销毁竞态)未定,
-需按缺陷 1 的方法追 `SleepAwaiter` 注册/撤销与帧销毁的顺序。
+### 归属判定:测试 harness lifetime bug,非 Sleep/Task 销毁竞态
+
+完整因果链(全栈 ASan 证据):
+
+1. **产品侧设计**:H2 服务端 handler 由
+   `ServerHttp2Request::run_handler_task`(src/http/ServerHttp2Request.cpp:235
+   `async::spawn`)**detached** 拉起,只持 `request` 裸指针 + stream Lease。
+   连接关停只 quiesce exchange I/O——`on_stream_aborted`(:552)仅置
+   `abort_reason_`、abort body recv、唤醒挂在 exchange 上的 awaiter;
+   **handler 若挂在普通 `async::sleep` 上,连接侧既看不见也无法唤醒**。
+2. **harness 侧**:测试 handler 以 1ms sleep 轮询 `hold_responses`
+   (`PoolHarness` 成员,活在 `run_scenario` 协程帧内,帧分配栈即 ASan 的
+   1168 B region)。`close()` 置 false 后的整条收尾(pool.shutdown/join →
+   listener close → accept_done → conn.shutdown → gate.join)**全部由
+   fd/defer 事件驱动,零定时器依赖**,可在 ≪1ms 内完成;而 handler 的
+   下一次轮询至少要等 1ms 定时器到期。
+3. **UAF**:`gate.join()` 的 `Joiner::on_notify` 最后一次恢复
+   `run_scenario` → `~PoolHarness` → `done.set_value()` → 帧释放。~1ms 后
+   仍挂在 timer 堆里的 `SleepTimer` 到期 → `fire()` resume handler
+   (handler 自身帧与 `ServerHttp2Request` 因 Lease 存活,故能执行到用户
+   代码)→ 读 `run_scenario` 已释放帧内偏移 728 处的 `hold_responses`。
+4. `SleepAwaiter` 无缺陷:`~SleepAwaiter` 会 cancel 定时器
+   (src/async/Sleep.cpp:11-16),问题是没人析构这个挂起的帧。
+
+**隐含契约(嵌入方须知)**:handler 是 detached task,连接/服务端关停
+不等待其完成;handler 内部若 park 在非 exchange I/O 的等待上(如裸
+sleep),其引用的用户状态必须活过 handler 返回。
+
+### 修复(2026-09-11 已落地)
+
+harness 增加 `handlers_done` 计数(handler 入口用文件既有 Guard 惯用法
+在帧析构时递增),`close()` 在 `hold_responses = false` 之后、
+`pool.shutdown()` 之前等待 `handlers_done == requests`——放在 shutdown
+前使挂起的 handler 仍能在活连接上完成收尾;被 RST 的流走
+`SendResponseHeaderOp::on_encode` 的 `remote_rst()` 快速失败路径,有界
+返回。run_case 自带 15s 兜底,潜在挂起会转为有界失败而非静默 UAF。
+
+红→绿验证:修复前单用例 ASan 100% heap-use-after-free;修复后单用例与
+`Http2ConnectionPoolTest.*` 全套(27 用例)ASan 构建零 ASan/LSan 输出
+通过,Release 构建同套件通过。
 
 ## 非内存失败(记录备查)
 
@@ -351,7 +388,9 @@ freed by: run_scenario 协程帧析构(同文件)
 
 1. **泄露检查(本次主诉求):库无稳态泄露**;唯一 LSan 命中为测试
    teardown 抛弃挂起协程——**已修**(见上文修复小节)。
-2. 新发现 2 个产品缺陷:Http1 registry drain UAF(HIGH)、H3/QUIC
-   析构顺序契约(MEDIUM)。两者 Release 下静默,仅 ASan 可见。
-3. ASan 构建配方与坑已固化在本文件开头,`temp/_deps_asan`、`build-asan`
+2. 新发现 2 个产品缺陷:Http1 registry drain UAF(HIGH)——已修;H3/QUIC
+   析构顺序契约(MEDIUM)——未修。两者 Release 下静默,仅 ASan 可见。
+3. 池测试协程帧 UAF 已定位为 harness 自身 lifetime bug 并修复;"handler
+   为 detached task、其用户状态须活过 handler 返回"的隐含契约见上文。
+4. ASan 构建配方与坑已固化在本文件开头,`temp/_deps_asan`、`build-asan`
    留存可直接复验。
