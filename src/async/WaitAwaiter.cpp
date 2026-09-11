@@ -18,6 +18,7 @@ void WaitAwaiter::complete(common::IoErr result) noexcept {
 }
 
 void WaitAwaiter::begin_wait(std::coroutine_handle<> handle, event::EventLoop &loop) noexcept {
+    FIBER_ASSERT(!completed_);
     FIBER_ASSERT(loop_ == nullptr || loop_ == &loop);
     handle_ = handle;
     loop_ = &loop;

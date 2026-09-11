@@ -81,8 +81,6 @@ public:
             queue_->read_waiter_ = nullptr;
         }
         queue_ = nullptr;
-        set_result(common::IoErr::None);
-        reset_completed();
         return outcome;
     }
 
