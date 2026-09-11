@@ -17,12 +17,11 @@ namespace fiber::http {
 
 class ClientHttp3Request;
 class Http3ClientConnection;
-class Http3Connection;
+class Http3ClientConnectionImpl;
 
 class ClientHttp3Exchange : public common::NonCopyable, public common::NonMovable {
 public:
     ClientHttp3Exchange() noexcept = default;
-    ClientHttp3Exchange(Http3Connection &conn, mem::BufPool &pool) noexcept;
     ClientHttp3Exchange(Http3ClientConnection &conn, mem::BufPool &pool) noexcept;
     ClientHttp3Exchange(ClientHttp3Exchange &&other) noexcept;
     ClientHttp3Exchange &operator=(ClientHttp3Exchange &&other) noexcept;
@@ -73,7 +72,7 @@ private:
     [[nodiscard]] ClientHttp3Request *request() noexcept;
     [[nodiscard]] const ClientHttp3Request *request() const noexcept;
 
-    Http3Connection *conn_ = nullptr;
+    Http3ClientConnectionImpl *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;
     quic::QuicStream::Lease stream_{};
 };

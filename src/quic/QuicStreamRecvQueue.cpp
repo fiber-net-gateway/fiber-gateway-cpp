@@ -5,6 +5,7 @@
 #include <limits>
 #include <utility>
 
+#include <fiber/async/WaitAwaiter.h>
 #include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
 
@@ -25,19 +26,15 @@ QuicDataReassembler::Options reassembler_options(QuicStreamRecvQueue::Options op
 
 } // namespace
 
-class QuicStreamRecvQueue::ReadAwaiter {
+class QuicStreamRecvQueue::ReadAwaiter : public async::WaitAwaiter {
 public:
     ReadAwaiter(QuicStreamRecvQueue &queue, std::chrono::steady_clock::time_point deadline) noexcept :
-        queue_(&queue), deadline_(deadline) {}
+        WaitAwaiter(deadline, nullptr), queue_(&queue) {}
 
-    ReadAwaiter(const ReadAwaiter &) = delete;
-    ReadAwaiter &operator=(const ReadAwaiter &) = delete;
-    ReadAwaiter(ReadAwaiter &&) = delete;
-    ReadAwaiter &operator=(ReadAwaiter &&) = delete;
-
+    // The queue holds a single read_waiter_ slot rather than a list, and it is
+    // released here or in await_resume -- whichever the caller reaches -- so
+    // complete() has nothing to detach from.
     ~ReadAwaiter() {
-        cancel_resume();
-        cancel_timer();
         if (queue_ != nullptr) {
             queue_->cancel_read_waiter(this);
         }
@@ -48,8 +45,8 @@ public:
             return true;
         }
         if (timed_out(std::chrono::steady_clock::now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
+            set_result(common::IoErr::TimedOut);
+            mark_completed();
             return true;
         }
         return false;
@@ -59,121 +56,38 @@ public:
         if (queue_ == nullptr || queue_->can_take_now()) {
             return false;
         }
-        loop_ = event::EventLoop::current_or_null();
-        FIBER_ASSERT(loop_ != nullptr);
-        if (timed_out(loop_->now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
-            loop_ = nullptr;
+        event::EventLoop *loop = event::EventLoop::current_or_null();
+        FIBER_ASSERT(loop != nullptr);
+        if (timed_out(loop->now())) {
+            set_result(common::IoErr::TimedOut);
+            mark_completed();
             return false;
         }
         if (queue_->read_waiter_ != nullptr) {
-            result_ = common::IoErr::Busy;
-            completed_ = true;
-            loop_ = nullptr;
+            set_result(common::IoErr::Busy);
+            mark_completed();
             return false;
         }
 
-        handle_ = handle;
         queue_->read_waiter_ = this;
-        arm_timer();
+        begin_wait(handle, *loop);
         return true;
     }
 
     common::IoErr await_resume() noexcept {
-        common::IoErr result = result_;
-        cancel_resume();
-        cancel_timer();
+        const common::IoErr outcome = result();
+        end_wait();
         if (queue_ != nullptr && queue_->read_waiter_ == this) {
             queue_->read_waiter_ = nullptr;
         }
         queue_ = nullptr;
-        loop_ = nullptr;
-        handle_ = {};
-        result_ = common::IoErr::None;
-        resume_posted_ = false;
-        completed_ = false;
-        return result;
+        return outcome;
     }
 
     [[nodiscard]] bool should_resume() const noexcept { return queue_ == nullptr || queue_->can_take_now(); }
 
-    void complete(common::IoErr result) noexcept {
-        if (completed_) {
-            return;
-        }
-        completed_ = true;
-        result_ = result;
-        cancel_timer();
-        post_resume();
-    }
-
 private:
-    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
-
-    [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
-        return has_timer() && now >= deadline_;
-    }
-
-    void arm_timer() noexcept {
-        if (!has_timer() || loop_ == nullptr) {
-            return;
-        }
-        loop_->post_at<ReadAwaiter, &ReadAwaiter::timer_entry_, &ReadAwaiter::on_timeout>(deadline_, *this);
-    }
-
-    void cancel_timer() noexcept {
-        if (loop_ != nullptr && timer_entry_.is_in_heap()) {
-            loop_->cancel<ReadAwaiter, &ReadAwaiter::timer_entry_>(*this);
-        }
-    }
-
-    static void on_notify(ReadAwaiter *awaiter) noexcept {
-        if (awaiter == nullptr) {
-            return;
-        }
-        awaiter->resume_posted_ = false;
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    static void on_timeout(ReadAwaiter *awaiter) noexcept {
-        if (awaiter == nullptr) {
-            return;
-        }
-        awaiter->complete(common::IoErr::TimedOut);
-    }
-
-    // Completions fire on the connection's loop; the cancellable local defer
-    // queue keeps this awaiter safe against hard coroutine destruction while a
-    // resume is queued (an MPSC entry cannot be retracted).
-    void post_resume() noexcept {
-        if (resume_posted_ || loop_ == nullptr) {
-            return;
-        }
-        FIBER_ASSERT(loop_->in_loop());
-        resume_posted_ = true;
-        loop_->post_local<ReadAwaiter, &ReadAwaiter::resume_entry_, &ReadAwaiter::on_notify>(*this);
-    }
-
-    void cancel_resume() noexcept {
-        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
-            loop_->cancel<ReadAwaiter, &ReadAwaiter::resume_entry_>(*this);
-        }
-    }
-
     QuicStreamRecvQueue *queue_ = nullptr;
-    std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::DeferEntry resume_entry_{};
-    event::EventLoop::TimerEntry timer_entry_{};
-    common::IoErr result_ = common::IoErr::None;
-    bool resume_posted_ = false;
-    bool completed_ = false;
 };
 
 QuicStreamRecvQueue::QuicStreamRecvQueue(mem::IoBufNodePool &pool) noexcept : QuicStreamRecvQueue(pool, Options{}) {}

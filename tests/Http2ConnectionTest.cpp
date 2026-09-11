@@ -6525,3 +6525,75 @@ TEST(Http2ConnectionTest, DisabledPushRejectsContinuationOnWrongStream) {
     ASSERT_NE(goaway, nullptr) << describe_frames(frames);
     EXPECT_EQ(goaway->payload.substr(4, 4), std::string("\0\0\0\1", 4));
 }
+
+namespace {
+
+fiber::async::Task<fiber::common::IoResult<fiber::http::Http2Stream::Lease>>
+attach_owned_for_cancellation(ControlHttp2Connection &connection) {
+    std::unique_ptr<TestHttp2StreamOwner> owner(TestHttp2StreamOwner::create_owner());
+    FIBER_ASSERT(owner != nullptr);
+    auto attached = co_await connection.gate().attach(owner->stream);
+    if (attached) {
+        (void) owner.release();
+    }
+    co_return attached;
+}
+
+void exercise_http2_cancelled_waiter(std::size_t cancelled) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        fiber::http::Http2Connection::Options options;
+        options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+        auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, true);
+        auto *fake = transport.get();
+        ControlHttp2Connection connection(std::move(transport), fake, options);
+        EXPECT_EQ(connection.apply_settings_parameter(0x3, 0), fiber::common::IoErr::None);
+        auto first = attach_owned_for_cancellation(connection);
+        auto middle = attach_owned_for_cancellation(connection);
+        auto last = attach_owned_for_cancellation(connection);
+        auto start = [](auto &task) {
+            auto handle = task.operator co_await().handle;
+            handle.promise().set_continuation(std::noop_coroutine());
+            handle.resume();
+            return handle;
+        };
+        auto h1 = start(first);
+        auto h2 = start(middle);
+        auto h3 = start(last);
+        EXPECT_EQ(connection.gate().waiter_count(), 3U);
+        EXPECT_EQ(connection.apply_settings_parameter(0x3, 2), fiber::common::IoErr::None);
+        if (cancelled == 0) {
+            first = {};
+        } else {
+            middle = {};
+        }
+        co_await fiber::async::sleep(std::chrono::milliseconds(10));
+        auto survivor = cancelled == 0 ? h2 : h1;
+        EXPECT_TRUE(survivor.done());
+        EXPECT_TRUE(h3.done());
+        if (survivor.done() && h3.done()) {
+            auto earlier = survivor.promise().result();
+            auto later = h3.promise().result();
+            EXPECT_TRUE(earlier);
+            EXPECT_TRUE(later);
+            if (earlier && later) {
+                EXPECT_EQ((*earlier)->stream_id(), 1U);
+                EXPECT_EQ((*later)->stream_id(), 3U);
+                (*earlier)->close(fiber::common::IoErr::Canceled);
+                connection.try_release_stream(**earlier);
+                (*later)->close(fiber::common::IoErr::Canceled);
+                connection.try_release_stream(**later);
+            }
+        }
+        connection.request_stop();
+        co_await connection.stop_and_join();
+        loop.stop();
+    });
+    loop.run();
+}
+
+} // namespace
+
+TEST(Http2ConnectionTest, DestroyingSignaledGateHeadRedistributesCapacity) { exercise_http2_cancelled_waiter(0); }
+
+TEST(Http2ConnectionTest, DestroyingSignaledGateMiddleRedistributesCapacity) { exercise_http2_cancelled_waiter(1); }

@@ -7,6 +7,7 @@
 
 #include <fiber/async/Spawn.h>
 #include <fiber/common/Assert.h>
+#include "http/Http3ClientConnectionImpl.h"
 
 namespace fiber::http {
 
@@ -16,50 +17,6 @@ constexpr std::string_view kHttp3Alpn = "h3";
 constexpr std::uint64_t kHttp3PeerUnidirectionalStreamLimit = 16;
 
 } // namespace
-
-class Http3Client::Session final : public common::NonCopyable, public common::NonMovable {
-public:
-    Session(const quic::QuicConnection::Options &quic_options, const Http3Connection::Options &h3_options) noexcept :
-        quic_(make_quic_options(quic_options, this)), h3_(quic_, h3_options) {
-        prepared_ = h3_.prepare().has_value();
-    }
-
-    [[nodiscard]] quic::QuicConnection &quic() noexcept { return quic_; }
-    [[nodiscard]] Http3Connection &h3() noexcept { return h3_; }
-    [[nodiscard]] bool prepared() const noexcept { return prepared_; }
-
-private:
-    [[nodiscard]] static quic::QuicConnection::Options make_quic_options(const quic::QuicConnection::Options &base,
-                                                                         Session *owner) noexcept {
-        quic::QuicConnection::Options options = base;
-        options.destroy_owner = owner;
-        options.on_destroy = &Session::destroy_connection;
-        return options;
-    }
-
-    static void destroy_connection(void *owner, quic::QuicConnection &connection) noexcept {
-        auto *session = static_cast<Session *>(owner);
-        if (session == nullptr || session->cleanup_started_) {
-            return;
-        }
-        session->cleanup_started_ = true;
-        event::EventLoop *loop = connection.loop();
-        if (loop == nullptr) {
-            delete session;
-            return;
-        }
-        async::spawn(*loop, [session]() -> async::DetachedTask {
-            co_await session->h3_.wait_closed();
-            delete session;
-            co_return;
-        });
-    }
-
-    quic::QuicConnection quic_;
-    Http3Connection h3_;
-    bool prepared_ = false;
-    bool cleanup_started_ = false;
-};
 
 Http3Client::Http3Client(quic::QuicUdpEndpoint &endpoint, Options options) noexcept :
     endpoint_(&endpoint), options_(std::move(options)) {}
@@ -81,19 +38,6 @@ common::IoResult<void> Http3Client::init() noexcept {
     return {};
 }
 
-Http3Connection::Options Http3Client::make_h3_options() const noexcept {
-    Http3Connection::Options options{};
-    options.local_settings = options_.local_settings;
-    if (options.local_settings.max_field_section_size == 0) {
-        options.local_settings.max_field_section_size = options_.max_field_section_size;
-    }
-    options.drain_timeout = options_.drain_timeout;
-    options.max_qpack_string_size = options_.max_qpack_string_size;
-    options.max_field_section_size = options_.max_field_section_size;
-    options.enable_push = false;
-    return options;
-}
-
 quic::QuicConnection::Lease Http3Client::create_connection_op(void *owner,
                                                               const quic::QuicConnection::Options &options) noexcept {
     auto *client = static_cast<Http3Client *>(owner);
@@ -101,15 +45,19 @@ quic::QuicConnection::Lease Http3Client::create_connection_op(void *owner,
 }
 
 quic::QuicConnection::Lease Http3Client::create_connection(const quic::QuicConnection::Options &options) noexcept {
-    auto *session = new (std::nothrow) Session(options, make_h3_options());
+    Http3ClientConnectionImpl::Options h3_options{};
+    h3_options.local_settings = options_.local_settings;
+    if (h3_options.local_settings.max_field_section_size == 0) {
+        h3_options.local_settings.max_field_section_size = options_.max_field_section_size;
+    }
+    h3_options.drain_timeout = options_.drain_timeout;
+    h3_options.max_qpack_string_size = options_.max_qpack_string_size;
+    h3_options.max_field_section_size = options_.max_field_section_size;
+    auto *session = Http3ClientConnectionImpl::create(options, h3_options);
     if (session == nullptr) {
         return {};
     }
-    if (!session->prepared()) {
-        delete session;
-        return {};
-    }
-    last_created_session_ = session;
+    last_created_connection_ = session;
     return quic::QuicConnection::Lease::adopt(&session->quic());
 }
 
@@ -137,10 +85,10 @@ async::Task<Http3ClientConnectResult> Http3Client::connect(Http3ClientConnectOpt
             std::max(quic_options.transport.initial_max_streams_uni, kHttp3PeerUnidirectionalStreamLimit);
     quic_options.allow_insecure = options.allow_insecure;
 
-    last_created_session_ = nullptr;
+    last_created_connection_ = nullptr;
     auto started = quic_client_.start_connect(quic_options);
-    Session *session = last_created_session_;
-    last_created_session_ = nullptr;
+    Http3ClientConnectionImpl *session = last_created_connection_;
+    last_created_connection_ = nullptr;
     if (!started) {
         Http3ClientConnectError error = make_error(Http3ClientConnectPhase::Quic, started.error().io_error);
         error.quic_error = started.error();
@@ -159,17 +107,17 @@ async::Task<Http3ClientConnectResult> Http3Client::connect(Http3ClientConnectOpt
         co_return std::unexpected(error);
     }
     if (attempt.connection() == nullptr || attempt.connection()->tls().selected_alpn() != kHttp3Alpn) {
-        session->h3().close(Http3ErrorCode::VersionFallback);
+        session->close(Http3ErrorCode::VersionFallback);
         co_return std::unexpected(make_error(Http3ClientConnectPhase::Alpn, common::IoErr::NotSupported));
     }
 
-    auto h3_started = co_await session->h3().start();
+    auto h3_started = co_await session->start();
     if (!h3_started) {
-        session->h3().close(Http3ErrorCode::InternalError);
+        session->close(Http3ErrorCode::InternalError);
         co_return std::unexpected(make_error(Http3ClientConnectPhase::Http3, h3_started.error()));
     }
 
-    co_return Http3ClientConnection(attempt.release(), session->h3());
+    co_return Http3ClientConnection(attempt.release(), *session);
 }
 
 } // namespace fiber::http

@@ -6,16 +6,15 @@
 
 #include <fiber/common/Assert.h>
 #include <fiber/http/Http3ClientConnection.h>
-#include <fiber/http/Http3Connection.h>
 #include "http/ClientHttp3Request.h"
+#include "http/Http3ClientConnectionImpl.h"
 
 namespace fiber::http {
 
-ClientHttp3Exchange::ClientHttp3Exchange(Http3Connection &conn, mem::BufPool &pool) noexcept :
-    conn_(&conn), pool_(&pool) {}
-
 ClientHttp3Exchange::ClientHttp3Exchange(Http3ClientConnection &conn, mem::BufPool &pool) noexcept :
-    ClientHttp3Exchange(conn.http3(), pool) {}
+    conn_(conn.impl_), pool_(&pool) {
+    FIBER_ASSERT(conn_ != nullptr);
+}
 
 ClientHttp3Exchange::ClientHttp3Exchange(ClientHttp3Exchange &&other) noexcept :
     conn_(other.conn_), pool_(other.pool_), stream_(std::move(other.stream_)) {
@@ -181,7 +180,7 @@ ClientHttp3Exchange::ensure_request_opened(std::chrono::milliseconds timeout) no
         co_return std::unexpected(common::IoErr::NoMem);
     }
     auto attached =
-            co_await conn_->quic().attach_local_stream(std::move(owned), quic::QuicStreamType::Bidirectional, timeout);
+            co_await conn_->local_stream_gate().attach(std::move(owned), quic::QuicStreamType::Bidirectional, timeout);
     if (!attached) {
         co_return std::unexpected(attached.error());
     }

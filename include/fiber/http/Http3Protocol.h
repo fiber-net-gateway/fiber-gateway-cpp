@@ -5,6 +5,17 @@
 
 namespace fiber::http {
 
+enum class Http3ConnectionState : std::uint8_t {
+    Init,
+    Prepared,
+    Starting,
+    Running,
+    Draining,
+    Closing,
+    Closed,
+};
+
+
 enum class Http3ErrorCode : std::uint64_t {
     NoError = 0x100,
     GeneralProtocolError = 0x101,

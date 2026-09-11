@@ -10,6 +10,7 @@
 
 #include <openssl/mem.h>
 
+#include <fiber/async/WaitAwaiter.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/quic/QuicPacketProcessor.h>
 #include <fiber/quic/QuicProtocol.h>
@@ -426,328 +427,6 @@ QuicReadKeyEpoch QuicCryptoState::select_application_read_epoch(bool wire_phase,
     return QuicReadKeyEpoch::Next;
 }
 
-class QuicConnection::HandshakeAwaiter {
-public:
-    HandshakeAwaiter(QuicConnection &connection, std::chrono::steady_clock::time_point deadline,
-                     bool wait_confirmed = false) noexcept :
-        connection_(&connection), deadline_(deadline), wait_confirmed_(wait_confirmed) {}
-
-    HandshakeAwaiter(const HandshakeAwaiter &) = delete;
-    HandshakeAwaiter &operator=(const HandshakeAwaiter &) = delete;
-    HandshakeAwaiter(HandshakeAwaiter &&) = delete;
-    HandshakeAwaiter &operator=(HandshakeAwaiter &&) = delete;
-
-    ~HandshakeAwaiter() {
-        cancel_resume();
-        cancel_timer();
-        if (connection_ != nullptr) {
-            connection_->cancel_handshake_wait(*this);
-        }
-    }
-
-    bool await_ready() noexcept {
-        if (connection_ == nullptr) {
-            result_ = common::IoErr::Canceled;
-            return true;
-        }
-        result_ = connection_->handshake_wait_result(wait_confirmed_);
-        if (result_ != common::IoErr::WouldBlock) {
-            completed_ = true;
-            return true;
-        }
-        if (timed_out(std::chrono::steady_clock::now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
-            return true;
-        }
-        return false;
-    }
-
-    bool await_suspend(std::coroutine_handle<> handle) noexcept {
-        if (connection_ == nullptr) {
-            result_ = common::IoErr::Canceled;
-            completed_ = true;
-            return false;
-        }
-        result_ = connection_->handshake_wait_result(wait_confirmed_);
-        if (result_ != common::IoErr::WouldBlock) {
-            completed_ = true;
-            return false;
-        }
-        loop_ = event::EventLoop::current_or_null();
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(connection_->loop_ == loop_);
-        if (timed_out(loop_->now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
-            loop_ = nullptr;
-            return false;
-        }
-
-        handle_ = handle;
-        connection_->wait_for_handshake(*this);
-        arm_timer();
-        return true;
-    }
-
-    common::IoErr await_resume() noexcept {
-        common::IoErr result = result_;
-        cancel_resume();
-        cancel_timer();
-        if (connection_ != nullptr) {
-            connection_->cancel_handshake_wait(*this);
-        }
-        connection_ = nullptr;
-        loop_ = nullptr;
-        handle_ = {};
-        return result == common::IoErr::WouldBlock ? common::IoErr::Canceled : result;
-    }
-
-    void complete(common::IoErr result) noexcept {
-        if (completed_) {
-            return;
-        }
-        completed_ = true;
-        result_ = result;
-        cancel_timer();
-        post_resume();
-    }
-
-private:
-    [[nodiscard]] static HandshakeAwaiter *from_wait_link(common::IntrusiveListHook *hook) noexcept {
-        return hook == nullptr ? nullptr
-                               : reinterpret_cast<HandshakeAwaiter *>(reinterpret_cast<std::uint8_t *>(hook) -
-                                                                      offsetof(HandshakeAwaiter, wait_link_));
-    }
-
-    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
-    [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
-        return has_timer() && now >= deadline_;
-    }
-
-    void arm_timer() noexcept {
-        if (has_timer() && loop_ != nullptr) {
-            loop_->post_at<HandshakeAwaiter, &HandshakeAwaiter::timer_entry_, &HandshakeAwaiter::on_timeout>(deadline_,
-                                                                                                             *this);
-        }
-    }
-
-    void cancel_timer() noexcept {
-        if (loop_ != nullptr && timer_entry_.is_in_heap()) {
-            loop_->cancel<HandshakeAwaiter, &HandshakeAwaiter::timer_entry_>(*this);
-        }
-    }
-
-    static void on_notify(HandshakeAwaiter *awaiter) noexcept {
-        if (awaiter == nullptr) {
-            return;
-        }
-        awaiter->resume_posted_ = false;
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    static void on_timeout(HandshakeAwaiter *awaiter) noexcept {
-        if (awaiter != nullptr) {
-            awaiter->complete(common::IoErr::TimedOut);
-        }
-    }
-
-    // Completions fire on the connection's loop; the cancellable local defer
-    // queue keeps this awaiter safe against hard coroutine destruction while a
-    // resume is queued (an MPSC entry cannot be retracted).
-    void post_resume() noexcept {
-        if (resume_posted_ || loop_ == nullptr) {
-            return;
-        }
-        FIBER_ASSERT(loop_->in_loop());
-        resume_posted_ = true;
-        loop_->post_local<HandshakeAwaiter, &HandshakeAwaiter::resume_entry_, &HandshakeAwaiter::on_notify>(*this);
-    }
-
-    void cancel_resume() noexcept {
-        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
-            loop_->cancel<HandshakeAwaiter, &HandshakeAwaiter::resume_entry_>(*this);
-        }
-    }
-
-    QuicConnection *connection_ = nullptr;
-    std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::DeferEntry resume_entry_{};
-    event::EventLoop::TimerEntry timer_entry_{};
-    common::IntrusiveListHook wait_link_{};
-    common::IoErr result_ = common::IoErr::WouldBlock;
-    bool resume_posted_ = false;
-    bool completed_ = false;
-    bool wait_confirmed_ = false;
-
-    friend class QuicConnection;
-};
-
-class QuicConnection::LocalStreamAttachAwaiter {
-public:
-    LocalStreamAttachAwaiter(QuicConnection &connection, QuicStreamType type,
-                             std::chrono::steady_clock::time_point deadline) noexcept :
-        connection_(&connection), type_(type), deadline_(deadline) {}
-
-    LocalStreamAttachAwaiter(const LocalStreamAttachAwaiter &) = delete;
-    LocalStreamAttachAwaiter &operator=(const LocalStreamAttachAwaiter &) = delete;
-    LocalStreamAttachAwaiter(LocalStreamAttachAwaiter &&) = delete;
-    LocalStreamAttachAwaiter &operator=(LocalStreamAttachAwaiter &&) = delete;
-
-    ~LocalStreamAttachAwaiter() {
-        cancel_resume();
-        cancel_timer();
-        if (connection_ != nullptr) {
-            connection_->cancel_local_stream_attach_wait(*this);
-        }
-    }
-
-    bool await_ready() noexcept {
-        if (connection_ == nullptr || connection_->local_stream_attach_ready(type_)) {
-            return true;
-        }
-        if (timed_out(std::chrono::steady_clock::now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
-            return true;
-        }
-        return false;
-    }
-
-    bool await_suspend(std::coroutine_handle<> handle) noexcept {
-        if (connection_ == nullptr || connection_->local_stream_attach_ready(type_)) {
-            return false;
-        }
-        loop_ = event::EventLoop::current_or_null();
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(connection_->loop_ == nullptr || connection_->loop_ == loop_);
-        if (timed_out(loop_->now())) {
-            result_ = common::IoErr::TimedOut;
-            completed_ = true;
-            loop_ = nullptr;
-            return false;
-        }
-
-        handle_ = handle;
-        connection_->wait_for_local_stream_attach(*this);
-        arm_timer();
-        return true;
-    }
-
-    common::IoErr await_resume() noexcept {
-        common::IoErr result = result_;
-        cancel_resume();
-        cancel_timer();
-        if (connection_ != nullptr) {
-            connection_->cancel_local_stream_attach_wait(*this);
-        }
-        connection_ = nullptr;
-        loop_ = nullptr;
-        handle_ = {};
-        result_ = common::IoErr::None;
-        resume_posted_ = false;
-        completed_ = false;
-        return result;
-    }
-
-    void complete(common::IoErr result) noexcept {
-        if (completed_) {
-            return;
-        }
-        completed_ = true;
-        result_ = result;
-        cancel_timer();
-        post_resume();
-    }
-
-private:
-    [[nodiscard]] static LocalStreamAttachAwaiter *from_wait_link(common::IntrusiveListHook *hook) noexcept {
-        if (hook == nullptr) {
-            return nullptr;
-        }
-        return reinterpret_cast<LocalStreamAttachAwaiter *>(reinterpret_cast<std::uint8_t *>(hook) -
-                                                            offsetof(LocalStreamAttachAwaiter, wait_link_));
-    }
-
-    [[nodiscard]] bool has_timer() const noexcept { return deadline_ != std::chrono::steady_clock::time_point::max(); }
-
-    [[nodiscard]] bool timed_out(std::chrono::steady_clock::time_point now) const noexcept {
-        return has_timer() && now >= deadline_;
-    }
-
-    void arm_timer() noexcept {
-        if (!has_timer() || loop_ == nullptr) {
-            return;
-        }
-        loop_->post_at<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::timer_entry_,
-                       &LocalStreamAttachAwaiter::on_timeout>(deadline_, *this);
-    }
-
-    void cancel_timer() noexcept {
-        if (loop_ != nullptr && timer_entry_.is_in_heap()) {
-            loop_->cancel<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::timer_entry_>(*this);
-        }
-    }
-
-    static void on_notify(LocalStreamAttachAwaiter *awaiter) noexcept {
-        if (awaiter == nullptr) {
-            return;
-        }
-        awaiter->resume_posted_ = false;
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
-    }
-
-    static void on_timeout(LocalStreamAttachAwaiter *awaiter) noexcept {
-        if (awaiter == nullptr) {
-            return;
-        }
-        awaiter->complete(common::IoErr::TimedOut);
-    }
-
-    // Completions fire on the connection's loop; the cancellable local defer
-    // queue keeps this awaiter safe against hard coroutine destruction while a
-    // resume is queued (an MPSC entry cannot be retracted).
-    void post_resume() noexcept {
-        if (resume_posted_ || loop_ == nullptr) {
-            return;
-        }
-        FIBER_ASSERT(loop_->in_loop());
-        resume_posted_ = true;
-        loop_->post_local<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::resume_entry_,
-                          &LocalStreamAttachAwaiter::on_notify>(*this);
-    }
-
-    void cancel_resume() noexcept {
-        if (loop_ != nullptr && resume_entry_.is_in_queue()) {
-            loop_->cancel<LocalStreamAttachAwaiter, &LocalStreamAttachAwaiter::resume_entry_>(*this);
-        }
-    }
-
-    QuicConnection *connection_ = nullptr;
-    QuicStreamType type_ = QuicStreamType::Bidirectional;
-    std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> handle_{};
-    event::EventLoop::DeferEntry resume_entry_{};
-    event::EventLoop::TimerEntry timer_entry_{};
-    common::IntrusiveListHook wait_link_{};
-    common::IoErr result_ = common::IoErr::None;
-    bool resume_posted_ = false;
-    bool completed_ = false;
-
-    friend class QuicConnection;
-};
-
 QuicConnection::Lease::Lease(QuicConnection *connection) noexcept : connection_(connection) {
     if (connection_) {
         connection_->retain();
@@ -873,11 +552,8 @@ QuicConnection::~QuicConnection() {
     // connection. Do not notify here: waiter completion cancels loop-affine
     // timers and posts an asynchronous resume, neither of which is safe to
     // initiate from a possibly quiesced off-loop destructor.
-    FIBER_ASSERT(peer_data_wait_head_ == nullptr);
-    FIBER_ASSERT(peer_data_wait_tail_ == nullptr);
-    FIBER_ASSERT(handshake_wait_head_ == nullptr);
-    FIBER_ASSERT(handshake_wait_tail_ == nullptr);
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    FIBER_ASSERT(peer_data_wait_anchor_.next == &peer_data_wait_anchor_);
+    FIBER_ASSERT(!handshake_gate_.has_waiters());
     if (loop_ != nullptr && loop_->in_loop()) {
         cancel_all_timers();
     } else if (loop_ != nullptr && loop_->group() != nullptr && !loop_->group()->running()) {
@@ -905,7 +581,8 @@ common::IoResult<void> QuicConnection::start_handshake() noexcept {
     if (state_ != QuicConnectionState::Init) {
         return std::unexpected(common::IoErr::Already);
     }
-    state_ = QuicConnectionState::Handshaking;
+    publish_state(QuicConnectionState::Handshaking);
+    dispatch_state_change();
     return {};
 }
 
@@ -921,7 +598,6 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
     if (state_ != QuicConnectionState::Init && state_ != QuicConnectionState::Handshaking) {
         return std::unexpected(common::IoErr::Already);
     }
-    state_ = QuicConnectionState::Established;
     if (endpoint_ != nullptr) {
         auto filled = endpoint_->fill_local_connection_ids(*this);
         if (!filled) {
@@ -929,8 +605,12 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
             return std::unexpected(filled.error());
         }
     }
-    notify_all_local_stream_attach_waiters();
-    notify_handshake_waiters(common::IoErr::WouldBlock);
+    // Publish Established only after endpoint-owned connection-id state is
+    // complete. State observers are synchronous and may immediately send or
+    // register the connection, so they must never observe a half-initialized
+    // established connection.
+    publish_state(QuicConnectionState::Established);
+    dispatch_state_change();
     return {};
 }
 
@@ -939,7 +619,7 @@ void QuicConnection::confirm_handshake() noexcept {
         return;
     }
     crypto_.epoch().handshake_confirmed = true;
-    notify_handshake_waiters(common::IoErr::WouldBlock);
+    handshake_gate_.notify();
     auto preferred = start_preferred_path_validation();
     if (!preferred) {
         close(QuicErrorCode::InternalError);
@@ -947,31 +627,11 @@ void QuicConnection::confirm_handshake() noexcept {
 }
 
 async::Task<common::IoResult<void>> QuicConnection::wait_established(std::chrono::milliseconds timeout) noexcept {
-    if (timeout < std::chrono::milliseconds::zero()) {
-        timeout = std::chrono::milliseconds::zero();
-    }
-    const std::chrono::steady_clock::time_point deadline = timeout == std::chrono::milliseconds::max()
-                                                                   ? std::chrono::steady_clock::time_point::max()
-                                                                   : event::EventLoop::current().now() + timeout;
-    const common::IoErr result = co_await HandshakeAwaiter(*this, deadline);
-    if (result != common::IoErr::None) {
-        co_return std::unexpected(result);
-    }
-    co_return common::IoResult<void>{};
+    return handshake_gate_.wait(/*confirmed=*/false, timeout);
 }
 
 async::Task<common::IoResult<void>> QuicConnection::wait_confirmed(std::chrono::milliseconds timeout) noexcept {
-    if (timeout < std::chrono::milliseconds::zero()) {
-        timeout = std::chrono::milliseconds::zero();
-    }
-    const std::chrono::steady_clock::time_point deadline = timeout == std::chrono::milliseconds::max()
-                                                                   ? std::chrono::steady_clock::time_point::max()
-                                                                   : event::EventLoop::current().now() + timeout;
-    const common::IoErr result = co_await HandshakeAwaiter(*this, deadline, true);
-    if (result != common::IoErr::None) {
-        co_return std::unexpected(result);
-    }
-    co_return common::IoResult<void>{};
+    return handshake_gate_.wait(/*confirmed=*/true, timeout);
 }
 
 void QuicConnection::begin_draining(QuicErrorCode error) noexcept {
@@ -1188,31 +848,71 @@ void QuicConnection::shutdown_application(std::uint64_t error_code, std::chrono:
     enter_graceful_closing(info, grace);
 }
 
+void QuicConnection::publish_state(QuicConnectionState next) noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
+    if (state_ == next) {
+        return;
+    }
+    state_ = next;
+    handshake_gate_.notify();
+}
+
+void QuicConnection::dispatch_state_change() noexcept {
+    // A transition raised from inside the callback is folded into one more pass
+    // so an owner that reacts by closing or shutting down cannot recurse. The
+    // nested transition has already published state_, so the extra pass reports
+    // the latest state rather than the one it superseded.
+    if (state_dispatch_running_) {
+        state_dispatch_again_ = true;
+        return;
+    }
+    state_dispatch_running_ = true;
+    do {
+        state_dispatch_again_ = false;
+        if (options_.ops.on_state_change != nullptr) {
+            options_.ops.on_state_change(options_.owner, *this);
+        }
+    } while (state_dispatch_again_);
+    state_dispatch_running_ = false;
+}
+
+void QuicConnection::dispatch_capacity_change() noexcept {
+    if (capacity_dispatch_running_) {
+        capacity_dispatch_again_ = true;
+        return;
+    }
+    capacity_dispatch_running_ = true;
+    do {
+        capacity_dispatch_again_ = false;
+        if (options_.ops.on_capacity_change != nullptr) {
+            options_.ops.on_capacity_change(options_.owner, *this);
+        }
+    } while (capacity_dispatch_again_);
+    capacity_dispatch_running_ = false;
+}
+
 void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::GracefulClosing || terminal_closing()) {
         return;
     }
     close_info_ = info;
-    state_ = QuicConnectionState::GracefulClosing;
-    notify_handshake_waiters(common::IoErr::Canceled);
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    publish_state(QuicConnectionState::GracefulClosing);
 
     const std::chrono::milliseconds delay = grace.count() > 0 ? grace : options_.graceful_shutdown_grace;
-    if (delay.count() <= 0) {
-        return;
+    if (delay.count() > 0 && active_timer_loop() != nullptr) {
+        if (close_timer_entry_.is_in_heap()) {
+            loop_->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
+        }
+        loop_->post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(
+                loop_->now() + delay, *this);
     }
-    if (active_timer_loop() == nullptr) {
-        return;
-    }
-    if (close_timer_entry_.is_in_heap()) {
-        loop_->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
-    }
-    loop_->post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(
-            loop_->now() + delay, *this);
+    dispatch_state_change();
 }
 
 void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::Closed || state_ == QuicConnectionState::Draining) {
         return;
@@ -1232,9 +932,7 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
     cancel_ack_timer();
 
     close_info_ = info;
-    state_ = QuicConnectionState::Closing;
-    notify_handshake_waiters(handshake_wait_result());
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    publish_state(QuicConnectionState::Closing);
 
     enqueue_close_frames_all_levels();
     close_all_streams(close_info_.error_code);
@@ -1247,9 +945,11 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
             arm_close_timer();
         }
     }
+    dispatch_state_change();
 }
 
 void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::Closed || state_ == QuicConnectionState::Draining) {
         return;
@@ -1260,33 +960,24 @@ void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
     cancel_ack_timer();
 
     close_info_ = info;
-    state_ = QuicConnectionState::Draining;
-    notify_handshake_waiters(handshake_wait_result());
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    publish_state(QuicConnectionState::Draining);
     clear_pending_frames_all_levels();
     close_all_streams(close_info_.error_code);
 
     if (active_timer_loop() != nullptr) {
         arm_close_timer();
     }
+    dispatch_state_change();
 }
 
 void QuicConnection::enter_closed() noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::Closed) {
         return;
     }
-
-    if (active_timer_loop() != nullptr) {
-        cancel_all_timers();
-    }
-
-    state_ = QuicConnectionState::Closed;
-    notify_handshake_waiters(handshake_wait_result());
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
-    close_all_streams(close_info_.error_code);
-    streams_.clear();
-
+    mark_closed();
+    // Detaching can release the last lease: no connection access after this.
     if (endpoint_ != nullptr) {
         endpoint_->detach_connection(*this);
     }
@@ -1357,14 +1048,18 @@ void QuicConnection::requeue_close_frame(QuicEncryptionLevel level) noexcept {
 }
 
 void QuicConnection::mark_closed() noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::Closed) {
         return;
     }
-    state_ = QuicConnectionState::Closed;
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
+    if (active_timer_loop() != nullptr) {
+        cancel_all_timers();
+    }
+    publish_state(QuicConnectionState::Closed);
     close_all_streams(close_info_.error_code);
     streams_.clear();
+    dispatch_state_change();
 }
 
 std::chrono::milliseconds QuicConnection::effective_idle_timeout() const noexcept {
@@ -1580,19 +1275,28 @@ void QuicConnection::cancel_close_timer() noexcept {
 }
 
 std::chrono::milliseconds QuicConnection::keepalive_delay() const noexcept {
-    std::chrono::milliseconds delay = options_.keepalive_interval;
+    const std::chrono::milliseconds delay = options_.keepalive_interval;
     if (delay.count() <= 0) {
-        return std::chrono::milliseconds{0};
+        return std::chrono::milliseconds{0}; // keepalive disabled
     }
 
     const std::chrono::milliseconds idle = effective_idle_timeout();
-    if (idle.count() > 0 && delay >= idle) {
-        delay = idle / 2;
-        if (delay.count() <= 0) {
-            delay = idle;
-        }
+    if (idle.count() <= 0) {
+        return delay; // no idle timeout to stay ahead of
     }
-    return delay;
+
+    // A PING only earns its keep if the peer's answer can arrive before the idle
+    // timeout expires, so cap at half the negotiated timeout however it was
+    // configured -- and note that timeout is negotiated, so the peer's transport
+    // parameters can lower it under a value that was fine when it was set.
+    //
+    // Only the upper end is capped. Asking for something shorter is legitimate:
+    // a NAT binding can expire long before an idle timeout measured in minutes.
+    std::chrono::milliseconds cap = idle / 2;
+    if (cap.count() <= 0) {
+        cap = idle; // a 1ms idle timeout halves to zero, which would read as "off"
+    }
+    return delay < cap ? delay : cap;
 }
 
 void QuicConnection::arm_keepalive_timer() noexcept {
@@ -1831,24 +1535,22 @@ void QuicConnection::on_idle_timer(QuicConnection *connection) noexcept {
     if (connection->loop_ == nullptr || !connection->loop_->in_loop()) {
         return;
     }
-    connection->cancel_all_timers();
-
-    // RFC 9000 §10.1: idle timeout is silent — discard state without sending CC.
-    connection->idle_send_timer_set_ = false;
+    // RFC 9000 §10.1: idle timeout is silent -- discard state without sending a
+    // CONNECTION_CLOSE. enter_closed() is that silent path; enter_closing() is
+    // the one that queues CC frames. Keep it that way: this caller depends on
+    // enter_closed() never putting anything on the wire.
+    //
+    // Streams still in flight are torn down like any other close. QuicStream::
+    // close() reports Canceled to readers and writers whatever error code it is
+    // given, and the connection is already Closed by then, so no STOP_SENDING or
+    // RESET_STREAM goes out either.
     connection->close_info_ = QuicCloseInfo{
             .source = QuicCloseSource::IdleTimeout,
             .frame_kind = QuicCloseFrameKind::Transport,
             .error_code = static_cast<std::uint64_t>(QuicErrorCode::NoError),
             .frame_type = 0,
     };
-    connection->state_ = QuicConnectionState::Closed;
-    connection->notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
-    connection->close_all_streams(connection->close_info_.error_code);
-    connection->streams_.clear();
-
-    if (connection->endpoint_ != nullptr) {
-        connection->endpoint_->detach_connection(*connection);
-    }
+    connection->enter_closed();
 }
 
 void QuicConnection::on_close_timer(QuicConnection *connection) noexcept {
@@ -1976,6 +1678,9 @@ common::IoResult<QuicStream *> QuicConnection::attach_stream(QuicStream::Lease &
         stream->detach_from_connection();
         return std::unexpected(common::IoErr::Invalid);
     }
+    // Deliberately silent. Both callers still have bookkeeping to finish that an
+    // on_capacity_change observer reads -- the local stream id counter here, the
+    // peer's attach hook there -- so each notifies once it is done.
     return stream;
 }
 
@@ -1988,10 +1693,7 @@ QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamTy
     if (!accepting_new_streams()) {
         return std::unexpected(common::IoErr::Canceled);
     }
-    const bool early_attach = state_ == QuicConnectionState::Handshaking &&
-                              early_data_mode == QuicStreamEarlyDataMode::ReplaySafe && early_data_attempted_ &&
-                              crypto_.early_write().ready();
-    if (state_ != QuicConnectionState::Established && !early_attach) {
+    if (state_ != QuicConnectionState::Established && !early_attach_ready(early_data_mode)) {
         return std::unexpected(common::IoErr::Busy);
     }
     if (event::EventLoop *current = event::EventLoop::current_or_null()) {
@@ -2003,9 +1705,8 @@ QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamTy
 
     std::uint64_t &next =
             type == QuicStreamType::Bidirectional ? next_local_bidi_stream_id_ : next_local_uni_stream_id_;
-    const std::uint64_t limit = local_stream_limit(type);
-    if (stream_sequence(next) >= limit) {
-        auto queued = queue_streams_blocked_frame(type, limit);
+    if (local_stream_blocked(type)) {
+        auto queued = queue_streams_blocked_frame(type, local_stream_limit(type));
         if (!queued) {
             return std::unexpected(queued.error());
         }
@@ -2025,43 +1726,8 @@ QuicConnection::try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamTy
     }
 
     next += kStreamIncrement;
+    dispatch_capacity_change();
     return *attached;
-}
-
-async::Task<common::IoResult<QuicStream *>>
-QuicConnection::attach_local_stream(QuicStream::Lease stream, QuicStreamType type, std::chrono::milliseconds timeout,
-                                    QuicStreamEarlyDataMode early_data_mode) noexcept {
-    if (timeout < std::chrono::milliseconds::zero()) {
-        timeout = std::chrono::milliseconds::zero();
-    }
-
-    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
-    bool deadline_set = timeout == std::chrono::milliseconds::max();
-
-    for (;;) {
-        auto attached = try_attach_local_stream(std::move(stream), type, early_data_mode);
-        if (attached || attached.error() != common::IoErr::Busy) {
-            co_return attached;
-        }
-        if (early_data_mode == QuicStreamEarlyDataMode::ReplaySafe && state_ != QuicConnectionState::Established) {
-            co_return std::unexpected(common::IoErr::Busy);
-        }
-        if (timeout == std::chrono::milliseconds::zero()) {
-            co_return std::unexpected(common::IoErr::TimedOut);
-        }
-        if (!deadline_set) {
-            auto *loop = event::EventLoop::current_or_null();
-            FIBER_ASSERT(loop != nullptr);
-            FIBER_ASSERT(loop_ == nullptr || loop == loop_);
-            deadline = loop->now() + timeout;
-            deadline_set = true;
-        }
-
-        common::IoErr wait_result = co_await LocalStreamAttachAwaiter(*this, type, deadline);
-        if (wait_result != common::IoErr::None) {
-            co_return std::unexpected(wait_result);
-        }
-    }
 }
 
 common::IoResult<std::uint64_t> QuicConnection::next_local_stream_id(QuicStreamType type) noexcept {
@@ -2148,6 +1814,7 @@ common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t 
     if (options_.ops.on_peer_stream_attached != nullptr) {
         options_.ops.on_peer_stream_attached(options_.owner, **attached);
     }
+    dispatch_capacity_change();
     return *attached;
 }
 
@@ -2439,7 +2106,7 @@ common::IoResult<void> QuicConnection::recv_max_streams_frame(const QuicMaxStrea
     LocalStreamBlockedState &blocked = local_stream_blocked_state(type);
     blocked.reported = false;
     blocked.last_limit = 0;
-    notify_local_stream_attach_waiters(type);
+    dispatch_capacity_change();
     return {};
 }
 
@@ -2837,7 +2504,7 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
         stream.on_max_stream_data(initial_stream_send_limit(stream.stream_id()));
     });
     notify_peer_data_waiters();
-    notify_all_local_stream_attach_waiters();
+    dispatch_capacity_change();
     const std::chrono::milliseconds peer_idle_timeout(params.max_idle_timeout);
     if (peer_idle_timeout.count() > 0 &&
         (options_.transport.max_idle_timeout.count() <= 0 || peer_idle_timeout < options_.transport.max_idle_timeout)) {
@@ -3364,151 +3031,34 @@ bool QuicConnection::local_stream_blocked(QuicStreamType type) const noexcept {
     return stream_sequence(next) >= local_stream_limit(type);
 }
 
-bool QuicConnection::local_stream_attach_ready(QuicStreamType type) const noexcept {
-    return state_ == QuicConnectionState::Established && accepting_new_streams() && !local_stream_blocked(type);
+std::uint64_t QuicConnection::available_local_stream_slots(QuicStreamType type) const noexcept {
+    const std::uint64_t next =
+            type == QuicStreamType::Bidirectional ? next_local_bidi_stream_id_ : next_local_uni_stream_id_;
+    const std::uint64_t limit = local_stream_limit(type);
+    const std::uint64_t used = stream_sequence(next);
+    return limit > used ? limit - used : 0;
 }
 
-common::IoErr QuicConnection::handshake_wait_result(bool confirmed) const noexcept {
-    if (state_ == QuicConnectionState::Established && (!confirmed || handshake_confirmed())) {
-        return common::IoErr::None;
-    }
-    if (connect_failure_ != common::IoErr::None) {
-        return connect_failure_;
-    }
-    if (state_ == QuicConnectionState::Init || state_ == QuicConnectionState::Handshaking ||
-        (state_ == QuicConnectionState::Established && confirmed)) {
-        return common::IoErr::WouldBlock;
-    }
-    switch (close_info_.source) {
-        case QuicCloseSource::IdleTimeout:
-            return common::IoErr::TimedOut;
-        case QuicCloseSource::PeerConnectionClose:
-        case QuicCloseSource::StatelessReset:
-            return common::IoErr::ConnReset;
-        case QuicCloseSource::None:
-        case QuicCloseSource::Local:
-            return common::IoErr::Canceled;
-    }
-    return common::IoErr::Canceled;
+bool QuicConnection::early_attach_ready(QuicStreamEarlyDataMode early_data_mode) const noexcept {
+    return state_ == QuicConnectionState::Handshaking && early_data_mode == QuicStreamEarlyDataMode::ReplaySafe &&
+           early_data_attempted_ && crypto_.early_write_ready();
 }
 
-void QuicConnection::wait_for_handshake(HandshakeAwaiter &awaiter) noexcept {
-    common::IntrusiveListHook &hook = awaiter.wait_link_;
-    if (hook.linked()) {
-        return;
+common::IoErr QuicConnection::local_stream_attach_status(QuicStreamType type,
+                                                         QuicStreamEarlyDataMode early_data_mode) const noexcept {
+    // Same predicates, in the same order, as try_attach_local_stream's
+    // connection-level admission; that one adds the per-stream checks and the
+    // STREAMS_BLOCKED side effect this query must not have.
+    if (!accepting_new_streams()) {
+        return common::IoErr::Canceled;
     }
-    hook.prev = handshake_wait_tail_;
-    hook.next = nullptr;
-    if (handshake_wait_tail_ != nullptr) {
-        handshake_wait_tail_->next = &hook;
-    } else {
-        handshake_wait_head_ = &hook;
+    if (state_ != QuicConnectionState::Established && !early_attach_ready(early_data_mode)) {
+        return common::IoErr::Busy;
     }
-    handshake_wait_tail_ = &hook;
-    hook.in_list = true;
-}
-
-void QuicConnection::cancel_handshake_wait(HandshakeAwaiter &awaiter) noexcept {
-    common::IntrusiveListHook &hook = awaiter.wait_link_;
-    if (!hook.linked()) {
-        return;
+    if (local_stream_blocked(type)) {
+        return common::IoErr::Busy;
     }
-    if (hook.prev != nullptr) {
-        hook.prev->next = hook.next;
-    } else {
-        handshake_wait_head_ = hook.next;
-    }
-    if (hook.next != nullptr) {
-        hook.next->prev = hook.prev;
-    } else {
-        handshake_wait_tail_ = hook.prev;
-    }
-    hook.prev = nullptr;
-    hook.next = nullptr;
-    hook.in_list = false;
-}
-
-void QuicConnection::notify_handshake_waiters(common::IoErr result) noexcept {
-    common::IntrusiveListHook *hook = handshake_wait_head_;
-    while (hook != nullptr) {
-        HandshakeAwaiter *awaiter = HandshakeAwaiter::from_wait_link(hook);
-        hook = hook->next;
-        const common::IoErr waiter_result =
-                result == common::IoErr::WouldBlock ? handshake_wait_result(awaiter->wait_confirmed_) : result;
-        if (waiter_result == common::IoErr::WouldBlock) {
-            continue;
-        }
-        cancel_handshake_wait(*awaiter);
-        awaiter->complete(waiter_result);
-    }
-}
-
-void QuicConnection::wait_for_local_stream_attach(LocalStreamAttachAwaiter &awaiter) noexcept {
-    common::IntrusiveListHook &hook = awaiter.wait_link_;
-    if (hook.linked()) {
-        return;
-    }
-
-    common::IntrusiveListHook *&head = awaiter.type_ == QuicStreamType::Bidirectional
-                                               ? local_bidi_stream_attach_wait_head_
-                                               : local_uni_stream_attach_wait_head_;
-    common::IntrusiveListHook *&tail = awaiter.type_ == QuicStreamType::Bidirectional
-                                               ? local_bidi_stream_attach_wait_tail_
-                                               : local_uni_stream_attach_wait_tail_;
-
-    hook.prev = tail;
-    hook.next = nullptr;
-    if (tail != nullptr) {
-        tail->next = &hook;
-    } else {
-        head = &hook;
-    }
-    tail = &hook;
-    hook.in_list = true;
-}
-
-void QuicConnection::cancel_local_stream_attach_wait(LocalStreamAttachAwaiter &awaiter) noexcept {
-    common::IntrusiveListHook &hook = awaiter.wait_link_;
-    if (!hook.linked()) {
-        return;
-    }
-
-    common::IntrusiveListHook *&head = awaiter.type_ == QuicStreamType::Bidirectional
-                                               ? local_bidi_stream_attach_wait_head_
-                                               : local_uni_stream_attach_wait_head_;
-    common::IntrusiveListHook *&tail = awaiter.type_ == QuicStreamType::Bidirectional
-                                               ? local_bidi_stream_attach_wait_tail_
-                                               : local_uni_stream_attach_wait_tail_;
-
-    if (hook.prev != nullptr) {
-        hook.prev->next = hook.next;
-    } else {
-        head = hook.next;
-    }
-    if (hook.next != nullptr) {
-        hook.next->prev = hook.prev;
-    } else {
-        tail = hook.prev;
-    }
-    hook.prev = nullptr;
-    hook.next = nullptr;
-    hook.in_list = false;
-}
-
-void QuicConnection::notify_local_stream_attach_waiters(QuicStreamType type, common::IoErr result) noexcept {
-    common::IntrusiveListHook *&head = type == QuicStreamType::Bidirectional ? local_bidi_stream_attach_wait_head_
-                                                                             : local_uni_stream_attach_wait_head_;
-
-    while (head != nullptr) {
-        LocalStreamAttachAwaiter *awaiter = LocalStreamAttachAwaiter::from_wait_link(head);
-        cancel_local_stream_attach_wait(*awaiter);
-        awaiter->complete(result);
-    }
-}
-
-void QuicConnection::notify_all_local_stream_attach_waiters(common::IoErr result) noexcept {
-    notify_local_stream_attach_waiters(QuicStreamType::Bidirectional, result);
-    notify_local_stream_attach_waiters(QuicStreamType::Unidirectional, result);
+    return common::IoErr::None;
 }
 
 void QuicConnection::attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept {
@@ -3525,8 +3075,7 @@ void QuicConnection::detach_from_endpoint() noexcept {
     }
     FIBER_ASSERT(state_ == QuicConnectionState::Closed);
 
-    notify_all_local_stream_attach_waiters(common::IoErr::Canceled);
-    notify_handshake_waiters(common::IoErr::Canceled);
+    handshake_gate_.notify(common::IoErr::Canceled);
     notify_peer_data_waiters(common::IoErr::Canceled);
     close_all_streams(close_info_.error_code);
     clear_frames_for_detach();
@@ -3534,8 +3083,6 @@ void QuicConnection::detach_from_endpoint() noexcept {
 
     endpoint_ = nullptr;
 
-    endpoint_index.connection = nullptr;
-    send_queue_entry.connection = nullptr;
     attached_to_endpoint_ = false;
     detached_from_endpoint_ = true;
 }
@@ -3631,6 +3178,11 @@ void QuicConnection::retire_stream(QuicStream &stream) noexcept {
         on_peer_stream_retired(stream_id);
     }
     lease->detach_from_connection();
+
+    // After on_peer_stream_retired: any MAX_STREAMS it queued has already
+    // extended the peer's advertised limit, so the observer sees the settled
+    // state and that extension needs no notification of its own.
+    dispatch_capacity_change();
 
     maybe_finish_graceful_close();
 }

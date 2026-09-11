@@ -19,13 +19,14 @@
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http3Connection.h>
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/UdpSocket.h>
 #include <fiber/quic/QuicToken.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
+#include "http/Http3ControlStreamEncoder.h"
+#include "http/Http3ControlStreams.h"
 #include "quic/QuicCrypto.h"
 #include "quic/QuicLossRecovery.h"
 #include "quic/QuicPacketCodec.h"
@@ -1641,8 +1642,18 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
         co_return;
     }
 
-    fiber::http::Http3Connection h3(server);
-    auto started = co_await h3.start();
+    auto stream = fiber::http::Http3ControlStreams::create_stream();
+    auto attached = server.try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Unidirectional);
+    if (!attached) {
+        done_promise->set_value(std::unexpected(attached.error()));
+        co_return;
+    }
+    auto preface = fiber::http::encode_http3_control_stream_preface({}, server.recv_extent_pool());
+    if (!preface) {
+        done_promise->set_value(std::unexpected(preface.error()));
+        co_return;
+    }
+    auto started = co_await (*attached)->write(*preface);
     if (!started) {
         done_promise->set_value(std::unexpected(started.error()));
         co_return;
@@ -2069,7 +2080,7 @@ DetachedTask observe_pacing_timer(fiber::quic::QuicUdpEndpoint *endpoint, fiber:
     PacingTimerSummary summary{};
     summary.sent_before_deadline = sent_frame_count(space);
     summary.timer_armed = connection->pacing_timer_armed();
-    summary.removed_while_delayed = !connection->send_queue_entry.link.linked();
+    summary.removed_while_delayed = !connection->send_queue_hook_.linked();
 
     fiber::quic::QuicOutputFrame *ping = space.alloc_frame();
     if (ping == nullptr) {
@@ -2079,14 +2090,14 @@ DetachedTask observe_pacing_timer(fiber::quic::QuicUdpEndpoint *endpoint, fiber:
     ping->type = fiber::quic::QuicFrameType::Ping;
     space.pending_frames.push_back(*ping);
     endpoint->schedule_send(*connection);
-    summary.normal_submit_suppressed = !connection->send_queue_entry.link.linked();
+    summary.normal_submit_suppressed = !connection->send_queue_hook_.linked();
     summary.timer_stayed_armed_after_submit = connection->pacing_timer_armed();
 
     co_await fiber::async::sleep(std::chrono::milliseconds(250));
     summary.sent_after_deadline = sent_frame_count(space);
     summary.timer_expired = !connection->pacing_timer_armed();
     summary.pending_empty = space.pending_frames.empty();
-    summary.removed_after_send = !connection->send_queue_entry.link.linked();
+    summary.removed_after_send = !connection->send_queue_hook_.linked();
     done_promise->set_value(summary);
 }
 
@@ -2121,7 +2132,7 @@ DetachedTask observe_ack_bypasses_pacing(fiber::quic::QuicUdpEndpoint *endpoint,
     summary.ack_sent = !space.send_ack;
     summary.data_still_pending = !space.pending_frames.empty();
     summary.timer_rearmed = connection->pacing_timer_armed();
-    summary.removed_while_delayed = !connection->send_queue_entry.link.linked();
+    summary.removed_while_delayed = !connection->send_queue_hook_.linked();
 
     const auto *path = connection->active_path();
     const std::uint64_t sent_before_close = path != nullptr ? path->sent : 0;
@@ -2150,7 +2161,7 @@ DetachedTask detach_while_pacing_delayed(fiber::quic::QuicUdpEndpoint *endpoint,
 
     PacingDetachSummary summary{};
     summary.timer_was_armed = connection->pacing_timer_armed();
-    summary.removed_while_delayed = !connection->send_queue_entry.link.linked();
+    summary.removed_while_delayed = !connection->send_queue_hook_.linked();
     auto removed = endpoint->remove_connection(dcid);
     summary.remove_error = removed ? fiber::common::IoErr::None : removed.error();
     done_promise->set_value(summary);

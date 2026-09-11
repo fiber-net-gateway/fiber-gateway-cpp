@@ -51,6 +51,10 @@ struct PoolHarness {
     PoolHarness(event::EventLoop &loop, Http2ConnectionPoolCore::Options options, std::uint32_t server_max) :
         loop(loop), pool(loop, options), listener(loop), factory([this](http::HttpExchange &ex) -> Task<void> {
             ++requests;
+            struct Done {
+                PoolHarness &h;
+                ~Done() { ++h.handlers_done; }
+            } done{*this};
             while (hold_responses)
                 co_await async::sleep(1ms);
             auto sent = co_await ex.send_header({.kind = http::OutgoingHeaderKind::Final,
@@ -144,6 +148,13 @@ struct PoolHarness {
     }
     Task<void> close() {
         hold_responses = false;
+        // Handler coroutines are spawned detached (ServerHttp2Request::run_handler_task):
+        // the connection gates below quiesce exchange I/O but never wait for a handler
+        // parked on async::sleep. The teardown after this point is fd/defer driven and
+        // can complete well inside one 1ms poll, so the harness would be freed while a
+        // handler still holds its `this`. Wait for every started handler to return first.
+        while (handlers_done != requests)
+            co_await async::sleep(1ms);
         pool.shutdown();
         co_await pool.join();
         EXPECT_EQ(pool.connection_total(), 0u);
@@ -164,7 +175,7 @@ struct PoolHarness {
     std::vector<std::unique_ptr<Server>> servers;
     std::uint16_t port = 0;
     unsigned dials = 0, dials_active = 0, max_dials_active = 0, fail_dials = 0;
-    unsigned requests = 0, responses = 0;
+    unsigned requests = 0, responses = 0, handlers_done = 0;
     std::chrono::milliseconds dial_delay{};
     bool hold_responses = false, accept_done = false;
 };

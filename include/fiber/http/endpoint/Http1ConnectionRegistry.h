@@ -26,9 +26,15 @@ public:
     // a request short: a session ends when HTTP/1 says it is done, bounded by
     // the connection's own header/keep-alive/write timeouts.
     void drain_all() noexcept {
-        for (Http1Connection *connection = connections_.front(); connection != nullptr;
-             connection = connections_.next_of(*connection)) {
+        // request_drain() on an idle connection tears the session down
+        // synchronously: the transport close wakes run(), the serve coroutine
+        // finishes, and the frame hosting this connection is freed before the
+        // call returns. Read the next pointer before invoking the callback.
+        Http1Connection *connection = connections_.front();
+        while (connection != nullptr) {
+            Http1Connection *next = connections_.next_of(*connection);
             connection->request_drain();
+            connection = next;
         }
     }
 

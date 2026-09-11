@@ -186,8 +186,7 @@ private:
 
     using DcidTree = common::IntrusiveRbTree<QuicConnectionIdIndex, offsetof(QuicConnectionIdIndex, cid_hook),
                                              QuicConnectionDcidLess>;
-    using ConnectionList =
-            common::IntrusiveList<QuicConnection::EndpointIndex, offsetof(QuicConnection::EndpointIndex, link)>;
+    using ConnectionList = common::IntrusiveList<QuicConnection, offsetof(QuicConnection, endpoint_link_)>;
 
     enum class QuicInitialValidationAction : std::uint8_t {
         Accept,

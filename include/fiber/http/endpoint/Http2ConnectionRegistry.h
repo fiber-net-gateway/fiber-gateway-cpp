@@ -19,9 +19,14 @@ public:
     // GOAWAY every session: the peer opens no new streams and the ones already
     // running finish, after which each connection closes itself.
     void drain_all() noexcept {
-        for (Http2ServerConnection *connection = connections_.front(); connection != nullptr;
-             connection = connections_.next_of(*connection)) {
+        // The callback must not assume the node survives: read the next
+        // pointer first so a connection that unlinks and destroys itself
+        // synchronously cannot leave this traversal reading freed memory.
+        Http2ServerConnection *connection = connections_.front();
+        while (connection != nullptr) {
+            Http2ServerConnection *next = connections_.next_of(*connection);
             connection->request_drain();
+            connection = next;
         }
     }
 
