@@ -6,25 +6,27 @@
 #include <utility>
 #include "http/ServerHttp3Request.h"
 namespace fiber::http {
-Http3ServerConnection::Http3ServerConnection(const quic::QuicConnection::Options &quic_options,
+Http3ServerConnection::Http3ServerConnection(quic::QuicUdpEndpoint &endpoint,
+                                             const quic::QuicConnection::Options &quic_options,
                                              std::shared_ptr<const HttpHandler> handler,
                                              const Http3ServerOptions &options, void *owner, const Ops &ops) noexcept :
     handler_(std::move(handler)), options_(options), owner_(owner), ops_(ops),
-    quic_(make_quic_options(quic_options, this)), local_stream_gate_(quic_),
+    quic_(endpoint, make_quic_options(quic_options, this)), local_stream_gate_(quic_),
     control_(quic_, local_stream_gate_, make_settings(options), this, control_ops()) {}
 Http3ServerConnection::~Http3ServerConnection() {
     FIBER_ASSERT(live_server_requests_ == 0 && server_request_group_.empty());
     FIBER_ASSERT(start_tasks_.empty() && drain_tasks_.empty());
     FIBER_ASSERT(!idle_timer_.is_in_heap());
 }
-Http3ServerConnection *Http3ServerConnection::create(const quic::QuicConnection::Options &quic_options,
+Http3ServerConnection *Http3ServerConnection::create(quic::QuicUdpEndpoint &endpoint,
+                                                     const quic::QuicConnection::Options &quic_options,
                                                      std::shared_ptr<const HttpHandler> handler,
                                                      const Http3ServerOptions &options, void *owner,
                                                      const Ops &ops) noexcept {
     if (!handler || ops.on_closed == nullptr || quic_options.role != quic::QuicConnectionRole::Server) {
         return nullptr;
     }
-    return new (std::nothrow) Http3ServerConnection(quic_options, std::move(handler), options, owner, ops);
+    return new (std::nothrow) Http3ServerConnection(endpoint, quic_options, std::move(handler), options, owner, ops);
 }
 quic::QuicConnection::Options Http3ServerConnection::make_quic_options(const quic::QuicConnection::Options &base,
                                                                        Http3ServerConnection *owner) noexcept {
@@ -77,7 +79,7 @@ void Http3ServerConnection::on_peer_stream_attached(void *owner, quic::QuicStrea
     self.server_request_group_.add();
     ++self.live_server_requests_;
     self.update_idle_timer();
-    request->start_read_loop(*self.quic_.loop(), self);
+    request->start_read_loop(self.quic_.loop(), self);
 }
 void Http3ServerConnection::on_quic_state_change(void *owner, quic::QuicConnection &quic) noexcept {
     auto &self = *static_cast<Http3ServerConnection *>(owner);
@@ -95,7 +97,7 @@ void Http3ServerConnection::start() noexcept {
     }
     state_ = Http3ConnectionState::Starting;
     start_tasks_.add();
-    async::spawn(*quic_.loop(), [this]() { return run_start(); });
+    async::spawn(quic_.loop(), [this]() { return run_start(); });
     update_idle_timer();
 }
 async::DetachedTask Http3ServerConnection::run_start() noexcept {
@@ -126,7 +128,7 @@ void Http3ServerConnection::graceful_shutdown() noexcept {
         return;
     }
     drain_tasks_.add();
-    async::spawn(*quic_.loop(), [this]() { return run_graceful_shutdown(); });
+    async::spawn(quic_.loop(), [this]() { return run_graceful_shutdown(); });
 }
 async::DetachedTask Http3ServerConnection::run_graceful_shutdown() noexcept {
     co_await start_tasks_.join();
@@ -164,20 +166,14 @@ void Http3ServerConnection::destroy_connection(void *owner, quic::QuicConnection
     FIBER_ASSERT(!self->cleanup_started_);
     self->cleanup_started_ = true;
     self->cancel_idle_timer();
-    if (quic.loop() == nullptr) {
-        self->ops_.on_closed(self->owner_, *self);
-        delete self;
-        return;
-    }
-    async::spawn(*quic.loop(), [self]() -> async::DetachedTask {
+    async::spawn(quic.loop(), [self]() -> async::DetachedTask {
         co_await self->join_protocol_tasks();
         self->ops_.on_closed(self->owner_, *self);
         delete self;
     });
 }
 void Http3ServerConnection::update_idle_timer() noexcept {
-    event::EventLoop *loop = quic_.loop();
-    if (loop == nullptr || cleanup_started_ || options_.idle_connection_timeout.count() <= 0) {
+    if (cleanup_started_ || options_.idle_connection_timeout.count() <= 0) {
         return;
     }
     // Serving anything, or already on the way out, means there is nothing to
@@ -190,14 +186,14 @@ void Http3ServerConnection::update_idle_timer() noexcept {
     // Restart rather than let a stale deadline through: the count reaching zero
     // is what the timeout measures from.
     cancel_idle_timer();
-    loop->post_at<Http3ServerConnection, &Http3ServerConnection::idle_timer_, &Http3ServerConnection::on_idle_timeout>(
-            loop->now() + options_.idle_connection_timeout, *this);
+    event::EventLoop &loop = quic_.loop();
+    loop.post_at<Http3ServerConnection, &Http3ServerConnection::idle_timer_, &Http3ServerConnection::on_idle_timeout>(
+            loop.now() + options_.idle_connection_timeout, *this);
 }
 
 void Http3ServerConnection::cancel_idle_timer() noexcept {
-    event::EventLoop *loop = quic_.loop();
-    if (loop != nullptr && idle_timer_.is_in_heap()) {
-        loop->cancel<Http3ServerConnection, &Http3ServerConnection::idle_timer_>(*this);
+    if (idle_timer_.is_in_heap()) {
+        quic_.loop().cancel<Http3ServerConnection, &Http3ServerConnection::idle_timer_>(*this);
     }
 }
 

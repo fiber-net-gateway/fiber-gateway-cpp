@@ -95,7 +95,7 @@ public:
         std::chrono::seconds retry_token_lifetime{3};
         std::chrono::seconds new_token_lifetime{600};
         void *connection_owner = nullptr;
-        QuicConnection::Lease (*create_connection)(void *owner,
+        QuicConnection::Lease (*create_connection)(void *owner, QuicUdpEndpoint &endpoint,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
         bool enable_early_data = false;
     };
@@ -128,25 +128,30 @@ public:
         std::chrono::seconds new_token_lifetime{600};
         void *connection_owner = nullptr;
         // Required. The endpoint never allocates QuicConnection itself; this
-        // callback must return an owning lease whose destroy callback releases
-        // the concrete connection storage when ref_count reaches zero.
-        QuicConnection::Lease (*create_connection)(void *owner,
+        // callback must construct the connection on the given endpoint and
+        // return an owning lease whose destroy callback releases the concrete
+        // connection storage when ref_count reaches zero.
+        QuicConnection::Lease (*create_connection)(void *owner, QuicUdpEndpoint &endpoint,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
         bool enable_early_data = false;
     };
 
-    QuicUdpEndpoint() noexcept;
+    // The endpoint, every connection it hosts and the send scheduler all run
+    // on this loop for the endpoint's whole lifetime; init() may be repeated
+    // after close() but never rebinds the loop.
+    explicit QuicUdpEndpoint(event::EventLoop &loop) noexcept;
     ~QuicUdpEndpoint();
 
-    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const EndpointOptions &endpoint_options) noexcept;
-    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const EndpointOptions &endpoint_options,
+    [[nodiscard]] common::IoResult<void> init(const EndpointOptions &endpoint_options) noexcept;
+    [[nodiscard]] common::IoResult<void> init(const EndpointOptions &endpoint_options,
                                               const ServerAdmissionOptions &server_options) noexcept;
-    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const Options &options) noexcept;
+    [[nodiscard]] common::IoResult<void> init(const Options &options) noexcept;
     // Starts callback-driven I/O and must run on the endpoint's event loop.
     [[nodiscard]] common::IoResult<void> start() noexcept;
     void close() noexcept;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool running() const noexcept { return started_ && !closing_; }
+    [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept;
     [[nodiscard]] std::size_t active_connection_count() const noexcept { return active_connection_count_; }
     [[nodiscard]] std::size_t dropped_datagram_count() const noexcept { return dropped_datagram_count_; }
@@ -163,7 +168,7 @@ public:
     [[nodiscard]] std::size_t rate_limited_stateless_response_count() const noexcept {
         return rate_limited_stateless_response_count_;
     }
-    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_->io_buf_node_pool(); }
+    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_.io_buf_node_pool(); }
 
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid) noexcept;
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid) const noexcept;
@@ -313,7 +318,7 @@ private:
                                                QuicTime now) noexcept;
 
     Options options_{};
-    event::EventLoop *loop_ = nullptr;
+    event::EventLoop &loop_;
     std::unique_ptr<net::UdpSocket> socket_{};
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
     std::array<net::UdpPacketRecvSlot, net::kUdpMaxBatchSize> recv_slots_{};
@@ -324,7 +329,7 @@ private:
     mem::IoBufStorageBudget recv_storage_budget_{};
     QuicCryptoBlockPool crypto_block_pool_{};
     QuicOutputFramePool output_frame_pool_{};
-    QuicSendScheduler send_scheduler_{};
+    QuicSendScheduler send_scheduler_;
     DcidTree dcid_tree_{};
     std::array<QuicStatelessResetTokenIndex *, kQuicStatelessResetTokenBucketCount> reset_token_buckets_{};
     ConnectionList connections_{};

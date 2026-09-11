@@ -491,10 +491,10 @@ TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
     ASSERT_TRUE(server.start());
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask { co_await server.serve(); });
 
-    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(client_endpoint.init(group.at(0), endpoint_options));
+    ASSERT_TRUE(client_endpoint.init(endpoint_options));
 
     std::promise<ClientObservation> client_promise;
     auto client_future = client_promise.get_future();
@@ -569,10 +569,10 @@ TEST(Http3ClientTest, PartialWriteContinuesDataFrameWithoutRepeatingHeader) {
     ASSERT_TRUE(server.start());
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask { co_await server.serve(); });
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
+    ASSERT_TRUE(endpoint.init(endpoint_options));
     std::promise<PartialClientObservation> client_promise;
     auto client_future = client_promise.get_future();
     const fiber::net::SocketAddress server_addr = server_endpoint->local_addr();
@@ -626,10 +626,10 @@ TEST(Http3ClientTest, NginxInterop) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
+    ASSERT_TRUE(endpoint.init(endpoint_options));
 
     std::promise<ClientObservation> promise;
     auto future = promise.get_future();

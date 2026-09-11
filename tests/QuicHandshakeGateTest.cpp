@@ -16,10 +16,9 @@ namespace {
 using fiber::common::IoErr;
 using fiber::quic::QuicConnection;
 
-QuicConnection::Options client_options(fiber::event::EventLoop &loop) noexcept {
+QuicConnection::Options client_options() noexcept {
     QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
-    options.loop = &loop;
     return options;
 }
 
@@ -42,7 +41,8 @@ fiber::async::DetachedTask wait_confirmed_into(QuicConnection *conn, std::chrono
 // waiter for confirmation exactly where it was.
 TEST(QuicHandshakeGateTest, EstablishedWakesOnlyThePlainWaiter) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection conn(client_options(group.at(0)));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection conn(endpoint.get(), client_options());
 
     std::promise<IoErr> established_done;
     std::promise<IoErr> confirmed_done;
@@ -78,7 +78,8 @@ TEST(QuicHandshakeGateTest, EstablishedWakesOnlyThePlainWaiter) {
 // A close resolves waiters with why it closed, not with a blanket Canceled.
 TEST(QuicHandshakeGateTest, PeerCloseResolvesWaitersWithConnReset) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection conn(client_options(group.at(0)));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection conn(endpoint.get(), client_options());
 
     std::promise<IoErr> done;
     auto future = done.get_future();
@@ -99,7 +100,8 @@ TEST(QuicHandshakeGateTest, PeerCloseResolvesWaitersWithConnReset) {
 
 TEST(QuicHandshakeGateTest, WaitTimesOutWhileHandshakeIsInFlight) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection conn(client_options(group.at(0)));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection conn(endpoint.get(), client_options());
 
     std::promise<IoErr> done;
     auto future = done.get_future();
@@ -123,7 +125,8 @@ TEST(QuicHandshakeGateTest, WaitTimesOutWhileHandshakeIsInFlight) {
 // Already-resolved waits never touch the queue at all.
 TEST(QuicHandshakeGateTest, WaitOnAnEstablishedConnectionReturnsImmediately) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection conn(client_options(group.at(0)));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection conn(endpoint.get(), client_options());
 
     std::promise<IoErr> established_done;
     std::promise<IoErr> confirmed_done;

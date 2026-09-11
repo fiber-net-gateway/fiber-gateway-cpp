@@ -7,7 +7,7 @@ Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool 
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto snapshot_promise = std::make_shared<std::promise<CapturedHttp3Request>>();
     auto snapshot_future = snapshot_promise->get_future();
@@ -18,7 +18,7 @@ Http3RequestRunResult run_http3_request_headers(const HeaderList &headers, bool 
 
     ctx.options.settings.enable_connect_protocol = enable_extended_connect;
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -54,7 +54,7 @@ run_http3_request_body(const std::vector<std::uint8_t> &request, bool delay_fin 
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     quic_options.recv_flow.stream_buffer_limit = stream_buffer_limit;
     ServerRequestContext ctx;
     auto outcome_promise = std::make_shared<std::promise<Http3BodyReadOutcome>>();
@@ -90,7 +90,7 @@ run_http3_request_body(const std::vector<std::uint8_t> &request, bool delay_fin 
     };
 
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -130,8 +130,8 @@ TEST(Http3ServerConnectionTest, StartsOverOpenQuicConnection) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
-    ServerFixture fixture(quic_options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ServerFixture fixture(endpoint.get(), quic_options);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
 
@@ -158,7 +158,7 @@ TEST(Http3ServerConnectionTest, ServerResponseChannelWaitCompletesOnStopSending)
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto handler_started = std::make_shared<std::promise<void>>();
     auto started_future = handler_started->get_future();
@@ -175,7 +175,7 @@ TEST(Http3ServerConnectionTest, ServerResponseChannelWaitCompletesOnStopSending)
     };
 
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -227,7 +227,7 @@ TEST(Http3ServerConnectionTest, ServerCanSendFinalResponseHeader) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto header_promise = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
     auto header_future = header_promise->get_future();
@@ -248,7 +248,7 @@ TEST(Http3ServerConnectionTest, ServerCanSendFinalResponseHeader) {
     };
 
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -282,7 +282,7 @@ TEST(Http3ServerConnectionTest, ServerFinalResponseStopsOnlyUnreadRequestReceive
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto header_promise = std::make_shared<std::promise<fiber::common::IoResult<void>>>();
     auto header_future = header_promise->get_future();
@@ -298,7 +298,7 @@ TEST(Http3ServerConnectionTest, ServerFinalResponseStopsOnlyUnreadRequestReceive
     };
 
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -342,7 +342,7 @@ TEST(Http3ServerConnectionTest, ServerCanWriteFinalResponseBody) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto outcome_promise = std::make_shared<std::promise<Http3BodyWriteOutcome>>();
     auto outcome_future = outcome_promise->get_future();
@@ -375,7 +375,7 @@ TEST(Http3ServerConnectionTest, ServerCanWriteFinalResponseBody) {
     };
 
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -411,7 +411,7 @@ TEST(Http3ServerConnectionTest, ServerCanWriteFinalResponseBodyFromForeignNodePo
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto outcome_promise = std::make_shared<std::promise<Http3BodyWriteOutcome>>();
     auto outcome_future = outcome_promise->get_future();
@@ -462,7 +462,7 @@ TEST(Http3ServerConnectionTest, ServerCanWriteFinalResponseBodyFromForeignNodePo
     };
 
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -500,7 +500,7 @@ TEST(Http3ServerConnectionTest, ServerWriteReturnsWithUnsentPayloadTailAtStreamF
 
     constexpr std::size_t kBodySize = 2048;
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto outcome_promise = std::make_shared<std::promise<Http3BodyWriteOutcome>>();
     auto outcome_future = outcome_promise->get_future();
@@ -551,7 +551,7 @@ TEST(Http3ServerConnectionTest, ServerWriteReturnsWithUnsentPayloadTailAtStreamF
     };
 
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -590,7 +590,7 @@ TEST(Http3ServerConnectionTest, ServerWriteTimeoutDuringDataHeaderAbortsStreamAn
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto outcome_promise = std::make_shared<std::promise<Http3WriteTimeoutOutcome>>();
     auto outcome_future = outcome_promise->get_future();
@@ -643,7 +643,7 @@ TEST(Http3ServerConnectionTest, ServerWriteTimeoutDuringDataHeaderAbortsStreamAn
     };
 
 
-    ServerFixture fixture(quic_options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), quic_options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     // A minimal 200 response HEADERS frame consumes five bytes. One byte of
@@ -1009,8 +1009,8 @@ void check_startup_drain(bool block_stream_credit) {
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
-    ServerFixture fixture(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ServerFixture fixture(endpoint.get(), options);
     auto &h3 = fixture.connection();
     std::promise<void> done;
     auto future = done.get_future();
@@ -1053,8 +1053,8 @@ TEST(Http3ServerConnectionTest, CloseCancelsStartupBeforeStreamCreditArrives) {
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
-    ServerFixture fixture(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ServerFixture fixture(endpoint.get(), options);
     auto &h3 = fixture.connection();
     std::promise<void> done;
     auto future = done.get_future();
@@ -1082,8 +1082,8 @@ TEST(Http3ServerConnectionTest, ServerRejectsPushStreamWithStreamCreationError) 
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
-    ServerFixture fixture(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    ServerFixture fixture(endpoint.get(), options);
     auto &h3 = fixture.connection();
     ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
 
@@ -1107,7 +1107,7 @@ TEST(Http3ServerConnectionTest, GracefulShutdownRejectsNewRequestStreams) {
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto invoked = std::make_shared<std::promise<void>>();
     auto invoked_future = invoked->get_future();
@@ -1115,7 +1115,7 @@ TEST(Http3ServerConnectionTest, GracefulShutdownRejectsNewRequestStreams) {
         invoked->set_value();
         co_return;
     };
-    ServerFixture fixture(options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
 
     std::promise<void> done;
@@ -1165,7 +1165,7 @@ TEST(Http3ServerConnectionTest, DrainWaitsForBlockedResponseDeliveryBeforeSettli
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto handler_started = std::make_shared<std::promise<void>>();
     auto written = std::make_shared<std::promise<fiber::common::IoResult<std::size_t>>>();
@@ -1200,7 +1200,7 @@ TEST(Http3ServerConnectionTest, DrainWaitsForBlockedResponseDeliveryBeforeSettli
         written->set_value(co_await exchange.write_all(std::move(chunk)));
     };
 
-    ServerFixture fixture(options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
 
     // Stream data credit covers the response header but not the body, so
@@ -1263,7 +1263,7 @@ TEST(Http3ServerConnectionTest, AcceptsRequestStreamWhileStarting) {
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     ServerRequestContext ctx;
     auto invoked = std::make_shared<std::promise<void>>();
     auto invoked_future = invoked->get_future();
@@ -1271,7 +1271,7 @@ TEST(Http3ServerConnectionTest, AcceptsRequestStreamWhileStarting) {
         invoked->set_value();
         co_return;
     };
-    ServerFixture fixture(options, ctx.options, ctx.handler);
+    ServerFixture fixture(endpoint.get(), options, ctx.options, ctx.handler);
     auto &h3 = fixture.connection();
 
     std::promise<void> done;

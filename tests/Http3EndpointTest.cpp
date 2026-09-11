@@ -94,10 +94,10 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
                               std::shared_ptr<std::promise<void>> done_first = {}, std::shared_future<void> hold = {},
                               std::uint64_t request_stream_window = 0) {
     ClientResult result{};
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(*loop);
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    auto endpoint_ready = endpoint.init(*loop, endpoint_options);
+    auto endpoint_ready = endpoint.init(endpoint_options);
     if (!endpoint_ready) {
         result.error = endpoint_ready.error();
         promise->set_value(std::move(result));
@@ -212,10 +212,10 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
                                            std::string cert_path, std::chrono::milliseconds wait,
                                            std::promise<ClientResult> *promise, bool send_first_request = true) {
     ClientResult result{};
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(*loop);
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    auto endpoint_ready = endpoint.init(*loop, endpoint_options);
+    auto endpoint_ready = endpoint.init(endpoint_options);
     if (!endpoint_ready) {
         result.error = endpoint_ready.error();
         promise->set_value(std::move(result));
@@ -337,10 +337,10 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
                                                  std::string cert_path, std::promise<ClientResult> *promise,
                                                  std::uint64_t request_stream_window) {
     ClientResult result{};
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(*loop);
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    auto endpoint_ready = endpoint.init(*loop, endpoint_options);
+    auto endpoint_ready = endpoint.init(endpoint_options);
     if (!endpoint_ready) {
         result.error = endpoint_ready.error();
         promise->set_value(std::move(result));

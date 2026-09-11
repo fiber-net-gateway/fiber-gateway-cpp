@@ -80,7 +80,7 @@ public:
         bool enable_gso = true;
     };
 
-    QuicSendScheduler() noexcept;
+    explicit QuicSendScheduler(QuicUdpEndpoint &endpoint) noexcept;
     ~QuicSendScheduler();
 
     struct PumpResult {
@@ -89,8 +89,7 @@ public:
         bool needs_reschedule = false;
     };
 
-    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, net::UdpSocket &socket, QuicUdpEndpoint &endpoint,
-                                              const Options &options) noexcept;
+    [[nodiscard]] common::IoResult<void> init(net::UdpSocket &socket, const Options &options) noexcept;
     void submit(QuicConnection &connection) noexcept;
     void remove(QuicConnection &connection) noexcept;
     void close(common::IoErr reason = common::IoErr::Canceled) noexcept;
@@ -115,9 +114,9 @@ private:
     void clear_ready() noexcept;
     [[nodiscard]] FlushResult flush_connection(QuicConnection &connection) noexcept;
 
-    event::EventLoop *loop_ = nullptr;
+    QuicUdpEndpoint &endpoint_;
+    event::EventLoop &loop_;
     net::UdpSocket *socket_ = nullptr;
-    QuicUdpEndpoint *endpoint_ = nullptr;
     Options options_{};
     ReadyList ready_{};
     common::IoErr stop_reason_ = common::IoErr::None;

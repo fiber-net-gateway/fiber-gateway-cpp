@@ -227,11 +227,13 @@ fiber::quic::QuicStream::Lease make_test_stream(void *, std::uint64_t) noexcept 
 void destroy_heap_connection(void *, fiber::quic::QuicConnection &connection) noexcept { delete &connection; }
 
 fiber::quic::QuicConnection::Lease
-create_heap_connection(void *, const fiber::quic::QuicConnection::Options &options) noexcept {
+create_heap_connection(void *, fiber::quic::QuicUdpEndpoint &endpoint,
+                       const fiber::quic::QuicConnection::Options &options) noexcept {
     fiber::quic::QuicConnection::Options owned_options = options;
     owned_options.destroy_owner = nullptr;
     owned_options.on_destroy = destroy_heap_connection;
-    return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(owned_options));
+    return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow)
+                                                             fiber::quic::QuicConnection(endpoint, owned_options));
 }
 
 fiber::quic::QuicUdpEndpoint::Options make_endpoint_options() noexcept {
@@ -256,7 +258,8 @@ void destroy_embedded_connection(void *owner, fiber::quic::QuicConnection &conne
 }
 
 fiber::quic::QuicConnection::Lease
-create_embedded_connection(void *owner, const fiber::quic::QuicConnection::Options &options) noexcept {
+create_embedded_connection(void *owner, fiber::quic::QuicUdpEndpoint &endpoint,
+                           const fiber::quic::QuicConnection::Options &options) noexcept {
     auto *state = static_cast<EmbeddedConnectionFactoryState *>(owner);
     ++state->create_calls;
     if (state->connection != nullptr) {
@@ -266,7 +269,7 @@ create_embedded_connection(void *owner, const fiber::quic::QuicConnection::Optio
     fiber::quic::QuicConnection::Options owned_options = options;
     owned_options.destroy_owner = state;
     owned_options.on_destroy = destroy_embedded_connection;
-    state->connection = new (static_cast<void *>(state->storage)) fiber::quic::QuicConnection(owned_options);
+    state->connection = new (static_cast<void *>(state->storage)) fiber::quic::QuicConnection(endpoint, owned_options);
     return fiber::quic::QuicConnection::Lease::adopt(state->connection);
 }
 
@@ -435,10 +438,10 @@ exercise_delayed_application_ack(fiber::event::EventLoop *loop, fiber::quic::Qui
         co_return;
     }
 
+    fiber::test::QuicTestEndpoint peer_host(*loop);
     fiber::quic::QuicConnection::Options peer_options{};
     peer_options.role = fiber::quic::QuicConnectionRole::Client;
-    peer_options.loop = loop;
-    fiber::quic::QuicConnection peer(peer_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), peer_options);
     auto peer_write = fiber::quic::quic_set_encryption_secret(
             peer.crypto(), fiber::quic::QuicEncryptionLevel::Application, true, suite, secret.data(), 32);
     auto peer_read = fiber::quic::quic_set_encryption_secret(
@@ -537,14 +540,14 @@ exercise_separate_pto_probe_packets(fiber::event::EventLoop *loop, fiber::quic::
 
     const auto server_cid = cid_from_hex("8182838485868788");
     const auto client_cid = cid_from_hex("9192939495969798");
+    fiber::test::QuicTestEndpoint peer_host(*loop);
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
-    server_options.loop = loop;
     server_options.local_addr = endpoint->local_addr();
     server_options.remote_addr = client.local_addr();
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(peer_host.get(), server_options);
     server.active_path()->validated = true;
 
     constexpr fiber::quic::QuicCryptoSuite suite = fiber::quic::QuicCryptoSuite::Aes128GcmSha256;
@@ -566,8 +569,7 @@ exercise_separate_pto_probe_packets(fiber::event::EventLoop *loop, fiber::quic::
 
     fiber::quic::QuicConnection::Options peer_options{};
     peer_options.role = fiber::quic::QuicConnectionRole::Client;
-    peer_options.loop = loop;
-    fiber::quic::QuicConnection peer(peer_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), peer_options);
     auto peer_read = fiber::quic::quic_set_encryption_secret(
             peer.crypto(), fiber::quic::QuicEncryptionLevel::Application, false, suite, secret.data(), 32);
     if (!peer_read) {
@@ -1030,13 +1032,14 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
         handshake_secret[i] = static_cast<std::uint8_t>(0x80U + i);
     }
 
+    fiber::test::QuicTestEndpoint peer_host(fiber::event::EventLoop::current());
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = endpoint->local_addr();
     server_options.remote_addr = client.local_addr();
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(peer_host.get(), server_options);
     auto *path = server.active_path();
     if (path == nullptr) {
         done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
@@ -1076,7 +1079,7 @@ recv_coalesced_initial_handshake(fiber::event::EventLoop *loop, fiber::quic::Qui
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection peer(client_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), client_options);
     auto peer_initial_ready = peer.init_initial_crypto(original_dcid);
     if (!peer_initial_ready) {
         done_promise->set_value(std::unexpected(peer_initial_ready.error()));
@@ -1158,13 +1161,14 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
         handshake_secret[i] = static_cast<std::uint8_t>(0x40U + i);
     }
 
+    fiber::test::QuicTestEndpoint peer_host(fiber::event::EventLoop::current());
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = endpoint->local_addr();
     server_options.remote_addr = client.local_addr();
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(peer_host.get(), server_options);
     auto *path = server.active_path();
     if (path == nullptr) {
         done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
@@ -1194,7 +1198,7 @@ recv_handshake_packet_with_many_frames(fiber::event::EventLoop *loop, fiber::qui
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection peer(client_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), client_options);
     auto peer_secret = fiber::quic::quic_set_encryption_secret(
             peer.crypto(), fiber::quic::QuicEncryptionLevel::Handshake, false, suite, handshake_secret.data(), 32);
     if (!peer_secret) {
@@ -1265,13 +1269,14 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
         handshake_secret[i] = static_cast<std::uint8_t>(0x20U + i);
     }
 
+    fiber::test::QuicTestEndpoint peer_host(fiber::event::EventLoop::current());
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = endpoint->local_addr();
     server_options.remote_addr = client.local_addr();
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(peer_host.get(), server_options);
     auto *path = server.active_path();
     if (path == nullptr) {
         done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
@@ -1309,7 +1314,7 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection peer(client_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), client_options);
     auto peer_secret = fiber::quic::quic_set_encryption_secret(
             peer.crypto(), fiber::quic::QuicEncryptionLevel::Handshake, false, suite, handshake_secret.data(), 32);
     if (!peer_secret) {
@@ -1373,13 +1378,14 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
         handshake_secret[i] = static_cast<std::uint8_t>(0x60U + i);
     }
 
+    fiber::test::QuicTestEndpoint peer_host(fiber::event::EventLoop::current());
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = endpoint->local_addr();
     server_options.remote_addr = client.local_addr();
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(peer_host.get(), server_options);
     auto *path = server.active_path();
     if (path == nullptr) {
         done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
@@ -1411,7 +1417,7 @@ DetachedTask recv_handshake_ack_only_when_congestion_full(
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection peer(client_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), client_options);
     auto peer_secret = fiber::quic::quic_set_encryption_secret(
             peer.crypto(), fiber::quic::QuicEncryptionLevel::Handshake, false, suite, handshake_secret.data(), 32);
     if (!peer_secret) {
@@ -1476,6 +1482,7 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
         app_secret[i] = static_cast<std::uint8_t>(0xa0U + i);
     }
 
+    fiber::test::QuicTestEndpoint peer_host(fiber::event::EventLoop::current());
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = endpoint->local_addr();
@@ -1483,7 +1490,7 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
     server_options.ops.create_stream = make_test_stream;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(peer_host.get(), server_options);
     auto *path = server.active_path();
     if (path == nullptr) {
         done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
@@ -1526,7 +1533,7 @@ DetachedTask recv_application_stream_frame(fiber::event::EventLoop *loop, fiber:
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection peer(client_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), client_options);
     auto peer_secret = fiber::quic::quic_set_encryption_secret(
             peer.crypto(), fiber::quic::QuicEncryptionLevel::Application, false, suite, app_secret.data(), 32);
     if (!peer_secret) {
@@ -1601,14 +1608,14 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
         app_secret[i] = static_cast<std::uint8_t>(0xb0U + i);
     }
 
+    fiber::test::QuicTestEndpoint peer_host(*loop);
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = endpoint->local_addr();
     server_options.remote_addr = client.local_addr();
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    server_options.loop = loop;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(peer_host.get(), server_options);
     auto *path = server.active_path();
     if (path == nullptr) {
         done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
@@ -1661,7 +1668,7 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection peer(client_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), client_options);
     auto peer_secret = fiber::quic::quic_set_encryption_secret(
             peer.crypto(), fiber::quic::QuicEncryptionLevel::Application, false, suite, app_secret.data(), 32);
     if (!peer_secret) {
@@ -1732,13 +1739,14 @@ DetachedTask recv_initial_ack_only_without_min_initial_padding(
     const auto server_cid = cid_from_hex("a1a2a3a4a5a6a7a8");
     const auto client_cid = cid_from_hex("b1b2b3b4b5b6b7b8");
 
+    fiber::test::QuicTestEndpoint peer_host(fiber::event::EventLoop::current());
     fiber::quic::QuicConnection::Options server_options{};
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = endpoint->local_addr();
     server_options.remote_addr = client.local_addr();
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(peer_host.get(), server_options);
     auto *path = server.active_path();
     if (path == nullptr) {
         done_promise->set_value(std::unexpected(fiber::common::IoErr::Invalid));
@@ -1761,7 +1769,7 @@ DetachedTask recv_initial_ack_only_without_min_initial_padding(
 
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection peer(client_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), client_options);
     auto peer_initial_ready = peer.init_initial_crypto(original_dcid);
     if (!peer_initial_ready) {
         done_promise->set_value(std::unexpected(peer_initial_ready.error()));
@@ -2173,11 +2181,11 @@ TEST(QuicUdpEndpointTest, InitializesClientOnlyEndpointWithoutConnectionFactory)
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions options{};
     options.bind_addr = loopback(0);
 
-    auto initialized = endpoint.init(group.at(0), options);
+    auto initialized = endpoint.init(options);
     ASSERT_TRUE(initialized.has_value());
     EXPECT_TRUE(endpoint.valid());
     EXPECT_EQ(endpoint.active_connection_count(), 0U);
@@ -2190,10 +2198,10 @@ TEST(QuicUdpEndpointTest, StartDrainsReadableCallbackAcrossReceiveBudget) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.max_recv_datagrams_per_wakeup = 1;
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<void>> start_promise;
     auto start_future = start_promise.get_future();
@@ -2235,9 +2243,9 @@ TEST(QuicUdpEndpointTest, CreatesConnectionForNewInitialDcid) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2268,11 +2276,11 @@ TEST(QuicUdpEndpointTest, CustomConnectionFactoryCanEmbedConnection) {
     group.start();
 
     EmbeddedConnectionFactoryState state{};
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.connection_owner = &state;
     options.create_connection = create_embedded_connection;
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2304,11 +2312,11 @@ TEST(QuicUdpEndpointTest, ConnectionDestroyWaitsForLastLeaseAfterEndpointDetach)
     group.start();
 
     EmbeddedConnectionFactoryState state{};
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.connection_owner = &state;
     options.create_connection = create_embedded_connection;
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2342,13 +2350,13 @@ TEST(QuicUdpEndpointTest, PacingRemovesConnectionUntilTimerRequeuesIt) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.send.pacing.rate_numerator = 1;
     options.send.pacing.rate_denominator = 10;
     options.send.pacing.max_burst_packets = 1;
     options.send.pacing.timer_granularity = std::chrono::milliseconds(1);
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2384,13 +2392,13 @@ TEST(QuicUdpEndpointTest, AckAndConnectionCloseBypassPacingWithoutConsumingDataB
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.send.pacing.rate_numerator = 1;
     options.send.pacing.rate_denominator = 10;
     options.send.pacing.max_burst_packets = 1;
     options.send.pacing.timer_granularity = std::chrono::milliseconds(1);
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2428,7 +2436,7 @@ TEST(QuicUdpEndpointTest, DetachCancelsArmedPacingTimerBeforeDestroy) {
     group.start();
 
     EmbeddedConnectionFactoryState state{};
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.connection_owner = &state;
     options.create_connection = create_embedded_connection;
@@ -2436,7 +2444,7 @@ TEST(QuicUdpEndpointTest, DetachCancelsArmedPacingTimerBeforeDestroy) {
     options.send.pacing.rate_denominator = 10;
     options.send.pacing.max_burst_packets = 1;
     options.send.pacing.timer_granularity = std::chrono::milliseconds(1);
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2471,11 +2479,11 @@ TEST(QuicUdpEndpointTest, DetachCancelsPeerDataWaiterBeforeDestroy) {
     group.start();
 
     EmbeddedConnectionFactoryState state{};
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.connection_owner = &state;
     options.create_connection = create_embedded_connection;
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2523,9 +2531,9 @@ TEST(QuicUdpEndpointTest, DetachClearsFramesAndSuppressesNewPendingFrames) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2587,9 +2595,9 @@ TEST(QuicUdpEndpointTest, EstablishingConnectionQueuesLocalConnectionIdsUpToPeer
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2626,9 +2634,9 @@ TEST(QuicUdpEndpointTest, EstablishingConnectionCapsLocalConnectionIdsAtPeerLimi
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("7394c8f03e515708");
     const auto scid = cid_from_hex("21223344");
@@ -2656,9 +2664,9 @@ TEST(QuicUdpEndpointTest, RetiringLocalConnectionIdUnregistersAndReplenishes) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("6394c8f03e515708");
     const auto scid = cid_from_hex("31223344");
@@ -2698,9 +2706,9 @@ TEST(QuicUdpEndpointTest, RejectsRetiringCurrentLocalConnectionId) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("5394c8f03e515708");
     const auto scid = cid_from_hex("41223344");
@@ -2733,10 +2741,10 @@ TEST(QuicUdpEndpointTest, IdleTimeoutDeletesConnection) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.transport.max_idle_timeout = std::chrono::milliseconds(5);
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -2763,10 +2771,10 @@ TEST(QuicUdpEndpointTest, RetryEnabledSendsRetryWithoutCreatingConnection) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.retry = true;
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("1020304050607080");
     const auto scid = cid_from_hex("a1a2a3a4");
@@ -2813,11 +2821,11 @@ TEST(QuicUdpEndpointTest, RetryResponsesAreRateLimited) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.retry = true;
     options.stateless_response_limits.retry = {2, 1};
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("1020304050607080");
     const auto scid = cid_from_hex("a1a2a3a4");
@@ -2855,13 +2863,13 @@ TEST(QuicUdpEndpointTest, GarbageInitialTokenIsAcceptedAsUnvalidatedWithoutRetry
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.address_validation_key_set = true;
     for (std::size_t i = 0; i < options.address_validation_key.size(); ++i) {
         options.address_validation_key[i] = static_cast<std::uint8_t>(0x40U + i);
     }
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("2021222324252627");
     const auto scid = cid_from_hex("31323334");
@@ -2885,14 +2893,14 @@ TEST(QuicUdpEndpointTest, InvalidRetryTokenCloseResponsesAreRateLimited) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.address_validation_key_set = true;
     for (std::size_t i = 0; i < options.address_validation_key.size(); ++i) {
         options.address_validation_key[i] = static_cast<std::uint8_t>(0x60U + i);
     }
     options.stateless_response_limits.invalid_token_close = {2, 1};
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("4041424344454647");
     const auto scid = cid_from_hex("51525354");
@@ -2935,10 +2943,10 @@ TEST(QuicUdpEndpointTest, ValidRetryTokenCreatesValidatedConnectionWithRetryIds)
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.retry = true;
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto original_dcid = cid_from_hex("0102030405060708");
     const auto client_scid = cid_from_hex("aabbccdd");
@@ -2998,12 +3006,12 @@ TEST(QuicUdpEndpointTest, SendsNewTokenWhenPathValidationCompletes) {
         key[i] = static_cast<std::uint8_t>(0x50U + i);
     }
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.issue_new_token = true;
     options.address_validation_key_set = true;
     options.address_validation_key = key;
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("a0a1a2a3a4a5a6a7");
     const auto client_scid = cid_from_hex("b0b1b2b3");
@@ -3044,10 +3052,10 @@ TEST(QuicUdpEndpointTest, SendsNewTokenWhenPathValidationCompletes) {
     auto challenge = prepare_future.get();
     ASSERT_TRUE(challenge.has_value()) << static_cast<int>(challenge.error());
 
+    fiber::test::QuicTestEndpoint peer_host(group.at(0));
     fiber::quic::QuicConnection::Options peer_options{};
     peer_options.role = fiber::quic::QuicConnectionRole::Client;
-    peer_options.loop = &group.at(0);
-    fiber::quic::QuicConnection peer(peer_options);
+    fiber::quic::QuicConnection peer(peer_host.get(), peer_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(peer.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, app_secret.data(), 32));
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(peer.crypto(), fiber::quic::QuicEncryptionLevel::Application,
@@ -3121,9 +3129,9 @@ TEST(QuicUdpEndpointTest, SendsInitialAckAfterProcessingAckElicitingInitial) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("8394c8f03e515708");
     const auto scid = cid_from_hex("11223344");
@@ -3150,10 +3158,10 @@ TEST(QuicUdpEndpointTest, SendsInitialAckAfterProcessingAckElicitingInitial) {
     auto response_size = response_future.get();
     ASSERT_TRUE(response_size.has_value()) << static_cast<int>(response_size.error());
 
+    fiber::test::QuicTestEndpoint peer_host(group.at(0));
     fiber::quic::QuicConnection::Options client_options{};
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    client_options.loop = &group.at(0);
-    fiber::quic::QuicConnection client(client_options);
+    fiber::quic::QuicConnection client(peer_host.get(), client_options);
     ASSERT_TRUE(client.init_initial_crypto(dcid));
     auto decoded = fiber::quic::quic_decode_packet(client, response.data(), *response_size, 0);
 
@@ -3173,9 +3181,9 @@ TEST(QuicUdpEndpointTest, DelaysFirstApplicationAckUntilTimerExpires) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<DelayedAckTimerSummary>> promise;
     auto future = promise.get_future();
@@ -3200,9 +3208,9 @@ TEST(QuicUdpEndpointTest, SendsPtoProbePingsInSeparatePackets) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<PtoProbePacketSummary>> promise;
     auto future = promise.get_future();
@@ -3226,9 +3234,9 @@ TEST(QuicUdpEndpointTest, CoalescesInitialAndHandshakePacketsIntoOneUdpDatagram)
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<CoalescedPacketSummary>> response_promise;
     auto response_future = response_promise.get_future();
@@ -3255,9 +3263,9 @@ TEST(QuicUdpEndpointTest, EncodesMoreThanEightFramesInOnePacket) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<ManyFramePacketSummary>> response_promise;
     auto response_future = response_promise.get_future();
@@ -3286,9 +3294,9 @@ TEST(QuicUdpEndpointTest, SplitsHandshakeCryptoFrameWhenPacketPayloadIsFull) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<SplitFramePacketSummary>> response_promise;
     auto response_future = response_promise.get_future();
@@ -3317,9 +3325,9 @@ TEST(QuicUdpEndpointTest, SendsOnlyAckWhenCongestionWindowIsFull) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<AckOnlyPacketSummary>> response_promise;
     auto response_future = response_promise.get_future();
@@ -3348,9 +3356,9 @@ TEST(QuicUdpEndpointTest, EncodesApplicationStreamFrameFromSendQueue) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<StreamPacketSummary>> response_promise;
     auto response_future = response_promise.get_future();
@@ -3379,9 +3387,9 @@ TEST(QuicUdpEndpointTest, EncodesHttp3ControlStreamPrefaceFromScheduler) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<StreamPacketSummary>> response_promise;
     auto response_future = response_promise.get_future();
@@ -3411,9 +3419,9 @@ TEST(QuicUdpEndpointTest, DoesNotPadInitialAckOnlyPacketToMinInitialSize) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::promise<fiber::common::IoResult<AckOnlyPacketSummary>> response_promise;
     auto response_future = response_promise.get_future();
@@ -3442,9 +3450,9 @@ TEST(QuicUdpEndpointTest, ReusesExistingConnectionForSameDcid) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0011223344556677");
     const auto scid = cid_from_hex("10203040");
@@ -3474,9 +3482,9 @@ TEST(QuicUdpEndpointTest, MovesActivePathWhenSameConnectionArrivesFromDifferentR
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708");
     const auto scid = cid_from_hex("aabbccdd");
@@ -3508,10 +3516,10 @@ TEST(QuicUdpEndpointTest, RejectsNewConnectionWhenSlotsAreFull) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.max_connections = 1;
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto first_dcid = cid_from_hex("aaaaaaaaaaaaaaaa");
     const auto second_dcid = cid_from_hex("bbbbbbbbbbbbbbbb");
@@ -3541,9 +3549,9 @@ TEST(QuicUdpEndpointTest, DropsMalformedPacketWithoutCreatingConnection) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     std::array<std::uint8_t, fiber::quic::kMinInitialDatagramSize> datagram{};
     auto result = recv_after_send(group, endpoint, datagram.data(), datagram.size());
@@ -3561,14 +3569,14 @@ TEST(QuicUdpEndpointTest, SendsStatelessResetForUnknownShortHeaderDcid) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     // Fixed secret so the reset token can be recomputed in the test.
     options.stateless_reset_secret_set = true;
     for (std::size_t i = 0; i < fiber::quic::kQuicStatelessResetSecretLength; ++i) {
         options.stateless_reset_secret[i] = static_cast<std::uint8_t>(0xa0U + i);
     }
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708090a0b0c0d0e0f1011121314"); // 20 bytes, unknown
     std::array<std::uint8_t, 50> datagram{};
@@ -3626,9 +3634,9 @@ TEST(QuicUdpEndpointTest, DoesNotSendStatelessResetForLongHeader) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708"); // 8 bytes, unknown
     std::array<std::uint8_t, 50> datagram{};
@@ -3668,9 +3676,9 @@ TEST(QuicUdpEndpointTest, SendsVersionNegotiationForUnsupportedVersionLongHeader
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708");
     const auto scid = cid_from_hex("11223344");
@@ -3728,9 +3736,9 @@ TEST(QuicUdpEndpointTest, DoesNotRespondToUndersizedUnsupportedVersionDatagram) 
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708");
     const auto scid = cid_from_hex("11223344");
@@ -3770,10 +3778,10 @@ TEST(QuicUdpEndpointTest, VersionNegotiationResponsesAreRateLimited) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
     options.stateless_response_limits.version_negotiation = {2, 1};
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708");
     const auto scid = cid_from_hex("11223344");
@@ -3812,9 +3820,9 @@ TEST(QuicUdpEndpointTest, DoesNotRespondToVersionNegotiationPacket) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708");
     const auto scid = cid_from_hex("11223344");
@@ -3854,9 +3862,9 @@ TEST(QuicUdpEndpointTest, DoesNotSendStatelessResetForTooSmallShortHeader) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708090a0b0c0d0e0f1011121314"); // 20 bytes, unknown
     // 30-byte short header: below the 41-byte trigger minimum (nginx
@@ -3898,9 +3906,9 @@ TEST(QuicUdpEndpointTest, StatelessResetIsRateLimited) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options options = make_endpoint_options();
-    ASSERT_TRUE(endpoint.init(group.at(0), options));
+    ASSERT_TRUE(endpoint.init(options));
 
     const auto dcid = cid_from_hex("0102030405060708090a0b0c0d0e0f1011121314"); // 20 bytes, unknown
     std::array<std::uint8_t, 50> datagram{};

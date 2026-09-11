@@ -469,10 +469,6 @@ public:
         std::uint64_t max_peer_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
-        QuicOutputFramePool *output_frame_pool = nullptr;
-        QuicCryptoBlockPool *crypto_block_pool = nullptr;
-        mem::IoBufStorageBudget *recv_storage_parent = nullptr;
-        event::EventLoop *loop = nullptr;
         void *destroy_owner = nullptr;
         DestroyCallback on_destroy = nullptr;
         void *owner = nullptr;
@@ -501,7 +497,11 @@ public:
         const net::TlsServerParam *tls = nullptr;
     };
 
-    explicit QuicConnection(const Options &options) noexcept;
+    // Every connection is hosted by an initialized endpoint that outlives it:
+    // the loop, frame/crypto pools and receive-storage budget all come from
+    // the endpoint. Construction alone does not index the connection; the
+    // endpoint attaches it once its connection IDs are registered.
+    QuicConnection(QuicUdpEndpoint &endpoint, const Options &options) noexcept;
     ~QuicConnection();
 
     [[nodiscard]] QuicConnectionRole role() const noexcept { return options_.role; }
@@ -549,8 +549,17 @@ public:
     }
     [[nodiscard]] bool closing() const noexcept { return terminal_closing(); }
     [[nodiscard]] bool graceful_closing() const noexcept { return state_ == QuicConnectionState::GracefulClosing; }
-    [[nodiscard]] bool attached_to_endpoint() const noexcept { return attached_to_endpoint_; }
-    [[nodiscard]] bool detached_from_endpoint() const noexcept { return detached_from_endpoint_; }
+    [[nodiscard]] QuicUdpEndpoint &endpoint() noexcept { return endpoint_; }
+    [[nodiscard]] const QuicUdpEndpoint &endpoint() const noexcept { return endpoint_; }
+    // Attached: indexed by the endpoint and serviced by its send scheduler.
+    // Detached: the endpoint has closed or removed the connection; nothing more
+    // is sent, but the object stays alive until its last lease drops.
+    [[nodiscard]] bool attached_to_endpoint() const noexcept {
+        return endpoint_attachment_ == EndpointAttachment::Attached;
+    }
+    [[nodiscard]] bool detached_from_endpoint() const noexcept {
+        return endpoint_attachment_ == EndpointAttachment::Detached;
+    }
     [[nodiscard]] std::uint32_t ref_count() const noexcept { return ref_count_; }
     [[nodiscard]] Lease lease() noexcept { return Lease(this); }
 
@@ -645,9 +654,8 @@ public:
     [[nodiscard]] common::IoResult<void> recv_max_streams_frame(const QuicMaxStreamsFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_max_data_frame(const QuicMaxDataFrame &frame) noexcept;
     [[nodiscard]] common::IoResult<void> recv_streams_blocked_frame(const QuicStreamsBlockedFrame &frame) noexcept;
-    [[nodiscard]] event::EventLoop *loop() noexcept { return loop_; }
-    [[nodiscard]] const event::EventLoop *loop() const noexcept { return loop_; }
-    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_->io_buf_node_pool(); }
+    [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
+    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_.io_buf_node_pool(); }
     [[nodiscard]] mem::IoBufStorageBudget &recv_storage_budget() noexcept { return recv_storage_budget_; }
     [[nodiscard]] std::size_t retained_recv_storage_capacity() const noexcept {
         return recv_storage_budget_.retained_capacity();
@@ -845,6 +853,12 @@ public:
     common::IntrusiveListHook send_queue_hook_{};
 
 private:
+    enum class EndpointAttachment : std::uint8_t {
+        Unattached,
+        Attached,
+        Detached,
+    };
+
     struct PeerStreamLimitWindow {
         std::uint64_t concurrent_limit = 0;
         std::uint64_t opened_count = 0;
@@ -965,7 +979,7 @@ private:
     void notify_peer_data_waiters(common::IoErr result = common::IoErr::None) noexcept;
     void reset_after_retry() noexcept;
     [[nodiscard]] common::IoResult<void> start_preferred_path_validation() noexcept;
-    void attach_to_endpoint(QuicUdpEndpoint &endpoint) noexcept;
+    void attach_to_endpoint() noexcept;
     void detach_from_endpoint() noexcept;
     void retain() noexcept;
     void release() noexcept;
@@ -986,10 +1000,11 @@ private:
     friend class QuicSendScheduler;
 
     Options options_{};
+    QuicUdpEndpoint &endpoint_;
+    // The endpoint's loop, cached off the timer paths.
+    event::EventLoop &loop_;
     QuicConnectionId current_initial_destination_connection_id_{};
     QuicConnectionId server_initial_source_connection_id_{};
-    event::EventLoop *loop_ = nullptr;
-    QuicUdpEndpoint *endpoint_ = nullptr;
     QuicConnectionState state_ = QuicConnectionState::Init;
     std::uint64_t next_local_bidi_stream_id_ = 0;
     std::uint64_t next_local_uni_stream_id_ = 0;
@@ -1057,8 +1072,7 @@ private:
     bool state_dispatch_again_ = false;
     bool capacity_dispatch_running_ = false;
     bool capacity_dispatch_again_ = false;
-    bool attached_to_endpoint_ = false;
-    bool detached_from_endpoint_ = false;
+    EndpointAttachment endpoint_attachment_ = EndpointAttachment::Unattached;
     std::uint32_t ref_count_ = 1;
     void *destroy_owner_ = nullptr;
     DestroyCallback on_destroy_ = nullptr;

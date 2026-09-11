@@ -13,9 +13,10 @@ public:
     struct Ops {
         void (*on_closed)(void *, Http3ServerConnection &) noexcept = nullptr;
     };
-    // Options and Ops outlive the connection. The handler is shared.
-    static Http3ServerConnection *create(const quic::QuicConnection::Options &, std::shared_ptr<const HttpHandler>,
-                                         const Http3ServerOptions &, void *, const Ops &) noexcept;
+    // The endpoint, Options and Ops outlive the connection. The handler is shared.
+    static Http3ServerConnection *create(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &,
+                                         std::shared_ptr<const HttpHandler>, const Http3ServerOptions &, void *,
+                                         const Ops &) noexcept;
     quic::QuicConnection &quic() noexcept { return quic_; }
     const Http3Settings &local_settings() const noexcept { return control_.local_settings(); }
     Http3ConnectionState state() const noexcept { return state_; }
@@ -38,8 +39,8 @@ public:
     async::Task<void> wait_started() noexcept;
 
 private:
-    Http3ServerConnection(const quic::QuicConnection::Options &, std::shared_ptr<const HttpHandler>,
-                          const Http3ServerOptions &, void *, const Ops &) noexcept;
+    Http3ServerConnection(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &,
+                          std::shared_ptr<const HttpHandler>, const Http3ServerOptions &, void *, const Ops &) noexcept;
     ~Http3ServerConnection();
     static quic::QuicConnection::Options make_quic_options(const quic::QuicConnection::Options &,
                                                            Http3ServerConnection *) noexcept;

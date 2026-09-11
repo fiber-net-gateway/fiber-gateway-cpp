@@ -98,7 +98,7 @@ QuicLocalStreamGate::attach(QuicStream::Lease stream, QuicStreamType type, std::
 
     auto *loop = event::EventLoop::current_or_null();
     FIBER_ASSERT(loop != nullptr);
-    FIBER_ASSERT(connection_->loop() == nullptr || connection_->loop() == loop);
+    FIBER_ASSERT(&connection_->loop() == loop);
     const std::chrono::steady_clock::time_point deadline = timeout == std::chrono::milliseconds::max()
                                                                    ? std::chrono::steady_clock::time_point::max()
                                                                    : loop->now() + timeout;
