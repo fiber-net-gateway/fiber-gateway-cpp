@@ -32,6 +32,8 @@ public:
 
     // Terminal outcome, idempotent: the first result wins, later ones are
     // ignored. Safe to call on a waiter that is still queued -- it detaches.
+    // Completion is irreversible: a completed waiter must never be queued or
+    // parked again. A non-terminal signal may re-park with the same deadline.
     void complete(common::IoErr result) noexcept;
 
     [[nodiscard]] bool completed() const noexcept { return completed_; }
@@ -65,12 +67,11 @@ protected:
     void begin_wait(std::coroutine_handle<> handle, event::EventLoop &loop) noexcept;
 
     // Release everything the loop holds and forget the handle, leaving the
-    // awaiter reusable for another round.
+    // loop association cleared. Completion remains irreversible.
     void end_wait() noexcept;
 
     void set_result(common::IoErr result) noexcept { result_ = result; }
     void mark_completed() noexcept { completed_ = true; }
-    void reset_completed() noexcept { completed_ = false; }
 
     // Non-terminal wake, for a waiter that stays queued and re-checks its own
     // condition (see QuicLocalStreamGate). Terminal outcomes use complete().

@@ -76,8 +76,6 @@ public:
             stream_->write_waiter_ = nullptr;
         }
         stream_ = nullptr;
-        set_result(common::IoErr::None);
-        reset_completed();
         return outcome;
     }
 
@@ -87,7 +85,7 @@ public:
     }
 
     void maybe_wait_for_connection_window() noexcept {
-        if (stream_ == nullptr) {
+        if (completed() || stream_ == nullptr) {
             return;
         }
         if (!stream_->blocked_by_connection_window()) {
@@ -124,6 +122,7 @@ private:
 };
 
 void QuicConnection::wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexcept {
+    FIBER_ASSERT(!awaiter.completed());
     common::IntrusiveListHook &hook = awaiter.peer_data_wait_link_;
     if (hook.linked()) {
         return;
@@ -163,10 +162,12 @@ void QuicConnection::cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) no
 
 void QuicConnection::notify_peer_data_waiters(common::IoErr result) noexcept {
     FIBER_ASSERT((peer_data_wait_head_ == nullptr) == (peer_data_wait_tail_ == nullptr));
-    // complete() detaches, so the head always moves on: a linked waiter is by
-    // construction one that has not completed yet.
+    // Advance the queue explicitly; completion is idempotent and must not be
+    // responsible for making this walk progress.
     while (peer_data_wait_head_ != nullptr) {
-        QuicStream::WriteAwaiter::from_peer_data_wait_link(peer_data_wait_head_)->complete(result);
+        auto *awaiter = QuicStream::WriteAwaiter::from_peer_data_wait_link(peer_data_wait_head_);
+        cancel_peer_data_wait(*awaiter);
+        awaiter->complete(result);
     }
     FIBER_ASSERT(peer_data_wait_head_ == nullptr);
     FIBER_ASSERT(peer_data_wait_tail_ == nullptr);
@@ -822,7 +823,7 @@ common::IoErr QuicStream::terminal_write_error() const noexcept {
 
 void QuicStream::notify_write_waiter(common::IoErr result) noexcept {
     WriteAwaiter *waiter = write_waiter_;
-    if (waiter == nullptr) {
+    if (waiter == nullptr || waiter->completed()) {
         return;
     }
     if (result != common::IoErr::None || waiter->should_resume()) {
