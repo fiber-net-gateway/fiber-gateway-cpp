@@ -85,6 +85,7 @@ private:
     void wake_waiters(QuicStreamType type) noexcept;
     void link_waiter(Waiter &waiter) noexcept;
     void unlink_waiter(Waiter &waiter) noexcept;
+    void detach_waiter(Waiter &waiter) noexcept;
 
     QuicConnection *connection_ = nullptr;
     Queue bidi_{};
