@@ -235,16 +235,14 @@ TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp1Connection) {
     group.join();
 }
 
-struct Http2LifecycleRunState {
-    std::atomic_bool done{false};
-    std::atomic<fiber::common::IoErr> err{fiber::common::IoErr::None};
-};
-
+// Resolves the close promise with the connection's terminal reason, giving the
+// test a blocking handle on "the client observed the close". Waiting on it
+// before the loops stop is what lets the watcher frame unwind and release the
+// connection; skipping that wait leaks the whole cluster (LSan-verified).
 fiber::async::DetachedTask watch_http2_client_close(std::shared_ptr<fiber::http::Http2ClientConnection> connection,
-                                                    std::shared_ptr<Http2LifecycleRunState> state) {
+                                                    std::promise<fiber::common::IoErr> *close_promise) {
     auto result = co_await connection->wait_closed();
-    state->err.store(result ? fiber::common::IoErr::None : result.error(), std::memory_order_release);
-    state->done.store(true, std::memory_order_release);
+    close_promise->set_value(result ? fiber::common::IoErr::None : result.error());
     co_return;
 }
 
@@ -252,7 +250,8 @@ fiber::async::DetachedTask watch_http2_client_close(std::shared_ptr<fiber::http:
 // connection open and idle. The run watcher stays attached so the test can
 // observe how the connection ends.
 fiber::async::DetachedTask open_idle_http2_client(fiber::event::EventLoop *loop, std::uint16_t port,
-                                                  std::promise<fiber::common::IoErr> *promise) {
+                                                  std::promise<fiber::common::IoErr> *promise,
+                                                  std::promise<fiber::common::IoErr> *close_promise) {
     fiber::common::IoErr err = fiber::common::IoErr::None;
     auto connection = std::make_shared<fiber::http::Http2ClientConnection>(*loop);
     fiber::http::HttpClientTlsOptions tls;
@@ -264,8 +263,8 @@ fiber::async::DetachedTask open_idle_http2_client(fiber::event::EventLoop *loop,
         promise->set_value(connect_result.error());
         co_return;
     }
-    auto run_state = std::make_shared<Http2LifecycleRunState>();
-    fiber::async::spawn(*loop, [connection, run_state]() { return watch_http2_client_close(connection, run_state); });
+    fiber::async::spawn(*loop,
+                        [connection, close_promise]() { return watch_http2_client_close(connection, close_promise); });
 
     {
         fiber::mem::BufPool pool;
@@ -356,7 +355,11 @@ TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp2Connection) {
 
     std::promise<fiber::common::IoErr> client_promise;
     auto client_future = client_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return open_idle_http2_client(&group.at(0), port, &client_promise); });
+    std::promise<fiber::common::IoErr> client_close_promise;
+    auto client_close_future = client_close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return open_idle_http2_client(&group.at(0), port, &client_promise, &client_close_promise);
+    });
     ASSERT_EQ(client_future.get(), fiber::common::IoErr::None);
     ASSERT_EQ(request_handled_future.wait_for(5s), std::future_status::ready);
 
@@ -370,6 +373,11 @@ TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp2Connection) {
         co_return;
     });
     EXPECT_EQ(closed_future.wait_for(5s), std::future_status::ready);
+    // The client must also observe the close and unwind its watcher before the
+    // loops stop, otherwise the suspended watcher frame keeps the connection
+    // (TLS transport, HPACK tables, stream table, ...) alive and LeakSanitizer
+    // reports the whole cluster as leaked.
+    EXPECT_EQ(client_close_future.wait_for(5s), std::future_status::ready);
     group.stop();
     group.join();
 }
