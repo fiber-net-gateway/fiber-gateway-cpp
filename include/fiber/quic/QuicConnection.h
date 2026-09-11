@@ -416,16 +416,15 @@ public:
     };
 
     // Notifications run inline on the connection's loop and must not destroy
-    // the owner or the connection, nor drive a nested event loop. Reentrant
-    // changes are folded into one more pass, so an owner that reacts by closing
-    // or shutting down cannot recurse. The two hooks fold independently: a
-    // state change raised from inside on_capacity_change is still reported
-    // immediately, nested.
+    // the owner or the connection, nor drive a nested event loop. State hooks
+    // may close or shut down; nested state notifications fold into another pass.
     struct Ops {
         QuicStream::Lease (*create_stream)(void *owner, std::uint64_t stream_id) noexcept = nullptr;
         void (*on_peer_stream_attached)(void *owner, QuicStream &stream) noexcept = nullptr;
         void (*on_early_data_rejected)(void *owner) noexcept = nullptr;
-        // state() moved. Read the new state from the connection.
+        // state() moved and its stream/frame/timer bookkeeping is complete.
+        // Read the new state from the connection. Endpoint detachment, which
+        // can release the last lease, happens after the Closed notification.
         void (*on_state_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
         // The number of live streams changed in either direction, or the peer
         // granted us more stream credit (MAX_STREAMS, or its initial transport
@@ -447,9 +446,10 @@ public:
         // must also observe on_state_change. So must an owner tracking admission:
         // reaching Established is a state change, not a credit change.
         //
-        // Raised from inside retire_stream(), which runs in the middle of the
-        // packet frame loop. Arming a timer there is fine; closing the connection
-        // is the hazard maybe_finish_graceful_close() defers around.
+        // Runs inside attach/retire and the packet frame loop: observe state,
+        // update a gate, or schedule deferred work only. Do not synchronously
+        // mutate the connection or its streams. In particular, defer closing
+        // until the current packet has finished processing.
         void (*on_capacity_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
     };
 
@@ -943,12 +943,11 @@ private:
     void close_all_streams(std::uint64_t error_code) noexcept;
     void clear_frames_for_detach() noexcept;
     void clear_packet_space_frames_for_detach(QuicPacketNumberSpace &space) noexcept;
-    // The single writer of state_. Every party that parks on connection state
-    // is re-evaluated here, so a new transition site cannot forget to wake one.
-    // Waiters resume through the loop, never inline, so a caller may keep
-    // working after the transition. Set close_info_ before transitioning:
-    // handshake_wait_result() reads it.
-    void transition_state(QuicConnectionState next) noexcept;
+    // The single writer of state_. Re-evaluates handshake waiters, whose
+    // resumes are deferred. Set close_info_ first. Each transition entry point
+    // must finish its bookkeeping before dispatch_state_change(), and must not
+    // continue that bookkeeping after the synchronous observer has run.
+    void publish_state(QuicConnectionState next) noexcept;
     void dispatch_state_change() noexcept;
     void dispatch_capacity_change() noexcept;
     void enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept;

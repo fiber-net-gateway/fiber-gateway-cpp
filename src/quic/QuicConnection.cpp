@@ -582,7 +582,8 @@ common::IoResult<void> QuicConnection::start_handshake() noexcept {
     if (state_ != QuicConnectionState::Init) {
         return std::unexpected(common::IoErr::Already);
     }
-    transition_state(QuicConnectionState::Handshaking);
+    publish_state(QuicConnectionState::Handshaking);
+    dispatch_state_change();
     return {};
 }
 
@@ -598,7 +599,6 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
     if (state_ != QuicConnectionState::Init && state_ != QuicConnectionState::Handshaking) {
         return std::unexpected(common::IoErr::Already);
     }
-    transition_state(QuicConnectionState::Established);
     if (endpoint_ != nullptr) {
         auto filled = endpoint_->fill_local_connection_ids(*this);
         if (!filled) {
@@ -606,6 +606,12 @@ common::IoResult<void> QuicConnection::mark_established() noexcept {
             return std::unexpected(filled.error());
         }
     }
+    // Publish Established only after endpoint-owned connection-id state is
+    // complete. State observers are synchronous and may immediately send or
+    // register the connection, so they must never observe a half-initialized
+    // established connection.
+    publish_state(QuicConnectionState::Established);
+    dispatch_state_change();
     return {};
 }
 
@@ -843,13 +849,13 @@ void QuicConnection::shutdown_application(std::uint64_t error_code, std::chrono:
     enter_graceful_closing(info, grace);
 }
 
-void QuicConnection::transition_state(QuicConnectionState next) noexcept {
+void QuicConnection::publish_state(QuicConnectionState next) noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     if (state_ == next) {
         return;
     }
     state_ = next;
     handshake_gate_.notify();
-    dispatch_state_change();
 }
 
 void QuicConnection::dispatch_state_change() noexcept {
@@ -887,28 +893,27 @@ void QuicConnection::dispatch_capacity_change() noexcept {
 }
 
 void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::milliseconds grace) noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::GracefulClosing || terminal_closing()) {
         return;
     }
     close_info_ = info;
-    transition_state(QuicConnectionState::GracefulClosing);
+    publish_state(QuicConnectionState::GracefulClosing);
 
     const std::chrono::milliseconds delay = grace.count() > 0 ? grace : options_.graceful_shutdown_grace;
-    if (delay.count() <= 0) {
-        return;
+    if (delay.count() > 0 && active_timer_loop() != nullptr) {
+        if (close_timer_entry_.is_in_heap()) {
+            loop_->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
+        }
+        loop_->post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(
+                loop_->now() + delay, *this);
     }
-    if (active_timer_loop() == nullptr) {
-        return;
-    }
-    if (close_timer_entry_.is_in_heap()) {
-        loop_->cancel<QuicConnection, &QuicConnection::close_timer_entry_>(*this);
-    }
-    loop_->post_at<QuicConnection, &QuicConnection::close_timer_entry_, &QuicConnection::on_close_timer>(
-            loop_->now() + delay, *this);
+    dispatch_state_change();
 }
 
 void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::Closed || state_ == QuicConnectionState::Draining) {
         return;
@@ -928,7 +933,7 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
     cancel_ack_timer();
 
     close_info_ = info;
-    transition_state(QuicConnectionState::Closing);
+    publish_state(QuicConnectionState::Closing);
 
     enqueue_close_frames_all_levels();
     close_all_streams(close_info_.error_code);
@@ -941,9 +946,11 @@ void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept 
             arm_close_timer();
         }
     }
+    dispatch_state_change();
 }
 
 void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::Closed || state_ == QuicConnectionState::Draining) {
         return;
@@ -954,29 +961,24 @@ void QuicConnection::enter_draining(QuicCloseInfo info) noexcept {
     cancel_ack_timer();
 
     close_info_ = info;
-    transition_state(QuicConnectionState::Draining);
+    publish_state(QuicConnectionState::Draining);
     clear_pending_frames_all_levels();
     close_all_streams(close_info_.error_code);
 
     if (active_timer_loop() != nullptr) {
         arm_close_timer();
     }
+    dispatch_state_change();
 }
 
 void QuicConnection::enter_closed() noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::Closed) {
         return;
     }
-
-    if (active_timer_loop() != nullptr) {
-        cancel_all_timers();
-    }
-
-    transition_state(QuicConnectionState::Closed);
-    close_all_streams(close_info_.error_code);
-    streams_.clear();
-
+    mark_closed();
+    // Detaching can release the last lease: no connection access after this.
     if (endpoint_ != nullptr) {
         endpoint_->detach_connection(*this);
     }
@@ -1047,13 +1049,18 @@ void QuicConnection::requeue_close_frame(QuicEncryptionLevel level) noexcept {
 }
 
 void QuicConnection::mark_closed() noexcept {
+    FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
     if (state_ == QuicConnectionState::Closed) {
         return;
     }
-    transition_state(QuicConnectionState::Closed);
+    if (active_timer_loop() != nullptr) {
+        cancel_all_timers();
+    }
+    publish_state(QuicConnectionState::Closed);
     close_all_streams(close_info_.error_code);
     streams_.clear();
+    dispatch_state_change();
 }
 
 std::chrono::milliseconds QuicConnection::effective_idle_timeout() const noexcept {
