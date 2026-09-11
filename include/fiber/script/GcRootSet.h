@@ -67,7 +67,6 @@ private:
     friend class GcRootSet;
 
     fiber::common::IntrusiveListHook hook_{};
-    GcRootSet *set_ = nullptr;
     GcRootSource *source_ = nullptr;
 };
 

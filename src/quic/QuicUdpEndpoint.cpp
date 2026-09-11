@@ -623,8 +623,8 @@ void QuicUdpEndpoint::close() noexcept {
         }
     }
 
-    while (QuicConnection::EndpointIndex *index = connections_.front()) {
-        force_detach_connection(*index->connection);
+    while (QuicConnection *connection = connections_.front()) {
+        force_detach_connection(*connection);
     }
     FIBER_ASSERT(recv_storage_budget_.retained_capacity() == 0);
     for (QuicStatelessResetTokenIndex *bucket: reset_token_buckets_) {
@@ -680,7 +680,7 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
     }
     QuicConnection *connection = lease.get();
     if (connection == nullptr || connection->role() != QuicConnectionRole::Client ||
-        connection->attached_to_endpoint() || connection->endpoint_index.link.linked() ||
+        connection->attached_to_endpoint() || connection->endpoint_link_.linked() ||
         connection->local_connection_id().empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -689,11 +689,9 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
         return std::unexpected(common::IoErr::NoMem);
     }
 
-    connection->endpoint_index.connection = connection;
     auto registered = register_connection_id(*connection, connection->local_cids_[0].endpoint_index,
                                              connection->local_connection_id());
     if (!registered) {
-        connection->endpoint_index.connection = nullptr;
         ++rejected_connection_count_;
         return std::unexpected(registered.error());
     }
@@ -704,8 +702,8 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
             register_stateless_reset_token(*connection, slot);
         }
     }
-    connection->endpoint_index.lease = std::move(lease);
-    connections_.push_back(connection->endpoint_index);
+    connection->endpoint_lease_ = std::move(lease);
+    connections_.push_back(*connection);
     ++active_connection_count_;
     return {};
 }
@@ -1111,7 +1109,6 @@ void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
     if (write_blocked_ && !send_scheduler_.has_work()) {
         schedule_io_pump();
     }
-    QuicConnection::EndpointIndex &index = connection.endpoint_index;
     unregister_connection_id(connection.original_dcid_index);
     for (QuicLocalConnectionIdSlot &slot: connection.local_cids_) {
         unregister_connection_id(slot.endpoint_index);
@@ -1119,14 +1116,14 @@ void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
     for (QuicRemoteConnectionIdSlot &slot: connection.remote_cids_) {
         unregister_stateless_reset_token(slot);
     }
-    if (index.link.linked()) {
-        connections_.erase(index);
-    }
+    connections_.erase(connection);
     if (active_connection_count_ != 0) {
         --active_connection_count_;
     }
 
-    QuicConnection::Lease lease = std::move(index.lease);
+    // The lease keeps the connection alive until it is fully unindexed;
+    // detach_from_endpoint() may drop the final reference.
+    QuicConnection::Lease lease = std::move(connection.endpoint_lease_);
     connection.detach_from_endpoint();
     lease.reset();
 }
@@ -1633,7 +1630,6 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     }
     FIBER_ASSERT(connection->on_destroy_ != nullptr);
 
-    connection->endpoint_index.connection = connection;
     auto registered = register_connection_id(*connection, connection->original_dcid_index, packet.dcid);
     if (!registered) {
         return std::unexpected(registered.error());
@@ -1647,8 +1643,8 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     // invoked from quic_process_datagram after the first Initial packet is
     // authenticated. This avoids per-forged-packet SSL_new cost.
     connection->attach_to_endpoint(*this);
-    connection->endpoint_index.lease = std::move(lease);
-    connections_.push_back(connection->endpoint_index);
+    connection->endpoint_lease_ = std::move(lease);
+    connections_.push_back(*connection);
     ++active_connection_count_;
     return connection;
 }

@@ -178,13 +178,7 @@ void QuicSendScheduler::submit(QuicConnection &connection) noexcept {
     enqueue_ready(connection);
 }
 
-void QuicSendScheduler::remove(QuicConnection &connection) noexcept {
-    auto &entry = connection.send_queue_entry;
-    if (entry.link.linked()) {
-        ready_.erase(entry);
-    }
-    entry.connection = nullptr;
-}
+void QuicSendScheduler::remove(QuicConnection &connection) noexcept { ready_.erase(connection); }
 
 void QuicSendScheduler::close(common::IoErr reason) noexcept {
     if (!initialized_) {
@@ -237,48 +231,28 @@ QuicSendScheduler::PumpResult QuicSendScheduler::pump() noexcept {
     return pump_result;
 }
 
-void QuicSendScheduler::enqueue_ready(QuicConnection &connection) noexcept {
-    auto &entry = connection.send_queue_entry;
-    if (entry.link.linked()) {
-        return;
-    }
-    entry.connection = &connection;
-    ready_.push_back(entry);
-}
+void QuicSendScheduler::enqueue_ready(QuicConnection &connection) noexcept { ready_.push_back(connection); }
 
 void QuicSendScheduler::rotate_front_to_back(QuicConnection &connection) noexcept {
-    auto &entry = connection.send_queue_entry;
-    if (!entry.link.linked() || ready_.front() != &entry || ready_.back() == &entry) {
+    if (!connection.send_queue_hook_.linked() || ready_.front() != &connection || ready_.back() == &connection) {
         return;
     }
-    ready_.erase(entry);
-    ready_.push_back(entry);
+    ready_.erase(connection);
+    ready_.push_back(connection);
 }
 
-QuicConnection *QuicSendScheduler::front_ready() noexcept {
-    auto *entry = ready_.front();
-    if (!entry) {
-        return nullptr;
-    }
-    if (entry->connection == nullptr) {
-        ready_.erase(*entry);
-        return nullptr;
-    }
-    return entry->connection;
-}
+QuicConnection *QuicSendScheduler::front_ready() noexcept { return ready_.front(); }
 
 void QuicSendScheduler::clear_ready() noexcept {
     while (!ready_.empty()) {
-        auto *entry = ready_.front();
-        ready_.erase(*entry);
-        entry->connection = nullptr;
+        ready_.erase(*ready_.front());
     }
 }
 
 QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnection &connection) noexcept {
     FIBER_ASSERT(endpoint_ != nullptr);
     FIBER_ASSERT(socket_ != nullptr);
-    FIBER_ASSERT(connection.send_queue_entry.link.linked());
+    FIBER_ASSERT(connection.send_queue_hook_.linked());
 
     FlushResult result{};
     connection.cancel_pacing_timer();

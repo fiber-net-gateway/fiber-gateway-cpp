@@ -552,8 +552,7 @@ QuicConnection::~QuicConnection() {
     // connection. Do not notify here: waiter completion cancels loop-affine
     // timers and posts an asynchronous resume, neither of which is safe to
     // initiate from a possibly quiesced off-loop destructor.
-    FIBER_ASSERT(peer_data_wait_head_ == nullptr);
-    FIBER_ASSERT(peer_data_wait_tail_ == nullptr);
+    FIBER_ASSERT(peer_data_wait_anchor_.next == &peer_data_wait_anchor_);
     FIBER_ASSERT(!handshake_gate_.has_waiters());
     if (loop_ != nullptr && loop_->in_loop()) {
         cancel_all_timers();
@@ -3084,8 +3083,6 @@ void QuicConnection::detach_from_endpoint() noexcept {
 
     endpoint_ = nullptr;
 
-    endpoint_index.connection = nullptr;
-    send_queue_entry.connection = nullptr;
     attached_to_endpoint_ = false;
     detached_from_endpoint_ = true;
 }

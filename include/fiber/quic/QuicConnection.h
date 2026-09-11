@@ -453,17 +453,6 @@ public:
         void (*on_capacity_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
     };
 
-    struct EndpointIndex {
-        QuicConnection *connection = nullptr;
-        Lease lease{};
-        common::IntrusiveListHook link{};
-    };
-
-    struct SendQueueEntry {
-        QuicConnection *connection = nullptr;
-        common::IntrusiveListHook link{};
-    };
-
     struct Options {
         QuicConnectionRole role = QuicConnectionRole::Server;
         net::SocketAddress local_addr{};
@@ -846,9 +835,14 @@ public:
     [[nodiscard]] const QuicTransportSettings &local_transport() const noexcept { return options_.transport; }
     [[nodiscard]] const QuicPeerTransportState &peer_transport() const noexcept { return peer_transport_; }
     [[nodiscard]] bool peer_transport_params_received() const noexcept { return peer_transport_.received; }
-    EndpointIndex endpoint_index{};
+    // Registration in the owning endpoint's connection list. The hook is the
+    // list membership; the lease keeps this connection alive while indexed,
+    // until detach moves it out to order its release after unindexing.
+    common::IntrusiveListHook endpoint_link_{};
+    Lease endpoint_lease_{};
     QuicConnectionIdIndex original_dcid_index{};
-    SendQueueEntry send_queue_entry{};
+    // Membership in the endpoint send scheduler's ready ring.
+    common::IntrusiveListHook send_queue_hook_{};
 
 private:
     struct PeerStreamLimitWindow {
@@ -1044,8 +1038,11 @@ private:
     std::uint64_t peer_data_reserved_ = 0;
     std::uint64_t last_data_blocked_limit_ = 0;
     QuicHandshakeGate handshake_gate_{*this};
-    common::IntrusiveListHook *peer_data_wait_head_ = nullptr;
-    common::IntrusiveListHook *peer_data_wait_tail_ = nullptr;
+    // Connection-window send waiters, as a hook ring anchored here. The queued
+    // nodes are QuicStream::WriteAwaiter hooks; IntrusiveList<T, Offset> cannot
+    // be named in this header because WriteAwaiter is defined in QuicStream.cpp,
+    // so the ring is driven with IntrusiveListHook primitives instead.
+    common::IntrusiveListHook peer_data_wait_anchor_{};
     bool data_blocked_reported_ = false;
     bool idle_send_timer_set_ = false;
     bool has_server_initial_source_connection_id_ = false;
