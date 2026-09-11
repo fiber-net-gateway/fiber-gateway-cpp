@@ -68,9 +68,9 @@ private:
     const std::uint32_t max_qpack_string_size_;
     const std::size_t max_field_section_size_;
     ClientRequestList client_requests_{};
-    async::WaitGroup client_request_group_{};
-    async::WaitGroup start_tasks_{};
-    async::WaitGroup drain_tasks_{};
+    async::LocalWaitGroup client_request_group_{};
+    async::LocalWaitGroup start_tasks_{};
+    async::LocalWaitGroup drain_tasks_{};
     Http3ConnectionState state_ = Http3ConnectionState::Prepared;
     Http3ErrorCode close_error_ = Http3ErrorCode::NoError;
     std::uint64_t peer_goaway_id_ = 0;

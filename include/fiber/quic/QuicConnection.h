@@ -366,8 +366,7 @@ enum class QuicLossTimerMode : std::uint8_t {
 };
 
 // Loop-affine connection state: once constructed, all state transitions and
-// timer heap operations run on Options::loop. A quiesced owner loop is handled
-// separately during destruction.
+// timer heap operations run on the hosting endpoint's loop.
 class QuicConnection : public common::NonCopyable, public common::NonMovable {
 public:
     using DestroyCallback = void (*)(void *owner, QuicConnection &connection) noexcept;
@@ -499,8 +498,10 @@ public:
 
     // Every connection is hosted by an initialized endpoint that outlives it:
     // the loop, frame/crypto pools and receive-storage budget all come from
-    // the endpoint. Construction alone does not index the connection; the
-    // endpoint attaches it once its connection IDs are registered.
+    // the endpoint, and QuicUdpEndpoint::shutdown() waits for every attached
+    // connection to be destroyed before the endpoint closes. Construction
+    // alone does not index the connection; the endpoint attaches it once its
+    // connection IDs are registered.
     QuicConnection(QuicUdpEndpoint &endpoint, const Options &options) noexcept;
     ~QuicConnection();
 
@@ -552,8 +553,8 @@ public:
     [[nodiscard]] QuicUdpEndpoint &endpoint() noexcept { return endpoint_; }
     [[nodiscard]] const QuicUdpEndpoint &endpoint() const noexcept { return endpoint_; }
     // Attached: indexed by the endpoint and serviced by its send scheduler.
-    // Detached: the endpoint has closed or removed the connection; nothing more
-    // is sent, but the object stays alive until its last lease drops.
+    // Detached: closed and unindexed; nothing more is sent, but the object
+    // stays alive -- and counted by the endpoint -- until its last lease drops.
     [[nodiscard]] bool attached_to_endpoint() const noexcept {
         return endpoint_attachment_ == EndpointAttachment::Attached;
     }
@@ -1013,7 +1014,6 @@ private:
     LocalStreamBlockedState local_bidi_streams_blocked_{};
     LocalStreamBlockedState local_uni_streams_blocked_{};
     mem::IoBufStorageBudget recv_storage_budget_{};
-    QuicOutputFramePool output_frame_pool_{};
     std::array<QuicPacketNumberSpace, kQuicPacketNumberSpaceCount> packet_number_spaces_{};
     QuicCongestionState congestion_{};
     QuicRttState rtt_{};

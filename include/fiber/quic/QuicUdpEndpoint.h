@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "../async/LocalWaitGroup.h"
 #include "../async/Task.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IntrusiveRbTree.h"
@@ -139,6 +140,11 @@ public:
     // The endpoint, every connection it hosts and the send scheduler all run
     // on this loop for the endpoint's whole lifetime; init() may be repeated
     // after close() but never rebinds the loop.
+    //
+    // Lifetime: the endpoint outlives every connection it has hosted. A hosted
+    // connection stays alive until its last lease drops, and the endpoint
+    // refuses to close while any of them exists -- shutdown() is the only way
+    // to close an endpoint that still hosts connections.
     explicit QuicUdpEndpoint(event::EventLoop &loop) noexcept;
     ~QuicUdpEndpoint();
 
@@ -148,6 +154,15 @@ public:
     [[nodiscard]] common::IoResult<void> init(const Options &options) noexcept;
     // Starts callback-driven I/O and must run on the endpoint's event loop.
     [[nodiscard]] common::IoResult<void> start() noexcept;
+    // Graceful teardown, on the endpoint's loop: stops admitting connections,
+    // sends CONNECTION_CLOSE(`error`) on every hosted connection that is not
+    // already closing, and completes once the last hosted connection has been
+    // destroyed -- the socket stays open until then so the closes can go out.
+    // Owners that drain at their own layer first (GOAWAY and friends) reach
+    // the join with nothing left to close.
+    [[nodiscard]] async::Task<void> shutdown(QuicErrorCode error = QuicErrorCode::NoError) noexcept;
+    // Immediate close. No hosted connection may still exist: either shutdown()
+    // completed or none was ever admitted. Asserted.
     void close() noexcept;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool running() const noexcept { return started_ && !closing_; }
@@ -333,6 +348,10 @@ private:
     DcidTree dcid_tree_{};
     std::array<QuicStatelessResetTokenIndex *, kQuicStatelessResetTokenBucketCount> reset_token_buckets_{};
     ConnectionList connections_{};
+    // Every connection ever attached, from attach until its destructor runs;
+    // shutdown() joins it and close() requires it empty. Loop-local: a hosted
+    // connection is destroyed on this loop, or on it once quiescent.
+    async::LocalWaitGroup hosted_{};
     std::size_t active_connection_count_ = 0;
     std::size_t dropped_datagram_count_ = 0;
     std::size_t rejected_connection_count_ = 0;
@@ -347,6 +366,7 @@ private:
     bool server_admission_enabled_ = false;
     bool started_ = false;
     bool closing_ = false;
+    bool draining_ = false;
     bool read_callback_registered_ = false;
     bool write_callback_registered_ = false;
     bool read_ready_ = false;

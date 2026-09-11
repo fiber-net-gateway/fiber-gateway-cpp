@@ -1388,7 +1388,7 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
 
     connected->shutdown(fiber::http::Http3ErrorCode::NoError);
     *connected = fiber::http::Http3ClientConnection{};
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(std::move(outcome));
 }
 
