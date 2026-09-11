@@ -136,22 +136,24 @@ fiber::async::DetachedTask start_client_attempt(fiber::quic::QuicUdpEndpoint *en
     auto started = client->start_connect(options);
     if (!started) {
         summary.error = started.error().io_error;
-        endpoint->close();
+        co_await endpoint->shutdown();
         promise->set_value(summary);
         co_return;
     }
 
-    fiber::quic::QuicClientAttempt attempt = std::move(*started);
-    fiber::quic::QuicConnection *connection = attempt.connection();
-    summary.state = connection->state();
-    summary.endpoint_connections = endpoint->active_connection_count();
-    summary.tls_initialized = connection->tls().initialized();
-    summary.initial_keys_ready = connection->crypto().initial_ready();
-    summary.cid_registered = endpoint->find_connection(connection->local_connection_id()) == connection;
-    summary.initial_output_queued =
-            !connection->packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).pending_frames.empty();
+    {
+        fiber::quic::QuicClientAttempt attempt = std::move(*started);
+        fiber::quic::QuicConnection *connection = attempt.connection();
+        summary.state = connection->state();
+        summary.endpoint_connections = endpoint->active_connection_count();
+        summary.tls_initialized = connection->tls().initialized();
+        summary.initial_keys_ready = connection->crypto().initial_ready();
+        summary.cid_registered = endpoint->find_connection(connection->local_connection_id()) == connection;
+        summary.initial_output_queued =
+                !connection->packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).pending_frames.empty();
+    }
 
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(summary);
 }
 
@@ -170,7 +172,7 @@ fiber::async::DetachedTask timeout_client_attempt(fiber::quic::QuicUdpEndpoint *
     auto bound = blackhole.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
     if (!bound) {
         summary.error = bound.error();
-        endpoint->close();
+        co_await endpoint->shutdown();
         promise->set_value(summary);
         co_return;
     }
@@ -192,7 +194,7 @@ fiber::async::DetachedTask timeout_client_attempt(fiber::quic::QuicUdpEndpoint *
     }
     summary.endpoint_connections = endpoint->active_connection_count();
     blackhole.close();
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(summary);
 }
 
@@ -361,11 +363,11 @@ fiber::async::DetachedTask receive_unknown_dcid_stateless_reset(
         }
     }
 
-    client_endpoint->close();
-    server_endpoint->close();
     if (connected) {
         connected->reset();
     }
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
     promise->set_value(summary);
 }
 
@@ -438,8 +440,8 @@ fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint
         }
     }
 
-    client_endpoint->close();
-    server_endpoint->close();
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
     promise->set_value(summary);
 }
 
@@ -452,12 +454,8 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
     auto client_started = client_endpoint->start();
     if (!server_started || !client_started) {
         summary.error = !server_started ? server_started.error() : client_started.error();
-        if (client_endpoint->valid()) {
-            client_endpoint->close();
-        }
-        if (server_endpoint->valid()) {
-            server_endpoint->close();
-        }
+        co_await client_endpoint->shutdown();
+        co_await server_endpoint->shutdown();
         promise->set_value(std::move(summary));
         co_return;
     }
@@ -482,11 +480,11 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
         summary.retry_processed = connection->retry_processed();
     }
 
-    client_endpoint->close();
-    server_endpoint->close();
     if (connected) {
         connected->reset();
     }
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
     promise->set_value(std::move(summary));
 }
 
@@ -499,12 +497,8 @@ fiber::async::DetachedTask connect_loopback_confirmed(fiber::quic::QuicUdpEndpoi
     auto client_started = client_endpoint->start();
     if (!server_started || !client_started) {
         summary.error = !server_started ? server_started.error() : client_started.error();
-        if (client_endpoint->valid()) {
-            client_endpoint->close();
-        }
-        if (server_endpoint->valid()) {
-            server_endpoint->close();
-        }
+        co_await client_endpoint->shutdown();
+        co_await server_endpoint->shutdown();
         promise->set_value(std::move(summary));
         co_return;
     }
@@ -538,8 +532,8 @@ fiber::async::DetachedTask connect_loopback_confirmed(fiber::quic::QuicUdpEndpoi
         attempt.cancel();
     }
 
-    client_endpoint->close();
-    server_endpoint->close();
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
     summary.client_endpoint_connections = client_endpoint->active_connection_count();
     summary.server_endpoint_connections = server_endpoint->active_connection_count();
     promise->set_value(std::move(summary));

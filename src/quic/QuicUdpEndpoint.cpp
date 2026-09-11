@@ -515,6 +515,7 @@ common::IoResult<void> QuicUdpEndpoint::init(const Options &options) noexcept {
     }
     started_ = false;
     closing_ = false;
+    draining_ = false;
     read_callback_registered_ = false;
     write_callback_registered_ = false;
     read_ready_ = false;
@@ -588,7 +589,34 @@ common::IoResult<void> QuicUdpEndpoint::start() noexcept {
     return {};
 }
 
+async::Task<void> QuicUdpEndpoint::shutdown(QuicErrorCode error) noexcept {
+    FIBER_ASSERT(loop_.in_loop());
+    if (initialized_ && !closing_) {
+        draining_ = true;
+        server_admission_enabled_ = false;
+        // Closing arms a timer and leaves the connection in the list; only the
+        // Closed transition (on that timer, or from a peer CONNECTION_CLOSE)
+        // detaches, so the walk is stable. The immediate variant skips the
+        // 3*PTO linger: the endpoint is going away and cannot service it.
+        for (QuicConnection *connection = connections_.front(); connection != nullptr;
+             connection = connections_.next_of(*connection)) {
+            if (connection->state() == QuicConnectionState::Draining) {
+                connection->arm_close_timer_immediate();
+            } else {
+                connection->close_immediately(error);
+            }
+        }
+    }
+    co_await hosted_.join();
+    close();
+}
+
 void QuicUdpEndpoint::close() noexcept {
+    // Hosted connections are destroyed by their owners on the last lease drop;
+    // the endpoint cannot force that, so a close with connections alive is an
+    // ordering bug in the caller. shutdown() waits for them.
+    FIBER_ASSERT(hosted_.empty());
+    FIBER_ASSERT(connections_.empty());
     if (!initialized_ && (!socket_ || !socket_->valid())) {
         return;
     }
@@ -620,9 +648,6 @@ void QuicUdpEndpoint::close() noexcept {
         }
     }
 
-    while (QuicConnection *connection = connections_.front()) {
-        force_detach_connection(*connection);
-    }
     FIBER_ASSERT(recv_storage_budget_.retained_capacity() == 0);
     for (QuicStatelessResetTokenIndex *bucket: reset_token_buckets_) {
         FIBER_ASSERT(bucket == nullptr);
@@ -646,6 +671,7 @@ void QuicUdpEndpoint::close() noexcept {
     // callback. Keep the closed wrapper alive until reinitialization or
     // destruction instead of resetting it from a callback-driven close.
     initialized_ = false;
+    draining_ = false;
     server_admission_enabled_ = false;
 }
 
@@ -671,7 +697,7 @@ common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId
 }
 
 common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection::Lease lease) noexcept {
-    if (!initialized_ || closing_ || !loop_.in_loop()) {
+    if (!initialized_ || closing_ || draining_ || !loop_.in_loop()) {
         return std::unexpected(common::IoErr::BadFd);
     }
     QuicConnection *connection = lease.get();
@@ -692,6 +718,7 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
         return std::unexpected(registered.error());
     }
 
+    hosted_.add();
     connection->attach_to_endpoint();
     for (QuicRemoteConnectionIdSlot &slot: connection->remote_cids_) {
         if (slot.in_use && slot.has_stateless_reset_token) {
@@ -1114,7 +1141,7 @@ void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
     }
 
     // The lease keeps the connection alive until it is fully unindexed;
-    // detach_from_endpoint() may drop the final reference.
+    // dropping it may be the final release, which destroys the connection.
     QuicConnection::Lease lease = std::move(connection.endpoint_lease_);
     connection.detach_from_endpoint();
     lease.reset();
@@ -1630,6 +1657,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     // TLS (SSL_new) is deferred to QuicConnection::ensure_server_tls(),
     // invoked from quic_process_datagram after the first Initial packet is
     // authenticated. This avoids per-forged-packet SSL_new cost.
+    hosted_.add();
     connection->attach_to_endpoint();
     connection->endpoint_lease_ = std::move(lease);
     connections_.push_back(*connection);

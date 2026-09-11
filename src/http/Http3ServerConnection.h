@@ -64,9 +64,9 @@ private:
     quic::QuicConnection quic_;
     quic::QuicLocalStreamGate local_stream_gate_;
     Http3ControlStreams control_;
-    async::WaitGroup start_tasks_{};
-    async::WaitGroup drain_tasks_{};
-    async::WaitGroup server_request_group_{};
+    async::LocalWaitGroup start_tasks_{};
+    async::LocalWaitGroup drain_tasks_{};
+    async::LocalWaitGroup server_request_group_{};
     std::size_t live_server_requests_ = 0;
     std::uint64_t next_rejected_request_id_ = 0;
     event::EventLoop::TimerEntry idle_timer_{};

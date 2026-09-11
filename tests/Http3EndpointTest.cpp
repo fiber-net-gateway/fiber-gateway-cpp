@@ -107,7 +107,7 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
     auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(cert_path));
     if (!trust_store) {
         result.error = trust_store.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -120,14 +120,14 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
     auto started = endpoint.start();
     if (!started) {
         result.error = started.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
     auto initialized = client.init();
     if (!initialized) {
         result.error = initialized.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -142,7 +142,7 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
     auto connected = co_await client.connect(std::move(connect_options));
     if (!connected) {
         result.error = connected.error().io_error;
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -195,7 +195,7 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
     // Let the CONNECTION_CLOSE actually reach the wire before tearing the
     // endpoint down; otherwise the server sees a peer that simply vanished.
     co_await fiber::async::sleep(50ms);
-    endpoint.close();
+    co_await endpoint.shutdown();
     promise->set_value(std::move(result));
     co_return;
 }
@@ -225,7 +225,7 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
     auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(cert_path));
     if (!trust_store) {
         result.error = trust_store.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -238,14 +238,14 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
     auto started = endpoint.start();
     if (!started) {
         result.error = started.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
     auto initialized = client.init();
     if (!initialized) {
         result.error = initialized.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -257,7 +257,7 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
     auto connected = co_await client.connect(std::move(connect_options));
     if (!connected) {
         result.error = connected.error().io_error;
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -324,7 +324,7 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
     connected->shutdown(fiber::http::Http3ErrorCode::NoError);
     *connected = fiber::http::Http3ClientConnection{};
     co_await fiber::async::sleep(50ms);
-    endpoint.close();
+    co_await endpoint.shutdown();
     promise->set_value(std::move(result));
     co_return;
 }
@@ -350,7 +350,7 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
     auto trust_store = fiber::net::TrustStore::create(fiber::net::TrustStoreOptions::from_file(cert_path));
     if (!trust_store) {
         result.error = trust_store.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -363,14 +363,14 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
     auto started = endpoint.start();
     if (!started) {
         result.error = started.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
     auto initialized = client.init();
     if (!initialized) {
         result.error = initialized.error();
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -383,7 +383,7 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
     auto connected = co_await client.connect(std::move(connect_options));
     if (!connected) {
         result.error = connected.error().io_error;
-        endpoint.close();
+        co_await endpoint.shutdown();
         promise->set_value(std::move(result));
         co_return;
     }
@@ -424,7 +424,8 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
     // Keep the connection alive long enough for the abort frames to reach the
     // server and its teardown to run, then vanish.
     co_await fiber::async::sleep(50ms);
-    endpoint.close();
+    *connected = fiber::http::Http3ClientConnection{};
+    co_await endpoint.shutdown();
     promise->set_value(std::move(result));
     co_return;
 }

@@ -276,7 +276,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
 
     connected->shutdown(fiber::http::Http3ErrorCode::NoError);
     *connected = fiber::http::Http3ClientConnection{};
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(std::move(observation));
 }
 
@@ -349,7 +349,7 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
 
     connected->shutdown(fiber::http::Http3ErrorCode::NoError);
     *connected = fiber::http::Http3ClientConnection{};
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(std::move(observation));
 }
 
@@ -456,7 +456,7 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
 
     connected->shutdown(fiber::http::Http3ErrorCode::NoError);
     *connected = fiber::http::Http3ClientConnection{};
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(std::move(observation));
 }
 

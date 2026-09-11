@@ -95,8 +95,9 @@ public:
 
     async::Task<void> wait_stopped() noexcept override {
         co_await live_.join();
-        // Last session is gone, so the socket has no more work.
-        endpoint_.close();
+        // Last session is gone, so nothing is left for shutdown() to close;
+        // it still joins the transport's own count before closing the socket.
+        co_await endpoint_.shutdown();
         co_return;
     }
 
@@ -147,7 +148,7 @@ private:
     event::EventLoop::NotifyEntry start_entry_{};
     quic::QuicUdpEndpoint endpoint_;
     Http3ConnectionRegistry connections_{};
-    async::WaitGroup live_{};
+    async::LocalWaitGroup live_{};
     bool admitting_ = true;
 };
 

@@ -1,3 +1,4 @@
+#include <fiber/async/WaitGroup.h>
 #include <fiber/http/ClientHttp3Exchange.h>
 #include "Http3ConnectionTestSupport.h"
 

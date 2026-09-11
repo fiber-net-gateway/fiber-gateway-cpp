@@ -655,7 +655,7 @@ DetachedTask observe_endpoint_connection_count_after_delay(fiber::quic::QuicUdpE
                                                            std::promise<std::size_t> *done_promise) {
     co_await fiber::async::sleep(delay);
     done_promise->set_value(endpoint->active_connection_count());
-    endpoint->close();
+    co_await endpoint->shutdown();
     fiber::event::EventLoop::current().stop();
 }
 
@@ -866,9 +866,55 @@ DetachedTask send_two_datagrams_from_distinct_clients(
 }
 
 DetachedTask close_endpoint(fiber::quic::QuicUdpEndpoint *endpoint, std::promise<void> *done_promise) {
-    endpoint->close();
+    co_await endpoint->shutdown();
+    done_promise->set_value();
+}
+
+DetachedTask remove_connection(fiber::quic::QuicUdpEndpoint *endpoint, fiber::quic::QuicConnectionId dcid,
+                               std::promise<fiber::common::IoResult<void>> *done_promise) {
+    done_promise->set_value(endpoint->remove_connection(dcid));
+    co_return;
+}
+
+DetachedTask release_lease(fiber::quic::QuicConnection::Lease lease, std::promise<void> *done_promise) {
+    lease.reset();
     done_promise->set_value();
     co_return;
+}
+
+// Observations taken on the loop while a connection lease outlives the
+// endpoint's shutdown() call.
+struct ShutdownWithLeaseSummary {
+    bool closed_after_shutdown_started = false;
+    bool detached_after_shutdown_started = false;
+    std::uint32_t destroy_calls_while_leased = 0;
+    bool shutdown_completed_while_leased = false;
+    std::uint32_t destroy_calls_after_release = 0;
+    bool shutdown_completed_after_release = false;
+};
+
+DetachedTask shutdown_with_lease_held(fiber::quic::QuicUdpEndpoint *endpoint, fiber::quic::QuicConnection::Lease lease,
+                                      EmbeddedConnectionFactoryState *state,
+                                      std::promise<ShutdownWithLeaseSummary> *done_promise) {
+    ShutdownWithLeaseSummary summary{};
+    bool shutdown_completed = false;
+    fiber::async::spawn(fiber::event::EventLoop::current(), [endpoint, &shutdown_completed]() -> DetachedTask {
+        co_await endpoint->shutdown();
+        shutdown_completed = true;
+    });
+    // The immediate close lands Closed on the next loop turn.
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    summary.closed_after_shutdown_started = lease->closed();
+    summary.detached_after_shutdown_started = lease->detached_from_endpoint();
+    summary.destroy_calls_while_leased = state->destroy_calls;
+    summary.shutdown_completed_while_leased = shutdown_completed;
+
+    lease.reset();
+    summary.destroy_calls_after_release = state->destroy_calls;
+    // The join resumes on a posted notification.
+    co_await fiber::async::sleep(std::chrono::milliseconds(20));
+    summary.shutdown_completed_after_release = shutdown_completed;
+    done_promise->set_value(summary);
 }
 
 DetachedTask write_stream_once(fiber::quic::QuicStream::Lease stream,
@@ -876,14 +922,13 @@ DetachedTask write_stream_once(fiber::quic::QuicStream::Lease stream,
     done_promise->set_value(co_await stream->write(iobuf_of("!")));
 }
 
-DetachedTask
-close_endpoint_with_blocked_peer_data_write(fiber::quic::QuicUdpEndpoint *endpoint,
-                                            fiber::quic::QuicConnection *connection,
-                                            std::promise<fiber::common::IoResult<std::size_t>> *write_promise,
-                                            std::promise<fiber::common::IoResult<void>> *close_promise) {
-    auto fail = [endpoint, write_promise, close_promise](fiber::common::IoErr error) noexcept {
+DetachedTask detach_with_blocked_peer_data_write(fiber::quic::QuicUdpEndpoint *endpoint,
+                                                 fiber::quic::QuicConnection *connection,
+                                                 fiber::quic::QuicConnectionId dcid,
+                                                 std::promise<fiber::common::IoResult<std::size_t>> *write_promise,
+                                                 std::promise<fiber::common::IoResult<void>> *close_promise) {
+    auto fail = [write_promise, close_promise](fiber::common::IoErr error) noexcept {
         write_promise->set_value(std::unexpected(error));
-        endpoint->close();
         close_promise->set_value(std::unexpected(error));
     };
 
@@ -924,8 +969,7 @@ close_endpoint_with_blocked_peer_data_write(fiber::quic::QuicUdpEndpoint *endpoi
     // peer-data list. Stream credit is available, while connection MAX_DATA is
     // intentionally still zero, so this can only block on that list.
     co_await fiber::async::sleep(std::chrono::milliseconds(20));
-    endpoint->close();
-    close_promise->set_value({});
+    close_promise->set_value(endpoint->remove_connection(dcid));
 }
 
 DetachedTask establish_connection(fiber::quic::QuicConnection *connection, std::uint64_t active_connection_id_limit,
@@ -1884,6 +1928,24 @@ void close_endpoint_on_loop(fiber::event::EventLoopGroup &group, fiber::quic::Qu
     EXPECT_EQ(close_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
 }
 
+fiber::common::IoResult<void> remove_connection_on_loop(fiber::event::EventLoopGroup &group,
+                                                        fiber::quic::QuicUdpEndpoint &endpoint,
+                                                        const fiber::quic::QuicConnectionId &dcid) {
+    std::promise<fiber::common::IoResult<void>> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return remove_connection(&endpoint, dcid, &promise); });
+    EXPECT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    return future.get();
+}
+
+void release_lease_on_loop(fiber::event::EventLoopGroup &group, fiber::quic::QuicConnection::Lease lease) {
+    std::promise<void> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&, lease = std::move(lease)]() mutable { return release_lease(std::move(lease), &promise); });
+    EXPECT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+}
+
 fiber::common::IoResult<void> establish_connection_on_loop(fiber::event::EventLoopGroup &group,
                                                            fiber::quic::QuicConnection *connection,
                                                            std::uint64_t active_connection_id_limit) {
@@ -2307,7 +2369,7 @@ TEST(QuicUdpEndpointTest, CustomConnectionFactoryCanEmbedConnection) {
     group.join();
 }
 
-TEST(QuicUdpEndpointTest, ConnectionDestroyWaitsForLastLeaseAfterEndpointDetach) {
+TEST(QuicUdpEndpointTest, ShutdownWaitsForLastLeaseOfDetachedConnection) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -2331,16 +2393,22 @@ TEST(QuicUdpEndpointTest, ConnectionDestroyWaitsForLastLeaseAfterEndpointDetach)
     EXPECT_EQ(state.create_calls, 1U);
     EXPECT_EQ(state.destroy_calls, 0U);
 
-    close_endpoint_on_loop(group, endpoint);
+    std::promise<ShutdownWithLeaseSummary> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return shutdown_with_lease_held(&endpoint, std::move(lease), &state, &promise); });
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto summary = future.get();
 
+    EXPECT_TRUE(summary.closed_after_shutdown_started);
+    EXPECT_TRUE(summary.detached_after_shutdown_started);
+    EXPECT_EQ(summary.destroy_calls_while_leased, 0U);
+    EXPECT_FALSE(summary.shutdown_completed_while_leased);
+    EXPECT_EQ(summary.destroy_calls_after_release, 1U);
+    EXPECT_TRUE(summary.shutdown_completed_after_release);
     EXPECT_EQ(endpoint.active_connection_count(), 0U);
-    EXPECT_EQ(state.destroy_calls, 0U);
-    EXPECT_EQ(state.connection, lease.get());
-    EXPECT_TRUE(lease->detached_from_endpoint());
-
-    lease.reset();
-    EXPECT_EQ(state.destroy_calls, 1U);
     EXPECT_EQ(state.connection, nullptr);
+    EXPECT_FALSE(endpoint.valid());
 
     group.stop();
     group.join();
@@ -2501,7 +2569,7 @@ TEST(QuicUdpEndpointTest, DetachCancelsPeerDataWaiterBeforeDestroy) {
     auto close_future = close_promise.get_future();
 
     fiber::async::spawn(group.at(0), [&]() {
-        return close_endpoint_with_blocked_peer_data_write(&endpoint, lease.get(), &write_promise, &close_promise);
+        return detach_with_blocked_peer_data_write(&endpoint, lease.get(), dcid, &write_promise, &close_promise);
     });
 
     ASSERT_EQ(close_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
@@ -2519,10 +2587,11 @@ TEST(QuicUdpEndpointTest, DetachCancelsPeerDataWaiterBeforeDestroy) {
     EXPECT_EQ(state.destroy_calls, 0U);
     EXPECT_EQ(state.connection, lease.get());
 
-    lease.reset();
+    release_lease_on_loop(group, std::move(lease));
     EXPECT_EQ(state.destroy_calls, 1U);
     EXPECT_EQ(state.connection, nullptr);
 
+    close_endpoint_on_loop(group, endpoint);
     group.stop();
     group.join();
 }
@@ -2570,7 +2639,7 @@ TEST(QuicUdpEndpointTest, DetachClearsFramesAndSuppressesNewPendingFrames) {
     path_pending->path = path;
     path->pending_frames.push_back(*path_pending);
 
-    close_endpoint_on_loop(group, endpoint);
+    ASSERT_TRUE(remove_connection_on_loop(group, endpoint, dcid));
 
     EXPECT_EQ(endpoint.active_connection_count(), 0U);
     EXPECT_TRUE(connection->closed());
@@ -2586,7 +2655,8 @@ TEST(QuicUdpEndpointTest, DetachClearsFramesAndSuppressesNewPendingFrames) {
     EXPECT_FALSE(queued.has_value());
     EXPECT_TRUE(path->pending_frames.empty());
 
-    lease.reset();
+    release_lease_on_loop(group, std::move(lease));
+    close_endpoint_on_loop(group, endpoint);
     group.stop();
     group.join();
 }

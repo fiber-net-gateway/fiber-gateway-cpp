@@ -543,20 +543,22 @@ event::EventLoop *QuicConnection::active_timer_loop() const noexcept {
 }
 
 QuicConnection::~QuicConnection() {
-    // Endpoint-owned connections must drain the connection-flow-control
-    // waiters in detach_from_endpoint() before the last lease can destroy the
-    // connection. Do not notify here: waiter completion cancels loop-affine
-    // timers and posts an asynchronous resume, neither of which is safe to
-    // initiate from a possibly quiesced off-loop destructor.
+    // A hosted connection is destroyed only after the endpoint detached it,
+    // which drained the flow-control and handshake waiters and cancelled every
+    // timer on the loop. Do not notify here: waiter completion posts a resume,
+    // which is not safe from a possibly off-loop destructor.
+    FIBER_ASSERT(!attached_to_endpoint());
     FIBER_ASSERT(peer_data_wait_anchor_.next == &peer_data_wait_anchor_);
     FIBER_ASSERT(!handshake_gate_.has_waiters());
     if (loop_.in_loop()) {
         cancel_all_timers();
     } else if (loop_.group() != nullptr && !loop_.group()->running()) {
-        // A stopped and joined EventLoopGroup is quiescent, so no callback can
-        // race this destructor. Remove intrusive entries directly from the
-        // owner loop's heaps; doing this while the loop is running would be an
-        // illegal cross-thread heap mutation.
+        // A never-attached connection (synchronous tests drive those) may be
+        // torn down after its loop stopped. A stopped and joined
+        // EventLoopGroup is quiescent, so no callback can race this
+        // destructor; remove intrusive entries directly from the owner loop's
+        // heaps, which would be an illegal cross-thread mutation on a running
+        // loop.
         cancel_all_timers_quiesced();
     }
     FIBER_ASSERT(!loss_timer_entry_.is_in_heap());
@@ -569,6 +571,11 @@ QuicConnection::~QuicConnection() {
     FIBER_ASSERT(!path_manager_.validation_timer_armed());
     for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
         FIBER_ASSERT(!slot.reset_token_index.linked);
+    }
+    // Last: the endpoint's shutdown() may be joined on this and close the
+    // endpoint as soon as it resumes.
+    if (endpoint_attachment_ != EndpointAttachment::Unattached) {
+        endpoint_.hosted_.done();
     }
 }
 
@@ -754,7 +761,6 @@ void QuicConnection::clear_frames_for_detach() noexcept {
 
     for (QuicPacketNumberSpace &space: packet_number_spaces_) {
         clear_packet_space_frames_for_detach(space);
-        space.set_frame_pool(output_frame_pool_);
     }
 }
 
