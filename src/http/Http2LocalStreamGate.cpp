@@ -31,10 +31,9 @@ public:
         return true;
     }
 
-    common::IoErr await_resume() noexcept {
-        signaled_ = false;
-        return result();
-    }
+    common::IoErr await_resume() noexcept { return result(); }
+
+    void retry_blocked() noexcept { signaled_ = false; }
 
     // Capacity is available; keep the waiter queued until it actually attaches.
     void signal_available() noexcept {
@@ -51,7 +50,7 @@ private:
     static void detach_from_gate(fiber::async::WaitAwaiter &base) noexcept {
         auto &self = static_cast<Waiter &>(base);
         if (self.linked_) {
-            self.gate_->unlink_waiter(self);
+            self.gate_->detach_waiter(self);
         }
     }
 
@@ -115,13 +114,16 @@ Http2LocalStreamGate::attach(Http2Stream &stream, std::chrono::milliseconds time
         if (attached || attached.error() != common::IoErr::Busy) {
             co_return attached;
         }
+        waiter.retry_blocked();
     }
 }
 
 void Http2LocalStreamGate::cancel_all(common::IoErr reason) noexcept {
     FIBER_ASSERT(reason != common::IoErr::None);
     while (waiter_head_ != nullptr) {
-        waiter_head_->complete(reason);
+        Waiter *waiter = waiter_head_;
+        unlink_waiter(*waiter);
+        waiter->complete(reason);
     }
 }
 
@@ -153,7 +155,7 @@ void Http2LocalStreamGate::wake_waiters() noexcept {
 }
 
 void Http2LocalStreamGate::link_waiter(Waiter &waiter) noexcept {
-    FIBER_ASSERT(!waiter.linked_);
+    FIBER_ASSERT(!waiter.linked_ && !waiter.completed());
     waiter.prev_ = waiter_tail_;
     waiter.next_ = nullptr;
     if (waiter_tail_ != nullptr) {
@@ -164,6 +166,15 @@ void Http2LocalStreamGate::link_waiter(Waiter &waiter) noexcept {
     waiter_tail_ = &waiter;
     waiter.linked_ = true;
     ++waiter_count_;
+}
+
+void Http2LocalStreamGate::detach_waiter(Waiter &waiter) noexcept {
+    unlink_waiter(waiter);
+    // Only individual departures redistribute capacity. Bulk cancellation
+    // pre-unlinks so that completion does not wake the rest of the queue.
+    if (waiter_head_ != nullptr && connection_->local_stream_attach_status() == common::IoErr::None) {
+        wake_waiters();
+    }
 }
 
 void Http2LocalStreamGate::unlink_waiter(Waiter &waiter) noexcept {
