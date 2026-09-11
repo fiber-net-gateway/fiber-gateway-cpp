@@ -32,7 +32,7 @@ fiber::quic::QuicStream::Lease make_test_stream() noexcept {
 
 // The gate is an observer like any other owner: it only learns about the
 // connection through the Ops hooks, so the tests wire them the way
-// Http3Connection does.
+// HTTP/3 connection owners do.
 void forward_state_change(void *owner, QuicConnection &) noexcept {
     static_cast<QuicLocalStreamGate *>(owner)->on_state_change();
 }

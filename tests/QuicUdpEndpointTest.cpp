@@ -19,13 +19,14 @@
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/event/EventLoopGroup.h>
-#include <fiber/http/Http3Connection.h>
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/UdpSocket.h>
 #include <fiber/quic/QuicToken.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
+#include "http/Http3ControlStreamEncoder.h"
+#include "http/Http3ControlStreams.h"
 #include "quic/QuicCrypto.h"
 #include "quic/QuicLossRecovery.h"
 #include "quic/QuicPacketCodec.h"
@@ -1641,8 +1642,18 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
         co_return;
     }
 
-    fiber::http::Http3Connection h3(server);
-    auto started = co_await h3.start();
+    auto stream = fiber::http::Http3ControlStreams::create_stream();
+    auto attached = server.try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Unidirectional);
+    if (!attached) {
+        done_promise->set_value(std::unexpected(attached.error()));
+        co_return;
+    }
+    auto preface = fiber::http::encode_http3_control_stream_preface({}, server.recv_extent_pool());
+    if (!preface) {
+        done_promise->set_value(std::unexpected(preface.error()));
+        co_return;
+    }
+    auto started = co_await (*attached)->write(*preface);
     if (!started) {
         done_promise->set_value(std::unexpected(started.error()));
         co_return;

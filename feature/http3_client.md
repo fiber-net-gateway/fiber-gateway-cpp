@@ -7,16 +7,18 @@ HTTP/3 client 基础能力已经实现。它复用 `QuicUdpEndpoint`、`QuicClie
 
 ## 组件边界
 
-- `Http3Client`：持有 TLS client context 和 `QuicClient`，负责 QUIC 建连、`h3` ALPN 校验、
-  HTTP/3 session 创建与本地 control stream 启动。
+- `Http3Client`：持有 TLS 安全配置和 `QuicClient`，负责 QUIC 建连、`h3` ALPN 校验、
+  HTTP/3 客户端连接创建与本地 control stream 启动。
 - `Http3ClientConnection`：move-only 连接句柄，创建 exchange，并提供立即关闭、GOAWAY
   graceful shutdown 和 `wait_closed()`。
 - `ClientHttp3Exchange`：一个请求/响应 exchange。首次发送请求头时才分配并 attach QUIC
   双向流。
 - `ClientHttp3Request`：与 `QuicStream` 同一所有权单元，负责 HEADERS/DATA/trailer、响应解析、
   取消及请求结果分类。
-- `Http3Connection`：服务端和客户端共享的 HTTP/3 control/critical stream 状态机、SETTINGS、
-  GOAWAY 和连接级关闭逻辑。
+- `Http3ClientConnectionImpl`：私有、地址稳定的客户端状态，按值持有 QUIC、stream gate、
+  control streams，负责请求表、GOAWAY、drain 和最后 lease 释放后的清理。
+- `Http3ControlStreams`：两端按值内嵌的私有协议组件，负责 SETTINGS 和 control/QPACK stream；
+  不包含请求表、角色或 drain 策略。服务端策略由 `Http3ServerConnection` 直接负责。
 
 ## 生命周期约束
 
@@ -27,6 +29,10 @@ HTTP/3 client 基础能力已经实现。它复用 `QuicUdpEndpoint`、`QuicClie
 4. `Http3ClientConnection::open_exchange(pool)` 借用 `BufPool`；pool 和连接必须长于 exchange。
 5. 放弃未完成的 exchange 时显式调用 `abort()`。连接句柄析构会立即关闭仍活动的连接。
 6. graceful shutdown 后保留连接句柄并 `co_await wait_closed()`，再释放句柄。
+   此等待完成 H3 启动、reader 和 drain 任务，不代表 QUIC 已脱离 endpoint 或对象已析构；
+   不在健康 Running 连接上把它当作完整 QUIC 关闭通知。
+7. 移动句柄不移动内部状态，已有 exchange 继续引用同一连接；移走后的空句柄不再执行关闭。
+   等待任务开始执行时取得临时 QUIC lease，保证挂起期间内部对象存活。
 
 同一个 request 允许一个读协程和一个写协程并行，以支持流式上传和响应；同方向并发操作返回
 `IoErr::Busy`。
@@ -63,7 +69,7 @@ HTTP/3 client 基础能力已经实现。它复用 `QuicUdpEndpoint`、`QuicClie
 
 ```bash
 cmake --build build -j2 --target fiber_tests
-./build/fiber_tests --gtest_filter='Http3ClientTest.*:Http3ConnectionTest.*:Http3ControlStream*'
+./build/fiber_tests --gtest_filter='Http3ClientTest.*:Http3ClientConnectionTest.*:Http3ServerConnectionTest.*:Http3ControlStream*'
 ctest --test-dir build --output-on-failure
 ```
 
@@ -78,3 +84,14 @@ temp/nginx-install/sbin/nginx -p "$PWD/" -c scripts/nginx.conf -s stop
 互操作用例覆盖 QUIC v1、TLS 1.3、ALPN `h3`、双向 request stream、SETTINGS、静态/literal
 QPACK、GET 响应头和响应体。未设置 `FIBER_HTTP3_NGINX_PORT` 时该用例跳过，不给日常 CTest
 增加外部服务依赖。
+
+## 公共 API 迁移
+
+删除 `Http3Connection` 类及其公共头。连接查询直接通过 `Http3ClientConnection`：
+`connection.http3().accepting_requests()` 改为 `connection.accepting_requests()`；
+state、settings、close error 和 peer GOAWAY 查询也直接位于句柄。
+`ClientHttp3Exchange` 只接收客户端句柄，不再接受通用连接。
+保留 `Http3ConnectionState` 枚举，声明移至 `Http3Protocol.h`。
+这属于源码兼容性变更，仓库外直接使用旧公共类的消费者需要迁移。
+
+详细边界和验收见 [连接按角色拆分方案](http3_connection_role_split.md)。

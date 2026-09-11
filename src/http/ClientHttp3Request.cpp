@@ -213,7 +213,7 @@ private:
 
 } // namespace
 
-ClientHttp3Request::ClientHttp3Request(Http3Connection &conn, mem::BufPool &pool) noexcept :
+ClientHttp3Request::ClientHttp3Request(Http3ClientConnectionImpl &conn, mem::BufPool &pool) noexcept :
     quic_lease_(conn.quic().lease()), conn_(&conn), stream_(this, &ClientHttp3Request::destroy_owner), pool_(&pool),
     inbound_buf_(conn.quic().recv_extent_pool()),
     request_entry_{.owner = this,
@@ -227,7 +227,7 @@ ClientHttp3Request::~ClientHttp3Request() {
     qpack_decoder_.release();
 }
 
-quic::QuicStream::Lease ClientHttp3Request::create(Http3Connection &conn, mem::BufPool &pool) noexcept {
+quic::QuicStream::Lease ClientHttp3Request::create(Http3ClientConnectionImpl &conn, mem::BufPool &pool) noexcept {
     auto *request = new (std::nothrow) ClientHttp3Request(conn, pool);
     return request == nullptr ? quic::QuicStream::Lease{} : quic::QuicStream::Lease::adopt(&request->stream_);
 }

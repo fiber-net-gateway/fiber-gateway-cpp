@@ -4,13 +4,13 @@
 
 #include <fiber/common/Assert.h>
 #include <fiber/http/ClientHttp3Exchange.h>
-#include <fiber/http/Http3Connection.h>
+#include "http/Http3ClientConnectionImpl.h"
 
 namespace fiber::http {
 
 Http3ClientConnection::Http3ClientConnection(Http3ClientConnection &&other) noexcept :
-    quic_(std::move(other.quic_)), h3_(other.h3_) {
-    other.h3_ = nullptr;
+    quic_(std::move(other.quic_)), impl_(other.impl_) {
+    other.impl_ = nullptr;
 }
 
 Http3ClientConnection &Http3ClientConnection::operator=(Http3ClientConnection &&other) noexcept {
@@ -19,8 +19,8 @@ Http3ClientConnection &Http3ClientConnection::operator=(Http3ClientConnection &&
     }
     shutdown();
     quic_ = std::move(other.quic_);
-    h3_ = other.h3_;
-    other.h3_ = nullptr;
+    impl_ = other.impl_;
+    other.impl_ = nullptr;
     return *this;
 }
 
@@ -31,33 +31,52 @@ ClientHttp3Exchange Http3ClientConnection::open_exchange(mem::BufPool &pool) noe
 }
 
 void Http3ClientConnection::shutdown(Http3ErrorCode error) noexcept {
-    if (h3_ != nullptr) {
-        h3_->close(error);
+    if (impl_ != nullptr) {
+        impl_->close(error);
     }
 }
 
 void Http3ClientConnection::graceful_shutdown(Http3ErrorCode error) noexcept {
-    if (h3_ != nullptr) {
-        h3_->graceful_shutdown(error);
+    if (impl_ != nullptr) {
+        impl_->graceful_shutdown(error);
     }
 }
 
 async::Task<void> Http3ClientConnection::wait_closed() noexcept {
-    if (h3_ != nullptr) {
-        co_await h3_->wait_closed();
+    if (impl_ != nullptr) {
+        co_await impl_->wait_closed();
     }
 }
 
-Http3Connection &Http3ClientConnection::http3() noexcept {
-    FIBER_ASSERT(h3_ != nullptr);
-    return *h3_;
+bool Http3ClientConnection::accepting_requests() const noexcept { return valid() && impl_->accepting_requests(); }
+Http3ConnectionState Http3ClientConnection::state() const noexcept {
+    FIBER_ASSERT(valid());
+    return impl_->state();
 }
-
-const Http3Connection &Http3ClientConnection::http3() const noexcept {
-    FIBER_ASSERT(h3_ != nullptr);
-    return *h3_;
+Http3ErrorCode Http3ClientConnection::close_error() const noexcept {
+    FIBER_ASSERT(valid());
+    return impl_->close_error();
 }
-
+bool Http3ClientConnection::peer_settings_received() const noexcept {
+    FIBER_ASSERT(valid());
+    return impl_->peer_settings_received();
+}
+const Http3Settings &Http3ClientConnection::local_settings() const noexcept {
+    FIBER_ASSERT(valid());
+    return impl_->local_settings();
+}
+const Http3Settings &Http3ClientConnection::peer_settings() const noexcept {
+    FIBER_ASSERT(valid());
+    return impl_->peer_settings();
+}
+bool Http3ClientConnection::peer_goaway_received() const noexcept {
+    FIBER_ASSERT(valid());
+    return impl_->peer_goaway_received();
+}
+std::uint64_t Http3ClientConnection::peer_goaway_id() const noexcept {
+    FIBER_ASSERT(valid());
+    return impl_->peer_goaway_id();
+}
 quic::QuicConnection &Http3ClientConnection::quic() noexcept {
     FIBER_ASSERT(quic_);
     return *quic_;
