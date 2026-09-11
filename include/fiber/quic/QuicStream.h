@@ -152,6 +152,8 @@ public:
     write(mem::IoBufChain &chain, std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] common::IoResult<void> stop_read(std::uint64_t error_code = 0) noexcept;
     [[nodiscard]] common::IoResult<void> reset(std::uint64_t error_code = 0) noexcept;
+    // Runs inline, including while the connection is closing all streams.
+    // Observe or defer work; do not destroy or mutate the connection/stream.
     common::IoErr set_send_aborted_callback(SendAbortedCallback callback, void *ctx) noexcept;
     common::IoErr clear_send_aborted_callback(SendAbortedCallback callback, void *ctx) noexcept;
     void close(std::uint64_t error_code = 0) noexcept;

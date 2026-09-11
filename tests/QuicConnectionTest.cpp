@@ -4,12 +4,14 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <new>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include <fiber/async/Sleep.h>
@@ -205,15 +207,17 @@ struct OpsObserver {
     std::vector<fiber::quic::QuicConnectionState> states;
     int capacity_calls = 0;
     std::uint64_t last_bidi_slots = 0;
-    // Tracked per kind: each dispatcher folds only its own reentrant changes,
-    // so a state notification raised from inside a capacity one legitimately
-    // nests. What must never happen is a kind recursing into itself.
+    // State callbacks may close; capacity callbacks schedule that work instead.
     int state_depth = 0;
     int max_state_depth = 0;
     int capacity_depth = 0;
     int max_capacity_depth = 0;
     bool shutdown_on_established = false;
     bool shutdown_on_capacity = false;
+    fiber::event::EventLoop::DeferEntry shutdown_entry{};
+    fiber::quic::QuicConnection *shutdown_connection = nullptr;
+
+    static void shutdown_deferred(OpsObserver *self) noexcept { self->shutdown_connection->shutdown(); }
 };
 
 void observe_state_change(void *owner, fiber::quic::QuicConnection &conn) noexcept {
@@ -240,7 +244,8 @@ void observe_capacity_change(void *owner, fiber::quic::QuicConnection &conn) noe
     observer->last_bidi_slots = conn.available_local_stream_slots(fiber::quic::QuicStreamType::Bidirectional);
     if (observer->shutdown_on_capacity) {
         observer->shutdown_on_capacity = false;
-        conn.shutdown();
+        observer->shutdown_connection = &conn;
+        conn.loop()->post_local<OpsObserver, &OpsObserver::shutdown_entry, &OpsObserver::shutdown_deferred>(*observer);
     }
     --observer->capacity_depth;
 }
@@ -1335,36 +1340,33 @@ TEST(QuicConnectionTest, OpsNotificationsFoldReentrantTransitions) {
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closing);
 }
 
-TEST(QuicConnectionTest, OpsCapacityNotificationFoldsReentrantShutdown) {
-    OpsObserver observer;
-    observer.shutdown_on_capacity = true;
-    fiber::quic::QuicConnection::Options options = observed_options(observer);
-    options.max_local_bidirectional_streams = 0;
-    fiber::quic::QuicConnection conn(options);
-    ASSERT_TRUE(conn.mark_established());
-    observer.states.clear();
-
-    fiber::quic::QuicMaxStreamsFrame frame{};
-    frame.bidirectional = true;
-    frame.limit = 4;
-    ASSERT_TRUE(conn.recv_max_streams_frame(frame));
-
-    EXPECT_EQ(observer.max_capacity_depth, 1);
-    EXPECT_EQ(observer.capacity_calls, 1);
-    // The state notification nests inside the capacity one: the two dispatchers
-    // fold independently, so closing from a capacity callback is still reported
-    // as a state change right away.
-    EXPECT_EQ(observer.max_state_depth, 1);
-    ASSERT_EQ(observer.states.size(), 1U);
-    EXPECT_EQ(observer.states[0], fiber::quic::QuicConnectionState::Closing);
-    EXPECT_EQ(conn.local_stream_attach_status(fiber::quic::QuicStreamType::Bidirectional),
-              fiber::common::IoErr::Canceled);
+TEST(QuicConnectionTest, OpsCapacityNotificationDefersShutdown) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        OpsObserver observer;
+        observer.shutdown_on_capacity = true;
+        auto options = observed_options(observer);
+        options.loop = &loop;
+        options.max_local_bidirectional_streams = 0;
+        fiber::quic::QuicConnection conn(options);
+        EXPECT_TRUE(conn.mark_established());
+        observer.states.clear();
+        EXPECT_TRUE(conn.recv_max_streams_frame({.limit = 4, .bidirectional = true}));
+        EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Established);
+        EXPECT_TRUE(observer.states.empty());
+        co_await fiber::async::sleep(std::chrono::milliseconds(10));
+        EXPECT_EQ(observer.max_capacity_depth, 1);
+        EXPECT_EQ(observer.capacity_calls, 1);
+        EXPECT_EQ(observer.states.size(), 1U);
+        EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closing);
+        loop.stop();
+    });
+    loop.run();
 }
 
-// Both closes below reach Closed without going through enter_closed(), which
-// used to be the only path that woke handshake waiters. transition_state() is
-// what makes them equivalent: a waiter must not sit out its own timeout just
-// because the connection died on a less-travelled path.
+// Both close paths publish the terminal state to handshake waiters. A waiter
+// must not sit out its own timeout just because a different close entry point
+// was used.
 TEST(QuicConnectionTest, IdleTimerWakesHandshakeWaiters) {
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -3204,4 +3206,118 @@ TEST(QuicConnectionTest, PeerCidPoolRetransmitsRetireOnlyWhenSlotEvicted) {
     // Trigger retire of seq=1 by issuing a frame with retire_prior_to > 1.
     ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(2, 2, {0xbb}, 0x22)).has_value());
     EXPECT_TRUE(conn.should_retransmit_retire_connection_id(1));
+}
+
+namespace {
+
+template<class T>
+auto start_pending_task(fiber::async::Task<T> &task) {
+    auto handle = task.operator co_await().handle;
+    handle.promise().set_continuation(std::noop_coroutine());
+    handle.resume();
+    return handle;
+}
+
+void exercise_completed_writer() {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        StreamCallbackState state;
+        auto options = server_options_with_factory(state);
+        options.loop = &loop;
+        fiber::quic::QuicConnection conn(options);
+        auto a = conn.get_or_create_peer_stream(0);
+        auto b = conn.get_or_create_peer_stream(4);
+        EXPECT_TRUE(a);
+        EXPECT_TRUE(b);
+        grant_max_stream_data(conn, 0, 10);
+        grant_max_stream_data(conn, 4, 10);
+        auto writing = (*a)->write("a", 1);
+        auto pending = start_pending_task(writing);
+        EXPECT_FALSE(pending.done());
+        grant_max_data(conn, 1);
+        EXPECT_TRUE((*b)->try_write("b", 1));
+        // A's completed waiter still occupies the stream slot until it resumes.
+        // A second stream-credit update must not put it back on the window list.
+        grant_max_stream_data(conn, 0, 11);
+        grant_max_data(conn, 2);
+        co_await fiber::async::sleep(std::chrono::milliseconds(10));
+        EXPECT_TRUE(pending.done());
+        if (pending.done()) {
+            EXPECT_TRUE(pending.promise().result());
+        }
+        loop.stop();
+    });
+    loop.run();
+}
+
+} // namespace
+
+TEST(QuicConnectionDeathTest, CompletedWriterDoesNotReenterConnectionWindowQueue) {
+    // Bound the child process even if a regression spins the event loop forever.
+    ASSERT_EXIT(
+            {
+                alarm(5);
+                exercise_completed_writer();
+                std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+            },
+            ::testing::ExitedWithCode(0), "");
+}
+
+TEST(QuicConnectionTest, GracefulStateObserverCanCloseImmediatelyWithoutOverwritingDeadline) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto options = fiber::test::quic_options();
+        options.loop = &loop;
+        options.ops.on_state_change = [](void *, fiber::quic::QuicConnection &conn) noexcept {
+            if (conn.state() == fiber::quic::QuicConnectionState::GracefulClosing) {
+                EXPECT_TRUE(conn.close_timer_armed());
+                conn.close_immediately();
+            }
+            if (conn.state() == fiber::quic::QuicConnectionState::Closed) {
+                EXPECT_EQ(conn.active_stream_count(), 0U);
+                EXPECT_FALSE(conn.close_timer_armed());
+            }
+        };
+        fiber::quic::QuicConnection conn(options);
+        EXPECT_TRUE(conn.mark_established());
+        EXPECT_TRUE(conn.try_attach_local_stream(make_test_stream(), fiber::quic::QuicStreamType::Bidirectional));
+        conn.shutdown(fiber::quic::QuicErrorCode::NoError, 0, std::chrono::seconds(5));
+        co_await fiber::async::sleep(std::chrono::milliseconds(20));
+        EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
+        loop.stop();
+    });
+    loop.run();
+}
+
+TEST(QuicConnectionTest, ClosingObserverSeesAbortedStreamsAndCanEnterDraining) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto options = fiber::test::quic_options();
+        options.loop = &loop;
+        options.ops.on_state_change = [](void *, fiber::quic::QuicConnection &conn) noexcept {
+            if (conn.state() == fiber::quic::QuicConnectionState::Closing) {
+                auto *stream = conn.find_stream(1);
+                EXPECT_NE(stream, nullptr);
+                if (stream != nullptr) {
+                    auto written = stream->try_write("x", 1);
+                    EXPECT_FALSE(written);
+                    EXPECT_EQ(written.error(), fiber::common::IoErr::Canceled);
+                }
+                EXPECT_TRUE(conn.close_timer_armed());
+                conn.begin_draining();
+            }
+            if (conn.state() == fiber::quic::QuicConnectionState::Draining) {
+                EXPECT_TRUE(conn.close_timer_armed());
+                EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ConnectionClose), 0U);
+            }
+        };
+        fiber::quic::QuicConnection conn(options);
+        EXPECT_TRUE(conn.mark_established());
+        EXPECT_TRUE(conn.try_attach_local_stream(make_test_stream(), fiber::quic::QuicStreamType::Bidirectional));
+        conn.close();
+        EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Draining);
+        loop.stop();
+        co_return;
+    });
+    loop.run();
 }
