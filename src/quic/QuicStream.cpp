@@ -128,49 +128,23 @@ void QuicConnection::wait_for_peer_data(QuicStream::WriteAwaiter &awaiter) noexc
         return;
     }
 
-    hook.prev = peer_data_wait_tail_;
-    hook.next = nullptr;
-    if (peer_data_wait_tail_ != nullptr) {
-        peer_data_wait_tail_->next = &hook;
-    } else {
-        peer_data_wait_head_ = &hook;
-    }
-    peer_data_wait_tail_ = &hook;
-    hook.in_list = true;
+    hook.insert_before(peer_data_wait_anchor_);
 }
 
 void QuicConnection::cancel_peer_data_wait(QuicStream::WriteAwaiter &awaiter) noexcept {
-    common::IntrusiveListHook &hook = awaiter.peer_data_wait_link_;
-    if (!hook.linked()) {
-        return;
-    }
-
-    if (hook.prev != nullptr) {
-        hook.prev->next = hook.next;
-    } else {
-        peer_data_wait_head_ = hook.next;
-    }
-    if (hook.next != nullptr) {
-        hook.next->prev = hook.prev;
-    } else {
-        peer_data_wait_tail_ = hook.prev;
-    }
-    hook.prev = nullptr;
-    hook.next = nullptr;
-    hook.in_list = false;
+    awaiter.peer_data_wait_link_.unlink_self();
 }
 
 void QuicConnection::notify_peer_data_waiters(common::IoErr result) noexcept {
-    FIBER_ASSERT((peer_data_wait_head_ == nullptr) == (peer_data_wait_tail_ == nullptr));
     // Advance the queue explicitly; completion is idempotent and must not be
     // responsible for making this walk progress.
-    while (peer_data_wait_head_ != nullptr) {
-        auto *awaiter = QuicStream::WriteAwaiter::from_peer_data_wait_link(peer_data_wait_head_);
+    common::IntrusiveListHook &anchor = peer_data_wait_anchor_;
+    while (anchor.next != &anchor) {
+        auto *awaiter = QuicStream::WriteAwaiter::from_peer_data_wait_link(anchor.next);
         cancel_peer_data_wait(*awaiter);
         awaiter->complete(result);
     }
-    FIBER_ASSERT(peer_data_wait_head_ == nullptr);
-    FIBER_ASSERT(peer_data_wait_tail_ == nullptr);
+    FIBER_ASSERT(anchor.next == &anchor);
 }
 
 void QuicStream::Lease::reset() noexcept {

@@ -107,8 +107,7 @@ private:
         std::size_t packets_sent = 0;
     };
 
-    using ReadyList =
-            common::IntrusiveList<QuicConnection::SendQueueEntry, offsetof(QuicConnection::SendQueueEntry, link)>;
+    using ReadyList = common::IntrusiveList<QuicConnection, offsetof(QuicConnection, send_queue_hook_)>;
 
     void enqueue_ready(QuicConnection &connection) noexcept;
     void rotate_front_to_back(QuicConnection &connection) noexcept;
