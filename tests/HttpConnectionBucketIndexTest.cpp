@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <fiber/http/Http1ConnectionPoolEntry.h>
 #include <fiber/http/Http2ConnectionPoolEntry.h>
+#include <string>
 #include <type_traits>
 
 #include <fiber/http/HttpConnectionBucketIndex.h>
@@ -22,9 +23,11 @@ using fiber::http::HttpConnectionBucketIndex;
 using fiber::http::HttpConnectionGroupKey;
 using fiber::http::HttpConnectionPoolBucketBase;
 
-HttpConnectionGroupKey make_ip_key(std::uint8_t last_octet, std::uint16_t port = 80,
-                                   HttpConnectionGroupKey::Scheme scheme = HttpConnectionGroupKey::Scheme::Http) {
-    return HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::v4({127, 0, 0, last_octet}), port, scheme);
+// One distinct group per octet: a name pinned to 127.0.0.<octet>.
+HttpConnectionGroupKey make_key(std::uint8_t last_octet, std::uint16_t port = 80,
+                                HttpConnectionGroupKey::Scheme scheme = HttpConnectionGroupKey::Scheme::Http) {
+    const std::string host = "peer" + std::to_string(last_octet) + ".test";
+    return *HttpConnectionGroupKey::make(host, port, scheme, fiber::net::IpAddress::v4({127, 0, 0, last_octet}));
 }
 
 std::size_t home_bucket(const HttpConnectionGroupKey &key, std::size_t slot_capacity) {
@@ -33,11 +36,11 @@ std::size_t home_bucket(const HttpConnectionGroupKey &key, std::size_t slot_capa
 
 std::array<std::uint8_t, 3> find_colliding_ip_suffixes(std::size_t slot_capacity) {
     std::array<std::uint8_t, 3> out{};
-    const std::size_t target_bucket = home_bucket(make_ip_key(1), slot_capacity);
+    const std::size_t target_bucket = home_bucket(make_key(1), slot_capacity);
     std::size_t found = 0;
 
     for (std::uint16_t octet = 1; octet <= 255 && found < out.size(); ++octet) {
-        const auto key = make_ip_key(static_cast<std::uint8_t>(octet));
+        const auto key = make_key(static_cast<std::uint8_t>(octet));
         if (home_bucket(key, slot_capacity) == target_bucket) {
             out[found++] = static_cast<std::uint8_t>(octet);
         }
@@ -64,8 +67,8 @@ TEST(HttpConnectionBucketIndexTest, InsertsFindsAndRejectsDuplicateKeys) {
     HttpConnectionBucketIndex index;
     ASSERT_TRUE(index.init(2));
 
-    const auto key1 = make_ip_key(1, 80, HttpConnectionGroupKey::Scheme::Http);
-    const auto key2 = make_ip_key(2, 443, HttpConnectionGroupKey::Scheme::Https);
+    const auto key1 = make_key(1, 80, HttpConnectionGroupKey::Scheme::Http);
+    const auto key2 = make_key(2, 443, HttpConnectionGroupKey::Scheme::Https);
 
     EXPECT_EQ(index.insert(key1, bucket1), IoErr::None);
     EXPECT_EQ(index.insert(key2, bucket2), IoErr::None);
@@ -79,7 +82,7 @@ TEST(HttpConnectionBucketIndexTest, InsertsFindsAndRejectsDuplicateKeys) {
     EXPECT_EQ(entry2.bucket, &bucket2);
     EXPECT_EQ(bucket1.slot_index(), entry1.slot_index);
     EXPECT_EQ(bucket2.slot_index(), entry2.slot_index);
-    EXPECT_FALSE(index.find(make_ip_key(3)));
+    EXPECT_FALSE(index.find(make_key(3)));
 }
 
 TEST(HttpConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdatesSlotIndices) {
@@ -90,9 +93,9 @@ TEST(HttpConnectionBucketIndexTest, EraseKeepsLaterCollisionsReachableAndUpdates
     ASSERT_TRUE(index.init(4));
 
     const auto octets = find_colliding_ip_suffixes(index.slot_capacity());
-    const auto key_a = make_ip_key(octets[0]);
-    const auto key_b = make_ip_key(octets[1]);
-    const auto key_c = make_ip_key(octets[2]);
+    const auto key_a = make_key(octets[0]);
+    const auto key_b = make_key(octets[1]);
+    const auto key_c = make_key(octets[2]);
 
     ASSERT_EQ(index.insert(key_a, bucket_a), IoErr::None);
     ASSERT_EQ(index.insert(key_b, bucket_b), IoErr::None);
@@ -122,11 +125,11 @@ TEST(HttpConnectionBucketIndexTest, GrowsAndRewritesBucketSlotIndices) {
     ASSERT_TRUE(index.init(0));
     EXPECT_EQ(index.slot_capacity(), 0u);
 
-    const auto key1 = make_ip_key(1);
-    const auto key2 = make_ip_key(2);
-    const auto key3 = make_ip_key(3);
-    const auto key4 = make_ip_key(4);
-    const auto key5 = make_ip_key(5);
+    const auto key1 = make_key(1);
+    const auto key2 = make_key(2);
+    const auto key3 = make_key(3);
+    const auto key4 = make_key(4);
+    const auto key5 = make_key(5);
 
     ASSERT_EQ(index.insert(key1, buckets[0]), IoErr::None);
     ASSERT_EQ(index.insert(key2, buckets[1]), IoErr::None);

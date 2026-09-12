@@ -14,8 +14,6 @@
 #include <fiber/http/HeaderMap.h>
 #include <fiber/http/HttpBodyPipe.h>
 #include <fiber/http/HttpConnectionGroupKey.h>
-#include <fiber/net/IpAddress.h>
-#include <fiber/net/SocketAddress.h>
 #include <fiber/script/Script.h>
 #include <fiber/script/std/StdLibrary.h>
 #include "../config/Ast.h"
@@ -90,11 +88,9 @@ struct RewritePathRuntime {
 };
 
 struct UpstreamPeerRuntime {
-    std::string host;
+    std::string host; // as configured; the pool identity and dial target live in connection_key
     std::uint16_t port = 0;
     std::uint32_t weight = 1;
-    fiber::net::IpAddress ip{}; // valid only when connection_key.is_ip()
-    fiber::net::SocketAddress address{}; // IP peers: config-time dial target; name peers: filled at runtime after DNS
     std::optional<fiber::http::HttpConnectionGroupKey> connection_key{};
 };
 

@@ -141,6 +141,7 @@ struct ListenAddress {
 };
 
 struct UpstreamServerConfig {
+    SourceLocation location;
     std::string host;
     std::uint16_t port = 0;
     std::uint32_t weight = 1;

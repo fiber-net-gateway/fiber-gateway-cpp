@@ -76,8 +76,8 @@ struct PoolHarness {
         async::spawn(loop, [this]() { return accept_loop(); });
     }
     HttpConnectionGroupKey key(std::uint16_t identity = 0) const {
-        return HttpConnectionGroupKey::from_ip(net::IpAddress::loopback_v4(), identity ? identity : port,
-                                               HttpConnectionGroupKey::Scheme::Http);
+        return *HttpConnectionGroupKey::make("127.0.0.1", identity ? identity : port,
+                                             HttpConnectionGroupKey::Scheme::Http);
     }
     Http2ConnectionPoolCore::Connector connector() { return {&PoolHarness::connect, this}; }
     static Task<common::IoResult<void>> connect(void *ctx, http::Http2ClientConnection &conn,

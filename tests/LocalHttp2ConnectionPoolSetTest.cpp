@@ -51,8 +51,7 @@ TEST(LocalHttp2ConnectionPoolSetTest, ShutdownCancelsEveryShardAndConcurrentCall
     std::array<std::promise<void>, 2> done;
     auto f0 = done[0].get_future();
     auto f1 = done[1].get_future();
-    const auto key = http::HttpConnectionGroupKey::from_ip(net::IpAddress::loopback_v4(), 80,
-                                                           http::HttpConnectionGroupKey::Scheme::Http);
+    const auto key = *http::HttpConnectionGroupKey::make("127.0.0.1", 80, http::HttpConnectionGroupKey::Scheme::Http);
     group.start();
     for (unsigned i = 0; i < 2; ++i) {
         async::spawn(group.at(i), [&, i]() -> async::DetachedTask {
@@ -91,8 +90,8 @@ TEST(LocalHttp2ConnectionPoolSetTest, ClearAcrossShardsAllowsSubsequentAcquire) 
     group.start();
     async::spawn(group.at(0), [&]() -> async::DetachedTask {
         co_await set.clear_async();
-        const auto key = http::HttpConnectionGroupKey::from_ip(net::IpAddress::loopback_v4(), 80,
-                                                               http::HttpConnectionGroupKey::Scheme::Http);
+        const auto key =
+                *http::HttpConnectionGroupKey::make("127.0.0.1", 80, http::HttpConnectionGroupKey::Scheme::Http);
         auto poll = co_await set.acquire(key, {}, 0ms);
         EXPECT_FALSE(poll);
         EXPECT_EQ(poll.error(), common::IoErr::Busy);
