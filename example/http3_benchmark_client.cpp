@@ -872,7 +872,7 @@ public:
         if (!co_await setup()) {
             coordinator_.setup_failed.store(true, std::memory_order_release);
             coordinator_.setup_done.fetch_add(1, std::memory_order_release);
-            cleanup_immediate();
+            co_await cleanup_immediate();
             coordinator_.workers_done.fetch_add(1, std::memory_order_release);
             co_return;
         }
@@ -1319,17 +1319,17 @@ private:
             co_await close_group_.join();
         }
         connections_.clear();
-        endpoint_.close();
+        co_await endpoint_.shutdown();
         client_.reset();
         request_body_ = fiber::mem::IoBuf{};
     }
 
-    void cleanup_immediate() noexcept {
+    [[nodiscard]] fiber::async::Task<void> cleanup_immediate() noexcept {
         for (auto &connection: connections_) {
             connection.shutdown(fiber::http::Http3ErrorCode::RequestCancelled);
         }
         connections_.clear();
-        endpoint_.close();
+        co_await endpoint_.shutdown();
         client_.reset();
         request_body_ = fiber::mem::IoBuf{};
     }

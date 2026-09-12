@@ -258,6 +258,7 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
         return std::unexpected(error(QuicConnectPhase::Connection, common::IoErr::Invalid));
     }
 
+    FIBER_ASSERT(&connection->endpoint() == endpoint_);
     auto token = connection->set_initial_token(cached.token, cached.token_len);
     if (!token) {
         return std::unexpected(error(QuicConnectPhase::Connection, token.error()));

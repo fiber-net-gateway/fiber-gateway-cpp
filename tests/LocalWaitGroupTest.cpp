@@ -6,6 +6,7 @@
 #include <fiber/async/LocalWaitGroup.h>
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
+#include <fiber/async/Task.h>
 #include <fiber/event/EventLoopGroup.h>
 
 namespace {
@@ -123,4 +124,65 @@ TEST(LocalWaitGroupTest, ReusableAfterDraining) {
 
     group.stop();
     group.join();
+}
+
+namespace {
+
+fiber::async::Task<void> join_and_count(LocalWaitGroup &group, int &resumes) {
+    co_await group.join();
+    ++resumes;
+}
+
+void start_join(fiber::async::Task<void> &task) {
+    task.operator co_await().await_suspend(std::noop_coroutine()).resume();
+}
+
+} // namespace
+
+TEST(LocalWaitGroupTest, DestroyingParkedJoinerPreservesOtherWaiters) {
+    fiber::event::EventLoop loop;
+    LocalWaitGroup group;
+    int resumed = 0;
+    int canceled_resumes = 0;
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        group.add();
+        auto first = join_and_count(group, resumed);
+        auto canceled = join_and_count(group, canceled_resumes);
+        auto last = join_and_count(group, resumed);
+        start_join(first);
+        start_join(canceled);
+        start_join(last);
+        canceled = {};
+        EXPECT_TRUE(group.has_waiters());
+        EXPECT_EQ(group.count(), 1U);
+        group.done();
+        co_await fiber::async::sleep(1ms);
+        EXPECT_EQ(resumed, 2);
+        EXPECT_EQ(canceled_resumes, 0);
+        EXPECT_FALSE(group.has_waiters());
+        loop.stop();
+    });
+    loop.run();
+}
+
+TEST(LocalWaitGroupTest, DestroyingJoinerRetractsQueuedResume) {
+    fiber::event::EventLoop loop;
+    int resumed = 0;
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        {
+            LocalWaitGroup group;
+            group.add();
+            auto canceled = join_and_count(group, resumed);
+            start_join(canceled);
+            group.done();
+            EXPECT_FALSE(group.has_waiters());
+            EXPECT_EQ(resumed, 0);
+            canceled = {};
+        }
+        // Drive the defer queue after both the coroutine and group are gone.
+        co_await fiber::async::sleep(1ms);
+        EXPECT_EQ(resumed, 0);
+        loop.stop();
+    });
+    loop.run();
 }
