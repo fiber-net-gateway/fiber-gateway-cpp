@@ -5,11 +5,11 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <string>
 
 #include <openssl/aead.h>
 #include <openssl/aes.h>
 
+#include "../async/LocalWaitGroup.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IntrusiveRbTree.h"
 #include "../common/IoError.h"
@@ -38,7 +38,6 @@ namespace fiber::quic {
 struct QuicTransportParams;
 struct QuicPacketHeader;
 struct QuicReceivedDatagram;
-class QuicClient;
 class QuicSendScheduler;
 class QuicUdpEndpoint;
 
@@ -154,6 +153,45 @@ struct QuicRecvFlowControlSettings {
 struct QuicPeerTransportState {
     QuicTransportSettings params{};
     bool received = false;
+};
+
+enum class QuicConnectPhase : std::uint8_t {
+    Endpoint,
+    Connection,
+    InitialCrypto,
+    Tls,
+    Handshake,
+    VersionNegotiation,
+    TransportParameters,
+    Timeout,
+    PeerClose,
+};
+
+struct QuicConnectError {
+    QuicConnectPhase phase = QuicConnectPhase::Connection;
+    common::IoErr io_error = common::IoErr::Unknown;
+    QuicCloseInfo close{};
+    long tls_verify_result = 0;
+    std::uint8_t tls_alert = 0;
+    std::uint32_t offered_version = 0;
+};
+
+// Consumed synchronously by QuicConnection::connect(). Every pointer and view
+// is borrowed only until connect() returns: BoringSSL copies what it needs out
+// of tls while the SSL is created, SSL_set_session retains its own reference,
+// and the token and remembered transport are copied into connection state.
+struct QuicClientConnectParams {
+    net::TlsClientParam tls{};
+    bool allow_insecure = false;
+    SSL_SESSION *resumption_session = nullptr;
+    const std::uint8_t *token = nullptr;
+    std::size_t token_len = 0;
+    // Offer 0-RTT. Early data is actually attempted only when
+    // resumption_session and remembered_peer_transport are both present: the
+    // remembered settings seed the peer limits until the real transport
+    // parameters arrive and are re-validated against them (RFC 9000 §7.4.1).
+    bool enable_early_data = false;
+    const QuicTransportSettings *remembered_peer_transport = nullptr;
 };
 
 class QuicConnection;
@@ -450,6 +488,14 @@ public:
         // mutate the connection or its streams. In particular, defer closing
         // until the current packet has finished processing.
         void (*on_capacity_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
+        // Client role. A NewSessionTicket arrived; returning true transfers the
+        // SSL_SESSION reference to the owner. Runs from inside the TLS stack:
+        // store it and return, do not touch the connection.
+        bool (*on_new_tls_session)(void *owner, QuicConnection &connection, SSL_SESSION *session) noexcept = nullptr;
+        // Client role. A NEW_TOKEN frame arrived; the bytes are borrowed for
+        // the call.
+        void (*on_new_token)(void *owner, QuicConnection &connection, const std::uint8_t *token,
+                             std::size_t token_len) noexcept = nullptr;
     };
 
     struct Options {
@@ -468,6 +514,12 @@ public:
         std::uint64_t max_peer_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
         std::uint64_t max_local_bidirectional_streams = kQuicDefaultMaxBidirectionalStreams;
         std::uint64_t max_local_unidirectional_streams = kQuicDefaultMaxUnidirectionalStreams;
+        // Ownership of the connection storage. Set: the storage is released by
+        // on_destroy once the connection is detached and its last lease drops
+        // (server connections, and clients that keep the lease model). Null:
+        // the storage belongs to the caller, which destroys it after
+        // wait_closed(); the endpoint only counts such a connection until it
+        // detaches. Server admission requires a callback.
         void *destroy_owner = nullptr;
         DestroyCallback on_destroy = nullptr;
         void *owner = nullptr;
@@ -478,22 +530,12 @@ public:
         std::chrono::milliseconds graceful_shutdown_grace{30000};
         bool has_retry_source_connection_id = false;
         bool initial_path_validated = false;
-        bool enable_early_data = false;
-        QuicTransportSettings remembered_peer_transport{};
-        bool has_remembered_peer_transport = false;
-        std::string client_server_name{};
-        std::string client_verify_name{};
-        net::SocketAddress client_cache_remote_addr{};
-        const net::TlsCredential *client_tls_credential = nullptr;
-        const net::TrustStore *client_trust_store = nullptr;
-        void *client_cache_owner = nullptr;
-        bool (*on_new_tls_session)(void *owner, QuicConnection &connection, SSL_SESSION *session) noexcept = nullptr;
-        void (*on_new_token)(void *owner, QuicConnection &connection, const std::uint8_t *token,
-                             std::size_t token_len) noexcept = nullptr;
-        // Server TLS parameters used to lazily create the SSL object only after
-        // the first Initial packet passes AEAD authentication (mirrors nginx
-        // ngx_quic_init_connection, which runs after ngx_quic_decrypt).
-        const net::TlsServerParam *tls = nullptr;
+        // Server role. Consumed lazily by ensure_server_tls() once the first
+        // Initial packet passes AEAD authentication (mirrors nginx
+        // ngx_quic_init_connection, which runs after ngx_quic_decrypt). The
+        // endpoint owns it and outlives the connection. Early data is accepted
+        // iff server_tls->enable_early_data.
+        const net::TlsServerParam *server_tls = nullptr;
     };
 
     // Every connection is hosted by an initialized endpoint that outlives it:
@@ -507,7 +549,8 @@ public:
 
     [[nodiscard]] QuicConnectionRole role() const noexcept { return options_.role; }
     [[nodiscard]] QuicConnectionState state() const noexcept { return state_; }
-    [[nodiscard]] bool early_data_enabled() const noexcept { return options_.enable_early_data; }
+    // Server: whether 0-RTT is accepted. Client: whether connect() offered it.
+    [[nodiscard]] bool early_data_enabled() const noexcept;
     [[nodiscard]] bool early_data_attempted() const noexcept { return early_data_attempted_; }
     [[nodiscard]] bool early_data_accepted() const noexcept { return early_data_accepted_; }
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept { return options_.local_addr; }
@@ -570,6 +613,32 @@ public:
     wait_established(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] async::Task<common::IoResult<void>>
     wait_confirmed(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    // Client role only, exactly once, on the connection's loop (asserted),
+    // before attach. Runs the whole client connect sequence synchronously --
+    // 0-RTT memory, Initial token and keys, TLS client SSL, first CRYPTO
+    // flight, attach -- and leaves the connection attached with its Initial
+    // queued for sending. The caller then awaits wait_established() /
+    // wait_confirmed(); a failed wait leaves the connection attached, and the
+    // caller closes it. A precondition failure (wrong role or state) leaves
+    // the connection untouched; any later failure leaves it unattached and
+    // Closed. connect_error() names the phase either way.
+    [[nodiscard]] common::IoResult<void> connect(const QuicClientConnectParams &params) noexcept;
+    // Classifies a connect() or handshake-wait failure for a client. Reports
+    // the phase connect() failed in, else what the handshake ran into: version
+    // negotiation, transport parameters, TLS verification or alert, a peer
+    // close, or the timeout.
+    [[nodiscard]] QuicConnectError connect_error(common::IoErr error) const noexcept;
+    // Seeds 0-RTT state from the transport parameters remembered alongside a
+    // resumed session: the client sends early data against these limits until
+    // the server's real parameters arrive. Client, Init state, before
+    // start_handshake(). connect() applies it when early data is enabled and
+    // both a session and remembered parameters are available.
+    [[nodiscard]] common::IoResult<void> remember_peer_transport(const QuicTransportSettings &remembered) noexcept;
+    // Resolves once the connection has detached from its endpoint (state
+    // Closed); immediately for one that never attached. The caller keeps the
+    // connection alive while parked -- it owns the storage, or holds a lease --
+    // and destroying a connection with a waiter parked is asserted.
+    [[nodiscard]] async::Task<void> wait_closed() noexcept;
     void begin_draining(QuicErrorCode error = QuicErrorCode::NoError) noexcept;
     void begin_draining(QuicCloseInfo info) noexcept;
     // RFC 9000 §10.2 Immediate Close — transport error path.
@@ -578,7 +647,9 @@ public:
     void close(QuicErrorCode error = QuicErrorCode::NoError, std::uint64_t frame_type = 0) noexcept;
     // Like close() but skips the 3*PTO close timer — transitions to Closed immediately
     // after queuing CC frames and scheduling the send. For fatal errors where waiting
-    // 3*PTO only delays cleanup (mirrors nginx's rc == NGX_ERROR path).
+    // 3*PTO only delays cleanup (mirrors nginx's rc == NGX_ERROR path). On a
+    // connection already Closing or Draining it changes nothing but the timer:
+    // the remaining period is cut short.
     void close_immediately(QuicErrorCode error = QuicErrorCode::NoError, std::uint64_t frame_type = 0) noexcept;
     // RFC 9000 §10.2 Immediate Close — application error path.
     // Identical to close() but uses CONNECTION_CLOSE_APP on Application-level packets and
@@ -802,15 +873,6 @@ public:
     [[nodiscard]] common::IoResult<void> set_initial_token(const std::uint8_t *token, std::size_t token_len) noexcept;
     [[nodiscard]] common::IoResult<void> recv_new_token_frame(const QuicInputFrame &frame) noexcept;
     [[nodiscard]] bool on_new_tls_session(SSL_SESSION *session) noexcept;
-    [[nodiscard]] std::string_view client_server_name() const noexcept { return options_.client_server_name; }
-    [[nodiscard]] std::string_view client_verify_name() const noexcept { return options_.client_verify_name; }
-    [[nodiscard]] const net::TlsCredential *client_tls_credential() const noexcept {
-        return options_.client_tls_credential;
-    }
-    [[nodiscard]] const net::TrustStore *client_trust_store() const noexcept { return options_.client_trust_store; }
-    [[nodiscard]] const net::SocketAddress &client_cache_remote_addr() const noexcept {
-        return options_.client_cache_remote_addr;
-    }
     void fail_client_connect(common::IoErr error) noexcept;
     // Lazily create the server SSL object the first time an Initial packet
     // is authenticated. Idempotent; no-op when no TLS parameters are configured
@@ -1063,8 +1125,12 @@ private:
     bool has_server_initial_source_connection_id_ = false;
     bool has_authenticated_server_packet_ = false;
     bool retry_processed_ = false;
+    // Client 0-RTT: what connect() offered, and the peer transport remembered
+    // with the resumed session while early data is in flight.
+    bool early_data_enabled_ = false;
     bool early_data_attempted_ = false;
     bool early_data_accepted_ = false;
+    QuicTransportSettings remembered_peer_transport_{};
     std::uint64_t early_next_local_bidi_stream_id_ = 0;
     std::uint64_t early_next_local_uni_stream_id_ = 0;
     std::uint64_t early_peer_data_reserved_ = 0;
@@ -1082,11 +1148,14 @@ private:
     // requeueing in Closing.
     QuicCloseInfo close_info_{};
     common::IoErr connect_failure_ = common::IoErr::None;
+    // Where connect() itself failed; Handshake once it handed off to the wire.
+    QuicConnectPhase connect_phase_ = QuicConnectPhase::Handshake;
     std::chrono::milliseconds last_cc_msec_{0};
+    // Coroutines parked in wait_closed(): counted from attach to detach.
+    async::LocalWaitGroup closed_{};
 
     friend class QuicStream;
     friend class QuicStream::WriteAwaiter;
-    friend class QuicClient;
     friend class QuicUdpEndpoint;
 };
 

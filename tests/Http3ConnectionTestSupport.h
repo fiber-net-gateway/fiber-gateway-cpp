@@ -21,6 +21,8 @@
 #include <fiber/common/mem/IoBufChain.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/Http3Client.h>
+#include <fiber/http/Http3ClientConnection.h>
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/http/Http3QpackStaticTable.h>
 #include <fiber/http/HttpHeaderHash.h>
@@ -28,7 +30,6 @@
 #include <fiber/quic/QuicConnection.h>
 #include <fiber/quic/QuicCursor.h>
 #include <fiber/quic/QuicFrame.h>
-#include "http/Http3ClientConnectionImpl.h"
 #include "http/Http3QpackEncoderIoBufWriter.h"
 #include "http/Http3ServerConnection.h"
 #include "http/ServerHttp3Request.h"
@@ -36,6 +37,35 @@
 #include "quic/QuicTransportParamsCodec.h"
 
 #include "QuicTestLoop.h"
+
+namespace fiber::http {
+
+// Builds a client connection on caller-provided QUIC options (no endpoint
+// identity, no connect()) and reaches the protocol entry points connect()
+// normally drives.
+struct Http3ClientConnectionTestAccess {
+    Http3ClientConnectionTestAccess(Http3Client &client, const quic::QuicConnection::Options &quic_options,
+                                    const Http3ClientConnectOptions &options = {}) noexcept :
+        connection(client, quic_options, options) {}
+
+    static async::Task<common::IoResult<void>> start(Http3ClientConnection &connection) noexcept {
+        return connection.start();
+    }
+    static common::IoResult<void> register_client_request(Http3ClientConnection &connection,
+                                                          Http3ClientRequestEntry &entry) noexcept {
+        return connection.register_client_request(entry);
+    }
+    static void unregister_client_request(Http3ClientConnection &connection, Http3ClientRequestEntry &entry) noexcept {
+        connection.unregister_client_request(entry);
+    }
+    static void close(Http3ClientConnection &connection, Http3ErrorCode error = Http3ErrorCode::NoError) noexcept {
+        connection.close(error);
+    }
+
+    Http3ClientConnection connection;
+};
+
+} // namespace fiber::http
 
 namespace {
 using namespace std::chrono_literals;
@@ -82,41 +112,36 @@ private:
     fiber::http::Http3ServerConnection *connection_ = nullptr;
     fiber::quic::QuicConnection::Lease lease_;
 };
+// Caller-owned client connection, torn down far enough by finish() to be
+// destroyed off-loop after the group stops.
 class ClientFixture {
 public:
     explicit ClientFixture(fiber::quic::QuicUdpEndpoint &endpoint, const fiber::quic::QuicConnection::Options &options,
-                           fiber::http::Http3ClientConnectionImpl::Options http_options = {}) : loop_(endpoint.loop()) {
-        connection_ = fiber::http::Http3ClientConnectionImpl::create(endpoint, options, http_options);
-        FIBER_ASSERT(connection_ != nullptr);
-        lease_ = fiber::quic::QuicConnection::Lease::adopt(&connection_->quic());
-    }
+                           fiber::http::Http3Client::Options client_options = {}) :
+        loop_(endpoint.loop()), client_(endpoint, std::move(client_options)), access_(client_, options) {}
     ~ClientFixture() { finish(); }
-    fiber::http::Http3ClientConnectionImpl &connection() { return *connection_; }
+    fiber::http::Http3ClientConnection &connection() { return access_.connection; }
     void finish() {
-        if (connection_ == nullptr) {
+        if (finished_) {
             return;
         }
+        finished_ = true;
         std::promise<void> done;
         auto future = done.get_future();
         fiber::async::spawn(loop_, [this, &done]() -> fiber::async::DetachedTask {
-            connection_->close();
-            connection_->quic().mark_closed();
-            co_await connection_->wait_closed();
-            lease_.reset();
-            // Cleanup was queued by the last release before this loop barrier.
-            fiber::async::spawn(loop_, [&done]() -> fiber::async::DetachedTask {
-                done.set_value();
-                co_return;
-            });
+            fiber::http::Http3ClientConnectionTestAccess::close(access_.connection);
+            access_.connection.quic().mark_closed();
+            co_await access_.connection.wait_closed();
+            done.set_value();
         });
         FIBER_ASSERT(future.wait_for(5s) == std::future_status::ready);
-        connection_ = nullptr;
     }
 
 private:
     fiber::event::EventLoop &loop_;
-    fiber::http::Http3ClientConnectionImpl *connection_ = nullptr;
-    fiber::quic::QuicConnection::Lease lease_;
+    fiber::http::Http3Client client_;
+    fiber::http::Http3ClientConnectionTestAccess access_;
+    bool finished_ = false;
 };
 // Component fixture owns no Request and can therefore use stack QUIC storage.
 class ControlFixture {
@@ -380,6 +405,9 @@ fiber::async::DetachedTask start_h3(Connection *h3, std::promise<StartResult> *d
         h3->start();
         co_await h3->wait_started();
         done->set_value({.ok = h3->state() == fiber::http::Http3ConnectionState::Running});
+    } else if constexpr (std::is_same_v<Connection, fiber::http::Http3ClientConnection>) {
+        auto result = co_await fiber::http::Http3ClientConnectionTestAccess::start(*h3);
+        done->set_value(to_start_result(result));
     } else {
         auto result = co_await h3->start();
         done->set_value(to_start_result(result));

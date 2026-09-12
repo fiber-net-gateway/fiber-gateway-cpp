@@ -7,14 +7,11 @@
 #include <fiber/common/Assert.h>
 #include <fiber/http/Http3ClientConnection.h>
 #include "http/ClientHttp3Request.h"
-#include "http/Http3ClientConnectionImpl.h"
 
 namespace fiber::http {
 
 ClientHttp3Exchange::ClientHttp3Exchange(Http3ClientConnection &conn, mem::BufPool &pool) noexcept :
-    conn_(conn.impl_), pool_(&pool) {
-    FIBER_ASSERT(conn_ != nullptr);
-}
+    conn_(&conn), pool_(&pool) {}
 
 ClientHttp3Exchange::ClientHttp3Exchange(ClientHttp3Exchange &&other) noexcept :
     conn_(other.conn_), pool_(other.pool_), stream_(std::move(other.stream_)) {

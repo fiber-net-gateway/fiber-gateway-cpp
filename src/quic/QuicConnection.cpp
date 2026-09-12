@@ -494,14 +494,7 @@ QuicConnection::QuicConnection(QuicUdpEndpoint &endpoint, const Options &options
     peer_uni_streams_.concurrent_limit = options_.max_peer_unidirectional_streams;
     peer_uni_streams_.advertised_limit = options_.max_peer_unidirectional_streams;
     recv_data_limit_ = options_.recv_flow.conn_recv_limit;
-    if (options_.enable_early_data && options_.has_remembered_peer_transport) {
-        peer_transport_.params = options_.remembered_peer_transport;
-        peer_max_data_ = options_.remembered_peer_transport.initial_max_data;
-        early_data_attempted_ = true;
-        early_next_local_bidi_stream_id_ = next_local_bidi_stream_id_;
-        early_next_local_uni_stream_id_ = next_local_uni_stream_id_;
-        early_peer_data_reserved_ = peer_data_reserved_;
-    }
+    FIBER_ASSERT(options_.role == QuicConnectionRole::Server || options_.server_tls == nullptr);
     QuicOutputFramePool &frame_pool = endpoint_.output_frame_pool_;
     packet_number_spaces_[0].reset(QuicEncryptionLevel::Initial);
     packet_number_spaces_[0].set_frame_pool(frame_pool);
@@ -572,12 +565,138 @@ QuicConnection::~QuicConnection() {
     for (const QuicRemoteConnectionIdSlot &slot: remote_cids_) {
         FIBER_ASSERT(!slot.reset_token_index.linked);
     }
+    FIBER_ASSERT(!closed_.has_waiters());
+    if (endpoint_attachment_ == EndpointAttachment::Unattached) {
+        return;
+    }
+    if (on_destroy_ == nullptr) {
+        // Caller-owned storage: every lease but the owner's implicit one has
+        // been dropped, and the endpoint stopped counting this connection at
+        // detach. It only asserts, in its own destructor, that the storage
+        // did not outlive it.
+        FIBER_ASSERT(ref_count_ == 1);
+        --endpoint_.external_connections_alive_;
+        return;
+    }
     // Last: the endpoint's shutdown() may be joined on this and close the
     // endpoint as soon as it resumes.
-    if (endpoint_attachment_ != EndpointAttachment::Unattached) {
-        endpoint_.hosted_.done();
-    }
+    endpoint_.hosted_.done();
 }
+
+bool QuicConnection::early_data_enabled() const noexcept {
+    if (role() == QuicConnectionRole::Client) {
+        return early_data_enabled_;
+    }
+    return options_.server_tls != nullptr && options_.server_tls->enable_early_data;
+}
+
+common::IoResult<void> QuicConnection::remember_peer_transport(const QuicTransportSettings &remembered) noexcept {
+    if (role() != QuicConnectionRole::Client || state_ != QuicConnectionState::Init || early_data_attempted_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    remembered_peer_transport_ = remembered;
+    peer_transport_.params = remembered;
+    peer_max_data_ = remembered.initial_max_data;
+    options_.max_local_bidirectional_streams = std::min(remembered.initial_max_streams_bidi, kQuicMaxStreamLimit);
+    options_.max_local_unidirectional_streams = std::min(remembered.initial_max_streams_uni, kQuicMaxStreamLimit);
+    early_data_attempted_ = true;
+    early_next_local_bidi_stream_id_ = next_local_bidi_stream_id_;
+    early_next_local_uni_stream_id_ = next_local_uni_stream_id_;
+    early_peer_data_reserved_ = peer_data_reserved_;
+    return {};
+}
+
+common::IoResult<void> QuicConnection::connect(const QuicClientConnectParams &params) noexcept {
+    // Strictly on the loop, not merely off every other one: the sequence ends
+    // by attaching to the endpoint, which indexes and sends from its loop.
+    FIBER_ASSERT(loop_.in_loop());
+    if (role() != QuicConnectionRole::Client || state_ != QuicConnectionState::Init ||
+        endpoint_attachment_ != EndpointAttachment::Unattached || tls_.initialized()) {
+        // A repeat call on a connection already on the wire must not disturb
+        // the classification of that attempt.
+        if (state_ == QuicConnectionState::Init) {
+            connect_phase_ = QuicConnectPhase::Connection;
+        }
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    auto fail = [this](QuicConnectPhase phase, common::IoErr error) noexcept -> common::IoResult<void> {
+        connect_phase_ = phase;
+        close_info_ = QuicCloseInfo{.source = QuicCloseSource::Local};
+        mark_closed();
+        return std::unexpected(error);
+    };
+
+    early_data_enabled_ = params.enable_early_data;
+    if (params.enable_early_data && params.resumption_session != nullptr &&
+        params.remembered_peer_transport != nullptr) {
+        auto remembered = remember_peer_transport(*params.remembered_peer_transport);
+        if (!remembered) {
+            return fail(QuicConnectPhase::Connection, remembered.error());
+        }
+    }
+    auto token = set_initial_token(params.token, params.token_len);
+    if (!token) {
+        return fail(QuicConnectPhase::Connection, token.error());
+    }
+    auto initial_crypto = init_initial_crypto(options_.original_destination_connection_id);
+    if (!initial_crypto) {
+        return fail(QuicConnectPhase::InitialCrypto, initial_crypto.error());
+    }
+    auto initialized_tls = tls_.init_client(params.tls, *this, params.allow_insecure, params.resumption_session);
+    if (!initialized_tls) {
+        return fail(QuicConnectPhase::Tls, initialized_tls.error());
+    }
+    auto driven = tls_.drive_handshake();
+    if (!driven && driven.error() != common::IoErr::WouldBlock) {
+        return fail(QuicConnectPhase::Tls, driven.error());
+    }
+    auto started = start_handshake();
+    if (!started) {
+        return fail(QuicConnectPhase::Handshake, started.error());
+    }
+    auto attached = endpoint_.attach_client_connection(lease());
+    if (!attached) {
+        return fail(QuicConnectPhase::Endpoint, attached.error());
+    }
+    endpoint_.schedule_send(*this);
+    return {};
+}
+
+QuicConnectError QuicConnection::connect_error(common::IoErr error) const noexcept {
+    QuicConnectError result{};
+    result.io_error = error;
+    if (connect_phase_ != QuicConnectPhase::Handshake) {
+        result.phase = connect_phase_;
+        result.offered_version = kQuicVersion1;
+        return result;
+    }
+    result.phase = error == common::IoErr::TimedOut ? QuicConnectPhase::Timeout : QuicConnectPhase::Handshake;
+    result.close = close_info_;
+    result.tls_verify_result = tls_.peer_verify_result();
+    if (const auto alert = tls_.last_alert()) {
+        result.tls_alert = *alert;
+    } else if (result.close.error_code >= kQuicCryptoErrorBase &&
+               result.close.error_code <= kQuicCryptoErrorBase + UINT8_MAX) {
+        result.tls_alert = static_cast<std::uint8_t>(result.close.error_code - kQuicCryptoErrorBase);
+    }
+    if (error != common::IoErr::TimedOut) {
+        if (connect_failure_ == common::IoErr::NotSupported && !has_authenticated_server_packet_) {
+            result.phase = QuicConnectPhase::VersionNegotiation;
+            result.offered_version = kQuicVersion1;
+        } else if (result.close.error_code == static_cast<std::uint64_t>(QuicErrorCode::TransportParameterError)) {
+            result.phase = QuicConnectPhase::TransportParameters;
+        } else if (result.tls_alert != 0 || result.tls_verify_result != 0) {
+            result.phase = QuicConnectPhase::Tls;
+        }
+    }
+    if (close_info_.source == QuicCloseSource::PeerConnectionClose ||
+        close_info_.source == QuicCloseSource::StatelessReset) {
+        result.phase = QuicConnectPhase::PeerClose;
+    }
+    return result;
+}
+
+async::Task<void> QuicConnection::wait_closed() noexcept { co_await closed_.join(); }
 
 common::IoResult<void> QuicConnection::start_handshake() noexcept {
     assert_loop_affinity();
@@ -916,14 +1035,15 @@ void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::mil
 void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept {
     FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
-    if (state_ == QuicConnectionState::Closed || state_ == QuicConnectionState::Draining) {
+    if (state_ == QuicConnectionState::Closed) {
         return;
     }
-    if (state_ == QuicConnectionState::Closing) {
+    if (state_ == QuicConnectionState::Closing || state_ == QuicConnectionState::Draining) {
+        // Already on the way out: the close info stands and a Draining
+        // connection still sends nothing (RFC 9000 §10.2.2). An immediate
+        // close only cuts the remaining closing or draining period short.
         if (immediate) {
-            if (active_timer_loop() != nullptr) {
-                arm_close_timer_immediate();
-            }
+            arm_close_timer_immediate();
         }
         return;
     }
@@ -2191,15 +2311,15 @@ common::IoResult<void> QuicConnection::recv_new_token_frame(const QuicInputFrame
         frame.data.len == 0 || frame.data.len > kMaxNewTokenLength) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (options_.on_new_token != nullptr) {
-        options_.on_new_token(options_.client_cache_owner, *this, frame.data.data, frame.data.len);
+    if (options_.ops.on_new_token != nullptr) {
+        options_.ops.on_new_token(options_.owner, *this, frame.data.data, frame.data.len);
     }
     return {};
 }
 
 bool QuicConnection::on_new_tls_session(SSL_SESSION *session) noexcept {
-    return role() == QuicConnectionRole::Client && session != nullptr && options_.on_new_tls_session != nullptr &&
-           options_.on_new_tls_session(options_.client_cache_owner, *this, session);
+    return role() == QuicConnectionRole::Client && session != nullptr && options_.ops.on_new_tls_session != nullptr &&
+           options_.ops.on_new_tls_session(options_.owner, *this, session);
 }
 
 void QuicConnection::reset_after_retry() noexcept {
@@ -2393,10 +2513,10 @@ common::IoResult<void> QuicConnection::ensure_server_tls() noexcept {
     if (tls_.initialized()) {
         return {};
     }
-    if (options_.tls == nullptr) {
+    if (options_.server_tls == nullptr) {
         return {};
     }
-    return tls_.init_server(*options_.tls, *this);
+    return tls_.init_server(*options_.server_tls, *this);
 }
 
 common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTransportParams &params) noexcept {
@@ -2549,10 +2669,10 @@ common::IoResult<void> QuicConnection::on_early_data_accepted() noexcept {
     if (!early_data_attempted_) {
         return {};
     }
-    if (!peer_transport_.received || !options_.has_remembered_peer_transport) {
+    if (!peer_transport_.received) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    const QuicTransportSettings &remembered = options_.remembered_peer_transport;
+    const QuicTransportSettings &remembered = remembered_peer_transport_;
     const QuicTransportSettings &current = peer_transport_.params;
     if (current.active_connection_id_limit < remembered.active_connection_id_limit ||
         current.initial_max_data < remembered.initial_max_data ||
@@ -3058,8 +3178,8 @@ common::IoErr QuicConnection::local_stream_attach_status(QuicStreamType type,
 
 void QuicConnection::attach_to_endpoint() noexcept {
     FIBER_ASSERT(endpoint_attachment_ == EndpointAttachment::Unattached);
-    FIBER_ASSERT(on_destroy_ != nullptr);
     endpoint_attachment_ = EndpointAttachment::Attached;
+    closed_.add();
 }
 
 void QuicConnection::detach_from_endpoint() noexcept {
@@ -3075,6 +3195,12 @@ void QuicConnection::detach_from_endpoint() noexcept {
     streams_.clear();
 
     endpoint_attachment_ = EndpointAttachment::Detached;
+    // Caller-owned storage is hosted only while attached: the endpoint's
+    // shutdown() waits for this, not for the destructor.
+    if (on_destroy_ == nullptr) {
+        endpoint_.hosted_.done();
+    }
+    closed_.done();
 }
 
 void QuicConnection::retain() noexcept { ++ref_count_; }

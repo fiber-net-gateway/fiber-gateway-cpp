@@ -288,12 +288,10 @@ common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerParam &op
         return std::unexpected(common::IoErr::Already);
     }
 
-    // The handshake borrows server_param_ (with the connection-level
-    // early-data switch merged in) through server_handshake_state_; both are
-    // session members, so the borrow holds across every drive_handshake()
-    // call.
+    // The handshake borrows server_param_ through server_handshake_state_;
+    // both are session members, so the borrow holds across every
+    // drive_handshake() call.
     server_param_ = options;
-    server_param_.enable_early_data = connection.early_data_enabled();
     server_handshake_state_ = net::detail::TlsServerHandshakeState{.param = &server_param_};
     auto created_ssl = net::detail::TlsSslFactory::create_server(server_param_);
     if (!created_ssl) {

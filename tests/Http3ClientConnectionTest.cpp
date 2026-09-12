@@ -2,6 +2,30 @@
 #include <fiber/http/ClientHttp3Exchange.h>
 #include "Http3ConnectionTestSupport.h"
 
+TEST(Http3ClientConnectionTest, LocalSettingsUseConfiguredFieldSectionLimit) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    auto quic_options = fiber::test::quic_options();
+    quic_options.role = fiber::quic::QuicConnectionRole::Client;
+    struct Case {
+        std::size_t receive_limit;
+        std::uint64_t advertised_limit;
+        std::uint64_t expected;
+    };
+    const Case cases[] = {{128 * 1024, 0, 128 * 1024}, {4096, 0, 4096}, {4096, 2048, 2048}, {0, 0, 0}};
+    for (const auto &test: cases) {
+        fiber::http::Http3Client::Options options{};
+        options.max_field_section_size = test.receive_limit;
+        options.local_settings.max_field_section_size = test.advertised_limit;
+        ClientFixture fixture(endpoint.get(), quic_options, options);
+        EXPECT_EQ(fixture.connection().local_settings().max_field_section_size, test.expected);
+        fixture.finish();
+    }
+    group.stop();
+    group.join();
+}
+
 TEST(Http3ClientConnectionTest, ClientStopsAcceptingRequestsWhenQuicShutdownBegins) {
     fiber::event::EventLoopGroup group(1);
     group.start();
@@ -71,9 +95,9 @@ TEST(Http3ClientConnectionTest, ClientDrainsAndRejectsRequestsAtOrAbovePeerGoawa
             .on_connection_close = &on_client_request_closed,
             .stream_id = 8,
     };
-    ASSERT_TRUE(h3.register_client_request(below));
-    ASSERT_TRUE(h3.register_client_request(equal));
-    ASSERT_TRUE(h3.register_client_request(above));
+    ASSERT_TRUE(fiber::http::Http3ClientConnectionTestAccess::register_client_request(h3, below));
+    ASSERT_TRUE(fiber::http::Http3ClientConnectionTestAccess::register_client_request(h3, equal));
+    ASSERT_TRUE(fiber::http::Http3ClientConnectionTestAccess::register_client_request(h3, above));
 
     auto control = control_settings_stream();
     append_control_varint_frame(control, fiber::http::Http3FrameType::Goaway, 4);
@@ -97,7 +121,7 @@ TEST(Http3ClientConnectionTest, ClientDrainsAndRejectsRequestsAtOrAbovePeerGoawa
     std::promise<void> closed;
     auto closed_future = closed.get_future();
     fiber::async::spawn(group.at(0), [&h3, &below, &closed]() -> fiber::async::DetachedTask {
-        h3.unregister_client_request(below);
+        fiber::http::Http3ClientConnectionTestAccess::unregister_client_request(h3, below);
         h3.graceful_shutdown();
         co_await h3.wait_closed();
         closed.set_value();
@@ -214,24 +238,23 @@ void check_local_drain_with_registered_request(std::chrono::milliseconds drain_t
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
     options.remote_connection_id = connection_id_from({5, 6, 7, 8});
-    fiber::http::Http3ClientConnectionImpl::Options http_options{};
-    http_options.drain_timeout = drain_timeout;
-    ClientFixture fixture(endpoint.get(), options, http_options);
+    fiber::http::Http3Client::Options client_options{};
+    client_options.drain_timeout = drain_timeout;
+    ClientFixture fixture(endpoint.get(), options, std::move(client_options));
     auto &h3 = fixture.connection();
     ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
     std::promise<void> done;
     auto future = done.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        auto handle = h3.make_handle(h3.quic().lease());
         fiber::mem::BufPool pool;
-        auto exchange = handle.open_exchange(pool);
+        auto exchange = h3.open_exchange(pool);
         fiber::http::Http3RequestHead head{
                 .method = fiber::http::HttpMethod::Get, .scheme = "https", .authority = "example.com", .path = "/"};
         EXPECT_TRUE(co_await exchange.send_request_header(head, true));
-        EXPECT_TRUE(handle.accepting_requests());
+        EXPECT_TRUE(h3.accepting_requests());
 
         const auto drain_started = std::chrono::steady_clock::now();
-        handle.graceful_shutdown();
+        h3.graceful_shutdown();
         co_await fiber::async::sleep(20ms);
         EXPECT_EQ(h3.state(), fiber::http::Http3ConnectionState::Draining);
 
@@ -246,7 +269,7 @@ void check_local_drain_with_registered_request(std::chrono::milliseconds drain_t
             EXPECT_EQ(exchange.outcome(), fiber::http::Http3RequestOutcome::Complete);
         }
 
-        co_await handle.wait_closed();
+        co_await h3.wait_closed();
         const auto elapsed = std::chrono::steady_clock::now() - drain_started;
         EXPECT_EQ(h3.state(), fiber::http::Http3ConnectionState::Closed);
         EXPECT_EQ(h3.close_error(), fiber::http::Http3ErrorCode::NoError);
@@ -294,9 +317,8 @@ void check_queued_request_drain(bool peer_goaway) {
     std::promise<void> done;
     auto future = done.get_future();
     fiber::async::spawn(group.at(0), [&h3, peer_goaway, &done]() -> fiber::async::DetachedTask {
-        auto handle = h3.make_handle(h3.quic().lease());
         fiber::mem::BufPool pool;
-        auto exchange = handle.open_exchange(pool);
+        auto exchange = h3.open_exchange(pool);
         for (int i = 0; i != 8; ++i) {
             auto stream = fiber::http::Http3ControlStreams::create_stream();
             EXPECT_TRUE(
@@ -324,14 +346,13 @@ void check_queued_request_drain(bool peer_goaway) {
             append_control_varint_frame(control, fiber::http::Http3FrameType::Goaway, 0);
             feed_stream(h3.quic(), 3, control);
         } else {
-            handle.graceful_shutdown();
+            h3.graceful_shutdown();
         }
         co_await sent.join();
-        EXPECT_FALSE(handle.accepting_requests());
+        EXPECT_FALSE(h3.accepting_requests());
         EXPECT_FALSE(h3.local_stream_gate().has_waiters());
-        handle.graceful_shutdown();
-        co_await handle.wait_closed();
-        EXPECT_TRUE(handle.valid());
+        h3.graceful_shutdown();
+        co_await h3.wait_closed();
         done.set_value();
     });
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
@@ -344,88 +365,7 @@ void check_queued_request_drain(bool peer_goaway) {
 TEST(Http3ClientConnectionTest, LocalDrainCancelsRequestWaitingForStreamCredit) { check_queued_request_drain(false); }
 TEST(Http3ClientConnectionTest, PeerGoawayCancelsRequestWaitingForStreamCredit) { check_queued_request_drain(true); }
 
-TEST(Http3ClientConnectionTest, MovingHandlePreservesUnsentAndAttachedExchanges) {
-    fiber::event::EventLoopGroup group(1);
-    group.start();
-    auto options = fiber::test::quic_options();
-    fiber::test::QuicTestEndpoint endpoint(group.at(0));
-    options.role = fiber::quic::QuicConnectionRole::Client;
-    options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
-    options.remote_connection_id = connection_id_from({5, 6, 7, 8});
-    ClientFixture fixture(endpoint.get(), options);
-    auto &h3 = fixture.connection();
-    ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
-    std::promise<void> done;
-    auto future = done.get_future();
-    fiber::async::spawn(group.at(0), [&h3, &done]() -> fiber::async::DetachedTask {
-        fiber::mem::BufPool pool;
-        auto original = h3.make_handle(h3.quic().lease());
-        auto unsent = original.open_exchange(pool);
-        auto attached = original.open_exchange(pool);
-        fiber::http::Http3RequestHead head{
-                .method = fiber::http::HttpMethod::Get, .scheme = "https", .authority = "example.com", .path = "/"};
-        EXPECT_TRUE(co_await attached.send_request_header(head, true));
-        auto moved = std::move(original);
-        EXPECT_FALSE(original.valid());
-        original = {};
-        EXPECT_TRUE(moved.accepting_requests());
-        EXPECT_EQ(&moved.quic(), &h3.quic());
-        EXPECT_TRUE(co_await unsent.send_request_header(head, true));
-        EXPECT_NE(attached.stream_id(), unsent.stream_id());
-        auto response = headers_frame({{":status", "200"}, {"content-length", "0"}});
-        feed_stream(h3.quic(), attached.stream_id(), response, true);
-        EXPECT_TRUE(co_await attached.read_header(1s));
-        auto body = co_await attached.read_body(1024, 1s);
-        EXPECT_TRUE(body);
-        if (body) {
-            EXPECT_TRUE(body->complete());
-        }
-        EXPECT_EQ(attached.outcome(), fiber::http::Http3RequestOutcome::Complete);
-        (void) unsent.abort();
-        moved.shutdown();
-        co_await moved.wait_closed();
-        EXPECT_TRUE(moved.valid());
-        done.set_value();
-    });
-    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    fixture.finish();
-    group.stop();
-    group.join();
-}
-
-TEST(Http3ClientConnectionTest, MoveAssignmentClosesPreviousConnection) {
-    fiber::event::EventLoopGroup group(1);
-    group.start();
-    auto options = fiber::test::quic_options();
-    fiber::test::QuicTestEndpoint endpoint(group.at(0));
-    options.role = fiber::quic::QuicConnectionRole::Client;
-    options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
-    options.remote_connection_id = connection_id_from({5, 6, 7, 8});
-    ClientFixture first(endpoint.get(), options), second(endpoint.get(), options);
-    ASSERT_TRUE(start_h3_on_loop(group.at(0), first.connection().quic(), options, first.connection()).ok);
-    ASSERT_TRUE(start_h3_on_loop(group.at(0), second.connection().quic(), options, second.connection()).ok);
-    std::promise<void> done;
-    auto future = done.get_future();
-    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-        auto destination = first.connection().make_handle(first.connection().quic().lease());
-        auto source = second.connection().make_handle(second.connection().quic().lease());
-        destination = std::move(source);
-        EXPECT_FALSE(source.valid());
-        EXPECT_TRUE(first.connection().quic().closing());
-        EXPECT_EQ(&destination.quic(), &second.connection().quic());
-        EXPECT_TRUE(destination.accepting_requests());
-        destination.shutdown();
-        co_await destination.wait_closed();
-        done.set_value();
-    });
-    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
-    first.finish();
-    second.finish();
-    group.stop();
-    group.join();
-}
-
-TEST(Http3ClientConnectionTest, RunningWaitRetainsConnectionWhenHandleIsResetDuringStartup) {
+TEST(Http3ClientConnectionTest, WaitClosedResolvesWhenStartupFails) {
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
@@ -439,6 +379,8 @@ TEST(Http3ClientConnectionTest, RunningWaitRetainsConnectionWhenHandleIsResetDur
     auto future = done.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
         auto params = valid_peer_transport_params(options);
+        // No unidirectional stream credit: the local control stream can never
+        // open, so start() parks on the gate until the connection closes.
         params.initial_max_streams_uni = 0;
         params.has_original_destination_connection_id = true;
         params.original_destination_connection_id = options.original_destination_connection_id;
@@ -447,25 +389,21 @@ TEST(Http3ClientConnectionTest, RunningWaitRetainsConnectionWhenHandleIsResetDur
         EXPECT_TRUE(h3.quic().mark_established());
         fiber::async::WaitGroup tasks;
         tasks.add(2);
-        auto handle = h3.make_handle(h3.quic().lease());
         fiber::async::spawn(fiber::event::EventLoop::current(), [&]() -> fiber::async::DetachedTask {
-            auto started = co_await h3.start();
+            auto started = co_await fiber::http::Http3ClientConnectionTestAccess::start(h3);
             EXPECT_FALSE(started);
             tasks.done();
         });
         co_await fiber::async::sleep(1ms);
         EXPECT_EQ(h3.local_stream_gate().waiter_count(), 1U);
-        const auto before_wait = h3.quic().ref_count();
         fiber::async::spawn(fiber::event::EventLoop::current(), [&]() -> fiber::async::DetachedTask {
-            co_await handle.wait_closed();
+            co_await h3.wait_closed();
             EXPECT_EQ(h3.state(), fiber::http::Http3ConnectionState::Closed);
             tasks.done();
         });
         co_await fiber::async::sleep(1ms);
-        EXPECT_EQ(h3.quic().ref_count(), before_wait + 1);
-        handle = {};
-        EXPECT_FALSE(handle.valid());
-        EXPECT_EQ(h3.quic().ref_count(), before_wait);
+        h3.shutdown();
+        h3.quic().mark_closed();
         co_await tasks.join();
         EXPECT_FALSE(h3.local_stream_gate().has_waiters());
         EXPECT_EQ(h3.quic().ref_count(), 1U);
