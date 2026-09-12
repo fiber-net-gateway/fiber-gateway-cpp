@@ -518,6 +518,14 @@ AsyncTask http_request_fn(void *userdata, const Library::HostCallFrame &frame, L
     fiber::http::ClientHttp1Exchange upstream(*ac.conn, ctx->exchange().pool());
     fiber::http::HttpHeaders req_headers(ctx->exchange().pool());
     apply_options_headers(*heap, options, req_headers);
+    // HTTP/1.1 requires Host; an ad-hoc request has no inbound header to copy it from, so default
+    // to the target's authority unless options.headers supplied one.
+    {
+        static constexpr std::uint64_t kHostHash = fiber::http::http_header_name_hash("host");
+        if (!req_headers.contains("host", kHostHash)) {
+            req_headers.set_view("Host", ac.holder->host_header(), "host", kHostHash);
+        }
+    }
 
     std::string body_bytes;
     bool end_stream = true;

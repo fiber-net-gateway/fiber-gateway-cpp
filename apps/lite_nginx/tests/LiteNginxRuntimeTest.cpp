@@ -4448,6 +4448,66 @@ http {
     EXPECT_NE(response.find("\"status\":200"), std::string::npos) << response;
     EXPECT_NE(response.find("\"Content-Type\":\"text/plain\""), std::string::npos) << response;
     EXPECT_NE(proxied_request.find("GET /x HTTP/1.1"), std::string::npos) << proxied_request;
+    // No Host in options.headers: the named upstream's name is the default, as for proxy_pass.
+    EXPECT_NE(proxied_request.find("\r\nHost: backend\r\n"), std::string::npos) << proxied_request;
+
+    ::unlink(script_path.c_str());
+}
+
+// options.headers.Host wins over the default Host, matching proxy_set_header Host semantics.
+TEST(LiteNginxRuntimeTest, HttpRequestHonoursExplicitHostHeader) {
+    const std::string script_path = "/tmp/lite_nginx_http_request_host_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"@backend\";\n"
+                "let r = svc.request({path: \"/x\", headers: {host: \"override.test\"}});\n"
+                "resp.sendJson(200, {status: r.status});";
+    }
+
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok",
+                                   &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "http_request_host.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char request[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    const std::string proxied_request = upstream_future.get();
+    EXPECT_NE(response.find("\"status\":200"), std::string::npos) << response;
+    EXPECT_NE(proxied_request.find("\r\nhost: override.test\r\n"), std::string::npos) << proxied_request;
+    EXPECT_EQ(proxied_request.find("Host: backend"), std::string::npos) << proxied_request;
 
     ::unlink(script_path.c_str());
 }
@@ -4748,6 +4808,10 @@ http {
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
     EXPECT_NE(response.find("\"status\":200"), std::string::npos) << response;
     EXPECT_NE(proxied_request.find("GET /x HTTP/1.1"), std::string::npos) << proxied_request;
+    // Default Host for a URL target is its authority; the non-default port is kept.
+    EXPECT_NE(proxied_request.find("\r\nHost: 127.0.0.1:" + std::to_string(upstream.port()) + "\r\n"),
+              std::string::npos)
+            << proxied_request;
 
     ::unlink(script_path.c_str());
 }

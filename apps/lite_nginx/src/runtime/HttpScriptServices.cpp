@@ -1,5 +1,6 @@
 #include "HttpScriptServices.h"
 
+#include <string>
 #include <utility>
 
 #include <fiber/http/Http1ClientConnection.h>
@@ -17,14 +18,38 @@ namespace {
 // Holds the pool lease (and any transient connection); released when this object is destroyed.
 class ConnectedUpstreamConnection final : public fiber::http_script::HttpUpstreamConnection {
 public:
-    explicit ConnectedUpstreamConnection(fiber::lite_nginx::upstream::AcquiredUpstreamConnection acquired) noexcept :
-        acquired_(std::move(acquired)) {}
+    ConnectedUpstreamConnection(fiber::lite_nginx::upstream::AcquiredUpstreamConnection acquired,
+                                std::string host_header) noexcept :
+        acquired_(std::move(acquired)), host_header_(std::move(host_header)) {}
 
     [[nodiscard]] fiber::http::Http1ClientConnection &connection() noexcept override { return *acquired_.conn; }
+    [[nodiscard]] std::string_view host_header() const noexcept override { return host_header_; }
 
 private:
     fiber::lite_nginx::upstream::AcquiredUpstreamConnection acquired_;
+    std::string host_header_;
 };
+
+// `host[:port]` for a URL target, mirroring what a client puts in Host: IPv6 literals are
+// bracketed and the scheme's default port is omitted.
+std::string url_target_authority(const fiber::http_script::HttpTargetSpec &target) {
+    const bool v6_literal = target.name.find(':') != std::string::npos;
+    std::string authority;
+    authority.reserve(target.name.size() + 8);
+    if (v6_literal) {
+        authority.push_back('[');
+    }
+    authority.append(target.name);
+    if (v6_literal) {
+        authority.push_back(']');
+    }
+    const std::uint16_t default_port = target.tls ? 443 : 80;
+    if (target.port != 0 && target.port != default_port) {
+        authority.push_back(':');
+        authority.append(std::to_string(target.port));
+    }
+    return authority;
+}
 
 } // namespace
 
@@ -47,7 +72,12 @@ HttpScriptServicesImpl::acquire(const fiber::http_script::HttpTargetSpec &target
         if (!acquired) {
             co_return std::unexpected(acquired.error());
         }
-        co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired))};
+        // Same default Host as `proxy_pass upstream://<name>`: the upstream's name.
+        std::string_view upstream_name = target.name;
+        if (!upstream_name.empty() && upstream_name.front() == '@') {
+            upstream_name.remove_prefix(1);
+        }
+        co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired), std::string(upstream_name))};
     }
 
     // Url target: the key is host:port:scheme; a literal host dials directly, a name resolves via
@@ -64,7 +94,7 @@ HttpScriptServicesImpl::acquire(const fiber::http_script::HttpTargetSpec &target
     if (!acquired) {
         co_return std::unexpected(acquired.error());
     }
-    co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired))};
+    co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired), url_target_authority(target))};
 }
 
 } // namespace fiber::lite_nginx::runtime
