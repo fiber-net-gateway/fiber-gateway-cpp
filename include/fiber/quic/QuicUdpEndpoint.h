@@ -159,7 +159,9 @@ public:
     // already closing, and completes once the last hosted connection has been
     // destroyed -- the socket stays open until then so the closes can go out.
     // Owners that drain at their own layer first (GOAWAY and friends) reach
-    // the join with nothing left to close.
+    // the join with nothing left to close. I/O failure stops the socket and
+    // detaches connections immediately; shutdown() still joins their leases
+    // before the endpoint can be destroyed or initialized again.
     [[nodiscard]] async::Task<void> shutdown(QuicErrorCode error = QuicErrorCode::NoError) noexcept;
     // Immediate close. No hosted connection may still exist: either shutdown()
     // completed or none was ever admitted. Asserted.
@@ -195,6 +197,7 @@ public:
     [[nodiscard]] async::Task<common::IoResult<QuicUdpReceiveResult>> recv_once() noexcept;
 
 private:
+    friend struct QuicUdpEndpointTestAccess;
     friend class QuicClient;
     friend class QuicSendScheduler;
     friend class QuicConnection;
@@ -311,6 +314,8 @@ private:
     void clear_socket_callbacks() noexcept;
     void schedule_io_pump() noexcept;
     void drive_io() noexcept;
+    void stop_io() noexcept;
+    void fail_io() noexcept;
     void handle_socket_ready(event::IoEvent event, common::IoErr err) noexcept;
     static void on_socket_read_ready(void *ctx, common::IoErr err) noexcept;
     static void on_socket_write_ready(void *ctx, common::IoErr err) noexcept;

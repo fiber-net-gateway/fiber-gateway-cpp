@@ -9,6 +9,7 @@
 #include <future>
 #include <new>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include <openssl/evp.h>
@@ -34,6 +35,19 @@
 #include "quic/QuicTransportParamsCodec.h"
 
 #include "QuicTestLoop.h"
+
+namespace fiber::quic {
+
+struct QuicUdpEndpointTestAccess {
+    static common::IoResult<void> attach(QuicUdpEndpoint &endpoint, QuicConnection::Lease lease) noexcept {
+        return endpoint.attach_client_connection(std::move(lease));
+    }
+    static void socket_error(QuicUdpEndpoint &endpoint, event::IoEvent event) noexcept {
+        endpoint.handle_socket_ready(event, common::IoErr::ConnReset);
+    }
+};
+
+} // namespace fiber::quic
 
 namespace {
 
@@ -4011,4 +4025,91 @@ TEST(QuicUdpEndpointTest, StatelessResetIsRateLimited) {
     close_endpoint_on_loop(group, endpoint);
     group.stop();
     group.join();
+}
+
+class QuicUdpEndpointSocketErrorTest : public testing::TestWithParam<std::tuple<fiber::event::IoEvent, bool>> {};
+
+TEST_P(QuicUdpEndpointSocketErrorTest, DetachesConnectionsAndWaitsForOutstandingLease) {
+    fiber::event::EventLoop loop;
+    fiber::quic::QuicUdpEndpoint endpoint(loop);
+    auto options = make_endpoint_options();
+    ASSERT_TRUE(endpoint.init(options));
+    EmbeddedConnectionFactoryState state{};
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        fiber::quic::QuicConnection::Options connection_options{};
+        connection_options.role = fiber::quic::QuicConnectionRole::Client;
+        connection_options.local_connection_id = cid_from_hex("1122334455667788");
+        auto lease = create_embedded_connection(&state, endpoint, connection_options);
+        EXPECT_TRUE(fiber::quic::QuicUdpEndpointTestAccess::attach(endpoint, lease->lease()));
+        EXPECT_TRUE(endpoint.start());
+        bool stopped = false;
+        auto shutdown = [&]() -> fiber::async::Task<void> {
+            co_await endpoint.shutdown();
+            stopped = true;
+        };
+        auto task = shutdown();
+        const bool shutdown_started = std::get<1>(GetParam());
+        if (shutdown_started) {
+            task.operator co_await().await_suspend(std::noop_coroutine()).resume();
+        }
+        fiber::quic::QuicUdpEndpointTestAccess::socket_error(endpoint, std::get<0>(GetParam()));
+        if (!shutdown_started) {
+            EXPECT_EQ(lease->close_info().error_code,
+                      static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::InternalError));
+            task.operator co_await().await_suspend(std::noop_coroutine()).resume();
+        }
+        EXPECT_FALSE(endpoint.valid());
+        EXPECT_FALSE(endpoint.running());
+        EXPECT_TRUE(lease->closed());
+        EXPECT_TRUE(lease->detached_from_endpoint());
+        EXPECT_EQ(endpoint.active_connection_count(), 0U);
+        EXPECT_EQ(endpoint.find_connection(connection_options.local_connection_id), nullptr);
+        EXPECT_EQ(state.destroy_calls, 0U);
+        EXPECT_FALSE(endpoint.init(options));
+        // The endpoint's frame pool remains usable until this lease is gone.
+        auto &space = lease->packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
+        auto *frame = space.alloc_frame();
+        EXPECT_NE(frame, nullptr);
+        if (frame != nullptr) {
+            space.release_frame(*frame);
+        }
+        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+        EXPECT_FALSE(stopped);
+        lease.reset();
+        co_await fiber::async::sleep(std::chrono::milliseconds(1));
+        EXPECT_TRUE(stopped);
+        EXPECT_EQ(state.destroy_calls, 1U);
+        EXPECT_TRUE(endpoint.init(options));
+        co_await endpoint.shutdown();
+        loop.stop();
+    });
+    loop.run();
+}
+
+INSTANTIATE_TEST_SUITE_P(ReadAndWrite, QuicUdpEndpointSocketErrorTest,
+                         testing::Combine(testing::Values(fiber::event::IoEvent::Read, fiber::event::IoEvent::Write),
+                                          testing::Bool()));
+
+TEST(QuicUdpEndpointTest, RejectsConnectionConstructedOnAnotherEndpoint) {
+    EXPECT_DEATH(
+            {
+                fiber::event::EventLoop loop;
+                fiber::quic::QuicUdpEndpoint first(loop);
+                fiber::quic::QuicUdpEndpoint second(loop);
+                auto options = make_endpoint_options();
+                (void) first.init(options);
+                (void) second.init(options);
+                EmbeddedConnectionFactoryState state{};
+                fiber::async::spawn(loop, [&]() -> DetachedTask {
+                    fiber::quic::QuicConnection::Options connection_options{};
+                    connection_options.role = fiber::quic::QuicConnectionRole::Client;
+                    connection_options.local_connection_id = cid_from_hex("1122334455667788");
+                    auto lease = create_embedded_connection(&state, first, connection_options);
+                    (void) fiber::quic::QuicUdpEndpointTestAccess::attach(second, std::move(lease));
+                    loop.stop();
+                    co_return;
+                });
+                loop.run();
+            },
+            "connection->endpoint\\(\\) == this");
 }

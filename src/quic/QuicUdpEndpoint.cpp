@@ -620,33 +620,7 @@ void QuicUdpEndpoint::close() noexcept {
     if (!initialized_ && (!socket_ || !socket_->valid())) {
         return;
     }
-    // Only a started endpoint has callbacks registered with the loop. Before
-    // start() nothing but this object references the socket, so init()'s own
-    // error paths -- and a server whose startup rolls back before the endpoint
-    // ever runs -- may close it from the thread that built it.
-    if (started_ && socket_ && socket_->valid()) {
-        FIBER_ASSERT(loop_.in_loop());
-    }
-
-    closing_ = true;
-    started_ = false;
-    if (io_pump_entry_.is_in_queue()) {
-        FIBER_ASSERT(loop_.in_loop());
-        loop_.cancel<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_>(*this);
-    }
-    clear_socket_callbacks();
-    send_scheduler_.close();
-    if (socket_ && socket_->valid()) {
-        if (loop_.in_loop()) {
-            socket_->close();
-        } else {
-            // Startup rollback: no readiness callback or connection has ever
-            // used this fd. RWFd::close() is loop-affine; release the untouched
-            // descriptor before closing it on the constructing thread.
-            FIBER_ASSERT(connections_.empty());
-            (void) ::close(socket_->release_fd());
-        }
-    }
+    stop_io();
 
     FIBER_ASSERT(recv_storage_budget_.retained_capacity() == 0);
     for (QuicStatelessResetTokenIndex *bucket: reset_token_buckets_) {
@@ -673,6 +647,48 @@ void QuicUdpEndpoint::close() noexcept {
     initialized_ = false;
     draining_ = false;
     server_admission_enabled_ = false;
+}
+
+// Keep initialized_ and the connection pools intact until shutdown() joins
+// all leases. In particular, init() cannot reuse a failed endpoint too early.
+void QuicUdpEndpoint::stop_io() noexcept {
+    // Only a started endpoint has callbacks registered with the loop. Before
+    // start() nothing but this object references the socket, so init()'s own
+    // error paths -- and a server whose startup rolls back before the endpoint
+    // ever runs -- may close it from the thread that built it.
+    if (started_ && socket_ && socket_->valid()) {
+        FIBER_ASSERT(loop_.in_loop());
+    }
+
+    closing_ = true;
+    started_ = false;
+    server_admission_enabled_ = false;
+    if (io_pump_entry_.is_in_queue()) {
+        FIBER_ASSERT(loop_.in_loop());
+        loop_.cancel<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_>(*this);
+    }
+    clear_socket_callbacks();
+    send_scheduler_.close();
+    if (socket_ && socket_->valid()) {
+        if (loop_.in_loop()) {
+            socket_->close();
+        } else {
+            // Startup rollback: no readiness callback or connection has ever
+            // used this fd. RWFd::close() is loop-affine; release the untouched
+            // descriptor before closing it on the constructing thread.
+            FIBER_ASSERT(connections_.empty());
+            (void) ::close(socket_->release_fd());
+        }
+    }
+}
+
+void QuicUdpEndpoint::fail_io() noexcept {
+    FIBER_ASSERT(loop_.in_loop());
+    stop_io();
+    while (QuicConnection *connection = connections_.front()) {
+        connection->close_immediately(QuicErrorCode::InternalError);
+        force_detach_connection(*connection);
+    }
 }
 
 bool QuicUdpEndpoint::valid() const noexcept { return socket_ && socket_->valid(); }
@@ -711,6 +727,7 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
         return std::unexpected(common::IoErr::NoMem);
     }
 
+    FIBER_ASSERT(&connection->endpoint() == this);
     auto registered = register_connection_id(*connection, connection->local_cids_[0].endpoint_index,
                                              connection->local_connection_id());
     if (!registered) {
@@ -914,7 +931,7 @@ void QuicUdpEndpoint::drive_io() noexcept {
         }
         const ReceivePumpResult result = pump_receive();
         if (result.error != common::IoErr::None) {
-            close();
+            fail_io();
             return false;
         }
         needs_reschedule = needs_reschedule || result.needs_reschedule;
@@ -954,7 +971,7 @@ void QuicUdpEndpoint::drive_io() noexcept {
     if (!closing_) {
         const common::IoErr callback_err = sync_socket_callbacks();
         if (callback_err != common::IoErr::None) {
-            close();
+            fail_io();
         }
     }
 
@@ -985,7 +1002,7 @@ void QuicUdpEndpoint::handle_socket_ready(event::IoEvent event, common::IoErr er
         return;
     }
     if (err != common::IoErr::None) {
-        close();
+        fail_io();
         return;
     }
 
@@ -1644,6 +1661,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
         return std::unexpected(common::IoErr::NoMem);
     }
     FIBER_ASSERT(connection->on_destroy_ != nullptr);
+    FIBER_ASSERT(&connection->endpoint() == this);
 
     auto registered = register_connection_id(*connection, connection->original_dcid_index, packet.dcid);
     if (!registered) {
