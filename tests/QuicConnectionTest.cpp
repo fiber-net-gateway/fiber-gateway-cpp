@@ -506,13 +506,12 @@ TEST(QuicConnectionTest, EarlyDataRejectionDropsReplaySafeStreamsWithoutReplay) 
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.owner = &state;
     options.ops.on_early_data_rejected = on_early_data_rejected;
-    options.enable_early_data = true;
-    options.has_remembered_peer_transport = true;
-    options.remembered_peer_transport.initial_max_data = 4096;
-    options.remembered_peer_transport.initial_max_stream_data_bidi_remote = 1024;
-    options.remembered_peer_transport.initial_max_streams_bidi = 1;
-    options.max_local_bidirectional_streams = 1;
     fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
+    fiber::quic::QuicTransportSettings remembered{};
+    remembered.initial_max_data = 4096;
+    remembered.initial_max_stream_data_bidi_remote = 1024;
+    remembered.initial_max_streams_bidi = 1;
+    ASSERT_TRUE(conn.remember_peer_transport(remembered));
     ASSERT_TRUE(conn.crypto().ensure_transient());
     conn.crypto().early_write().packet->ready = true;
     conn.crypto().early_write().header->ready = true;

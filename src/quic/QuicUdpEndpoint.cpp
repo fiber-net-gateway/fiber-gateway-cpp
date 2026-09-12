@@ -105,7 +105,13 @@ encode_invalid_token_close_packet(QuicUdpEndpoint &endpoint, const QuicPacketHea
 
 QuicUdpEndpoint::QuicUdpEndpoint(event::EventLoop &loop) noexcept : loop_(loop), send_scheduler_(*this) {}
 
-QuicUdpEndpoint::~QuicUdpEndpoint() { close(); }
+QuicUdpEndpoint::~QuicUdpEndpoint() {
+    close();
+    // A caller-owned connection destroyed after this object would return its
+    // crypto blocks and receive credit to freed memory.
+    FIBER_ASSERT(external_connections_alive_ == 0);
+    FIBER_ASSERT(recv_storage_budget_.retained_capacity() == 0);
+}
 
 namespace {
 
@@ -482,7 +488,6 @@ common::IoResult<void> QuicUdpEndpoint::init(const EndpointOptions &endpoint_opt
     options.new_token_lifetime = server_options.new_token_lifetime;
     options.connection_owner = server_options.connection_owner;
     options.create_connection = server_options.create_connection;
-    options.enable_early_data = server_options.enable_early_data;
     return init(options);
 }
 
@@ -495,6 +500,9 @@ common::IoResult<void> QuicUdpEndpoint::init(const Options &options) noexcept {
         return std::unexpected(common::IoErr::Invalid);
     }
 
+    // A caller-owned connection still alive from an earlier run may hold
+    // credit in the budget about to be reinitialized.
+    FIBER_ASSERT(external_connections_alive_ == 0);
     options_ = options;
     server_admission_enabled_ = options_.create_connection != nullptr;
     recv_storage_budget_.init(options_.retained_storage_limit);
@@ -612,9 +620,12 @@ async::Task<void> QuicUdpEndpoint::shutdown(QuicErrorCode error) noexcept {
 }
 
 void QuicUdpEndpoint::close() noexcept {
-    // Hosted connections are destroyed by their owners on the last lease drop;
-    // the endpoint cannot force that, so a close with connections alive is an
-    // ordering bug in the caller. shutdown() waits for them.
+    // Lease-owned connections are destroyed by their owners on the last lease
+    // drop; the endpoint cannot force that, so a close with such connections
+    // alive is an ordering bug in the caller. shutdown() waits for them. A
+    // caller-owned connection only has to be detached: its storage may still
+    // hold receive credit here, which is checked once it is gone, in the
+    // destructor.
     FIBER_ASSERT(hosted_.empty());
     FIBER_ASSERT(connections_.empty());
     if (!initialized_ && (!socket_ || !socket_->valid())) {
@@ -622,7 +633,6 @@ void QuicUdpEndpoint::close() noexcept {
     }
     stop_io();
 
-    FIBER_ASSERT(recv_storage_budget_.retained_capacity() == 0);
     for (QuicStatelessResetTokenIndex *bucket: reset_token_buckets_) {
         FIBER_ASSERT(bucket == nullptr);
     }
@@ -736,6 +746,9 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
     }
 
     hosted_.add();
+    if (connection->on_destroy_ == nullptr) {
+        ++external_connections_alive_;
+    }
     connection->attach_to_endpoint();
     for (QuicRemoteConnectionIdSlot &slot: connection->remote_cids_) {
         if (slot.in_use && slot.has_stateless_reset_token) {
@@ -746,6 +759,31 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
     connections_.push_back(*connection);
     ++active_connection_count_;
     return {};
+}
+
+common::IoResult<QuicClientIdentity> QuicUdpEndpoint::allocate_client_identity() noexcept {
+    if (!initialized_ || !loop_.in_loop()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    auto original_dcid = generate_connection_id();
+    if (!original_dcid) {
+        return std::unexpected(original_dcid.error());
+    }
+    // The local CID is what this endpoint indexes the connection under; the
+    // ODCID doubles as the peer's CID (remote slot 0) until the server picks
+    // its own, so the two must differ.
+    for (std::uint8_t attempt = 0; attempt < 8; ++attempt) {
+        auto local_cid = generate_unique_connection_id();
+        if (!local_cid) {
+            return std::unexpected(local_cid.error());
+        }
+        if (local_cid->size() != original_dcid->size() ||
+            std::memcmp(local_cid->data(), original_dcid->data(), local_cid->size()) != 0) {
+            return QuicClientIdentity{.original_destination_connection_id = *original_dcid,
+                                      .local_connection_id = *local_cid};
+        }
+    }
+    return std::unexpected(common::IoErr::Already);
 }
 
 void QuicUdpEndpoint::schedule_send(QuicConnection &connection) noexcept {
@@ -1651,8 +1689,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
-    conn_options.enable_early_data = options_.enable_early_data;
-    conn_options.tls = options_.tls;
+    conn_options.server_tls = options_.tls;
 
     QuicConnection::Lease lease = options_.create_connection(options_.connection_owner, *this, conn_options);
     QuicConnection *connection = lease.get();

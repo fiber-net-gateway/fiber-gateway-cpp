@@ -6,8 +6,9 @@ namespace fiber::http {
 Http3ClientConnectionImpl::Http3ClientConnectionImpl(quic::QuicUdpEndpoint &endpoint,
                                                      const quic::QuicConnection::Options &quic_options,
                                                      const Options &options) noexcept :
-    quic_(endpoint, make_quic_options(quic_options, this)), local_stream_gate_(quic_),
-    control_(quic_, local_stream_gate_, options.local_settings, this, control_ops()),
+    server_name_(options.server_name), verify_name_(options.verify_name), remote_addr_(options.remote_addr),
+    security_(options.security), cache_(options.cache), quic_(endpoint, make_quic_options(quic_options, this)),
+    local_stream_gate_(quic_), control_(quic_, local_stream_gate_, options.local_settings, this, control_ops()),
     drain_timeout_(options.drain_timeout), max_qpack_string_size_(options.max_qpack_string_size),
     max_field_section_size_(options.max_field_section_size) {}
 Http3ClientConnectionImpl::~Http3ClientConnectionImpl() {
@@ -35,8 +36,35 @@ quic::QuicConnection::Options Http3ClientConnectionImpl::make_quic_options(const
     options.ops = {.create_stream = &create_peer_stream,
                    .on_peer_stream_attached = &on_peer_stream_attached,
                    .on_state_change = &on_quic_state_change,
-                   .on_capacity_change = &on_quic_capacity_change};
+                   .on_capacity_change = &on_quic_capacity_change,
+                   .on_new_tls_session = &on_new_tls_session,
+                   .on_new_token = &on_new_token};
     return options;
+}
+quic::QuicClientCacheKey Http3ClientConnectionImpl::cache_key() const noexcept {
+    return quic::QuicClientCacheKey{
+            .server_name = server_name_,
+            .verify_name = verify_name_,
+            .remote_addr = remote_addr_,
+            .credential = security_.credential,
+            .trust_store = security_.trust_store,
+    };
+}
+bool Http3ClientConnectionImpl::on_new_tls_session(void *owner, quic::QuicConnection &quic,
+                                                   SSL_SESSION *session) noexcept {
+    auto &self = *static_cast<Http3ClientConnectionImpl *>(owner);
+    if (self.cache_ == nullptr || self.cache_->store_session == nullptr) {
+        return false;
+    }
+    return self.cache_->store_session(self.cache_->owner, self.cache_key(), session, quic.peer_transport().params);
+}
+void Http3ClientConnectionImpl::on_new_token(void *owner, quic::QuicConnection &, const std::uint8_t *token,
+                                             std::size_t token_len) noexcept {
+    auto &self = *static_cast<Http3ClientConnectionImpl *>(owner);
+    if (self.cache_ == nullptr || self.cache_->store_token == nullptr) {
+        return;
+    }
+    self.cache_->store_token(self.cache_->owner, self.cache_key(), token, token_len);
 }
 quic::QuicStream::Lease Http3ClientConnectionImpl::create_peer_stream(void *, std::uint64_t) noexcept {
     return Http3ControlStreams::create_stream();

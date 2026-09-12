@@ -29,8 +29,6 @@ struct TlsServerParam;
 
 namespace fiber::quic {
 
-class QuicClient;
-
 inline constexpr std::size_t kQuicUdpDefaultReadBufferSize = 65536;
 inline constexpr std::size_t kQuicUdpDefaultRecvBatchSize = 16;
 inline constexpr std::size_t kQuicUdpDefaultPlaintextBufferSize = 65536;
@@ -53,6 +51,14 @@ struct QuicUdpReceiveResult {
     QuicConnection *connection = nullptr;
     QuicPacketProcessResult packet{};
     bool created = false;
+};
+
+// Connection IDs a client connection is built with: the random Original
+// Destination Connection ID its Initial keys derive from, and the local CID
+// the endpoint will index it under. See QuicUdpEndpoint::allocate_client_identity.
+struct QuicClientIdentity {
+    QuicConnectionId original_destination_connection_id{};
+    QuicConnectionId local_connection_id{};
 };
 
 class QuicUdpEndpoint : public common::NonCopyable, public common::NonMovable {
@@ -98,7 +104,6 @@ public:
         void *connection_owner = nullptr;
         QuicConnection::Lease (*create_connection)(void *owner, QuicUdpEndpoint &endpoint,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
-        bool enable_early_data = false;
     };
 
     // Compatibility aggregate for existing server users. New code should use
@@ -134,17 +139,19 @@ public:
         // connection storage when ref_count reaches zero.
         QuicConnection::Lease (*create_connection)(void *owner, QuicUdpEndpoint &endpoint,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
-        bool enable_early_data = false;
     };
 
     // The endpoint, every connection it hosts and the send scheduler all run
     // on this loop for the endpoint's whole lifetime; init() may be repeated
     // after close() but never rebinds the loop.
     //
-    // Lifetime: the endpoint outlives every connection it has hosted. A hosted
-    // connection stays alive until its last lease drops, and the endpoint
-    // refuses to close while any of them exists -- shutdown() is the only way
-    // to close an endpoint that still hosts connections.
+    // Lifetime: the endpoint outlives every connection it has hosted. A
+    // lease-owned connection stays alive until its last lease drops, and the
+    // endpoint refuses to close while any of them exists -- shutdown() is the
+    // only way to close an endpoint that still hosts connections. A
+    // caller-owned connection (QuicConnection::Options::on_destroy null) is
+    // hosted only until it detaches; its storage may outlive close(), but not
+    // this object, which asserts that in its destructor.
     explicit QuicUdpEndpoint(event::EventLoop &loop) noexcept;
     ~QuicUdpEndpoint();
 
@@ -156,8 +163,9 @@ public:
     [[nodiscard]] common::IoResult<void> start() noexcept;
     // Graceful teardown, on the endpoint's loop: stops admitting connections,
     // sends CONNECTION_CLOSE(`error`) on every hosted connection that is not
-    // already closing, and completes once the last hosted connection has been
-    // destroyed -- the socket stays open until then so the closes can go out.
+    // already closing, and completes once the last lease-owned connection has
+    // been destroyed and the last caller-owned one has detached -- the socket
+    // stays open until then so the closes can go out.
     // Owners that drain at their own layer first (GOAWAY and friends) reach
     // the join with nothing left to close. I/O failure stops the socket and
     // detaches connections immediately; shutdown() still joins their leases
@@ -191,6 +199,10 @@ public:
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid) const noexcept;
     [[nodiscard]] common::IoResult<void> remove_connection(const QuicConnectionId &dcid) noexcept;
     void schedule_send(QuicConnection &connection) noexcept;
+    // On the endpoint's loop. A random ODCID plus a local CID that is unique
+    // in this endpoint's index and differs from the ODCID. Nothing is
+    // registered until the connection built with them calls connect().
+    [[nodiscard]] common::IoResult<QuicClientIdentity> allocate_client_identity() noexcept;
 
     // Manual one-shot receive for focused callers and tests. It is unavailable
     // after start() because readiness callbacks and awaiters share the read slot.
@@ -198,7 +210,6 @@ public:
 
 private:
     friend struct QuicUdpEndpointTestAccess;
-    friend class QuicClient;
     friend class QuicSendScheduler;
     friend class QuicConnection;
 
@@ -353,10 +364,14 @@ private:
     DcidTree dcid_tree_{};
     std::array<QuicStatelessResetTokenIndex *, kQuicStatelessResetTokenBucketCount> reset_token_buckets_{};
     ConnectionList connections_{};
-    // Every connection ever attached, from attach until its destructor runs;
+    // Every connection ever attached: a lease-owned one from attach until its
+    // destructor runs, a caller-owned one from attach until it detaches.
     // shutdown() joins it and close() requires it empty. Loop-local: a hosted
     // connection is destroyed on this loop, or on it once quiescent.
     async::LocalWaitGroup hosted_{};
+    // Caller-owned connections attached and not yet destroyed. Their storage
+    // may outlive close() but never this object.
+    std::size_t external_connections_alive_ = 0;
     std::size_t active_connection_count_ = 0;
     std::size_t dropped_datagram_count_ = 0;
     std::size_t rejected_connection_count_ = 0;

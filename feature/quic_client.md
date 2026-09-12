@@ -1,6 +1,14 @@
 # QUIC Client 实现方案
 
-## Status: Implemented / Validated
+## Status: Implemented / Validated（`QuicClient` 类已于 2026-09-12 拆解）
+
+> 2026-09-12：`QuicClient` / `QuicClientAttempt` / `create_connection` 工厂已删除。建连编排收成
+> `QuicConnection::connect(QuicClientConnectParams)` + `wait_established()/wait_confirmed()` +
+> `connect_error()`；CID 分配为 `QuicUdpEndpoint::allocate_client_identity()`；session/token cache
+> 钩子并入 `QuicConnection::Ops`，cache 类型在 `QuicClientConnect.h`。连接存储可以由调用方拥有
+> （`Options::on_destroy == nullptr`）。设计与理由见
+> [`quic_http3_client_connection_ownership_design.md`](quic_http3_client_connection_ownership_design.md)。
+> 下文的 `QuicClient` 描述保留为历史记录。
 
 ## 0. 落地状态（2026-07-20）
 

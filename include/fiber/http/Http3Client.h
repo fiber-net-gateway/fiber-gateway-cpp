@@ -12,8 +12,9 @@
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
 #include "../net/TlsCredential.h"
+#include "../net/TlsParams.h"
 #include "../net/TrustStore.h"
-#include "../quic/QuicClient.h"
+#include "../quic/QuicClientConnect.h"
 #include "../quic/QuicUdpEndpoint.h"
 #include "Http3ClientConnection.h"
 
@@ -57,30 +58,27 @@ public:
     };
 
     Http3Client(quic::QuicUdpEndpoint &endpoint, Options options) noexcept;
-    // Cache callbacks and connection factories retain this object as their owner.
-    // The client and endpoint must outlive every connection created by connect();
-    // QuicUdpEndpoint::shutdown() is how an owner waits for that.
+    // Connections borrow the cache callbacks and TLS material through this
+    // object. The client and endpoint must outlive every connection created by
+    // connect(); QuicUdpEndpoint::shutdown() is how an owner waits for that.
     ~Http3Client() = default;
 
     [[nodiscard]] common::IoResult<void> init() noexcept;
+    // On the endpoint's loop. Every view in `options` is borrowed only until
+    // the returned task completes.
     [[nodiscard]] async::Task<Http3ClientConnectResult> connect(Http3ClientConnectOptions options) noexcept;
 
     [[nodiscard]] const net::TlsCredential *tls_credential() const noexcept { return options_.tls.credential; }
     [[nodiscard]] const net::TrustStore *trust_store() const noexcept { return options_.tls.trust_store; }
 
 private:
-    [[nodiscard]] static quic::QuicConnection::Lease
-    create_connection_op(void *owner, quic::QuicUdpEndpoint &endpoint,
-                         const quic::QuicConnection::Options &options) noexcept;
-    [[nodiscard]] quic::QuicConnection::Lease create_connection(quic::QuicUdpEndpoint &endpoint,
-                                                                const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] static Http3ClientConnectError make_error(Http3ClientConnectPhase phase,
                                                             common::IoErr error) noexcept;
+    [[nodiscard]] static Http3ClientConnectError make_quic_error(const quic::QuicConnectError &error) noexcept;
 
     quic::QuicUdpEndpoint *endpoint_ = nullptr;
     Options options_{};
-    quic::QuicClient quic_client_{};
-    Http3ClientConnectionImpl *last_created_connection_ = nullptr;
+    net::TlsAlpnList alpn_{};
     bool initialized_ = false;
 };
 

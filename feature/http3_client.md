@@ -2,12 +2,16 @@
 
 ## 状态
 
-HTTP/3 client 基础能力已经实现。它复用 `QuicUdpEndpoint`、`QuicClient`、`QuicConnection`
+HTTP/3 client 基础能力已经实现。它复用 `QuicUdpEndpoint`、`QuicConnection::connect()`
 和静态 QPACK 编解码路径，没有引入第二套 UDP 或 QUIC runtime。
+
+> 2026-09-12：`QuicClient` 已拆解，`Http3Client::connect` 直接构造连接并调用
+> `QuicConnection::connect()`；下一步（值类型 `Http3ClientConnection`）见
+> [`quic_http3_client_connection_ownership_design.md`](quic_http3_client_connection_ownership_design.md) §5。
 
 ## 组件边界
 
-- `Http3Client`：持有 TLS 安全配置和 `QuicClient`，负责 QUIC 建连、`h3` ALPN 校验、
+- `Http3Client`：持有 TLS 安全配置、session cache 回调和 `h3` ALPN，负责 QUIC 建连、`h3` ALPN 校验、
   HTTP/3 客户端连接创建与本地 control stream 启动。
 - `Http3ClientConnection`：move-only 连接句柄，创建 exchange，并提供立即关闭、GOAWAY
   graceful shutdown 和 `wait_closed()`。
@@ -16,15 +20,15 @@ HTTP/3 client 基础能力已经实现。它复用 `QuicUdpEndpoint`、`QuicClie
 - `ClientHttp3Request`：与 `QuicStream` 同一所有权单元，负责 HEADERS/DATA/trailer、响应解析、
   取消及请求结果分类。
 - `Http3ClientConnectionImpl`：私有、地址稳定的客户端状态，按值持有 QUIC、stream gate、
-  control streams，负责请求表、GOAWAY、drain 和最后 lease 释放后的清理。
+  control streams，负责请求表、GOAWAY、drain 和最后 lease 释放后的清理；自持 session cache key
+  的名字和拨号地址，通过 `QuicConnection::Ops` 接收 NewSessionTicket / NEW_TOKEN 并回写 cache。
 - `Http3ControlStreams`：两端按值内嵌的私有协议组件，负责 SETTINGS 和 control/QPACK stream；
   不包含请求表、角色或 drain 策略。服务端策略由 `Http3ServerConnection` 直接负责。
 
 ## 生命周期约束
 
 1. 调用者先初始化并启动一个 client-only 或混合角色的 `QuicUdpEndpoint`。
-2. `Http3Client::init()` 初始化 TLS 和 QUIC connector；`connect()` 必须在 endpoint owner loop
-   中调用。
+2. `Http3Client::init()` 校验 endpoint；`connect()` 必须在 endpoint owner loop 中调用。
 3. `Http3Client` 和 endpoint 必须长于由它创建的全部连接。
 4. `Http3ClientConnection::open_exchange(pool)` 借用 `BufPool`；pool 和连接必须长于 exchange。
 5. 放弃未完成的 exchange 时显式调用 `abort()`。连接句柄析构会立即关闭仍活动的连接。

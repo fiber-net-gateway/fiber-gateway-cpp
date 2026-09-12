@@ -57,7 +57,6 @@ public:
         admission.recv_flow = options_->recv_flow;
         admission.retry = options_->retry;
         admission.issue_new_token = options_->issue_new_token;
-        admission.enable_early_data = options_->enable_early_data;
         admission.connection_owner = this;
         admission.create_connection = &Http3EndpointWorker::create_connection_op;
 

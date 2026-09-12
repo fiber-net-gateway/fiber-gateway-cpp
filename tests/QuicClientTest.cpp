@@ -18,7 +18,7 @@
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
 #include <fiber/net/UdpSocket.h>
-#include <fiber/quic/QuicClient.h>
+#include <fiber/quic/QuicClientConnect.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
 #include "QuicTestTlsCertificate.h"
 #include "TlsClientIdentityTestData.h"
@@ -26,6 +26,8 @@
 namespace {
 
 using namespace std::chrono_literals;
+
+constexpr std::string_view kQuicTestAlpn[] = {"fiber-quic-test"};
 
 void destroy_connection(void *, fiber::quic::QuicConnection &connection) noexcept { delete &connection; }
 
@@ -50,6 +52,53 @@ fiber::quic::QuicConnection::Lease create_connection(void *, fiber::quic::QuicUd
     fiber::quic::QuicConnection::Options owned = options;
     owned.on_destroy = destroy_connection;
     return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(endpoint, owned));
+}
+
+// Options for a caller-owned client connection (no on_destroy): the endpoint
+// hosts it only until it detaches, and the coroutine frame that builds it
+// destroys it after wait_closed().
+fiber::common::IoResult<fiber::quic::QuicConnection::Options>
+make_client_options(fiber::quic::QuicUdpEndpoint &endpoint, const fiber::net::SocketAddress &remote_addr) noexcept {
+    auto identity = endpoint.allocate_client_identity();
+    if (!identity) {
+        return std::unexpected(identity.error());
+    }
+    fiber::quic::QuicConnection::Options options{};
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.local_addr = endpoint.local_addr();
+    options.remote_addr = remote_addr;
+    options.original_destination_connection_id = identity->original_destination_connection_id;
+    options.initial_destination_connection_id = identity->original_destination_connection_id;
+    options.remote_connection_id = identity->original_destination_connection_id;
+    options.local_connection_id = identity->local_connection_id;
+    options.max_local_bidirectional_streams = 0;
+    options.max_local_unidirectional_streams = 0;
+    options.ops.create_stream = create_stream;
+    return options;
+}
+
+fiber::quic::QuicClientConnectParams make_connect_params(const fiber::net::TlsClientSecurity &security,
+                                                         std::string_view server_name,
+                                                         std::string_view verify_name = {},
+                                                         bool allow_insecure = false) noexcept {
+    fiber::quic::QuicClientConnectParams params{};
+    params.tls.security = security;
+    params.tls.min_version = 0x0304;
+    params.tls.max_version = 0x0304;
+    params.tls.alpn = kQuicTestAlpn;
+    params.tls.server_name = server_name;
+    params.tls.verify_name = verify_name;
+    params.allow_insecure = allow_insecure;
+    return params;
+}
+
+// Tears a caller-owned connection down far enough to destroy it: an immediate
+// close if it is still open, then the detach wait.
+fiber::async::Task<void> close_and_wait(fiber::quic::QuicConnection &connection) noexcept {
+    if (!connection.terminal_closing()) {
+        connection.close_immediately();
+    }
+    co_await connection.wait_closed();
 }
 
 struct QuicTestTls {
@@ -98,15 +147,18 @@ fiber::net::TlsServerParam make_quic_server_tls(
     options.client_certificate_mode = client_certificate_mode;
     options.min_version = 0x0304;
     options.max_version = 0x0304;
-    static constexpr std::string_view kQuicTestAlpn[] = {"fiber-quic-test"};
     options.alpn = kQuicTestAlpn;
     return options;
 }
 
 struct StartSummary {
     fiber::common::IoErr error = fiber::common::IoErr::None;
+    fiber::common::IoErr missing_alpn_error = fiber::common::IoErr::None;
+    fiber::quic::QuicConnectPhase missing_alpn_phase = fiber::quic::QuicConnectPhase::Handshake;
+    fiber::quic::QuicConnectionState missing_alpn_state = fiber::quic::QuicConnectionState::Init;
     fiber::quic::QuicConnectionState state = fiber::quic::QuicConnectionState::Closed;
     std::size_t endpoint_connections = 0;
+    std::size_t endpoint_connections_after_close = 0;
     bool tls_initialized = false;
     bool initial_keys_ready = false;
     bool cid_registered = false;
@@ -119,7 +171,8 @@ struct TimeoutSummary {
     std::size_t endpoint_connections = 0;
 };
 
-fiber::async::DetachedTask start_client_attempt(fiber::quic::QuicUdpEndpoint *endpoint, fiber::quic::QuicClient *client,
+fiber::async::DetachedTask start_client_attempt(fiber::quic::QuicUdpEndpoint *endpoint,
+                                                const fiber::net::TlsClientSecurity *security,
                                                 std::promise<StartSummary> *promise) {
     StartSummary summary{};
     auto started_endpoint = endpoint->start();
@@ -128,37 +181,60 @@ fiber::async::DetachedTask start_client_attempt(fiber::quic::QuicUdpEndpoint *en
         promise->set_value(summary);
         co_return;
     }
+    const fiber::net::SocketAddress remote_addr{fiber::net::IpAddress::loopback_v4(), 4433};
 
-    fiber::quic::QuicClientConnectOptions options{};
-    options.remote_addr = {fiber::net::IpAddress::loopback_v4(), 4433};
-    options.server_name = "localhost";
-    options.allow_insecure = true;
-    auto started = client->start_connect(options);
-    if (!started) {
-        summary.error = started.error().io_error;
+    {
+        // An empty ALPN list is rejected when the client SSL is created; the
+        // connection never attaches and is destructible right away.
+        auto options = make_client_options(*endpoint, remote_addr);
+        if (!options) {
+            summary.error = options.error();
+            co_await endpoint->shutdown();
+            promise->set_value(summary);
+            co_return;
+        }
+        fiber::quic::QuicConnection connection(*endpoint, *options);
+        auto params = make_connect_params(*security, "localhost", {}, true);
+        params.tls.alpn = {};
+        auto connected = connection.connect(params);
+        summary.missing_alpn_error = connected ? fiber::common::IoErr::None : connected.error();
+        summary.missing_alpn_phase = connection.connect_error(summary.missing_alpn_error).phase;
+        summary.missing_alpn_state = connection.state();
+        co_await connection.wait_closed();
+    }
+
+    auto options = make_client_options(*endpoint, remote_addr);
+    if (!options) {
+        summary.error = options.error();
         co_await endpoint->shutdown();
         promise->set_value(summary);
         co_return;
     }
-
-    {
-        fiber::quic::QuicClientAttempt attempt = std::move(*started);
-        fiber::quic::QuicConnection *connection = attempt.connection();
-        summary.state = connection->state();
-        summary.endpoint_connections = endpoint->active_connection_count();
-        summary.tls_initialized = connection->tls().initialized();
-        summary.initial_keys_ready = connection->crypto().initial_ready();
-        summary.cid_registered = endpoint->find_connection(connection->local_connection_id()) == connection;
-        summary.initial_output_queued =
-                !connection->packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).pending_frames.empty();
+    fiber::quic::QuicConnection connection(*endpoint, *options);
+    auto connected = connection.connect(make_connect_params(*security, "localhost", {}, true));
+    if (!connected) {
+        summary.error = connected.error();
+        co_await connection.wait_closed();
+        co_await endpoint->shutdown();
+        promise->set_value(summary);
+        co_return;
     }
+    summary.state = connection.state();
+    summary.endpoint_connections = endpoint->active_connection_count();
+    summary.tls_initialized = connection.tls().initialized();
+    summary.initial_keys_ready = connection.crypto().initial_ready();
+    summary.cid_registered = endpoint->find_connection(connection.local_connection_id()) == &connection;
+    summary.initial_output_queued =
+            !connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).pending_frames.empty();
 
+    co_await close_and_wait(connection);
+    summary.endpoint_connections_after_close = endpoint->active_connection_count();
     co_await endpoint->shutdown();
     promise->set_value(summary);
 }
 
 fiber::async::DetachedTask timeout_client_attempt(fiber::quic::QuicUdpEndpoint *endpoint,
-                                                  fiber::quic::QuicClient *client,
+                                                  const fiber::net::TlsClientSecurity *security,
                                                   std::promise<TimeoutSummary> *promise) {
     TimeoutSummary summary{};
     auto started = endpoint->start();
@@ -177,21 +253,29 @@ fiber::async::DetachedTask timeout_client_attempt(fiber::quic::QuicUdpEndpoint *
         co_return;
     }
 
-    fiber::quic::QuicClientConnectOptions options{};
-    options.remote_addr = blackhole.local_addr();
-    options.server_name = "localhost";
-    options.allow_insecure = true;
-    options.handshake_timeout = 10ms;
-    auto connected = co_await client->connect(options);
-    if (connected) {
-        connected->reset();
+    auto options = make_client_options(*endpoint, blackhole.local_addr());
+    if (!options) {
+        summary.error = options.error();
+        blackhole.close();
+        co_await endpoint->shutdown();
+        promise->set_value(summary);
+        co_return;
+    }
+    fiber::quic::QuicConnection connection(*endpoint, *options);
+    auto connected = connection.connect(make_connect_params(*security, "localhost", {}, true));
+    if (!connected) {
+        summary.error = connected.error();
+        summary.phase = connection.connect_error(connected.error()).phase;
     } else {
-        summary.error = connected.error().io_error;
-        summary.phase = connected.error().phase;
+        auto established = co_await connection.wait_established(10ms);
+        if (established) {
+            summary.error = fiber::common::IoErr::Already;
+        } else {
+            summary.error = established.error();
+            summary.phase = connection.connect_error(established.error()).phase;
+        }
     }
-    for (std::uint8_t attempt = 0; attempt < 50 && endpoint->active_connection_count() != 0; ++attempt) {
-        co_await fiber::async::sleep(1ms);
-    }
+    co_await close_and_wait(connection);
     summary.endpoint_connections = endpoint->active_connection_count();
     blackhole.close();
     co_await endpoint->shutdown();
@@ -275,6 +359,15 @@ struct TestClientCache {
     std::size_t token_store_count = 0;
 };
 
+bool cache_store_session(void *owner, fiber::quic::QuicConnection &connection, SSL_SESSION *session) noexcept {
+    return TestClientCache::store_session(owner, {}, session, connection.peer_transport().params);
+}
+
+void cache_store_token(void *owner, fiber::quic::QuicConnection &, const std::uint8_t *token,
+                       std::size_t token_len) noexcept {
+    TestClientCache::store_token(owner, {}, token, token_len);
+}
+
 struct ResumptionSummary {
     fiber::common::IoErr error = fiber::common::IoErr::None;
     bool session_cached = false;
@@ -315,7 +408,7 @@ bool create_reset_token(const std::array<std::uint8_t, fiber::quic::kQuicStatele
 
 fiber::async::DetachedTask receive_unknown_dcid_stateless_reset(
         fiber::quic::QuicUdpEndpoint *server_endpoint, fiber::quic::QuicUdpEndpoint *client_endpoint,
-        fiber::quic::QuicClient *client,
+        const fiber::net::TlsClientSecurity *security,
         const std::array<std::uint8_t, fiber::quic::kQuicStatelessResetSecretLength> *secret,
         std::promise<StatelessResetSummary> *promise) {
     StatelessResetSummary summary{};
@@ -327,23 +420,31 @@ fiber::async::DetachedTask receive_unknown_dcid_stateless_reset(
         co_return;
     }
 
-    fiber::quic::QuicClientConnectOptions options{};
-    options.remote_addr = {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()};
-    options.server_name = "localhost";
-    auto connected = co_await client->connect(options);
+    auto options = make_client_options(*client_endpoint,
+                                       {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()});
+    if (!options) {
+        summary.error = options.error();
+        co_await client_endpoint->shutdown();
+        co_await server_endpoint->shutdown();
+        promise->set_value(summary);
+        co_return;
+    }
+    fiber::quic::QuicConnection connection(*client_endpoint, *options);
+    auto connected = connection.connect(make_connect_params(*security, "localhost"));
     if (!connected) {
-        summary.error = connected.error().io_error;
+        summary.error = connected.error();
+    } else if (auto established = co_await connection.wait_established(2s); !established) {
+        summary.error = established.error();
     } else {
-        fiber::quic::QuicConnection *connection = connected->get();
         std::array<std::uint8_t, fiber::quic::kStatelessResetTokenLength> token{};
         std::array<std::uint8_t, 64> packet{};
         packet.fill(0x5a);
         packet[0] = fiber::quic::kPacketFlagFixed | 0x03U;
-        if (!create_reset_token(*secret, connection->server_initial_source_connection_id(), token.data())) {
+        if (!create_reset_token(*secret, connection.server_initial_source_connection_id(), token.data())) {
             summary.error = fiber::common::IoErr::Invalid;
         } else {
             std::memcpy(packet.data() + packet.size() - token.size(), token.data(), token.size());
-            summary.token_installed = connection->detects_stateless_reset(packet.data(), packet.size());
+            summary.token_installed = connection.detects_stateless_reset(packet.data(), packet.size());
 
             fiber::net::UdpSocket sender(fiber::event::EventLoop::current());
             auto bound = sender.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
@@ -355,17 +456,16 @@ fiber::async::DetachedTask receive_unknown_dcid_stateless_reset(
                     summary.error = sent.error();
                 } else {
                     co_await fiber::async::sleep(10ms);
-                    summary.state = connection->state();
-                    summary.close_source = connection->close_source();
+                    summary.state = connection.state();
+                    summary.close_source = connection.close_source();
                 }
                 sender.close();
             }
         }
     }
 
-    if (connected) {
-        connected->reset();
-    }
+    // The reverse teardown order: shutdown() closes and detaches the
+    // caller-owned connection, which this frame destroys afterwards.
     co_await client_endpoint->shutdown();
     co_await server_endpoint->shutdown();
     promise->set_value(summary);
@@ -373,8 +473,8 @@ fiber::async::DetachedTask receive_unknown_dcid_stateless_reset(
 
 fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint *server_endpoint,
                                                     fiber::quic::QuicUdpEndpoint *client_endpoint,
-                                                    fiber::quic::QuicClient *client, TestClientCache *cache,
-                                                    std::promise<ResumptionSummary> *promise) {
+                                                    const fiber::net::TlsClientSecurity *security,
+                                                    TestClientCache *cache, std::promise<ResumptionSummary> *promise) {
     ResumptionSummary summary{};
     auto server_started = server_endpoint->start();
     auto client_started = client_endpoint->start();
@@ -383,60 +483,92 @@ fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint
         promise->set_value(summary);
         co_return;
     }
+    const fiber::net::SocketAddress remote_addr{fiber::net::IpAddress::loopback_v4(),
+                                                server_endpoint->local_addr().port()};
+    auto make_options = [&]() {
+        auto options = make_client_options(*client_endpoint, remote_addr);
+        if (options) {
+            options->owner = cache;
+            options->ops.on_new_tls_session = cache_store_session;
+            options->ops.on_new_token = cache_store_token;
+        }
+        return options;
+    };
 
-    fiber::quic::QuicClientConnectOptions options{};
-    options.remote_addr = {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()};
-    options.server_name = "localhost";
-    options.handshake_timeout = 2s;
-    auto first = co_await client->connect(options);
-    if (!first) {
-        summary.error = first.error().io_error;
-    } else {
-        (void) co_await (*first)->wait_confirmed(2s);
-        co_await fiber::async::sleep(20ms);
-        summary.session_cached = cache->session != nullptr;
-        summary.token_cached = !cache->token.empty();
-        (*first)->close_immediately();
-        first->reset();
-        co_await fiber::async::sleep(5ms);
-
-        options.enable_early_data = true;
-        auto second_started = client->start_connect(options);
-        summary.cached_session_early_capable =
-                cache->session != nullptr && SSL_SESSION_early_data_capable(cache->session) == 1;
-        if (!second_started) {
-            summary.error = second_started.error().io_error;
+    {
+        auto options = make_options();
+        if (!options) {
+            summary.error = options.error();
+            co_await client_endpoint->shutdown();
+            co_await server_endpoint->shutdown();
+            promise->set_value(summary);
+            co_return;
+        }
+        fiber::quic::QuicConnection first(*client_endpoint, *options);
+        auto connected = first.connect(make_connect_params(*security, "localhost"));
+        if (!connected) {
+            summary.error = connected.error();
+        } else if (auto established = co_await first.wait_established(2s); !established) {
+            summary.error = established.error();
         } else {
-            fiber::quic::QuicClientAttempt attempt = std::move(*second_started);
-            fiber::quic::QuicConnection *connection = attempt.connection();
-            summary.early_write_ready = connection->crypto().early_write().ready();
-            auto stream = fiber::quic::QuicStream::Lease::adopt(
-                    new (std::nothrow) fiber::quic::QuicStream(nullptr, destroy_stream));
-            auto attached =
-                    connection->try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Bidirectional,
-                                                        fiber::quic::QuicStreamEarlyDataMode::ReplaySafe);
-            if (attached) {
-                fiber::mem::IoBuf data = fiber::mem::IoBuf::allocate(4);
-                if (data) {
-                    std::memcpy(data.writable_data(), "ping", 4);
-                    data.commit(4);
-                    summary.early_stream_queued = (*attached)->try_write(data, true).has_value();
-                }
-            } else {
-                summary.early_attach_error = attached.error();
-            }
-            auto connected = co_await attempt.wait_connected(2s);
+            (void) co_await first.wait_confirmed(2s);
+            co_await fiber::async::sleep(20ms);
+            summary.session_cached = cache->session != nullptr;
+            summary.token_cached = !cache->token.empty();
+        }
+        co_await close_and_wait(first);
+        co_await fiber::async::sleep(5ms);
+    }
+
+    if (summary.error == fiber::common::IoErr::None) {
+        fiber::quic::QuicClientCachedState cached{};
+        if (!TestClientCache::load(cache, {}, cached)) {
+            cached = {};
+        }
+        summary.cached_session_early_capable =
+                cached.session != nullptr && SSL_SESSION_early_data_capable(cached.session) == 1;
+        auto options = make_options();
+        if (!options) {
+            summary.error = options.error();
+        } else {
+            fiber::quic::QuicConnection second(*client_endpoint, *options);
+            auto params = make_connect_params(*security, "localhost");
+            params.resumption_session = cached.session;
+            params.token = cached.token;
+            params.token_len = cached.token_len;
+            params.enable_early_data = true;
+            params.remembered_peer_transport = cached.has_remembered_transport ? &cached.remembered_transport : nullptr;
+            auto connected = second.connect(params);
             if (!connected) {
-                summary.error = connected.error().io_error;
+                summary.error = connected.error();
             } else {
-                summary.session_reused = connection->tls().session_reused();
-                summary.token_reused = connection->initial_token().readable() == cache->token.size();
-                summary.early_data_attempted = connection->early_data_attempted();
-                summary.early_data_accepted = connection->early_data_accepted();
-                fiber::quic::QuicConnection::Lease second = attempt.release();
-                second->close_immediately();
-                second.reset();
+                summary.early_write_ready = second.crypto().early_write().ready();
+                auto stream = fiber::quic::QuicStream::Lease::adopt(
+                        new (std::nothrow) fiber::quic::QuicStream(nullptr, destroy_stream));
+                auto attached =
+                        second.try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Bidirectional,
+                                                       fiber::quic::QuicStreamEarlyDataMode::ReplaySafe);
+                if (attached) {
+                    fiber::mem::IoBuf data = fiber::mem::IoBuf::allocate(4);
+                    if (data) {
+                        std::memcpy(data.writable_data(), "ping", 4);
+                        data.commit(4);
+                        summary.early_stream_queued = (*attached)->try_write(data, true).has_value();
+                    }
+                } else {
+                    summary.early_attach_error = attached.error();
+                }
+                auto established = co_await second.wait_established(2s);
+                if (!established) {
+                    summary.error = established.error();
+                } else {
+                    summary.session_reused = second.tls().session_reused();
+                    summary.token_reused = second.initial_token().readable() == cache->token.size();
+                    summary.early_data_attempted = second.early_data_attempted();
+                    summary.early_data_accepted = second.early_data_accepted();
+                }
             }
+            co_await close_and_wait(second);
         }
     }
 
@@ -445,53 +577,29 @@ fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint
     promise->set_value(summary);
 }
 
-fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server_endpoint,
-                                            fiber::quic::QuicUdpEndpoint *client_endpoint,
-                                            fiber::quic::QuicClient *client, const char *server_name,
-                                            std::promise<ConnectSummary> *promise, std::string_view verify_name = {}) {
-    ConnectSummary summary{};
-    auto server_started = server_endpoint->start();
-    auto client_started = client_endpoint->start();
-    if (!server_started || !client_started) {
-        summary.error = !server_started ? server_started.error() : client_started.error();
-        co_await client_endpoint->shutdown();
-        co_await server_endpoint->shutdown();
-        promise->set_value(std::move(summary));
-        co_return;
-    }
-
-    fiber::quic::QuicClientConnectOptions options{};
-    options.remote_addr = {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()};
-    options.server_name = server_name;
-    options.verify_name.assign(verify_name);
-    options.handshake_timeout = 2s;
-    auto connected = co_await client->connect(options);
-    if (!connected) {
-        summary.error = connected.error().io_error;
-        summary.phase = connected.error().phase;
-        summary.tls_verify_result = connected.error().tls_verify_result;
-        summary.tls_alert = connected.error().tls_alert;
-    } else {
-        fiber::quic::QuicConnection *connection = connected->get();
-        summary.state = connection->state();
-        summary.selected_alpn.assign(connection->tls().selected_alpn());
-        summary.peer_transport_received = connection->peer_transport_params_received();
-        summary.server_scid_adopted = connection->has_server_initial_source_connection_id();
-        summary.retry_processed = connection->retry_processed();
-    }
-
-    if (connected) {
-        connected->reset();
-    }
-    co_await client_endpoint->shutdown();
-    co_await server_endpoint->shutdown();
-    promise->set_value(std::move(summary));
+void fill_connect_error(ConnectSummary &summary, const fiber::quic::QuicConnectError &error) noexcept {
+    summary.error = error.io_error;
+    summary.phase = error.phase;
+    summary.tls_verify_result = error.tls_verify_result;
+    summary.tls_alert = error.tls_alert;
 }
 
-fiber::async::DetachedTask connect_loopback_confirmed(fiber::quic::QuicUdpEndpoint *server_endpoint,
-                                                      fiber::quic::QuicUdpEndpoint *client_endpoint,
-                                                      fiber::quic::QuicClient *client, const char *server_name,
-                                                      std::promise<ConnectSummary> *promise) {
+void fill_connected(ConnectSummary &summary, const fiber::quic::QuicConnection &connection) {
+    summary.state = connection.state();
+    summary.selected_alpn.assign(connection.tls().selected_alpn());
+    summary.peer_transport_received = connection.peer_transport_params_received();
+    summary.server_scid_adopted = connection.has_server_initial_source_connection_id();
+    summary.retry_processed = connection.retry_processed();
+}
+
+// Connects, waits for Established (or, with `confirmed`, for the handshake to
+// be confirmed), records the outcome, tears the connection down and shuts
+// both endpoints.
+fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server_endpoint,
+                                            fiber::quic::QuicUdpEndpoint *client_endpoint,
+                                            const fiber::net::TlsClientSecurity *security, const char *server_name,
+                                            std::promise<ConnectSummary> *promise, std::string_view verify_name = {},
+                                            bool confirmed = false) {
     ConnectSummary summary{};
     auto server_started = server_endpoint->start();
     auto client_started = client_endpoint->start();
@@ -503,33 +611,29 @@ fiber::async::DetachedTask connect_loopback_confirmed(fiber::quic::QuicUdpEndpoi
         co_return;
     }
 
-    fiber::quic::QuicClientConnectOptions options{};
-    options.remote_addr = {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()};
-    options.server_name = server_name;
-    options.handshake_timeout = 2s;
-    auto started = client->start_connect(options);
-    if (!started) {
-        summary.error = started.error().io_error;
-        summary.phase = started.error().phase;
-        summary.tls_verify_result = started.error().tls_verify_result;
-        summary.tls_alert = started.error().tls_alert;
+    auto options = make_client_options(*client_endpoint,
+                                       {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()});
+    if (!options) {
+        summary.error = options.error();
     } else {
-        fiber::quic::QuicClientAttempt attempt = std::move(*started);
-        auto confirmed = co_await attempt.wait_confirmed(2s);
-        if (!confirmed) {
-            summary.error = confirmed.error().io_error;
-            summary.phase = confirmed.error().phase;
-            summary.tls_verify_result = confirmed.error().tls_verify_result;
-            summary.tls_alert = confirmed.error().tls_alert;
+        fiber::quic::QuicConnection connection(*client_endpoint, *options);
+        auto connected = connection.connect(make_connect_params(*security, server_name, verify_name));
+        if (!connected) {
+            fill_connect_error(summary, connection.connect_error(connected.error()));
         } else {
-            fiber::quic::QuicConnection *connection = attempt.connection();
-            summary.state = connection->state();
-            summary.selected_alpn.assign(connection->tls().selected_alpn());
-            summary.peer_transport_received = connection->peer_transport_params_received();
-            summary.server_scid_adopted = connection->has_server_initial_source_connection_id();
-            summary.retry_processed = connection->retry_processed();
+            fiber::common::IoResult<void> waited{};
+            if (confirmed) {
+                waited = co_await connection.wait_confirmed(2s);
+            } else {
+                waited = co_await connection.wait_established(2s);
+            }
+            if (!waited) {
+                fill_connect_error(summary, connection.connect_error(waited.error()));
+            } else {
+                fill_connected(summary, connection);
+            }
         }
-        attempt.cancel();
+        co_await close_and_wait(connection);
     }
 
     co_await client_endpoint->shutdown();
@@ -541,7 +645,7 @@ fiber::async::DetachedTask connect_loopback_confirmed(fiber::quic::QuicUdpEndpoi
 
 } // namespace
 
-TEST(QuicClientTest, StartConnectAttachesAndQueuesClientInitial) {
+TEST(QuicClientTest, ConnectAttachesAndQueuesClientInitial) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -554,26 +658,19 @@ TEST(QuicClientTest, StartConnectAttachesAndQueuesClientInitial) {
     ASSERT_TRUE(tls_material);
     auto tls_options = make_quic_client_tls(*tls_material, false);
 
-    fiber::quic::QuicClient missing_alpn_client;
-    auto missing_alpn = missing_alpn_client.init(endpoint, tls_options,
-                                                 {.connection_owner = nullptr, .create_connection = create_connection});
-    ASSERT_FALSE(missing_alpn);
-    EXPECT_EQ(missing_alpn.error(), fiber::common::IoErr::Invalid);
-
-    fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(
-            endpoint, tls_options,
-            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
-
     std::promise<StartSummary> promise;
     auto future = promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return start_client_attempt(&endpoint, &client, &promise); });
+    fiber::async::spawn(group.at(0), [&]() { return start_client_attempt(&endpoint, &tls_options, &promise); });
 
     ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
     const StartSummary summary = future.get();
+    EXPECT_EQ(summary.missing_alpn_error, fiber::common::IoErr::Invalid);
+    EXPECT_EQ(summary.missing_alpn_phase, fiber::quic::QuicConnectPhase::Tls);
+    EXPECT_EQ(summary.missing_alpn_state, fiber::quic::QuicConnectionState::Closed);
     EXPECT_EQ(summary.error, fiber::common::IoErr::None);
     EXPECT_EQ(summary.state, fiber::quic::QuicConnectionState::Handshaking);
     EXPECT_EQ(summary.endpoint_connections, 1U);
+    EXPECT_EQ(summary.endpoint_connections_after_close, 0U);
     EXPECT_TRUE(summary.tls_initialized);
     EXPECT_TRUE(summary.initial_keys_ready);
     EXPECT_TRUE(summary.cid_registered);
@@ -596,14 +693,9 @@ TEST(QuicClientTest, HandshakeTimeoutCancelsAndDetachesConnection) {
     ASSERT_TRUE(tls_material);
     auto tls_options = make_quic_client_tls(*tls_material, false);
 
-    fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(
-            endpoint, tls_options,
-            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
-
     std::promise<TimeoutSummary> promise;
     auto future = promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return timeout_client_attempt(&endpoint, &client, &promise); });
+    fiber::async::spawn(group.at(0), [&]() { return timeout_client_attempt(&endpoint, &tls_options, &promise); });
 
     ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
     const TimeoutSummary summary = future.get();
@@ -643,15 +735,11 @@ TEST(QuicClientTest, VerifyNameMayDifferFromServerName) {
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(client_endpoint.init(client_options));
 
-    fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(
-            client_endpoint, client_tls,
-            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
-
     std::promise<ConnectSummary> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return connect_loopback(&server_endpoint, &client_endpoint, &client, "routing.example", &promise, "localhost");
+        return connect_loopback(&server_endpoint, &client_endpoint, &client_tls, "routing.example", &promise,
+                                "localhost");
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
@@ -709,15 +797,11 @@ TEST_P(QuicClientMtlsTest, EnforcesClientCertificateAuthentication) {
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(client_endpoint.init(client_options));
 
-    fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(
-            client_endpoint, client_tls,
-            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
-
     std::promise<ConnectSummary> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return connect_loopback_confirmed(&server_endpoint, &client_endpoint, &client, "localhost", &promise);
+        return connect_loopback(&server_endpoint, &client_endpoint, &client_tls, "localhost", &promise, {},
+                                /*confirmed=*/true);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
@@ -773,15 +857,10 @@ TEST(QuicClientTest, RejectsCertificateForWrongHostname) {
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(client_endpoint.init(client_options));
 
-    fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(
-            client_endpoint, client_tls,
-            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
-
     std::promise<ConnectSummary> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return connect_loopback(&server_endpoint, &client_endpoint, &client, "wrong.example", &promise);
+        return connect_loopback(&server_endpoint, &client_endpoint, &client_tls, "wrong.example", &promise);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
@@ -830,15 +909,10 @@ TEST(QuicClientTest, UnknownDcidStatelessResetUsesEndpointTokenIndex) {
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(client_endpoint.init(client_options));
 
-    fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(
-            client_endpoint, client_tls,
-            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
-
     std::promise<StatelessResetSummary> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return receive_unknown_dcid_stateless_reset(&server_endpoint, &client_endpoint, &client, &reset_secret,
+        return receive_unknown_dcid_stateless_reset(&server_endpoint, &client_endpoint, &client_tls, &reset_secret,
                                                     &promise);
     });
 
@@ -883,15 +957,10 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshakeAfterRetry) {
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     ASSERT_TRUE(client_endpoint.init(client_options));
 
-    fiber::quic::QuicClient client;
-    ASSERT_TRUE(client.init(
-            client_endpoint, client_tls,
-            {.connection_owner = nullptr, .create_connection = create_connection, .alpn = {"fiber-quic-test"}}));
-
     std::promise<ConnectSummary> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return connect_loopback(&server_endpoint, &client_endpoint, &client, "localhost", &promise);
+        return connect_loopback(&server_endpoint, &client_endpoint, &client_tls, "localhost", &promise);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
@@ -929,7 +998,7 @@ TEST(QuicClientTest, ReusesSessionAndNewTokenWithEarlyData) {
     server_options.tls = &server_tls;
     server_options.create_connection = create_server_connection;
     server_options.issue_new_token = true;
-    server_options.enable_early_data = true;
+    server_tls.enable_early_data = true;
     ASSERT_TRUE(server_endpoint.init(server_options));
 
     fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
@@ -938,22 +1007,11 @@ TEST(QuicClientTest, ReusesSessionAndNewTokenWithEarlyData) {
     ASSERT_TRUE(client_endpoint.init(client_options));
 
     TestClientCache cache{};
-    fiber::quic::QuicClient client;
-    fiber::quic::QuicClient::Options client_options_config{};
-    client_options_config.create_connection = create_connection;
-    client_options_config.cache = {
-            .owner = &cache,
-            .load = TestClientCache::load,
-            .store_session = TestClientCache::store_session,
-            .store_token = TestClientCache::store_token,
-    };
-    client_options_config.alpn = {"fiber-quic-test"};
-    ASSERT_TRUE(client.init(client_endpoint, client_tls, std::move(client_options_config)));
 
     std::promise<ResumptionSummary> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return connect_twice_with_cache(&server_endpoint, &client_endpoint, &client, &cache, &promise);
+        return connect_twice_with_cache(&server_endpoint, &client_endpoint, &client_tls, &cache, &promise);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
