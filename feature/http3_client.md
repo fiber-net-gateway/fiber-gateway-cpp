@@ -54,9 +54,13 @@ co_await conn.wait_closed();   // H3 任务 join + QUIC 已 detach，之后才�
 5. 析构前必须 `shutdown()` 或 `graceful_shutdown()` 并 `co_await wait_closed()`；`wait_closed()` 返回
    意味着 H3 任务已 join 且 QUIC 已从 endpoint detach。析构断言这两点以及没有存活的请求。
    `connect()` 失败的对象已经满足该条件（失败路径自己走立即关闭并等待 detach）。
+   若通过外层超时或竞速取消 `connect()` 任务，任务析构会发起立即关闭，但不能异步等待清理；
+   调用方必须保持连接存活并 `co_await wait_closed()`，之后才可析构，无需额外调用 `shutdown()`。
 6. `endpoint.shutdown()` 会关闭并 detach 尚存的连接，但不等待连接对象析构；对象可以在 `shutdown()`
    之后、`~QuicUdpEndpoint` 之前析构，仍需先 `co_await wait_closed()`。先 `endpoint.shutdown()` 再
    `wait_closed()` 可以跳过 3×PTO 的 closing 期。
+   `shutdown()` 完成不代表 endpoint 可以析构或重新 `init()`；必须先销毁所有连接对象，
+   因为已 detach 的对象仍可能持有 endpoint 的内存池资源。
 
 同一个 request 允许一个读协程和一个写协程并行，以支持流式上传和响应；同方向并发操作返回
 `IoErr::Busy`。

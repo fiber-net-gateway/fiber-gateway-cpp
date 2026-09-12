@@ -2,6 +2,30 @@
 #include <fiber/http/ClientHttp3Exchange.h>
 #include "Http3ConnectionTestSupport.h"
 
+TEST(Http3ClientConnectionTest, LocalSettingsUseConfiguredFieldSectionLimit) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    auto quic_options = fiber::test::quic_options();
+    quic_options.role = fiber::quic::QuicConnectionRole::Client;
+    struct Case {
+        std::size_t receive_limit;
+        std::uint64_t advertised_limit;
+        std::uint64_t expected;
+    };
+    const Case cases[] = {{128 * 1024, 0, 128 * 1024}, {4096, 0, 4096}, {4096, 2048, 2048}, {0, 0, 0}};
+    for (const auto &test: cases) {
+        fiber::http::Http3Client::Options options{};
+        options.max_field_section_size = test.receive_limit;
+        options.local_settings.max_field_section_size = test.advertised_limit;
+        ClientFixture fixture(endpoint.get(), quic_options, options);
+        EXPECT_EQ(fixture.connection().local_settings().max_field_section_size, test.expected);
+        fixture.finish();
+    }
+    group.stop();
+    group.join();
+}
+
 TEST(Http3ClientConnectionTest, ClientStopsAcceptingRequestsWhenQuicShutdownBegins) {
     fiber::event::EventLoopGroup group(1);
     group.start();
