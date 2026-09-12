@@ -1,6 +1,11 @@
 #ifndef FIBER_HTTP_HTTP3_CLIENT_CONNECTION_IMPL_H
 #define FIBER_HTTP_HTTP3_CLIENT_CONNECTION_IMPL_H
 #include <fiber/http/Http3ClientConnection.h>
+#include <fiber/net/SocketAddress.h>
+#include <fiber/net/TlsParams.h>
+#include <fiber/quic/QuicClientConnect.h>
+#include <string>
+#include <string_view>
 #include "http/Http3ControlStreams.h"
 namespace fiber::http {
 struct Http3ClientRequestEntry {
@@ -18,6 +23,14 @@ public:
         std::chrono::milliseconds drain_timeout = std::chrono::seconds(3);
         std::uint32_t max_qpack_string_size = 64 * 1024;
         std::size_t max_field_section_size = 128 * 1024;
+        // Session cache identity. The names are copied; the cache ops are
+        // borrowed from the Http3Client, which outlives the connection. The
+        // address is the dial target, not the (migratable) QUIC path.
+        std::string_view server_name{};
+        std::string_view verify_name{};
+        net::SocketAddress remote_addr{};
+        net::TlsClientSecurity security{};
+        const quic::QuicClientCacheOps *cache = nullptr;
     };
     static Http3ClientConnectionImpl *create(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &,
                                              const Options &) noexcept;
@@ -53,6 +66,9 @@ private:
     static void on_peer_stream_attached(void *, quic::QuicStream &) noexcept;
     static void on_quic_state_change(void *, quic::QuicConnection &) noexcept;
     static void on_quic_capacity_change(void *, quic::QuicConnection &) noexcept;
+    static bool on_new_tls_session(void *, quic::QuicConnection &, SSL_SESSION *) noexcept;
+    static void on_new_token(void *, quic::QuicConnection &, const std::uint8_t *, std::size_t) noexcept;
+    [[nodiscard]] quic::QuicClientCacheKey cache_key() const noexcept;
     static const Http3ControlStreams::Ops &control_ops() noexcept;
     static void destroy_connection(void *, quic::QuicConnection &) noexcept;
     async::Task<void> join_protocol_tasks() noexcept;
@@ -61,6 +77,11 @@ private:
     void reject_client_requests(std::uint64_t) noexcept;
     void detach_client_requests(Http3ErrorCode) noexcept;
     using ClientRequestList = common::IntrusiveList<Http3ClientRequestEntry, offsetof(Http3ClientRequestEntry, link)>;
+    const std::string server_name_;
+    const std::string verify_name_;
+    const net::SocketAddress remote_addr_;
+    const net::TlsClientSecurity security_;
+    const quic::QuicClientCacheOps *const cache_;
     quic::QuicConnection quic_;
     quic::QuicLocalStreamGate local_stream_gate_;
     Http3ControlStreams control_;

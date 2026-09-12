@@ -59,10 +59,10 @@ private:
     bool client_mode_ = false;
     bool verify_peer_ = false;
     net::detail::TlsNewSessionOps new_session_ops_{};
-    // Server handshake borrow pair: the param copy (with the connection-level
-    // early-data switch merged in) and the state borrowing it. Unlike TCP, the
-    // QUIC handshake spans many drive_handshake() calls with no owning
-    // coroutine frame, so both live here for the session's lifetime.
+    // Server handshake borrow pair: the param copy and the state borrowing
+    // it. Unlike TCP, the QUIC handshake spans many drive_handshake() calls
+    // with no owning coroutine frame, so both live here for the session's
+    // lifetime.
     net::TlsServerParam server_param_{};
     net::detail::TlsServerHandshakeState server_handshake_state_{};
 };
