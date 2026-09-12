@@ -10,6 +10,9 @@
 
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
+#include <fiber/async/TaskSelect.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/async/WaitGroup.h>
 #include <fiber/common/mem/BufPool.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp3Exchange.h>
@@ -19,6 +22,7 @@
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
+#include "QuicTestLoop.h"
 #include "QuicTestTlsCertificate.h"
 
 namespace {
@@ -157,18 +161,13 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         promise->set_value(std::move(observation));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        observation.error = initialized.error();
-        promise->set_value(std::move(observation));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         observation.error = connected.error().io_error;
         observation.connect_phase = connected.error().phase;
@@ -180,7 +179,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         fiber::mem::BufPool pool;
         fiber::http::HttpHeaders headers(pool);
         headers.set("content-length", "17");
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         fiber::http::Http3RequestHead head{
                 .method = fiber::http::HttpMethod::Post,
                 .scheme = "https",
@@ -242,7 +241,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
             }
         }
 
-        fiber::http::ClientHttp3Exchange head_exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange head_exchange = connection.open_exchange(pool);
         fiber::http::Http3RequestHead head_request{
                 .method = fiber::http::HttpMethod::Head,
                 .scheme = "https",
@@ -274,9 +273,11 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         }
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+    // The endpoint's shutdown cuts the closing period short; the connection
+    // object is then joined before this frame destroys it.
     co_await endpoint->shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(observation));
 }
 
@@ -294,19 +295,14 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
         promise->set_value(std::move(observation));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        observation.error = initialized.error();
-        promise->set_value(std::move(observation));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
     connect_options.allow_insecure = true;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         observation.error = connected.error().io_error;
         observation.connect_phase = connected.error().phase;
@@ -316,7 +312,7 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
 
     {
         fiber::mem::BufPool pool;
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         fiber::http::Http3RequestHead head{
                 .method = fiber::http::HttpMethod::Get,
                 .scheme = "https",
@@ -347,9 +343,11 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
         observation.outcome = exchange.outcome();
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+    // The endpoint's shutdown cuts the closing period short; the connection
+    // object is then joined before this frame destroys it.
     co_await endpoint->shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(observation));
 }
 
@@ -375,18 +373,13 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         promise->set_value(std::move(observation));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        observation.error = initialized.error();
-        promise->set_value(std::move(observation));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         observation.error = connected.error().io_error;
         promise->set_value(std::move(observation));
@@ -404,7 +397,7 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         fiber::http::HttpHeaders headers(pool);
         const std::string content_length = std::to_string(body.size());
         headers.set("content-length", content_length);
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         fiber::http::Http3RequestHead head{
                 .method = fiber::http::HttpMethod::Post,
                 .scheme = "https",
@@ -454,13 +447,167 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         }
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+    // The endpoint's shutdown cuts the closing period short; the connection
+    // object is then joined before this frame destroys it.
     co_await endpoint->shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(observation));
 }
 
 } // namespace
+
+namespace {
+
+enum class ConnectInterruption { Cancel, Closing, Draining };
+
+void check_interrupted_connect(ConnectInterruption interruption) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    // Bound but never started: Initial packets have a destination, but no
+    // peer can complete the handshake or reset the connection.
+    fiber::test::QuicTestEndpoint silent_peer(group.at(0));
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        EXPECT_TRUE(endpoint.get().start());
+        fiber::http::Http3Client::Options options{};
+        options.tls.verify_peer = false;
+        fiber::http::Http3Client client(endpoint.get(), options);
+        fiber::http::Http3ClientConnectOptions target{};
+        target.remote_addr = silent_peer.get().local_addr();
+        target.allow_insecure = true;
+        target.handshake_timeout = 2s;
+        {
+            fiber::http::Http3ClientConnection connection(client, target);
+            fiber::async::WaitGroup injector;
+            injector.add();
+            fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+                co_await fiber::async::sleep(1ms);
+                EXPECT_TRUE(connection.quic().attached_to_endpoint());
+                if (interruption == ConnectInterruption::Closing) {
+                    connection.quic().close(fiber::quic::QuicErrorCode::InternalError);
+                } else if (interruption == ConnectInterruption::Draining) {
+                    connection.quic().begin_draining();
+                }
+                injector.done();
+            });
+            auto result =
+                    co_await fiber::async::timeout_for([&]() { return connection.connect().select(); },
+                                                       interruption == ConnectInterruption::Cancel ? 20ms : 500ms);
+            if (interruption == ConnectInterruption::Cancel) {
+                EXPECT_FALSE(result);
+                if (!result) {
+                    EXPECT_EQ(result.error(), fiber::common::IoErr::TimedOut);
+                }
+                EXPECT_NE(connection.state(), fiber::http::Http3ConnectionState::Prepared);
+            } else {
+                // The error must return without spending the default ~3 s
+                // closing period. It must also leave the object detached.
+                EXPECT_TRUE(result);
+                if (result) {
+                    EXPECT_FALSE(*result);
+                    EXPECT_FALSE(connection.quic().attached_to_endpoint());
+                }
+            }
+            co_await injector.join();
+            // Canceled connect initiates closure itself; no explicit shutdown
+            // should be needed before joining and destroying the connection.
+            auto closed =
+                    co_await fiber::async::timeout_for([&]() { return connection.wait_closed().select(); }, 500ms);
+            EXPECT_TRUE(closed);
+            if (!closed) {
+                // Keep failures diagnostic instead of destroying attached storage.
+                connection.shutdown();
+                connection.quic().arm_close_timer_immediate();
+                co_await connection.wait_closed();
+            }
+            EXPECT_FALSE(connection.quic().attached_to_endpoint());
+            EXPECT_EQ(connection.quic().ref_count(), 1U);
+            EXPECT_EQ(endpoint.get().active_connection_count(), 0U);
+        }
+        co_await endpoint.get().shutdown();
+        done.set_value();
+    });
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+} // namespace
+
+TEST(Http3ClientTest, CanceledConnectClosesAndDetaches) { check_interrupted_connect(ConnectInterruption::Cancel); }
+
+TEST(Http3ClientTest, FailedConnectAcceleratesClosing) { check_interrupted_connect(ConnectInterruption::Closing); }
+
+TEST(Http3ClientTest, FailedConnectAcceleratesDraining) { check_interrupted_connect(ConnectInterruption::Draining); }
+
+namespace {
+
+enum class ConnectRejection { EndpointNotInitialized, EndpointNotStarted };
+
+// A connect() refused before the connection ever attaches ends in the same
+// place as one that failed on the wire: Closed, detached, destructible.
+void check_rejected_connect(ConnectRejection rejection) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
+    if (rejection == ConnectRejection::EndpointNotStarted) {
+        fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
+        endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+        ASSERT_TRUE(endpoint.init(endpoint_options));
+    }
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        fiber::http::Http3Client::Options options{};
+        options.tls.verify_peer = false;
+        fiber::http::Http3Client client(endpoint, options);
+        fiber::http::Http3ClientConnectOptions target{};
+        target.remote_addr = {fiber::net::IpAddress::loopback_v4(), 4433};
+        target.allow_insecure = true;
+        {
+            fiber::http::Http3ClientConnection connection(client, target);
+            auto result = co_await connection.connect();
+            EXPECT_FALSE(result);
+            if (!result) {
+                EXPECT_EQ(result.error().phase, fiber::http::Http3ClientConnectPhase::Quic);
+                EXPECT_EQ(result.error().io_error, fiber::common::IoErr::Invalid);
+                EXPECT_EQ(result.error().quic_error.phase, rejection == ConnectRejection::EndpointNotInitialized
+                                                                   ? fiber::quic::QuicConnectPhase::Connection
+                                                                   : fiber::quic::QuicConnectPhase::Endpoint);
+            }
+            EXPECT_EQ(connection.state(), fiber::http::Http3ConnectionState::Closed);
+            EXPECT_EQ(connection.quic().state(), fiber::quic::QuicConnectionState::Closed);
+            EXPECT_FALSE(connection.quic().attached_to_endpoint());
+            EXPECT_EQ(endpoint.active_connection_count(), 0U);
+            // A repeat call is refused without disturbing the closed object.
+            auto again = co_await connection.connect();
+            EXPECT_FALSE(again);
+            if (!again) {
+                EXPECT_EQ(again.error().phase, fiber::http::Http3ClientConnectPhase::ClientInit);
+                EXPECT_EQ(again.error().io_error, fiber::common::IoErr::Already);
+            }
+            co_await connection.wait_closed();
+        }
+        co_await endpoint.shutdown();
+        done.set_value();
+    });
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+} // namespace
+
+TEST(Http3ClientTest, RejectedConnectOnUninitializedEndpointClosesConnection) {
+    check_rejected_connect(ConnectRejection::EndpointNotInitialized);
+}
+
+TEST(Http3ClientTest, RejectedConnectOnUnstartedEndpointClosesConnection) {
+    check_rejected_connect(ConnectRejection::EndpointNotStarted);
+}
 
 TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
     fiber::test::QuicTestTlsFile cert("h3-client-cert", fiber::test::kQuicTestCertificatePem);

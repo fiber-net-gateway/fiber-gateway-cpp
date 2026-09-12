@@ -506,13 +506,12 @@ TEST(QuicConnectionTest, EarlyDataRejectionDropsReplaySafeStreamsWithoutReplay) 
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.owner = &state;
     options.ops.on_early_data_rejected = on_early_data_rejected;
-    options.enable_early_data = true;
-    options.has_remembered_peer_transport = true;
-    options.remembered_peer_transport.initial_max_data = 4096;
-    options.remembered_peer_transport.initial_max_stream_data_bidi_remote = 1024;
-    options.remembered_peer_transport.initial_max_streams_bidi = 1;
-    options.max_local_bidirectional_streams = 1;
     fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
+    fiber::quic::QuicTransportSettings remembered{};
+    remembered.initial_max_data = 4096;
+    remembered.initial_max_stream_data_bidi_remote = 1024;
+    remembered.initial_max_streams_bidi = 1;
+    ASSERT_TRUE(conn.remember_peer_transport(remembered));
     ASSERT_TRUE(conn.crypto().ensure_transient());
     conn.crypto().early_write().packet->ready = true;
     conn.crypto().early_write().header->ready = true;
@@ -3284,6 +3283,32 @@ TEST(QuicConnectionTest, GracefulStateObserverCanCloseImmediatelyWithoutOverwrit
         EXPECT_TRUE(conn.try_attach_local_stream(make_test_stream(), fiber::quic::QuicStreamType::Bidirectional));
         conn.shutdown(fiber::quic::QuicErrorCode::NoError, 0, std::chrono::seconds(5));
         co_await fiber::async::sleep(std::chrono::milliseconds(20));
+        EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
+        loop.stop();
+    });
+    loop.run();
+}
+
+TEST(QuicConnectionTest, CloseImmediatelyCutsDrainingPeriodShort) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        auto options = fiber::test::quic_options();
+        fiber::test::QuicTestEndpoint endpoint(loop);
+        fiber::quic::QuicConnection conn(endpoint.get(), options);
+        EXPECT_TRUE(conn.mark_established());
+        conn.begin_draining();
+        EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Draining);
+        EXPECT_TRUE(conn.close_timer_armed());
+        const fiber::quic::QuicCloseInfo draining_info = conn.close_info();
+
+        // Draining sends nothing, so the close info is unchanged; only the
+        // 3*PTO wait collapses to the next loop turn.
+        conn.close_immediately(fiber::quic::QuicErrorCode::InternalError);
+        EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Draining);
+        EXPECT_EQ(conn.close_info().source, draining_info.source);
+        EXPECT_EQ(conn.close_info().error_code, draining_info.error_code);
+        EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ConnectionClose), 0U);
+        co_await fiber::async::sleep(std::chrono::milliseconds(5));
         EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Closed);
         loop.stop();
     });

@@ -20,10 +20,9 @@ class QuicConnection;
 // no policy for an owner to make: every waiter gets the same answer at the
 // same instant, so there is no admission order, no budget, and nothing an
 // application knows that the transport does not. And the party that waits --
-// QuicClientAttempt -- does so before any application owner exists, on a
-// connection whose Ops are later replaced wholesale by set_app_ops; a gate
-// wired through Ops would be handed off mid-handshake. What moves out here is
-// the machinery, not the ownership.
+// whoever called connect() -- may do so on a connection whose Ops are later
+// replaced wholesale by set_app_ops; a gate wired through Ops would be handed
+// off mid-handshake. What moves out here is the machinery, not the ownership.
 //
 // Lives on the connection's EventLoop and is not thread safe.
 class QuicHandshakeGate : public common::NonCopyable, public common::NonMovable {

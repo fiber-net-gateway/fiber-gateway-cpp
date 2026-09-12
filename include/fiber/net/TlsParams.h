@@ -111,8 +111,8 @@ struct TlsClientParam {
 inline constexpr std::chrono::milliseconds kDefaultTlsHandshakeTimeout{10000};
 
 // Owning ALPN protocol list for callers that need to keep a caller-configured
-// set of protocols alive across many handshakes (e.g. QuicClient::Options::alpn,
-// set once at init() and reused per connect()) and hand out a borrowed span for
+// set of protocols alive across many handshakes (e.g. an HTTP/3 client's "h3",
+// set once and reused per connection) and hand out a borrowed span for
 // TlsClientParam::alpn/TlsServerParam::alpn. assign() copies the protocol
 // characters; views returned by view() stay valid until the next mutation.
 // Copy and move rebind the internal views to the new storage.

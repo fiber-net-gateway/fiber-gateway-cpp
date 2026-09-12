@@ -1,4 +1,4 @@
-#include "http/Http3ControlStreams.h"
+#include <fiber/http/Http3ControlStreams.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 #include <fiber/common/Assert.h>
 #include <fiber/common/mem/IoBufChain.h>
 #include <fiber/http/Http3Codec.h>
-#include "http/Http3ControlStreamDecoder.h"
+#include <fiber/http/Http3ControlStreamDecoder.h>
 #include "http/Http3ControlStreamEncoder.h"
 #include "http/Http3QpackControlStreamDecoder.h"
 
