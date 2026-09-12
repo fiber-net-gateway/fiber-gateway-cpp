@@ -628,10 +628,10 @@ TEST(ServerLifecycleTest, WorkerAllocationFailureRollsBackTcpAndUdpAndAllowsRetr
             EXPECT_EQ(server.state(), Server::State::Created);
             EXPECT_EQ(endpoint->listener_fd(), -1);
             // Every UDP shard must have released the inherited port too.
-            fiber::quic::QuicUdpEndpoint probe;
+            fiber::quic::QuicUdpEndpoint probe(group.at(0));
             fiber::quic::QuicUdpEndpoint::EndpointOptions opts{};
             opts.bind_addr = endpoint->local_addr();
-            EXPECT_TRUE(probe.init(group.at(0), opts));
+            EXPECT_TRUE(probe.init(opts));
             probe.close();
         }
         failing->allow_workers();

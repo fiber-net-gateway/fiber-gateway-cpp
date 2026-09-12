@@ -105,9 +105,8 @@ void Http3ControlStreams::accept_peer_stream(quic::QuicStream &stream) noexcept 
     }
     quic::QuicStream::Lease lease = stream.lease();
     peer_reader_group_.add();
-    event::EventLoop *loop = quic_.loop();
-    FIBER_ASSERT(loop != nullptr);
-    async::spawn(*loop, [this, lease = std::move(lease)]() mutable { return run_peer_uni_stream(std::move(lease)); });
+    async::spawn(quic_.loop(),
+                 [this, lease = std::move(lease)]() mutable { return run_peer_uni_stream(std::move(lease)); });
 }
 
 async::DetachedTask Http3ControlStreams::run_peer_uni_stream(quic::QuicStream::Lease stream) noexcept {

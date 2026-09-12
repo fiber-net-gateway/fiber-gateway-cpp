@@ -138,12 +138,11 @@ struct QuicSendMessageBatch {
 
 } // namespace
 
-QuicSendScheduler::QuicSendScheduler() noexcept = default;
+QuicSendScheduler::QuicSendScheduler(QuicUdpEndpoint &endpoint) noexcept : endpoint_(endpoint), loop_(endpoint.loop_) {}
 
 QuicSendScheduler::~QuicSendScheduler() { close(); }
 
-common::IoResult<void> QuicSendScheduler::init(event::EventLoop &loop, net::UdpSocket &socket,
-                                               QuicUdpEndpoint &endpoint, const Options &options) noexcept {
+common::IoResult<void> QuicSendScheduler::init(net::UdpSocket &socket, const Options &options) noexcept {
     if (initialized_ || options.max_datagrams_per_batch == 0 || options.max_gso_segments == 0 ||
         options.max_datagrams_per_batch > net::kUdpMaxBatchSize || options.max_packets_per_wakeup == 0 ||
         options.max_gso_segments > net::kUdpMaxBatchSize || options.max_packets_per_connection == 0 ||
@@ -153,9 +152,7 @@ common::IoResult<void> QuicSendScheduler::init(event::EventLoop &loop, net::UdpS
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    loop_ = &loop;
     socket_ = &socket;
-    endpoint_ = &endpoint;
     options_ = options;
     stop_reason_ = common::IoErr::None;
     closing_ = false;
@@ -168,8 +165,7 @@ void QuicSendScheduler::submit(QuicConnection &connection) noexcept {
     if (!initialized_ || closing_) {
         return;
     }
-    FIBER_ASSERT(loop_ != nullptr);
-    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(loop_.in_loop());
     // Ordinary work remains pending until the existing pacing timer fires. Only frames that are exempt from pacing
     // may requeue the connection early.
     if (connection.pacing_timer_armed() && !connection.has_pacing_exempt_send_work()) {
@@ -190,9 +186,7 @@ void QuicSendScheduler::close(common::IoErr reason) noexcept {
     closing_ = true;
     clear_ready();
     initialized_ = false;
-    loop_ = nullptr;
     socket_ = nullptr;
-    endpoint_ = nullptr;
     gso_enabled_ = false;
 }
 
@@ -201,8 +195,7 @@ QuicSendScheduler::PumpResult QuicSendScheduler::pump() noexcept {
     if (!initialized_ || closing_) {
         return pump_result;
     }
-    FIBER_ASSERT(loop_ != nullptr);
-    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(loop_.in_loop());
 
     std::size_t flushes = 0;
     while (!closing_ && has_work()) {
@@ -250,7 +243,6 @@ void QuicSendScheduler::clear_ready() noexcept {
 }
 
 QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnection &connection) noexcept {
-    FIBER_ASSERT(endpoint_ != nullptr);
     FIBER_ASSERT(socket_ != nullptr);
     FIBER_ASSERT(connection.send_queue_hook_.linked());
 
@@ -268,7 +260,7 @@ QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnectio
         const QuicPath *initial_path = connection.active_path();
         const std::size_t initial_mtu = initial_path != nullptr ? initial_path->mtu : kQuicCongestionMinInitialSize;
         (void) quic_pacer_check(connection.pacer_, options_.pacing, connection.congestion(), connection.rtt(),
-                                initial_mtu, loop_->now());
+                                initial_mtu, loop_.now());
         build_state.pacer = connection.pacer_;
 
         std::size_t datagram_count = 0;
@@ -283,14 +275,14 @@ QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnectio
             const QuicPath *active_path = connection.active_path();
             const std::size_t path_mtu = active_path != nullptr ? active_path->mtu : kQuicCongestionMinInitialSize;
             const auto pacing = quic_pacer_check(build_state.pacer, options_.pacing, build_state.congestion,
-                                                 connection.rtt(), path_mtu, loop_->now());
+                                                 connection.rtt(), path_mtu, loop_.now());
             const QuicBuildMode mode = pacing.ready ? QuicBuildMode::Normal : QuicBuildMode::PacingExemptOnly;
 
             QuicSendDatagram &datagram = datagrams[datagram_count];
-            datagram.data = endpoint_->send_buffer_.get() + arena_used;
+            datagram.data = endpoint_.send_buffer_.get() + arena_used;
             datagram.capacity = options_.send_buffer_size - arena_used;
 
-            auto built = endpoint_->build_send_datagram(connection, datagram, build_state, mode);
+            auto built = endpoint_.build_send_datagram(connection, datagram, build_state, mode);
             if (!built) {
                 terminal_status = QuicBuildSendStatus::Closed;
                 result.error = built.error();
@@ -299,7 +291,7 @@ QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnectio
             terminal_status = built->status;
             if (built->status != QuicBuildSendStatus::Encoded) {
                 if (built->status == QuicBuildSendStatus::NoWork && !pacing.ready &&
-                    endpoint_->connection_has_send_work(connection)) {
+                    endpoint_.connection_has_send_work(connection)) {
                     pacing_delayed = true;
                     pacing_deadline = pacing.deadline;
                 }
@@ -316,13 +308,13 @@ QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnectio
         }
 
         if (datagram_count == 0) {
-            endpoint_->finish_send_batch(connection);
+            endpoint_.finish_send_batch(connection);
             remove(connection);
             if (pacing_delayed) {
                 connection.arm_pacing_timer(pacing_deadline);
             }
             if (result.error == common::IoErr::None && terminal_status == QuicBuildSendStatus::Encoded &&
-                endpoint_->connection_has_send_work(connection)) {
+                endpoint_.connection_has_send_work(connection)) {
                 result.error = common::IoErr::NoMem;
             }
             return result;
@@ -342,12 +334,12 @@ QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnectio
         }
         if (!sent) {
             for (std::size_t i = datagram_count; i != 0; --i) {
-                endpoint_->rollback_send_datagram(connection, datagrams[i - 1]);
+                endpoint_.rollback_send_datagram(connection, datagrams[i - 1]);
             }
-            endpoint_->finish_send_batch(connection);
+            endpoint_.finish_send_batch(connection);
             if (sent.error() == common::IoErr::MessageTooLarge && datagrams[0].mtu_probe &&
                 datagrams[0].path != nullptr) {
-                const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+                const QuicTime now = quic_time_ms(loop_.now());
                 auto handled = connection.paths().handle_mtu_probe_send_failed(*datagrams[0].path, now);
                 if (!handled) {
                     result.error = handled.error();
@@ -372,12 +364,12 @@ QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnectio
             if (datagrams[i].pacing_controlled) {
                 quic_pacer_on_datagram_sent(connection.pacer_, datagrams[i].length);
             }
-            endpoint_->commit_send_datagram(connection, datagrams[i]);
+            endpoint_.commit_send_datagram(connection, datagrams[i]);
         }
         for (std::size_t i = datagram_count; i > sent_count; --i) {
-            endpoint_->rollback_send_datagram(connection, datagrams[i - 1]);
+            endpoint_.rollback_send_datagram(connection, datagrams[i - 1]);
         }
-        endpoint_->finish_send_batch(connection);
+        endpoint_.finish_send_batch(connection);
         result.packets_sent += datagram_packet_count(datagrams.data(), sent_count);
 
         if (result.error != common::IoErr::None) {
@@ -385,14 +377,14 @@ QuicSendScheduler::FlushResult QuicSendScheduler::flush_connection(QuicConnectio
         }
 
         if (result.packets_sent >= options_.max_packets_per_connection) {
-            if (endpoint_->connection_has_send_work(connection)) {
+            if (endpoint_.connection_has_send_work(connection)) {
                 rotate_front_to_back(connection);
             } else {
                 remove(connection);
             }
             return result;
         }
-        if (!endpoint_->connection_has_send_work(connection)) {
+        if (!endpoint_.connection_has_send_work(connection)) {
             remove(connection);
             return result;
         }

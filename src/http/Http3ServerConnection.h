@@ -13,9 +13,10 @@ public:
     struct Ops {
         void (*on_closed)(void *, Http3ServerConnection &) noexcept = nullptr;
     };
-    // Options and Ops outlive the connection. The handler is shared.
-    static Http3ServerConnection *create(const quic::QuicConnection::Options &, std::shared_ptr<const HttpHandler>,
-                                         const Http3ServerOptions &, void *, const Ops &) noexcept;
+    // The endpoint, Options and Ops outlive the connection. The handler is shared.
+    static Http3ServerConnection *create(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &,
+                                         std::shared_ptr<const HttpHandler>, const Http3ServerOptions &, void *,
+                                         const Ops &) noexcept;
     quic::QuicConnection &quic() noexcept { return quic_; }
     const Http3Settings &local_settings() const noexcept { return control_.local_settings(); }
     Http3ConnectionState state() const noexcept { return state_; }
@@ -38,8 +39,8 @@ public:
     async::Task<void> wait_started() noexcept;
 
 private:
-    Http3ServerConnection(const quic::QuicConnection::Options &, std::shared_ptr<const HttpHandler>,
-                          const Http3ServerOptions &, void *, const Ops &) noexcept;
+    Http3ServerConnection(quic::QuicUdpEndpoint &, const quic::QuicConnection::Options &,
+                          std::shared_ptr<const HttpHandler>, const Http3ServerOptions &, void *, const Ops &) noexcept;
     ~Http3ServerConnection();
     static quic::QuicConnection::Options make_quic_options(const quic::QuicConnection::Options &,
                                                            Http3ServerConnection *) noexcept;
@@ -63,9 +64,9 @@ private:
     quic::QuicConnection quic_;
     quic::QuicLocalStreamGate local_stream_gate_;
     Http3ControlStreams control_;
-    async::WaitGroup start_tasks_{};
-    async::WaitGroup drain_tasks_{};
-    async::WaitGroup server_request_group_{};
+    async::LocalWaitGroup start_tasks_{};
+    async::LocalWaitGroup drain_tasks_{};
+    async::LocalWaitGroup server_request_group_{};
     std::size_t live_server_requests_ = 0;
     std::uint64_t next_rejected_request_id_ = 0;
     event::EventLoop::TimerEntry idle_timer_{};

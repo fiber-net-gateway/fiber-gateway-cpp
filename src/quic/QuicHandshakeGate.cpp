@@ -43,7 +43,7 @@ public:
         }
         event::EventLoop *loop = event::EventLoop::current_or_null();
         FIBER_ASSERT(loop != nullptr);
-        FIBER_ASSERT(gate_->connection_->loop() == loop);
+        FIBER_ASSERT(&gate_->connection_->loop() == loop);
         if (timed_out(loop->now())) {
             set_result(common::IoErr::TimedOut);
             mark_completed();

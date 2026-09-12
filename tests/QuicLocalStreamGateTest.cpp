@@ -48,12 +48,9 @@ void wire_gate(QuicConnection &conn, QuicLocalStreamGate &gate) noexcept {
     (void) conn.set_app_ops(&gate, ops);
 }
 
-QuicConnection::Options client_options(fiber::event::EventLoop *loop) noexcept {
+QuicConnection::Options client_options() noexcept {
     QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
-    if (loop != nullptr) {
-        options.loop = loop;
-    }
     return options;
 }
 
@@ -110,9 +107,10 @@ fiber::async::DetachedTask cancel_all_on_loop(QuicLocalStreamGate *gate) noexcep
 
 TEST(QuicLocalStreamGateTest, AttachResumesAfterMaxStreams) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection::Options options = client_options(&group.at(0));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection::Options options = client_options();
     options.max_local_bidirectional_streams = 0;
-    QuicConnection conn(options);
+    QuicConnection conn(endpoint.get(), options);
     QuicLocalStreamGate gate(conn);
     wire_gate(conn, gate);
     ASSERT_TRUE(conn.mark_established());
@@ -149,9 +147,10 @@ TEST(QuicLocalStreamGateTest, AttachResumesAfterMaxStreams) {
 // connection no longer keeps a wait queue that it could cancel itself.
 TEST(QuicLocalStreamGateTest, ConnectionShutdownCancelsWaiters) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection::Options options = client_options(&group.at(0));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection::Options options = client_options();
     options.max_local_bidirectional_streams = 0;
-    QuicConnection conn(options);
+    QuicConnection conn(endpoint.get(), options);
     QuicLocalStreamGate gate(conn);
     wire_gate(conn, gate);
     ASSERT_TRUE(conn.mark_established());
@@ -184,10 +183,11 @@ TEST(QuicLocalStreamGateTest, ConnectionShutdownCancelsWaiters) {
 // HTTP/3 GOAWAY refuses new requests while the control stream is unaffected.
 TEST(QuicLocalStreamGateTest, CancelAllIsPerStreamType) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection::Options options = client_options(&group.at(0));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection::Options options = client_options();
     options.max_local_bidirectional_streams = 0;
     options.max_local_unidirectional_streams = 0;
-    QuicConnection conn(options);
+    QuicConnection conn(endpoint.get(), options);
     QuicLocalStreamGate gate(conn);
     wire_gate(conn, gate);
     ASSERT_TRUE(conn.mark_established());
@@ -236,9 +236,10 @@ TEST(QuicLocalStreamGateTest, CancelAllIsPerStreamType) {
 // for, which is what lets the gate work without reserving anything.
 TEST(QuicLocalStreamGateTest, TryAttachYieldsToQueuedWaiters) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection::Options options = client_options(&group.at(0));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection::Options options = client_options();
     options.max_local_bidirectional_streams = 0;
-    QuicConnection conn(options);
+    QuicConnection conn(endpoint.get(), options);
     QuicLocalStreamGate gate(conn);
     wire_gate(conn, gate);
     ASSERT_TRUE(conn.mark_established());
@@ -289,9 +290,10 @@ TEST(QuicLocalStreamGateTest, TryAttachYieldsToQueuedWaiters) {
 
 TEST(QuicLocalStreamGateTest, AttachTimesOutWithoutCredit) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection::Options options = client_options(&group.at(0));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection::Options options = client_options();
     options.max_local_bidirectional_streams = 0;
-    QuicConnection conn(options);
+    QuicConnection conn(endpoint.get(), options);
     QuicLocalStreamGate gate(conn);
     wire_gate(conn, gate);
     ASSERT_TRUE(conn.mark_established());
@@ -321,7 +323,8 @@ TEST(QuicLocalStreamGateTest, AttachTimesOutWithoutCredit) {
 // would defeat the point, so it is told Busy instead of being parked.
 TEST(QuicLocalStreamGateTest, ReplaySafeAttachDoesNotWaitForHandshake) {
     fiber::event::EventLoopGroup group(1);
-    QuicConnection conn(client_options(&group.at(0)));
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    QuicConnection conn(endpoint.get(), client_options());
     QuicLocalStreamGate gate(conn);
     wire_gate(conn, gate);
     ASSERT_TRUE(conn.start_handshake());
@@ -363,9 +366,10 @@ auto start_pending_task(fiber::async::Task<T> &task) {
 void exercise_cancelled_waiter(bool cancel_head) {
     fiber::event::EventLoop loop;
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
-        auto options = client_options(&loop);
+        fiber::test::QuicTestEndpoint endpoint(loop);
+        auto options = client_options();
         options.max_local_bidirectional_streams = 0;
-        QuicConnection conn(options);
+        QuicConnection conn(endpoint.get(), options);
         QuicLocalStreamGate gate(conn);
         wire_gate(conn, gate);
         EXPECT_TRUE(conn.mark_established());
@@ -414,9 +418,10 @@ TEST(QuicLocalStreamGateTest, DestroyingSignaledMiddleRedistributesCreditInFifoO
 TEST(QuicLocalStreamGateTest, CancelAllOverridesQueuedSignalsWithoutAttachingStreams) {
     fiber::event::EventLoop loop;
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
-        auto options = client_options(&loop);
+        fiber::test::QuicTestEndpoint endpoint(loop);
+        auto options = client_options();
         options.max_local_bidirectional_streams = 0;
-        QuicConnection conn(options);
+        QuicConnection conn(endpoint.get(), options);
         QuicLocalStreamGate gate(conn);
         wire_gate(conn, gate);
         EXPECT_TRUE(conn.mark_established());
@@ -443,9 +448,10 @@ TEST(QuicLocalStreamGateTest, CancelAllOverridesQueuedSignalsWithoutAttachingStr
 TEST(QuicLocalStreamGateTest, TimedOutHeadRedistributesCreditBeforeItsQueuedResume) {
     fiber::event::EventLoop loop;
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
-        auto options = client_options(&loop);
+        fiber::test::QuicTestEndpoint endpoint(loop);
+        auto options = client_options();
         options.max_local_bidirectional_streams = 0;
-        QuicConnection conn(options);
+        QuicConnection conn(endpoint.get(), options);
         QuicLocalStreamGate gate(conn);
         wire_gate(conn, gate);
         EXPECT_TRUE(conn.mark_established());
@@ -480,9 +486,10 @@ TEST(QuicLocalStreamGateTest, TimedOutHeadRedistributesCreditBeforeItsQueuedResu
 TEST(QuicLocalStreamGateTest, DestroyingGateCancelsQueuedResumesWithoutAccessingDestroyedOwner) {
     fiber::event::EventLoop loop;
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
-        auto options = client_options(&loop);
+        fiber::test::QuicTestEndpoint endpoint(loop);
+        auto options = client_options();
         options.max_local_bidirectional_streams = 0;
-        QuicConnection conn(options);
+        QuicConnection conn(endpoint.get(), options);
         auto gate = std::make_unique<QuicLocalStreamGate>(conn);
         wire_gate(conn, *gate);
         EXPECT_TRUE(conn.mark_established());

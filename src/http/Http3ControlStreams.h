@@ -1,7 +1,7 @@
 #ifndef FIBER_HTTP_HTTP3_CONTROL_STREAMS_H
 #define FIBER_HTTP_HTTP3_CONTROL_STREAMS_H
+#include <fiber/async/LocalWaitGroup.h>
 #include <fiber/async/Spawn.h>
-#include <fiber/async/WaitGroup.h>
 #include <fiber/common/IntrusiveList.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
@@ -54,7 +54,7 @@ private:
     Http3Settings peer_settings_{};
     quic::QuicStream::Lease local_control_stream_{};
     PeerStreamReaderList peer_readers_{};
-    async::WaitGroup peer_reader_group_{};
+    async::LocalWaitGroup peer_reader_group_{};
     bool peer_settings_received_ = false;
     bool peer_control_seen_ = false;
     bool peer_qpack_encoder_seen_ = false;

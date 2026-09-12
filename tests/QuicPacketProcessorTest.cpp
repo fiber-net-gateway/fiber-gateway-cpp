@@ -144,8 +144,8 @@ fiber::quic::QuicConnection::Options application_server_options(const fiber::qui
 struct ApplicationPacketTestContext {
     ApplicationPacketTestContext() :
         server_cid(cid_from_hex("0102030405060708")), client_cid(cid_from_hex("1112131415161718")),
-        client(application_client_options(server_cid, client_cid)),
-        server(application_server_options(server_cid, client_cid)) {
+        client(fiber::test::quic_endpoint(), application_client_options(server_cid, client_cid)),
+        server(fiber::test::quic_endpoint(), application_server_options(server_cid, client_cid)) {
         for (std::size_t i = 0; i < secret.size(); ++i) {
             secret[i] = static_cast<std::uint8_t>(i + 1);
         }
@@ -213,7 +213,7 @@ TEST(QuicPacketProcessorTest, ProcessesClientInitialCryptoFrame) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_addr = loopback(4433);
     options.local_addr = loopback(8443);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto received = received_datagram(datagram.data(), datagram.size());
 
     auto result = fiber::quic::quic_process_initial_datagram(conn, received);
@@ -245,7 +245,7 @@ TEST(QuicPacketProcessorTest, RejectsInitialStreamFrame) {
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto received = received_datagram(datagram.data(), datagram.size());
 
     auto result = fiber::quic::quic_process_initial_datagram(conn, received);
@@ -263,7 +263,7 @@ TEST(QuicPacketProcessorTest, RejectsTamperedInitialWithoutPacketNumberUpdate) {
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto received = received_datagram(datagram.data(), datagram.size());
 
     auto result = fiber::quic::quic_process_initial_datagram(conn, received);
@@ -279,14 +279,14 @@ TEST(QuicPacketProcessorTest, MalformedInitialTailIsRejectedBeforeStateCommit) {
 
     fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection client(client_options);
+    fiber::quic::QuicConnection client(fiber::test::quic_endpoint(), client_options);
     ASSERT_TRUE(client.init_initial_crypto(dcid));
 
     fiber::quic::QuicConnection::Options server_options = fiber::test::quic_options();
     server_options.role = fiber::quic::QuicConnectionRole::Server;
     server_options.local_addr = loopback(8443);
     server_options.remote_addr = loopback(4433);
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(fiber::test::quic_endpoint(), server_options);
     ASSERT_TRUE(server.init_initial_crypto(dcid));
 
     // A valid PING followed by an unknown frame type. Initial packets are not
@@ -343,7 +343,7 @@ TEST(QuicPacketProcessorTest, RejectsNonInitialPacket) {
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto received = received_datagram(datagram.data(), out.offset());
 
     auto result = fiber::quic::quic_process_initial_datagram(conn, received);
@@ -362,7 +362,7 @@ TEST(QuicPacketProcessorTest, CreatesProbePathForDifferentRemoteAddress) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_addr = loopback(4433);
     options.local_addr = loopback(8443);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto received = received_datagram(datagram.data(), datagram.size());
     received.peer = loopback(4434);
 
@@ -388,7 +388,7 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
 
     fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection client(client_options);
+    fiber::quic::QuicConnection client(fiber::test::quic_endpoint(), client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, secret.data(), 32));
 
@@ -398,7 +398,7 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
     server_options.remote_addr = loopback(4433);
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(fiber::test::quic_endpoint(), server_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         false, suite, secret.data(), 32));
 
@@ -623,7 +623,7 @@ TEST(QuicPacketProcessorTest, ProcessesEarlyDataStreamPacketWithEarlyKeys) {
     client_options.role = fiber::quic::QuicConnectionRole::Client;
     client_options.local_connection_id = client_cid;
     client_options.remote_connection_id = server_cid;
-    fiber::quic::QuicConnection client(client_options);
+    fiber::quic::QuicConnection client(fiber::test::quic_endpoint(), client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::EarlyData,
                                                         true, suite, secret.data(), 32));
 
@@ -634,7 +634,7 @@ TEST(QuicPacketProcessorTest, ProcessesEarlyDataStreamPacketWithEarlyKeys) {
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
     server_options.ops.create_stream = create_stream;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(fiber::test::quic_endpoint(), server_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::EarlyData,
                                                         false, suite, secret.data(), 32));
     fiber::quic::QuicTransportParams peer_params{};
@@ -718,7 +718,7 @@ TEST(QuicPacketProcessorTest, ConnectionCloseDuringGracefulShutdownEntersDrainin
 
     fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection client(client_options);
+    fiber::quic::QuicConnection client(fiber::test::quic_endpoint(), client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, secret.data(), 32));
 
@@ -729,7 +729,7 @@ TEST(QuicPacketProcessorTest, ConnectionCloseDuringGracefulShutdownEntersDrainin
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
     server_options.ops.create_stream = create_stream;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(fiber::test::quic_endpoint(), server_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         false, suite, secret.data(), 32));
     ASSERT_TRUE(server.mark_established().has_value());
@@ -778,7 +778,7 @@ TEST(QuicPacketProcessorTest, PathChallengeQueuesPathResponse) {
 
     fiber::quic::QuicConnection::Options client_options = fiber::test::quic_options();
     client_options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection client(client_options);
+    fiber::quic::QuicConnection client(fiber::test::quic_endpoint(), client_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(client.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         true, suite, secret.data(), 32));
 
@@ -788,7 +788,7 @@ TEST(QuicPacketProcessorTest, PathChallengeQueuesPathResponse) {
     server_options.remote_addr = loopback(4433);
     server_options.local_connection_id = server_cid;
     server_options.remote_connection_id = client_cid;
-    fiber::quic::QuicConnection server(server_options);
+    fiber::quic::QuicConnection server(fiber::test::quic_endpoint(), server_options);
     ASSERT_TRUE(fiber::quic::quic_set_encryption_secret(server.crypto(), fiber::quic::QuicEncryptionLevel::Application,
                                                         false, suite, secret.data(), 32));
 

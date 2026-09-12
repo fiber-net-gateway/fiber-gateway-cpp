@@ -679,13 +679,13 @@ void QuicPathManager::arm_validation_timer() noexcept {
         return;
     }
     if (validation_timer_entry_.is_in_heap()) {
-        connection_.loop_->cancel<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
+        connection_.loop_.cancel<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
     }
     if (connection_.closing()) {
         return;
     }
 
-    const QuicTime now = quic_time_ms(connection_.loop_->now());
+    const QuicTime now = quic_time_ms(connection_.loop_.now());
     bool found = false;
     QuicTime delay{0};
     for (const QuicPath &path: paths_) {
@@ -707,8 +707,9 @@ void QuicPathManager::arm_validation_timer() noexcept {
         return;
     }
 
-    connection_.loop_->post_at<QuicPathManager, &QuicPathManager::validation_timer_entry_,
-                               &QuicPathManager::on_validation_timer>(connection_.loop_->now() + delay, *this);
+    connection_.loop_
+            .post_at<QuicPathManager, &QuicPathManager::validation_timer_entry_, &QuicPathManager::on_validation_timer>(
+                    connection_.loop_.now() + delay, *this);
 }
 
 void QuicPathManager::cancel_validation_timer() noexcept {
@@ -716,13 +717,12 @@ void QuicPathManager::cancel_validation_timer() noexcept {
         return;
     }
     if (validation_timer_entry_.is_in_heap()) {
-        connection_.loop_->cancel<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
+        connection_.loop_.cancel<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
     }
 }
 
 void QuicPathManager::cancel_validation_timer_quiesced() noexcept {
-    FIBER_ASSERT(connection_.loop_ != nullptr);
-    connection_.loop_->cancel_quiesced<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
+    connection_.loop_.cancel_quiesced<QuicPathManager, &QuicPathManager::validation_timer_entry_>(*this);
 }
 
 void QuicPathManager::on_validation_timer(QuicPathManager *manager) noexcept {
@@ -730,13 +730,12 @@ void QuicPathManager::on_validation_timer(QuicPathManager *manager) noexcept {
         return;
     }
 
-    FIBER_ASSERT(manager->connection_.loop_ != nullptr && manager->connection_.loop_->in_loop());
-    if (manager->connection_.loop_ == nullptr || !manager->connection_.loop_->in_loop() ||
-        manager->connection_.closing()) {
+    FIBER_ASSERT(manager->connection_.loop_.in_loop());
+    if (!manager->connection_.loop_.in_loop() || manager->connection_.closing()) {
         return;
     }
 
-    const QuicTime now = quic_time_ms(manager->connection_.loop_->now());
+    const QuicTime now = quic_time_ms(manager->connection_.loop_.now());
     bool send_output = false;
     for (QuicPath &path: manager->paths_) {
         if (!path.allocated || path.state == QuicPathState::Idle || path.expires > now) {
