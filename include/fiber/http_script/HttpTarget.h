@@ -23,7 +23,7 @@ struct HttpTargetSpec {
     };
 
     Kind kind = Kind::Upstream;
-    std::string name; // Upstream: upstream name (leading '@' optional); Url: host
+    std::string name; // Upstream: upstream name (leading '@' optional); Url: host (a name when tls)
     std::uint16_t port = 0; // Url only; 0 means scheme default (80/443)
     bool tls = false; // Url only
 

@@ -9,7 +9,6 @@
 相关头文件：
 
 - `include/fiber/http/HttpConnectionGroupKey.h`
-- `include/fiber/http/HttpConnectionPoolAffinity.h`
 - `include/fiber/http/Http1ConnectionPoolCore.h`
 - `include/fiber/http/LocalHttp1ConnectionPoolSet.h`
 - `include/fiber/http/StealableHttp1ConnectionPoolSet.h`
@@ -66,64 +65,54 @@
 
 ## 3. `HttpConnectionGroupKey`
 
-连接分组由 `HttpConnectionGroupKey` 决定。
+连接分组由 `HttpConnectionGroupKey` 决定。key 描述客户端眼中的一个上游服务：
 
-当前分组条件：
+- `host()`：请求 authority 的 host 部分，域名或裸 IP 字面量，永远非空，存储时归一化为小写
+- `port()`
+- `scheme()`：`Scheme::Http` 或 `Scheme::Https`
+- `has_ip()` / `ip()`：可选的拨号地址
 
-- host identity
-- port
-- scheme
-- pool affinity
+host 与 ip 的组合只有三种：
 
-其中 `scheme` 只有：
+| host | ip | 拨号 | TLS server name |
+|---|---|---|---|
+| 域名 | 无 | 拨号前由调用方做 DNS | `host()` |
+| 域名 | pinned | 直接拨 `ip()` | `host()` |
+| IP 字面量 | 由 host 解析得到 | 直接拨 `ip()` | 不适用：`Https` 直接被拒绝 |
 
-- `HttpConnectionGroupKey::Scheme::Http`
-- `HttpConnectionGroupKey::Scheme::Https`
-
-创建方式：
+创建方式只有一个工厂：
 
 ```cpp
 using fiber::http::HttpConnectionGroupKey;
 
-auto name_key = HttpConnectionGroupKey::from_name(
-    "example.com",
-    443,
-    HttpConnectionGroupKey::Scheme::Https);
+// 域名，拨号前解析
+auto name_key = HttpConnectionGroupKey::make(
+    "example.com", 443, HttpConnectionGroupKey::Scheme::Https);
 
-auto ip_key = HttpConnectionGroupKey::from_ip(
-    fiber::net::IpAddress::loopback_v4(),
-    8080,
-    HttpConnectionGroupKey::Scheme::Http);
+// 域名 + pinned 地址：直接拨 10.0.0.1，SNI 仍为 example.com（lite_nginx 目前不暴露这种形式）
+auto pinned_key = HttpConnectionGroupKey::make(
+    "example.com", 443, HttpConnectionGroupKey::Scheme::Https,
+    fiber::net::IpAddress::v4({10, 0, 0, 1}));
 
-auto mtls_key = HttpConnectionGroupKey::from_name(
-    "example.com",
-    443,
-    HttpConnectionGroupKey::Scheme::Https,
-    fiber::http::HttpConnectionPoolAffinity{tls_profile_generation});
+// IP 字面量，只允许 http
+auto literal_key = HttpConnectionGroupKey::make(
+    "127.0.0.1", 8080, HttpConnectionGroupKey::Scheme::Http);
 ```
 
-注意：
+`make()` 返回 `std::optional`，以下输入返回 `nullopt`：
 
-- `from_name()` 会把域名归一化为小写
-- 域名和 IP 是不同的 host kind，不会混用
+- host 为空、超过 `kMaxHostSize`（255）、包含 `[`、`]`、`/`、空白或控制字符，或非字面量却含 `:`
+- `Https` 配 IP 字面量 host：SNI 不能携带 IP 字面量（RFC 6066 §3），HTTPS 上游必须有名字
+- IP 字面量 host 再显式传 `ip`：字面量本身就是地址
+
+所有字段都参与 hash 和 `operator==`：
+
 - `http` 和 `https` 永远不会共用连接
-- `example.com:443 + https` 与 `1.2.3.4:443 + https` 不是同组
-- key 的 affinity 默认为 `0`，因此不传该参数时保持原有分组与建连语义
-- 同一 endpoint 的 affinity 不同，本地复用和跨 loop steal 都不会共享连接
-- affinity 只存在于 key 上：`emplace_connection()` 不接受任何参数，连接本身不持有 affinity 副本
+- `example.com`（DNS）与 `example.com` pinned 到 `10.0.0.1` 是两个组
+- `a.example` 与 `b.example` 即使 pinned 到同一地址也是两个组
+- `::1` 与 `0:0:0:0:0:0:0:1` 是不同的 host 文本，因此也是两个组（它们的 Host 头本来就不同）
 
-建议：
-
-- 如果上层请求目标是域名，就用域名建 key
-- 如果上层是按 IP 直连，就用 IP 建 key
-- 对 HTTPS，不要把不同域名压成同一个 IP key
-- 当同一 endpoint 可能使用不同的客户端证书或其它连接级 TLS 配置时，为每个有效、不可变的 transport profile 分配不同的非零 affinity
-- 同一个 profile 在共享连接池的所有 worker 上必须使用同一个 affinity；不同 profile 在其生命周期重叠时必须使用不同 affinity
-- affinity 只需在一个连接池实例及其仍可能归还的 lease/连接生命周期内唯一，不要求跨进程或跨重启全局唯一
-- affinity 是固定宽度的非敏感 `uint64_t` 标识；不要把证书路径、域名、CA 内容、私钥内容或其它 secret 编码进 key，也不要从 secret 内容直接计算它
-- 凭据或连接级策略轮换时，先创建并初始化新的 `TlsCredential`/`TrustStore`，再发布新的 profile generation/affinity；在旧 profile 的所有 lease 和连接销毁、淘汰或清池前，不要复用其 affinity
-
-连接池不会从 `TlsCredential`、`TrustStore` 或参数内容自动推导 affinity。配置控制层必须为每个不可变 TLS profile 指定一个显式 affinity 写入 key，并保证 `connect()` 传入的 TLS 参数与该 profile 一致；连接池无法判断调用方是否错误地给两组不同的 TLS 配置分配了同一个值。除客户端身份外，信任根、peer verification、SNI、`verify_name`、ALPN 等会固化在已建立连接上的选项也应纳入 profile generation。正在使用旧连接的 lease 可以自然完成；销毁旧 TLS 材料前必须确保借用它们的连接都已释放。
+连接池本身只用 `hash()` 和 `operator==`，不解释 host/ip；拨号方按 `has_ip()` 决定是否做 DNS，把 `host()` 作为 SNI。连接池不区分 TLS client profile：同一 endpoint 上如果需要不同的客户端证书或信任根，调用方要自行保证它们不会命中同一个 key。
 
 ## 4. `Lease` 语义
 
@@ -588,10 +577,8 @@ FIBER_ASSERT(pool_set.init());
 
 group.start();
 fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
-    auto key = fiber::http::HttpConnectionGroupKey::from_ip(
-        fiber::net::IpAddress::loopback_v4(),
-        8080,
-        fiber::http::HttpConnectionGroupKey::Scheme::Http);
+    auto key = *fiber::http::HttpConnectionGroupKey::make(
+        "127.0.0.1", 8080, fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     auto lease = pool_set.acquire(key);
     if (!lease.hit()) {
@@ -620,10 +607,8 @@ FIBER_ASSERT(pool_set.init());
 
 group.start();
 fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
-    auto key = fiber::http::HttpConnectionGroupKey::from_ip(
-        fiber::net::IpAddress::loopback_v4(),
-        8080,
-        fiber::http::HttpConnectionGroupKey::Scheme::Http);
+    auto key = *fiber::http::HttpConnectionGroupKey::make(
+        "127.0.0.1", 8080, fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     auto lease = co_await pool_set.acquire(key);
     if (!lease.hit()) {

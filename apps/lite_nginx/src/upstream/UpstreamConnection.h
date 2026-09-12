@@ -39,17 +39,16 @@ struct AcquiredUpstreamConnection {
 
 // Unified acquire + connect path. Resolves the peer identity to a connected Http1ClientConnection:
 //   1. With Pooled policy, pool.acquire(key) -> hit (has_connection) => reuse, zero DNS.
-//   2. miss => resolve the dial target(s): IP-key peers use the key's IP directly; name-key peers
-//      resolve via DnsService on the calling worker loop, then pass the bounded address set to the
-//      cancellable Happy Eyeballs TCP connector.
+//   2. miss => resolve the dial target(s): a key with a pinned or literal address dials it directly;
+//      otherwise the key's host is resolved via DnsService on the calling worker loop, then the
+//      bounded address set goes to the cancellable Happy Eyeballs TCP connector.
 //   3. emplace_connection(opts) + connect() (pooled), or construct a transient connection +
 //      connect() when no pool is configured or Transient was requested. A pooled miss holds one
 //      lease until TCP and optional TLS setup complete, and publishes no partial connection.
-// `tls_server_name` is forwarded as SNI for HTTPS keys; ignored for HTTP.
+// For HTTPS keys the key's host is sent as SNI (the key guarantees it is a name, not a literal).
 [[nodiscard]] fiber::async::Task<fiber::common::IoResult<AcquiredUpstreamConnection>>
 acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService &dns,
-                    const fiber::http::HttpConnectionGroupKey &key, std::string_view tls_server_name,
-                    std::chrono::milliseconds connect_timeout,
+                    const fiber::http::HttpConnectionGroupKey &key, std::chrono::milliseconds connect_timeout,
                     ConnectionReusePolicy reuse_policy = ConnectionReusePolicy::Pooled) noexcept;
 
 } // namespace fiber::lite_nginx::upstream

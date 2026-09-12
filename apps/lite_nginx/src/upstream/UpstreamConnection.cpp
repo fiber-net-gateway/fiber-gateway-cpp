@@ -13,8 +13,8 @@ namespace fiber::lite_nginx::upstream {
 
 fiber::async::Task<fiber::common::IoResult<AcquiredUpstreamConnection>>
 acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService &dns,
-                    const fiber::http::HttpConnectionGroupKey &key, std::string_view tls_server_name,
-                    std::chrono::milliseconds connect_timeout, ConnectionReusePolicy reuse_policy) noexcept {
+                    const fiber::http::HttpConnectionGroupKey &key, std::chrono::milliseconds connect_timeout,
+                    ConnectionReusePolicy reuse_policy) noexcept {
     AcquiredUpstreamConnection out;
     if (reuse_policy == ConnectionReusePolicy::Pooled) {
         out.lease = co_await pool.acquire(key);
@@ -28,10 +28,10 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
 
     // Resolve the dial target(s). DNS remains separate from the bounded TCP connection race.
     std::vector<fiber::net::IpAddress> addresses;
-    if (key.is_ip()) {
-        addresses.push_back(key.ip_address());
+    if (key.has_ip()) {
+        addresses.push_back(key.ip());
     } else {
-        auto resolved = co_await dns.resolve(key.host_name());
+        auto resolved = co_await dns.resolve(key.host());
         if (!resolved) {
             co_return std::unexpected(resolved.error());
         }
@@ -53,11 +53,11 @@ acquire_and_connect(ConnectionPool &pool, fiber::lite_nginx::runtime::DnsService
     fiber::net::HappyEyeballsOptions connect_options;
     connect_options.total_timeout = connect_timeout;
 
-    // Borrowed by connect() for the whole dial: `tls_server_name` is the caller's, and `peers`
-    // lives in this frame, which the co_awaits below keep alive.
+    // Borrowed by connect() for the whole dial: `key` is the caller's, and `peers` lives in this
+    // frame, which the co_awaits below keep alive.
     const bool https = key.scheme() == fiber::http::HttpConnectionGroupKey::Scheme::Https;
     fiber::http::HttpClientTlsOptions tls;
-    tls.server_name = tls_server_name;
+    tls.server_name = key.host();
     auto dial = [&](fiber::http::Http1ClientConnection &connection) {
         return https ? connection.connect(peer_span, connect_options, tls)
                      : connection.connect(peer_span, connect_options);

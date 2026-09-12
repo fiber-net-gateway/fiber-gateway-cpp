@@ -12,6 +12,7 @@
 #include <fstream>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <netinet/in.h>
 #include <poll.h>
 #include <string>
@@ -44,6 +45,7 @@
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
+#include <fiber/net/UdpSocket.h>
 #include "config/ConfigLoader.h"
 #include "logging/LoggingBuilder.h"
 #include "runtime/GzipResponseWriter.h"
@@ -1013,6 +1015,104 @@ private:
     std::thread thread_{};
 };
 
+// Minimal UDP nameserver on loopback: answers every A query with 127.0.0.1 and every other
+// query type with an empty NOERROR answer. Lets runtime tests use DNS-name upstreams without
+// depending on the host's resolver, which is what the DnsService consults for name peers.
+class StubNameserver {
+public:
+    StubNameserver() {
+        group_.start();
+        std::promise<std::uint16_t> ready;
+        auto ready_future = ready.get_future();
+        fiber::async::spawn(group_.at(0), [this, &ready]() { return serve(&ready); });
+        port_ = ready_future.get();
+    }
+
+    ~StubNameserver() {
+        stop_.store(true, std::memory_order_release);
+        group_.stop();
+        group_.join();
+    }
+
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+    [[nodiscard]] std::size_t query_count() const noexcept { return queries_.load(std::memory_order_acquire); }
+
+    [[nodiscard]] fiber::dns::SystemResolverConfig resolver_config() const {
+        fiber::dns::SystemResolverConfig config;
+        EXPECT_TRUE(config.nameservers.add(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), port_)));
+        config.timeout = 2s;
+        config.attempts = 1;
+        return config;
+    }
+
+private:
+    static constexpr std::uint16_t kTypeA = 1;
+    static constexpr std::size_t kHeaderSize = 12;
+
+    // Returns the offset just past the question section (name + type + class), or 0 if malformed.
+    static std::size_t question_end(const std::uint8_t *packet, std::size_t size) noexcept {
+        std::size_t offset = kHeaderSize;
+        while (offset < size) {
+            const std::uint8_t label = packet[offset++];
+            if (label == 0) {
+                return offset + 4 <= size ? offset + 4 : 0;
+            }
+            if (label > 63 || label > size - offset) {
+                return 0;
+            }
+            offset += label;
+        }
+        return 0;
+    }
+
+    fiber::async::DetachedTask serve(std::promise<std::uint16_t> *ready) {
+        fiber::net::UdpSocket socket(group_.at(0));
+        auto bind_result = socket.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
+        if (!bind_result) {
+            ready->set_value(0);
+            co_return;
+        }
+        ready->set_value(socket.local_addr().port());
+
+        std::array<std::uint8_t, 512> query{};
+        std::vector<std::uint8_t> response;
+        while (!stop_.load(std::memory_order_acquire)) {
+            auto received = co_await socket.recv_from(query.data(), query.size(), 200ms);
+            if (!received) {
+                continue;
+            }
+            const std::size_t end = question_end(query.data(), received->size);
+            if (end == 0) {
+                continue;
+            }
+            queries_.fetch_add(1, std::memory_order_acq_rel);
+            const std::uint16_t qtype = static_cast<std::uint16_t>((query[end - 4] << 8U) | query[end - 3]);
+
+            // Header: same id, QR|RD|RA + NOERROR, qdcount 1, ancount 0/1; then the echoed question.
+            response.assign(query.begin(), query.begin() + static_cast<std::ptrdiff_t>(end));
+            response[2] = 0x81;
+            response[3] = 0x80;
+            response[4] = 0;
+            response[5] = 1;
+            response[6] = 0;
+            response[7] = qtype == kTypeA ? 1 : 0;
+            response[8] = response[9] = response[10] = response[11] = 0;
+            if (qtype == kTypeA) {
+                static constexpr std::uint8_t kAnswer[] = {0xc0, 0x0c, 0, kTypeA, 0,   1, 0, 0,
+                                                           0,    60,   0, 4,      127, 0, 0, 1};
+                response.insert(response.end(), std::begin(kAnswer), std::end(kAnswer));
+            }
+            (void) co_await socket.send_to(response.data(), response.size(), received->peer, 1s);
+        }
+        socket.close();
+    }
+
+    fiber::event::EventLoopGroup group_{1};
+    std::atomic_bool stop_{false};
+    std::atomic<std::size_t> queries_{0};
+    std::uint16_t port_ = 0;
+};
+
 class TlsSingleRequestUpstream {
 public:
     TlsSingleRequestUpstream() : cert_("upstream_cert", kSelfSignedCertPem), key_("upstream_key", kSelfSignedKeyPem) {
@@ -1037,11 +1137,15 @@ public:
         auto ready_future = ready.get_future();
         fiber::async::spawn(group_.at(0), [this, &ready]() -> fiber::async::DetachedTask {
             fiber::http::Http2Endpoint::Options options;
-            options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-            options.tls.configure_ctx = tls_credential_.get();
+            options.tls.configure_callback = &TlsSingleRequestUpstream::configure_tls;
+            options.tls.configure_ctx = this;
 
-            auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto handler = [this](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
                 static constexpr std::string_view kBody = "secure";
+                if (const auto *host = exchange.host_header(); host != nullptr) {
+                    std::lock_guard lock(mutex_);
+                    host_header_.assign(host->value, host->value_len);
+                }
                 auto header_result = co_await exchange.send_header({
                         .kind = fiber::http::OutgoingHeaderKind::Final,
                         .status_code = 200,
@@ -1093,13 +1197,37 @@ public:
 
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
 
+    // SNI from the most recent ClientHello and Host from the most recent request; read after the
+    // downstream response has been received so the upstream side has already run.
+    [[nodiscard]] std::string server_name() const {
+        std::lock_guard lock(mutex_);
+        return server_name_;
+    }
+    [[nodiscard]] std::string host_header() const {
+        std::lock_guard lock(mutex_);
+        return host_header_;
+    }
+
 private:
+    static fiber::common::IoErr configure_tls(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
+                                              const fiber::net::TlsClientHelloView &client_hello) noexcept {
+        auto *self = static_cast<TlsSingleRequestUpstream *>(ctx);
+        {
+            std::lock_guard lock(self->mutex_);
+            self->server_name_.assign(client_hello.server_name);
+        }
+        return config.add_credential(*self->tls_credential_);
+    }
+
     TestPemFile cert_;
     TestPemFile key_;
     std::unique_ptr<fiber::net::TlsCredential> tls_credential_;
     fiber::event::EventLoopGroup group_{1};
     fiber::http::Server *server_ = nullptr;
     std::uint16_t port_ = 0;
+    mutable std::mutex mutex_;
+    std::string server_name_;
+    std::string host_header_;
 };
 
 struct Http2WebSocketOutcome {
@@ -1397,7 +1525,19 @@ public:
             ADD_FAILURE() << fiber::dns::resolver_config_error_name(resolver_config.error().code);
             return;
         }
-        auto start_result = launcher_.start(runtime, *resolver_config);
+        start(runtime, *resolver_config);
+    }
+
+    // Runs the launcher against the given resolver (e.g. a StubNameserver) instead of the system one.
+    RuntimeHarness(const fiber::lite_nginx::runtime::RuntimeConfig &runtime,
+                   const fiber::dns::SystemResolverConfig &resolver_config) : launcher_(loop_) {
+        start(runtime, resolver_config);
+    }
+
+private:
+    void start(const fiber::lite_nginx::runtime::RuntimeConfig &runtime,
+               const fiber::dns::SystemResolverConfig &resolver_config) {
+        auto start_result = launcher_.start(runtime, resolver_config);
         if (!start_result.has_value()) {
             ADD_FAILURE() << start_result.error().message;
             return;
@@ -1409,6 +1549,7 @@ public:
         thread_ = std::thread([this]() { loop_.run(); });
     }
 
+public:
     ~RuntimeHarness() {
         ShutdownOp shutdown{
                 .launcher = &launcher_,
@@ -2909,6 +3050,8 @@ http {
 TEST(LiteNginxRuntimeTest, ProxiesToHttpsUpstreamOverTls) {
     TlsSingleRequestUpstream upstream;
     ASSERT_NE(upstream.port(), 0);
+    StubNameserver nameserver;
+    ASSERT_NE(nameserver.port(), 0);
 
     std::uint16_t port = reserve_loopback_port();
     ASSERT_NE(port, 0);
@@ -2919,7 +3062,7 @@ http {
     listen 127.0.0.1:LISTEN_PORT;
 
     upstream backend {
-        server https://127.0.0.1:UPSTREAM_PORT;
+        server https://backend.test:UPSTREAM_PORT;
     }
 
     server {
@@ -2938,8 +3081,15 @@ http {
     ASSERT_TRUE(config.has_value()) << config.error().message;
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    ASSERT_EQ(runtime->upstreams.size(), 1u);
+    ASSERT_EQ(runtime->upstreams[0].peers.size(), 1u);
+    const auto &key = runtime->upstreams[0].peers[0].connection_key;
+    ASSERT_TRUE(key.has_value());
+    EXPECT_EQ(key->host(), "backend.test");
+    EXPECT_EQ(key->scheme(), fiber::http::HttpConnectionGroupKey::Scheme::Https);
+    EXPECT_FALSE(key->has_ip());
 
-    RuntimeHarness harness(*runtime);
+    RuntimeHarness harness(*runtime, nameserver.resolver_config());
     int client = connect_client(harness.port());
     ASSERT_GE(client, 0);
     const char request[] = "GET /secure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -2949,11 +3099,39 @@ http {
 
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
     EXPECT_NE(response.find("\r\n\r\nsecure"), std::string::npos) << response;
+    EXPECT_GE(nameserver.query_count(), 1u);
+    EXPECT_EQ(upstream.server_name(), "backend.test");
+    // Named upstreams keep the upstream name as the default Host.
+    EXPECT_EQ(upstream.host_header(), "backend");
+}
+
+TEST(LiteNginxRuntimeTest, RejectsHttpsIpLiteralUpstreamServer) {
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:18080;
+    upstream backend {
+        server https://127.0.0.1:18443;
+    }
+    server {
+        server_name localhost;
+        location /* { proxy_pass upstream://backend; }
+    }
+}
+)",
+                                                                            "https_literal_upstream.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_FALSE(runtime.has_value());
+    EXPECT_NE(runtime.error().message.find("IP literal"), std::string::npos) << runtime.error().message;
+    EXPECT_EQ(runtime.error().location.line, 6u);
 }
 
 TEST(LiteNginxRuntimeTest, ProxiesDirectHttpsTargetOverTls) {
     TlsSingleRequestUpstream upstream;
     ASSERT_NE(upstream.port(), 0);
+    StubNameserver nameserver;
+    ASSERT_NE(nameserver.port(), 0);
 
     std::uint16_t port = reserve_loopback_port();
     ASSERT_NE(port, 0);
@@ -2964,7 +3142,7 @@ http {
     server {
         server_name localhost;
         location /* {
-            proxy_pass https://127.0.0.1:UPSTREAM_PORT;
+            proxy_pass https://backend.test:UPSTREAM_PORT;
         }
     }
 }
@@ -2978,7 +3156,7 @@ http {
     auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
     ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
 
-    RuntimeHarness harness(*runtime);
+    RuntimeHarness harness(*runtime, nameserver.resolver_config());
     int client = connect_client(harness.port());
     ASSERT_GE(client, 0);
     static constexpr std::string_view kRequest = "GET /secure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -2988,11 +3166,33 @@ http {
 
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
     EXPECT_NE(response.find("\r\n\r\nsecure"), std::string::npos) << response;
+    EXPECT_GE(nameserver.query_count(), 1u);
+    EXPECT_EQ(upstream.server_name(), "backend.test");
+    // A direct target's default Host is the proxy_pass host.
+    EXPECT_EQ(upstream.host_header(), "backend.test");
 }
 
-// steal off must still pool per-loop: with worker_processes 1 there is one loop, so two sequential
-// requests reuse one upstream connection (accept_count == 1). This exercises the LocalHttp1ConnectionPoolSet
-// wiring through the unified acquire_and_connect path.
+TEST(LiteNginxRuntimeTest, RejectsHttpsIpLiteralDirectTarget) {
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:18080;
+    server {
+        server_name localhost;
+        location /* {
+            proxy_pass https://127.0.0.1:18443;
+        }
+    }
+}
+)",
+                                                                            "https_literal_direct.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_FALSE(runtime.has_value());
+    EXPECT_NE(runtime.error().message.find("IP literal"), std::string::npos) << runtime.error().message;
+    EXPECT_EQ(runtime.error().location.line, 8u);
+}
+
 TEST(LiteNginxRuntimeTest, ReusesConnectionsWithStealOff) {
     std::promise<std::string> first_upstream_request;
     std::promise<std::string> second_upstream_request;
@@ -4248,6 +4448,66 @@ http {
     EXPECT_NE(response.find("\"status\":200"), std::string::npos) << response;
     EXPECT_NE(response.find("\"Content-Type\":\"text/plain\""), std::string::npos) << response;
     EXPECT_NE(proxied_request.find("GET /x HTTP/1.1"), std::string::npos) << proxied_request;
+    // No Host in options.headers: the named upstream's name is the default, as for proxy_pass.
+    EXPECT_NE(proxied_request.find("\r\nHost: backend\r\n"), std::string::npos) << proxied_request;
+
+    ::unlink(script_path.c_str());
+}
+
+// options.headers.Host wins over the default Host, matching proxy_set_header Host semantics.
+TEST(LiteNginxRuntimeTest, HttpRequestHonoursExplicitHostHeader) {
+    const std::string script_path = "/tmp/lite_nginx_http_request_host_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"@backend\";\n"
+                "let r = svc.request({path: \"/x\", headers: {host: \"override.test\"}});\n"
+                "resp.sendJson(200, {status: r.status});";
+    }
+
+    std::promise<std::string> upstream_request;
+    auto upstream_future = upstream_request.get_future();
+    SingleRequestUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok",
+                                   &upstream_request);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+    upstream backend { server 127.0.0.1:UPSTREAM_PORT; }
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "http_request_host.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+
+    RuntimeHarness harness(*runtime);
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    const char request[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, sizeof(request) - 1, 0), static_cast<ssize_t>(sizeof(request) - 1));
+    std::string response = recv_http_response(client);
+    ::close(client);
+
+    ASSERT_EQ(upstream_future.wait_for(3s), std::future_status::ready);
+    const std::string proxied_request = upstream_future.get();
+    EXPECT_NE(response.find("\"status\":200"), std::string::npos) << response;
+    EXPECT_NE(proxied_request.find("\r\nhost: override.test\r\n"), std::string::npos) << proxied_request;
+    EXPECT_EQ(proxied_request.find("Host: backend"), std::string::npos) << proxied_request;
 
     ::unlink(script_path.c_str());
 }
@@ -4447,6 +4707,39 @@ http {
     EXPECT_EQ(response.find("500"), std::string::npos) << response;
 }
 
+// `directive svc = http "https://127.0.0.1:PORT";` cannot bind: an https URL target needs a host
+// name for SNI, so the directive is rejected at script compile time rather than at request time.
+TEST(LiteNginxRuntimeTest, HttpDirectiveRejectsHttpsIpLiteralUrlTarget) {
+    const std::string script_path = "/tmp/lite_nginx_https_literal_directive_test.js";
+    {
+        std::ofstream file(script_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.good());
+        file << "directive svc = http \"https://127.0.0.1:8443\";\n"
+                "let r = svc.request({path: \"/x\"});\n"
+                "resp.sendJson(200, {status: r.status});";
+    }
+
+    std::string config_text = R"(
+worker_processes 1;
+http {
+    listen 127.0.0.1:18080;
+    server {
+        server_name localhost;
+        location /* { script_file SCRIPT_PATH; }
+    }
+}
+)";
+    config_text.replace(config_text.find("SCRIPT_PATH"), sizeof("SCRIPT_PATH") - 1, script_path);
+
+    auto config =
+            fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "https_literal_directive.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_FALSE(runtime.has_value());
+    EXPECT_NE(runtime.error().message.find("directive not found"), std::string::npos) << runtime.error().message;
+    ::unlink(script_path.c_str());
+}
+
 // `directive svc = http "http://127.0.0.1:PORT";` binds a script handle to an ad-hoc IP-literal URL
 // target; svc.request then resolves to the bound target.
 TEST(LiteNginxRuntimeTest, HttpDirectiveBindsUrlTarget) {
@@ -4515,6 +4808,10 @@ http {
     EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << response;
     EXPECT_NE(response.find("\"status\":200"), std::string::npos) << response;
     EXPECT_NE(proxied_request.find("GET /x HTTP/1.1"), std::string::npos) << proxied_request;
+    // Default Host for a URL target is its authority; the non-default port is kept.
+    EXPECT_NE(proxied_request.find("\r\nHost: 127.0.0.1:" + std::to_string(upstream.port()) + "\r\n"),
+              std::string::npos)
+            << proxied_request;
 
     ::unlink(script_path.c_str());
 }

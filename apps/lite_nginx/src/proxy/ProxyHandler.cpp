@@ -468,10 +468,9 @@ run_proxy_request(fiber::http::HttpExchange &exchange, fiber::http::HttpResponse
         co_return;
     }
 
-    const std::string_view sni = peer.connection_key->is_name() ? peer.connection_key->host_name() : std::string_view{};
     const auto reuse_policy = location.reuse_connection ? upstream::ConnectionReusePolicy::Pooled
                                                         : upstream::ConnectionReusePolicy::Transient;
-    auto acquired_result = co_await upstream::acquire_and_connect(pool, dns, *peer.connection_key, sni,
+    auto acquired_result = co_await upstream::acquire_and_connect(pool, dns, *peer.connection_key,
                                                                   location.connect_timeout, reuse_policy);
     if (!acquired_result) {
         record_upstream_error(log_context, acquired_result.error(), "connect");

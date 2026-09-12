@@ -2,6 +2,7 @@
 #define FIBER_HTTP_SCRIPT_HTTP_SCRIPT_SERVICES_H
 
 #include <memory>
+#include <string_view>
 
 #include "../async/Task.h"
 #include "../common/IoError.h"
@@ -32,6 +33,11 @@ public:
     virtual ~HttpUpstreamConnection() = default;
 
     [[nodiscard]] virtual fiber::http::Http1ClientConnection &connection() noexcept = 0;
+
+    // Authority to send as the request's Host when the script does not supply one:
+    // `host[:port]` with IPv6 literals bracketed, or whatever the app uses as the default Host
+    // for a named upstream. Valid for the lifetime of this object.
+    [[nodiscard]] virtual std::string_view host_header() const noexcept = 0;
 };
 
 // App-provided bridge that resolves an HttpTargetSpec (named upstream or ad-hoc URL, the latter
