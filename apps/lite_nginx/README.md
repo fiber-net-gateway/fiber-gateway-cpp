@@ -394,7 +394,9 @@ handshake needs a server name for SNI.
 - `svc.request(options)` - issue an upstream request and return
   `{status:int, headers?:object, body:binary}`. `options`: `url` (request path?query, e.g.
   `/items?q=1`; not a host) or `path` + `query` (string or object), `method`, `headers`, `body`
-  (binary/string/object), `timeout` (ms), `includeHeaders`.
+  (binary/string/object), `timeout` (ms), `includeHeaders`. Unless `headers` supplies `Host`,
+  the request carries the target's authority: `host[:port]` for a URL target (default port
+  omitted, IPv6 bracketed) or the upstream name for `@name`, as `proxy_pass` does.
 - `svc.proxyPass(options)` - forward the inbound request to the bound upstream and stream its
   response back to the client; returns the upstream status code. `options`: `url` or
   `method`/`path`/`query` (default to the inbound values), `headers`, `responseHeaders` (set on
