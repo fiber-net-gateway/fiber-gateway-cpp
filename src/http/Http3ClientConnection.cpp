@@ -15,7 +15,6 @@ namespace {
 
 constexpr std::string_view kHttp3Alpn = "h3";
 constexpr std::uint64_t kHttp3PeerUnidirectionalStreamLimit = 16;
-constexpr std::size_t kMaxCachedTokenLength = 16 * 1024;
 
 } // namespace
 
@@ -65,6 +64,7 @@ quic::QuicConnection::Options Http3ClientConnection::make_quic_options(Http3Clie
     quic_options.max_local_unidirectional_streams = 0;
 
     quic::QuicUdpEndpoint &endpoint = client.endpoint();
+    FIBER_ASSERT(endpoint.loop().in_loop());
     if (!endpoint.valid()) {
         identity_error = common::IoErr::Invalid;
         return quic_options;
@@ -173,11 +173,12 @@ const Http3ControlStreams::Ops &Http3ClientConnection::control_ops() noexcept {
 void Http3ClientConnection::abort_connect(Http3ErrorCode close_code) noexcept {
     // No closing or draining period for a connection that never served a
     // request: the peer has either already closed it or will never hear
-    // from it again.
-    if (quic_.state() == quic::QuicConnectionState::Draining) {
-        quic_.arm_close_timer_immediate();
-    } else {
+    // from it again. One that never attached has nothing on the wire at all,
+    // so it is marked Closed in place.
+    if (quic_.attached_to_endpoint()) {
         quic_.close_immediately(quic::QuicErrorCode::NoError);
+    } else {
+        quic_.mark_closed();
     }
     close(close_code);
 }
@@ -190,35 +191,49 @@ async::Task<Http3ClientConnectResult> Http3ClientConnection::fail_connect(Http3C
 }
 
 async::Task<Http3ClientConnectResult> Http3ClientConnection::connect() noexcept {
+    quic::QuicUdpEndpoint &endpoint = client_.endpoint();
+    FIBER_ASSERT(endpoint.loop().in_loop());
     if (state_ != Http3ConnectionState::Prepared) {
         co_return std::unexpected(Http3ClientConnectError{.phase = Http3ClientConnectPhase::ClientInit,
                                                           .io_error = common::IoErr::Already});
     }
+    // Every exit but success ends in abort_connect(): a failure through
+    // fail(), which also waits for the teardown; task cancellation -- the
+    // frame destroyed at an await -- through this guard, which cannot wait and
+    // leaves that to the caller's wait_closed().
+    struct Scope {
+        Http3ClientConnection &self;
+        bool settled = false;
+        ~Scope() {
+            if (!settled) {
+                self.abort_connect(Http3ErrorCode::RequestCancelled);
+            }
+        }
+    } scope{*this};
+    auto fail = [&scope, this](Http3ClientConnectError error, Http3ErrorCode close_code) noexcept {
+        scope.settled = true;
+        return fail_connect(error, close_code);
+    };
     auto quic_error = [](quic::QuicConnectError error) noexcept {
         return Http3ClientConnectError{
                 .phase = Http3ClientConnectPhase::Quic, .io_error = error.io_error, .quic_error = error};
     };
     if (identity_error_ != common::IoErr::None) {
-        co_return std::unexpected(
-                quic_error({.phase = quic::QuicConnectPhase::Connection, .io_error = identity_error_}));
+        co_return co_await fail(quic_error({.phase = quic::QuicConnectPhase::Connection, .io_error = identity_error_}),
+                                Http3ErrorCode::InternalError);
     }
-    quic::QuicUdpEndpoint &endpoint = client_.endpoint();
-    if (!endpoint.running() || !endpoint.loop().in_loop() || remote_addr_.port() == 0 ||
-        remote_addr_.ip().is_unspecified() || handshake_timeout_ < std::chrono::milliseconds::zero()) {
-        co_return std::unexpected(
-                quic_error({.phase = quic::QuicConnectPhase::Endpoint, .io_error = common::IoErr::Invalid}));
+    if (!endpoint.running() || remote_addr_.port() == 0 || remote_addr_.ip().is_unspecified() ||
+        handshake_timeout_ < std::chrono::milliseconds::zero()) {
+        co_return co_await fail(
+                quic_error({.phase = quic::QuicConnectPhase::Endpoint, .io_error = common::IoErr::Invalid}),
+                Http3ErrorCode::InternalError);
     }
 
+    // The token is validated by QuicConnection::set_initial_token().
     const quic::QuicClientCacheOps &cache = client_.options().cache;
     quic::QuicClientCachedState cached{};
-    if (cache.load != nullptr) {
-        if (!cache.load(cache.owner, cache_key(), cached)) {
-            cached = {};
-        }
-        if ((cached.token == nullptr && cached.token_len != 0) || cached.token_len > kMaxCachedTokenLength) {
-            co_return std::unexpected(
-                    quic_error({.phase = quic::QuicConnectPhase::Connection, .io_error = common::IoErr::Invalid}));
-        }
+    if (cache.load != nullptr && !cache.load(cache.owner, cache_key(), cached)) {
+        cached = {};
     }
 
     // QUIC requires TLS 1.3; min/max are fixed here rather than caller-configurable.
@@ -235,37 +250,22 @@ async::Task<Http3ClientConnectResult> Http3ClientConnection::connect() noexcept 
     params.token_len = cached.token_len;
     auto connected = quic_.connect(params);
     if (!connected) {
-        // Never attached: Closed already, nothing to wait for.
-        co_return std::unexpected(quic_error(quic_.connect_error(connected.error())));
+        co_return co_await fail(quic_error(quic_.connect_error(connected.error())), Http3ErrorCode::InternalError);
     }
-
-    // Task cancellation destroys this scope without resuming the await below.
-    // Begin teardown synchronously; the caller joins it with wait_closed().
-    struct Scope {
-        Http3ClientConnection &self;
-        bool completed = false;
-        ~Scope() {
-            if (!completed) {
-                self.abort_connect(Http3ErrorCode::RequestCancelled);
-            }
-        }
-    } scope{*this};
     auto established = co_await quic_.wait_established(handshake_timeout_);
     if (!established) {
-        co_return co_await fail_connect(quic_error(quic_.connect_error(established.error())),
-                                        Http3ErrorCode::InternalError);
+        co_return co_await fail(quic_error(quic_.connect_error(established.error())), Http3ErrorCode::InternalError);
     }
     if (quic_.tls().selected_alpn() != kHttp3Alpn) {
-        co_return co_await fail_connect(
-                {.phase = Http3ClientConnectPhase::Alpn, .io_error = common::IoErr::NotSupported},
-                Http3ErrorCode::VersionFallback);
+        co_return co_await fail({.phase = Http3ClientConnectPhase::Alpn, .io_error = common::IoErr::NotSupported},
+                                Http3ErrorCode::VersionFallback);
     }
     auto started = co_await start();
     if (!started) {
-        co_return co_await fail_connect({.phase = Http3ClientConnectPhase::Http3, .io_error = started.error()},
-                                        Http3ErrorCode::InternalError);
+        co_return co_await fail({.phase = Http3ClientConnectPhase::Http3, .io_error = started.error()},
+                                Http3ErrorCode::InternalError);
     }
-    scope.completed = true;
+    scope.settled = true;
     co_return Http3ClientConnectResult{};
 }
 

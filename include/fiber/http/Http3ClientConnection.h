@@ -77,22 +77,24 @@ struct Http3ClientRequestEntry {
 // endpoint hosts it until it detaches and must itself outlive this object.
 class Http3ClientConnection : public common::NonCopyable, public common::NonMovable {
 public:
-    // On the endpoint's loop. Allocates the QUIC identity from the endpoint and
-    // builds the QUIC connection in place; nothing is registered or sent until
-    // connect(). Never fails: an identity allocation failure is reported by
-    // connect() as phase Quic / QuicConnectPhase::Connection.
+    // On the endpoint's loop (asserted). Allocates the QUIC identity from the
+    // endpoint and builds the QUIC connection in place; nothing is registered
+    // or sent until connect(). Never fails: an identity allocation failure
+    // (endpoint not initialized) is reported by connect() as phase Quic /
+    // QuicConnectPhase::Connection.
     Http3ClientConnection(Http3Client &client, const Http3ClientConnectOptions &options) noexcept;
     // Never connected, or closed and detached from the endpoint, with no
     // exchange, request or wait_closed() joiner alive. Asserted.
     ~Http3ClientConnection();
 
-    // Exactly once. Loads the session cache, runs QUIC connect, waits for the
-    // handshake (handshake_timeout), verifies ALPN "h3" and starts the HTTP/3
-    // control streams. A failure after the connection attached closes it
-    // immediately and waits for detach before returning, so a failed
-    // connect() always leaves this object destructible. Canceling the task
-    // after attach also begins immediate closure, but cannot await cleanup:
-    // the caller must co_await wait_closed() before destroying this object.
+    // Exactly once, on the endpoint's loop (asserted). Loads the session
+    // cache, runs QUIC connect, waits for the handshake (handshake_timeout),
+    // verifies ALPN "h3" and starts the HTTP/3 control streams. Every failure
+    // returns with this object Closed and destructible: one after the
+    // connection attached closes it immediately and waits for detach first.
+    // Canceling the task after attach also begins immediate closure, but
+    // cannot await cleanup: the caller must co_await wait_closed() before
+    // destroying this object.
     [[nodiscard]] async::Task<Http3ClientConnectResult> connect() noexcept;
 
     // The buffer pool and this connection must outlive the exchange.
@@ -148,8 +150,10 @@ private:
     // Immediate close; connect()'s failure paths run it after an immediate
     // QUIC close so no closing period is spent.
     void close(Http3ErrorCode error = Http3ErrorCode::NoError) noexcept;
-    // Shared by failed and canceled connect attempts; accelerates Closing and
-    // Draining too. Cleanup completes asynchronously through wait_closed().
+    // Shared by failed and canceled connect attempts: an immediate QUIC close
+    // (which also cuts a Closing or Draining period short), or Closed in place
+    // for a connection that never attached, then the HTTP/3 close. Cleanup
+    // completes through wait_closed().
     void abort_connect(Http3ErrorCode close_code) noexcept;
     [[nodiscard]] async::Task<Http3ClientConnectResult> fail_connect(Http3ClientConnectError error,
                                                                      Http3ErrorCode close_code) noexcept;

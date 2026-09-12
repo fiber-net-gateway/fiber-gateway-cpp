@@ -613,14 +613,15 @@ public:
     wait_established(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] async::Task<common::IoResult<void>>
     wait_confirmed(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
-    // Client role only, exactly once, on the connection's loop, before attach.
-    // Runs the whole client connect sequence synchronously -- 0-RTT memory,
-    // Initial token and keys, TLS client SSL, first CRYPTO flight, attach --
-    // and leaves the connection attached with its Initial queued for sending.
-    // The caller then awaits wait_established()/wait_confirmed(). A
-    // precondition failure (wrong role or state, off-loop) leaves the
-    // connection untouched; any later failure leaves it unattached and Closed.
-    // connect_error() names the phase either way.
+    // Client role only, exactly once, on the connection's loop (asserted),
+    // before attach. Runs the whole client connect sequence synchronously --
+    // 0-RTT memory, Initial token and keys, TLS client SSL, first CRYPTO
+    // flight, attach -- and leaves the connection attached with its Initial
+    // queued for sending. The caller then awaits wait_established() /
+    // wait_confirmed(); a failed wait leaves the connection attached, and the
+    // caller closes it. A precondition failure (wrong role or state) leaves
+    // the connection untouched; any later failure leaves it unattached and
+    // Closed. connect_error() names the phase either way.
     [[nodiscard]] common::IoResult<void> connect(const QuicClientConnectParams &params) noexcept;
     // Classifies a connect() or handshake-wait failure for a client. Reports
     // the phase connect() failed in, else what the handshake ran into: version
@@ -646,7 +647,9 @@ public:
     void close(QuicErrorCode error = QuicErrorCode::NoError, std::uint64_t frame_type = 0) noexcept;
     // Like close() but skips the 3*PTO close timer — transitions to Closed immediately
     // after queuing CC frames and scheduling the send. For fatal errors where waiting
-    // 3*PTO only delays cleanup (mirrors nginx's rc == NGX_ERROR path).
+    // 3*PTO only delays cleanup (mirrors nginx's rc == NGX_ERROR path). On a
+    // connection already Closing or Draining it changes nothing but the timer:
+    // the remaining period is cut short.
     void close_immediately(QuicErrorCode error = QuicErrorCode::NoError, std::uint64_t frame_type = 0) noexcept;
     // RFC 9000 §10.2 Immediate Close — application error path.
     // Identical to close() but uses CONNECTION_CLOSE_APP on Application-level packets and

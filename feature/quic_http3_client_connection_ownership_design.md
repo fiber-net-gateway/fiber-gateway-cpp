@@ -693,8 +693,18 @@ ctest --test-dir build --output-on-failure
   `Http3ControlStreams.h` / `Http3ControlStreamDecoder.h` 移到 `include/fiber/http/`，因为公开的值类型按值
   内嵌它们；组件测试通过 `Http3ClientConnectionTestAccess`（friend）用一个接受现成
   `QuicConnection::Options` 的私有构造函数构造连接，并触达 `start()` / 请求表等 `connect()` 内部才用的
-  入口；`connect()` 失败路径对 Draining 状态用 `arm_close_timer_immediate()` 跳过 draining 期。
-  `Http3ClientConnectionTest` 里两个只对句柄移动语义有意义的用例删除。
+  入口。`Http3ClientConnectionTest` 里两个只对句柄移动语义有意义的用例删除。
+- 评审修订（2026-09-12）：
+  - loop 亲和改为断言：`QuicConnection::connect()`、`QuicUdpEndpoint::allocate_client_identity()`、
+    `Http3ClientConnection` 的公开构造函数和 `connect()` 都 `FIBER_ASSERT(in_loop())`，不再"判断后返回
+    `Invalid`"。
+  - `enter_closing(info, immediate=true)` 对已处于 Closing / Draining 的连接自己
+    `arm_close_timer_immediate()`，`QuicUdpEndpoint::shutdown()` 与 `Http3ClientConnection::abort_connect()`
+    不再各自特判 Draining。
+  - `Http3ClientConnection::connect()` 的所有失败路径（含 attach 之前的：身份分配失败、endpoint 未 start、
+    `QuicConnection::connect()` 失败）统一经 `abort_connect()` + `wait_closed()`，返回时 `state() == Closed`
+    且 QUIC 已 Closed；从未 attach 的连接由 `mark_closed()` 原地关闭。取消保护 `Scope` 只在真正取消时触发。
+  - 删除 `Http3ClientConnection` 里与 `QuicConnection::set_initial_token()` 重复的 token 长度校验。
 
 ## 10. 评审后的收益与验证口径
 

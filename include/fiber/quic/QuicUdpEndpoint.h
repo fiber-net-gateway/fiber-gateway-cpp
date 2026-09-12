@@ -201,9 +201,10 @@ public:
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid) const noexcept;
     [[nodiscard]] common::IoResult<void> remove_connection(const QuicConnectionId &dcid) noexcept;
     void schedule_send(QuicConnection &connection) noexcept;
-    // On the endpoint's loop. A random ODCID plus a local CID that is unique
-    // in this endpoint's index and differs from the ODCID. Nothing is
-    // registered until the connection built with them calls connect().
+    // On the endpoint's loop (asserted), after init(). A random ODCID plus a
+    // local CID that is unique in this endpoint's index and differs from the
+    // ODCID. Nothing is registered until the connection built with them calls
+    // connect().
     [[nodiscard]] common::IoResult<QuicClientIdentity> allocate_client_identity() noexcept;
 
     // Manual one-shot receive for focused callers and tests. It is unavailable

@@ -607,7 +607,10 @@ common::IoResult<void> QuicConnection::remember_peer_transport(const QuicTranspo
 }
 
 common::IoResult<void> QuicConnection::connect(const QuicClientConnectParams &params) noexcept {
-    if (role() != QuicConnectionRole::Client || state_ != QuicConnectionState::Init || !loop_.in_loop() ||
+    // Strictly on the loop, not merely off every other one: the sequence ends
+    // by attaching to the endpoint, which indexes and sends from its loop.
+    FIBER_ASSERT(loop_.in_loop());
+    if (role() != QuicConnectionRole::Client || state_ != QuicConnectionState::Init ||
         endpoint_attachment_ != EndpointAttachment::Unattached || tls_.initialized()) {
         // A repeat call on a connection already on the wire must not disturb
         // the classification of that attempt.
@@ -1032,14 +1035,15 @@ void QuicConnection::enter_graceful_closing(QuicCloseInfo info, std::chrono::mil
 void QuicConnection::enter_closing(QuicCloseInfo info, bool immediate) noexcept {
     FIBER_ASSERT(!capacity_dispatch_running_);
     assert_loop_affinity();
-    if (state_ == QuicConnectionState::Closed || state_ == QuicConnectionState::Draining) {
+    if (state_ == QuicConnectionState::Closed) {
         return;
     }
-    if (state_ == QuicConnectionState::Closing) {
+    if (state_ == QuicConnectionState::Closing || state_ == QuicConnectionState::Draining) {
+        // Already on the way out: the close info stands and a Draining
+        // connection still sends nothing (RFC 9000 §10.2.2). An immediate
+        // close only cuts the remaining closing or draining period short.
         if (immediate) {
-            if (active_timer_loop() != nullptr) {
-                arm_close_timer_immediate();
-            }
+            arm_close_timer_immediate();
         }
         return;
     }
