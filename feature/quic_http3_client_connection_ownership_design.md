@@ -2,7 +2,7 @@
 
 > 起因：`QuicConnection::Options` 中 TLS 相关字段散落，评估"按 role 做 union"时发现根因是
 > client 侧建连编排放在 `QuicClient` 外部对象里，Options 只剩 cache 残留。
-> 状态：PR 1（quic 层，§6.3）已实施；PR 2（值类型 `Http3ClientConnection`）未实施
+> 状态：已实施（PR 1 quic 层、PR 2 值类型 `Http3ClientConnection`，见 §6.3；实施偏差见 §9）
 > 目标读者：实现者 / 评审者
 > 关联：`feature/quic_client.md`（现状）、`feature/http3_client.md`（现状）、
 > `feature/http2_client_connection.md`（对齐目标）、`feature/fiber-lib-h3-client-teardown-uaf.md`（生命周期背景）
@@ -677,3 +677,18 @@ ctest --test-dir build --output-on-failure
 5. 外部所有权用例：连接对象在 `endpoint.shutdown()` 之后析构，Release 与 ASan 均无报告；
    连接对象比 endpoint 活得久的错误顺序在 Debug 下命中 `~QuicUdpEndpoint` 断言。
 6. `ctest --test-dir build` 全绿；`Http3ClientTest.NginxInterop`（设置 `FIBER_HTTP3_NGINX_PORT` 时）通过。
+
+---
+
+## 9. 实施记录
+
+- PR 1 `refactor(quic): fold client connect into QuicConnection`（2026-09-12）。偏差：
+  `QuicConnectPhase` / `QuicConnectError` / `QuicClientConnectParams` 定义在 `QuicConnection.h` 而非
+  `QuicClientConnect.h`（避免头文件互相 include），后者只装 cache 三件套；`connect()` 的前置条件失败
+  不改变连接状态，只在 `state_ == Init` 时记 `Connection` 相位。`sizeof(Options)` 672 → 448。
+- PR 2 `refactor(http): make Http3ClientConnection a caller-owned value type`（2026-09-12）。偏差：
+  `Http3ControlStreams.h` / `Http3ControlStreamDecoder.h` 移到 `include/fiber/http/`，因为公开的值类型按值
+  内嵌它们；组件测试通过 `Http3ClientConnectionTestAccess`（friend）用一个接受现成
+  `QuicConnection::Options` 的私有构造函数构造连接，并触达 `start()` / 请求表等 `connect()` 内部才用的
+  入口；`connect()` 失败路径对 Draining 状态用 `arm_close_timer_immediate()` 跳过 draining 期。
+  `Http3ClientConnectionTest` 里两个只对句柄移动语义有意义的用例删除。

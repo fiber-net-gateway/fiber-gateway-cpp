@@ -7,9 +7,9 @@
 
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/common/mem/IoBufChain.h>
+#include <fiber/http/Http3ControlStreamDecoder.h>
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/quic/QuicCursor.h>
-#include "http/Http3ControlStreamDecoder.h"
 #include "quic/QuicTransportCodec.h"
 
 namespace {

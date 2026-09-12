@@ -957,10 +957,6 @@ private:
         client_options.tls.verify_peer = !options_.insecure;
         client_options.drain_timeout = options_.drain;
         client_ = std::make_unique<fiber::http::Http3Client>(endpoint_, std::move(client_options));
-        auto client_initialized = client_->init();
-        if (!client_initialized) {
-            co_return fail_setup(SetupPhase::ClientInit, client_initialized.error());
-        }
 
         if (!options_.body.empty()) {
             request_body_ = fiber::mem::IoBuf::allocate(options_.body.size());
@@ -978,12 +974,13 @@ private:
             connect_options.server_name = options_.target.host;
             connect_options.handshake_timeout = options_.handshake_timeout;
             connect_options.allow_insecure = options_.insecure;
-            auto connected = co_await client_->connect(std::move(connect_options));
+            auto &connection = *connections_.emplace_back(
+                    std::make_unique<fiber::http::Http3ClientConnection>(*client_, connect_options));
+            auto connected = co_await connection.connect();
             if (!connected) {
                 connect_error_ = connected.error();
                 co_return fail_setup(SetupPhase::Connect, connected.error().io_error);
             }
-            connections_.push_back(std::move(*connected));
         }
         co_return true;
     }
@@ -995,7 +992,7 @@ private:
         } done{&lane_group_};
 
         std::uint32_t consecutive_not_sent_failures = 0;
-        fiber::http::Http3ClientConnection &connection = connections_[connection_index];
+        fiber::http::Http3ClientConnection &connection = *connections_[connection_index];
         co_await sleep_until(warmup_start_);
         while (!stop_requested()) {
             auto now = fiber::event::EventLoop::current().now();
@@ -1084,7 +1081,7 @@ private:
             co_return;
         }
         for (auto &connection: connections_) {
-            connection.shutdown(fiber::http::Http3ErrorCode::RequestCancelled);
+            connection->shutdown(fiber::http::Http3ErrorCode::RequestCancelled);
         }
     }
 
@@ -1280,7 +1277,7 @@ private:
         stats_.endpoint_recv_storage_high_water = endpoint_.retained_recv_storage_high_water();
         stats_.endpoint_recv_storage_rejected = endpoint_.retained_recv_storage_rejected_count();
         for (auto &connection: connections_) {
-            fiber::quic::QuicConnection &quic = connection.quic();
+            fiber::quic::QuicConnection &quic = connection->quic();
             if (const fiber::quic::QuicPath *path = quic.active_path()) {
                 stats_.path_sent_bytes += path->sent;
                 stats_.path_received_bytes += path->received;
@@ -1299,37 +1296,47 @@ private:
         }
     }
 
-    [[nodiscard]] fiber::async::Task<void> cleanup() noexcept {
-        for (auto &connection: connections_) {
-            connection.graceful_shutdown(fiber::http::Http3ErrorCode::NoError);
-        }
+    // Parks one joiner per connection on wait_closed(); close_group_ settles
+    // once every connection object may be destroyed.
+    void start_close_joins() noexcept {
         close_group_.add(connections_.size());
         for (std::size_t i = 0; i < connections_.size(); ++i) {
             fiber::async::spawn([this, i]() -> fiber::async::DetachedTask {
-                co_await connections_[i].wait_closed();
+                co_await connections_[i]->wait_closed();
                 close_group_.done();
             });
         }
+    }
+
+    [[nodiscard]] fiber::async::Task<void> cleanup() noexcept {
+        for (auto &connection: connections_) {
+            connection->graceful_shutdown(fiber::http::Http3ErrorCode::NoError);
+        }
+        start_close_joins();
         auto graceful = co_await fiber::async::timeout_for([this]() { return close_group_.join(); },
                                                            std::max(options_.drain, 1ms));
         if (!graceful) {
             for (auto &connection: connections_) {
-                connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+                connection->shutdown(fiber::http::Http3ErrorCode::NoError);
             }
-            co_await close_group_.join();
         }
-        connections_.clear();
+        // The endpoint's shutdown cuts any remaining closing period short;
+        // the connection objects are destroyed only after their joins settle.
         co_await endpoint_.shutdown();
+        co_await close_group_.join();
+        connections_.clear();
         client_.reset();
         request_body_ = fiber::mem::IoBuf{};
     }
 
     [[nodiscard]] fiber::async::Task<void> cleanup_immediate() noexcept {
         for (auto &connection: connections_) {
-            connection.shutdown(fiber::http::Http3ErrorCode::RequestCancelled);
+            connection->shutdown(fiber::http::Http3ErrorCode::RequestCancelled);
         }
-        connections_.clear();
+        start_close_joins();
         co_await endpoint_.shutdown();
+        co_await close_group_.join();
+        connections_.clear();
         client_.reset();
         request_body_ = fiber::mem::IoBuf{};
     }
@@ -1342,7 +1349,7 @@ private:
     fiber::quic::QuicUdpEndpoint endpoint_;
     std::unique_ptr<fiber::net::TrustStore> trust_store_;
     std::unique_ptr<fiber::http::Http3Client> client_;
-    std::vector<fiber::http::Http3ClientConnection> connections_;
+    std::vector<std::unique_ptr<fiber::http::Http3ClientConnection>> connections_;
     fiber::mem::IoBuf request_body_;
     fiber::async::WaitGroup lane_group_;
     fiber::async::WaitGroup stop_monitor_group_;

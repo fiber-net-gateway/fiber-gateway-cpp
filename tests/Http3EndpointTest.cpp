@@ -124,13 +124,6 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
         promise->set_value(std::move(result));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        result.error = initialized.error();
-        co_await endpoint.shutdown();
-        promise->set_value(std::move(result));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = server_addr;
@@ -139,7 +132,8 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
     if (request_stream_window != 0) {
         connect_options.transport.initial_max_stream_data_bidi_local = request_stream_window;
     }
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         result.error = connected.error().io_error;
         co_await endpoint.shutdown();
@@ -150,7 +144,7 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
 
     {
         fiber::mem::BufPool pool;
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         auto sent = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
@@ -190,12 +184,12 @@ DetachedTask run_http3_client(fiber::event::EventLoop *loop, fiber::net::SocketA
         }
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
     // Let the CONNECTION_CLOSE actually reach the wire before tearing the
     // endpoint down; otherwise the server sees a peer that simply vanished.
     co_await fiber::async::sleep(50ms);
     co_await endpoint.shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(result));
     co_return;
 }
@@ -242,19 +236,13 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
         promise->set_value(std::move(result));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        result.error = initialized.error();
-        co_await endpoint.shutdown();
-        promise->set_value(std::move(result));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 3s;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         result.error = connected.error().io_error;
         co_await endpoint.shutdown();
@@ -265,7 +253,7 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
 
     if (send_first_request) {
         fiber::mem::BufPool pool;
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         auto sent = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
@@ -300,7 +288,7 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
 
     {
         fiber::mem::BufPool pool;
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         auto sent = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
@@ -321,10 +309,10 @@ DetachedTask run_http3_client_idle_reclaim(fiber::event::EventLoop *loop, fiber:
         }
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
     co_await fiber::async::sleep(50ms);
     co_await endpoint.shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(result));
     co_return;
 }
@@ -367,20 +355,14 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
         promise->set_value(std::move(result));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        result.error = initialized.error();
-        co_await endpoint.shutdown();
-        promise->set_value(std::move(result));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 3s;
     connect_options.transport.initial_max_stream_data_bidi_local = request_stream_window;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         result.error = connected.error().io_error;
         co_await endpoint.shutdown();
@@ -391,7 +373,7 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
 
     {
         fiber::mem::BufPool pool;
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         auto sent = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
@@ -424,8 +406,9 @@ DetachedTask run_http3_client_close_after_header(fiber::event::EventLoop *loop, 
     // Keep the connection alive long enough for the abort frames to reach the
     // server and its teardown to run, then vanish.
     co_await fiber::async::sleep(50ms);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown();
     co_await endpoint.shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(result));
     co_return;
 }
