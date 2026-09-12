@@ -20,6 +20,7 @@
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/Http3ControlStreams.h>
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/net/IpAddress.h>
 #include <fiber/net/SocketAddress.h>
@@ -27,7 +28,6 @@
 #include <fiber/quic/QuicToken.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
 #include "http/Http3ControlStreamEncoder.h"
-#include "http/Http3ControlStreams.h"
 #include "quic/QuicCrypto.h"
 #include "quic/QuicLossRecovery.h"
 #include "quic/QuicPacketCodec.h"

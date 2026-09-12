@@ -5,38 +5,58 @@
 HTTP/3 client 基础能力已经实现。它复用 `QuicUdpEndpoint`、`QuicConnection::connect()`
 和静态 QPACK 编解码路径，没有引入第二套 UDP 或 QUIC runtime。
 
-> 2026-09-12：`QuicClient` 已拆解，`Http3Client::connect` 直接构造连接并调用
-> `QuicConnection::connect()`；下一步（值类型 `Http3ClientConnection`）见
-> [`quic_http3_client_connection_ownership_design.md`](quic_http3_client_connection_ownership_design.md) §5。
+> 2026-09-12：`QuicClient` 已拆解，`Http3ClientConnection` 改为调用方持有的值类型，与
+> `Http2ClientConnection` 同一所有权模型。设计与理由见
+> [`quic_http3_client_connection_ownership_design.md`](quic_http3_client_connection_ownership_design.md)。
 
 ## 组件边界
 
-- `Http3Client`：持有 TLS 安全配置、session cache 回调和 `h3` ALPN，负责 QUIC 建连、`h3` ALPN 校验、
-  HTTP/3 客户端连接创建与本地 control stream 启动。
-- `Http3ClientConnection`：move-only 连接句柄，创建 exchange，并提供立即关闭、GOAWAY
-  graceful shutdown 和 `wait_closed()`。
+- `Http3Client`：一个 endpoint 上所有客户端连接共享的配置——TLS 安全配置、session cache 回调、
+  `h3` ALPN 和 HTTP/3 settings。不持有任何连接状态。
+- `Http3ClientConnection`：调用方持有的 `NonMovable` 值类型，按值内嵌 `QuicConnection`（外部所有权，
+  `on_destroy == nullptr`）、stream gate 和 control streams。构造时从 endpoint 分配 QUIC 身份；
+  `connect()` 负责 cache 读取、QUIC 建连、握手等待、`h3` ALPN 校验和 control stream 启动；负责请求表、
+  GOAWAY、drain；自持 session cache key 的名字和拨号地址，通过 `QuicConnection::Ops` 接收
+  NewSessionTicket / NEW_TOKEN 并回写 cache。
 - `ClientHttp3Exchange`：一个请求/响应 exchange。首次发送请求头时才分配并 attach QUIC
   双向流。
 - `ClientHttp3Request`：与 `QuicStream` 同一所有权单元，负责 HEADERS/DATA/trailer、响应解析、
-  取消及请求结果分类。
-- `Http3ClientConnectionImpl`：私有、地址稳定的客户端状态，按值持有 QUIC、stream gate、
-  control streams，负责请求表、GOAWAY、drain 和最后 lease 释放后的清理；自持 session cache key
-  的名字和拨号地址，通过 `QuicConnection::Ops` 接收 NewSessionTicket / NEW_TOKEN 并回写 cache。
-- `Http3ControlStreams`：两端按值内嵌的私有协议组件，负责 SETTINGS 和 control/QPACK stream；
-  不包含请求表、角色或 drain 策略。服务端策略由 `Http3ServerConnection` 直接负责。
+  取消及请求结果分类。持有连接的 QUIC lease，因此连接析构前必须结束全部请求。
+- `Http3ControlStreams`：两端按值内嵌的协议组件（头文件已公开，因为客户端连接按值内嵌它），
+  负责 SETTINGS 和 control/QPACK stream；不包含请求表、角色或 drain 策略。服务端策略由
+  `Http3ServerConnection` 直接负责。
+
+## 使用方式
+
+```cpp
+fiber::http::Http3Client h3_client(endpoint, client_options);
+
+fiber::http::Http3ClientConnectOptions target{};
+target.remote_addr = {ip, 443};
+target.server_name = "example.com";
+fiber::http::Http3ClientConnection conn(h3_client, target);   // 在 endpoint loop 上构造
+auto connected = co_await conn.connect();
+if (!connected) { /* connected.error().phase / quic_error */ }
+
+auto exchange = conn.open_exchange(pool);
+// ...
+conn.graceful_shutdown();
+co_await conn.wait_closed();   // H3 任务 join + QUIC 已 detach，之后才可析构
+```
 
 ## 生命周期约束
 
 1. 调用者先初始化并启动一个 client-only 或混合角色的 `QuicUdpEndpoint`。
-2. `Http3Client::init()` 校验 endpoint；`connect()` 必须在 endpoint owner loop 中调用。
-3. `Http3Client` 和 endpoint 必须长于由它创建的全部连接。
-4. `Http3ClientConnection::open_exchange(pool)` 借用 `BufPool`；pool 和连接必须长于 exchange。
-5. 放弃未完成的 exchange 时显式调用 `abort()`。连接句柄析构会立即关闭仍活动的连接。
-6. graceful shutdown 后保留连接句柄并 `co_await wait_closed()`，再释放句柄。
-   此等待完成 H3 启动、reader 和 drain 任务，不代表 QUIC 已脱离 endpoint 或对象已析构；
-   不在健康 Running 连接上把它当作完整 QUIC 关闭通知。
-7. 移动句柄不移动内部状态，已有 exchange 继续引用同一连接；移走后的空句柄不再执行关闭。
-   等待任务开始执行时取得临时 QUIC lease，保证挂起期间内部对象存活。
+2. `Http3Client` 只是配置；它、endpoint 和 TLS 材料必须比所有连接对象活得久。
+3. `Http3ClientConnection` 在 endpoint 的 loop 上构造；`connect()` 只能调用一次。
+4. `open_exchange(pool)` 借用 `BufPool`；pool 和连接必须长于 exchange。放弃未完成的 exchange 时显式
+   `abort()`。
+5. 析构前必须 `shutdown()` 或 `graceful_shutdown()` 并 `co_await wait_closed()`；`wait_closed()` 返回
+   意味着 H3 任务已 join 且 QUIC 已从 endpoint detach。析构断言这两点以及没有存活的请求。
+   `connect()` 失败的对象已经满足该条件（失败路径自己走立即关闭并等待 detach）。
+6. `endpoint.shutdown()` 会关闭并 detach 尚存的连接，但不等待连接对象析构；对象可以在 `shutdown()`
+   之后、`~QuicUdpEndpoint` 之前析构，仍需先 `co_await wait_closed()`。先 `endpoint.shutdown()` 再
+   `wait_closed()` 可以跳过 3×PTO 的 closing 期。
 
 同一个 request 允许一个读协程和一个写协程并行，以支持流式上传和响应；同方向并发操作返回
 `IoErr::Busy`。
@@ -91,11 +111,17 @@ QPACK、GET 响应头和响应体。未设置 `FIBER_HTTP3_NGINX_PORT` 时该用
 
 ## 公共 API 迁移
 
-删除 `Http3Connection` 类及其公共头。连接查询直接通过 `Http3ClientConnection`：
+2026-09-12：`Http3ClientConnection` 从 move-only 句柄变为调用方持有的值类型；
+`Http3Client::init()` 与 `Http3Client::connect()` 删除，改为
+`Http3ClientConnection conn(client, options); co_await conn.connect();`。
+`Http3ClientConnectOptions` 的名字字段改为 `std::string_view`（借用到构造函数返回）。
+需要放进容器时用 `std::unique_ptr<Http3ClientConnection>`（见 `example/http3_benchmark_client.cpp`）。
+
+更早：删除 `Http3Connection` 类及其公共头。连接查询直接通过 `Http3ClientConnection`：
 `connection.http3().accepting_requests()` 改为 `connection.accepting_requests()`；
-state、settings、close error 和 peer GOAWAY 查询也直接位于句柄。
-`ClientHttp3Exchange` 只接收客户端句柄，不再接受通用连接。
+state、settings、close error 和 peer GOAWAY 查询也直接位于连接。
+`ClientHttp3Exchange` 只接收客户端连接，不再接受通用连接。
 保留 `Http3ConnectionState` 枚举，声明移至 `Http3Protocol.h`。
-这属于源码兼容性变更，仓库外直接使用旧公共类的消费者需要迁移。
+这些属于源码兼容性变更，仓库外直接使用旧公共类的消费者需要迁移。
 
 详细边界和验收见 [连接按角色拆分方案](http3_connection_role_split.md)。

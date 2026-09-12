@@ -17,7 +17,6 @@ namespace fiber::http {
 
 class ClientHttp3Request;
 class Http3ClientConnection;
-class Http3ClientConnectionImpl;
 
 class ClientHttp3Exchange : public common::NonCopyable, public common::NonMovable {
 public:
@@ -72,7 +71,7 @@ private:
     [[nodiscard]] ClientHttp3Request *request() noexcept;
     [[nodiscard]] const ClientHttp3Request *request() const noexcept;
 
-    Http3ClientConnectionImpl *conn_ = nullptr;
+    Http3ClientConnection *conn_ = nullptr;
     mem::BufPool *pool_ = nullptr;
     quic::QuicStream::Lease stream_{};
 };

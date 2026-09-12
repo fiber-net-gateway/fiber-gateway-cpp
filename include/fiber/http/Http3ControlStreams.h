@@ -6,7 +6,7 @@
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
 #include <fiber/quic/QuicLocalStreamGate.h>
-#include "http/Http3ControlStreamDecoder.h"
+#include "Http3ControlStreamDecoder.h"
 namespace fiber::http {
 // Protocol streams only. The owner controls admission, requests and shutdown.
 class Http3ControlStreams : public common::NonCopyable, public common::NonMovable {

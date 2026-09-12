@@ -1330,18 +1330,13 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
         promise->set_value(std::move(outcome));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        outcome.error = initialized.error();
-        promise->set_value(std::move(outcome));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options;
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         outcome.error = connected.error().io_error;
         promise->set_value(std::move(outcome));
@@ -1352,7 +1347,7 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
         fiber::mem::BufPool pool;
         fiber::http::HttpHeaders headers(pool);
         headers.set("Accept-Encoding", "gzip");
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         auto send_result = co_await exchange.send_request_header(
                 {
                         .method = fiber::http::HttpMethod::Get,
@@ -1386,9 +1381,11 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
         outcome.request_outcome = exchange.outcome();
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+    // The endpoint's shutdown cuts the closing period short; the connection
+    // object is then joined before this frame destroys it.
     co_await endpoint->shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(outcome));
 }
 

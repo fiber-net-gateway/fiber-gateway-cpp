@@ -157,18 +157,13 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         promise->set_value(std::move(observation));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        observation.error = initialized.error();
-        promise->set_value(std::move(observation));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         observation.error = connected.error().io_error;
         observation.connect_phase = connected.error().phase;
@@ -180,7 +175,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         fiber::mem::BufPool pool;
         fiber::http::HttpHeaders headers(pool);
         headers.set("content-length", "17");
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         fiber::http::Http3RequestHead head{
                 .method = fiber::http::HttpMethod::Post,
                 .scheme = "https",
@@ -242,7 +237,7 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
             }
         }
 
-        fiber::http::ClientHttp3Exchange head_exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange head_exchange = connection.open_exchange(pool);
         fiber::http::Http3RequestHead head_request{
                 .method = fiber::http::HttpMethod::Head,
                 .scheme = "https",
@@ -274,9 +269,11 @@ fiber::async::DetachedTask run_client(fiber::quic::QuicUdpEndpoint *endpoint,
         }
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+    // The endpoint's shutdown cuts the closing period short; the connection
+    // object is then joined before this frame destroys it.
     co_await endpoint->shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(observation));
 }
 
@@ -294,19 +291,14 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
         promise->set_value(std::move(observation));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        observation.error = initialized.error();
-        promise->set_value(std::move(observation));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
     connect_options.allow_insecure = true;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         observation.error = connected.error().io_error;
         observation.connect_phase = connected.error().phase;
@@ -316,7 +308,7 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
 
     {
         fiber::mem::BufPool pool;
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         fiber::http::Http3RequestHead head{
                 .method = fiber::http::HttpMethod::Get,
                 .scheme = "https",
@@ -347,9 +339,11 @@ fiber::async::DetachedTask run_nginx_client(fiber::quic::QuicUdpEndpoint *endpoi
         observation.outcome = exchange.outcome();
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+    // The endpoint's shutdown cuts the closing period short; the connection
+    // object is then joined before this frame destroys it.
     co_await endpoint->shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(observation));
 }
 
@@ -375,18 +369,13 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         promise->set_value(std::move(observation));
         co_return;
     }
-    auto initialized = client.init();
-    if (!initialized) {
-        observation.error = initialized.error();
-        promise->set_value(std::move(observation));
-        co_return;
-    }
 
     fiber::http::Http3ClientConnectOptions connect_options{};
     connect_options.remote_addr = *server_addr;
     connect_options.server_name = "localhost";
     connect_options.handshake_timeout = 2s;
-    auto connected = co_await client.connect(std::move(connect_options));
+    fiber::http::Http3ClientConnection connection(client, connect_options);
+    auto connected = co_await connection.connect();
     if (!connected) {
         observation.error = connected.error().io_error;
         promise->set_value(std::move(observation));
@@ -404,7 +393,7 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         fiber::http::HttpHeaders headers(pool);
         const std::string content_length = std::to_string(body.size());
         headers.set("content-length", content_length);
-        fiber::http::ClientHttp3Exchange exchange = connected->open_exchange(pool);
+        fiber::http::ClientHttp3Exchange exchange = connection.open_exchange(pool);
         fiber::http::Http3RequestHead head{
                 .method = fiber::http::HttpMethod::Post,
                 .scheme = "https",
@@ -454,9 +443,11 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
         }
     }
 
-    connected->shutdown(fiber::http::Http3ErrorCode::NoError);
-    *connected = fiber::http::Http3ClientConnection{};
+    connection.shutdown(fiber::http::Http3ErrorCode::NoError);
+    // The endpoint's shutdown cuts the closing period short; the connection
+    // object is then joined before this frame destroys it.
     co_await endpoint->shutdown();
+    co_await connection.wait_closed();
     promise->set_value(std::move(observation));
 }
 
