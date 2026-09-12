@@ -19,7 +19,7 @@ class Http3EndpointWorker final : public EndpointWorker {
 public:
     Http3EndpointWorker(event::EventLoop &loop, std::shared_ptr<const HttpHandler> handler,
                         const Http3ServerOptions &options) noexcept :
-        loop_(loop), handler_(std::move(handler)), options_(&options) {}
+        loop_(loop), handler_(std::move(handler)), options_(&options), endpoint_(loop) {}
 
     ~Http3EndpointWorker() override {
         // Either wait_stopped() already closed it on this loop, or the endpoint
@@ -61,7 +61,7 @@ public:
         admission.connection_owner = this;
         admission.create_connection = &Http3EndpointWorker::create_connection_op;
 
-        return endpoint_.init(loop_, endpoint_options, admission);
+        return endpoint_.init(endpoint_options, admission);
     }
 
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept { return endpoint_.local_addr(); }
@@ -95,8 +95,9 @@ public:
 
     async::Task<void> wait_stopped() noexcept override {
         co_await live_.join();
-        // Last session is gone, so the socket has no more work.
-        endpoint_.close();
+        // Last session is gone, so nothing is left for shutdown() to close;
+        // it still joins the transport's own count before closing the socket.
+        co_await endpoint_.shutdown();
         co_return;
     }
 
@@ -104,17 +105,20 @@ private:
     static void on_start(Http3EndpointWorker *self) noexcept { self->start(); }
 
     [[nodiscard]] static quic::QuicConnection::Lease
-    create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept {
-        return static_cast<Http3EndpointWorker *>(owner)->create_connection(options);
+    create_connection_op(void *owner, quic::QuicUdpEndpoint &endpoint,
+                         const quic::QuicConnection::Options &options) noexcept {
+        return static_cast<Http3EndpointWorker *>(owner)->create_connection(endpoint, options);
     }
 
-    [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept {
+    [[nodiscard]] quic::QuicConnection::Lease create_connection(quic::QuicUdpEndpoint &endpoint,
+                                                                const quic::QuicConnection::Options &options) noexcept {
+        FIBER_ASSERT(&endpoint == &endpoint_);
         if (!admitting_) {
             return {};
         }
         live_.add();
         Http3ServerConnection *connection =
-                Http3ServerConnection::create(options, handler_, *options_, this, connection_ops());
+                Http3ServerConnection::create(endpoint, options, handler_, *options_, this, connection_ops());
         if (connection == nullptr) {
             live_.done();
             return {};
@@ -142,9 +146,9 @@ private:
     std::shared_ptr<const HttpHandler> handler_;
     const Http3ServerOptions *options_;
     event::EventLoop::NotifyEntry start_entry_{};
-    quic::QuicUdpEndpoint endpoint_{};
+    quic::QuicUdpEndpoint endpoint_;
     Http3ConnectionRegistry connections_{};
-    async::WaitGroup live_{};
+    async::LocalWaitGroup live_{};
     bool admitting_ = true;
 };
 

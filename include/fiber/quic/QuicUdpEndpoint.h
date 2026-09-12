@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "../async/LocalWaitGroup.h"
 #include "../async/Task.h"
 #include "../common/IntrusiveList.h"
 #include "../common/IntrusiveRbTree.h"
@@ -95,7 +96,7 @@ public:
         std::chrono::seconds retry_token_lifetime{3};
         std::chrono::seconds new_token_lifetime{600};
         void *connection_owner = nullptr;
-        QuicConnection::Lease (*create_connection)(void *owner,
+        QuicConnection::Lease (*create_connection)(void *owner, QuicUdpEndpoint &endpoint,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
         bool enable_early_data = false;
     };
@@ -128,25 +129,46 @@ public:
         std::chrono::seconds new_token_lifetime{600};
         void *connection_owner = nullptr;
         // Required. The endpoint never allocates QuicConnection itself; this
-        // callback must return an owning lease whose destroy callback releases
-        // the concrete connection storage when ref_count reaches zero.
-        QuicConnection::Lease (*create_connection)(void *owner,
+        // callback must construct the connection on the given endpoint and
+        // return an owning lease whose destroy callback releases the concrete
+        // connection storage when ref_count reaches zero.
+        QuicConnection::Lease (*create_connection)(void *owner, QuicUdpEndpoint &endpoint,
                                                    const QuicConnection::Options &options) noexcept = nullptr;
         bool enable_early_data = false;
     };
 
-    QuicUdpEndpoint() noexcept;
+    // The endpoint, every connection it hosts and the send scheduler all run
+    // on this loop for the endpoint's whole lifetime; init() may be repeated
+    // after close() but never rebinds the loop.
+    //
+    // Lifetime: the endpoint outlives every connection it has hosted. A hosted
+    // connection stays alive until its last lease drops, and the endpoint
+    // refuses to close while any of them exists -- shutdown() is the only way
+    // to close an endpoint that still hosts connections.
+    explicit QuicUdpEndpoint(event::EventLoop &loop) noexcept;
     ~QuicUdpEndpoint();
 
-    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const EndpointOptions &endpoint_options) noexcept;
-    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const EndpointOptions &endpoint_options,
+    [[nodiscard]] common::IoResult<void> init(const EndpointOptions &endpoint_options) noexcept;
+    [[nodiscard]] common::IoResult<void> init(const EndpointOptions &endpoint_options,
                                               const ServerAdmissionOptions &server_options) noexcept;
-    [[nodiscard]] common::IoResult<void> init(event::EventLoop &loop, const Options &options) noexcept;
+    [[nodiscard]] common::IoResult<void> init(const Options &options) noexcept;
     // Starts callback-driven I/O and must run on the endpoint's event loop.
     [[nodiscard]] common::IoResult<void> start() noexcept;
+    // Graceful teardown, on the endpoint's loop: stops admitting connections,
+    // sends CONNECTION_CLOSE(`error`) on every hosted connection that is not
+    // already closing, and completes once the last hosted connection has been
+    // destroyed -- the socket stays open until then so the closes can go out.
+    // Owners that drain at their own layer first (GOAWAY and friends) reach
+    // the join with nothing left to close. I/O failure stops the socket and
+    // detaches connections immediately; shutdown() still joins their leases
+    // before the endpoint can be destroyed or initialized again.
+    [[nodiscard]] async::Task<void> shutdown(QuicErrorCode error = QuicErrorCode::NoError) noexcept;
+    // Immediate close. No hosted connection may still exist: either shutdown()
+    // completed or none was ever admitted. Asserted.
     void close() noexcept;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool running() const noexcept { return started_ && !closing_; }
+    [[nodiscard]] event::EventLoop &loop() const noexcept { return loop_; }
     [[nodiscard]] const net::SocketAddress &local_addr() const noexcept;
     [[nodiscard]] std::size_t active_connection_count() const noexcept { return active_connection_count_; }
     [[nodiscard]] std::size_t dropped_datagram_count() const noexcept { return dropped_datagram_count_; }
@@ -163,7 +185,7 @@ public:
     [[nodiscard]] std::size_t rate_limited_stateless_response_count() const noexcept {
         return rate_limited_stateless_response_count_;
     }
-    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_->io_buf_node_pool(); }
+    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_.io_buf_node_pool(); }
 
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid) noexcept;
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid) const noexcept;
@@ -175,6 +197,7 @@ public:
     [[nodiscard]] async::Task<common::IoResult<QuicUdpReceiveResult>> recv_once() noexcept;
 
 private:
+    friend struct QuicUdpEndpointTestAccess;
     friend class QuicClient;
     friend class QuicSendScheduler;
     friend class QuicConnection;
@@ -291,6 +314,8 @@ private:
     void clear_socket_callbacks() noexcept;
     void schedule_io_pump() noexcept;
     void drive_io() noexcept;
+    void stop_io() noexcept;
+    void fail_io() noexcept;
     void handle_socket_ready(event::IoEvent event, common::IoErr err) noexcept;
     static void on_socket_read_ready(void *ctx, common::IoErr err) noexcept;
     static void on_socket_write_ready(void *ctx, common::IoErr err) noexcept;
@@ -313,7 +338,7 @@ private:
                                                QuicTime now) noexcept;
 
     Options options_{};
-    event::EventLoop *loop_ = nullptr;
+    event::EventLoop &loop_;
     std::unique_ptr<net::UdpSocket> socket_{};
     std::unique_ptr<std::uint8_t[]> read_buffer_{};
     std::array<net::UdpPacketRecvSlot, net::kUdpMaxBatchSize> recv_slots_{};
@@ -324,10 +349,14 @@ private:
     mem::IoBufStorageBudget recv_storage_budget_{};
     QuicCryptoBlockPool crypto_block_pool_{};
     QuicOutputFramePool output_frame_pool_{};
-    QuicSendScheduler send_scheduler_{};
+    QuicSendScheduler send_scheduler_;
     DcidTree dcid_tree_{};
     std::array<QuicStatelessResetTokenIndex *, kQuicStatelessResetTokenBucketCount> reset_token_buckets_{};
     ConnectionList connections_{};
+    // Every connection ever attached, from attach until its destructor runs;
+    // shutdown() joins it and close() requires it empty. Loop-local: a hosted
+    // connection is destroyed on this loop, or on it once quiescent.
+    async::LocalWaitGroup hosted_{};
     std::size_t active_connection_count_ = 0;
     std::size_t dropped_datagram_count_ = 0;
     std::size_t rejected_connection_count_ = 0;
@@ -342,6 +371,7 @@ private:
     bool server_admission_enabled_ = false;
     bool started_ = false;
     bool closing_ = false;
+    bool draining_ = false;
     bool read_callback_registered_ = false;
     bool write_callback_registered_ = false;
     bool read_ready_ = false;

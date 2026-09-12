@@ -1,3 +1,4 @@
+#include <fiber/async/WaitGroup.h>
 #include <fiber/http/ClientHttp3Exchange.h>
 #include "Http3ConnectionTestSupport.h"
 
@@ -6,11 +7,11 @@ TEST(Http3ClientConnectionTest, ClientStopsAcceptingRequestsWhenQuicShutdownBegi
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     quic_options.role = fiber::quic::QuicConnectionRole::Client;
     quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
     quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
-    ClientFixture fixture(quic_options);
+    ClientFixture fixture(endpoint.get(), quic_options);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
 
@@ -39,11 +40,11 @@ TEST(Http3ClientConnectionTest, ClientDrainsAndRejectsRequestsAtOrAbovePeerGoawa
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     quic_options.role = fiber::quic::QuicConnectionRole::Client;
     quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
     quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
-    ClientFixture fixture(quic_options);
+    ClientFixture fixture(endpoint.get(), quic_options);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -115,11 +116,11 @@ TEST(Http3ClientConnectionTest, ClientRejectsIncreasingPeerGoawayId) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     quic_options.role = fiber::quic::QuicConnectionRole::Client;
     quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
     quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
-    ClientFixture fixture(quic_options);
+    ClientFixture fixture(endpoint.get(), quic_options);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -147,11 +148,11 @@ TEST(Http3ClientConnectionTest, ClientRejectsPushStreamWhenPushIsDisabled) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     quic_options.role = fiber::quic::QuicConnectionRole::Client;
     quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
     quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
-    ClientFixture fixture(quic_options);
+    ClientFixture fixture(endpoint.get(), quic_options);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -178,11 +179,11 @@ TEST(Http3ClientConnectionTest, ClientRejectsMaxPushIdFrame) {
     group.start();
 
     fiber::quic::QuicConnection::Options quic_options{};
-    quic_options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     quic_options.role = fiber::quic::QuicConnectionRole::Client;
     quic_options.original_destination_connection_id = connection_id_from({0x01, 0x02, 0x03, 0x04});
     quic_options.remote_connection_id = connection_id_from({0x11, 0x12, 0x13, 0x14});
-    ClientFixture fixture(quic_options);
+    ClientFixture fixture(endpoint.get(), quic_options);
     auto &h3 = fixture.connection();
     auto &quic = h3.quic();
     auto start = start_h3_on_loop(group.at(0), quic, quic_options, h3);
@@ -209,13 +210,13 @@ void check_local_drain_with_registered_request(std::chrono::milliseconds drain_t
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
     options.remote_connection_id = connection_id_from({5, 6, 7, 8});
     fiber::http::Http3ClientConnectionImpl::Options http_options{};
     http_options.drain_timeout = drain_timeout;
-    ClientFixture fixture(options, http_options);
+    ClientFixture fixture(endpoint.get(), options, http_options);
     auto &h3 = fixture.connection();
     ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
     std::promise<void> done;
@@ -283,11 +284,11 @@ void check_queued_request_drain(bool peer_goaway) {
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
     options.remote_connection_id = connection_id_from({5, 6, 7, 8});
-    ClientFixture fixture(options);
+    ClientFixture fixture(endpoint.get(), options);
     auto &h3 = fixture.connection();
     ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
     std::promise<void> done;
@@ -347,11 +348,11 @@ TEST(Http3ClientConnectionTest, MovingHandlePreservesUnsentAndAttachedExchanges)
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
     options.remote_connection_id = connection_id_from({5, 6, 7, 8});
-    ClientFixture fixture(options);
+    ClientFixture fixture(endpoint.get(), options);
     auto &h3 = fixture.connection();
     ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3).ok);
     std::promise<void> done;
@@ -396,11 +397,11 @@ TEST(Http3ClientConnectionTest, MoveAssignmentClosesPreviousConnection) {
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
     options.remote_connection_id = connection_id_from({5, 6, 7, 8});
-    ClientFixture first(options), second(options);
+    ClientFixture first(endpoint.get(), options), second(endpoint.get(), options);
     ASSERT_TRUE(start_h3_on_loop(group.at(0), first.connection().quic(), options, first.connection()).ok);
     ASSERT_TRUE(start_h3_on_loop(group.at(0), second.connection().quic(), options, second.connection()).ok);
     std::promise<void> done;
@@ -428,11 +429,11 @@ TEST(Http3ClientConnectionTest, RunningWaitRetainsConnectionWhenHandleIsResetDur
     fiber::event::EventLoopGroup group(1);
     group.start();
     auto options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
     options.remote_connection_id = connection_id_from({5, 6, 7, 8});
-    ClientFixture fixture(options);
+    ClientFixture fixture(endpoint.get(), options);
     auto &h3 = fixture.connection();
     std::promise<void> done;
     auto future = done.get_future();

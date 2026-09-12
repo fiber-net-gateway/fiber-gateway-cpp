@@ -200,7 +200,7 @@ TEST(QuicOutputFrameQueueTest, MaintainsReverseLinksAcrossMutations) {
 TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection connection(options);
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), options);
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
 
     fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
@@ -234,7 +234,7 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
 }
 
 TEST(QuicAckHandlerTest, AckOfAckDropsRangesThroughSentAckLargest) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
 
     space.on_packet_received(10, fiber::quic::QuicTime{1}, true);
@@ -277,7 +277,7 @@ TEST(QuicAckHandlerTest, AckOfAckDropsRangesThroughSentAckLargest) {
 }
 
 TEST(QuicAckHandlerTest, HandlesDescendingAckRangesWithSingleReverseScan) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
 
     for (std::uint64_t packet_number = 0; packet_number <= 6; ++packet_number) {
@@ -329,7 +329,7 @@ TEST(QuicAckHandlerTest, HandlesDescendingAckRangesWithSingleReverseScan) {
 TEST(QuicAckHandlerTest, MissingAckEcnDisablesPathEcn) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection connection(options);
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), options);
     auto *path = connection.active_path();
     ASSERT_NE(path, nullptr);
     path->ecn_state = fiber::quic::QuicEcnState::Testing;
@@ -365,7 +365,7 @@ TEST(QuicAckHandlerTest, MissingAckEcnDisablesPathEcn) {
 }
 
 TEST(QuicAckHandlerTest, AckEcnValidatesTestingPath) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto *path = connection.active_path();
     ASSERT_NE(path, nullptr);
     path->ecn_state = fiber::quic::QuicEcnState::Testing;
@@ -404,7 +404,7 @@ TEST(QuicAckHandlerTest, AckEcnValidatesTestingPath) {
 }
 
 TEST(QuicAckHandlerTest, AckEcnCeTriggersCongestionResponse) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto *path = connection.active_path();
     ASSERT_NE(path, nullptr);
     path->ecn_state = fiber::quic::QuicEcnState::Testing;
@@ -444,7 +444,7 @@ TEST(QuicAckHandlerTest, AckEcnCeTriggersCongestionResponse) {
 }
 
 TEST(QuicLossRecoveryTest, LostEcnValidationProbeDisablesPathEcn) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto *path = connection.active_path();
     ASSERT_NE(path, nullptr);
     path->ecn_state = fiber::quic::QuicEcnState::Testing;
@@ -473,7 +473,7 @@ TEST(QuicLossRecoveryTest, LostEcnValidationProbeDisablesPathEcn) {
 }
 
 TEST(QuicLossRecoveryTest, AckedIntervalBeforeLostIntervalCanEstablishPersistentCongestion) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     prepare_persistent_congestion_loss(connection);
 
     detect_loss_with_ack_interval(connection, fiber::quic::QuicTime{10}, fiber::quic::QuicTime{20});
@@ -482,7 +482,7 @@ TEST(QuicLossRecoveryTest, AckedIntervalBeforeLostIntervalCanEstablishPersistent
 }
 
 TEST(QuicLossRecoveryTest, AckedIntervalAfterLostIntervalCanEstablishPersistentCongestion) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     prepare_persistent_congestion_loss(connection);
 
     detect_loss_with_ack_interval(connection, fiber::quic::QuicTime{400}, fiber::quic::QuicTime{450});
@@ -491,7 +491,7 @@ TEST(QuicLossRecoveryTest, AckedIntervalAfterLostIntervalCanEstablishPersistentC
 }
 
 TEST(QuicLossRecoveryTest, AckedPacketInsideLostIntervalPreventsPersistentCongestion) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     prepare_persistent_congestion_loss(connection);
 
     detect_loss_with_ack_interval(connection, fiber::quic::QuicTime{200}, fiber::quic::QuicTime{200});
@@ -500,7 +500,7 @@ TEST(QuicLossRecoveryTest, AckedPacketInsideLostIntervalPreventsPersistentConges
 }
 
 TEST(QuicLossRecoveryTest, SelectsPtoTimerFromLatestSentPacket) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
 
     fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
@@ -519,7 +519,7 @@ TEST(QuicLossRecoveryTest, SelectsPtoTimerFromLatestSentPacket) {
 }
 
 TEST(QuicLossRecoveryTest, LossTimerTakesPriorityOverPto) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
 
     fiber::quic::QuicOutputFrame *frame = space.alloc_frame();
@@ -539,7 +539,7 @@ TEST(QuicLossRecoveryTest, LossTimerTakesPriorityOverPto) {
 }
 
 TEST(QuicLossRecoveryTest, PtoQueuesTwoCongestionIgnoringPingProbes) {
-    fiber::quic::QuicConnection connection(fiber::test::quic_options());
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
 
     fiber::quic::QuicOutputFrame *sent = space.alloc_frame();

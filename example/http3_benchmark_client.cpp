@@ -865,13 +865,14 @@ class BenchmarkWorker {
 public:
     BenchmarkWorker(std::size_t index, std::size_t connection_count, fiber::event::EventLoop &loop,
                     const BenchmarkOptions &options, RunCoordinator &coordinator) noexcept :
-        index_(index), connection_count_(connection_count), loop_(loop), options_(options), coordinator_(coordinator) {}
+        index_(index), connection_count_(connection_count), loop_(loop), options_(options), coordinator_(coordinator),
+        endpoint_(loop) {}
 
     [[nodiscard]] fiber::async::DetachedTask run() {
         if (!co_await setup()) {
             coordinator_.setup_failed.store(true, std::memory_order_release);
             coordinator_.setup_done.fetch_add(1, std::memory_order_release);
-            cleanup_immediate();
+            co_await cleanup_immediate();
             coordinator_.workers_done.fetch_add(1, std::memory_order_release);
             co_return;
         }
@@ -930,7 +931,7 @@ private:
                                                                          : fiber::net::SocketAddress::any_v6(0);
         endpoint_options.max_connections = connection_count_ + 4;
         endpoint_options.send.pacing.enabled = options_.pacing_enabled;
-        auto endpoint_initialized = endpoint_.init(loop_, endpoint_options);
+        auto endpoint_initialized = endpoint_.init(endpoint_options);
         if (!endpoint_initialized) {
             co_return fail_setup(SetupPhase::EndpointInit, endpoint_initialized.error());
         }
@@ -1318,17 +1319,17 @@ private:
             co_await close_group_.join();
         }
         connections_.clear();
-        endpoint_.close();
+        co_await endpoint_.shutdown();
         client_.reset();
         request_body_ = fiber::mem::IoBuf{};
     }
 
-    void cleanup_immediate() noexcept {
+    [[nodiscard]] fiber::async::Task<void> cleanup_immediate() noexcept {
         for (auto &connection: connections_) {
             connection.shutdown(fiber::http::Http3ErrorCode::RequestCancelled);
         }
         connections_.clear();
-        endpoint_.close();
+        co_await endpoint_.shutdown();
         client_.reset();
         request_body_ = fiber::mem::IoBuf{};
     }

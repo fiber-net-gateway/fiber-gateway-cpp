@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-#include "../../async/WaitGroup.h"
+#include "../../async/LocalWaitGroup.h"
 #include "../../net/SocketAddress.h"
 #include "../../net/TlsParams.h"
 #include "../Http3ServerOptions.h"
@@ -69,7 +69,7 @@ private:
     // Borrowed: the Server owns the workers once they are claimed.
     std::vector<Http3EndpointWorker *> workers_{};
     // Released by on_stop(), which is what ends on_serve().
-    async::WaitGroup serve_gate_{};
+    async::LocalWaitGroup serve_gate_{};
     bool gate_opened_ = false;
 };
 

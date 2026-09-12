@@ -47,11 +47,10 @@ inline constexpr QuicEncryptionLevel kSendLevels[] = {
     return quic_create_retry_packet(spec, out);
 }
 
-[[nodiscard]] common::IoResult<std::size_t> encode_invalid_token_close_packet(const QuicPacketHeader &packet,
-                                                                              const QuicReceivedDatagram &datagram,
-                                                                              const char *reason, std::uint8_t *out,
-                                                                              std::size_t out_cap,
-                                                                              QuicPacketPlaintext plaintext) noexcept {
+[[nodiscard]] common::IoResult<std::size_t>
+encode_invalid_token_close_packet(QuicUdpEndpoint &endpoint, const QuicPacketHeader &packet,
+                                  const QuicReceivedDatagram &datagram, const char *reason, std::uint8_t *out,
+                                  std::size_t out_cap, QuicPacketPlaintext plaintext) noexcept {
     if (reason == nullptr || out == nullptr || out_cap == 0 || plaintext.data == nullptr || plaintext.capacity == 0) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -78,9 +77,8 @@ inline constexpr QuicEncryptionLevel kSendLevels[] = {
     conn_options.initial_destination_connection_id = packet.dcid;
     conn_options.local_connection_id = packet.dcid;
     conn_options.remote_connection_id = packet.scid;
-    conn_options.loop = event::EventLoop::current_or_null();
 
-    QuicConnection temp(conn_options);
+    QuicConnection temp(endpoint, conn_options);
     auto initialized = temp.init_initial_crypto(packet.dcid);
     if (!initialized) {
         return std::unexpected(initialized.error());
@@ -105,7 +103,7 @@ inline constexpr QuicEncryptionLevel kSendLevels[] = {
 
 } // namespace
 
-QuicUdpEndpoint::QuicUdpEndpoint() noexcept = default;
+QuicUdpEndpoint::QuicUdpEndpoint(event::EventLoop &loop) noexcept : loop_(loop), send_scheduler_(*this) {}
 
 QuicUdpEndpoint::~QuicUdpEndpoint() { close(); }
 
@@ -437,7 +435,7 @@ namespace {
 
 } // namespace
 
-common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const EndpointOptions &endpoint_options) noexcept {
+common::IoResult<void> QuicUdpEndpoint::init(const EndpointOptions &endpoint_options) noexcept {
     Options options{};
     options.bind_addr = endpoint_options.bind_addr;
     options.max_connections = endpoint_options.max_connections;
@@ -449,10 +447,10 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Endpo
     options.retained_storage_limit = endpoint_options.retained_storage_limit;
     options.stateless_reset_secret_set = endpoint_options.stateless_reset_secret_set;
     options.stateless_reset_secret = endpoint_options.stateless_reset_secret;
-    return init(loop, options);
+    return init(options);
 }
 
-common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const EndpointOptions &endpoint_options,
+common::IoResult<void> QuicUdpEndpoint::init(const EndpointOptions &endpoint_options,
                                              const ServerAdmissionOptions &server_options) noexcept {
     if (server_options.create_connection == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
@@ -485,10 +483,10 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Endpo
     options.connection_owner = server_options.connection_owner;
     options.create_connection = server_options.create_connection;
     options.enable_early_data = server_options.enable_early_data;
-    return init(loop, options);
+    return init(options);
 }
 
-common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Options &options) noexcept {
+common::IoResult<void> QuicUdpEndpoint::init(const Options &options) noexcept {
     if (initialized_ || options.max_connections == 0 || options.send.send_buffer_size == 0 ||
         options.max_recv_datagrams_per_wakeup == 0 || options.max_recv_bytes_per_wakeup == 0 ||
         options.recv_batch_size == 0 || options.recv_batch_size > net::kUdpMaxBatchSize ||
@@ -515,9 +513,9 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
         }
         options_.stateless_reset_secret_set = true;
     }
-    loop_ = &loop;
     started_ = false;
     closing_ = false;
+    draining_ = false;
     read_callback_registered_ = false;
     write_callback_registered_ = false;
     read_ready_ = false;
@@ -535,7 +533,7 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
     stateless_rate_ = {};
     reset_token_buckets_.fill(nullptr);
 
-    socket_ = std::make_unique<net::UdpSocket>(loop);
+    socket_ = std::make_unique<net::UdpSocket>(loop_);
     read_buffer_ = std::make_unique<std::uint8_t[]>(options_.recv_batch_size * kQuicUdpDefaultReadBufferSize);
     send_plaintext_buffer_ = std::make_unique<std::uint8_t[]>(kQuicUdpDefaultPlaintextBufferSize);
     send_buffer_ = std::make_unique<std::uint8_t[]>(options_.send.send_buffer_size);
@@ -557,7 +555,7 @@ common::IoResult<void> QuicUdpEndpoint::init(event::EventLoop &loop, const Optio
         return std::unexpected(bound.error());
     }
 
-    auto send_initialized = send_scheduler_.init(loop, *socket_, *this, options_.send);
+    auto send_initialized = send_scheduler_.init(*socket_, options_.send);
     if (!send_initialized) {
         close();
         return std::unexpected(send_initialized.error());
@@ -574,7 +572,7 @@ common::IoResult<void> QuicUdpEndpoint::start() noexcept {
     if (started_) {
         return std::unexpected(common::IoErr::Already);
     }
-    if (loop_ == nullptr || !loop_->in_loop()) {
+    if (!loop_.in_loop()) {
         return std::unexpected(common::IoErr::NotSupported);
     }
 
@@ -591,41 +589,39 @@ common::IoResult<void> QuicUdpEndpoint::start() noexcept {
     return {};
 }
 
+async::Task<void> QuicUdpEndpoint::shutdown(QuicErrorCode error) noexcept {
+    FIBER_ASSERT(loop_.in_loop());
+    if (initialized_ && !closing_) {
+        draining_ = true;
+        server_admission_enabled_ = false;
+        // Closing arms a timer and leaves the connection in the list; only the
+        // Closed transition (on that timer, or from a peer CONNECTION_CLOSE)
+        // detaches, so the walk is stable. The immediate variant skips the
+        // 3*PTO linger: the endpoint is going away and cannot service it.
+        for (QuicConnection *connection = connections_.front(); connection != nullptr;
+             connection = connections_.next_of(*connection)) {
+            if (connection->state() == QuicConnectionState::Draining) {
+                connection->arm_close_timer_immediate();
+            } else {
+                connection->close_immediately(error);
+            }
+        }
+    }
+    co_await hosted_.join();
+    close();
+}
+
 void QuicUdpEndpoint::close() noexcept {
+    // Hosted connections are destroyed by their owners on the last lease drop;
+    // the endpoint cannot force that, so a close with connections alive is an
+    // ordering bug in the caller. shutdown() waits for them.
+    FIBER_ASSERT(hosted_.empty());
+    FIBER_ASSERT(connections_.empty());
     if (!initialized_ && (!socket_ || !socket_->valid())) {
         return;
     }
-    // Only a started endpoint has callbacks registered with the loop. Before
-    // start() nothing but this object references the socket, so init()'s own
-    // error paths -- and a server whose startup rolls back before the endpoint
-    // ever runs -- may close it from the thread that built it.
-    if (started_ && loop_ != nullptr && socket_ && socket_->valid()) {
-        FIBER_ASSERT(loop_->in_loop());
-    }
+    stop_io();
 
-    closing_ = true;
-    started_ = false;
-    if (loop_ != nullptr && io_pump_entry_.is_in_queue()) {
-        FIBER_ASSERT(loop_->in_loop());
-        loop_->cancel<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_>(*this);
-    }
-    clear_socket_callbacks();
-    send_scheduler_.close();
-    if (socket_ && socket_->valid()) {
-        if (loop_->in_loop()) {
-            socket_->close();
-        } else {
-            // Startup rollback: no readiness callback or connection has ever
-            // used this fd. RWFd::close() is loop-affine; release the untouched
-            // descriptor before closing it on the constructing thread.
-            FIBER_ASSERT(connections_.empty());
-            (void) ::close(socket_->release_fd());
-        }
-    }
-
-    while (QuicConnection *connection = connections_.front()) {
-        force_detach_connection(*connection);
-    }
     FIBER_ASSERT(recv_storage_budget_.retained_capacity() == 0);
     for (QuicStatelessResetTokenIndex *bucket: reset_token_buckets_) {
         FIBER_ASSERT(bucket == nullptr);
@@ -648,9 +644,51 @@ void QuicUdpEndpoint::close() noexcept {
     // RWFd readiness dispatch still refers to the UdpSocket after invoking a
     // callback. Keep the closed wrapper alive until reinitialization or
     // destruction instead of resetting it from a callback-driven close.
-    loop_ = nullptr;
     initialized_ = false;
+    draining_ = false;
     server_admission_enabled_ = false;
+}
+
+// Keep initialized_ and the connection pools intact until shutdown() joins
+// all leases. In particular, init() cannot reuse a failed endpoint too early.
+void QuicUdpEndpoint::stop_io() noexcept {
+    // Only a started endpoint has callbacks registered with the loop. Before
+    // start() nothing but this object references the socket, so init()'s own
+    // error paths -- and a server whose startup rolls back before the endpoint
+    // ever runs -- may close it from the thread that built it.
+    if (started_ && socket_ && socket_->valid()) {
+        FIBER_ASSERT(loop_.in_loop());
+    }
+
+    closing_ = true;
+    started_ = false;
+    server_admission_enabled_ = false;
+    if (io_pump_entry_.is_in_queue()) {
+        FIBER_ASSERT(loop_.in_loop());
+        loop_.cancel<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_>(*this);
+    }
+    clear_socket_callbacks();
+    send_scheduler_.close();
+    if (socket_ && socket_->valid()) {
+        if (loop_.in_loop()) {
+            socket_->close();
+        } else {
+            // Startup rollback: no readiness callback or connection has ever
+            // used this fd. RWFd::close() is loop-affine; release the untouched
+            // descriptor before closing it on the constructing thread.
+            FIBER_ASSERT(connections_.empty());
+            (void) ::close(socket_->release_fd());
+        }
+    }
+}
+
+void QuicUdpEndpoint::fail_io() noexcept {
+    FIBER_ASSERT(loop_.in_loop());
+    stop_io();
+    while (QuicConnection *connection = connections_.front()) {
+        connection->close_immediately(QuicErrorCode::InternalError);
+        force_detach_connection(*connection);
+    }
 }
 
 bool QuicUdpEndpoint::valid() const noexcept { return socket_ && socket_->valid(); }
@@ -675,7 +713,7 @@ common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId
 }
 
 common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection::Lease lease) noexcept {
-    if (!initialized_ || closing_ || loop_ == nullptr || !loop_->in_loop()) {
+    if (!initialized_ || closing_ || draining_ || !loop_.in_loop()) {
         return std::unexpected(common::IoErr::BadFd);
     }
     QuicConnection *connection = lease.get();
@@ -689,6 +727,7 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
         return std::unexpected(common::IoErr::NoMem);
     }
 
+    FIBER_ASSERT(&connection->endpoint() == this);
     auto registered = register_connection_id(*connection, connection->local_cids_[0].endpoint_index,
                                              connection->local_connection_id());
     if (!registered) {
@@ -696,7 +735,8 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
         return std::unexpected(registered.error());
     }
 
-    connection->attach_to_endpoint(*this);
+    hosted_.add();
+    connection->attach_to_endpoint();
     for (QuicRemoteConnectionIdSlot &slot: connection->remote_cids_) {
         if (slot.in_use && slot.has_stateless_reset_token) {
             register_stateless_reset_token(*connection, slot);
@@ -749,14 +789,12 @@ async::Task<common::IoResult<QuicUdpReceiveResult>> QuicUdpEndpoint::recv_once()
     if (!recv) {
         co_return std::unexpected(recv.error());
     }
-    co_return process_datagram(read_buffer_.get(), *recv,
-                               loop_ != nullptr ? loop_->now() : std::chrono::steady_clock::now());
+    co_return process_datagram(read_buffer_.get(), *recv, loop_.now());
 }
 
 QuicUdpEndpoint::ReceivePumpResult QuicUdpEndpoint::pump_receive() noexcept {
     ReceivePumpResult result{};
-    FIBER_ASSERT(loop_ != nullptr);
-    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(loop_.in_loop());
     FIBER_ASSERT(read_buffer_ != nullptr);
 
     auto budget_available = [&]() noexcept {
@@ -771,7 +809,7 @@ QuicUdpEndpoint::ReceivePumpResult QuicUdpEndpoint::pump_receive() noexcept {
             --recv_pending_count_;
             ++result.datagrams_received;
             result.bytes_received += slot.result.size;
-            (void) process_datagram(static_cast<std::uint8_t *>(slot.buf), slot.result, loop_->now());
+            (void) process_datagram(static_cast<std::uint8_t *>(slot.buf), slot.result, loop_.now());
         }
         if (recv_pending_count_ == 0) {
             recv_pending_index_ = 0;
@@ -859,10 +897,10 @@ void QuicUdpEndpoint::clear_socket_callbacks() noexcept {
 }
 
 void QuicUdpEndpoint::schedule_io_pump() noexcept {
-    if (!initialized_ || closing_ || loop_ == nullptr) {
+    if (!initialized_ || closing_) {
         return;
     }
-    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(loop_.in_loop());
     if (io_pump_running_) {
         io_pump_again_ = true;
         return;
@@ -870,14 +908,14 @@ void QuicUdpEndpoint::schedule_io_pump() noexcept {
     if (io_pump_entry_.is_in_queue()) {
         return;
     }
-    loop_->post_local<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_, &QuicUdpEndpoint::on_io_pump>(*this);
+    loop_.post_local<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_, &QuicUdpEndpoint::on_io_pump>(*this);
 }
 
 void QuicUdpEndpoint::drive_io() noexcept {
-    if (!initialized_ || closing_ || loop_ == nullptr) {
+    if (!initialized_ || closing_) {
         return;
     }
-    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(loop_.in_loop());
     if (io_pump_running_) {
         io_pump_again_ = true;
         return;
@@ -893,7 +931,7 @@ void QuicUdpEndpoint::drive_io() noexcept {
         }
         const ReceivePumpResult result = pump_receive();
         if (result.error != common::IoErr::None) {
-            close();
+            fail_io();
             return false;
         }
         needs_reschedule = needs_reschedule || result.needs_reschedule;
@@ -933,7 +971,7 @@ void QuicUdpEndpoint::drive_io() noexcept {
     if (!closing_) {
         const common::IoErr callback_err = sync_socket_callbacks();
         if (callback_err != common::IoErr::None) {
-            close();
+            fail_io();
         }
     }
 
@@ -964,7 +1002,7 @@ void QuicUdpEndpoint::handle_socket_ready(event::IoEvent event, common::IoErr er
         return;
     }
     if (err != common::IoErr::None) {
-        close();
+        fail_io();
         return;
     }
 
@@ -1101,10 +1139,8 @@ const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &d
 }
 
 void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
-    if (loop_ != nullptr) {
-        FIBER_ASSERT(connection.loop() == loop_);
-        connection.cancel_all_timers();
-    }
+    FIBER_ASSERT(&connection.loop() == &loop_);
+    connection.cancel_all_timers();
     send_scheduler_.remove(connection);
     if (write_blocked_ && !send_scheduler_.has_work()) {
         schedule_io_pump();
@@ -1122,7 +1158,7 @@ void QuicUdpEndpoint::detach_connection(QuicConnection &connection) noexcept {
     }
 
     // The lease keeps the connection alive until it is fully unindexed;
-    // detach_from_endpoint() may drop the final reference.
+    // dropping it may be the final release, which destroys the connection.
     QuicConnection::Lease lease = std::move(connection.endpoint_lease_);
     connection.detach_from_endpoint();
     lease.reset();
@@ -1613,22 +1649,19 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     conn_options.recv_flow = options_.recv_flow;
     conn_options.max_peer_bidirectional_streams = options_.transport.initial_max_streams_bidi;
     conn_options.max_peer_unidirectional_streams = options_.transport.initial_max_streams_uni;
-    conn_options.output_frame_pool = &output_frame_pool_;
-    conn_options.crypto_block_pool = &crypto_block_pool_;
-    conn_options.recv_storage_parent = &recv_storage_budget_;
-    conn_options.loop = loop_;
     conn_options.has_retry_source_connection_id = validation.retried;
     conn_options.initial_path_validated = validation.address_validated;
     conn_options.enable_early_data = options_.enable_early_data;
     conn_options.tls = options_.tls;
 
-    QuicConnection::Lease lease = options_.create_connection(options_.connection_owner, conn_options);
+    QuicConnection::Lease lease = options_.create_connection(options_.connection_owner, *this, conn_options);
     QuicConnection *connection = lease.get();
     if (connection == nullptr) {
         ++rejected_connection_count_;
         return std::unexpected(common::IoErr::NoMem);
     }
     FIBER_ASSERT(connection->on_destroy_ != nullptr);
+    FIBER_ASSERT(&connection->endpoint() == this);
 
     auto registered = register_connection_id(*connection, connection->original_dcid_index, packet.dcid);
     if (!registered) {
@@ -1642,7 +1675,8 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     // TLS (SSL_new) is deferred to QuicConnection::ensure_server_tls(),
     // invoked from quic_process_datagram after the first Initial packet is
     // authenticated. This avoids per-forged-packet SSL_new cost.
-    connection->attach_to_endpoint(*this);
+    hosted_.add();
+    connection->attach_to_endpoint();
     connection->endpoint_lease_ = std::move(lease);
     connections_.push_back(*connection);
     ++active_connection_count_;
@@ -1815,8 +1849,8 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
             }
             std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
             QuicPacketPlaintext plaintext{send_plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
-            auto written = encode_invalid_token_close_packet(*packet, datagram, validation->close_reason, out.data(),
-                                                             out.size(), plaintext);
+            auto written = encode_invalid_token_close_packet(*this, *packet, datagram, validation->close_reason,
+                                                             out.data(), out.size(), plaintext);
             if (!written) {
                 ++dropped_datagram_count_;
                 return std::unexpected(written.error());
@@ -1883,7 +1917,7 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
 
 void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
                                             const QuicPacketProcessResult &result) noexcept {
-    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    const QuicTime now = quic_time_ms(loop_.now());
     const auto applied_result = quic_apply_receive_result(connection, result, now);
     QuicReceiveApplyResult applied{};
     bool should_send = result.send_output;
@@ -1918,25 +1952,21 @@ void QuicUdpEndpoint::handle_receive_result(QuicConnection &connection,
         QuicPacketNumberSpace &space = connection.packet_number_space(result.level);
         if (should_delay_ack(connection, space, now)) {
             const QuicTime remaining = connection.local_transport().max_ack_delay - (now - space.ack_delay_start);
-            if (loop_ != nullptr) {
-                connection.arm_ack_timer(loop_->now() + remaining);
-            }
+            connection.arm_ack_timer(loop_.now() + remaining);
         } else {
             should_send = true;
         }
     }
 
-    if (loop_ != nullptr) {
-        if (connection.closing()) {
-            // arm_close_timer is idempotent; this is a safety net in case close() was
-            // called without an EventLoop context (the 3*PTO timer must be armed before
-            // we let the connection idle).
-            connection.arm_close_timer();
-        } else {
-            connection.on_packet_processed();
-            connection.arm_loss_detection_timer();
-            connection.paths().arm_validation_timer();
-        }
+    if (connection.closing()) {
+        // arm_close_timer is idempotent; this is a safety net in case close() was
+        // called without an EventLoop context (the 3*PTO timer must be armed before
+        // we let the connection idle).
+        connection.arm_close_timer();
+    } else {
+        connection.on_packet_processed();
+        connection.arm_loss_detection_timer();
+        connection.paths().arm_validation_timer();
     }
 
     // In Draining state we never send anything (RFC §10.2.2).
@@ -2065,7 +2095,7 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
             return std::unexpected(encoded.error());
         }
 
-        const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+        const QuicTime now = quic_time_ms(loop_.now());
         frame->packet_number = encoded->packet_number;
         frame->send_time = now;
         frame->packet_ack_eliciting = encoded->ack_eliciting;
@@ -2137,7 +2167,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
     }
     datagram.capacity = allowed;
 
-    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    const QuicTime now = quic_time_ms(loop_.now());
     const std::size_t pad_level = padding_level_index(connection);
     QuicOutputFrame *sending_tails[kQuicSendLevelCount]{};
     for (std::size_t i = 0; i < kQuicSendLevelCount; ++i) {
@@ -2467,7 +2497,7 @@ void QuicUdpEndpoint::commit_send_datagram(QuicConnection &connection, const Qui
     if (datagram.path != nullptr) {
         connection.record_path_sent(*datagram.path, datagram.length);
     }
-    if (sent_ack_eliciting && loop_ != nullptr) {
+    if (sent_ack_eliciting) {
         connection.on_ack_eliciting_packet_sent();
         connection.arm_loss_detection_timer();
     }
@@ -2487,7 +2517,7 @@ void QuicUdpEndpoint::rollback_send_datagram(QuicConnection &connection, const Q
 }
 
 void QuicUdpEndpoint::finish_send_batch(QuicConnection &connection) noexcept {
-    const QuicTime now = loop_ != nullptr ? quic_time_ms(loop_->now()) : QuicTime{0};
+    const QuicTime now = quic_time_ms(loop_.now());
     quic_congestion_on_idle(connection.congestion(), !connection_has_send_work(connection), now);
 }
 

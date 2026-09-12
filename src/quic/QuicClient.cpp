@@ -153,8 +153,7 @@ void QuicClientAttempt::cancel() noexcept {
     if (connection == nullptr) {
         return;
     }
-    FIBER_ASSERT(connection->loop() != nullptr);
-    FIBER_ASSERT(connection->loop()->in_loop());
+    FIBER_ASSERT(connection->loop().in_loop());
     if (!connection->terminal_closing()) {
         connection->close_immediately(QuicErrorCode::NoError);
     }
@@ -164,8 +163,7 @@ void QuicClientAttempt::cancel() noexcept {
 
 common::IoResult<void> QuicClient::init(QuicUdpEndpoint &endpoint, net::TlsClientSecurity tls_security,
                                         Options options) noexcept {
-    if (endpoint_ != nullptr || !endpoint.valid() || endpoint.loop_ == nullptr || options.alpn.empty() ||
-        options.create_connection == nullptr) {
+    if (endpoint_ != nullptr || !endpoint.valid() || options.alpn.empty() || options.create_connection == nullptr) {
         return std::unexpected(common::IoErr::Invalid);
     }
     endpoint_ = &endpoint;
@@ -180,7 +178,7 @@ QuicConnectError QuicClient::error(QuicConnectPhase phase, common::IoErr io_erro
 
 std::expected<QuicClientAttempt, QuicConnectError>
 QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
-    if (endpoint_ == nullptr || !endpoint_->running() || endpoint_->loop_ == nullptr || !endpoint_->loop_->in_loop() ||
+    if (endpoint_ == nullptr || !endpoint_->running() || !endpoint_->loop_.in_loop() ||
         options.remote_addr.port() == 0 || options.remote_addr.ip().is_unspecified() ||
         options.handshake_timeout < std::chrono::milliseconds::zero()) {
         return std::unexpected(error(QuicConnectPhase::Endpoint, common::IoErr::Invalid));
@@ -236,10 +234,6 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
             attempt_early_data ? cached.remembered_transport.initial_max_streams_bidi : 0;
     connection_options.max_local_unidirectional_streams =
             attempt_early_data ? cached.remembered_transport.initial_max_streams_uni : 0;
-    connection_options.output_frame_pool = &endpoint_->output_frame_pool_;
-    connection_options.crypto_block_pool = &endpoint_->crypto_block_pool_;
-    connection_options.recv_storage_parent = &endpoint_->recv_storage_budget_;
-    connection_options.loop = endpoint_->loop_;
     connection_options.owner = options.application_owner;
     connection_options.ops = options.application_ops;
     connection_options.enable_early_data = options.enable_early_data;
@@ -254,7 +248,8 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
     connection_options.on_new_tls_session = options_.cache.store_session != nullptr ? store_session : nullptr;
     connection_options.on_new_token = options_.cache.store_token != nullptr ? store_token : nullptr;
 
-    QuicConnection::Lease endpoint_lease = options_.create_connection(options_.connection_owner, connection_options);
+    QuicConnection::Lease endpoint_lease =
+            options_.create_connection(options_.connection_owner, *endpoint_, connection_options);
     QuicConnection *connection = endpoint_lease.get();
     if (connection == nullptr) {
         return std::unexpected(error(QuicConnectPhase::Connection, common::IoErr::NoMem));
@@ -263,6 +258,7 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
         return std::unexpected(error(QuicConnectPhase::Connection, common::IoErr::Invalid));
     }
 
+    FIBER_ASSERT(&connection->endpoint() == endpoint_);
     auto token = connection->set_initial_token(cached.token, cached.token_len);
     if (!token) {
         return std::unexpected(error(QuicConnectPhase::Connection, token.error()));
@@ -297,7 +293,7 @@ QuicClient::start_connect(const QuicClientConnectOptions &options) noexcept {
     endpoint_->schedule_send(*connection);
     const auto handshake_deadline = options.handshake_timeout == std::chrono::milliseconds::max()
                                             ? std::chrono::steady_clock::time_point::max()
-                                            : endpoint_->loop_->now() + options.handshake_timeout;
+                                            : endpoint_->loop_.now() + options.handshake_timeout;
     return QuicClientAttempt(std::move(caller_lease), handshake_deadline);
 }
 

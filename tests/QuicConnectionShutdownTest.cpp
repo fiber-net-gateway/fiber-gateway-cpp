@@ -46,7 +46,6 @@ fiber::quic::QuicConnection::Options established_server_options(ShutdownCallback
     options.transport.max_idle_timeout = std::chrono::seconds(60);
     // Default to the shared non-running test loop; callers that drive
     // coroutines/timers override this with their running group loop.
-    options.loop = &fiber::test::quic_loop();
     return options;
 }
 
@@ -107,7 +106,7 @@ fiber::quic::QuicStream *open_peer_stream(fiber::quic::QuicConnection &conn, std
 TEST(QuicConnectionShutdownTest, ShutdownWithoutStreamsClosesImmediately) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     conn.shutdown(fiber::quic::QuicErrorCode::NoError);
@@ -124,7 +123,7 @@ TEST(QuicConnectionShutdownTest, ShutdownWithoutStreamsClosesImmediately) {
 TEST(QuicConnectionShutdownTest, LastStreamRetirementFinalizesShutdown) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -165,8 +164,8 @@ TEST(QuicConnectionShutdownTest, GraceTimerForcesCloseWhenStreamsRemain) {
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -190,7 +189,7 @@ TEST(QuicConnectionShutdownTest, GraceTimerForcesCloseWhenStreamsRemain) {
 TEST(QuicConnectionShutdownTest, ReceivingCloseDuringShutdownEntersDraining) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -220,7 +219,7 @@ TEST(QuicConnectionShutdownTest, ReceivingCloseDuringShutdownEntersDraining) {
 TEST(QuicConnectionShutdownTest, CloseImmediatelyTakesOverGracefulShutdown) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -241,7 +240,7 @@ TEST(QuicConnectionShutdownTest, CloseImmediatelyTakesOverGracefulShutdown) {
 TEST(QuicConnectionShutdownTest, CloseTakesOverGracefulShutdownWithoutStreamControlFrames) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -288,9 +287,9 @@ TEST(QuicConnectionShutdownTest, IdleTimeoutDuringShutdownGoesToClosed) {
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.transport.max_idle_timeout = std::chrono::milliseconds(10);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -314,7 +313,7 @@ TEST(QuicConnectionShutdownTest, IdleTimeoutDuringShutdownGoesToClosed) {
 TEST(QuicConnectionShutdownTest, PeerStreamRejectedDuringShutdown) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -335,7 +334,7 @@ TEST(QuicConnectionShutdownTest, PeerStreamRejectedDuringShutdown) {
 TEST(QuicConnectionShutdownTest, LocalStreamRequestRejectedDuringShutdown) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     // Pin a peer stream so shutdown() stays in the shutdown_pending state
@@ -409,8 +408,8 @@ TEST(QuicConnectionShutdownTest, GracefulCloseCompletionDeferredOnRunningLoop) {
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -450,9 +449,9 @@ TEST(QuicConnectionShutdownTest, KeepaliveSuppressedDuringShutdown) {
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.keepalive_interval = std::chrono::milliseconds(5);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     mark_established_with_app_keys(conn);
 
     // Pin a peer stream to keep the connection out of immediate close.
@@ -476,7 +475,7 @@ TEST(QuicConnectionShutdownTest, KeepaliveSuppressedDuringShutdown) {
 TEST(QuicConnectionShutdownTest, ShutdownApplicationProducesAppCloseFrame) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     constexpr std::uint64_t kAppError = 0x108; // H3_INTERNAL_ERROR
@@ -496,7 +495,7 @@ TEST(QuicConnectionShutdownTest, ShutdownApplicationProducesAppCloseFrame) {
 TEST(QuicConnectionShutdownTest, RepeatedShutdownIsNoOp) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -525,7 +524,7 @@ TEST(QuicConnectionShutdownTest, RepeatedShutdownIsNoOp) {
 TEST(QuicConnectionShutdownTest, ShutdownDuringHandshakingWithNoStreamsClosesImmediately) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.start_handshake().has_value());
     EXPECT_EQ(conn.state(), fiber::quic::QuicConnectionState::Handshaking);
 
@@ -540,7 +539,7 @@ TEST(QuicConnectionShutdownTest, ShutdownDuringHandshakingWithNoStreamsClosesImm
 TEST(QuicConnectionShutdownTest, StreamCloseQueuesControlFramesBeforeConnectionClosing) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     fiber::quic::QuicStreamFrame frame{};
@@ -565,7 +564,7 @@ TEST(QuicConnectionShutdownTest, StreamCloseQueuesControlFramesBeforeConnectionC
 TEST(QuicConnectionShutdownTest, ConnectionCloseDoesNotQueueStreamControlFrames) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     auto *stream = open_peer_stream(conn, 0);
@@ -626,8 +625,8 @@ TEST(QuicConnectionShutdownTest, TlsAlertCloseStagesCryptoErrorAndSchedulesSend)
 
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     mark_established_with_app_keys(conn);
 
     std::promise<void> done;
@@ -663,7 +662,7 @@ TEST(QuicConnectionShutdownTest, StreamDataExceedingMaxStreamDataClosesFlowContr
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
     options.recv_flow.stream_buffer_limit = 8; // advertised max_stream_data
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     fiber::quic::QuicStreamFrame frame{};
@@ -688,7 +687,7 @@ TEST(QuicConnectionShutdownTest, StreamDataExceedingMaxDataClosesFlowControl) {
     auto options = established_server_options(state);
     options.recv_flow.conn_recv_limit = 10;
     options.recv_flow.conn_recv_low_water = 0;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     fiber::quic::QuicStreamFrame frame{};
@@ -710,7 +709,7 @@ TEST(QuicConnectionShutdownTest, StreamDataExceedingMaxDataClosesFlowControl) {
 TEST(QuicConnectionShutdownTest, ResetStreamFinalSizeBelowReceivedClosesFinalSize) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     fiber::quic::QuicStreamFrame data{};
@@ -741,7 +740,7 @@ TEST(QuicConnectionShutdownTest, ResetStreamFinalSizeBelowReceivedClosesFinalSiz
 TEST(QuicConnectionShutdownTest, StreamFinFinalSizeBelowReceivedClosesFinalSize) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     fiber::quic::QuicStreamFrame data{};
@@ -772,7 +771,7 @@ TEST(QuicConnectionShutdownTest, StreamFinFinalSizeBelowReceivedClosesFinalSize)
 TEST(QuicConnectionShutdownTest, StopSendingOnPeerUnidirectionalClosesStreamState) {
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     // Open a peer-initiated unidirectional stream (client-uni, id 2): the peer
@@ -802,7 +801,7 @@ TEST(QuicConnectionShutdownTest, PeerStreamExceedingAdvertisedMaxStreamsClosesSt
     ShutdownCallbackState state{};
     auto options = established_server_options(state);
     options.max_peer_bidirectional_streams = 0; // advertise zero bidi streams
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     mark_established_with_app_keys(conn);
 
     fiber::quic::QuicStreamFrame frame{};
@@ -885,7 +884,7 @@ void fill_reset_datagram(std::array<std::uint8_t, 48> &out, const std::uint8_t *
 // rejects non-matching tails.
 TEST(QuicStatelessResetTest, DetectsStatelessResetMatchesPeerToken) {
     ShutdownCallbackState state{};
-    fiber::quic::QuicConnection conn(reset_test_options(state));
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), reset_test_options(state));
 
     const std::uint8_t token[fiber::quic::kStatelessResetTokenLength] = {
             0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF};
@@ -920,7 +919,7 @@ TEST(QuicStatelessResetTest, DetectsStatelessResetMatchesPeerToken) {
 // with no CONNECTION_CLOSE frame queued (RFC 9000 §10.2.2 / §10.3).
 TEST(QuicStatelessResetTest, UndecryptableShortHeaderWithMatchingTokenDrainsSilently) {
     ShutdownCallbackState state{};
-    fiber::quic::QuicConnection conn(reset_test_options(state));
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), reset_test_options(state));
     mark_established_with_app_keys(conn);
     install_application_read_keys(conn);
 
@@ -962,7 +961,7 @@ TEST(QuicStatelessResetTest, UndecryptableShortHeaderWithMatchingTokenDrainsSile
 // the connection stays open.
 TEST(QuicStatelessResetTest, UndecryptableShortHeaderWithoutMatchingTokenIsDropped) {
     ShutdownCallbackState state{};
-    fiber::quic::QuicConnection conn(reset_test_options(state));
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), reset_test_options(state));
     mark_established_with_app_keys(conn);
     install_application_read_keys(conn);
 

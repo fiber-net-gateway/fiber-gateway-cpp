@@ -43,16 +43,18 @@ using namespace std::chrono_literals;
 class ServerFixture {
 public:
     explicit ServerFixture(
-            const fiber::quic::QuicConnection::Options &options, fiber::http::Http3ServerOptions http_options = {},
+            fiber::quic::QuicUdpEndpoint &endpoint, const fiber::quic::QuicConnection::Options &options,
+            fiber::http::Http3ServerOptions http_options = {},
             fiber::http::HttpHandler handler = [](fiber::http::HttpExchange &) -> fiber::async::Task<void> {
                 co_return;
-            }) : loop_(*options.loop), options_(http_options), closed_future_(closed_.get_future()) {
+            }) : loop_(endpoint.loop()), options_(http_options), closed_future_(closed_.get_future()) {
         static const fiber::http::Http3ServerConnection::Ops ops{
                 [](void *owner, fiber::http::Http3ServerConnection &) noexcept {
                     static_cast<ServerFixture *>(owner)->closed_.set_value();
                 }};
         connection_ = fiber::http::Http3ServerConnection::create(
-                options, std::make_shared<const fiber::http::HttpHandler>(std::move(handler)), options_, this, ops);
+                endpoint, options, std::make_shared<const fiber::http::HttpHandler>(std::move(handler)), options_, this,
+                ops);
         FIBER_ASSERT(connection_ != nullptr);
         lease_ = fiber::quic::QuicConnection::Lease::adopt(&connection_->quic());
     }
@@ -82,9 +84,9 @@ private:
 };
 class ClientFixture {
 public:
-    explicit ClientFixture(const fiber::quic::QuicConnection::Options &options,
-                           fiber::http::Http3ClientConnectionImpl::Options http_options = {}) : loop_(*options.loop) {
-        connection_ = fiber::http::Http3ClientConnectionImpl::create(options, http_options);
+    explicit ClientFixture(fiber::quic::QuicUdpEndpoint &endpoint, const fiber::quic::QuicConnection::Options &options,
+                           fiber::http::Http3ClientConnectionImpl::Options http_options = {}) : loop_(endpoint.loop()) {
+        connection_ = fiber::http::Http3ClientConnectionImpl::create(endpoint, options, http_options);
         FIBER_ASSERT(connection_ != nullptr);
         lease_ = fiber::quic::QuicConnection::Lease::adopt(&connection_->quic());
     }
@@ -120,9 +122,10 @@ private:
 class ControlFixture {
 public:
     explicit ControlFixture(
-            const fiber::quic::QuicConnection::Options &options,
+            fiber::quic::QuicUdpEndpoint &endpoint, const fiber::quic::QuicConnection::Options &options,
             fiber::http::Http3ErrorCode push_result = fiber::http::Http3ErrorCode::StreamCreationError) :
-        push_result_(push_result), quic_(options), gate_(quic_), control_(quic_, gate_, {}, this, control_ops()) {
+        push_result_(push_result), quic_(endpoint, options), gate_(quic_),
+        control_(quic_, gate_, {}, this, control_ops()) {
         fiber::quic::QuicConnection::Ops ops{.create_stream =
                                                      [](void *, std::uint64_t) noexcept {
                                                          return fiber::http::Http3ControlStreams::create_stream();
@@ -166,7 +169,7 @@ public:
     void finish() {
         std::promise<void> done;
         auto future = done.get_future();
-        fiber::async::spawn(*quic_.loop(), [this, &done]() -> fiber::async::DetachedTask {
+        fiber::async::spawn(quic_.loop(), [this, &done]() -> fiber::async::DetachedTask {
             close();
             quic_.mark_closed();
             co_await wait_closed();

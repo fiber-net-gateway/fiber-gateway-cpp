@@ -36,19 +36,20 @@ fiber::quic::QuicStream::Lease create_stream(void *, std::uint64_t) noexcept {
 }
 
 fiber::quic::QuicConnection::Lease
-create_server_connection(void *owner, const fiber::quic::QuicConnection::Options &options) noexcept {
+create_server_connection(void *owner, fiber::quic::QuicUdpEndpoint &endpoint,
+                         const fiber::quic::QuicConnection::Options &options) noexcept {
     fiber::quic::QuicConnection::Options owned = options;
     owned.on_destroy = destroy_connection;
     owned.owner = owner;
     owned.ops.create_stream = create_stream;
-    return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(owned));
+    return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(endpoint, owned));
 }
 
-fiber::quic::QuicConnection::Lease create_connection(void *,
+fiber::quic::QuicConnection::Lease create_connection(void *, fiber::quic::QuicUdpEndpoint &endpoint,
                                                      const fiber::quic::QuicConnection::Options &options) noexcept {
     fiber::quic::QuicConnection::Options owned = options;
     owned.on_destroy = destroy_connection;
-    return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(owned));
+    return fiber::quic::QuicConnection::Lease::adopt(new (std::nothrow) fiber::quic::QuicConnection(endpoint, owned));
 }
 
 struct QuicTestTls {
@@ -135,22 +136,24 @@ fiber::async::DetachedTask start_client_attempt(fiber::quic::QuicUdpEndpoint *en
     auto started = client->start_connect(options);
     if (!started) {
         summary.error = started.error().io_error;
-        endpoint->close();
+        co_await endpoint->shutdown();
         promise->set_value(summary);
         co_return;
     }
 
-    fiber::quic::QuicClientAttempt attempt = std::move(*started);
-    fiber::quic::QuicConnection *connection = attempt.connection();
-    summary.state = connection->state();
-    summary.endpoint_connections = endpoint->active_connection_count();
-    summary.tls_initialized = connection->tls().initialized();
-    summary.initial_keys_ready = connection->crypto().initial_ready();
-    summary.cid_registered = endpoint->find_connection(connection->local_connection_id()) == connection;
-    summary.initial_output_queued =
-            !connection->packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).pending_frames.empty();
+    {
+        fiber::quic::QuicClientAttempt attempt = std::move(*started);
+        fiber::quic::QuicConnection *connection = attempt.connection();
+        summary.state = connection->state();
+        summary.endpoint_connections = endpoint->active_connection_count();
+        summary.tls_initialized = connection->tls().initialized();
+        summary.initial_keys_ready = connection->crypto().initial_ready();
+        summary.cid_registered = endpoint->find_connection(connection->local_connection_id()) == connection;
+        summary.initial_output_queued =
+                !connection->packet_number_space(fiber::quic::QuicEncryptionLevel::Initial).pending_frames.empty();
+    }
 
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(summary);
 }
 
@@ -169,7 +172,7 @@ fiber::async::DetachedTask timeout_client_attempt(fiber::quic::QuicUdpEndpoint *
     auto bound = blackhole.bind({fiber::net::IpAddress::loopback_v4(), 0}, {});
     if (!bound) {
         summary.error = bound.error();
-        endpoint->close();
+        co_await endpoint->shutdown();
         promise->set_value(summary);
         co_return;
     }
@@ -191,7 +194,7 @@ fiber::async::DetachedTask timeout_client_attempt(fiber::quic::QuicUdpEndpoint *
     }
     summary.endpoint_connections = endpoint->active_connection_count();
     blackhole.close();
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(summary);
 }
 
@@ -360,11 +363,11 @@ fiber::async::DetachedTask receive_unknown_dcid_stateless_reset(
         }
     }
 
-    client_endpoint->close();
-    server_endpoint->close();
     if (connected) {
         connected->reset();
     }
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
     promise->set_value(summary);
 }
 
@@ -437,8 +440,8 @@ fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint
         }
     }
 
-    client_endpoint->close();
-    server_endpoint->close();
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
     promise->set_value(summary);
 }
 
@@ -451,12 +454,8 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
     auto client_started = client_endpoint->start();
     if (!server_started || !client_started) {
         summary.error = !server_started ? server_started.error() : client_started.error();
-        if (client_endpoint->valid()) {
-            client_endpoint->close();
-        }
-        if (server_endpoint->valid()) {
-            server_endpoint->close();
-        }
+        co_await client_endpoint->shutdown();
+        co_await server_endpoint->shutdown();
         promise->set_value(std::move(summary));
         co_return;
     }
@@ -481,11 +480,11 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
         summary.retry_processed = connection->retry_processed();
     }
 
-    client_endpoint->close();
-    server_endpoint->close();
     if (connected) {
         connected->reset();
     }
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
     promise->set_value(std::move(summary));
 }
 
@@ -498,12 +497,8 @@ fiber::async::DetachedTask connect_loopback_confirmed(fiber::quic::QuicUdpEndpoi
     auto client_started = client_endpoint->start();
     if (!server_started || !client_started) {
         summary.error = !server_started ? server_started.error() : client_started.error();
-        if (client_endpoint->valid()) {
-            client_endpoint->close();
-        }
-        if (server_endpoint->valid()) {
-            server_endpoint->close();
-        }
+        co_await client_endpoint->shutdown();
+        co_await server_endpoint->shutdown();
         promise->set_value(std::move(summary));
         co_return;
     }
@@ -537,8 +532,8 @@ fiber::async::DetachedTask connect_loopback_confirmed(fiber::quic::QuicUdpEndpoi
         attempt.cancel();
     }
 
-    client_endpoint->close();
-    server_endpoint->close();
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
     summary.client_endpoint_connections = client_endpoint->active_connection_count();
     summary.server_endpoint_connections = server_endpoint->active_connection_count();
     promise->set_value(std::move(summary));
@@ -550,10 +545,10 @@ TEST(QuicClientTest, StartConnectAttachesAndQueuesClientInitial) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
+    ASSERT_TRUE(endpoint.init(endpoint_options));
 
     auto tls_material = create_quic_tls();
     ASSERT_TRUE(tls_material);
@@ -592,10 +587,10 @@ TEST(QuicClientTest, HandshakeTimeoutCancelsAndDetachesConnection) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint endpoint;
+    fiber::quic::QuicUdpEndpoint endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(endpoint.init(group.at(0), endpoint_options));
+    ASSERT_TRUE(endpoint.init(endpoint_options));
 
     auto tls_material = create_quic_tls();
     ASSERT_TRUE(tls_material);
@@ -636,17 +631,17 @@ TEST(QuicClientTest, VerifyNameMayDifferFromServerName) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint server_endpoint;
+    fiber::quic::QuicUdpEndpoint server_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
-    ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
+    ASSERT_TRUE(server_endpoint.init(server_options));
 
-    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
+    ASSERT_TRUE(client_endpoint.init(client_options));
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(client.init(
@@ -702,17 +697,17 @@ TEST_P(QuicClientMtlsTest, EnforcesClientCertificateAuthentication) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint server_endpoint;
+    fiber::quic::QuicUdpEndpoint server_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
-    ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
+    ASSERT_TRUE(server_endpoint.init(server_options));
 
-    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
+    ASSERT_TRUE(client_endpoint.init(client_options));
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(client.init(
@@ -766,17 +761,17 @@ TEST(QuicClientTest, RejectsCertificateForWrongHostname) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint server_endpoint;
+    fiber::quic::QuicUdpEndpoint server_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
-    ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
+    ASSERT_TRUE(server_endpoint.init(server_options));
 
-    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
+    ASSERT_TRUE(client_endpoint.init(client_options));
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(client.init(
@@ -820,7 +815,7 @@ TEST(QuicClientTest, UnknownDcidStatelessResetUsesEndpointTokenIndex) {
         reset_secret[i] = static_cast<std::uint8_t>(0x40U + i);
     }
 
-    fiber::quic::QuicUdpEndpoint server_endpoint;
+    fiber::quic::QuicUdpEndpoint server_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions server_endpoint_options{};
     server_endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     server_endpoint_options.stateless_reset_secret_set = true;
@@ -828,12 +823,12 @@ TEST(QuicClientTest, UnknownDcidStatelessResetUsesEndpointTokenIndex) {
     fiber::quic::QuicUdpEndpoint::ServerAdmissionOptions server_options{};
     server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
-    ASSERT_TRUE(server_endpoint.init(group.at(0), server_endpoint_options, server_options));
+    ASSERT_TRUE(server_endpoint.init(server_endpoint_options, server_options));
 
-    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
+    ASSERT_TRUE(client_endpoint.init(client_options));
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(client.init(
@@ -875,18 +870,18 @@ TEST(QuicClientTest, CompletesVerifiedLoopbackHandshakeAfterRetry) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint server_endpoint;
+    fiber::quic::QuicUdpEndpoint server_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     server_options.tls = &server_tls;
     server_options.create_connection = create_connection;
     server_options.retry = true;
-    ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
+    ASSERT_TRUE(server_endpoint.init(server_options));
 
-    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
+    ASSERT_TRUE(client_endpoint.init(client_options));
 
     fiber::quic::QuicClient client;
     ASSERT_TRUE(client.init(
@@ -928,19 +923,19 @@ TEST(QuicClientTest, ReusesSessionAndNewTokenWithEarlyData) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
-    fiber::quic::QuicUdpEndpoint server_endpoint;
+    fiber::quic::QuicUdpEndpoint server_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::Options server_options{};
     server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
     server_options.tls = &server_tls;
     server_options.create_connection = create_server_connection;
     server_options.issue_new_token = true;
     server_options.enable_early_data = true;
-    ASSERT_TRUE(server_endpoint.init(group.at(0), server_options));
+    ASSERT_TRUE(server_endpoint.init(server_options));
 
-    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
     client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(client_endpoint.init(group.at(0), client_options));
+    ASSERT_TRUE(client_endpoint.init(client_options));
 
     TestClientCache cache{};
     fiber::quic::QuicClient client;

@@ -58,7 +58,8 @@ public:
 
     Http3Client(quic::QuicUdpEndpoint &endpoint, Options options) noexcept;
     // Cache callbacks and connection factories retain this object as their owner.
-    // The client and endpoint must outlive every connection created by connect().
+    // The client and endpoint must outlive every connection created by connect();
+    // QuicUdpEndpoint::shutdown() is how an owner waits for that.
     ~Http3Client() = default;
 
     [[nodiscard]] common::IoResult<void> init() noexcept;
@@ -69,8 +70,10 @@ public:
 
 private:
     [[nodiscard]] static quic::QuicConnection::Lease
-    create_connection_op(void *owner, const quic::QuicConnection::Options &options) noexcept;
-    [[nodiscard]] quic::QuicConnection::Lease create_connection(const quic::QuicConnection::Options &options) noexcept;
+    create_connection_op(void *owner, quic::QuicUdpEndpoint &endpoint,
+                         const quic::QuicConnection::Options &options) noexcept;
+    [[nodiscard]] quic::QuicConnection::Lease create_connection(quic::QuicUdpEndpoint &endpoint,
+                                                                const quic::QuicConnection::Options &options) noexcept;
     [[nodiscard]] static Http3ClientConnectError make_error(Http3ClientConnectPhase phase,
                                                             common::IoErr error) noexcept;
 

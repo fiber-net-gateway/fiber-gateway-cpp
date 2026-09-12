@@ -245,7 +245,7 @@ void observe_capacity_change(void *owner, fiber::quic::QuicConnection &conn) noe
     if (observer->shutdown_on_capacity) {
         observer->shutdown_on_capacity = false;
         observer->shutdown_connection = &conn;
-        conn.loop()->post_local<OpsObserver, &OpsObserver::shutdown_entry, &OpsObserver::shutdown_deferred>(*observer);
+        conn.loop().post_local<OpsObserver, &OpsObserver::shutdown_entry, &OpsObserver::shutdown_deferred>(*observer);
     }
     --observer->capacity_depth;
 }
@@ -438,7 +438,7 @@ TEST(QuicConnectionTest, AllocatesClientInitiatedStreamIds) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 2;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     auto first = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
     auto second = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
@@ -454,7 +454,7 @@ TEST(QuicConnectionTest, AllocatesClientInitiatedStreamIds) {
 TEST(QuicConnectionTest, AllocatesServerInitiatedUnidirectionalStreamIds) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     auto stream_id = conn.next_local_stream_id(fiber::quic::QuicStreamType::Unidirectional);
 
@@ -468,7 +468,7 @@ TEST(QuicConnectionTest, TryAttachLocalStreamAssignsClientBidirectionalStream) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 2;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.mark_established());
 
     auto stream = make_test_stream();
@@ -487,7 +487,7 @@ TEST(QuicConnectionTest, TryAttachLocalStreamAssignsClientBidirectionalStream) {
 TEST(QuicConnectionTest, TryAttachLocalStreamReturnsBusyBeforeEstablished) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = make_test_stream();
     ASSERT_TRUE(stream);
 
@@ -512,7 +512,7 @@ TEST(QuicConnectionTest, EarlyDataRejectionDropsReplaySafeStreamsWithoutReplay) 
     options.remembered_peer_transport.initial_max_stream_data_bidi_remote = 1024;
     options.remembered_peer_transport.initial_max_streams_bidi = 1;
     options.max_local_bidirectional_streams = 1;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.crypto().ensure_transient());
     conn.crypto().early_write().packet->ready = true;
     conn.crypto().early_write().header->ready = true;
@@ -541,7 +541,7 @@ TEST(QuicConnectionTest, TryAttachLocalStreamQueuesStreamsBlockedAtLimit) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 0;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.mark_established());
     auto stream = make_test_stream();
     ASSERT_TRUE(stream);
@@ -557,7 +557,7 @@ TEST(QuicConnectionTest, TryAttachLocalStreamQueuesStreamsBlockedAtLimit) {
 }
 
 TEST(QuicConnectionTest, InitializesThreePacketNumberSpaces) {
-    fiber::quic::QuicConnection conn(fiber::test::quic_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), fiber::test::quic_options());
 
     auto &initial = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
     auto &handshake = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
@@ -575,7 +575,7 @@ TEST(QuicConnectionTest, InitializesThreePacketNumberSpaces) {
 }
 
 TEST(QuicConnectionTest, MapsEarlyDataToApplicationPacketNumberSpace) {
-    fiber::quic::QuicConnection conn(fiber::test::quic_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), fiber::test::quic_options());
 
     auto &early = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::EarlyData);
     auto &application = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Application);
@@ -589,7 +589,7 @@ TEST(QuicConnectionTest, MapsEarlyDataToApplicationPacketNumberSpace) {
 }
 
 TEST(QuicConnectionTest, AdvancesPacketNumbersIndependentlyPerSpace) {
-    fiber::quic::QuicConnection conn(fiber::test::quic_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), fiber::test::quic_options());
 
     auto &initial = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
     auto &handshake = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
@@ -602,7 +602,7 @@ TEST(QuicConnectionTest, AdvancesPacketNumbersIndependentlyPerSpace) {
 }
 
 TEST(QuicConnectionTest, QueuesFramesIntrusively) {
-    fiber::quic::QuicConnection conn(fiber::test::quic_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto &space = conn.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);
     fiber::quic::QuicOutputFrame *first = space.alloc_frame();
     fiber::quic::QuicOutputFrame *second = space.alloc_frame();
@@ -626,7 +626,7 @@ TEST(QuicConnectionTest, QueuesFramesIntrusively) {
 TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
@@ -648,7 +648,7 @@ TEST(QuicConnectionTest, StreamWriteSubmitsConnectionSendWork) {
 }
 
 TEST(QuicConnectionTest, RecvFlowDefaultsInitializeLocalTransportAndLimit) {
-    fiber::quic::QuicConnection conn(fiber::test::quic_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), fiber::test::quic_options());
 
     EXPECT_EQ(conn.recv_data_limit(), fiber::quic::kQuicDefaultConnRecvLimit);
     EXPECT_EQ(conn.local_transport().initial_max_data, fiber::quic::kQuicDefaultConnRecvLimit);
@@ -665,7 +665,7 @@ TEST(QuicConnectionTest, CreatesInitialActivePathFromOptions) {
     options.remote_addr = loopback(5555);
     options.remote_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
 
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
@@ -678,7 +678,7 @@ TEST(QuicConnectionTest, CreatesInitialActivePathFromOptions) {
 }
 
 TEST(QuicConnectionTest, TracksPathReceiveSendAndAntiAmplificationLimit) {
-    fiber::quic::QuicConnection conn(fiber::test::quic_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
 
@@ -699,7 +699,7 @@ TEST(QuicConnectionTest, PeerTransportStartsMtuDiscoveryOnValidatedPath) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22});
     options.initial_path_validated = true;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
 
@@ -722,7 +722,7 @@ TEST(QuicConnectionTest, HandshakeConfirmationStartsMtuDiscoveryForValidatedPath
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
     ASSERT_FALSE(path->validated);
@@ -757,7 +757,7 @@ TEST(QuicConnectionTest, HandshakeConfirmationDoesNotRestartMtuDiscovery) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22});
     options.initial_path_validated = true;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
 
@@ -788,7 +788,7 @@ TEST(QuicConnectionTest, MtuDelayQueuesPingProbe) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22});
     options.initial_path_validated = true;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
 
@@ -816,7 +816,7 @@ TEST(QuicConnectionTest, MtuAckRaisesPathMtuAndContinuesDiscovery) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22});
     options.initial_path_validated = true;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
 
@@ -849,7 +849,7 @@ TEST(QuicConnectionTest, MtuProbeFailureSetsUpperBoundAndBisects) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22});
     options.initial_path_validated = true;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
 
@@ -879,7 +879,7 @@ TEST(QuicConnectionTest, AckHandlerPromotesMtuProbePacket) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22});
     options.initial_path_validated = true;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
 
@@ -924,7 +924,7 @@ TEST(QuicConnectionTest, AckHandlerPromotesMtuProbePacket) {
 }
 
 TEST(QuicConnectionTest, ReplacesProbePathWhenCreatingAnotherProbe) {
-    fiber::quic::QuicConnection conn(fiber::test::quic_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), fiber::test::quic_options());
     const auto cid = cid_from({0x11, 0x22});
 
     auto *first = conn.create_path(loopback(6001), loopback(4433), cid, fiber::quic::QuicPathTag::Probe);
@@ -947,7 +947,7 @@ TEST(QuicConnectionTest, RecvPathChallengeQueuesPathResponseOnSamePath) {
     options.local_addr = loopback(4433);
     options.remote_addr = loopback(5555);
     options.remote_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *path = conn.active_path();
     ASSERT_NE(path, nullptr);
     path->validated = true;
@@ -975,7 +975,7 @@ TEST(QuicConnectionTest, MigrationQueuesPathChallengesAndValidatesPortOnlyRebind
     options.local_addr = loopback(4433);
     options.remote_addr = loopback(5555);
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *old = conn.active_path();
     ASSERT_NE(old, nullptr);
     old->validated = true;
@@ -1012,7 +1012,7 @@ TEST(QuicConnectionTest, ValidatingMigratedIpResetsCongestionAndRtt) {
     options.local_addr = loopback(4433);
     options.remote_addr = v4_addr({127, 0, 0, 1}, 5555);
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto *old = conn.active_path();
     ASSERT_NE(old, nullptr);
     old->validated = true;
@@ -1040,7 +1040,7 @@ TEST(QuicConnectionTest, AppliesPeerTransportParamsAndUpdatesLocalStreamLimits) 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     fiber::quic::QuicTransportParams params{};
     params.has_initial_source_connection_id = true;
@@ -1076,7 +1076,7 @@ TEST(QuicConnectionTest, PeerIdleTimeoutUsesMinimumNonZeroTransportValue) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
     options.transport.max_idle_timeout = std::chrono::milliseconds(30000);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     auto params = valid_server_peer_params(options);
     params.max_idle_timeout = 12000;
@@ -1090,7 +1090,7 @@ TEST(QuicConnectionTest, ZeroLocalIdleTimeoutAllowsPeerIdleTimeout) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
     options.transport.max_idle_timeout = std::chrono::milliseconds(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     auto params = valid_server_peer_params(options);
     params.max_idle_timeout = 9000;
@@ -1104,7 +1104,7 @@ TEST(QuicConnectionTest, ZeroPeerIdleTimeoutKeepsLocalIdleTimeout) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
     options.transport.max_idle_timeout = std::chrono::milliseconds(7000);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     auto params = valid_server_peer_params(options);
     params.max_idle_timeout = 0;
@@ -1119,9 +1119,9 @@ TEST(QuicConnectionTest, ReceiveClearsSendSideIdleTimerState) {
     group.start();
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.transport.max_idle_timeout = std::chrono::milliseconds(1000);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
 
     std::promise<IdleTimerSnapshot> done;
     auto future = done.get_future();
@@ -1142,9 +1142,9 @@ TEST(QuicConnectionTest, IdleTimerMarksClosed) {
     group.start();
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.transport.max_idle_timeout = std::chrono::milliseconds(5);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
 
     std::promise<fiber::quic::QuicConnectionState> done;
     auto future = done.get_future();
@@ -1161,7 +1161,7 @@ TEST(QuicConnectionTest, LocalStreamAttachStatusTracksAdmission) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 1;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     // Before the handshake completes there is nothing to admit yet, but the
     // connection is not done either: Busy, not Canceled.
@@ -1195,7 +1195,7 @@ TEST(QuicConnectionTest, LocalStreamAttachStatusQueuesNoStreamsBlocked) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 0;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.mark_established());
 
     ASSERT_EQ(conn.local_stream_attach_status(fiber::quic::QuicStreamType::Bidirectional), fiber::common::IoErr::Busy);
@@ -1211,7 +1211,7 @@ TEST(QuicConnectionTest, LocalStreamAttachStatusQueuesNoStreamsBlocked) {
 
 TEST(QuicConnectionTest, OpsStateChangeReportsEveryTransition) {
     OpsObserver observer;
-    fiber::quic::QuicConnection conn(observed_options(observer));
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), observed_options(observer));
 
     ASSERT_TRUE(conn.start_handshake());
     ASSERT_TRUE(conn.mark_established());
@@ -1228,7 +1228,7 @@ TEST(QuicConnectionTest, OpsCapacityChangeReportsPeerStreamCredit) {
     OpsObserver observer;
     fiber::quic::QuicConnection::Options options = observed_options(observer);
     options.max_local_bidirectional_streams = 0;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.mark_established());
 
     // Reaching Established is a state change, not a credit change.
@@ -1246,7 +1246,7 @@ TEST(QuicConnectionTest, OpsCapacityChangeReportsPeerStreamCredit) {
 
 TEST(QuicConnectionTest, OpsCapacityChangeReportsStreamAttachAndDetach) {
     OpsObserver observer;
-    fiber::quic::QuicConnection conn(observed_options(observer));
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), observed_options(observer));
     ASSERT_TRUE(conn.mark_established());
     ASSERT_EQ(observer.capacity_calls, 0);
 
@@ -1275,7 +1275,7 @@ TEST(QuicConnectionTest, PeerCreditExtensionRidesOnTheDetachNotification) {
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.max_peer_bidirectional_streams = 4;
     options.ops.create_stream = create_stream_plain;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.mark_established());
 
     // Client-initiated bidirectional stream 0.
@@ -1299,7 +1299,7 @@ TEST(QuicConnectionTest, NonIncreasingMaxStreamsRaisesNoCapacityChange) {
     OpsObserver observer;
     fiber::quic::QuicConnection::Options options = observed_options(observer);
     options.max_local_bidirectional_streams = 8;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.mark_established());
     ASSERT_EQ(observer.capacity_calls, 0);
 
@@ -1329,7 +1329,7 @@ TEST(QuicConnectionTest, NonIncreasingMaxStreamsRaisesNoCapacityChange) {
 TEST(QuicConnectionTest, OpsNotificationsFoldReentrantTransitions) {
     OpsObserver observer;
     observer.shutdown_on_established = true;
-    fiber::quic::QuicConnection conn(observed_options(observer));
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), observed_options(observer));
 
     ASSERT_TRUE(conn.mark_established());
 
@@ -1346,9 +1346,9 @@ TEST(QuicConnectionTest, OpsCapacityNotificationDefersShutdown) {
         OpsObserver observer;
         observer.shutdown_on_capacity = true;
         auto options = observed_options(observer);
-        options.loop = &loop;
+        fiber::test::QuicTestEndpoint endpoint(loop);
         options.max_local_bidirectional_streams = 0;
-        fiber::quic::QuicConnection conn(options);
+        fiber::quic::QuicConnection conn(endpoint.get(), options);
         EXPECT_TRUE(conn.mark_established());
         observer.states.clear();
         EXPECT_TRUE(conn.recv_max_streams_frame({.limit = 4, .bidirectional = true}));
@@ -1372,9 +1372,9 @@ TEST(QuicConnectionTest, IdleTimerWakesHandshakeWaiters) {
     group.start();
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.transport.max_idle_timeout = std::chrono::milliseconds(5);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
 
     std::promise<fiber::common::IoErr> done;
     auto future = done.get_future();
@@ -1394,8 +1394,8 @@ TEST(QuicConnectionTest, MarkClosedWakesHandshakeWaiters) {
     group.start();
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
 
     std::promise<fiber::common::IoErr> done;
     auto future = done.get_future();
@@ -1419,9 +1419,9 @@ TEST(QuicConnectionTest, IdleTimeoutClosesSilentlyAndAbortsLiveStreams) {
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.transport.max_idle_timeout = std::chrono::milliseconds(5);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     ASSERT_TRUE(conn.mark_established());
 
     auto owned = make_test_stream();
@@ -1466,26 +1466,26 @@ TEST(QuicConnectionTest, KeepaliveDelayIsCappedAtHalfTheIdleTimeout) {
     {
         // Under the cap: honoured as configured.
         options.keepalive_interval = std::chrono::milliseconds(50);
-        fiber::quic::QuicConnection conn(options);
+        fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
         EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(50));
     }
     {
         // Between half and the whole timeout: capped. This is the case the old
         // one-sided clamp let through, leaving no room for the answer.
         options.keepalive_interval = std::chrono::milliseconds(300);
-        fiber::quic::QuicConnection conn(options);
+        fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
         EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(200));
     }
     {
         // At or beyond the timeout: capped just the same.
         options.keepalive_interval = std::chrono::milliseconds(4000);
-        fiber::quic::QuicConnection conn(options);
+        fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
         EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(200));
     }
     {
         // Zero means off, and stays off whatever the idle timeout is.
         options.keepalive_interval = std::chrono::milliseconds::zero();
-        fiber::quic::QuicConnection conn(options);
+        fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
         EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds::zero());
     }
 }
@@ -1494,7 +1494,7 @@ TEST(QuicConnectionTest, KeepaliveDelayWithoutAnIdleTimeoutIsUncapped) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.transport.max_idle_timeout = std::chrono::milliseconds::zero();
     options.keepalive_interval = std::chrono::milliseconds(4000);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     EXPECT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(4000));
 }
 
@@ -1505,7 +1505,7 @@ TEST(QuicConnectionTest, KeepaliveDelayFollowsThePeerNegotiatedIdleTimeout) {
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
     options.transport.max_idle_timeout = std::chrono::milliseconds(30000);
     options.keepalive_interval = std::chrono::milliseconds(5000);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_EQ(conn.keepalive_delay(), std::chrono::milliseconds(5000));
 
     auto params = valid_server_peer_params(options);
@@ -1522,9 +1522,9 @@ TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
     group.start();
 
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
-    options.loop = &group.at(0);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
     options.keepalive_interval = std::chrono::milliseconds(5);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     ASSERT_TRUE(conn.mark_established());
     ASSERT_TRUE(conn.crypto().ensure_application());
     conn.crypto().application_write().packet->ready = true;
@@ -1545,7 +1545,7 @@ TEST(QuicConnectionTest, KeepaliveTimerQueuesApplicationPingWhenEstablished) {
 TEST(QuicConnectionTest, RejectsPeerTransportParamsWithMismatchedInitialScid) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.remote_connection_id = cid_from({0x11, 0x22});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     fiber::quic::QuicTransportParams params{};
     params.has_initial_source_connection_id = true;
@@ -1566,7 +1566,7 @@ TEST(QuicConnectionTest, ClientAcceptsServerTransportParamsWithMatchingRetryIds)
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
     options.retry_source_connection_id = cid_from({0xaa, 0xbb, 0xcc, 0xdd});
     options.has_retry_source_connection_id = true;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.adopt_server_initial_source_connection_id(options.remote_connection_id));
 
     fiber::quic::QuicTransportParams params{};
@@ -1588,7 +1588,7 @@ TEST(QuicConnectionTest, ClientDetectsSequenceZeroStatelessResetTokenFromServerP
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.adopt_server_initial_source_connection_id(options.remote_connection_id));
 
     fiber::quic::QuicTransportParams params{};
@@ -1613,7 +1613,7 @@ TEST(QuicConnectionTest, ClientVersionNegotiationWithoutV1FailsConnect) {
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
     options.local_connection_id = cid_from({0x11, 0x12, 0x13, 0x14});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.start_handshake());
 
     const std::uint8_t versions[] = {0x6b, 0x33, 0x43, 0xcf};
@@ -1633,7 +1633,7 @@ TEST(QuicConnectionTest, ClientIgnoresVersionNegotiationContainingV1) {
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
     options.local_connection_id = cid_from({0x11, 0x12, 0x13, 0x14});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.start_handshake());
 
     const std::uint8_t versions[] = {0x00, 0x00, 0x00, 0x01};
@@ -1656,7 +1656,7 @@ TEST(QuicConnectionTest, ClientActivatesPreferredAddressOnlyAfterPathValidation)
     options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
     options.local_connection_id = cid_from({0x11, 0x12, 0x13, 0x14});
     options.remote_connection_id = cid_from({0x21, 0x22, 0x23, 0x24});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     ASSERT_TRUE(conn.adopt_server_initial_source_connection_id(options.remote_connection_id));
 
     fiber::quic::QuicTransportParams params{};
@@ -1697,7 +1697,7 @@ TEST(QuicConnectionTest, ClientRejectsUnexpectedRetrySourceConnectionId) {
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.original_destination_connection_id = cid_from({0x01, 0x02, 0x03, 0x04});
     options.remote_connection_id = cid_from({0x11, 0x22, 0x33, 0x44});
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     fiber::quic::QuicTransportParams params{};
     params.has_initial_source_connection_id = true;
@@ -1716,7 +1716,7 @@ TEST(QuicConnectionTest, ClientRejectsUnexpectedRetrySourceConnectionId) {
 TEST(QuicConnectionTest, RecvStreamFrameCreatesPeerInitiatedStream) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     frame.length = 3;
@@ -1736,11 +1736,12 @@ TEST(QuicConnectionTest, RecvStreamFrameCreatesPeerInitiatedStream) {
 
 TEST(QuicConnectionTest, RetainedStorageUsesConnectionAndParentBudgets) {
     StreamCallbackState state{};
-    fiber::mem::IoBufStorageBudget endpoint_budget(64);
+    fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
+    endpoint_options.retained_storage_limit = 64;
+    fiber::test::QuicTestEndpoint endpoint(fiber::test::quic_loop(), endpoint_options);
     auto options = server_options_with_factory(state);
     options.recv_flow.retained_storage_limit = 64;
-    options.recv_storage_parent = &endpoint_budget;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     frame.offset = 4;
@@ -1752,20 +1753,20 @@ TEST(QuicConnectionTest, RetainedStorageUsesConnectionAndParentBudgets) {
     ASSERT_TRUE(received.has_value());
     EXPECT_EQ(conn.retained_recv_storage_capacity(), 1U);
     EXPECT_EQ(conn.retained_recv_storage_high_water(), 1U);
-    EXPECT_EQ(endpoint_budget.retained_capacity(), 1U);
+    EXPECT_EQ(endpoint.get().retained_recv_storage_capacity(), 1U);
     auto *stream = conn.find_stream(0);
     ASSERT_NE(stream, nullptr);
 
     ASSERT_TRUE(stream->stop_read().has_value());
     EXPECT_EQ(conn.retained_recv_storage_capacity(), 0U);
-    EXPECT_EQ(endpoint_budget.retained_capacity(), 0U);
+    EXPECT_EQ(endpoint.get().retained_recv_storage_capacity(), 0U);
 }
 
 TEST(QuicConnectionTest, RetainedStoragePressureDoesNotBecomeFlowControlError) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     options.recv_flow.retained_storage_limit = 0;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     frame.offset = 4;
@@ -1788,7 +1789,7 @@ TEST(QuicConnectionTest, RecvStreamFrameCountsEndOffsetGrowthForConnectionFlowCo
     auto options = server_options_with_factory(state);
     options.recv_flow.conn_recv_limit = 13;
     options.recv_flow.conn_recv_low_water = 0;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     frame.offset = 10;
@@ -1814,7 +1815,7 @@ TEST(QuicConnectionTest, RecvStreamFrameExtendsConnectionFlowControlAtLowWater) 
     auto options = server_options_with_factory(state);
     options.recv_flow.conn_recv_limit = 20;
     options.recv_flow.conn_recv_low_water = 5;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     frame.offset = 15;
@@ -1839,7 +1840,7 @@ TEST(QuicConnectionTest, StreamReadExtendsStreamFlowControlOnly) {
     options.recv_flow.conn_recv_low_water = 0;
     options.recv_flow.stream_buffer_limit = 8;
     options.recv_flow.stream_low_water = 3;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     frame.length = 6;
@@ -1863,7 +1864,7 @@ TEST(QuicConnectionTest, StreamReadExtendsStreamFlowControlOnly) {
 TEST(QuicConnectionTest, RejectsPassiveStreamWhenConnectionOpsIsMissing) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
 
@@ -1877,7 +1878,7 @@ TEST(QuicConnectionTest, RejectsPassiveStreamWhenConnectionOpsIsMissing) {
 TEST(QuicConnectionTest, UsesConnectionOpsToCreatePeerStreamOnce) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     frame.length = 3;
@@ -1901,7 +1902,7 @@ TEST(QuicConnectionTest, RejectsPeerStreamWhenConnectionOpsReturnsEmptyLease) {
     options.owner = &state;
     options.ops.create_stream = create_stream_record;
     options.ops.on_peer_stream_attached = on_peer_stream_attached_record;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
 
@@ -1922,7 +1923,7 @@ TEST(QuicConnectionTest, ConnectionOpsCanCreateAndRetainRetiredResetStream) {
     options.owner = &state;
     options.ops.create_stream = create_stream_retain;
     options.ops.on_peer_stream_attached = on_peer_stream_attached_retain;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicResetStreamFrame reset{};
     reset.id = 0;
     reset.error_code = 7;
@@ -1950,7 +1951,7 @@ TEST(QuicConnectionTest, ConnectionOpsCanCreateAndRetainRetiredResetStream) {
 TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     // Stream 2 is a peer-initiated unidirectional stream (server role): only the
     // recv direction applies, so recv_done retires it. The natural trigger is a
     // FIN frame arriving once the app has consumed all buffered data: at recv
@@ -2004,7 +2005,7 @@ TEST(QuicConnectionTest, RecvFinStreamRetiresAfterDataIsTaken) {
 TEST(QuicConnectionTest, BidiStreamNotRetiredUntilBothDirectionsDone) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     // Stream 0 is a peer-initiated bidirectional stream (server role): both recv
     // and send must be done. Recv finishing alone must NOT retire, or the app
     // could no longer write a response (conn_ would be detached).
@@ -2039,7 +2040,7 @@ TEST(QuicConnectionTest, ResetStreamCountsFinalSizeGrowthForConnectionFlowContro
     auto options = server_options_with_factory(state);
     options.recv_flow.conn_recv_limit = 10;
     options.recv_flow.conn_recv_low_water = 0;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame data{};
     data.stream_id = 0;
     data.offset = 5;
@@ -2061,7 +2062,7 @@ TEST(QuicConnectionTest, ResetStreamCountsFinalSizeGrowthForConnectionFlowContro
 TEST(QuicConnectionTest, StopReadQueuesStopSendingFrame) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
 
@@ -2082,7 +2083,7 @@ TEST(QuicConnectionTest, StopReadQueuesStopSendingFrame) {
 TEST(QuicConnectionTest, RemoteStopSendingQueuesResetStreamFrame) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
@@ -2124,7 +2125,7 @@ TEST(QuicConnectionTest, RemoteStopSendingQueuesResetStreamFrame) {
 TEST(QuicConnectionTest, StopSendingCreatesValidPeerBidirectionalStream) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStopSendingFrame stop{};
     stop.id = 0;
     stop.error_code = 11;
@@ -2140,7 +2141,7 @@ TEST(QuicConnectionTest, StopSendingCreatesValidPeerBidirectionalStream) {
 TEST(QuicConnectionTest, StopSendingIgnoresGonePeerStream) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
@@ -2163,7 +2164,7 @@ TEST(QuicConnectionTest, StopSendingIgnoresGonePeerStream) {
 TEST(QuicConnectionTest, StopSendingOnUnopenedLocalStreamClosesStreamState) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStopSendingFrame stop{};
     stop.id = 1;
 
@@ -2179,7 +2180,7 @@ TEST(QuicConnectionTest, StopSendingAbovePeerLimitClosesStreamLimit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     options.max_peer_bidirectional_streams = 0;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStopSendingFrame stop{};
     stop.id = 0;
 
@@ -2194,7 +2195,7 @@ TEST(QuicConnectionTest, StopSendingAbovePeerLimitClosesStreamLimit) {
 TEST(QuicConnectionTest, MaxStreamDataUpdatesStreamWriteWindow) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame frame{};
     frame.stream_id = 0;
     ASSERT_TRUE(conn.recv_stream_frame(frame, {}).has_value());
@@ -2219,7 +2220,7 @@ TEST(QuicConnectionTest, MaxStreamDataUpdatesStreamWriteWindow) {
 TEST(QuicConnectionTest, MaxStreamDataCreatesPeerBidirectionalStream) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     grant_max_data(conn, 1024);
 
     fiber::quic::QuicMaxStreamDataFrame max_stream_data{};
@@ -2243,7 +2244,7 @@ TEST(QuicConnectionTest, MaxStreamDataBeyondAdvertisedPeerBidirectionalLimitClos
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     options.max_peer_bidirectional_streams = 1;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     fiber::quic::QuicMaxStreamDataFrame max_stream_data{};
     max_stream_data.id = 4;
@@ -2259,7 +2260,7 @@ TEST(QuicConnectionTest, MaxStreamDataBeyondAdvertisedPeerBidirectionalLimitClos
 TEST(QuicConnectionTest, StreamWriteShortWritesToStreamCredit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 2);
@@ -2278,7 +2279,7 @@ TEST(QuicConnectionTest, StreamWriteShortWritesToStreamCredit) {
 TEST(QuicConnectionTest, StreamWriteShortWritesToConnectionCredit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 1024);
@@ -2297,7 +2298,7 @@ TEST(QuicConnectionTest, StreamWriteShortWritesToConnectionCredit) {
 TEST(QuicConnectionTest, StreamWriteShortWritesToBufferLimit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, fiber::quic::kQuicStreamSendDefaultBufferLimit + 4);
@@ -2318,7 +2319,7 @@ TEST(QuicConnectionTest, StreamWriteShortWritesToBufferLimit) {
 TEST(QuicConnectionTest, StreamWriteQueuesStreamDataBlockedAtStreamLimit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_data(conn, 1024);
@@ -2337,7 +2338,7 @@ TEST(QuicConnectionTest, StreamWriteQueuesStreamDataBlockedAtStreamLimit) {
 TEST(QuicConnectionTest, StreamWriteQueuesDataBlockedAtConnectionLimit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 1024);
@@ -2356,7 +2357,7 @@ TEST(QuicConnectionTest, StreamWriteQueuesDataBlockedAtConnectionLimit) {
 TEST(QuicConnectionTest, StreamWriteQueuesBothBlockedFramesWhenBothLimitsApply) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
 
@@ -2371,7 +2372,7 @@ TEST(QuicConnectionTest, StreamWriteQueuesBothBlockedFramesWhenBothLimitsApply) 
 TEST(QuicConnectionTest, StreamWriteReportsStreamDataBlockedAgainForNewLimit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 2);
@@ -2392,7 +2393,7 @@ TEST(QuicConnectionTest, StreamWriteReportsStreamDataBlockedAgainForNewLimit) {
 TEST(QuicConnectionTest, StreamWriteReportsDataBlockedAgainForNewLimit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 1024);
@@ -2413,7 +2414,7 @@ TEST(QuicConnectionTest, StreamWriteReportsDataBlockedAgainForNewLimit) {
 TEST(QuicConnectionTest, LostDataBlockedFrameRequeuesOnlyWhileStillBlocked) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 1024);
@@ -2440,7 +2441,7 @@ TEST(QuicConnectionTest, LostDataBlockedFrameRequeuesOnlyWhileStillBlocked) {
 TEST(QuicConnectionTest, LostDataBlockedFrameDropsAfterConnectionLimitIncreases) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 1024);
@@ -2469,8 +2470,8 @@ TEST(QuicConnectionTest, AsyncWriteResumesAfterMaxStreamData) {
     StreamCallbackState state{};
     fiber::event::EventLoopGroup group(1);
     auto options = server_options_with_factory(state);
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_data(conn, 1024);
@@ -2502,8 +2503,8 @@ TEST(QuicConnectionTest, AsyncWriteResumesAfterMaxData) {
     StreamCallbackState state{};
     fiber::event::EventLoopGroup group(1);
     auto options = server_options_with_factory(state);
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 1024);
@@ -2536,8 +2537,8 @@ TEST(QuicConnectionTest, AsyncWriteRequeuesForConnectionWindowAfterMaxStreamData
     StreamCallbackState state{};
     fiber::event::EventLoopGroup group(1);
     auto options = server_options_with_factory(state);
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
 
@@ -2581,8 +2582,8 @@ TEST(QuicConnectionTest, AsyncWriteTimeoutUnlinksConnectionWindowWaiter) {
     StreamCallbackState state{};
     fiber::event::EventLoopGroup group(1);
     auto options = server_options_with_factory(state);
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 1);
@@ -2615,8 +2616,8 @@ TEST(QuicConnectionTest, AsyncWriteCanceledWhileBlockedByConnectionWindow) {
     StreamCallbackState state{};
     fiber::event::EventLoopGroup group(1);
     auto options = server_options_with_factory(state);
-    options.loop = &group.at(0);
-    fiber::quic::QuicConnection conn(options);
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    fiber::quic::QuicConnection conn(endpoint.get(), options);
     auto stream = conn.get_or_create_peer_stream(0);
     ASSERT_TRUE(stream.has_value());
     grant_max_stream_data(conn, 0, 1);
@@ -2648,7 +2649,7 @@ TEST(QuicConnectionTest, AsyncWriteCanceledWhileBlockedByConnectionWindow) {
 TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicResetStreamFrame reset{};
     reset.id = 0;
     reset.error_code = 42;
@@ -2678,7 +2679,7 @@ TEST(QuicConnectionTest, ResetStreamCreatesAndRetiresPeerStream) {
 TEST(QuicConnectionTest, LowerPeerStreamBelowOpenedWatermarkIsGoneWhenMissing) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     // Open bidi stream 0, receive its FIN. Under the direction-aware retire
     // model a bidi stream is not retired by recv_done alone (the local send
@@ -2721,7 +2722,7 @@ TEST(QuicConnectionTest, LowerPeerStreamBelowOpenedWatermarkIsGoneWhenMissing) {
 TEST(QuicConnectionTest, OutOfOrderPeerStreamFrameCreatesImplicitIntermediates) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     // Stream 8 (seq 2) arrives before streams 0 and 4. nginx creates streams
     // 0, 4, 8 in order and notifies the app for each.
@@ -2761,7 +2762,7 @@ TEST(QuicConnectionTest, OutOfOrderPeerStreamFrameCreatesImplicitIntermediates) 
 TEST(QuicConnectionTest, OutOfOrderPeerStreamFrameCreatesMultipleImplicitIntermediates) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     // Stream 0 opens normally.
     fiber::quic::QuicStreamFrame frame0{};
@@ -2791,7 +2792,7 @@ TEST(QuicConnectionTest, OutOfOrderPeerStreamFrameCreatesMultipleImplicitInterme
 TEST(QuicConnectionTest, ImplicitlyOpenedPeerStreamIsOpenAndHonorsLaterFinAndReset) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     // Stream 8 (seq 2) arrives first; streams 0 and 4 are implicitly opened.
     fiber::quic::QuicStreamFrame frame8{};
@@ -2838,7 +2839,7 @@ TEST(QuicConnectionTest, ImplicitPeerStreamCreationRespectsAdvertisedStreamLimit
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     options.max_peer_bidirectional_streams = 3; // advertised = concurrent = 3
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     // Stream 8 (seq 2) arrives out of order: implicit 0, 4, 8 — all within the
     // advertised limit (seq 0..2). Created unconditionally.
@@ -2863,7 +2864,7 @@ TEST(QuicConnectionTest, RetiringPeerStreamQueuesMaxStreamsWithinConcurrentLimit
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     options.max_peer_bidirectional_streams = 4;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     for (std::uint64_t id = 0; id < 16; id += 4) {
         fiber::quic::QuicStreamFrame frame{};
@@ -2907,7 +2908,7 @@ TEST(QuicConnectionTest, PeerBidirectionalAndUnidirectionalStreamLimitsAreIndepe
     auto options = server_options_with_factory(state);
     options.max_peer_bidirectional_streams = 1;
     options.max_peer_unidirectional_streams = 1;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     fiber::quic::QuicStreamFrame bidi{};
     bidi.stream_id = 0;
@@ -2929,7 +2930,7 @@ TEST(QuicConnectionTest, RecvMaxStreamsUpdatesLocalStreamLimitAndIgnoresLowerVal
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Client;
     options.max_local_bidirectional_streams = 1;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     auto first = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
     auto blocked = conn.next_local_stream_id(fiber::quic::QuicStreamType::Bidirectional);
@@ -2964,7 +2965,7 @@ TEST(QuicConnectionTest, RecvStreamsBlockedDoesNotIncreasePeerStreamLimit) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
     options.max_peer_bidirectional_streams = 1;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     fiber::quic::QuicStreamFrame first{};
     first.stream_id = 0;
@@ -2984,7 +2985,7 @@ TEST(QuicConnectionTest, RecvStreamsBlockedDoesNotIncreasePeerStreamLimit) {
 TEST(QuicConnectionTest, RejectsFinalSizeBelowReceivedStreamData) {
     StreamCallbackState state{};
     auto options = server_options_with_factory(state);
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame data{};
     data.stream_id = 0;
     data.offset = 10;
@@ -3012,7 +3013,7 @@ TEST(QuicConnectionTest, RejectsLocalOrLimitExceededPassiveStreams) {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
     options.role = fiber::quic::QuicConnectionRole::Server;
     options.max_peer_bidirectional_streams = 1;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
     fiber::quic::QuicStreamFrame server_initiated{};
     server_initiated.stream_id = 1;
     fiber::quic::QuicStreamFrame over_limit{};
@@ -3072,7 +3073,7 @@ std::size_t count_pending_retire_for(const fiber::quic::QuicConnection &conn, st
 } // namespace
 
 TEST(QuicConnectionTest, PeerCidPoolInstallsNewConnectionIdFrame) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     auto frame = make_new_cid_frame(1, 0, {0xaa, 0xbb, 0xcc, 0xdd}, 0x42);
 
     auto result = conn.recv_new_connection_id_frame(frame);
@@ -3083,7 +3084,7 @@ TEST(QuicConnectionTest, PeerCidPoolInstallsNewConnectionIdFrame) {
 }
 
 TEST(QuicConnectionTest, PeerCidPoolIgnoresRetransmittedNewConnectionId) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     auto frame = make_new_cid_frame(1, 0, {0xaa, 0xbb, 0xcc, 0xdd}, 0x42);
 
     ASSERT_TRUE(conn.recv_new_connection_id_frame(frame).has_value());
@@ -3094,7 +3095,7 @@ TEST(QuicConnectionTest, PeerCidPoolIgnoresRetransmittedNewConnectionId) {
 }
 
 TEST(QuicConnectionTest, PeerCidPoolRejectsConflictingDuplicateSeqnum) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0xaa, 0xbb}, 0x42)).has_value());
 
     auto conflict = conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0x11, 0x22}, 0x42));
@@ -3105,7 +3106,7 @@ TEST(QuicConnectionTest, PeerCidPoolRejectsConflictingDuplicateSeqnum) {
 }
 
 TEST(QuicConnectionTest, PeerCidPoolRejectsZeroLengthCid) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     fiber::quic::QuicNewConnectionIdFrame frame{};
     frame.sequence_number = 1;
     frame.cid_len = 0;
@@ -3118,7 +3119,7 @@ TEST(QuicConnectionTest, PeerCidPoolRejectsZeroLengthCid) {
 }
 
 TEST(QuicConnectionTest, PeerCidPoolRejectsRetirePriorToAboveSeqnum) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     auto bad = make_new_cid_frame(1, 5, {0xaa, 0xbb}, 0x42);
 
     auto result = conn.recv_new_connection_id_frame(bad);
@@ -3129,7 +3130,7 @@ TEST(QuicConnectionTest, PeerCidPoolRejectsRetirePriorToAboveSeqnum) {
 }
 
 TEST(QuicConnectionTest, PeerCidPoolImmediatelyRetiresBelowMaxRetiredSeqnum) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     // Bump max_retired_remote_seq_ to 3 via a frame with seq=5, retire_prior_to=3.
     ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(5, 3, {0x55, 0x55}, 0x42)).has_value());
 
@@ -3142,7 +3143,7 @@ TEST(QuicConnectionTest, PeerCidPoolImmediatelyRetiresBelowMaxRetiredSeqnum) {
 }
 
 TEST(QuicConnectionTest, PeerCidPoolAppliesRetirePriorToAndQueuesRetires) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0xa1, 0xb1}, 0x11)).has_value());
     ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(2, 0, {0xa2, 0xb2}, 0x22)).has_value());
 
@@ -3158,7 +3159,7 @@ TEST(QuicConnectionTest, PeerCidPoolAppliesRetirePriorToAndQueuesRetires) {
 }
 
 TEST(QuicConnectionTest, PeerCidPoolSwitchesActivePathToReplacementOnRetire) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     // Provide a replacement CID, then ask to retire seq=0 (the active path's CID).
     auto replacement = make_new_cid_frame(1, 0, {0xaa, 0xbb, 0xcc}, 0x42);
     ASSERT_TRUE(conn.recv_new_connection_id_frame(replacement).has_value());
@@ -3183,7 +3184,7 @@ TEST(QuicConnectionTest, PeerCidPoolEnforcesActiveConnectionIdLimit) {
     // Connection's advertised active_connection_id_limit defaults to 4 — pool
     // contains slot 0 plus up to 3 more. Push past the limit.
     options.transport.active_connection_id_limit = 3;
-    fiber::quic::QuicConnection conn(options);
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
 
     ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0x01}, 0x11)).has_value());
     ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(2, 0, {0x02}, 0x22)).has_value());
@@ -3196,7 +3197,7 @@ TEST(QuicConnectionTest, PeerCidPoolEnforcesActiveConnectionIdLimit) {
 }
 
 TEST(QuicConnectionTest, PeerCidPoolRetransmitsRetireOnlyWhenSlotEvicted) {
-    fiber::quic::QuicConnection conn(peer_pool_options());
+    fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), peer_pool_options());
     ASSERT_TRUE(conn.recv_new_connection_id_frame(make_new_cid_frame(1, 0, {0xaa}, 0x11)).has_value());
 
     // While the slot is still in the pool, a lost RETIRE for seq=1 would be
@@ -3223,8 +3224,8 @@ void exercise_completed_writer() {
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         StreamCallbackState state;
         auto options = server_options_with_factory(state);
-        options.loop = &loop;
-        fiber::quic::QuicConnection conn(options);
+        fiber::test::QuicTestEndpoint endpoint(loop);
+        fiber::quic::QuicConnection conn(endpoint.get(), options);
         auto a = conn.get_or_create_peer_stream(0);
         auto b = conn.get_or_create_peer_stream(4);
         EXPECT_TRUE(a);
@@ -3267,7 +3268,7 @@ TEST(QuicConnectionTest, GracefulStateObserverCanCloseImmediatelyWithoutOverwrit
     fiber::event::EventLoop loop;
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto options = fiber::test::quic_options();
-        options.loop = &loop;
+        fiber::test::QuicTestEndpoint endpoint(loop);
         options.ops.on_state_change = [](void *, fiber::quic::QuicConnection &conn) noexcept {
             if (conn.state() == fiber::quic::QuicConnectionState::GracefulClosing) {
                 EXPECT_TRUE(conn.close_timer_armed());
@@ -3278,7 +3279,7 @@ TEST(QuicConnectionTest, GracefulStateObserverCanCloseImmediatelyWithoutOverwrit
                 EXPECT_FALSE(conn.close_timer_armed());
             }
         };
-        fiber::quic::QuicConnection conn(options);
+        fiber::quic::QuicConnection conn(endpoint.get(), options);
         EXPECT_TRUE(conn.mark_established());
         EXPECT_TRUE(conn.try_attach_local_stream(make_test_stream(), fiber::quic::QuicStreamType::Bidirectional));
         conn.shutdown(fiber::quic::QuicErrorCode::NoError, 0, std::chrono::seconds(5));
@@ -3293,7 +3294,7 @@ TEST(QuicConnectionTest, ClosingObserverSeesAbortedStreamsAndCanEnterDraining) {
     fiber::event::EventLoop loop;
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
         auto options = fiber::test::quic_options();
-        options.loop = &loop;
+        fiber::test::QuicTestEndpoint endpoint(loop);
         options.ops.on_state_change = [](void *, fiber::quic::QuicConnection &conn) noexcept {
             if (conn.state() == fiber::quic::QuicConnectionState::Closing) {
                 auto *stream = conn.find_stream(1);
@@ -3311,7 +3312,7 @@ TEST(QuicConnectionTest, ClosingObserverSeesAbortedStreamsAndCanEnterDraining) {
                 EXPECT_EQ(count_pending_frame_type(conn, fiber::quic::QuicFrameType::ConnectionClose), 0U);
             }
         };
-        fiber::quic::QuicConnection conn(options);
+        fiber::quic::QuicConnection conn(endpoint.get(), options);
         EXPECT_TRUE(conn.mark_established());
         EXPECT_TRUE(conn.try_attach_local_stream(make_test_stream(), fiber::quic::QuicStreamType::Bidirectional));
         conn.close();

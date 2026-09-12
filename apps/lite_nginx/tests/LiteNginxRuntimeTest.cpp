@@ -1388,7 +1388,7 @@ fiber::async::DetachedTask run_http3_gzip_client(fiber::quic::QuicUdpEndpoint *e
 
     connected->shutdown(fiber::http::Http3ErrorCode::NoError);
     *connected = fiber::http::Http3ClientConnection{};
-    endpoint->close();
+    co_await endpoint->shutdown();
     promise->set_value(std::move(outcome));
 }
 
@@ -3509,10 +3509,10 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
     ASSERT_TRUE(server.start());
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask { co_await server.serve(); });
 
-    fiber::quic::QuicUdpEndpoint client_endpoint;
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
     fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options;
     endpoint_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
-    ASSERT_TRUE(client_endpoint.init(group.at(0), endpoint_options));
+    ASSERT_TRUE(client_endpoint.init(endpoint_options));
 
     std::promise<Http3GzipOutcome> client_promise;
     auto client_future = client_promise.get_future();
