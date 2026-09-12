@@ -143,11 +143,11 @@ std::string make_http3_alt_svc(std::uint16_t port) {
     return value;
 }
 
-std::string direct_upstream_key(std::string_view host, std::uint16_t port, bool tls) {
-    std::string key(tls ? "https|" : "http|");
-    key.append(host);
+std::string direct_upstream_key(const config::ProxyPassTarget &target) {
+    std::string key(target.tls ? "https|" : "http|");
+    key.append(target.host);
     key.push_back(':');
-    key.append(std::to_string(port));
+    key.append(std::to_string(target.port));
     return key;
 }
 
@@ -177,6 +177,9 @@ fiber::http::HeaderMap<std::uint8_t>::Builder make_default_skip_headers_builder(
     return builder;
 }
 
+// Builds the peer's pool identity. A hostname peer resolves via DnsService at connect time; an
+// IP-literal peer dials the literal directly. https:// needs a host name: the TLS handshake sends
+// it as SNI, which cannot carry a literal, so `https://<ip>` is a configuration error.
 std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config::SourceLocation &location,
                                                                    std::string host, std::uint16_t port,
                                                                    std::uint32_t weight, bool tls) {
@@ -189,19 +192,14 @@ std::expected<UpstreamPeerRuntime, RuntimeError> make_peer_runtime(const config:
     peer.weight = weight;
 
     fiber::net::IpAddress ip;
-    if (fiber::net::IpAddress::parse(host, ip)) {
-        // IP-literal peer: config-time dial target, no runtime DNS.
-        peer.ip = ip;
-        peer.address = fiber::net::SocketAddress(ip, port);
-        peer.connection_key = fiber::http::HttpConnectionGroupKey::from_ip(ip, port, scheme);
-        return peer;
+    if (tls && fiber::net::IpAddress::parse(host, ip)) {
+        return std::unexpected(make_error(location, "https upstream " + host + ":" + std::to_string(port) +
+                                                            " uses an IP literal; TLS needs a host name for SNI, "
+                                                            "use a DNS name instead"));
     }
-
-    // Hostname peer: pool identity is the name; the dial target is resolved at runtime
-    // via DnsService on the worker loop that needs a fresh connection.
-    auto key = fiber::http::HttpConnectionGroupKey::from_name(host, port, scheme);
+    auto key = fiber::http::HttpConnectionGroupKey::make(host, port, scheme);
     if (!key) {
-        return std::unexpected(make_error(location, "upstream host name too long: " + host));
+        return std::unexpected(make_error(location, "invalid upstream host name: " + host));
     }
     peer.connection_key = std::move(*key);
     return peer;
@@ -273,8 +271,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
         runtime_upstream.peers.reserve(upstream.servers.size());
 
         for (const auto &server: upstream.servers) {
-            auto peer_result =
-                    make_peer_runtime(config::SourceLocation{}, server.host, server.port, server.weight, server.tls);
+            auto peer_result = make_peer_runtime(server.location, server.host, server.port, server.weight, server.tls);
             if (!peer_result) {
                 return std::unexpected(peer_result.error());
             }
@@ -386,8 +383,7 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 inherited_send = upstream.send_timeout;
                 default_host_header = location.proxy_pass.upstream_name;
             } else {
-                const std::string key = direct_upstream_key(location.proxy_pass.host, location.proxy_pass.port,
-                                                            location.proxy_pass.tls);
+                const std::string key = direct_upstream_key(location.proxy_pass);
                 auto it = direct_upstream_indices.find(key);
                 if (it == direct_upstream_indices.end()) {
                     auto peer_result = make_peer_runtime(location.proxy_pass.location, location.proxy_pass.host,

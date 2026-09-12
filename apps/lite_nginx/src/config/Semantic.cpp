@@ -788,6 +788,7 @@ std::expected<UpstreamConfig, ConfigError> parse_upstream(const DirectiveNode &d
                 return std::unexpected(host_port.error());
             }
             UpstreamServerConfig server;
+            server.location = child.location;
             server.host = std::move(host_port->host);
             server.port = host_port->port;
             server.tls = stripped->tls;

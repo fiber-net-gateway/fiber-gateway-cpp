@@ -169,6 +169,8 @@ Top level:
   omitted) or `https://`; it selects TLS for the peer and is baked into the pool key. `host` may
   be an IP literal (config-time dial target, no DNS) or a hostname (resolved via DNS at connect
   time on the worker loop that needs a fresh connection; the pooled identity stays the host name).
+  An `https://` server must use a hostname: it is sent as the TLS server name (SNI), which cannot
+  carry an IP literal, so `server https://10.0.0.1:443;` is rejected at startup.
   `weight` drives smooth weighted round-robin peer selection (default 1). Upstreams carry only
   peers + weight + scheme; pool sizing lives in `connection_pool`.
 - `connect_timeout <duration>;`
@@ -201,7 +203,7 @@ Top level:
   `gzip_comp_level <1..9>;`
 - `proxy_pass upstream://<upstream_name>;`
 - `proxy_pass http://<host>[:port];`
-- `proxy_pass https://<host>[:port];`
+- `proxy_pass https://<host>[:port];` - `host` must be a hostname (sent as SNI), not an IP literal.
 - `rewrite_path <literal-or-template>;` - replace only the upstream path; the original
   query string is preserved.
 - `reuse_connection on|off;` - use or bypass the global pool for this location; default `on`.
@@ -385,10 +387,16 @@ let r = svc.request({path: "/items"});    // target pre-bound
 let st = svc.proxyPass({});
 ```
 
+An ad-hoc `https://` target must use a host name (`https://api.internal:8443`); an
+`https://` URL with an IP-literal host fails to bind at compile time, because the TLS
+handshake needs a server name for SNI.
+
 - `svc.request(options)` - issue an upstream request and return
   `{status:int, headers?:object, body:binary}`. `options`: `url` (request path?query, e.g.
   `/items?q=1`; not a host) or `path` + `query` (string or object), `method`, `headers`, `body`
-  (binary/string/object), `timeout` (ms), `includeHeaders`.
+  (binary/string/object), `timeout` (ms), `includeHeaders`. Unless `headers` supplies `Host`,
+  the request carries the target's authority: `host[:port]` for a URL target (default port
+  omitted, IPv6 bracketed) or the upstream name for `@name`, as `proxy_pass` does.
 - `svc.proxyPass(options)` - forward the inbound request to the bound upstream and stream its
   response back to the client; returns the upstream status code. `options`: `url` or
   `method`/`path`/`query` (default to the inbound values), `headers`, `responseHeaders` (set on
@@ -413,6 +421,8 @@ The directive target is either a named upstream (`@backend` / `backend`) or an a
 - `proxy_pass` accepts only a static connection target. Named targets use
   `upstream://name`; direct targets use `http://authority` or `https://authority`.
   A direct target cannot contain a path, query, fragment, or userinfo.
+- `https://` targets and `https://` upstream servers must use a hostname; TLS to an
+  IP literal (no server name for SNI) is not supported.
 - `rewrite_path` accepts a literal absolute path or a synchronous `${...}` template.
   Its result must be a valid absolute URI path and cannot contain `?` or `#`.
 - Script constants in `${...}` are supported only by directives documented as templates; nginx
@@ -461,6 +471,7 @@ proxy_set_header Host $host;
 proxy_set_header X-Forwarded-For $remote_addr;
 proxy_pass upstream://backend$request_uri;
 proxy_pass http://example.com/api;
+proxy_pass https://10.0.0.1:8443;   # https needs a hostname for SNI
 rewrite_path relative/path;
 location ~ ^/api/ { }
 location @named { }

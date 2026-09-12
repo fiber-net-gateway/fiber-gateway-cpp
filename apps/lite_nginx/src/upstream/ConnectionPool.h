@@ -21,7 +21,7 @@ namespace fiber::lite_nginx::upstream {
 // The global keepalive pool abstraction. Backed by either a per-loop LocalHttp1ConnectionPoolSet
 // (steal=false: N independent per-loop pools, no cross-loop reuse) or a StealableHttp1ConnectionPoolSet
 // (steal=true: one pool whose idle connections can be borrowed across worker loops). Both are keyed
-// by HttpConnectionGroupKey (peer identity = host/ip + port + scheme + pool affinity). The selection
+// by HttpConnectionGroupKey (peer identity = host + port + scheme + optional pinned address). The selection
 // is fixed at construction from ConnectionPoolRuntime::steal.
 //
 // Callers drive the lifecycle: acquire(key) -> ConnectionLease; if !has_connection(), the caller

@@ -268,6 +268,7 @@ struct Shard {
     IoErr request_error(IoErr error, const char *phase, std::uint64_t id, std::uint64_t generation = 0,
                         std::uint32_t stream = 0) noexcept;
     ConnectionState &connection_state(http::Http2ClientConnection &connection) noexcept;
+    std::size_t key_index(const Key &key) noexcept;
     void emit(const char *kind) noexcept;
     void check_drained() noexcept;
     Task<IoErr> request(mem::BufPool &, std::size_t key_id, std::uint64_t id, std::uint64_t random,
@@ -347,9 +348,18 @@ Shard::Shard(Benchmark &b, std::size_t i, const Options &o) :
     bench(b), index(i), groups(std::make_unique<GroupState[]>(o.keys)),
     connections(std::make_unique<ConnectionState[]>(o.pool.max_connections_total)) {
     keys.reserve(o.keys);
+    // Distinct names pinned to one address give `keys` separate pool groups over the same server.
     for (std::size_t k = 0; k < o.keys; ++k)
-        keys.push_back(Key::from_ip(b.address.ip(), o.port, o.tls ? Key::Scheme::Https : Key::Scheme::Http,
-                                    http::HttpConnectionPoolAffinity(k + 1)));
+        keys.push_back(*Key::make("group" + std::to_string(k) + ".bench", o.port,
+                                  o.tls ? Key::Scheme::Https : Key::Scheme::Http, b.address.ip()));
+}
+
+std::size_t Shard::key_index(const Key &key) noexcept {
+    for (std::size_t k = 0; k < keys.size(); ++k) {
+        if (keys[k] == key)
+            return k;
+    }
+    FIBER_PANIC("benchmark key not registered");
 }
 
 void Shard::check(bool condition, const char *message) noexcept {
@@ -364,7 +374,7 @@ void Shard::check(bool condition, const char *message) noexcept {
 void Shard::count_changed(void *ctx, const Key &key, std::size_t total, std::size_t ready) noexcept {
     auto &s = *static_cast<Shard *>(ctx);
     s.check(&event::EventLoop::current() == &s.bench.group.at(s.index), "callback loop ownership");
-    auto &g = s.groups[key.pool_affinity().value() - 1];
+    auto &g = s.groups[s.key_index(key)];
     g.total = total;
     g.ready = ready;
     const auto &o = s.bench.options.pool;
@@ -422,7 +432,7 @@ ConnectionState &Shard::connection_state(http::Http2ClientConnection &connection
 Task<common::IoResult<void>> Shard::dial(void *ctx, http::Http2ClientConnection &connection, const Key &key) noexcept {
     auto &s = *static_cast<Shard *>(ctx);
     auto &b = s.bench;
-    const auto id = key.pool_affinity().value() - 1;
+    const auto id = s.key_index(key);
     s.check(&connection.loop() == &b.group.at(s.index), "connector loop ownership");
     auto &g = s.groups[id];
     ++g.dials;
