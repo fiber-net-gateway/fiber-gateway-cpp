@@ -48,12 +48,13 @@ co_await conn.wait_closed();   // H3 任务 join + QUIC 已 detach，之后才�
 
 1. 调用者先初始化并启动一个 client-only 或混合角色的 `QuicUdpEndpoint`。
 2. `Http3Client` 只是配置；它、endpoint 和 TLS 材料必须比所有连接对象活得久。
-3. `Http3ClientConnection` 在 endpoint 的 loop 上构造；`connect()` 只能调用一次。
+3. `Http3ClientConnection` 在 endpoint 的 loop 上构造并 `connect()`（两处均断言）；`connect()` 只能调用一次。
 4. `open_exchange(pool)` 借用 `BufPool`；pool 和连接必须长于 exchange。放弃未完成的 exchange 时显式
    `abort()`。
 5. 析构前必须 `shutdown()` 或 `graceful_shutdown()` 并 `co_await wait_closed()`；`wait_closed()` 返回
    意味着 H3 任务已 join 且 QUIC 已从 endpoint detach。析构断言这两点以及没有存活的请求。
-   `connect()` 失败的对象已经满足该条件（失败路径自己走立即关闭并等待 detach）。
+   `connect()` 失败的对象已经满足该条件：无论在 attach 之前还是之后失败，返回时 `state() == Closed`
+   （attach 之后的失败自己走立即关闭并等待 detach；从未 attach 的原地关闭）。
    若通过外层超时或竞速取消 `connect()` 任务，任务析构会发起立即关闭，但不能异步等待清理；
    调用方必须保持连接存活并 `co_await wait_closed()`，之后才可析构，无需额外调用 `shutdown()`。
 6. `endpoint.shutdown()` 会关闭并 detach 尚存的连接，但不等待连接对象析构；对象可以在 `shutdown()`

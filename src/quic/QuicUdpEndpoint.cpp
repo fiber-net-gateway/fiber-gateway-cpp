@@ -605,14 +605,11 @@ async::Task<void> QuicUdpEndpoint::shutdown(QuicErrorCode error) noexcept {
         // Closing arms a timer and leaves the connection in the list; only the
         // Closed transition (on that timer, or from a peer CONNECTION_CLOSE)
         // detaches, so the walk is stable. The immediate variant skips the
-        // 3*PTO linger: the endpoint is going away and cannot service it.
+        // 3*PTO linger, and cuts short one already under way: the endpoint is
+        // going away and cannot service it.
         for (QuicConnection *connection = connections_.front(); connection != nullptr;
              connection = connections_.next_of(*connection)) {
-            if (connection->state() == QuicConnectionState::Draining) {
-                connection->arm_close_timer_immediate();
-            } else {
-                connection->close_immediately(error);
-            }
+            connection->close_immediately(error);
         }
     }
     co_await hosted_.join();
@@ -762,7 +759,8 @@ common::IoResult<void> QuicUdpEndpoint::attach_client_connection(QuicConnection:
 }
 
 common::IoResult<QuicClientIdentity> QuicUdpEndpoint::allocate_client_identity() noexcept {
-    if (!initialized_ || !loop_.in_loop()) {
+    FIBER_ASSERT(loop_.in_loop());
+    if (!initialized_) {
         return std::unexpected(common::IoErr::Invalid);
     }
     auto original_dcid = generate_connection_id();
