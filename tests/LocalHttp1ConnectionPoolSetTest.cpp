@@ -34,8 +34,8 @@ TEST(LocalHttp1ConnectionPoolSetTest, AcquireUsesCurrentEventLoopShard) {
     auto loop0_future = loop0_promise.get_future();
     auto loop1_future = loop1_promise.get_future();
 
-    const auto key = fiber::http::HttpConnectionGroupKey::from_ip(fiber::net::IpAddress::loopback_v4(), 80,
-                                                                  fiber::http::HttpConnectionGroupKey::Scheme::Http);
+    const auto key = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", 80,
+                                                                fiber::http::HttpConnectionGroupKey::Scheme::Http);
 
     group.start();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {

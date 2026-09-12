@@ -5,8 +5,6 @@
 #include <fiber/http/Http1ClientConnection.h>
 #include <fiber/http_script/HttpScriptServices.h>
 #include <fiber/http_script/HttpTarget.h>
-#include <fiber/net/IpAddress.h>
-#include <fiber/net/SocketAddress.h>
 
 #include "../upstream/ConnectionPool.h"
 #include "../upstream/UpstreamConnection.h"
@@ -44,36 +42,25 @@ HttpScriptServicesImpl::acquire(const fiber::http_script::HttpTargetSpec &target
         if (peer == nullptr || !peer->connection_key.has_value()) {
             co_return std::unexpected(fiber::common::IoErr::NotFound);
         }
-        // For HTTPS upstreams, SNI uses the configured host (IP-literal peers have no name to send).
-        const std::string_view sni =
-                peer->connection_key->is_name() ? peer->connection_key->host_name() : std::string_view{};
         auto acquired = co_await fiber::lite_nginx::upstream::acquire_and_connect(*pool_, *dns_, *peer->connection_key,
-                                                                                  sni, connect_timeout);
+                                                                                  connect_timeout);
         if (!acquired) {
             co_return std::unexpected(acquired.error());
         }
         co_return OutPtr{new ConnectedUpstreamConnection(std::move(*acquired))};
     }
 
-    // Url target: build a key from host:port:scheme. IP-literal host -> from_ip; hostname -> from_name.
+    // Url target: the key is host:port:scheme; a literal host dials directly, a name resolves via
+    // DNS. HttpTargetSpec::parse already rejected https:// with a literal host at directive bind.
     const std::uint16_t port = target.port != 0 ? target.port : static_cast<std::uint16_t>(target.tls ? 443 : 80);
     const auto scheme = target.tls ? fiber::http::HttpConnectionGroupKey::Scheme::Https
                                    : fiber::http::HttpConnectionGroupKey::Scheme::Http;
-
-    fiber::net::IpAddress ip;
-    std::optional<fiber::http::HttpConnectionGroupKey> key;
-    if (fiber::net::IpAddress::parse(target.name, ip)) {
-        key = fiber::http::HttpConnectionGroupKey::from_ip(ip, port, scheme);
-    } else {
-        key = fiber::http::HttpConnectionGroupKey::from_name(target.name, port, scheme);
-        if (!key) {
-            co_return std::unexpected(fiber::common::IoErr::Invalid);
-        }
+    auto key = fiber::http::HttpConnectionGroupKey::make(target.name, port, scheme);
+    if (!key) {
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
     }
 
-    // SNI = the host as given in the URL for HTTPS.
-    auto acquired = co_await fiber::lite_nginx::upstream::acquire_and_connect(*pool_, *dns_, *key, target.name,
-                                                                              connect_timeout);
+    auto acquired = co_await fiber::lite_nginx::upstream::acquire_and_connect(*pool_, *dns_, *key, connect_timeout);
     if (!acquired) {
         co_return std::unexpected(acquired.error());
     }

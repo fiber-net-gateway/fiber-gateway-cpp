@@ -10,48 +10,46 @@
 
 #include "../common/Assert.h"
 #include "../net/IpAddress.h"
-#include "HttpConnectionPoolAffinity.h"
 
 namespace fiber::http {
 
+// Identity of one upstream service as a client sees it: the request authority host, the port,
+// the scheme, and optionally the address to dial.
+//
+//   host      ip        dial            TLS server name
+//   name      none      DNS at dial     host
+//   name      pinned    ip              host
+//   literal   parsed    ip              n/a (HTTPS is rejected: RFC 6066 §3 forbids literal SNI)
+//
+// Every field takes part in hashing and equality, so a name with a pinned address and the same
+// name resolved through DNS are distinct groups, as are two names pinned to the same address.
 class HttpConnectionGroupKey {
 public:
-    enum class HostKind : std::uint8_t {
-        Name,
-        Ip,
-    };
-
     enum class Scheme : std::uint8_t {
         Http,
         Https,
     };
 
-    static constexpr std::size_t kMaxHostNameSize = 255;
+    static constexpr std::size_t kMaxHostSize = 255;
 
+    // `host` is a DNS name or a bare IP literal (no brackets, no port); it is stored lowercased.
+    // A literal host is parsed into ip() and must not be combined with an explicit `ip`.
+    // `ip` pins the dial target for a DNS-name host; without it the host is resolved at dial time.
+    // Returns nullopt for an empty, oversized, or malformed host, for Https with a literal host,
+    // and for a literal host combined with `ip`.
     [[nodiscard]] static std::optional<HttpConnectionGroupKey>
-    from_name(std::string_view host, std::uint16_t port, Scheme scheme,
-              HttpConnectionPoolAffinity affinity = {}) noexcept;
-    [[nodiscard]] static HttpConnectionGroupKey from_ip(net::IpAddress ip, std::uint16_t port, Scheme scheme,
-                                                        HttpConnectionPoolAffinity affinity = {}) noexcept;
+    make(std::string_view host, std::uint16_t port, Scheme scheme,
+         std::optional<net::IpAddress> ip = std::nullopt) noexcept;
 
-    [[nodiscard]] HostKind host_kind() const noexcept { return host_kind_; }
-    [[nodiscard]] Scheme scheme() const noexcept { return scheme_; }
+    [[nodiscard]] std::string_view host() const noexcept { return std::string_view(host_.data(), host_size_); }
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
-    [[nodiscard]] HttpConnectionPoolAffinity pool_affinity() const noexcept { return affinity_; }
+    [[nodiscard]] Scheme scheme() const noexcept { return scheme_; }
+    [[nodiscard]] bool has_ip() const noexcept { return has_ip_; }
+    [[nodiscard]] const net::IpAddress &ip() const noexcept {
+        FIBER_ASSERT(has_ip_);
+        return ip_;
+    }
     [[nodiscard]] std::uint64_t hash() const noexcept { return hash_; }
-
-    [[nodiscard]] std::string_view host_name() const noexcept {
-        FIBER_ASSERT(host_kind_ == HostKind::Name);
-        return std::string_view(host_name_.data(), host_name_size_);
-    }
-
-    [[nodiscard]] const net::IpAddress &ip_address() const noexcept {
-        FIBER_ASSERT(host_kind_ == HostKind::Ip);
-        return ip_address_;
-    }
-
-    [[nodiscard]] bool is_name() const noexcept { return host_kind_ == HostKind::Name; }
-    [[nodiscard]] bool is_ip() const noexcept { return host_kind_ == HostKind::Ip; }
 
     friend bool operator==(const HttpConnectionGroupKey &left, const HttpConnectionGroupKey &right) noexcept;
     friend bool operator!=(const HttpConnectionGroupKey &left, const HttpConnectionGroupKey &right) noexcept {
@@ -61,14 +59,13 @@ public:
 private:
     HttpConnectionGroupKey() = default;
 
-    HostKind host_kind_ = HostKind::Name;
     Scheme scheme_ = Scheme::Http;
+    bool has_ip_ = false;
     std::uint16_t port_ = 0;
-    std::uint16_t host_name_size_ = 0;
-    HttpConnectionPoolAffinity affinity_{};
+    std::uint16_t host_size_ = 0;
     std::uint64_t hash_ = 0;
-    std::array<char, kMaxHostNameSize> host_name_{};
-    net::IpAddress ip_address_{};
+    net::IpAddress ip_{};
+    std::array<char, kMaxHostSize> host_{};
 };
 
 bool operator==(const HttpConnectionGroupKey &left, const HttpConnectionGroupKey &right) noexcept;

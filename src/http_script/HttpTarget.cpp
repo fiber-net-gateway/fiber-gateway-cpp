@@ -2,6 +2,8 @@
 
 #include <cctype>
 
+#include <fiber/net/IpAddress.h>
+
 namespace fiber::http_script {
 
 namespace {
@@ -105,6 +107,12 @@ std::optional<HttpTargetSpec> HttpTargetSpec::parse(std::string_view literal) no
     spec.kind = HttpTargetSpec::Kind::Url;
     spec.tls = tls;
     if (!split_authority(authority, spec.name, spec.port)) {
+        return std::nullopt;
+    }
+    // An https:// target needs a host name: the TLS handshake sends it as SNI, which cannot carry
+    // an IP literal (RFC 6066 §3), and HttpConnectionGroupKey refuses the combination.
+    fiber::net::IpAddress literal_host;
+    if (tls && fiber::net::IpAddress::parse(spec.name, literal_host)) {
         return std::nullopt;
     }
     return spec;

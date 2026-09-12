@@ -89,6 +89,8 @@ docs/http1-connection-pool.md, docs/tls-client-identity.md
 
 `HttpConnectionGroupKey` 字段不变（host identity + port + scheme + affinity）。H2 池与 H1 池是**两个独立实例**，同 key 不会串（一个 h2 连接不会被 h1 池取到）。若同一进程里同一 endpoint 同时需要 h2c 与 h2-over-TLS 之外的差异（比如不同 client cert profile），仍靠 `HttpConnectionPoolAffinity` 区分，语义与 H1 一致。
 
+> 2026-09-12 更新：`HttpConnectionPoolAffinity` 已删除，key 改为 host + port + scheme + 可选拨号地址（`HttpConnectionGroupKey::make()`），见 `docs/http1-connection-pool.md` 第 3 节。
+
 ---
 
 ## 4. HTTP/2 层的前置重构

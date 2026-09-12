@@ -8,7 +8,7 @@
 
 ## 2. 分层概览
 
-- `HttpConnectionGroupKey`、`HttpConnectionPoolAffinity`、`HttpConnectionBucketIndex` 为 H1/H2 共用组件，原 `Http1` 前缀名称已移除。两种协议的池实例相互独立。
+- `HttpConnectionGroupKey`、`HttpConnectionBucketIndex` 为 H1/H2 共用组件，原 `Http1` 前缀名称已移除。两种协议的池实例相互独立。
 - `Http2ConnectionPoolCore` 管理一个 loop 的连接、FIFO 等待队列、拨号限制和空闲定时器。
 - `Http2PooledExchange` 组合一个 Lease 和一个 `ClientHttp2Exchange`，建议请求层统一使用。
 - `LocalHttp2ConnectionPoolSet` 为 EventLoopGroup 中每个 loop 内联构造一个 core，按当前 loop 路由。
@@ -17,7 +17,7 @@ HTTP/2 底层由 `Http2LocalStreamGate` 提供流准入和容量通知，由 `Ht
 
 ## 3. 分组与拨号
 
-Key 包含主机身份、端口、scheme 和 affinity。TLS 客户端身份或传输 profile 不同时，必须使用不同 affinity；相同 key 的新请求可能直接复用既有连接，传入的新 connector 不会被执行。
+Key 包含 host、端口、scheme 和可选的拨号地址（见 `docs/http1-connection-pool.md` 第 3 节）。相同 key 的新请求可能直接复用既有连接，传入的新 connector 不会被执行；因此 connector 的 TLS 参数必须由 key 唯一决定。
 
 Connector 是函数指针和 `void *ctx`，不在池中长期保存。参数必须在 acquire 完成前有效。回调成功返回前必须完成 `Http2ClientConnection::connect()`，启动 HTTP/2 I/O；拨号地址、TCP/TLS 参数由回调负责。
 

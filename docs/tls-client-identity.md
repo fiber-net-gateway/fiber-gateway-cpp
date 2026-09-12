@@ -89,7 +89,7 @@ callback state 及其选择的 `TlsCredential`、`TrustStore` 必须活到同步
 ## 连接池与轮换
 
 客户端身份、信任根、peer verification、SNI、`verify_name` 和 ALPN 都属于有效 TLS profile。
-不同 profile 不得共用 HTTP/1 keep-alive 连接，应映射到不同的
-`HttpConnectionPoolAffinity`。轮换时先完整创建新 `TlsCredential`/`TrustStore`，再与新的 profile
-generation 一起发布；旧连接退役前不要复用旧 generation。不要从证书路径、私钥或 secret 内容推导
-affinity。
+不同 profile 不得共用 HTTP/1 keep-alive 连接。`HttpConnectionGroupKey` 只按 host、端口、scheme
+和拨号地址分组，SNI 与 `verify_name` 直接来自 `host()`；连接池不区分其它 profile 维度，需要按
+profile 隔离的调用方必须自行保证不同 profile 不会命中同一个 key。轮换时先完整创建新
+`TlsCredential`/`TrustStore`，再切换到新 profile；旧连接退役前不要销毁它们借用的材料。
