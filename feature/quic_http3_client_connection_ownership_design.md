@@ -398,7 +398,7 @@ public:
 ```
 
 `local_settings.max_field_section_size == 0` 时回退到 `max_field_section_size` 的逻辑
-（`Http3Client.cpp:52-54`）搬到连接构造。
+（原 `Http3Client.cpp:52-54`）搬到 `Http3Client` 构造，统一规范化共享配置，连接直接使用规范化后的值。
 
 ### 5.2 `Http3ClientConnectOptions`
 
@@ -554,8 +554,10 @@ exchange"由 `~QuicConnection` 的 `ref_count_ == 1` 断言兜底。
    `abort()`。
 5. 析构前必须 `shutdown()` 或 `graceful_shutdown()` 并 `co_await wait_closed()`；`wait_closed()` 返回
    意味着 H3 任务已 join 且 QUIC 已从 endpoint detach。`connect()` 失败的对象已经满足该条件。
+   取消已 attach 的 `connect()` 任务会同步发起立即关闭（包括加速已有 Closing / Draining），
+   但任务析构不能等待清理；调用方仍必须保持连接存活并 `co_await wait_closed()` 后再析构。
 6. `endpoint.shutdown()` 会关闭并 detach 尚存的连接，但不等待连接对象析构；对象可以在 `shutdown()`
-   之后、`~QuicUdpEndpoint` 之前析构。
+   之后、`~QuicUdpEndpoint` 之前析构。重新 `init()` endpoint 前也必须先销毁所有旧连接对象。
 7. 单线程：连接的全部操作在其 endpoint loop 上。
 
 ---
@@ -653,7 +655,8 @@ ctest --test-dir build --output-on-failure
 
 1. **`connect()` 失败与 `shutdown()` 是否应跳过 3×PTO closing 期**。`close_application()` 走完整的
    closing 期（`QuicConnection.h:576-587`），`wait_closed()` 因此可能等 3×PTO（loopback 约 100 ms）。
-   `connect()` 的失败路径本文选 `close_immediately`（transport 级 CC）；正常 `shutdown()` 保持
+   `connect()` 的失败及取消路径本文选 `close_immediately`（transport 级 CC），已有 Closing 或
+   Draining 状态也必须加速关闭；正常 `shutdown()` 保持
    application close 与 closing 期不变。若测试或压测觉得慢，再给 `shutdown()` 加 `immediate` 参数，
    不在本次范围。
 2. **`Http3ClientConnection` 是否需要 `std::string` 副本以外的更省的形态**。两个 `std::string` +
@@ -692,3 +695,22 @@ ctest --test-dir build --output-on-failure
   `QuicConnection::Options` 的私有构造函数构造连接，并触达 `start()` / 请求表等 `connect()` 内部才用的
   入口；`connect()` 失败路径对 Draining 状态用 `arm_close_timer_immediate()` 跳过 draining 期。
   `Http3ClientConnectionTest` 里两个只对句柄移动语义有意义的用例删除。
+
+## 10. 评审后的收益与验证口径
+
+同一平台、同一编译器下，原版本与本次实现的对象大小如下（不含分配器元数据及字符串堆存储）：
+
+| 对象 | 原版本 | 本次实现 |
+|---|---:|---:|
+| `QuicConnection::Options` | 672 B | 448 B |
+| `QuicConnection` | 7040 B | 6936 B |
+| HTTP/3 连接 | Impl 7416 B + handle 16 B | 7424 B |
+
+`Options` 减少 224 B 不等于每个 HTTP/3 连接减少 224 B：恢复参数和缓存身份仍在完整连接中。
+实际完整 QUIC 对象减少约 1.5%，HTTP/3 对象存储合计减少 8 B。主要收益是消除外部建连编排和
+重复 owner 回调，并允许把连接嵌入调用方对象或协程帧以减少独立分配；若调用方仍使用
+`unique_ptr` 持有连接，这次独立分配仍存在。没有分配次数和吞吐、延迟对比前，不宣称显著性能提升。
+
+验收还需覆盖共享 SETTINGS 默认值与显式覆盖、真实 attach 后取消建连并等待 detach，以及已有
+Closing / Draining 的失败清理不等待完整关闭期。所有权模型仍有 lease 与调用方持有两种，
+endpoint 的 `shutdown()` 完成不代表所有存储已释放，重新初始化和析构的边界必须分别说明。

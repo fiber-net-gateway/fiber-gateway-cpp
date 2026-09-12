@@ -10,6 +10,9 @@
 
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
+#include <fiber/async/TaskSelect.h>
+#include <fiber/async/Timeout.h>
+#include <fiber/async/WaitGroup.h>
 #include <fiber/common/mem/BufPool.h>
 #include <fiber/event/EventLoopGroup.h>
 #include <fiber/http/ClientHttp3Exchange.h>
@@ -19,6 +22,7 @@
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
+#include "QuicTestLoop.h"
 #include "QuicTestTlsCertificate.h"
 
 namespace {
@@ -452,6 +456,92 @@ fiber::async::DetachedTask run_partial_client(fiber::quic::QuicUdpEndpoint *endp
 }
 
 } // namespace
+
+namespace {
+
+enum class ConnectInterruption { Cancel, Closing, Draining };
+
+void check_interrupted_connect(ConnectInterruption interruption) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    // Bound but never started: Initial packets have a destination, but no
+    // peer can complete the handshake or reset the connection.
+    fiber::test::QuicTestEndpoint silent_peer(group.at(0));
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        EXPECT_TRUE(endpoint.get().start());
+        fiber::http::Http3Client::Options options{};
+        options.tls.verify_peer = false;
+        fiber::http::Http3Client client(endpoint.get(), options);
+        fiber::http::Http3ClientConnectOptions target{};
+        target.remote_addr = silent_peer.get().local_addr();
+        target.allow_insecure = true;
+        target.handshake_timeout = 2s;
+        {
+            fiber::http::Http3ClientConnection connection(client, target);
+            fiber::async::WaitGroup injector;
+            injector.add();
+            fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+                co_await fiber::async::sleep(1ms);
+                EXPECT_TRUE(connection.quic().attached_to_endpoint());
+                if (interruption == ConnectInterruption::Closing) {
+                    connection.quic().close(fiber::quic::QuicErrorCode::InternalError);
+                } else if (interruption == ConnectInterruption::Draining) {
+                    connection.quic().begin_draining();
+                }
+                injector.done();
+            });
+            auto result =
+                    co_await fiber::async::timeout_for([&]() { return connection.connect().select(); },
+                                                       interruption == ConnectInterruption::Cancel ? 20ms : 500ms);
+            if (interruption == ConnectInterruption::Cancel) {
+                EXPECT_FALSE(result);
+                if (!result) {
+                    EXPECT_EQ(result.error(), fiber::common::IoErr::TimedOut);
+                }
+                EXPECT_NE(connection.state(), fiber::http::Http3ConnectionState::Prepared);
+            } else {
+                // The error must return without spending the default ~3 s
+                // closing period. It must also leave the object detached.
+                EXPECT_TRUE(result);
+                if (result) {
+                    EXPECT_FALSE(*result);
+                    EXPECT_FALSE(connection.quic().attached_to_endpoint());
+                }
+            }
+            co_await injector.join();
+            // Canceled connect initiates closure itself; no explicit shutdown
+            // should be needed before joining and destroying the connection.
+            auto closed =
+                    co_await fiber::async::timeout_for([&]() { return connection.wait_closed().select(); }, 500ms);
+            EXPECT_TRUE(closed);
+            if (!closed) {
+                // Keep failures diagnostic instead of destroying attached storage.
+                connection.shutdown();
+                connection.quic().arm_close_timer_immediate();
+                co_await connection.wait_closed();
+            }
+            EXPECT_FALSE(connection.quic().attached_to_endpoint());
+            EXPECT_EQ(connection.quic().ref_count(), 1U);
+            EXPECT_EQ(endpoint.get().active_connection_count(), 0U);
+        }
+        co_await endpoint.get().shutdown();
+        done.set_value();
+    });
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    group.stop();
+    group.join();
+}
+
+} // namespace
+
+TEST(Http3ClientTest, CanceledConnectClosesAndDetaches) { check_interrupted_connect(ConnectInterruption::Cancel); }
+
+TEST(Http3ClientTest, FailedConnectAcceleratesClosing) { check_interrupted_connect(ConnectInterruption::Closing); }
+
+TEST(Http3ClientTest, FailedConnectAcceleratesDraining) { check_interrupted_connect(ConnectInterruption::Draining); }
 
 TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
     fiber::test::QuicTestTlsFile cert("h3-client-cert", fiber::test::kQuicTestCertificatePem);

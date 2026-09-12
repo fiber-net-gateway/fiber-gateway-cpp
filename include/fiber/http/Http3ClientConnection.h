@@ -90,7 +90,9 @@ public:
     // handshake (handshake_timeout), verifies ALPN "h3" and starts the HTTP/3
     // control streams. A failure after the connection attached closes it
     // immediately and waits for detach before returning, so a failed
-    // connect() always leaves this object destructible.
+    // connect() always leaves this object destructible. Canceling the task
+    // after attach also begins immediate closure, but cannot await cleanup:
+    // the caller must co_await wait_closed() before destroying this object.
     [[nodiscard]] async::Task<Http3ClientConnectResult> connect() noexcept;
 
     // The buffer pool and this connection must outlive the exchange.
@@ -146,6 +148,9 @@ private:
     // Immediate close; connect()'s failure paths run it after an immediate
     // QUIC close so no closing period is spent.
     void close(Http3ErrorCode error = Http3ErrorCode::NoError) noexcept;
+    // Shared by failed and canceled connect attempts; accelerates Closing and
+    // Draining too. Cleanup completes asynchronously through wait_closed().
+    void abort_connect(Http3ErrorCode close_code) noexcept;
     [[nodiscard]] async::Task<Http3ClientConnectResult> fail_connect(Http3ClientConnectError error,
                                                                      Http3ErrorCode close_code) noexcept;
     [[nodiscard]] common::IoResult<void> register_client_request(Http3ClientRequestEntry &) noexcept;

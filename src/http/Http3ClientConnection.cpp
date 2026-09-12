@@ -170,17 +170,21 @@ const Http3ControlStreams::Ops &Http3ClientConnection::control_ops() noexcept {
     return ops;
 }
 
-async::Task<Http3ClientConnectResult> Http3ClientConnection::fail_connect(Http3ClientConnectError error,
-                                                                          Http3ErrorCode close_code) noexcept {
+void Http3ClientConnection::abort_connect(Http3ErrorCode close_code) noexcept {
     // No closing or draining period for a connection that never served a
     // request: the peer has either already closed it or will never hear
     // from it again.
     if (quic_.state() == quic::QuicConnectionState::Draining) {
         quic_.arm_close_timer_immediate();
-    } else if (!quic_.terminal_closing()) {
+    } else {
         quic_.close_immediately(quic::QuicErrorCode::NoError);
     }
     close(close_code);
+}
+
+async::Task<Http3ClientConnectResult> Http3ClientConnection::fail_connect(Http3ClientConnectError error,
+                                                                          Http3ErrorCode close_code) noexcept {
+    abort_connect(close_code);
     co_await wait_closed();
     co_return std::unexpected(error);
 }
@@ -235,6 +239,17 @@ async::Task<Http3ClientConnectResult> Http3ClientConnection::connect() noexcept 
         co_return std::unexpected(quic_error(quic_.connect_error(connected.error())));
     }
 
+    // Task cancellation destroys this scope without resuming the await below.
+    // Begin teardown synchronously; the caller joins it with wait_closed().
+    struct Scope {
+        Http3ClientConnection &self;
+        bool completed = false;
+        ~Scope() {
+            if (!completed) {
+                self.abort_connect(Http3ErrorCode::RequestCancelled);
+            }
+        }
+    } scope{*this};
     auto established = co_await quic_.wait_established(handshake_timeout_);
     if (!established) {
         co_return co_await fail_connect(quic_error(quic_.connect_error(established.error())),
@@ -250,6 +265,7 @@ async::Task<Http3ClientConnectResult> Http3ClientConnection::connect() noexcept 
         co_return co_await fail_connect({.phase = Http3ClientConnectPhase::Http3, .io_error = started.error()},
                                         Http3ErrorCode::InternalError);
     }
+    scope.completed = true;
     co_return Http3ClientConnectResult{};
 }
 

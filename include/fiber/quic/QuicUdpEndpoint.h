@@ -151,7 +151,9 @@ public:
     // only way to close an endpoint that still hosts connections. A
     // caller-owned connection (QuicConnection::Options::on_destroy null) is
     // hosted only until it detaches; its storage may outlive close(), but not
-    // this object, which asserts that in its destructor.
+    // this object, which asserts that in its destructor. Destroy all such
+    // storage before reinitializing the endpoint too: detached connections
+    // can still hold resources from its pools and receive-storage budget.
     explicit QuicUdpEndpoint(event::EventLoop &loop) noexcept;
     ~QuicUdpEndpoint();
 
