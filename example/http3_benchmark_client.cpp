@@ -929,6 +929,9 @@ private:
         fiber::quic::QuicUdpEndpoint::EndpointOptions endpoint_options{};
         endpoint_options.bind_addr = options_.target.remote.ip().is_v4() ? fiber::net::SocketAddress::any_v4(0)
                                                                          : fiber::net::SocketAddress::any_v6(0);
+        // Each worker needs an exclusive port; SO_REUSEADDR can let bind(0)
+        // select another worker's port and route QUIC replies to its endpoint.
+        endpoint_options.udp.reuse_addr = false;
         endpoint_options.max_connections = connection_count_ + 4;
         endpoint_options.send.pacing.enabled = options_.pacing_enabled;
         auto endpoint_initialized = endpoint_.init(endpoint_options);

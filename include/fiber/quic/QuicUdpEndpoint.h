@@ -61,6 +61,12 @@ struct QuicClientIdentity {
     QuicConnectionId local_connection_id{};
 };
 
+// Prefer separate endpoint instances for server admission and outbound client
+// connections so their UDP binding policies can be configured independently.
+// Client endpoints should disable udp.reuse_addr and udp.reuse_port to reserve
+// exclusive local ports: even bind(0) can reuse a live UDP port with SO_REUSEADDR,
+// routing replies to an endpoint that does not own the destination connection ID.
+// Server endpoints may need port reuse for their worker/listener configuration.
 class QuicUdpEndpoint : public common::NonCopyable, public common::NonMovable {
 public:
     struct StatelessResponseLimit {
