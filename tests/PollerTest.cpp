@@ -82,7 +82,7 @@ TEST(PollerTest, EventReadinessPreemptsInfiniteDeadline) {
     const int count = wait_no_intr(poller, events, 2, std::chrono::steady_clock::time_point::max());
 
     ASSERT_EQ(count, 1);
-    void *event_owner = events[0].data.ptr;
+    void *event_owner = poller.resolve(events[0].data.u64);
     EXPECT_EQ(event_owner, &event_fd.item);
     EXPECT_TRUE(event_fd.drain());
 }
@@ -163,9 +163,63 @@ TEST(PollerTest, InfiniteDeadlineDisarmsPreviousTimer) {
 
     ASSERT_TRUE(signal_ok.load(std::memory_order_acquire));
     ASSERT_EQ(count, 1);
-    void *event_owner = events[0].data.ptr;
+    void *event_owner = poller.resolve(events[0].data.u64);
     EXPECT_EQ(event_owner, &event_fd.item);
     EXPECT_TRUE(event_fd.drain());
     EXPECT_GE(elapsed, 15ms);
     EXPECT_LT(elapsed, 1s);
+}
+
+TEST(PollerTest, RemovedTokenCannotResolveAfterSameItemAndFdAreReused) {
+    fiber::event::Poller poller;
+    EventFdFixture event_fd;
+    ASSERT_TRUE(event_fd.init(poller));
+    ASSERT_TRUE(event_fd.signal());
+    epoll_event events[2]{};
+    ASSERT_EQ(wait_no_intr(poller, events, 2, std::chrono::steady_clock::now() + 1s), 1);
+    const auto old_token = events[0].data.u64;
+    ASSERT_EQ(poller.del(event_fd.item), fiber::common::IoErr::None);
+    EXPECT_EQ(poller.resolve(old_token), nullptr);
+    ASSERT_EQ(poller.add(event_fd.fd, fiber::event::Poller::Event::Read, &event_fd.item), fiber::common::IoErr::None);
+    EXPECT_NE(event_fd.item.token(), old_token);
+    EXPECT_EQ(poller.resolve(old_token), nullptr);
+    EXPECT_EQ(poller.resolve(event_fd.item.token()), &event_fd.item);
+    EXPECT_EQ(poller.del(event_fd.item), fiber::common::IoErr::None);
+}
+
+TEST(PollerTest, FailedAddDoesNotPublishItemAndCanBeRetried) {
+    fiber::event::Poller poller;
+    fiber::event::Poller::Item item;
+    EXPECT_NE(poller.add(-1, fiber::event::Poller::Event::Read, &item), fiber::common::IoErr::None);
+    EXPECT_EQ(item.token(), 0U);
+    const int fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(poller.add(fd, fiber::event::Poller::Event::Read, &item), fiber::common::IoErr::None);
+    EXPECT_EQ(poller.resolve(item.token()), &item);
+    EXPECT_EQ(poller.del(item), fiber::common::IoErr::None);
+    ::close(fd);
+}
+
+TEST(PollerTest, FailedDeleteStillInvalidatesReturnedEvent) {
+    fiber::event::Poller poller;
+    EventFdFixture event_fd;
+    ASSERT_TRUE(event_fd.init(poller));
+    const auto token = event_fd.item.token();
+    ::close(event_fd.fd);
+    event_fd.fd = -1;
+    EXPECT_NE(poller.del(event_fd.item), fiber::common::IoErr::None);
+    EXPECT_EQ(poller.resolve(token), nullptr);
+    EXPECT_EQ(event_fd.item.token(), 0U);
+}
+
+TEST(PollerTest, RegistryGrowthPreservesEarlierTokens) {
+    fiber::event::Poller poller;
+    EventFdFixture sockets[130];
+    for (auto &socket: sockets) {
+        ASSERT_TRUE(socket.init(poller));
+    }
+    for (auto &socket: sockets) {
+        EXPECT_EQ(poller.resolve(socket.item.token()), &socket.item);
+        EXPECT_EQ(poller.del(socket.item), fiber::common::IoErr::None);
+    }
 }

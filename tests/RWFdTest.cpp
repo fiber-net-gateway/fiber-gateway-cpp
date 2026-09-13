@@ -267,7 +267,7 @@ TEST(RWFdTest, StopsDispatchAfterCallbackDestroysAndReplacesOwner) {
     EXPECT_EQ(replacement_watching, fiber::event::IoEvent::None);
 }
 
-TEST(RWFdTest, RearmsPersistentReadCallbackAfterOneShotEvent) {
+TEST(RWFdTest, PersistentReadCallbackSeesLaterEdges) {
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
 
@@ -766,3 +766,113 @@ TEST(RWFdTest, RejectsSameDirectionCallbackAndWaiterCoexistence) {
 }
 
 } // namespace
+
+namespace {
+struct ReplaceSubscription {
+    fiber::net::detail::RWFd &fd;
+    int writes = 0;
+    static void write(void *ctx, fiber::common::IoErr err) noexcept {
+        if (err == fiber::common::IoErr::None) {
+            ++static_cast<ReplaceSubscription *>(ctx)->writes;
+        }
+    }
+    static void read(void *ctx, fiber::common::IoErr) noexcept {
+        auto &self = *static_cast<ReplaceSubscription *>(ctx);
+        EXPECT_EQ(self.fd.clear_write_callback(&write, ctx), fiber::common::IoErr::None);
+        EXPECT_EQ(self.fd.set_write_callback(&write, ctx), fiber::common::IoErr::None);
+        EXPECT_EQ(self.fd.clear_read_callback(&read, ctx), fiber::common::IoErr::None);
+    }
+};
+} // namespace
+
+TEST(RWFdTest, SameCallbackPairReinstalledDuringReadDoesNotReceiveOldWriteEvent) {
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        fiber::net::detail::RWFd fd(loop, fds[0], fiber::net::detail::RWFd::Kind::Stream);
+        ReplaceSubscription context{fd};
+        EXPECT_EQ(fd.set_read_callback(&ReplaceSubscription::read, &context), fiber::common::IoErr::None);
+        EXPECT_EQ(fd.set_write_callback(&ReplaceSubscription::write, &context), fiber::common::IoErr::None);
+        const auto token = fd.efd_.token();
+        fd.handle_events(fiber::event::IoEvent::Read | fiber::event::IoEvent::Write);
+        EXPECT_EQ(context.writes, 0);
+        EXPECT_EQ(fd.efd_.token(), token);
+        co_await fiber::async::sleep(2ms);
+        EXPECT_GE(context.writes, 1);
+        fd.close();
+        ::close(fds[1]);
+        loop.stop();
+    });
+    loop.run();
+}
+
+TEST(RWFdTest, CachedReadyNotifiesLateSubscriberOnceWithoutRearming) {
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        fiber::net::detail::RWFd fd(loop, fds[0], fiber::net::detail::RWFd::Kind::Stream);
+        EXPECT_EQ(fd.prepare_io(fiber::event::IoEvent::Read), fiber::common::IoErr::None);
+        fd.handle_events(fiber::event::IoEvent::Read);
+        const auto token = fd.efd_.token();
+        CallbackResult result;
+        EXPECT_EQ(fd.set_read_callback(&record_callback, &result), fiber::common::IoErr::None);
+        EXPECT_EQ(result.calls, 0);
+        co_await fiber::async::sleep(2ms);
+        EXPECT_EQ(result.calls, 1);
+        co_await fiber::async::sleep(2ms);
+        EXPECT_EQ(result.calls, 1);
+        EXPECT_EQ(fd.clear_read_callback(&record_callback, &result), fiber::common::IoErr::None);
+        EXPECT_EQ(fd.efd_.token(), token);
+        EXPECT_TRUE(fd.efd_.registered());
+        fd.close();
+        ::close(fds[1]);
+        loop.stop();
+    });
+    loop.run();
+}
+
+namespace {
+struct DetachedCloseWaiter : fiber::net::detail::RWFdWaiterBase {
+    int completions = 0;
+    static void done(fiber::net::detail::RWFdWaiterBase *base, fiber::common::IoErr err) noexcept {
+        auto *self = static_cast<DetachedCloseWaiter *>(base);
+        self->err_ = err;
+        ++self->completions;
+    }
+};
+void delete_terminal_owner(void *ctx, fiber::common::IoErr) noexcept {
+    delete static_cast<fiber::net::detail::RWFd *>(ctx);
+}
+} // namespace
+
+TEST(RWFdTest, CloseCompletesDetachedWaitersAfterTerminalCallbackDestroysOwner) {
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    DetachedCloseWaiter read;
+    DetachedCloseWaiter write;
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        auto *fd = new fiber::net::detail::RWFd(loop, fds[0], fiber::net::detail::RWFd::Kind::Stream);
+        EXPECT_EQ(fd->prepare_io(fiber::event::IoEvent::Read), fiber::common::IoErr::None);
+        fd->finish_io(fiber::event::IoEvent::Read, fiber::common::IoErr::WouldBlock);
+        fd->finish_io(fiber::event::IoEvent::Write, fiber::common::IoErr::WouldBlock);
+        read.rwfd_ = write.rwfd_ = fd;
+        read.event_ = fiber::event::IoEvent::Read;
+        write.event_ = fiber::event::IoEvent::Write;
+        read.complete_callback_ = write.complete_callback_ = &DetachedCloseWaiter::done;
+        EXPECT_EQ(fd->begin_wait(&read), true);
+        EXPECT_EQ(fd->begin_wait(&write), true);
+        EXPECT_EQ(fd->set_terminal_callback(&delete_terminal_owner, fd), fiber::common::IoErr::None);
+        fd->close();
+        EXPECT_EQ(read.completions, 1);
+        EXPECT_EQ(write.completions, 1);
+        EXPECT_EQ(read.err_, fiber::common::IoErr::Canceled);
+        EXPECT_EQ(write.err_, fiber::common::IoErr::Canceled);
+        ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+    loop.run();
+}

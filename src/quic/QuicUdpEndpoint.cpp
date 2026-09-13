@@ -882,8 +882,8 @@ common::IoErr QuicUdpEndpoint::sync_socket_callbacks() noexcept {
     }
 
     const bool want_read = started_ && !closing_;
-    // A datagram socket is normally writable. Watching Write continuously
-    // would hot-loop, so arm it only after sendmsg reports WouldBlock.
+    // The socket has persistent ET interest. Subscribe to write notifications
+    // only after socket backpressure; pacing and congestion use their own wakeups.
     const bool want_write = write_blocked_ && send_scheduler_.has_work() && !closing_;
     if (want_read && !read_callback_registered_) {
         const common::IoErr err = socket_->set_read_callback(&QuicUdpEndpoint::on_socket_read_ready, this);

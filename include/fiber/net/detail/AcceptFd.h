@@ -24,7 +24,8 @@ public:
 
     class AcceptAwaiter;
 
-    explicit AcceptFd(fiber::event::EventLoop &loop) : efd_(loop, this, &AcceptFd::on_efd_events) {}
+    explicit AcceptFd(fiber::event::EventLoop &loop) :
+        efd_(loop, this, &AcceptFd::on_efd_events, fiber::event::Poller::Mode::Edge) {}
 
     ~AcceptFd() {
         if (!efd_.valid()) {
@@ -63,6 +64,10 @@ public:
         if (!efd_.valid()) {
             return;
         }
+        cancel_pending();
+        if (stop_entry_.is_registered()) {
+            loop().template unregister_stop<AcceptFd, &AcceptFd::stop_entry_>(*this);
+        }
         auto *waiter = waiter_;
         waiter_ = nullptr;
         std::coroutine_handle<> handle{};
@@ -99,24 +104,53 @@ private:
             awaiter->result_ = std::unexpected(fiber::common::IoErr::Busy);
             return false;
         }
-        AcceptResult out;
-        fiber::common::IoErr err = Traits::accept_once(efd_.fd(), out);
-        if (err == fiber::common::IoErr::None) {
-            awaiter->result_ = std::move(out);
-            return false;
-        }
-        if (err != fiber::common::IoErr::WouldBlock) {
-            awaiter->result_ = std::unexpected(err);
-            return false;
-        }
-        fiber::common::IoErr watch_err = watch_read();
+        const auto watch_err = watch_read();
         if (watch_err != fiber::common::IoErr::None) {
             awaiter->result_ = std::unexpected(watch_err);
             return false;
         }
+        if (!stop_entry_.is_registered() &&
+            !loop().template register_stop<AcceptFd, &AcceptFd::stop_entry_, &AcceptFd::on_stop>(*this)) {
+            awaiter->result_ = std::unexpected(fiber::common::IoErr::Canceled);
+            return false;
+        }
+        if (loop().now() < retry_after_ || consecutive_ >= 64) {
+            waiter_ = awaiter;
+            awaiter->waiting_ = true;
+            if (loop().now() < retry_after_) {
+                loop().template post_at<AcceptFd, &AcceptFd::retry_entry_, &AcceptFd::on_retry>(retry_after_, *this);
+            } else {
+                loop().template post_local<AcceptFd, &AcceptFd::continue_entry_, &AcceptFd::on_retry>(*this);
+            }
+            return true;
+        }
+        if (ready_) {
+            AcceptResult out;
+            const auto err = Traits::accept_once(efd_.fd(), out);
+            ++consecutive_;
+            if (err == fiber::common::IoErr::None) {
+                awaiter->result_ = std::move(out);
+                return false;
+            }
+            if (err != fiber::common::IoErr::WouldBlock) {
+                retry_after_ = loop().now() + std::chrono::milliseconds(1);
+                awaiter->result_ = std::unexpected(err);
+                return false;
+            }
+            ready_ = false;
+        }
         waiter_ = awaiter;
         awaiter->waiting_ = true;
         return true;
+    }
+
+    void cancel_pending() noexcept {
+        if (continue_entry_.is_in_queue()) {
+            loop().template cancel<AcceptFd, &AcceptFd::continue_entry_>(*this);
+        }
+        if (retry_entry_.is_in_heap()) {
+            loop().template cancel<AcceptFd, &AcceptFd::retry_entry_>(*this);
+        }
     }
 
     void cancel_wait(AcceptAwaiter *awaiter) {
@@ -124,27 +158,37 @@ private:
         FIBER_ASSERT(awaiter == waiter_);
         waiter_ = nullptr;
         awaiter->waiting_ = false;
-        unwatch_read();
+        cancel_pending();
     }
 
-    fiber::common::IoErr watch_read() { return efd_.watch_add(fiber::event::IoEvent::Read); }
+    fiber::common::IoErr watch_read() { return efd_.watch_set(fiber::event::IoEvent::Read); }
 
-    void unwatch_read() { (void) efd_.watch_del(fiber::event::IoEvent::Read); }
+    static void on_stop(AcceptFd *owner) noexcept { owner->close(); }
+    static void on_retry(AcceptFd *owner) noexcept {
+        owner->consecutive_ = 0;
+        owner->handle_acceptable();
+    }
 
     void handle_acceptable() {
-        if (!waiter_) {
-            unwatch_read();
+        if (!waiter_ || loop().now() < retry_after_) {
+            return;
+        }
+        if (!ready_) {
             return;
         }
         AcceptResult out;
-        fiber::common::IoErr err = Traits::accept_once(efd_.fd(), out);
+        const auto err = Traits::accept_once(efd_.fd(), out);
         if (err == fiber::common::IoErr::WouldBlock) {
+            ready_ = false;
             return;
+        }
+        if (err != fiber::common::IoErr::None) {
+            retry_after_ = loop().now() + std::chrono::milliseconds(1);
         }
         AcceptAwaiter *waiter = waiter_;
         waiter_ = nullptr;
         waiter->waiting_ = false;
-        unwatch_read();
+        cancel_pending();
         if (err == fiber::common::IoErr::None) {
             waiter->result_ = std::move(out);
         } else {
@@ -160,11 +204,20 @@ private:
         if (!fiber::event::any(events & fiber::event::IoEvent::Read)) {
             return;
         }
-        static_cast<AcceptFd *>(owner)->handle_acceptable();
+        auto *acceptor = static_cast<AcceptFd *>(owner);
+        acceptor->ready_ = true;
+        acceptor->consecutive_ = 0;
+        acceptor->handle_acceptable();
     }
 
     Efd efd_;
     AcceptAwaiter *waiter_ = nullptr;
+    bool ready_ = true;
+    unsigned consecutive_ = 0;
+    std::chrono::steady_clock::time_point retry_after_{};
+    fiber::event::EventLoop::DeferEntry continue_entry_{};
+    fiber::event::EventLoop::TimerEntry retry_entry_{};
+    fiber::event::EventLoop::StopEntry stop_entry_{};
 };
 
 template<typename Traits>

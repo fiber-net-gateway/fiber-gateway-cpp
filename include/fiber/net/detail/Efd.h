@@ -24,6 +24,8 @@ public:
     [[nodiscard]] fiber::event::IoEvent watching() const noexcept { return watching_; }
     [[nodiscard]] fiber::event::Poller::Mode mode() const noexcept { return mode_; }
 
+    [[nodiscard]] std::uint64_t token() const noexcept { return item_.token(); }
+
     void set_owner(void *owner, EventCallback callback) noexcept;
 
     fiber::common::IoErr attach(int fd) noexcept;
@@ -38,10 +40,6 @@ public:
     fiber::common::IoErr watch_add(fiber::event::IoEvent events) noexcept;
     fiber::common::IoErr watch_del(fiber::event::IoEvent events) noexcept;
 
-    // Called by owner after a poller callback to consume one-shot readiness and optionally
-    // re-arm the remaining interest mask. Unlike watch_set(None), this keeps the poller
-    // registration when desired becomes None so later watch_set/add can re-arm with mod().
-    fiber::common::IoErr consume_ready(fiber::event::IoEvent ready) noexcept;
 
 private:
     struct Item : fiber::event::Poller::Item {

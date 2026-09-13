@@ -152,3 +152,123 @@ TEST(StreamFdTest, TryWritevReturnsBrokenPipeInsteadOfSigpipe) { EXPECT_EQ(run_b
 TEST(StreamFdTest, CrossLoopTryWriteReturnsBrokenPipeWithoutTouchingOwnerPoller) {
     EXPECT_EQ(run_cross_loop_broken_pipe_child(), 0);
 }
+
+namespace {
+using namespace std::chrono_literals;
+using fiber::common::IoErr;
+using fiber::event::IoEvent;
+struct EtWatchdog {
+    fiber::event::EventLoop &loop;
+    fiber::event::EventLoop::TimerEntry timer{};
+    static void expire(EtWatchdog *self) noexcept {
+        ADD_FAILURE() << "ET operation failed to make progress";
+        self->loop.stop();
+    }
+    void arm() { loop.post_at<EtWatchdog, &EtWatchdog::timer, &EtWatchdog::expire>(loop.now() + 1s, *this); }
+    void finish() {
+        if (timer.is_in_heap()) {
+            loop.cancel<EtWatchdog, &EtWatchdog::timer>(*this);
+        }
+        loop.stop();
+    }
+};
+} // namespace
+
+TEST(StreamFdTest, ShortReadSuppressesEmptyProbeAndNextPacketWakesReader) {
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    EtWatchdog watchdog{loop};
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        watchdog.arm();
+        fiber::net::detail::StreamFd stream(loop, fds[0]);
+        EXPECT_EQ(::send(fds[1], "a", 1, 0), 1);
+        char data[16]{};
+        auto first = stream.try_read(data, sizeof(data));
+        EXPECT_TRUE(first && *first == 1);
+        EXPECT_EQ(stream.rwfd().prepare_io(IoEvent::Read), IoErr::WouldBlock);
+        EXPECT_EQ(::send(fds[1], "b", 1, 0), 1);
+        auto second = co_await stream.read(data, sizeof(data), 500ms);
+        EXPECT_TRUE(second && *second == 1);
+        EXPECT_EQ(data[0], 'b');
+        stream.close();
+        ::close(fds[1]);
+        watchdog.finish();
+    });
+    loop.run();
+}
+
+TEST(StreamFdTest, FullReadKeepsRemainingBytesRunnableWithoutAnotherEdge) {
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    EtWatchdog watchdog{loop};
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        watchdog.arm();
+        fiber::net::detail::StreamFd stream(loop, fds[0]);
+        EXPECT_EQ(::send(fds[1], "abcd", 4, 0), 4);
+        auto ready = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(ready);
+        char data[2]{};
+        auto first = stream.try_read(data, 2);
+        EXPECT_TRUE(first && *first == 2);
+        auto still_ready = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(still_ready);
+        auto rest = stream.try_read(data, 2);
+        EXPECT_TRUE(rest && *rest == 2);
+        EXPECT_EQ(data[0], 'c');
+        stream.close();
+        ::close(fds[1]);
+        watchdog.finish();
+    });
+    loop.run();
+}
+
+TEST(StreamFdTest, DataThenHalfCloseDrainsEofAndStillAllowsReply) {
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    EtWatchdog watchdog{loop};
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        watchdog.arm();
+        fiber::net::detail::StreamFd stream(loop, fds[0]);
+        EXPECT_EQ(::send(fds[1], "tail", 4, 0), 4);
+        EXPECT_EQ(::shutdown(fds[1], SHUT_WR), 0);
+        auto ready = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(ready);
+        char data[16]{};
+        auto tail = co_await stream.read(data, sizeof(data), 500ms);
+        EXPECT_TRUE(tail && *tail == 4);
+        auto eof = co_await stream.read(data, sizeof(data), 500ms);
+        EXPECT_TRUE(eof && *eof == 0);
+        EXPECT_FALSE(stream.terminal());
+        auto written = co_await stream.write("ok", 2, 500ms);
+        EXPECT_TRUE(written && *written == 2);
+        EXPECT_EQ(::recv(fds[1], data, sizeof(data), 0), 2);
+        stream.close();
+        ::close(fds[1]);
+        watchdog.finish();
+    });
+    loop.run();
+}
+
+TEST(StreamFdTest, ZeroLengthReadDoesNotConsumeReadiness) {
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        fiber::net::detail::StreamFd stream(loop, fds[0]);
+        EXPECT_EQ(::send(fds[1], "x", 1, 0), 1);
+        auto empty = stream.try_read(nullptr, 0);
+        EXPECT_TRUE(empty && *empty == 0);
+        char byte{};
+        auto read = stream.try_read(&byte, 1);
+        EXPECT_TRUE(read && *read == 1);
+        EXPECT_EQ(byte, 'x');
+        stream.close();
+        ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+    loop.run();
+}

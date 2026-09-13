@@ -124,8 +124,8 @@ private:
 
     struct Attempt {
         Attempt(ConnectAwaiter &connect, std::uint8_t slot_index, std::uint8_t candidate_index) noexcept :
-            efd(*connect.loop_, this, &Attempt::on_events), owner(&connect), slot(slot_index),
-            candidate(candidate_index) {}
+            efd(*connect.loop_, this, &Attempt::on_events, event::Poller::Mode::Edge), owner(&connect),
+            slot(slot_index), candidate(candidate_index) {}
 
         static void on_events(void *owner_ptr, event::IoEvent events) noexcept {
             auto *attempt = static_cast<Attempt *>(owner_ptr);

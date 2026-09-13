@@ -1,5 +1,9 @@
 #include <fiber/net/detail/RWFd.h>
 
+#include <cerrno>
+#include <poll.h>
+#include <utility>
+
 namespace fiber::net::detail {
 
 RWFd::DispatchGuard::DispatchGuard(RWFd &owner) noexcept : owner_(&owner) {
@@ -31,13 +35,12 @@ void RWFdWaiterBase::complete(fiber::common::IoErr err) noexcept {
     complete_callback_(this, err);
 }
 
-RWFd::RWFd(fiber::event::EventLoop &loop) :
-    efd_(loop, this, &RWFd::on_efd_events, fiber::event::Poller::Mode::OneShot) {}
+RWFd::RWFd(event::EventLoop &loop, Kind kind) :
+    kind_(kind), external_io_(kind == Kind::Raw), efd_(loop, this, &RWFd::on_efd_events, event::Poller::Mode::Edge) {}
 
-RWFd::RWFd(fiber::event::EventLoop &loop, int fd) :
-    efd_(loop, this, &RWFd::on_efd_events, fiber::event::Poller::Mode::OneShot) {
-    fiber::common::IoErr err = efd_.attach(fd);
-    FIBER_ASSERT(err == fiber::common::IoErr::None);
+RWFd::RWFd(event::EventLoop &loop, int socket, Kind kind) : RWFd(loop, kind) {
+    const auto err = attach(socket);
+    FIBER_ASSERT(err == common::IoErr::None);
 }
 
 RWFd::~RWFd() {
@@ -45,373 +48,409 @@ RWFd::~RWFd() {
         *dispatch_destroyed_observer_ = true;
         dispatch_destroyed_observer_ = nullptr;
     }
-    if (!valid()) {
-        return;
-    }
     if (loop().in_loop()) {
         close();
-        return;
+    } else {
+        FIBER_ASSERT(!efd_.registered() && !has_callbacks() && !ready_entry_.is_in_queue());
     }
-    FIBER_ASSERT(false);
 }
 
 bool RWFd::valid() const noexcept { return efd_.valid(); }
-
 int RWFd::fd() const noexcept { return efd_.fd(); }
+event::EventLoop &RWFd::loop() const noexcept { return efd_.loop(); }
 
-fiber::event::EventLoop &RWFd::loop() const noexcept { return efd_.loop(); }
-
-fiber::common::IoErr RWFd::attach(int fd) noexcept {
-    fiber::common::IoErr err = efd_.attach(fd);
-    if (err == fiber::common::IoErr::None) {
+common::IoErr RWFd::attach(int socket) noexcept {
+    const auto err = efd_.attach(socket);
+    if (err == common::IoErr::None) {
         terminal_ = false;
-        terminal_error_ = fiber::common::IoErr::None;
+        terminal_error_ = common::IoErr::None;
+        read_ready_ = write_ready_ = Readiness::Unknown;
+        read_hangup_ = false;
+        external_io_.store(kind_ == Kind::Raw, std::memory_order_release);
     }
     return err;
 }
 
 int RWFd::release_fd() noexcept {
     FIBER_ASSERT(!has_callbacks());
-    if (efd_.registered()) {
-        FIBER_ASSERT(loop().in_loop());
-        fiber::common::IoErr err = efd_.unwatch_all();
-        FIBER_ASSERT(err == fiber::common::IoErr::None);
+    if (efd_.registered() && efd_.unwatch_all() != common::IoErr::None) {
+        return -1;
     }
+    if (ready_entry_.is_in_queue()) {
+        loop().cancel<RWFd, &RWFd::ready_entry_>(*this);
+    }
+    if (stop_entry_.is_registered()) {
+        loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
+    }
+    pending_ready_ = event::IoEvent::None;
     return efd_.release_fd();
+}
+
+void RWFd::on_loop_stop(RWFd *owner) noexcept { owner->close(); }
+
+common::IoErr RWFd::ensure_registered() noexcept {
+    FIBER_ASSERT(loop().in_loop());
+    event::IoEvent interest = event::IoEvent::Read | event::IoEvent::Write | event::IoEvent::Terminal;
+    if (kind_ != Kind::Datagram) {
+        interest |= event::IoEvent::ReadHangup;
+    }
+    const auto err = efd_.watch_set(interest);
+    if (err == common::IoErr::None && !stop_entry_.is_registered()) {
+        if (!loop().register_stop<RWFd, &RWFd::stop_entry_, &RWFd::on_loop_stop>(*this)) {
+            return common::IoErr::Canceled;
+        }
+    }
+    return err;
+}
+
+common::IoErr RWFd::prepare_io(event::IoEvent direction) noexcept {
+    if (!valid()) {
+        return common::IoErr::BadFd;
+    }
+    if (!loop().in_loop()) {
+        use_external_io();
+        return common::IoErr::None;
+    }
+    const auto err = ensure_registered();
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    if (!external_io_.load(std::memory_order_acquire)) {
+        const auto state = direction == event::IoEvent::Read ? read_ready_ : write_ready_;
+        if (state == Readiness::Blocked && !terminal_) {
+            return common::IoErr::WouldBlock;
+        }
+    }
+    return common::IoErr::None;
+}
+
+void RWFd::finish_io(event::IoEvent direction, common::IoErr err, bool exhausted) noexcept {
+    if (!loop().in_loop()) {
+        return;
+    }
+    auto &state = direction == event::IoEvent::Read ? read_ready_ : write_ready_;
+    if (err == common::IoErr::WouldBlock) {
+        state = Readiness::Blocked;
+    } else if (err == common::IoErr::None) {
+        const bool drained = direction == event::IoEvent::Read && exhausted && !read_hangup_ && !terminal_ &&
+                             !external_io_.load(std::memory_order_acquire);
+        state = drained ? Readiness::Blocked : Readiness::Ready;
+    } else if (err == common::IoErr::ConnReset || err == common::IoErr::BrokenPipe ||
+               err == common::IoErr::NotConnected || err == common::IoErr::ConnAborted) {
+        mark_terminal(err);
+    }
+    if (state == Readiness::Blocked) {
+        pending_ready_ &= ~direction;
+    }
+}
+
+common::IoResult<bool> RWFd::check_ready(event::IoEvent direction) noexcept {
+    if (direction == event::IoEvent::Terminal) {
+        return terminal_;
+    }
+    if (external_io_.load(std::memory_order_acquire)) {
+        pollfd descriptor{.fd = fd(),
+                          .events = static_cast<short>(direction == event::IoEvent::Read ? POLLIN : POLLOUT)};
+        int result;
+        do {
+            result = ::poll(&descriptor, 1, 0);
+        } while (result < 0 && errno == EINTR);
+        if (result < 0) {
+            return std::unexpected(common::io_err_from_errno(errno));
+        }
+        if (descriptor.revents & POLLNVAL) {
+            return std::unexpected(common::IoErr::BadFd);
+        }
+        return descriptor.revents != 0;
+    }
+    return terminal_ || (direction == event::IoEvent::Read ? read_ready_ : write_ready_) == Readiness::Ready;
 }
 
 void RWFd::close() {
     FIBER_ASSERT(loop().in_loop());
-    if (!valid()) {
-        return;
+    if (ready_entry_.is_in_queue()) {
+        loop().cancel<RWFd, &RWFd::ready_entry_>(*this);
     }
-
-    (void) efd_.unwatch_all();
-
-    ReadyCallback read_callback = read_callback_;
-    void *read_callback_ctx = read_callback_ctx_;
-    ReadyCallback write_callback = write_callback_;
-    void *write_callback_ctx = write_callback_ctx_;
-    ReadyCallback terminal_callback = terminal_callback_;
-    void *terminal_callback_ctx = terminal_callback_ctx_;
-    read_callback_ = nullptr;
-    read_callback_ctx_ = nullptr;
-    write_callback_ = nullptr;
-    write_callback_ctx_ = nullptr;
-    terminal_callback_ = nullptr;
-    terminal_callback_ctx_ = nullptr;
+    if (stop_entry_.is_registered()) {
+        loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
+    }
+    pending_ready_ = event::IoEvent::None;
+    const auto read_callback = std::exchange(read_callback_, nullptr);
+    void *read_ctx = std::exchange(read_callback_ctx_, nullptr);
+    const auto write_callback = std::exchange(write_callback_, nullptr);
+    void *write_ctx = std::exchange(write_callback_ctx_, nullptr);
+    const auto terminal_callback = std::exchange(terminal_callback_, nullptr);
+    void *terminal_ctx = std::exchange(terminal_callback_ctx_, nullptr);
+    if (read_generation_ != UINT64_MAX) {
+        ++read_generation_;
+    }
+    if (write_generation_ != UINT64_MAX) {
+        ++write_generation_;
+    }
+    if (terminal_generation_ != UINT64_MAX) {
+        ++terminal_generation_;
+    }
     if (!terminal_) {
         terminal_ = true;
-        terminal_error_ = fiber::common::IoErr::Canceled;
+        terminal_error_ = common::IoErr::Canceled;
     }
+    const auto error = terminal_error_;
     efd_.close_fd();
-
+    // All state is detached before a completion may destroy this object.
+    auto complete_closed = [](ReadyCallback callback, void *ctx) noexcept {
+        if (callback == &RWFdWaiterBase::on_event) {
+            // The waiter has already been detached. In particular, its RWFd
+            // may have been destroyed by the preceding terminal completion.
+            static_cast<RWFdWaiterBase *>(ctx)->complete(common::IoErr::Canceled);
+        } else if (callback) {
+            callback(ctx, common::IoErr::Canceled);
+        }
+    };
     if (terminal_callback) {
-        terminal_callback(terminal_callback_ctx, terminal_error_);
+        terminal_callback(terminal_ctx, error);
     }
-    if (read_callback) {
-        read_callback(read_callback_ctx, fiber::common::IoErr::Canceled);
-    }
-    if (write_callback) {
-        write_callback(write_callback_ctx, fiber::common::IoErr::Canceled);
-    }
+    complete_closed(read_callback, read_ctx);
+    complete_closed(write_callback, write_ctx);
 }
 
-fiber::common::IoErr RWFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+common::IoErr RWFd::install_callback(event::IoEvent direction, ReadyCallback callback, void *ctx) noexcept {
     FIBER_ASSERT(loop().in_loop());
     if (!callback) {
-        return fiber::common::IoErr::Invalid;
+        return common::IoErr::Invalid;
     }
-    if (read_callback_) {
-        return fiber::common::IoErr::Busy;
+    auto &slot = direction == event::IoEvent::Read    ? read_callback_
+                 : direction == event::IoEvent::Write ? write_callback_
+                                                      : terminal_callback_;
+    auto &context = direction == event::IoEvent::Read    ? read_callback_ctx_
+                    : direction == event::IoEvent::Write ? write_callback_ctx_
+                                                         : terminal_callback_ctx_;
+    auto &generation = direction == event::IoEvent::Read    ? read_generation_
+                       : direction == event::IoEvent::Write ? write_generation_
+                                                            : terminal_generation_;
+    if (slot) {
+        return common::IoErr::Busy;
     }
-    read_callback_ = callback;
-    read_callback_ctx_ = ctx;
-    fiber::common::IoErr err = sync_interest();
-    if (err != fiber::common::IoErr::None) {
-        read_callback_ = nullptr;
-        read_callback_ctx_ = nullptr;
+    if (generation == UINT64_MAX) {
+        return common::IoErr::Invalid;
     }
-    return err;
+    const auto err = ensure_registered();
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    auto ready = check_ready(direction);
+    if (!ready) {
+        return ready.error();
+    }
+    slot = callback;
+    context = ctx;
+    ++generation;
+    if (*ready) {
+        queue_ready(direction);
+    }
+    return common::IoErr::None;
 }
 
-fiber::common::IoErr RWFd::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+common::IoErr RWFd::set_read_callback(ReadyCallback cb, void *ctx) noexcept {
+    return install_callback(event::IoEvent::Read, cb, ctx);
+}
+common::IoErr RWFd::set_write_callback(ReadyCallback cb, void *ctx) noexcept {
+    return install_callback(event::IoEvent::Write, cb, ctx);
+}
+common::IoErr RWFd::set_terminal_callback(ReadyCallback cb, void *ctx) noexcept {
+    return install_callback(event::IoEvent::Terminal, cb, ctx);
+}
+
+bool RWFd::remove_callback(event::IoEvent direction, ReadyCallback callback, void *ctx) noexcept {
+    auto &slot = direction == event::IoEvent::Read    ? read_callback_
+                 : direction == event::IoEvent::Write ? write_callback_
+                                                      : terminal_callback_;
+    auto &context = direction == event::IoEvent::Read    ? read_callback_ctx_
+                    : direction == event::IoEvent::Write ? write_callback_ctx_
+                                                         : terminal_callback_ctx_;
+    auto &generation = direction == event::IoEvent::Read    ? read_generation_
+                       : direction == event::IoEvent::Write ? write_generation_
+                                                            : terminal_generation_;
+    if (slot != callback || context != ctx) {
+        return false;
+    }
+    slot = nullptr;
+    context = nullptr;
+    // Saturation rejects later subscriptions instead of wrapping their identity.
+    if (generation != UINT64_MAX) {
+        ++generation;
+    }
+    pending_ready_ &= ~direction;
+    if (!event::any(pending_ready_) && ready_entry_.is_in_queue()) {
+        loop().cancel<RWFd, &RWFd::ready_entry_>(*this);
+    }
+    return true;
+}
+
+common::IoErr RWFd::clear_read_callback(ReadyCallback cb, void *ctx) noexcept {
     FIBER_ASSERT(loop().in_loop());
-    if (!callback) {
-        return fiber::common::IoErr::Invalid;
+    if (!cb) {
+        return common::IoErr::Invalid;
     }
-    if (write_callback_) {
-        return fiber::common::IoErr::Busy;
-    }
-    write_callback_ = callback;
-    write_callback_ctx_ = ctx;
-    fiber::common::IoErr err = sync_interest();
-    if (err != fiber::common::IoErr::None) {
-        write_callback_ = nullptr;
-        write_callback_ctx_ = nullptr;
-    }
-    return err;
+    (void) remove_callback(event::IoEvent::Read, cb, ctx);
+    return common::IoErr::None;
 }
-
-fiber::common::IoErr RWFd::set_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
+common::IoErr RWFd::clear_write_callback(ReadyCallback cb, void *ctx) noexcept {
     FIBER_ASSERT(loop().in_loop());
-    if (!callback) {
-        return fiber::common::IoErr::Invalid;
+    if (!cb) {
+        return common::IoErr::Invalid;
     }
-    if (terminal_callback_) {
-        return fiber::common::IoErr::Busy;
-    }
-    if (terminal_) {
-        callback(ctx, terminal_error_);
-        return fiber::common::IoErr::None;
-    }
-    terminal_callback_ = callback;
-    terminal_callback_ctx_ = ctx;
-    fiber::common::IoErr err = sync_interest();
-    if (err != fiber::common::IoErr::None) {
-        terminal_callback_ = nullptr;
-        terminal_callback_ctx_ = nullptr;
-    }
-    return err;
+    (void) remove_callback(event::IoEvent::Write, cb, ctx);
+    return common::IoErr::None;
 }
-
-fiber::common::IoErr RWFd::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+common::IoErr RWFd::clear_terminal_callback(ReadyCallback cb, void *ctx) noexcept {
     FIBER_ASSERT(loop().in_loop());
-    if (!callback) {
-        return fiber::common::IoErr::Invalid;
+    if (!cb) {
+        return common::IoErr::Invalid;
     }
-    if (!remove_callback(fiber::event::IoEvent::Read, callback, ctx)) {
-        return fiber::common::IoErr::None;
-    }
-    fiber::common::IoErr err = sync_interest();
-    if (err != fiber::common::IoErr::None) {
-        read_callback_ = callback;
-        read_callback_ctx_ = ctx;
-    }
-    return err;
+    (void) remove_callback(event::IoEvent::Terminal, cb, ctx);
+    return common::IoErr::None;
 }
 
-fiber::common::IoErr RWFd::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    if (!callback) {
-        return fiber::common::IoErr::Invalid;
-    }
-    if (!remove_callback(fiber::event::IoEvent::Terminal, callback, ctx)) {
-        return fiber::common::IoErr::None;
-    }
-    fiber::common::IoErr err = sync_interest();
-    if (err != fiber::common::IoErr::None) {
-        terminal_callback_ = callback;
-        terminal_callback_ctx_ = ctx;
-    }
-    return err;
-}
-
-void RWFd::mark_terminal(fiber::common::IoErr error) noexcept {
+void RWFd::mark_terminal(common::IoErr error) noexcept {
     FIBER_ASSERT(loop().in_loop());
     if (terminal_) {
         return;
     }
     terminal_ = true;
-    terminal_error_ = error == fiber::common::IoErr::None ? fiber::common::IoErr::Unknown : error;
-
-    ReadyCallback callback = terminal_callback_;
-    void *ctx = terminal_callback_ctx_;
-    terminal_callback_ = nullptr;
-    terminal_callback_ctx_ = nullptr;
-    if (valid()) {
-        fiber::common::IoErr sync_err = sync_interest();
-        FIBER_ASSERT(sync_err == fiber::common::IoErr::None);
-    }
-    if (callback) {
-        callback(ctx, terminal_error_);
-    }
-}
-
-fiber::common::IoErr RWFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    if (!callback) {
-        return fiber::common::IoErr::Invalid;
-    }
-    if (!remove_callback(fiber::event::IoEvent::Write, callback, ctx)) {
-        return fiber::common::IoErr::None;
-    }
-    fiber::common::IoErr err = sync_interest();
-    if (err != fiber::common::IoErr::None) {
-        write_callback_ = callback;
-        write_callback_ctx_ = ctx;
-    }
-    return err;
+    terminal_error_ = error == common::IoErr::None ? common::IoErr::Unknown : error;
+    read_ready_ = write_ready_ = Readiness::Ready;
+    queue_ready(active_events());
 }
 
 RWFd::WaitReadableAwaiter RWFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return WaitReadableAwaiter(*this, timeout);
 }
-
 RWFd::WaitWritableAwaiter RWFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return WaitWritableAwaiter(*this, timeout);
 }
 
-fiber::common::IoErr RWFd::begin_wait(RWFdWaiterBase *waiter) noexcept {
+common::IoResult<bool> RWFd::begin_wait(RWFdWaiterBase *waiter) noexcept {
     FIBER_ASSERT(loop().in_loop());
-    FIBER_ASSERT(waiter != nullptr);
-    FIBER_ASSERT(waiter->event_ == fiber::event::IoEvent::Read || waiter->event_ == fiber::event::IoEvent::Write);
-    if (!valid()) {
-        return fiber::common::IoErr::BadFd;
+    const auto direction = waiter->event_;
+    if ((direction == event::IoEvent::Read ? read_callback_ : write_callback_)) {
+        return std::unexpected(common::IoErr::Busy);
     }
-
-    ReadyCallback *callback_slot = nullptr;
-    void **ctx_slot = nullptr;
-    if (waiter->event_ == fiber::event::IoEvent::Read) {
-        callback_slot = &read_callback_;
-        ctx_slot = &read_callback_ctx_;
-    } else {
-        callback_slot = &write_callback_;
-        ctx_slot = &write_callback_ctx_;
+    const auto err = ensure_registered();
+    if (err != common::IoErr::None) {
+        return std::unexpected(err);
     }
-    if (*callback_slot) {
-        return fiber::common::IoErr::Busy;
+    auto ready = check_ready(direction);
+    if (!ready) {
+        return std::unexpected(ready.error());
     }
-
-    *callback_slot = &RWFdWaiterBase::on_event;
-    *ctx_slot = waiter;
-    fiber::common::IoErr err = sync_interest();
-    if (err != fiber::common::IoErr::None) {
-        *callback_slot = nullptr;
-        *ctx_slot = nullptr;
-    }
-    return err;
-}
-
-fiber::common::IoErr RWFd::cancel_wait(RWFdWaiterBase *waiter) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    FIBER_ASSERT(waiter != nullptr);
-
-    if (!remove_callback(waiter->event_, &RWFdWaiterBase::on_event, waiter)) {
-        return fiber::common::IoErr::None;
-    }
-    return sync_interest();
-}
-
-bool RWFd::remove_callback(fiber::event::IoEvent event, ReadyCallback callback, void *ctx) noexcept {
-    ReadyCallback *callback_slot = nullptr;
-    void **ctx_slot = nullptr;
-    if (event == fiber::event::IoEvent::Read) {
-        callback_slot = &read_callback_;
-        ctx_slot = &read_callback_ctx_;
-    } else if (event == fiber::event::IoEvent::Write) {
-        callback_slot = &write_callback_;
-        ctx_slot = &write_callback_ctx_;
-    } else {
-        FIBER_ASSERT(event == fiber::event::IoEvent::Terminal);
-        callback_slot = &terminal_callback_;
-        ctx_slot = &terminal_callback_ctx_;
-    }
-    if (*callback_slot != callback || *ctx_slot != ctx) {
+    if (*ready) {
         return false;
     }
-    *callback_slot = nullptr;
-    *ctx_slot = nullptr;
+    // install_callback cannot run the callback synchronously.
+    const auto installed = install_callback(direction, &RWFdWaiterBase::on_event, waiter);
+    if (installed != common::IoErr::None) {
+        return std::unexpected(installed);
+    }
     return true;
 }
 
-void RWFd::on_efd_events(void *owner, fiber::event::IoEvent events) {
-    auto *rwfd = static_cast<RWFd *>(owner);
-    if (!rwfd) {
-        return;
-    }
-    rwfd->handle_events(events);
-}
-
-void RWFd::handle_events(fiber::event::IoEvent events) {
+common::IoErr RWFd::cancel_wait(RWFdWaiterBase *waiter) noexcept {
     FIBER_ASSERT(loop().in_loop());
-    if (!fiber::event::any(events)) {
+    (void) remove_callback(waiter->event_, &RWFdWaiterBase::on_event, waiter);
+    return common::IoErr::None;
+}
+
+void RWFd::queue_ready(event::IoEvent events) noexcept {
+    pending_ready_ |= events;
+    if (event::any(pending_ready_)) {
+        loop().post_local<RWFd, &RWFd::ready_entry_, &RWFd::on_deferred_ready>(*this);
+    }
+}
+
+void RWFd::on_deferred_ready(RWFd *owner) noexcept {
+    auto events = std::exchange(owner->pending_ready_, event::IoEvent::None);
+    if (!owner->external_io_.load(std::memory_order_acquire)) {
+        if (owner->read_ready_ == Readiness::Blocked) {
+            events &= ~event::IoEvent::Read;
+        }
+        if (owner->write_ready_ == Readiness::Blocked) {
+            events &= ~event::IoEvent::Write;
+        }
+    }
+    owner->dispatch_ready(events);
+}
+
+void RWFd::on_efd_events(void *owner, event::IoEvent events) { static_cast<RWFd *>(owner)->handle_events(events); }
+
+void RWFd::handle_events(event::IoEvent events) {
+    FIBER_ASSERT(loop().in_loop());
+    if (event::any(events & event::IoEvent::ReadHangup)) {
+        read_hangup_ = true;
+        events |= event::IoEvent::Read;
+    }
+    if (event::any(events & event::IoEvent::Terminal)) {
+        if (!terminal_) {
+            terminal_ = true;
+            terminal_error_ = common::IoErr::Unknown;
+        }
+        events |= event::IoEvent::Read | event::IoEvent::Write;
+    }
+    if (event::any(events & event::IoEvent::Read)) {
+        read_ready_ = Readiness::Ready;
+    }
+    if (event::any(events & event::IoEvent::Write)) {
+        write_ready_ = Readiness::Ready;
+    }
+    pending_ready_ &= ~events;
+    if (!event::any(pending_ready_) && ready_entry_.is_in_queue()) {
+        loop().cancel<RWFd, &RWFd::ready_entry_>(*this);
+    }
+    dispatch_ready(events);
+}
+
+void RWFd::dispatch_ready(event::IoEvent events) {
+    if (!event::any(events)) {
         return;
     }
-    DispatchGuard dispatch(*this);
-
-    ReadyCallback read_callback = nullptr;
-    void *read_callback_ctx = nullptr;
-    ReadyCallback write_callback = nullptr;
-    void *write_callback_ctx = nullptr;
-    ReadyCallback terminal_callback = nullptr;
-    void *terminal_callback_ctx = nullptr;
-
-    if (fiber::event::any(events & fiber::event::IoEvent::Read)) {
-        read_callback = read_callback_;
-        read_callback_ctx = read_callback_ctx_;
-    }
-    if (fiber::event::any(events & fiber::event::IoEvent::Write)) {
-        write_callback = write_callback_;
-        write_callback_ctx = write_callback_ctx_;
-    }
-    if (fiber::event::any(events & fiber::event::IoEvent::Terminal)) {
-        terminal_ = true;
-        terminal_error_ = fiber::common::IoErr::Unknown;
-        terminal_callback = terminal_callback_;
-        terminal_callback_ctx = terminal_callback_ctx_;
-        terminal_callback_ = nullptr;
-        terminal_callback_ctx_ = nullptr;
-    }
-
-    fiber::event::IoEvent old_watching = efd_.watching();
-    fiber::common::IoErr consume_err = efd_.consume_ready(old_watching);
-    FIBER_ASSERT(consume_err == fiber::common::IoErr::None);
-
-    if (terminal_callback) {
-        terminal_callback(terminal_callback_ctx, terminal_error_);
-        if (dispatch.owner_destroyed()) {
-            return;
-        }
-        if (!valid()) {
+    DispatchGuard guard(*this);
+    const auto token = efd_.token();
+    const auto read_generation = read_generation_;
+    const auto write_generation = write_generation_;
+    if (event::any(events & event::IoEvent::Terminal) && terminal_callback_) {
+        auto callback = terminal_callback_;
+        void *ctx = terminal_callback_ctx_;
+        (void) remove_callback(event::IoEvent::Terminal, callback, ctx);
+        callback(ctx, terminal_error_);
+        if (guard.owner_destroyed() || !valid() || efd_.token() != token) {
             return;
         }
     }
-    if (read_callback && read_callback_ == read_callback && read_callback_ctx_ == read_callback_ctx) {
-        read_callback(read_callback_ctx, fiber::common::IoErr::None);
-        if (dispatch.owner_destroyed()) {
-            return;
-        }
-        if (!valid()) {
+    if (event::any(events & event::IoEvent::Read) && read_callback_ && read_generation == read_generation_) {
+        read_callback_(read_callback_ctx_, common::IoErr::None);
+        if (guard.owner_destroyed() || !valid() || efd_.token() != token) {
             return;
         }
     }
-    if (write_callback && write_callback_ == write_callback && write_callback_ctx_ == write_callback_ctx) {
-        write_callback(write_callback_ctx, fiber::common::IoErr::None);
-        if (dispatch.owner_destroyed()) {
-            return;
-        }
-        if (!valid()) {
-            return;
-        }
-    }
-
-    fiber::event::IoEvent active = active_events();
-    if (fiber::event::any(active)) {
-        fiber::common::IoErr rearm_err = efd_.watch_set(active);
-        FIBER_ASSERT(rearm_err == fiber::common::IoErr::None);
+    if (event::any(events & event::IoEvent::Write) && write_callback_ && write_generation == write_generation_) {
+        write_callback_(write_callback_ctx_, common::IoErr::None);
     }
 }
 
-bool RWFd::has_callbacks() const noexcept {
-    return read_callback_ != nullptr || write_callback_ != nullptr || terminal_callback_ != nullptr;
-}
+bool RWFd::has_callbacks() const noexcept { return read_callback_ || write_callback_ || terminal_callback_; }
 
-fiber::event::IoEvent RWFd::active_events() const noexcept {
-    fiber::event::IoEvent events = fiber::event::IoEvent::None;
+event::IoEvent RWFd::active_events() const noexcept {
+    event::IoEvent events = event::IoEvent::None;
     if (read_callback_) {
-        events |= fiber::event::IoEvent::Read;
+        events |= event::IoEvent::Read;
     }
     if (write_callback_) {
-        events |= fiber::event::IoEvent::Write;
+        events |= event::IoEvent::Write;
     }
     if (terminal_callback_) {
-        events |= fiber::event::IoEvent::Terminal;
+        events |= event::IoEvent::Terminal;
     }
     return events;
 }
-
-fiber::common::IoErr RWFd::sync_interest() noexcept { return efd_.watch_set(active_events()); }
 
 void RWFdCrossThreadWaiter::on_complete(RWFdWaiterBase *base, fiber::common::IoErr err) noexcept {
     auto *waiter = static_cast<RWFdCrossThreadWaiter *>(base);
@@ -505,9 +544,9 @@ void RWFdCrossThreadWaiter::on_notify_watch(RWFdCrossThreadWaiter *waiter) noexc
     FIBER_ASSERT(old == RWFdWaiterState::Notify_Watch);
 
     RWFd *rwfd = waiter->rwfd_;
-    fiber::common::IoErr err = rwfd->begin_wait(waiter);
-    if (err != fiber::common::IoErr::None) {
-        waiter->err_ = err;
+    auto result = rwfd->begin_wait(waiter);
+    if (!result || !*result) {
+        waiter->err_ = result ? fiber::common::IoErr::None : result.error();
         do_notify_resume(waiter);
     }
 }
