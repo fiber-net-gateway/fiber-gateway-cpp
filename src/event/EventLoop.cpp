@@ -191,16 +191,18 @@ void EventLoop::run_once() {
     }
 
     for (int i = 0; i < count; ++i) {
-        auto *item = poller_.resolve(events[i].data.u64);
+        // Blanked by Poller::del() when a callback removed the item mid-batch.
+        auto *item = static_cast<Poller::Item *>(events[i].data.ptr);
         if (!item) {
             continue;
         }
-        IoEvent io = to_io_event(events[i].events, item ? item->interested_ : IoEvent::None);
+        IoEvent io = to_io_event(events[i].events, item->interested_);
         if (to_mask(io) == 0) {
             continue;
         }
         item->callback(item, item->fd(), io);
     }
+    poller_.end_batch();
     drain_defer();
 }
 
