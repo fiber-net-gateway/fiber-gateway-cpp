@@ -19,13 +19,14 @@ constexpr int kMaxIov = 16;
 
 // TLS writes go through SSL_write, which encrypts a contiguous input buffer into
 // one record. Unlike sendmsg, BoringSSL has no scatter-gather API, so multi-node
-// chains would otherwise produce one record per IoBuf. To collapse small adjacent
-// nodes into a single record we coalesce them into a scratch buffer before the
-// SSL_write call. Groups are kept <= kTlsCoalesceMax so each coalesced write fits
-// in a single TLS record (default max fragment 16384). A group that is a single
-// node -- including any oversized node -- is passed through to SSL_write with the
-// node's own pointer (zero copy), so large bodies never touch the scratch buffer.
-constexpr std::size_t kTlsCoalesceMax = 8192;
+// chains would otherwise produce one record per IoBuf: an HTTP/2 DATA frame is
+// a 9-byte header node followed by its payload node, and writing the header as
+// its own record costs a full send() for 31 bytes on the wire. A node that is
+// itself at least one full record is passed to SSL_write with the node's own
+// pointer (zero copy). Anything smaller is coalesced into a scratch buffer with
+// the nodes that follow it, splitting the last node when needed, so that each
+// scratch write is a full record whenever the chain holds enough data.
+constexpr std::size_t kTlsRecordPlaintextMax = 16384;
 
 std::chrono::steady_clock::time_point make_deadline(std::chrono::milliseconds timeout) noexcept {
     if (timeout == std::chrono::milliseconds::max()) {
@@ -433,34 +434,31 @@ common::IoErr TlsTransport::poll_writev(mem::IoBufChain &buf, size_t &out, event
             return common::IoErr::None;
         }
 
-        int group_end = 0;
-        std::size_t group_len = 0;
-        while (group_end < count && group_len + iov[group_end].iov_len <= kTlsCoalesceMax) {
-            group_len += iov[group_end].iov_len;
-            ++group_end;
-        }
-        if (group_end == 0) {
-            group_end = 1;
-            group_len = iov[0].iov_len;
-        }
-
-        if (group_end == 1) {
+        if (count == 1) {
             write_data = iov[0].iov_base;
+            write_len = iov[0].iov_len;
+        } else if (iov[0].iov_len >= kTlsRecordPlaintextMax) {
+            // Whole records straight from the node; its tail joins the next
+            // group so it does not become a short record of its own.
+            write_data = iov[0].iov_base;
+            write_len = iov[0].iov_len - iov[0].iov_len % kTlsRecordPlaintextMax;
         } else {
             if (!writev_scratch_) {
-                writev_scratch_.reset(new (std::nothrow) std::uint8_t[kTlsCoalesceMax]);
+                writev_scratch_.reset(new (std::nothrow) std::uint8_t[kTlsRecordPlaintextMax]);
                 if (!writev_scratch_) {
                     return common::IoErr::NoMem;
                 }
             }
             std::uint8_t *dst = writev_scratch_.get();
-            for (int i = 0; i < group_end; ++i) {
-                std::memcpy(dst, iov[i].iov_base, iov[i].iov_len);
-                dst += iov[i].iov_len;
+            std::size_t group_len = 0;
+            for (int i = 0; i < count && group_len < kTlsRecordPlaintextMax; ++i) {
+                const std::size_t take = std::min(iov[i].iov_len, kTlsRecordPlaintextMax - group_len);
+                std::memcpy(dst + group_len, iov[i].iov_base, take);
+                group_len += take;
             }
             write_data = writev_scratch_.get();
+            write_len = group_len;
         }
-        write_len = group_len;
     }
 
     common::IoErr err = stream_.poll_write(write_data, write_len, out, wait_event);

@@ -47,6 +47,11 @@ constexpr std::size_t kIoPumpByteBudget = 256 * 1024;
 // cap stay in the same turn so a connection is not throttled to one batch
 // per poll.
 constexpr std::size_t kIoPumpTurnByteBudget = 2 * 1024 * 1024;
+// Flow-controlled payload one stream may encode per outbound batch. A batch
+// is split into DATA frames of the peer's max frame size; bounding it keeps
+// streams interleaving on the connection without forcing one loop
+// round-trip per frame.
+constexpr std::size_t kStreamOutboundBatchBytes = 64 * 1024;
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -2078,8 +2083,7 @@ common::IoErr Http2Connection::try_encode_stream_outbound(Http2Stream &stream) n
 
         payload_budget = static_cast<std::uint32_t>(
                 std::min<std::size_t>({pending_flow_controlled, static_cast<std::size_t>(stream.send_window_),
-                                       static_cast<std::size_t>(conn_send_window_),
-                                       static_cast<std::size_t>(peer_max_outbound_frame_size_)}));
+                                       static_cast<std::size_t>(conn_send_window_), kStreamOutboundBatchBytes}));
         FIBER_ASSERT(payload_budget != 0);
     }
 

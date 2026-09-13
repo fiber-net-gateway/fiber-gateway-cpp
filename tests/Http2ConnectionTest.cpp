@@ -5550,6 +5550,63 @@ TEST(Http2ConnectionTest, ServerHandlerCanSendResponseBodyDataFrames) {
     EXPECT_EQ(data_frame_count, 1U) << describe_frames(frames);
 }
 
+TEST(Http2ConnectionTest, ServerHandlerWriteAcceptsMultipleFramesPerBatch) {
+    std::string request = std::string(kClientConnectionPreface);
+    request += make_frame(0, 0x4, 0x0, 0, {});
+    request += build_headers_frame_bytes(1,
+                                         {
+                                                 {":method", "GET"},
+                                                 {":scheme", "https"},
+                                                 {":path", "/body-batch"},
+                                                 {":authority", "example.com"},
+                                         },
+                                         true);
+
+    // Larger than one max-size frame but within the per-stream batch, so a
+    // single write() accepts everything and the batch is split into frames.
+    const std::size_t body_size = 16384 * 2 + 7000;
+    auto body = std::make_shared<std::string>(body_size, 'b');
+    auto header_result = std::make_shared<fiber::common::IoResult<void>>();
+    auto body_result = std::make_shared<fiber::common::IoResult<size_t>>();
+    fiber::http::HttpHandler handler = [header_result, body_result,
+                                        body](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+        *header_result = co_await exchange.send_header({
+                .kind = fiber::http::OutgoingHeaderKind::Final,
+                .status_code = 200,
+                .end_stream = false,
+        });
+        if (!*header_result) {
+            co_return;
+        }
+        *body_result =
+                co_await exchange.write(reinterpret_cast<const std::uint8_t *>(body->data()), body->size(), true);
+        co_return;
+    };
+
+    ServerHeaderRunOutcome outcome = execute_server_request({std::move(request)}, std::move(handler));
+
+    ASSERT_TRUE(outcome.result.has_value());
+    ASSERT_TRUE(header_result->has_value());
+    ASSERT_TRUE(body_result->has_value());
+    EXPECT_EQ(body_result->value(), body_size);
+
+    std::vector<EncodedFrame> frames = parse_frames(outcome.written);
+    std::vector<std::size_t> data_sizes;
+    std::string reassembled;
+    std::uint8_t last_flags = 0;
+    for (const auto &frame: frames) {
+        if (frame.type != 0x0 || frame.stream_id != 1U) {
+            continue;
+        }
+        data_sizes.push_back(frame.payload.size());
+        reassembled += frame.payload;
+        last_flags = frame.flags;
+    }
+    EXPECT_EQ(data_sizes, (std::vector<std::size_t>{16384, 16384, 7000})) << describe_frames(frames);
+    EXPECT_EQ(last_flags & 0x1U, 0x1U);
+    EXPECT_EQ(reassembled, *body);
+}
+
 TEST(Http2ConnectionTest, ServerHandlerResumesBodySendAfterStreamWindowUpdate) {
     fiber::http::Http2Connection::Options options;
     options.initial_stream_send_window = 0;
