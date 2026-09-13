@@ -223,6 +223,52 @@ TEST(IntrusiveListTest, HookPrimitivesDriveBareAnchorRing) {
     EXPECT_EQ(anchor.prev, &anchor);
 }
 
+TEST(IntrusiveListTest, SpliceBackAppendsInOrderAndEmptiesSource) {
+    TestList dst, src;
+    TestNode a{1}, b{2}, c{3}, d{4};
+    dst.push_back(a);
+    dst.push_back(b);
+    src.push_back(c);
+    src.push_back(d);
+
+    dst.splice_back(src);
+    EXPECT_TRUE(src.empty());
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2, 3, 4}));
+    EXPECT_EQ(dst.back(), &d);
+    EXPECT_EQ(dst.prev_of(c), &b);
+
+    // Moved nodes now unlink from dst, not src, and later pushes to src start
+    // a fresh ring.
+    dst.erase(c);
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2, 4}));
+    src.push_back(c);
+    EXPECT_EQ(collected(src), (std::vector<int>{3}));
+}
+
+TEST(IntrusiveListTest, SpliceBackIntoEmptyAndFromEmpty) {
+    TestList dst, src;
+    TestNode a{1}, b{2};
+
+    // Empty source is a no-op.
+    dst.push_back(a);
+    dst.splice_back(src);
+    EXPECT_EQ(collected(dst), (std::vector<int>{1}));
+
+    // Empty destination takes over the whole ring.
+    dst.erase(a);
+    src.push_back(a);
+    src.push_back(b);
+    dst.splice_back(src);
+    EXPECT_TRUE(src.empty());
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2}));
+    EXPECT_EQ(dst.front(), &a);
+    EXPECT_EQ(dst.back(), &b);
+
+    // Self-splice is a no-op.
+    dst.splice_back(dst);
+    EXPECT_EQ(collected(dst), (std::vector<int>{1, 2}));
+}
+
 TEST(IntrusiveListDeathTest, ListDestructorAssertsWhenNotEmpty) {
     TestNode node{1};
     EXPECT_DEATH(
