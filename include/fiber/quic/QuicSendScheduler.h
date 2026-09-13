@@ -106,7 +106,12 @@ private:
         std::size_t packets_sent = 0;
     };
 
+    // QuicConnection is not standard-layout, but it is non-polymorphic, which
+    // is what container_of actually needs.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
     using ReadyList = common::IntrusiveList<QuicConnection, offsetof(QuicConnection, send_queue_hook_)>;
+#pragma GCC diagnostic pop
 
     void enqueue_ready(QuicConnection &connection) noexcept;
     void rotate_front_to_back(QuicConnection &connection) noexcept;

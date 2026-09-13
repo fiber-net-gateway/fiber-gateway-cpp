@@ -107,6 +107,10 @@ private:
         self.stream_->conn_->cancel_peer_data_wait(self);
     }
 
+    // WriteAwaiter is not standard-layout, but it is non-polymorphic, which
+    // is what container_of actually needs.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
     [[nodiscard]] static WriteAwaiter *from_peer_data_wait_link(common::IntrusiveListHook *hook) noexcept {
         if (hook == nullptr) {
             return nullptr;
@@ -114,6 +118,7 @@ private:
         return reinterpret_cast<WriteAwaiter *>(reinterpret_cast<std::uint8_t *>(hook) -
                                                 offsetof(WriteAwaiter, peer_data_wait_link_));
     }
+#pragma GCC diagnostic pop
 
     QuicStream *stream_ = nullptr;
     common::IntrusiveListHook peer_data_wait_link_{};
