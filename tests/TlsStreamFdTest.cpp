@@ -793,6 +793,115 @@ TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
     group.join();
 }
 
+DetachedTask write_chain_recording_records(fiber::http::TlsTransport *transport,
+                                           const fiber::net::TlsClientParam &param, fiber::mem::IoBufChain chain,
+                                           std::promise<fiber::common::IoResult<std::vector<std::size_t>>> *done) {
+    auto handshake_result = co_await transport->handshake(param, 5s);
+    if (!handshake_result) {
+        done->set_value(std::unexpected(handshake_result.error()));
+        co_return;
+    }
+
+    // Each successful poll_writev is exactly one SSL_write, i.e. one record's
+    // worth of plaintext.
+    std::vector<std::size_t> records;
+    while (chain.readable_bytes() != 0) {
+        std::size_t out = 0;
+        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
+        fiber::common::IoErr err = transport->poll_writev(chain, out, wait_event);
+        if (err == fiber::common::IoErr::WouldBlock) {
+            // The pending group is retained; the peer drains continuously.
+            co_await fiber::async::sleep(1ms);
+            continue;
+        }
+        if (err != fiber::common::IoErr::None) {
+            done->set_value(std::unexpected(err));
+            co_return;
+        }
+        if (out == 0) {
+            done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
+            co_return;
+        }
+        records.push_back(out);
+    }
+    (void) co_await transport->shutdown(5s);
+    done->set_value(std::move(records));
+    co_return;
+}
+
+TEST(TlsStreamFdTest, TlsTransportWritevFillsRecordsAcrossSmallAndLargeNodes) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert", kSelfSignedCertPem);
+    TempFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
+
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+
+    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
+    ASSERT_TRUE(server_transport_result);
+    ASSERT_TRUE(client_transport_result);
+    auto *server_transport = server_transport_result->release();
+    auto *client_transport = client_transport_result->release();
+
+    fiber::mem::IoBufNodePool pool;
+    fiber::mem::IoBufChain chain(pool);
+    // HTTP/2 DATA frame shape: 9-byte header node + 16 KiB payload node, three
+    // times, then an oversized node followed by small nodes.
+    std::vector<std::size_t> sizes = {9, 16384, 9, 16384, 9, 16384, 20000, 9, 300};
+    std::string expected = build_distinct_chain(pool, chain, sizes);
+
+    std::promise<fiber::common::IoResult<std::string>> server_promise;
+    std::promise<fiber::common::IoResult<std::vector<std::size_t>>> client_promise;
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_transport_server(server_transport, tls_pair->server_options, &server_promise);
+    });
+    fiber::async::spawn(group.at(1), [&]() {
+        return write_chain_recording_records(client_transport, tls_pair->client_options, std::move(chain),
+                                             &client_promise);
+    });
+
+    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+
+    auto client_result = client_future.get();
+    auto server_result = server_future.get();
+    ASSERT_TRUE(client_result);
+    ASSERT_TRUE(server_result);
+    EXPECT_EQ(*server_result, expected);
+    // 3 x (9 + 16384) = 49179 -> three full records + 27 bytes carried into
+    // the fourth, which is filled from the 20000 node; its 3643-byte tail is
+    // coalesced with the trailing [9][300] instead of becoming its own record.
+    const std::vector<std::size_t> expected_records = {16384, 16384, 16384, 16384, 3643 + 9 + 300};
+    EXPECT_EQ(*client_result, expected_records);
+
+    std::promise<void> close_promise;
+    auto close_future = close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &close_promise); });
+    ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+    std::promise<void> close_promise2;
+    auto close_future2 = close_promise2.get_future();
+    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &close_promise2); });
+    ASSERT_EQ(close_future2.wait_for(2s), std::future_status::ready);
+
+    group.stop();
+    group.join();
+}
+
 TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBlock) {
     SigpipeGuard sigpipe_guard;
     TempFile cert("cert", kSelfSignedCertPem);
