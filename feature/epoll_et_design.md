@@ -486,4 +486,4 @@ H3 压测偶发 `warmup_errors`（客户端 `broken_pipe`/`canceled`）的主因
 - `Http1Connection::parse_request` 在收到第一个字节之前使用剩余的 keep-alive 预算，`header_timeout` 从首字节起算（与 Nginx `client_header_timeout` 语义一致）。
 - 新增 `RWFd/StreamFd/TcpStream/HttpTransport::peer_closed()`（RDHUP 或 terminal），`Http1ClientConnection::peer_closed()`；`Http1ConnectionPoolCore::try_steal_idle_entry` 发放前丢弃对端已关闭的空闲连接，`acquire_exchange` 同样拒绝。持久 ET 注册保证空闲连接的 RDHUP 无需任何读取即可送达 owner loop。
 
-修复后 `steal off`/`steal auto` 各 30～60 次压测无上游 `broken_pipe`。仍有约 1/60 的运行在启动阶段出现单个 QUIC 连接握手超时（服务端没有该连接的任何记录），尚未归因；建议后续把 `QuicUdpEndpoint` 的丢包/限速计数暴露到代理统计中。
+修复后 `steal off`/`steal auto` 各 30～60 次压测无上游 `broken_pipe`。仍有约 1/60 的运行在启动阶段出现单个 QUIC 连接握手超时（服务端没有该连接的任何记录），尚未归因，事实与排查线索见 [h3_connect_timeout_open_issue.md](h3_connect_timeout_open_issue.md)。
