@@ -294,6 +294,8 @@ bool Http1ClientConnection::connected() const noexcept {
 
 bool Http1ClientConnection::reusable() const noexcept { return idle() && keepalive_usable_; }
 
+bool Http1ClientConnection::peer_closed() const noexcept { return transport_ && transport_->peer_closed(); }
+
 void Http1ClientConnection::record_request_started() noexcept {
     if (request_count_ != std::numeric_limits<std::uint64_t>::max()) {
         ++request_count_;
@@ -306,7 +308,7 @@ event::EventLoop &Http1ClientConnection::loop() const noexcept {
 }
 
 bool Http1ClientConnection::acquire_exchange() noexcept {
-    if (state_ != State::ConnectedIdle || !valid() || !keepalive_usable_) {
+    if (state_ != State::ConnectedIdle || !valid() || !keepalive_usable_ || transport_->peer_closed()) {
         return false;
     }
     active_loop_ = &event::EventLoop::current();

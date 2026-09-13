@@ -37,6 +37,7 @@ public:
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
     [[nodiscard]] bool terminal() const noexcept;
+    [[nodiscard]] bool peer_closed() const noexcept;
     [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
     void close();
 

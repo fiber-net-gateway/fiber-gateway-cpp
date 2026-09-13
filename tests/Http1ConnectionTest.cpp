@@ -76,16 +76,20 @@ public:
                                                                        std::chrono::milliseconds timeout) override {
         metrics_.events.push_back(TransportEvent::Read);
         metrics_.read_timeouts.push_back(timeout);
-        if (input_consumed_) {
+        if (input_offset_ >= input_.size()) {
             co_return static_cast<std::size_t>(0);
         }
-        if (buf.writable() < input_.size()) {
+        // The first read may be limited to model bytes trickling in after a
+        // readiness wake-up; the remainder is delivered by the next read.
+        const std::size_t remaining = input_.size() - input_offset_;
+        const std::size_t take = std::min(remaining, input_offset_ == 0 ? first_read_limit_ : remaining);
+        if (buf.writable() < take) {
             co_return std::unexpected(fiber::common::IoErr::MessageTooLarge);
         }
-        std::memcpy(buf.writable_data(), input_.data(), input_.size());
-        buf.commit(input_.size());
-        input_consumed_ = true;
-        co_return input_.size();
+        std::memcpy(buf.writable_data(), input_.data() + input_offset_, take);
+        buf.commit(take);
+        input_offset_ += take;
+        co_return take;
     }
 
     fiber::async::Task<fiber::common::IoResult<std::size_t>> readv_into(fiber::mem::IoBufChain &,
@@ -155,6 +159,7 @@ public:
         writev_successes_before_error_ = successful_writes;
         writev_error_ = error;
     }
+    void limit_first_read(std::size_t bytes) noexcept { first_read_limit_ = bytes; }
 
 private:
     void record_write() {
@@ -169,7 +174,8 @@ private:
     std::size_t write_limit_ = std::numeric_limits<std::size_t>::max();
     std::size_t writev_successes_before_error_ = 0;
     fiber::common::IoErr writev_error_ = fiber::common::IoErr::None;
-    bool input_consumed_ = false;
+    std::size_t input_offset_ = 0;
+    std::size_t first_read_limit_ = std::numeric_limits<std::size_t>::max();
     bool closed_ = false;
 };
 
@@ -178,6 +184,9 @@ fiber::async::DetachedTask run_pipelined_http1_connection(fiber::event::EventLoo
     std::string requests = "GET /one HTTP/1.1\r\nHost: example.test\r\n\r\n"
                            "GET /two HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n";
     auto transport = std::make_unique<RecordingHttp1Transport>(*loop, *metrics, std::move(requests));
+    // Deliver the first request line byte by itself so the header budget
+    // observably starts once bytes exist.
+    transport->limit_first_read(1);
 
     fiber::http::Http1ServerOptions options;
     options.keep_alive_timeout = 2s;
@@ -202,7 +211,7 @@ fiber::async::DetachedTask run_pipelined_http1_connection(fiber::event::EventLoo
     co_return;
 }
 
-TEST(Http1ConnectionTest, WaitsBeforeFirstReadUsesHeaderTimeoutAndSkipsWaitForPipelinedRequest) {
+TEST(Http1ConnectionTest, FirstByteWaitsOnKeepAliveBudgetThenHeaderTimeoutAndSkipsWaitForPipelinedRequest) {
     fiber::event::EventLoopGroup group(1);
     group.start();
 
@@ -218,8 +227,13 @@ TEST(Http1ConnectionTest, WaitsBeforeFirstReadUsesHeaderTimeoutAndSkipsWaitForPi
 
     ASSERT_EQ(metrics.wait_timeouts.size(), 1U);
     EXPECT_EQ(metrics.wait_timeouts.front(), 2s);
-    ASSERT_EQ(metrics.read_timeouts.size(), 1U);
-    EXPECT_EQ(metrics.read_timeouts.front(), 1s);
+    // A readiness wake-up can be stale under edge-triggered I/O, so the read
+    // for the first byte keeps the remaining keep-alive budget; once a byte
+    // has arrived the header timeout applies.
+    ASSERT_EQ(metrics.read_timeouts.size(), 2U);
+    EXPECT_GT(metrics.read_timeouts[0], 1s);
+    EXPECT_LE(metrics.read_timeouts[0], 2s);
+    EXPECT_EQ(metrics.read_timeouts[1], 1s);
     EXPECT_EQ(metrics.handler_calls, 2U);
     EXPECT_EQ(metrics.write_calls, 2U);
     EXPECT_TRUE(metrics.responses_ok);

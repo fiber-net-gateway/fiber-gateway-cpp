@@ -477,3 +477,13 @@ H2 1m 稳态每请求 `epoll_pwait2` 0.071 次（修改前 0.030，计数预算�
 | H3 echo | 1,678 | 1,654 | -1.5% | 2553 → 2605 |
 
 H3 不经过 TlsTransport 与 H2 编码路径，差异在噪声内。一次 H3 1m 预热阶段出现 4 个客户端侧 `canceled` 计入 `warmup_errors` 使客户端非零退出，后续 8 次同场景未复现，未归因。全量 CTest 2008 项通过。
+
+### 14.7 ET 就绪缓存与 HTTP/1 keep-alive 超时（2026-09-13）
+
+H3 压测偶发 `warmup_errors`（客户端 `broken_pipe`/`canceled`）的主因：ET 的方向缓存允许 `wait_readable` 在没有新数据时立即完成（例如请求体最后一次读恰好填满缓冲区，`Ready` 未被 EAGAIN 清除）。HTTP/1 服务端把这次唤醒当作下一请求到达，转入 `header_timeout`（10s）等待，超时后关闭本应空闲 70s 的 keep-alive 连接；代理的上游连接池（60s）随后复用了已被后端关闭的连接，首个请求体写入得到 `EPIPE`，返回 502 并向 H3 客户端发送 STOP_SENDING。`steal off` 时 40 次压测失败 20 次，后端记录 `parse_io TimedOut`；修改前的 LT 程序不会产生伪唤醒，同场景 24 次均通过。
+
+修复：
+- `Http1Connection::parse_request` 在收到第一个字节之前使用剩余的 keep-alive 预算，`header_timeout` 从首字节起算（与 Nginx `client_header_timeout` 语义一致）。
+- 新增 `RWFd/StreamFd/TcpStream/HttpTransport::peer_closed()`（RDHUP 或 terminal），`Http1ClientConnection::peer_closed()`；`Http1ConnectionPoolCore::try_steal_idle_entry` 发放前丢弃对端已关闭的空闲连接，`acquire_exchange` 同样拒绝。持久 ET 注册保证空闲连接的 RDHUP 无需任何读取即可送达 owner loop。
+
+修复后 `steal off`/`steal auto` 各 30～60 次压测无上游 `broken_pipe`。仍有约 1/60 的运行在启动阶段出现单个 QUIC 连接握手超时（服务端没有该连接的任何记录），尚未归因；建议后续把 `QuicUdpEndpoint` 的丢包/限速计数暴露到代理统计中。

@@ -33,6 +33,7 @@ public:
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     [[nodiscard]] RWFd &rwfd() noexcept;
     [[nodiscard]] bool terminal() const noexcept { return rwfd_.terminal(); }
+    [[nodiscard]] bool peer_closed() const noexcept { return rwfd_.peer_closed(); }
     [[nodiscard]] fiber::common::IoErr terminal_error() const noexcept { return rwfd_.terminal_error(); }
     int release_fd() noexcept;
     void close();

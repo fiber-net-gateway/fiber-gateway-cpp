@@ -287,6 +287,7 @@ void TcpTransport::close() { stream_.close(); }
 bool TcpTransport::valid() const noexcept { return stream_.valid(); }
 
 bool TcpTransport::terminal() const noexcept { return stream_.terminal(); }
+bool TcpTransport::peer_closed() const noexcept { return stream_.peer_closed(); }
 
 int TcpTransport::fd() const noexcept { return stream_.fd(); }
 
@@ -653,6 +654,7 @@ void TlsTransport::close() {
 bool TlsTransport::valid() const noexcept { return stream_.valid(); }
 
 bool TlsTransport::terminal() const noexcept { return stream_.terminal(); }
+bool TlsTransport::peer_closed() const noexcept { return stream_.peer_closed(); }
 
 bool TlsTransport::has_pending_read() const noexcept { return stream_.has_pending_read(); }
 

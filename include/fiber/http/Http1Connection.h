@@ -1,6 +1,7 @@
 #ifndef FIBER_HTTP_HTTP1_CONNECTION_H
 #define FIBER_HTTP_HTTP1_CONNECTION_H
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 
@@ -53,7 +54,10 @@ private:
     static bool handle_transfer_encoding(HttpExchange &exchange, const HttpHeaders::HeaderField &header);
     static bool handle_connection(HttpExchange &exchange, const HttpHeaders::HeaderField &header);
 
-    fiber::async::Task<common::IoResult<ParseCode>> parse_request(HttpExchange &exchange);
+    // idle_deadline bounds the wait for the first byte of the request; the
+    // header timeout applies once bytes have arrived.
+    fiber::async::Task<common::IoResult<ParseCode>> parse_request(HttpExchange &exchange,
+                                                                  std::chrono::steady_clock::time_point idle_deadline);
     std::size_t drain_inbound(mem::IoBuf &buffer) noexcept;
     void finish() noexcept;
 
