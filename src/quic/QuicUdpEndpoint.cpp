@@ -932,7 +932,7 @@ void QuicUdpEndpoint::clear_socket_callbacks() noexcept {
     }
 }
 
-void QuicUdpEndpoint::schedule_io_pump() noexcept {
+void QuicUdpEndpoint::schedule_io_pump(bool next_turn) noexcept {
     if (!initialized_ || closing_) {
         return;
     }
@@ -942,6 +942,11 @@ void QuicUdpEndpoint::schedule_io_pump() noexcept {
         return;
     }
     if (io_pump_entry_.is_in_queue()) {
+        return;
+    }
+    if (next_turn) {
+        // Budget-bounded continuation: yield to the poll first.
+        loop_.post_next<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_, &QuicUdpEndpoint::on_io_pump>(*this);
         return;
     }
     loop_.post_local<QuicUdpEndpoint, &QuicUdpEndpoint::io_pump_entry_, &QuicUdpEndpoint::on_io_pump>(*this);
@@ -1021,7 +1026,12 @@ void QuicUdpEndpoint::drive_io() noexcept {
         send_buffer_.reset();
         return;
     }
-    if (needs_reschedule || io_pump_again_) {
+    // Stopping on the pump budget with work left yields to the next turn;
+    // work that arrived while pumping is resumed in this turn.
+    if (needs_reschedule) {
+        io_pump_again_ = false;
+        schedule_io_pump(true);
+    } else if (io_pump_again_) {
         io_pump_again_ = false;
         schedule_io_pump();
     }

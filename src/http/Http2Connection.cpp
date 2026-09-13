@@ -42,6 +42,11 @@ constexpr std::int64_t kMaxFlowControlWindow = 0x7fffffffLL;
 constexpr std::int32_t kInitialFlowControlWindow = 65535;
 constexpr std::size_t kIoPumpOperationBudget = 64;
 constexpr std::size_t kIoPumpByteBudget = 256 * 1024;
+// Bytes one connection may move per event-loop turn before its pump yields
+// with post_next (nginx sendfile_max_chunk-like). Continuations under this
+// cap stay in the same turn so a connection is not throttled to one batch
+// per poll.
+constexpr std::size_t kIoPumpTurnByteBudget = 2 * 1024 * 1024;
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -450,7 +455,7 @@ void Http2Connection::handle_transport_ready(event::IoEvent event, common::IoErr
     drive_io();
 }
 
-void Http2Connection::schedule_io_pump() noexcept {
+void Http2Connection::schedule_io_pump(bool next_turn) noexcept {
     if (!transport_ || state_ == State::Closed) {
         return;
     }
@@ -463,6 +468,13 @@ void Http2Connection::schedule_io_pump() noexcept {
     }
     FIBER_ASSERT(transport_->loop().in_loop());
     io_pump_posted_ = true;
+    if (next_turn) {
+        // Budget-bounded continuation: yield to the poll first so other
+        // connections, timers and stop interleave with this pump.
+        transport_->loop().post_next<Http2Connection, &Http2Connection::io_pump_entry_, &Http2Connection::on_io_pump>(
+                *this);
+        return;
+    }
     transport_->loop().post_local<Http2Connection, &Http2Connection::io_pump_entry_, &Http2Connection::on_io_pump>(
             *this);
 }
@@ -477,6 +489,17 @@ void Http2Connection::drive_io() noexcept {
         return;
     }
 
+    const std::uint64_t turn = transport_->loop().turn();
+    if (turn != pump_turn_) {
+        pump_turn_ = turn;
+        pump_turn_bytes_ = 0;
+    }
+    if (pump_turn_bytes_ >= kIoPumpTurnByteBudget) {
+        schedule_io_pump(true);
+        return;
+    }
+    const std::size_t byte_budget = std::min(kIoPumpByteBudget, kIoPumpTurnByteBudget - pump_turn_bytes_);
+
     io_pump_running_ = true;
     io_pump_again_ = false;
     ReadPumpResult read_result;
@@ -488,7 +511,7 @@ void Http2Connection::drive_io() noexcept {
             inbound_io_.wait_event = event::IoEvent::None;
             return true;
         }
-        auto result = pump_read(kIoPumpOperationBudget, kIoPumpByteBudget);
+        auto result = pump_read(kIoPumpOperationBudget, byte_budget);
         if (!result) {
             if (pending_error_raised_) {
                 close_after_connection_error(result.error());
@@ -512,7 +535,7 @@ void Http2Connection::drive_io() noexcept {
             return true;
         }
         outbound_ready_hint_ = false;
-        auto result = this->pump_outbound(kIoPumpOperationBudget, kIoPumpByteBudget);
+        auto result = this->pump_outbound(kIoPumpOperationBudget, byte_budget);
         if (!result) {
             enter_closing(result.error());
             return false;
@@ -542,11 +565,12 @@ void Http2Connection::drive_io() noexcept {
             enter_closing(callback_err);
         }
     }
+    pump_turn_bytes_ += read_result.bytes_read + write_result.bytes_written;
     if (state_ != State::Closed) {
         arm_read_timer();
         arm_write_timer(write_progress);
         arm_read_buffer_idle_timer();
-        if (read_result.needs_reschedule || write_result.needs_reschedule || io_pump_again_) {
+        if (read_result.needs_reschedule || write_result.needs_reschedule) {
             io_pump_again_ = true;
         }
         if (state_ == State::Closing) {
@@ -558,9 +582,11 @@ void Http2Connection::drive_io() noexcept {
     if (state_ == State::Closed) {
         return;
     }
-    if (state_ != State::Closed && io_pump_again_) {
+    if (io_pump_again_) {
         io_pump_again_ = false;
-        schedule_io_pump();
+        // Continue in this turn while the per-turn share lasts; once it is
+        // spent, yield so the poll, timers and other connections run first.
+        schedule_io_pump(pump_turn_bytes_ >= kIoPumpTurnByteBudget);
     }
 }
 
@@ -2262,46 +2288,49 @@ void Http2Connection::finish_written_outbound_hooks(std::size_t bytes_written) n
 common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outbound(std::size_t operation_budget,
                                                                                      std::size_t byte_budget) noexcept {
     OutboundPumpResult result;
-    if (outbound_stopped_) {
-        return result;
-    }
-    if (inflight_outbound_chain_.empty()) {
-        build_outbound_batch(operation_budget, byte_budget);
-    }
-    if (inflight_outbound_chain_.empty()) {
-        if (outbound_closed_ && outbound_idle()) {
-            outbound_stopped_ = true;
+    byte_budget = std::max<std::size_t>(byte_budget, 1);
+    // A TLS transport writes one record per poll_writev, so keep writing until
+    // the transport blocks, the queue drains or the byte budget is spent
+    // instead of handing each record back to the loop.
+    while (!outbound_stopped_ && state_ != State::Closed && result.bytes_written < byte_budget) {
+        if (inflight_outbound_chain_.empty()) {
+            build_outbound_batch(operation_budget, byte_budget - result.bytes_written);
         }
-        return result;
-    }
-    if (!transport_ || !transport_->valid()) {
-        abort_outbound(common::IoErr::Invalid);
-        return std::unexpected(common::IoErr::Invalid);
-    }
-
-    std::size_t written = 0;
-    event::IoEvent wait_event = event::IoEvent::None;
-    common::IoErr err = transport_->poll_writev(inflight_outbound_chain_, written, wait_event);
-    if (err == common::IoErr::WouldBlock) {
-        if (wait_event != event::IoEvent::Read && wait_event != event::IoEvent::Write) {
+        if (inflight_outbound_chain_.empty()) {
+            if (outbound_closed_ && outbound_idle()) {
+                outbound_stopped_ = true;
+            }
+            return result;
+        }
+        if (!transport_ || !transport_->valid()) {
             abort_outbound(common::IoErr::Invalid);
             return std::unexpected(common::IoErr::Invalid);
         }
-        result.wait_event = wait_event;
-        return result;
-    }
-    if (err != common::IoErr::None) {
-        abort_outbound(err);
-        return std::unexpected(err);
-    }
-    if (written == 0) {
-        abort_outbound(common::IoErr::ConnReset);
-        return std::unexpected(common::IoErr::ConnReset);
-    }
 
-    result.bytes_written = written;
-    finish_written_outbound_hooks(written);
-    result.needs_reschedule = !inflight_outbound_chain_.empty() || !outbound_queue_.empty();
+        std::size_t written = 0;
+        event::IoEvent wait_event = event::IoEvent::None;
+        common::IoErr err = transport_->poll_writev(inflight_outbound_chain_, written, wait_event);
+        if (err == common::IoErr::WouldBlock) {
+            if (wait_event != event::IoEvent::Read && wait_event != event::IoEvent::Write) {
+                abort_outbound(common::IoErr::Invalid);
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            result.wait_event = wait_event;
+            return result;
+        }
+        if (err != common::IoErr::None) {
+            abort_outbound(err);
+            return std::unexpected(err);
+        }
+        if (written == 0) {
+            abort_outbound(common::IoErr::ConnReset);
+            return std::unexpected(common::IoErr::ConnReset);
+        }
+
+        result.bytes_written += written;
+        finish_written_outbound_hooks(written);
+    }
+    result.needs_reschedule = !outbound_stopped_ && (!inflight_outbound_chain_.empty() || !outbound_queue_.empty());
     if (outbound_closed_ && outbound_idle()) {
         outbound_stopped_ = true;
         result.needs_reschedule = false;

@@ -120,7 +120,8 @@ private:
             if (loop().now() < retry_after_) {
                 loop().template post_at<AcceptFd, &AcceptFd::retry_entry_, &AcceptFd::on_retry>(retry_after_, *this);
             } else {
-                loop().template post_local<AcceptFd, &AcceptFd::continue_entry_, &AcceptFd::on_retry>(*this);
+                // The accept burst limit yields the turn to other work first.
+                loop().template post_next<AcceptFd, &AcceptFd::continue_entry_, &AcceptFd::on_retry>(*this);
             }
             return true;
         }

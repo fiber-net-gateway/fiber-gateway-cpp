@@ -197,11 +197,11 @@ callback 消费者必须做到其中之一：推进到 EAGAIN；因预算退出�
 
 当前 `drain_defer<true>` 会不断执行新提交的任务。ET 需要主动 continuation，因此必须一并调整 EventLoop，而不是直接把未耗尽任务无限 post_local。
 
-设计采用分轮快照与总预算：每轮先处理到期 timer，再处理有界跨线程通知、本地快照，随后 poll，再处理本轮事件及有界本地任务。可从每轮 256 个本地/通知回调的总预算开始，作为可调内部常量，不能在前后两个 drain 各自重新获得无限额度。
+设计采用 Nginx `posted_next_events` 语义（修订于 2026-09-13，替代最初的每轮 256 任务计数预算，见 §14.5）：本地队列分为 `post_local`（本轮，排空为止，包括回调期间新提交的任务）与 `post_next`（下一轮：poll 之后才运行）。每轮先处理到期 timer，再处理一批跨线程通知与本地队列，然后把 next 队列整体挪到本地队列尾部并 poll，最后处理本轮事件与本地队列。
 
-- 回调新提交的 continuation 排队尾，可留到下一轮；仍用可取消、去重的 intrusive entry。
-- 本地或跨线程待处理队列非空时，poll deadline 取 `loop.now()`，绝不以无限或未来 timer deadline 阻塞。
-- 每轮仍非阻塞读取新内核事件并更新时间，防止一个忙连接饿死其他 fd、超时及 stop。
+- 主动让出的 continuation（pump 达到每轮字节配额、listener 连续 accept 上限、`yield()`）使用 `post_next`；协程恢复、就绪通知等普通提交使用 `post_local`。同一个 entry 已在队列中时保持原位置。
+- next 队列或跨线程待处理非空时，poll deadline 取 `loop.now()`，绝不以无限或未来 timer deadline 阻塞；两次运行同一个 `post_next` continuation 之间必定夹着一次 poll，因此 timer、新事件和 stop 不会被饿死。
+- 不再按任务个数打断：打断点由消费者的配额决定。H2 pump 每个连接每轮最多推进 2 MiB（`kIoPumpTurnByteBudget`，对应 Nginx `sendfile_max_chunk`），配额内的继续执行留在本轮，避免每 poll 只写一批的细粒度调度（实测该细粒度会让对端唤醒和系统调用成本上升 15%～20%）。
 - 跨线程 drain 若拆出链表后达到预算，剩余节点要保存在 loop 的待处理链中，保持 FIFO 和节点所有权；不能把节点遗失或重复推回 MPSC。
 - 无待处理任务时仍按正常 timer deadline 阻塞，不以周期性空 poll 替代 ET。
 - stop 时取消或结清网络通知与 waiter，不能留下指向已销毁 owner 的 DeferEntry。
@@ -357,7 +357,7 @@ H3 同时报告源端口数与实际 worker 分布；UDP 接收错误计数按�
 - `Poller` 注册使用 index/generation token，分发前校验，DEL 即使失败也先使 token 失效。槽位耗尽时在注册冷路径按倍数扩容连续数组；槽位地址不对外暴露，热路径不分配。generation 达到上限后退休槽位。
 - `RWFd` 使用持久 ET 注册、每方向就绪缓存、订阅代次和可取消的本地通知。安装回调不内联调用；owner loop 中已经就绪的 awaiter 通过 `await_suspend(false)` 继续。关闭先拆除注册、通知和 waiter，再完成回调，允许终结回调销毁 owner。
 - TCP/Unix scalar/vector I/O 与 TLS BIO 统一更新缓存；socket syscall 带 `MSG_DONTWAIT`，写入保留 `MSG_NOSIGNAL`。UDP 成功收包不推断耗尽。Raw fd 默认采用兼容探测；跨 loop 使用 sticky external 模式和原 loop 恢复流程。
-- listener 保持 Read ET，每连续 64 次 accept 让出本轮；资源错误退避 1ms。connect/HappyEyeballs 使用 ET，成功移交前先解绑。EventLoop 每轮 notify/defer 合计预算 256，notify 优先额度 128；本地自重排延至下一轮，存在待办时执行零超时 poll。
+- listener 保持 Read ET，每连续 64 次 accept 让出本轮；资源错误退避 1ms。connect/HappyEyeballs 使用 ET，成功移交前先解绑。EventLoop 采用 `post_local`/`post_next` 双队列（§6.3）：本轮队列排空为止，next 队列在 poll 之后运行且触发零超时 poll；没有任务计数预算。H2 pump 的出站写入在单次调用内循环到阻塞、队列耗尽或配额用完（TLS 每次 `poll_writev` 只写一条记录），并按每连接每轮 2 MiB 决定留在本轮还是 `post_next`。
 - H2/QUIC 继续使用现有 pump 的预算与本地继续机制；未修改协议编码预算、缓存大小或 pacing。
 
 接口变化：`Poller::del(int)` 改为 `del(Item&)`，调用者必须持有原注册项。`RWFd::release_fd()` 解绑失败返回 `-1` 并保留 fd 所有权；调用方不能把失败解释为成功转移。直接绕过 StreamFd/DatagramFd 进行系统调用的使用者应使用 Raw/external 兼容模式，不能依赖未经维护的就绪缓存。
@@ -431,3 +431,27 @@ ASan/UBSan 75/75 通过；定向 TSan 26/26 通过；强制 timerfd 后端的 AS
 
 这批短测表明小请求的收益与降低系统调用成本相符，但 H1/H2 大响应收益不一致，H2 1MiB 短测出现负向差异，需要结合下述较长复测判断。它不支持“全场景提升 15～20%”的结论。WSL 调度、短时采样与 H3 单样本均限制可外推性；尚未完成裸机长稳、CPU user/sys 每请求分解、空闲连接内存及混合负载尾延迟验收。
 
+### 14.5 调度语义修订（2026-09-13）
+
+初版每轮 256 任务的计数预算使 H2 大响应退化：每个 1 MiB 响应约 170 个本地任务（每条 TLS 记录一次 pump、每个 16 KiB 帧一次 body op 完成通知），loop 每 2 ms 就被打断做零超时 poll，代理永远处于积压模式；对端唤醒（后端 voluntary switch 0.08 → 0.5/请求、CAL IPI +30%）、逐条读取 WINDOW_UPDATE 与更细的发送节奏使代理每请求 CPU 上升约 20%。把预算扫到 16384 或无界即可恢复，说明问题在调度粒度而非 ET 本身。
+
+修订为 §6.3 的 next 队列语义，并让 H2 pump 在单次调用内写完整批、按每连接每轮 2 MiB 让出。同机 A/B（交替 3～4 样本、5s、中位数；`before` 为修改前程序）：
+
+| 场景 | 修改前 RPS | 修订后 RPS | 变化 | CPU µs/请求 前 → 后 |
+|---|---:|---:|---:|---:|
+| H2 1m | 2,437 | 2,886 | +18.4% | 1540 → 1303 |
+| H2 echo | 1,240 | 1,332 | +7.5% | 3102 → 2886 |
+| H2 64k | 28,426 | 37,820 | +33.1% | 135 → 101 |
+| H2 1k | 170,759 | 175,515 | +2.8% | 22 → 22 |
+| H1 1k | 115,170 | 125,717 | +9.2% | 33 → 30 |
+| H1 64k | 64,488 | 68,594 | +6.4% | 59 → 55 |
+| H1 echo | 3,801 | 3,828 | +0.7% | 1025 → 1022 |
+| H3 1m | 2,776 | 2,854 | +2.8% | 1572 → 1572 |
+| H3 1k | 117,438 | 120,162 | +2.3% | 38 → 38 |
+| H3 64k | 34,955 | 35,825 | +2.5% | 117 → 127 |
+| H3 echo | 1,663 | 1,609 | -3.3% | 2565 → 2605 |
+| H3 1k-low | 7,690 | 8,074 | +5.0% | 68 → 67 |
+
+H2 1m 稳态每请求 `epoll_pwait2` 0.071 次（修改前 0.030，计数预算版 0.65），sys CPU 每请求 -18%。H3 差异在本机噪声（±3%）内。全量 CTest 2006 项通过；`GrpcClientTest.ImmediateShutdownReleasesAllConnectionCloseWaiters` 原本依赖旧 `drain_defer<false>` 的快照顺序在观察者进入之前读取其标志，在 ET 树上已确定性失败，现改为在读取前 `co_await yield()`。
+
+尚未处理、与本轮调度无关的放大器：TLS 传输把 9 字节 DATA 帧头单独写成 31 字节记录（每 16 KiB 帧 2 次 `send`，约占 H2 大响应 send 耗时 45%），以及 body op 每批只编码一帧；两者修复后 H2 1m 在同机可再提升约 20%。

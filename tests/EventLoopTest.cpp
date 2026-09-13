@@ -44,7 +44,7 @@ struct BusyDefer {
     bool timer_fired = false;
     static void run(BusyDefer *self) noexcept {
         ++self->calls;
-        self->loop.post_local<BusyDefer, &BusyDefer::work, &BusyDefer::run>(*self);
+        self->loop.post_next<BusyDefer, &BusyDefer::work, &BusyDefer::run>(*self);
     }
     static void finish(BusyDefer *self) noexcept {
         self->timer_fired = true;
@@ -54,11 +54,11 @@ struct BusyDefer {
 };
 } // namespace
 
-TEST(EventLoopTest, RepostingDeferDoesNotStarveTimerOrBlockInPoll) {
+TEST(EventLoopTest, RepostingNextDeferDoesNotStarveTimerOrBlockInPoll) {
     fiber::event::EventLoop loop;
     BusyDefer busy{loop};
     fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
-        loop.post_local<BusyDefer, &BusyDefer::work, &BusyDefer::run>(busy);
+        loop.post_next<BusyDefer, &BusyDefer::work, &BusyDefer::run>(busy);
         loop.post_at<BusyDefer, &BusyDefer::timer, &BusyDefer::finish>(loop.now() + std::chrono::milliseconds(2), busy);
         co_return;
     });
@@ -66,6 +66,60 @@ TEST(EventLoopTest, RepostingDeferDoesNotStarveTimerOrBlockInPoll) {
     EXPECT_TRUE(busy.timer_fired);
     EXPECT_GT(busy.calls, 0U);
     EXPECT_FALSE(busy.work.is_in_queue());
+}
+
+namespace {
+// post_local work runs in the same turn; post_next work runs only after the
+// following poll. Event callbacks run directly during that poll, and local work
+// they post is queued behind the moved next-turn entries (nginx order).
+struct TurnOrder {
+    fiber::event::EventLoop &loop;
+    fiber::event::EventLoop::DeferEntry first{};
+    fiber::event::EventLoop::DeferEntry next{};
+    fiber::event::EventLoop::DeferEntry chained{};
+    fiber::event::EventLoop::DeferEntry after_poll{};
+    int fd = -1;
+    std::vector<int> order;
+    static void on_first(TurnOrder *self) noexcept {
+        self->order.push_back(1);
+        // Posted from inside the drain: still this turn, before anything parked
+        // for the next turn.
+        self->loop.post_local<TurnOrder, &TurnOrder::chained, &TurnOrder::on_chained>(*self);
+        self->loop.post_next<TurnOrder, &TurnOrder::next, &TurnOrder::on_next>(*self);
+    }
+    static void on_chained(TurnOrder *self) noexcept { self->order.push_back(2); }
+    static void on_next(TurnOrder *self) noexcept { self->order.push_back(4); }
+    static void on_after_poll(TurnOrder *self) noexcept {
+        self->order.push_back(5);
+        self->loop.stop();
+    }
+    struct Item : fiber::event::Poller::Item {
+        TurnOrder *owner = nullptr;
+    } item;
+    static void on_event(fiber::event::Poller::Item *raw, int, fiber::event::IoEvent) {
+        auto *self = static_cast<Item *>(raw)->owner;
+        self->order.push_back(3);
+        self->loop.post_local<TurnOrder, &TurnOrder::after_poll, &TurnOrder::on_after_poll>(*self);
+        EXPECT_EQ(self->loop.poller().del(self->item), fiber::common::IoErr::None);
+    }
+};
+} // namespace
+
+TEST(EventLoopTest, NextTurnDeferRunsAfterPollBehindLocalWork) {
+    fiber::event::EventLoop loop;
+    TurnOrder context{loop};
+    context.item.owner = &context;
+    context.item.callback = &TurnOrder::on_event;
+    context.fd = ::eventfd(1, EFD_NONBLOCK | EFD_CLOEXEC);
+    ASSERT_GE(context.fd, 0);
+    ASSERT_EQ(loop.poller().add(context.fd, fiber::event::IoEvent::Read, &context.item), fiber::common::IoErr::None);
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        loop.post_local<TurnOrder, &TurnOrder::first, &TurnOrder::on_first>(context);
+        co_return;
+    });
+    loop.run();
+    ::close(context.fd);
+    EXPECT_EQ(context.order, (std::vector<int>{1, 2, 3, 4, 5}));
 }
 
 namespace {

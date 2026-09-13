@@ -326,7 +326,7 @@ private:
     [[nodiscard]] ReceivePumpResult pump_receive() noexcept;
     [[nodiscard]] common::IoErr sync_socket_callbacks() noexcept;
     void clear_socket_callbacks() noexcept;
-    void schedule_io_pump() noexcept;
+    void schedule_io_pump(bool next_turn = false) noexcept;
     void drive_io() noexcept;
     void stop_io() noexcept;
     void fail_io() noexcept;

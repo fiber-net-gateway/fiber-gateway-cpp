@@ -731,8 +731,12 @@ void CatClientCore::append_local(OutboundFrame *frame) noexcept {
     tail = frame;
 }
 
-void CatClientCore::schedule_pump() noexcept {
+void CatClientCore::schedule_pump(bool next_turn) noexcept {
     FIBER_ASSERT(loop_->in_loop());
+    if (next_turn) {
+        loop_->post_next<CatClientCore, &CatClientCore::pump_defer_entry_, &CatClientCore::on_pump_deferred>(*this);
+        return;
+    }
     loop_->post_local<CatClientCore, &CatClientCore::pump_defer_entry_, &CatClientCore::on_pump_deferred>(*this);
 }
 
@@ -794,7 +798,8 @@ void CatClientCore::drive_write() noexcept {
     }
 
     if (stream_ && has_local_frames() && !write_callback_armed_) {
-        schedule_pump();
+        // Per-pump send limits reached with frames left: yield the turn first.
+        schedule_pump(true);
     }
 }
 

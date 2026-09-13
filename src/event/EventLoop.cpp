@@ -39,6 +39,7 @@ EventLoop::NotifyEntry::NotifyEntry() : node(this) {}
 
 EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(group), group_index_(group_index) {
     detail::queue_init(&local_queue_);
+    detail::queue_init(&next_queue_);
     detail::queue_init(&stop_queue_);
     wakeup_entry_.loop = this;
     wakeup_entry_.callback = &EventLoop::on_wakeup;
@@ -160,23 +161,28 @@ void EventLoop::run_once() {
     now_ = std::chrono::steady_clock::now();
     run_due_timers(now_);
 
-    std::size_t budget = 256;
-    // Split the pre-poll allowance so a notify flood cannot starve local work.
-    std::size_t notify_budget = 128;
-    drain_notify(notify_budget);
-    budget -= 128 - notify_budget;
-    drain_defer(budget);
+    drain_notify();
+    drain_defer();
+
+    // Continuations parked with post_next run after this poll: move them behind
+    // the (now empty) local queue and poll without blocking so new kernel
+    // events, timers and stop interleave with them.
+    const bool has_next = !detail::queue_empty(&next_queue_);
+    if (has_next) {
+        detail::queue_add(&local_queue_, &next_queue_);
+        detail::queue_init(&next_queue_);
+    }
     if (!pending_notify_) {
         pending_notify_ = notify_queue_.try_pop_all();
     }
-    const bool runnable =
-            pending_notify_ || !detail::queue_empty(&local_queue_) || stop_requested_.load(std::memory_order_acquire);
+    const bool runnable = has_next || pending_notify_ || stop_requested_.load(std::memory_order_acquire);
     const auto deadline = runnable ? now_ : next_deadline();
     constexpr int kMaxEvents = 64;
     epoll_event events[kMaxEvents];
 
     int count = poller_.wait(events, kMaxEvents, deadline);
     now_ = std::chrono::steady_clock::now();
+    ++turn_;
     if (count < 0) {
         if (errno == EINTR) {
             return;
@@ -195,7 +201,7 @@ void EventLoop::run_once() {
         }
         item->callback(item, item->fd(), io);
     }
-    drain_defer(budget);
+    drain_defer();
 }
 
 void EventLoop::stop() {

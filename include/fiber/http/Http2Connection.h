@@ -398,7 +398,7 @@ private:
     static void on_write_timer(Http2Connection *connection) noexcept;
     static void on_read_buffer_idle_timer(Http2Connection *connection) noexcept;
     void handle_transport_ready(event::IoEvent event, common::IoErr err) noexcept;
-    void schedule_io_pump() noexcept;
+    void schedule_io_pump(bool next_turn = false) noexcept;
     void drive_io() noexcept;
     [[nodiscard]] common::IoErr sync_transport_callbacks() noexcept;
     void clear_transport_callbacks() noexcept;
@@ -478,6 +478,8 @@ private:
     bool io_pump_posted_ = false;
     bool io_pump_running_ = false;
     bool io_pump_again_ = false;
+    std::uint64_t pump_turn_ = 0;
+    std::size_t pump_turn_bytes_ = 0;
     bool capacity_dispatch_running_ = false;
     bool capacity_dispatch_again_ = false;
     bool state_dispatch_running_ = false;
