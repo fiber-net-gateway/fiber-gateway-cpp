@@ -229,7 +229,12 @@ private:
 
     using DcidTree = common::IntrusiveRbTree<QuicConnectionIdIndex, offsetof(QuicConnectionIdIndex, cid_hook),
                                              QuicConnectionDcidLess>;
+    // QuicConnection is not standard-layout, but it is non-polymorphic, which
+    // is what container_of actually needs.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
     using ConnectionList = common::IntrusiveList<QuicConnection, offsetof(QuicConnection, endpoint_link_)>;
+#pragma GCC diagnostic pop
 
     enum class QuicInitialValidationAction : std::uint8_t {
         Accept,
