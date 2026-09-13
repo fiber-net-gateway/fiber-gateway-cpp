@@ -22,6 +22,7 @@ bool TlsTcpStream::handshake_done() const noexcept { return stream_.handshake_do
 bool TlsTcpStream::has_pending_read() const noexcept { return stream_.has_pending_read(); }
 
 bool TlsTcpStream::terminal() const noexcept { return stream_.terminal(); }
+bool TlsTcpStream::peer_closed() const noexcept { return stream_.peer_closed(); }
 
 fiber::common::IoErr TlsTcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
     return detail::apply_tcp_socket_options(fd(), options);

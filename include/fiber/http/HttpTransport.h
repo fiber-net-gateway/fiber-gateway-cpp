@@ -74,6 +74,9 @@ public:
     virtual void close() = 0;
     [[nodiscard]] virtual bool valid() const noexcept = 0;
     [[nodiscard]] virtual bool terminal() const noexcept = 0;
+    // True once the peer closed its write side or the connection terminated;
+    // a pooled connection must not be reused when this is set.
+    [[nodiscard]] virtual bool peer_closed() const noexcept { return terminal(); }
     [[nodiscard]] virtual int fd() const noexcept = 0;
     // Borrowed view into the transport. Invalidated by close() or destruction.
     [[nodiscard]] virtual std::string_view negotiated_alpn() const noexcept = 0;
@@ -114,6 +117,7 @@ public:
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
     [[nodiscard]] bool terminal() const noexcept override;
+    [[nodiscard]] bool peer_closed() const noexcept override;
     [[nodiscard]] int fd() const noexcept override;
     [[nodiscard]] std::string_view negotiated_alpn() const noexcept override;
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept override;
@@ -167,6 +171,7 @@ public:
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
     [[nodiscard]] bool terminal() const noexcept override;
+    [[nodiscard]] bool peer_closed() const noexcept override;
     [[nodiscard]] int fd() const noexcept override;
     [[nodiscard]] std::string_view negotiated_alpn() const noexcept override;
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept override;

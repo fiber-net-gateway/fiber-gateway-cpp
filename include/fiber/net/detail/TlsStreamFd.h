@@ -37,6 +37,7 @@ public:
     [[nodiscard]] bool handshake_done() const noexcept;
     [[nodiscard]] bool has_pending_read() const noexcept;
     [[nodiscard]] bool terminal() const noexcept { return stream_fd_.terminal(); }
+    [[nodiscard]] bool peer_closed() const noexcept { return stream_fd_.peer_closed(); }
     void close();
 
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;

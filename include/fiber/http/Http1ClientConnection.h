@@ -57,6 +57,10 @@ public:
     [[nodiscard]] bool busy() const noexcept;
     [[nodiscard]] bool connected() const noexcept;
     [[nodiscard]] bool reusable() const noexcept;
+    // Owner-loop only: the peer has closed the connection (hang-up or error)
+    // even though the last exchange finished cleanly. Such a connection is
+    // protocol-reusable but must not be handed out again.
+    [[nodiscard]] bool peer_closed() const noexcept;
     [[nodiscard]] std::uint64_t request_count() const noexcept { return request_count_; }
 
     [[nodiscard]] event::EventLoop &loop() const noexcept;

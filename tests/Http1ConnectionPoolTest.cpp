@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <unistd.h>
@@ -11,10 +14,14 @@
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/common/IoError.h>
+#include <fiber/common/mem/BufPool.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/ClientHttp1Exchange.h>
 #include <fiber/http/Http1ConnectionPoolCore.h>
 #include <fiber/http/HttpConnectionGroupKey.h>
+#include <fiber/http/HttpHeaders.h>
 #include <fiber/net/TcpListener.h>
+#include <fiber/net/TcpStream.h>
 
 namespace {
 
@@ -40,7 +47,32 @@ fiber::net::SocketAddress loopback_peer(std::uint16_t port) {
 
 struct HoldServerState {
     std::atomic_bool stop{false};
+    // respond: answer one request per connection, then hold it open until
+    // close_accepted or stop.
+    bool respond = false;
+    std::atomic_bool close_accepted{false};
 };
+
+// Answers one request on the accepted socket with an empty 200 and keeps the
+// socket open so the client side can park it as an idle keep-alive connection.
+DetachedTask respond_once_and_hold(fiber::event::EventLoop *loop, int fd, std::shared_ptr<HoldServerState> state) {
+    fiber::net::TcpStream stream(*loop, fd);
+    std::array<char, 1024> buf{};
+    std::string request;
+    while (request.find("\r\n\r\n") == std::string::npos) {
+        auto n = co_await stream.read(buf.data(), buf.size(), 5s);
+        if (!n || *n == 0) {
+            co_return;
+        }
+        request.append(buf.data(), *n);
+    }
+    static constexpr std::string_view kResponse = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    (void) co_await stream.write(kResponse.data(), kResponse.size(), 5s);
+    while (!state->stop.load(std::memory_order_acquire) && !state->close_accepted.load(std::memory_order_acquire)) {
+        co_await fiber::async::sleep(1ms);
+    }
+    stream.close();
+}
 
 DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::size_t accept_count,
                              std::promise<std::uint16_t> *port_promise,
@@ -74,6 +106,12 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::size_t accept_c
             listener.close();
             result_promise->set_value(accept_result.error());
             co_return;
+        }
+        if (state->respond) {
+            fiber::async::spawn(*loop, [loop, fd = accept_result->release_fd(), state]() {
+                return respond_once_and_hold(loop, fd, state);
+            });
+            continue;
         }
         accepted_fds.push_back(accept_result->release_fd());
     }
@@ -384,6 +422,87 @@ DetachedTask run_closed_scenario(fiber::event::EventLoop *loop, std::uint16_t po
     promise->set_value(out);
 }
 
+struct PeerClosedScenarioResult {
+    fiber::common::IoErr err = fiber::common::IoErr::None;
+    std::size_t idle_after_park = 0;
+    bool peer_closed_seen = false;
+    bool dropped = false;
+    std::size_t idle_after_acquire = 0;
+};
+
+DetachedTask run_peer_closed_scenario(fiber::event::EventLoop *loop, std::uint16_t port,
+                                      std::shared_ptr<HoldServerState> state,
+                                      std::promise<PeerClosedScenarioResult> *promise) {
+    PeerClosedScenarioResult out;
+    fiber::http::Http1ConnectionPoolCore pool(*loop, {
+                                                             .max_idle_per_group = 1,
+                                                             .max_idle_total = 1,
+                                                             .idle_timeout = 30s,
+                                                             .initial_group_capacity = 1,
+                                                     });
+    if (!pool.init()) {
+        out.err = fiber::common::IoErr::NoMem;
+        promise->set_value(out);
+        co_return;
+    }
+
+    const auto key = *fiber::http::HttpConnectionGroupKey::make("127.0.0.1", port,
+                                                                fiber::http::HttpConnectionGroupKey::Scheme::Http);
+    auto lease = pool.acquire(key);
+    auto conn_result = co_await ensure_connected(lease, port);
+    if (!conn_result) {
+        out.err = conn_result.error();
+        promise->set_value(out);
+        co_return;
+    }
+    fiber::http::Http1ClientConnection *conn = lease.get();
+    {
+        // One complete exchange, like any pooled connection has carried.
+        fiber::mem::BufPool buf_pool;
+        fiber::http::HttpHeaders headers(buf_pool);
+        headers.add_view("host", "example.com");
+        fiber::http::ClientHttp1Exchange exchange(*conn, buf_pool);
+        fiber::http::Http1RequestHead head;
+        head.method = fiber::http::HttpMethod::Get;
+        head.target = "/";
+        head.headers = &headers;
+        head.body = fiber::http::HttpBodySpec::None();
+        auto header_result = co_await exchange.send_header(head, true);
+        if (!header_result) {
+            out.err = header_result.error();
+            promise->set_value(out);
+            co_return;
+        }
+        auto response = co_await exchange.read_header(5s);
+        if (!response) {
+            out.err = response.error();
+            promise->set_value(out);
+            co_return;
+        }
+        auto discard = co_await exchange.discard_response_body(5s);
+        if (!discard) {
+            out.err = discard.error();
+            promise->set_value(out);
+            co_return;
+        }
+    }
+    lease.reset();
+    out.idle_after_park = pool.idle_total();
+
+    // The server drops the idle connection; the hang-up reaches the owner loop
+    // through the persistent registration without anyone reading.
+    state->close_accepted.store(true, std::memory_order_release);
+    for (int i = 0; i < 200 && !conn->peer_closed(); ++i) {
+        co_await fiber::async::sleep(5ms);
+    }
+    out.peer_closed_seen = conn->peer_closed();
+
+    auto miss = pool.acquire(key);
+    out.dropped = miss.valid() && !miss.hit() && !miss.has_connection();
+    out.idle_after_acquire = pool.idle_total();
+    promise->set_value(out);
+}
+
 struct IdentityScenarioResult {
     fiber::common::IoErr err = fiber::common::IoErr::None;
     bool different_identity_missed = false;
@@ -611,6 +730,41 @@ TEST(Http1ConnectionPoolTest, IdleExpiryTimerRemovesIdleConnectionsAndBuckets) {
     EXPECT_TRUE(result.expired);
     EXPECT_EQ(result.idle_after_sweep, 0u);
     EXPECT_EQ(result.groups_after_sweep, 0u);
+
+    state->stop.store(true, std::memory_order_release);
+    EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);
+    group.stop();
+    group.join();
+}
+
+TEST(Http1ConnectionPoolTest, PeerClosedIdleConnectionIsDroppedOnAcquire) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    auto state = std::make_shared<HoldServerState>();
+    state->respond = true;
+    std::promise<std::uint16_t> port_promise;
+    auto port_future = port_promise.get_future();
+    std::promise<fiber::common::IoErr> server_result_promise;
+    auto server_result_future = server_result_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_hold_server(&group.at(0), 1, &port_promise, &server_result_promise, state);
+    });
+
+    const std::uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    std::promise<PeerClosedScenarioResult> result_promise;
+    auto result_future = result_promise.get_future();
+    fiber::async::spawn(group.at(0),
+                        [&]() { return run_peer_closed_scenario(&group.at(0), port, state, &result_promise); });
+
+    const PeerClosedScenarioResult result = result_future.get();
+    EXPECT_EQ(result.err, fiber::common::IoErr::None);
+    EXPECT_EQ(result.idle_after_park, 1u);
+    EXPECT_TRUE(result.peer_closed_seen);
+    EXPECT_TRUE(result.dropped);
+    EXPECT_EQ(result.idle_after_acquire, 0u);
 
     state->stop.store(true, std::memory_order_release);
     EXPECT_EQ(server_result_future.get(), fiber::common::IoErr::None);

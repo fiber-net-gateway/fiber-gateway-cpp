@@ -68,6 +68,10 @@ public:
     [[nodiscard]] int fd() const noexcept;
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
     [[nodiscard]] bool terminal() const noexcept { return terminal_; }
+    // Owner-loop view of whether the peer has closed its write side or the
+    // connection has terminated. Lets idle pooled connections be discarded
+    // before a request is written onto a dead socket.
+    [[nodiscard]] bool peer_closed() const noexcept { return read_hangup_ || terminal_; }
     [[nodiscard]] fiber::common::IoErr terminal_error() const noexcept { return terminal_error_; }
 
     fiber::common::IoErr attach(int fd) noexcept;

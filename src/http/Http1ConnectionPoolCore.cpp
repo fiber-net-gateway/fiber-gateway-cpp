@@ -155,6 +155,13 @@ Http1ConnectionPoolEntry *Http1ConnectionPoolCore::try_steal_idle_entry(const Ht
         FIBER_ASSERT(entry != nullptr);
         FIBER_ASSERT(entry->has_connection());
         detach_idle_entry(*entry);
+        // The peer may have closed the idle connection (server keep-alive
+        // limits, restarts): drop it here instead of handing out a socket
+        // whose first write would fail.
+        if (!entry->connection()->reusable() || entry->connection()->peer_closed()) {
+            recycle_entry(entry);
+            continue;
+        }
         return entry;
     }
     return nullptr;

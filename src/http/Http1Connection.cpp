@@ -165,15 +165,30 @@ std::size_t Http1Connection::drain_inbound(mem::IoBuf &buffer) noexcept {
     return copied;
 }
 
-fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_request(HttpExchange &exchange) {
+fiber::async::Task<fiber::common::IoResult<ParseCode>>
+Http1Connection::parse_request(HttpExchange &exchange, std::chrono::steady_clock::time_point idle_deadline) {
     Http1HeaderParseBuffer header_buffer(header_parse_buffer_options(options_));
     auto init_result = header_buffer.ensure_init();
     if (!init_result) {
         co_return std::unexpected(init_result.error());
     }
 
+    // The header budget starts with the first byte of the request. Until then
+    // the connection is still idle: readiness hints can be stale under
+    // edge-triggered I/O, so an empty read keeps waiting on the keep-alive
+    // deadline instead of the (much shorter) header timeout.
+    auto head_timeout = [&](bool received_any) noexcept -> std::chrono::milliseconds {
+        if (received_any) {
+            return options_.header_timeout;
+        }
+        const auto now = loop_.now();
+        return idle_deadline > now ? std::chrono::duration_cast<std::chrono::milliseconds>(idle_deadline - now)
+                                   : std::chrono::milliseconds::zero();
+    };
+
     {
         RequestLineParser req_parser;
+        bool received_any = false;
         for (;;) {
             ParseCode code = req_parser.execute(&header_buffer.buf());
             if (code == ParseCode::Again) {
@@ -188,7 +203,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
                 }
                 std::size_t copied = drain_inbound(header_buffer.buf());
                 if (copied == 0) {
-                    auto result = co_await transport_->read_into(header_buffer.buf(), options_.header_timeout);
+                    auto result = co_await transport_->read_into(header_buffer.buf(), head_timeout(received_any));
                     if (!result) {
                         co_return std::unexpected(result.error());
                     }
@@ -196,6 +211,7 @@ fiber::async::Task<fiber::common::IoResult<ParseCode>> Http1Connection::parse_re
                         co_return std::unexpected(common::IoErr::ConnReset);
                     }
                 }
+                received_any = true;
                 continue;
             }
             if (code != ParseCode::Ok) {
@@ -340,16 +356,19 @@ fiber::async::Task<void> Http1Connection::run() {
         co_return;
     }
 
+
     for (;;) {
         if (stopping()) {
             break;
         }
 
+        std::chrono::steady_clock::time_point idle_deadline = loop_.now();
         if (inbound_bufs_.readable_bytes() == 0) {
             // Between requests: request_drain() may close the transport from
             // under this wait, which is exactly how an idle keep-alive
             // connection is woken during shutdown.
             idle_ = true;
+            idle_deadline = idle_deadline + options_.keep_alive_timeout;
             auto wait_result = co_await transport_->wait_readable(options_.keep_alive_timeout);
             idle_ = false;
             if (!wait_result) {
@@ -358,7 +377,7 @@ fiber::async::Task<void> Http1Connection::run() {
         }
 
         HttpExchange exchange(loop_.io_buf_node_pool(), transport_->remote_addr());
-        auto parse_result = co_await parse_request(exchange);
+        auto parse_result = co_await parse_request(exchange, idle_deadline);
         if (!parse_result) {
             break;
         }
