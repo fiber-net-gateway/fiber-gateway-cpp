@@ -24,7 +24,9 @@ public:
     [[nodiscard]] fiber::event::IoEvent watching() const noexcept { return watching_; }
     [[nodiscard]] fiber::event::Poller::Mode mode() const noexcept { return mode_; }
 
-    [[nodiscard]] std::uint64_t token() const noexcept { return item_.token(); }
+    // Bumped every time the fd is added to or removed from the poller. Callers
+    // that re-enter user code compare it to detect a close/re-register in between.
+    [[nodiscard]] std::uint32_t epoch() const noexcept { return epoch_; }
 
     void set_owner(void *owner, EventCallback callback) noexcept;
 
@@ -55,6 +57,7 @@ private:
     int fd_ = -1;
     fiber::event::IoEvent watching_ = fiber::event::IoEvent::None;
     bool registered_ = false;
+    std::uint32_t epoch_ = 0;
     fiber::event::Poller::Mode mode_ = fiber::event::Poller::Mode::None;
 };
 

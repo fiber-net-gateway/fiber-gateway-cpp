@@ -25,17 +25,21 @@ public:
     };
     enum class Mode : std::uint32_t { None = 0, Edge = 1u << 0, OneShot = 1u << 1 };
 
+    // Registered items are addressed directly through epoll_event::data.ptr.
+    // An item must stay alive until del() returns; del() also blanks any entry
+    // still pointing at it in the batch most recently returned by wait(), so
+    // a callback may destroy other items from the same kernel batch.
     struct Item : common::NonCopyable, common::NonMovable {
         using Callback = void (*)(Item *, int fd, Event);
         Callback callback{};
         int fd() const noexcept { return fd_; }
-        std::uint64_t token() const noexcept { return token_; }
+        bool registered() const noexcept { return registered_; }
         friend class Poller;
 
     private:
         int fd_{};
-        std::uint64_t token_ = 0;
         Event interested_{Event::None};
+        bool registered_ = false;
         friend class EventLoop;
     };
 
@@ -52,25 +56,21 @@ public:
     fiber::common::IoErr add(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr mod(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr del(Item &item);
-    [[nodiscard]] Item *resolve(std::uint64_t token) const noexcept;
+    // Returns ready events with data.ptr set to the registered Item (nullptr
+    // entries must be skipped). The array stays the "current batch" until
+    // end_batch() is called or the next wait() begins.
     int wait(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
+    void end_batch() noexcept {
+        batch_ = nullptr;
+        batch_count_ = 0;
+    }
 
 private:
     enum class WaitBackend : std::uint8_t { Unknown, EpollPwait2, TimerFd };
 
-    struct Slot {
-        Item *item = nullptr;
-        std::uint32_t generation = 1;
-        std::uint32_t next = 0;
-    };
-    static constexpr std::uint32_t kNoSlot = UINT32_MAX;
-    static constexpr std::uint64_t kTimerToken = 0;
-    bool grow_slots() noexcept;
-    void retire_slot(std::uint32_t index) noexcept;
-    Slot *slots_ = nullptr;
-    std::uint32_t slot_count_ = 0;
-    std::uint32_t free_slot_ = kNoSlot;
+    void invalidate_batch(const Item &item) noexcept;
 
+    int wait_impl(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
     int init_timer_fd();
     int wait_timer_fd(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
     int wait_epoll(epoll_event *events, int max_events, int timeout_ms);
@@ -79,6 +79,8 @@ private:
 
     int epoll_fd_ = -1;
     int timer_fd_ = -1;
+    epoll_event *batch_ = nullptr;
+    int batch_count_ = 0;
     WaitBackend wait_backend_ = WaitBackend::Unknown;
     std::chrono::steady_clock::time_point armed_deadline_ = std::chrono::steady_clock::time_point::max();
 };

@@ -64,6 +64,7 @@ void Efd::close_fd() noexcept {
         FIBER_ASSERT(loop_.in_loop());
         loop_.poller().del(item_);
         registered_ = false;
+        ++epoch_;
     }
     int fd = fd_;
     fd_ = -1;
@@ -85,6 +86,7 @@ fiber::common::IoErr Efd::unwatch_all() noexcept {
         return err;
     }
     registered_ = false;
+    ++epoch_;
     watching_ = fiber::event::IoEvent::None;
     return fiber::common::IoErr::None;
 }
@@ -95,9 +97,6 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
     }
     FIBER_ASSERT(loop_.in_loop());
 
-    if (registered_ && item_.token() == 0) {
-        return fiber::common::IoErr::BadFd;
-    }
     if (desired == watching_ && (fiber::event::any(desired) || !registered_)) {
         return fiber::common::IoErr::None;
     }
@@ -112,6 +111,7 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
             return err;
         }
         registered_ = false;
+        ++epoch_;
         watching_ = fiber::event::IoEvent::None;
         return fiber::common::IoErr::None;
     }
@@ -123,6 +123,7 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
             return err;
         }
         registered_ = true;
+        ++epoch_;
     } else {
         err = loop_.poller().mod(fd_, desired, &item_, mode_);
         if (err != fiber::common::IoErr::None) {

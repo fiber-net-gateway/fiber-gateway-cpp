@@ -794,10 +794,10 @@ TEST(RWFdTest, SameCallbackPairReinstalledDuringReadDoesNotReceiveOldWriteEvent)
         ReplaceSubscription context{fd};
         EXPECT_EQ(fd.set_read_callback(&ReplaceSubscription::read, &context), fiber::common::IoErr::None);
         EXPECT_EQ(fd.set_write_callback(&ReplaceSubscription::write, &context), fiber::common::IoErr::None);
-        const auto token = fd.efd_.token();
+        const auto epoch = fd.efd_.epoch();
         fd.handle_events(fiber::event::IoEvent::Read | fiber::event::IoEvent::Write);
         EXPECT_EQ(context.writes, 0);
-        EXPECT_EQ(fd.efd_.token(), token);
+        EXPECT_EQ(fd.efd_.epoch(), epoch);
         co_await fiber::async::sleep(2ms);
         EXPECT_GE(context.writes, 1);
         fd.close();
@@ -815,7 +815,7 @@ TEST(RWFdTest, CachedReadyNotifiesLateSubscriberOnceWithoutRearming) {
         fiber::net::detail::RWFd fd(loop, fds[0], fiber::net::detail::RWFd::Kind::Stream);
         EXPECT_EQ(fd.prepare_io(fiber::event::IoEvent::Read), fiber::common::IoErr::None);
         fd.handle_events(fiber::event::IoEvent::Read);
-        const auto token = fd.efd_.token();
+        const auto epoch = fd.efd_.epoch();
         CallbackResult result;
         EXPECT_EQ(fd.set_read_callback(&record_callback, &result), fiber::common::IoErr::None);
         EXPECT_EQ(result.calls, 0);
@@ -824,7 +824,7 @@ TEST(RWFdTest, CachedReadyNotifiesLateSubscriberOnceWithoutRearming) {
         co_await fiber::async::sleep(2ms);
         EXPECT_EQ(result.calls, 1);
         EXPECT_EQ(fd.clear_read_callback(&record_callback, &result), fiber::common::IoErr::None);
-        EXPECT_EQ(fd.efd_.token(), token);
+        EXPECT_EQ(fd.efd_.epoch(), epoch);
         EXPECT_TRUE(fd.efd_.registered());
         fd.close();
         ::close(fds[1]);

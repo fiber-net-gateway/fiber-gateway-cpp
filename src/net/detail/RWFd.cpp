@@ -413,7 +413,7 @@ void RWFd::dispatch_ready(event::IoEvent events) {
         return;
     }
     DispatchGuard guard(*this);
-    const auto token = efd_.token();
+    const auto epoch = efd_.epoch();
     const auto read_generation = read_generation_;
     const auto write_generation = write_generation_;
     if (event::any(events & event::IoEvent::Terminal) && terminal_callback_) {
@@ -421,13 +421,13 @@ void RWFd::dispatch_ready(event::IoEvent events) {
         void *ctx = terminal_callback_ctx_;
         (void) remove_callback(event::IoEvent::Terminal, callback, ctx);
         callback(ctx, terminal_error_);
-        if (guard.owner_destroyed() || !valid() || efd_.token() != token) {
+        if (guard.owner_destroyed() || !valid() || efd_.epoch() != epoch) {
             return;
         }
     }
     if (event::any(events & event::IoEvent::Read) && read_callback_ && read_generation == read_generation_) {
         read_callback_(read_callback_ctx_, common::IoErr::None);
-        if (guard.owner_destroyed() || !valid() || efd_.token() != token) {
+        if (guard.owner_destroyed() || !valid() || efd_.epoch() != epoch) {
             return;
         }
     }
