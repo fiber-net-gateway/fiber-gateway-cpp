@@ -84,12 +84,8 @@ struct ServerStateGuard {
 // returned instead, so every TLS caller (server+client, h2/h3/gRPC) is safe with
 // no process-wide signal disposition changes.
 //
-// The fd lives in the BIO's data slot as a pointer-encoded int (BIO exposes no
-// public fd field), avoiding any per-connection allocation. The BIO never owns
-// the fd (BIO_NOCLOSE); TlsStreamFd owns it via stream_fd_.
-//
-// The three I/O callbacks have C language linkage because bio.h declares the
-// BIO_meth_set_* parameters inside extern "C"; `static` keeps them TU-local.
+// BIO data borrows the stable StreamFd. All socket I/O updates its ET state;
+// SSL/BIO is destroyed before the stream. No per-operation allocation is needed.
 // ---------------------------------------------------------------------------
 
 // Mirrors BoringSSL's bio_errno_should_retry (crypto/bio/errno.cc): a -1 return
@@ -103,12 +99,17 @@ int tls_bio_should_retry(int ret) noexcept {
            errno == EINPROGRESS || errno == EALREADY;
 }
 
-int tls_bio_fd(BIO *b) noexcept { return static_cast<int>(reinterpret_cast<intptr_t>(BIO_get_data(b))); }
+StreamFd &tls_bio_stream(BIO *b) noexcept { return *static_cast<StreamFd *>(BIO_get_data(b)); }
+int tls_bio_fd(BIO *b) noexcept { return tls_bio_stream(b).fd(); }
 
 extern "C" {
 
 static int tls_bio_read(BIO *b, char *out, int outl) noexcept {
-    int ret = static_cast<int>(::recv(tls_bio_fd(b), out, static_cast<size_t>(outl), 0));
+    const auto result = tls_bio_stream(b).try_read(out, static_cast<size_t>(outl));
+    const int ret = result ? static_cast<int>(*result) : -1;
+    if (!result) {
+        errno = common::io_err_to_errno(result.error());
+    }
     BIO_clear_retry_flags(b);
     if (ret <= 0 && tls_bio_should_retry(ret) != 0) {
         BIO_set_retry_read(b);
@@ -117,7 +118,11 @@ static int tls_bio_read(BIO *b, char *out, int outl) noexcept {
 }
 
 static int tls_bio_write(BIO *b, const char *in, int inl) noexcept {
-    int ret = static_cast<int>(::send(tls_bio_fd(b), in, static_cast<size_t>(inl), MSG_NOSIGNAL));
+    const auto result = tls_bio_stream(b).try_write(in, static_cast<size_t>(inl));
+    const int ret = result ? static_cast<int>(*result) : -1;
+    if (!result) {
+        errno = common::io_err_to_errno(result.error());
+    }
     BIO_clear_retry_flags(b);
     if (ret <= 0 && tls_bio_should_retry(ret) != 0) {
         BIO_set_retry_write(b);
@@ -127,13 +132,9 @@ static int tls_bio_write(BIO *b, const char *in, int inl) noexcept {
 
 static long tls_bio_ctrl(BIO *b, int cmd, long num, void *ptr) noexcept {
     switch (cmd) {
-        case BIO_C_SET_FD: {
-            int fd = *static_cast<int *>(ptr);
-            BIO_set_data(b, reinterpret_cast<void *>(static_cast<intptr_t>(fd)));
-            BIO_set_shutdown(b, static_cast<int>(num));
-            BIO_set_init(b, 1);
-            return 1;
-        }
+        case BIO_C_SET_FD:
+            // Ownership and the borrowed StreamFd are installed explicitly.
+            return 0;
         case BIO_C_GET_FD: {
             if (BIO_get_init(b) == 0) {
                 return -1;
@@ -211,7 +212,9 @@ common::IoResult<void> TlsStreamFd::attach_ssl(SSL *ssl) noexcept {
         ssl_ = nullptr;
         return std::unexpected(common::IoErr::NoMem);
     }
-    BIO_set_fd(bio, stream_fd_.fd(), BIO_NOCLOSE);
+    BIO_set_data(bio, &stream_fd_);
+    BIO_set_shutdown(bio, BIO_NOCLOSE);
+    BIO_set_init(bio, 1);
     SSL_set_bio(ssl_, bio, bio);
     handshake_done_ = false;
     return {};

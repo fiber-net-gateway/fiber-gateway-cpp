@@ -62,7 +62,7 @@ void Efd::close_fd() noexcept {
     }
     if (registered_) {
         FIBER_ASSERT(loop_.in_loop());
-        loop_.poller().del(fd_);
+        loop_.poller().del(item_);
         registered_ = false;
     }
     int fd = fd_;
@@ -80,7 +80,7 @@ fiber::common::IoErr Efd::unwatch_all() noexcept {
         return fiber::common::IoErr::BadFd;
     }
     FIBER_ASSERT(loop_.in_loop());
-    fiber::common::IoErr err = loop_.poller().del(fd_);
+    fiber::common::IoErr err = loop_.poller().del(item_);
     if (err != fiber::common::IoErr::None) {
         return err;
     }
@@ -95,6 +95,9 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
     }
     FIBER_ASSERT(loop_.in_loop());
 
+    if (registered_ && item_.token() == 0) {
+        return fiber::common::IoErr::BadFd;
+    }
     if (desired == watching_ && (fiber::event::any(desired) || !registered_)) {
         return fiber::common::IoErr::None;
     }
@@ -104,7 +107,7 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
             watching_ = fiber::event::IoEvent::None;
             return fiber::common::IoErr::None;
         }
-        fiber::common::IoErr err = loop_.poller().del(fd_);
+        fiber::common::IoErr err = loop_.poller().del(item_);
         if (err != fiber::common::IoErr::None) {
             return err;
         }
@@ -133,31 +136,6 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
 fiber::common::IoErr Efd::watch_add(fiber::event::IoEvent events) noexcept { return watch_set(watching_ | events); }
 
 fiber::common::IoErr Efd::watch_del(fiber::event::IoEvent events) noexcept { return watch_set(watching_ & ~events); }
-
-fiber::common::IoErr Efd::consume_ready(fiber::event::IoEvent ready) noexcept {
-    if (!fiber::event::any(ready)) {
-        return fiber::common::IoErr::None;
-    }
-    if (fd_ < 0) {
-        return fiber::common::IoErr::BadFd;
-    }
-    FIBER_ASSERT(loop_.in_loop());
-
-    fiber::event::IoEvent desired = watching_ & ~ready;
-    if (desired == watching_) {
-        return fiber::common::IoErr::None;
-    }
-
-    if (registered_ && fiber::event::any(desired)) {
-        fiber::common::IoErr err = loop_.poller().mod(fd_, desired, &item_, mode_);
-        if (err != fiber::common::IoErr::None) {
-            return err;
-        }
-    }
-
-    watching_ = desired;
-    return fiber::common::IoErr::None;
-}
 
 void Efd::on_poller_event(fiber::event::Poller::Item *item, int fd, fiber::event::IoEvent events) {
     (void) fd;

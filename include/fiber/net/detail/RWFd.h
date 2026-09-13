@@ -53,8 +53,15 @@ public:
     using WaitReadableAwaiter = WaitAwaiter<fiber::event::IoEvent::Read>;
     using WaitWritableAwaiter = WaitAwaiter<fiber::event::IoEvent::Write>;
 
-    explicit RWFd(fiber::event::EventLoop &loop);
-    RWFd(fiber::event::EventLoop &loop, int fd);
+    enum class Kind : std::uint8_t { Raw, Stream, Datagram };
+    explicit RWFd(fiber::event::EventLoop &loop, Kind kind = Kind::Raw);
+    RWFd(fiber::event::EventLoop &loop, int fd, Kind kind = Kind::Raw);
+
+    // Raw fd consumers opt out of cached syscall suppression. Off-loop I/O
+    // automatically makes this choice sticky until the next attach.
+    void use_external_io() noexcept { external_io_.store(true, std::memory_order_release); }
+    common::IoErr prepare_io(event::IoEvent direction) noexcept;
+    void finish_io(event::IoEvent direction, common::IoErr error, bool exhausted = false) noexcept;
     ~RWFd();
 
     [[nodiscard]] bool valid() const noexcept;
@@ -67,6 +74,11 @@ public:
     int release_fd() noexcept;
     void close();
 
+    // Read/write subscriptions persist, but readiness is delivered once per
+    // kernel hint or newly installed subscription. Budgeted consumers must post
+    // their own continuation; clearing a subscription does not clear readiness.
+    // Setters never invoke callbacks synchronously. Callback contexts must outlive
+    // their cancellation notification (or be removed before close).
     // Read/write callbacks receive None on readiness and Canceled when the fd is
     // closed. The terminal callback is one-shot and independent from both
     // directions; it observes ERR/HUP or an explicit terminal syscall error, but
@@ -110,7 +122,7 @@ private:
         bool owner_destroyed_ = false;
     };
 
-    fiber::common::IoErr begin_wait(RWFdWaiterBase *waiter) noexcept;
+    common::IoResult<bool> begin_wait(RWFdWaiterBase *waiter) noexcept;
     fiber::common::IoErr cancel_wait(RWFdWaiterBase *waiter) noexcept;
     bool remove_callback(fiber::event::IoEvent event, ReadyCallback callback, void *ctx) noexcept;
 
@@ -118,7 +130,25 @@ private:
     void handle_events(fiber::event::IoEvent events);
     [[nodiscard]] bool has_callbacks() const noexcept;
     [[nodiscard]] fiber::event::IoEvent active_events() const noexcept;
-    fiber::common::IoErr sync_interest() noexcept;
+    common::IoErr ensure_registered() noexcept;
+    common::IoResult<bool> check_ready(event::IoEvent direction) noexcept;
+    common::IoErr install_callback(event::IoEvent direction, ReadyCallback callback, void *ctx) noexcept;
+    void queue_ready(event::IoEvent events) noexcept;
+    void dispatch_ready(event::IoEvent events);
+    static void on_deferred_ready(RWFd *owner) noexcept;
+    static void on_loop_stop(RWFd *owner) noexcept;
+    enum class Readiness : std::uint8_t { Unknown, Ready, Blocked };
+    Readiness read_ready_ = Readiness::Unknown;
+    Readiness write_ready_ = Readiness::Unknown;
+    const Kind kind_;
+    std::atomic<bool> external_io_;
+    bool read_hangup_ = false;
+    std::uint64_t read_generation_ = 0;
+    std::uint64_t write_generation_ = 0;
+    std::uint64_t terminal_generation_ = 0;
+    event::IoEvent pending_ready_ = event::IoEvent::None;
+    event::EventLoop::DeferEntry ready_entry_{};
+    event::EventLoop::StopEntry stop_entry_{};
 
     Efd efd_;
     ReadyCallback read_callback_ = nullptr;
@@ -196,9 +226,9 @@ public:
         origin_loop_ = &fiber::event::EventLoop::current();
 
         if (rwfd_->loop().in_loop()) {
-            fiber::common::IoErr err = rwfd_->begin_wait(this);
-            if (err != fiber::common::IoErr::None) {
-                err_ = err;
+            auto result = rwfd_->begin_wait(this);
+            if (!result || !*result) {
+                err_ = result ? fiber::common::IoErr::None : result.error();
                 completed_ = true;
                 waiting_ = false;
                 return false;
@@ -207,6 +237,7 @@ public:
             return true;
         }
 
+        rwfd_->use_external_io();
         auto *waiter = new (std::nothrow) RWFdCrossThreadWaiter();
         if (!waiter) {
             err_ = fiber::common::IoErr::NoMem;

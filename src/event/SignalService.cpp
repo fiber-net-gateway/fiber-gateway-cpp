@@ -75,7 +75,7 @@ void SignalService::detach() {
     }
     attached_.store(false, std::memory_order_release);
     if (signalfd_ >= 0) {
-        loop_.poller().del(signalfd_);
+        loop_.poller().del(item_);
         ::close(signalfd_);
         signalfd_ = -1;
     }

@@ -21,11 +21,14 @@ IoEvent to_io_event(std::uint32_t events, IoEvent interested) {
     if (events & (EPOLLIN | EPOLLPRI)) {
         mask |= IoEvent::Read;
     }
+    if (events & EPOLLRDHUP) {
+        mask |= IoEvent::Read | IoEvent::ReadHangup;
+    }
     if (events & EPOLLOUT) {
         mask |= IoEvent::Write;
     }
     if (events & (EPOLLERR | EPOLLHUP)) {
-        mask |= interested;
+        mask |= interested | IoEvent::Terminal;
     }
     return mask;
 }
@@ -142,7 +145,6 @@ void EventLoop::run_prepared() {
     EventLoop *prev = current_;
     current_ = this;
     now_ = std::chrono::steady_clock::now();
-    drain_notify<false>();
     do {
         run_once();
     } while (!stop_requested_.load(std::memory_order_acquire));
@@ -158,9 +160,18 @@ void EventLoop::run_once() {
     now_ = std::chrono::steady_clock::now();
     run_due_timers(now_);
 
-    drain_notify<true>();
-    drain_defer<true>();
-    const std::chrono::steady_clock::time_point deadline = next_deadline();
+    std::size_t budget = 256;
+    // Split the pre-poll allowance so a notify flood cannot starve local work.
+    std::size_t notify_budget = 128;
+    drain_notify(notify_budget);
+    budget -= 128 - notify_budget;
+    drain_defer(budget);
+    if (!pending_notify_) {
+        pending_notify_ = notify_queue_.try_pop_all();
+    }
+    const bool runnable =
+            pending_notify_ || !detail::queue_empty(&local_queue_) || stop_requested_.load(std::memory_order_acquire);
+    const auto deadline = runnable ? now_ : next_deadline();
     constexpr int kMaxEvents = 64;
     epoll_event events[kMaxEvents];
 
@@ -174,14 +185,17 @@ void EventLoop::run_once() {
     }
 
     for (int i = 0; i < count; ++i) {
-        auto *item = static_cast<Poller::Item *>(events[i].data.ptr);
+        auto *item = poller_.resolve(events[i].data.u64);
+        if (!item) {
+            continue;
+        }
         IoEvent io = to_io_event(events[i].events, item ? item->interested_ : IoEvent::None);
         if (to_mask(io) == 0) {
             continue;
         }
         item->callback(item, item->fd(), io);
     }
-    drain_defer<false>();
+    drain_defer(budget);
 }
 
 void EventLoop::stop() {

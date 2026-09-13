@@ -100,7 +100,8 @@ template<typename Traits>
 class ConnectFd<Traits>::ConnectAwaiter {
 public:
     ConnectAwaiter(fiber::event::EventLoop &loop, Address peer, std::chrono::milliseconds timeout) noexcept :
-        efd_(loop, this, &ConnectAwaiter::on_efd_events), peer_(std::move(peer)), timeout_(timeout) {}
+        efd_(loop, this, &ConnectAwaiter::on_efd_events, fiber::event::Poller::Mode::Edge), peer_(std::move(peer)),
+        timeout_(timeout) {}
 
     ConnectAwaiter(const ConnectAwaiter &) = delete;
     ConnectAwaiter &operator=(const ConnectAwaiter &) = delete;
@@ -239,10 +240,10 @@ private:
             return;
         }
         waiting_ = false;
-        (void) efd_.watch_del(fiber::event::IoEvent::Write);
+        const auto unwatch_err = efd_.unwatch_all();
         cancel_timer();
 
-        fiber::common::IoErr err = finish_connect();
+        fiber::common::IoErr err = unwatch_err == fiber::common::IoErr::None ? finish_connect() : unwatch_err;
         if (err == fiber::common::IoErr::None) {
             result_ = ConnectResult(&efd_.loop(), efd_.release_fd(), std::move(peer_));
         }

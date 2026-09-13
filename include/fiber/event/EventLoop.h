@@ -358,43 +358,30 @@ private:
 
     void notify_wakeup();
     void enqueue_notify(NotifyNode *node);
-    template<bool all>
-    void drain_notify() {
-        NotifyNode *node = notify_queue_.try_pop_all();
-
-        while (node) {
-            NotifyNode *next = MpscQueue<NotifyEntry *>::next(node);
+    void drain_notify(std::size_t &budget) {
+        if (!pending_notify_) {
+            pending_notify_ = notify_queue_.try_pop_all();
+        }
+        while (pending_notify_ && budget != 0) {
+            NotifyNode *node = pending_notify_;
+            pending_notify_ = MpscQueue<NotifyEntry *>::next(node);
             NotifyEntry *entry = MpscQueue<NotifyEntry *>::unwrap(node);
             MpscQueue<NotifyEntry *>::reset(node);
+            --budget;
             entry->on_run(entry);
-            node = next;
-            if constexpr (all) {
-                if (!node) {
-                    node = notify_queue_.try_pop_all();
-                }
-            }
         }
     }
 
-    template<bool all>
-    void drain_defer() {
-        for (;;) {
-            if (detail::queue_empty(&local_queue_)) {
-                return;
-            }
-            detail::Queue pending;
-            detail::queue_move(&local_queue_, &pending);
-
-            while (!detail::queue_empty(&pending)) {
-                detail::Queue *node = detail::queue_head(&pending);
-                detail::queue_remove(node);
-                auto *entry = queue_data(node, DeferEntry, node_);
-                entry->in_queue_ = false;
-                entry->callback_(entry);
-            }
-            if constexpr (!all) {
-                return;
-            }
+    void drain_defer(std::size_t &budget) {
+        // Continuations may use the remaining turn budget. Keeping entries in
+        // the loop queue preserves cancellation, including callback destruction.
+        while (!detail::queue_empty(&local_queue_) && budget != 0) {
+            detail::Queue *node = detail::queue_head(&local_queue_);
+            detail::queue_remove(node);
+            auto *entry = queue_data(node, DeferEntry, node_);
+            entry->in_queue_ = false;
+            --budget;
+            entry->callback_(entry);
         }
     }
 
@@ -408,6 +395,7 @@ private:
     void cancel(DeferEntry &entry);
 
     MpscQueue<NotifyEntry *> notify_queue_;
+    NotifyNode *pending_notify_ = nullptr;
     // Loop-thread only: timer heap operations.
     detail::Queue local_queue_;
     detail::Queue stop_queue_;

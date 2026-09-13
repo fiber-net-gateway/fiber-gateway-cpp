@@ -6,6 +6,8 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <new>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
@@ -45,6 +47,9 @@ std::uint32_t to_epoll_events(Poller::Event events, Poller::Mode mode) {
     if (bits & to_mask(Poller::Event::Read)) {
         mask |= EPOLLIN;
     }
+    if (bits & to_mask(Poller::Event::ReadHangup)) {
+        mask |= EPOLLRDHUP;
+    }
     if (bits & to_mask(Poller::Event::Write)) {
         mask |= EPOLLOUT;
     }
@@ -83,6 +88,7 @@ Poller::Poller() {
 }
 
 Poller::~Poller() {
+    std::free(slots_);
     if (timer_fd_ >= 0) {
         ::close(timer_fd_);
     }
@@ -93,36 +99,91 @@ Poller::~Poller() {
 
 bool Poller::valid() const { return epoll_fd_ >= 0; }
 
-fiber::common::IoErr Poller::add(int fd, Event events, Item *item, Mode mode) {
-    if (item) {
-        item->fd_ = fd;
-        item->interested_ = events;
+bool Poller::grow_slots() noexcept {
+    if (slot_count_ >= kNoSlot / 2) {
+        return false;
     }
+    const std::uint32_t count = slot_count_ == 0 ? 64 : slot_count_ * 2;
+    auto *storage = static_cast<Slot *>(std::realloc(slots_, sizeof(Slot) * count));
+    if (!storage) {
+        return false;
+    }
+    slots_ = storage;
+    for (std::uint32_t i = slot_count_; i < count; ++i) {
+        new (&slots_[i]) Slot{.next = i + 1 == count ? kNoSlot : i + 1};
+    }
+    free_slot_ = slot_count_;
+    slot_count_ = count;
+    return true;
+}
+
+void Poller::retire_slot(std::uint32_t index) noexcept {
+    Slot &slot = slots_[index];
+    slot.item = nullptr;
+    if (slot.generation == UINT32_MAX) {
+        return;
+    }
+    ++slot.generation;
+    slot.next = free_slot_;
+    free_slot_ = index;
+}
+
+Poller::Item *Poller::resolve(std::uint64_t token) const noexcept {
+    const auto index = static_cast<std::uint32_t>(token);
+    if (token == 0 || index >= slot_count_) {
+        return nullptr;
+    }
+    const Slot &slot = slots_[index];
+    return slot.generation == static_cast<std::uint32_t>(token >> 32) ? slot.item : nullptr;
+}
+
+fiber::common::IoErr Poller::add(int fd, Event events, Item *item, Mode mode) {
+    if (!item || item->token_ != 0) {
+        return fiber::common::IoErr::Invalid;
+    }
+    if (free_slot_ == kNoSlot && !grow_slots()) {
+        return fiber::common::IoErr::NoMem;
+    }
+    const auto index = free_slot_;
+    Slot &slot = slots_[index];
+    free_slot_ = slot.next;
+    const std::uint64_t token = (static_cast<std::uint64_t>(slot.generation) << 32) | index;
     epoll_event ev{};
     ev.events = to_epoll_events(events, mode);
-    ev.data.ptr = item;
-    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) == 0) {
-        return fiber::common::IoErr::None;
+    ev.data.u64 = token;
+    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) != 0) {
+        const auto err = fiber::common::io_err_from_errno(errno);
+        retire_slot(index);
+        return err;
     }
-    return fiber::common::io_err_from_errno(errno);
+    slot.item = item;
+    item->fd_ = fd;
+    item->interested_ = events;
+    item->token_ = token;
+    return fiber::common::IoErr::None;
 }
 
 fiber::common::IoErr Poller::mod(int fd, Event events, Item *item, Mode mode) {
-    if (item) {
-        item->fd_ = fd;
-        item->interested_ = events;
+    if (!item || resolve(item->token_) != item || item->fd_ != fd) {
+        return fiber::common::IoErr::Invalid;
     }
     epoll_event ev{};
     ev.events = to_epoll_events(events, mode);
-    ev.data.ptr = item;
-    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) == 0) {
-        return fiber::common::IoErr::None;
+    ev.data.u64 = item->token_;
+    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) != 0) {
+        return fiber::common::io_err_from_errno(errno);
     }
-    return fiber::common::io_err_from_errno(errno);
+    item->interested_ = events;
+    return fiber::common::IoErr::None;
 }
 
-fiber::common::IoErr Poller::del(int fd) {
-    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) == 0) {
+fiber::common::IoErr Poller::del(Item &item) {
+    if (resolve(item.token_) != &item) {
+        return fiber::common::IoErr::Invalid;
+    }
+    retire_slot(static_cast<std::uint32_t>(item.token_));
+    item.token_ = 0;
+    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, item.fd_, nullptr) == 0) {
         return fiber::common::IoErr::None;
     }
     return fiber::common::io_err_from_errno(errno);
@@ -161,7 +222,7 @@ int Poller::init_timer_fd() {
 
     epoll_event timer_event{};
     timer_event.events = EPOLLIN;
-    timer_event.data.ptr = &timer_fd_tag_;
+    timer_event.data.u64 = kTimerToken;
     if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, timer_fd, &timer_event) != 0) {
         const int saved_errno = errno;
         ::close(timer_fd);
@@ -192,7 +253,7 @@ int Poller::wait_epoll(epoll_event *events, int max_events, int timeout_ms) {
 
     int output_count = 0;
     for (int i = 0; i < count; ++i) {
-        if (events[i].data.ptr == &timer_fd_tag_) {
+        if (events[i].data.u64 == kTimerToken) {
             if (drain_timer_fd() != 0) {
                 return -1;
             }

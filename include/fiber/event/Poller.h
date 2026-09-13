@@ -21,6 +21,7 @@ public:
         // EPOLLERR/EPOLLHUP only. Deliberately excludes EPOLLRDHUP so a peer
         // that half-closes its write side can continue receiving data.
         Terminal = 1u << 2,
+        ReadHangup = 1u << 3,
     };
     enum class Mode : std::uint32_t { None = 0, Edge = 1u << 0, OneShot = 1u << 1 };
 
@@ -28,10 +29,12 @@ public:
         using Callback = void (*)(Item *, int fd, Event);
         Callback callback{};
         int fd() const noexcept { return fd_; }
+        std::uint64_t token() const noexcept { return token_; }
         friend class Poller;
 
     private:
         int fd_{};
+        std::uint64_t token_ = 0;
         Event interested_{Event::None};
         friend class EventLoop;
     };
@@ -48,13 +51,25 @@ public:
 
     fiber::common::IoErr add(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr mod(int fd, Event events, Item *item, Mode mode = Mode::None);
-    fiber::common::IoErr del(int fd);
+    fiber::common::IoErr del(Item &item);
+    [[nodiscard]] Item *resolve(std::uint64_t token) const noexcept;
     int wait(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
 
 private:
     enum class WaitBackend : std::uint8_t { Unknown, EpollPwait2, TimerFd };
 
-    struct TimerFdTag {};
+    struct Slot {
+        Item *item = nullptr;
+        std::uint32_t generation = 1;
+        std::uint32_t next = 0;
+    };
+    static constexpr std::uint32_t kNoSlot = UINT32_MAX;
+    static constexpr std::uint64_t kTimerToken = 0;
+    bool grow_slots() noexcept;
+    void retire_slot(std::uint32_t index) noexcept;
+    Slot *slots_ = nullptr;
+    std::uint32_t slot_count_ = 0;
+    std::uint32_t free_slot_ = kNoSlot;
 
     int init_timer_fd();
     int wait_timer_fd(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
@@ -64,7 +79,6 @@ private:
 
     int epoll_fd_ = -1;
     int timer_fd_ = -1;
-    TimerFdTag timer_fd_tag_{};
     WaitBackend wait_backend_ = WaitBackend::Unknown;
     std::chrono::steady_clock::time_point armed_deadline_ = std::chrono::steady_clock::time_point::max();
 };
