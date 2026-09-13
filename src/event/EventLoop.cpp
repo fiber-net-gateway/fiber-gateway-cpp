@@ -38,9 +38,6 @@ IoEvent to_io_event(std::uint32_t events, IoEvent interested) {
 EventLoop::NotifyEntry::NotifyEntry() : node(this) {}
 
 EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(group), group_index_(group_index) {
-    detail::queue_init(&local_queue_);
-    detail::queue_init(&next_queue_);
-    detail::queue_init(&stop_queue_);
     wakeup_entry_.loop = this;
     wakeup_entry_.callback = &EventLoop::on_wakeup;
     event_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -59,7 +56,6 @@ EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(gr
 }
 
 EventLoop::~EventLoop() {
-    FIBER_ASSERT(detail::queue_empty(&stop_queue_));
     if (event_fd_ >= 0) {
         ::close(event_fd_);
     }
@@ -167,11 +163,8 @@ void EventLoop::run_once() {
     // Continuations parked with post_next run after this poll: move them behind
     // the (now empty) local queue and poll without blocking so new kernel
     // events, timers and stop interleave with them.
-    const bool has_next = !detail::queue_empty(&next_queue_);
-    if (has_next) {
-        detail::queue_add(&local_queue_, &next_queue_);
-        detail::queue_init(&next_queue_);
-    }
+    const bool has_next = !next_queue_.empty();
+    local_queue_.splice_back(next_queue_);
     if (!pending_notify_) {
         pending_notify_ = notify_queue_.try_pop_all();
     }
@@ -213,11 +206,8 @@ void EventLoop::stop() {
 
 void EventLoop::drain_stop() noexcept {
     FIBER_ASSERT(in_loop());
-    while (!detail::queue_empty(&stop_queue_)) {
-        detail::Queue *node = detail::queue_head(&stop_queue_);
-        detail::queue_remove(node);
-        auto *entry = queue_data(node, StopEntry, node_);
-        entry->registered_ = false;
+    while (StopEntry *entry = stop_queue_.front()) {
+        stop_queue_.erase(*entry);
         StopEntry::Callback callback = entry->callback_;
         if (callback != nullptr) {
             callback(entry);
@@ -255,11 +245,9 @@ void EventLoop::cancel_quiesced(TimerEntry &entry) {
 
 void EventLoop::cancel(DeferEntry &entry) {
     FIBER_ASSERT(in_loop());
-    if (!entry.in_queue_) {
-        return;
-    }
-    detail::queue_remove(&entry.node_);
-    entry.in_queue_ = false;
+    // The entry may sit in either the local or the next queue; the ring hook
+    // unlinks without knowing which.
+    entry.node_.unlink_self();
 }
 
 } // namespace fiber::event

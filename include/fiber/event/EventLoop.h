@@ -9,6 +9,7 @@
 #include <type_traits>
 
 #include "../common/BinaryHeap.h"
+#include "../common/IntrusiveList.h"
 #include "../common/mem/IoBufChain.h"
 #include "MpscQueue.h"
 #include "Poller.h"
@@ -57,67 +58,7 @@ concept DeferCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>;
 template<typename Handle, auto Cb>
 concept StopCallback = std::same_as<decltype(Cb), void (*)(Handle *) noexcept>;
 
-struct Queue {
-    struct Queue *next;
-    struct Queue *prev;
-};
-
-static inline void queue_init(Queue *q) {
-    q->next = q;
-    q->prev = q;
-}
-
-static inline int queue_empty(const Queue *q) { return q == q->next; }
-
-static inline Queue *queue_head(const Queue *q) { return q->next; }
-
-static inline Queue *queue_next(const Queue *q) { return q->next; }
-
-static inline void queue_add(Queue *h, Queue *n) {
-    h->prev->next = n->next;
-    n->next->prev = h->prev;
-    h->prev = n->prev;
-    h->prev->next = h;
-}
-
-static inline void queue_split(Queue *h, Queue *q, Queue *n) {
-    n->prev = h->prev;
-    n->prev->next = n;
-    n->next = q;
-    h->prev = q->prev;
-    h->prev->next = h;
-    q->prev = n;
-}
-
-static inline void queue_move(Queue *h, Queue *n) {
-    if (queue_empty(h))
-        queue_init(n);
-    else
-        queue_split(h, h->next, n);
-}
-static inline void queue_insert_head(Queue *h, Queue *q) {
-    q->next = h->next;
-    q->prev = h;
-    q->next->prev = q;
-    h->next = q;
-}
-
-static inline void queue_insert_tail(Queue *h, Queue *q) {
-    q->next = h;
-    q->prev = h->prev;
-    q->prev->next = q;
-    h->prev = q;
-}
-
-static inline void queue_remove(Queue *q) {
-    q->prev->next = q->next;
-    q->next->prev = q->prev;
-}
-
-
 } // namespace detail
-
-#define queue_data(pointer, type, field) ((type *) ((char *) (pointer) - offsetof(type, field)))
 
 class EventLoop {
 public:
@@ -173,12 +114,14 @@ public:
         friend class EventLoop;
 
         using Callback = void (*)(DeferEntry *);
-        [[nodiscard]] bool is_in_queue() const noexcept { return in_queue_; }
+        // Queued state lives in the hook: an unlinked hook is self-linked, so
+        // no separate flag is needed and a queued entry unlinks itself if it
+        // is destroyed.
+        [[nodiscard]] bool is_in_queue() const noexcept { return node_.linked(); }
 
     private:
-        detail::Queue node_;
+        common::IntrusiveListHook node_{};
         Callback callback_ = nullptr;
-        bool in_queue_ = false;
         std::ptrdiff_t handle_offset_ = 0;
     };
 
@@ -190,12 +133,11 @@ public:
         friend class EventLoop;
 
         using Callback = void (*)(StopEntry *) noexcept;
-        [[nodiscard]] bool is_registered() const noexcept { return registered_; }
+        [[nodiscard]] bool is_registered() const noexcept { return node_.linked(); }
 
     private:
-        detail::Queue node_{};
+        common::IntrusiveListHook node_{};
         Callback callback_ = nullptr;
-        bool registered_ = false;
         std::ptrdiff_t handle_offset_ = 0;
     };
 
@@ -288,14 +230,13 @@ public:
     [[nodiscard]] bool register_stop(Handle &handle) noexcept {
         FIBER_ASSERT(in_loop());
         StopEntry &entry = handle.*EntryMember;
-        FIBER_ASSERT(!entry.registered_);
+        FIBER_ASSERT(!entry.node_.linked());
         if (stop_requested_.load(std::memory_order_acquire)) {
             return false;
         }
         entry.handle_offset_ = reinterpret_cast<char *>(&entry) - reinterpret_cast<char *>(&handle);
         entry.callback_ = &EventLoop::stop_trampoline<Handle, EntryMember, Cb>;
-        entry.registered_ = true;
-        detail::queue_insert_tail(&stop_queue_, &entry.node_);
+        stop_queue_.push_back(entry);
         return true;
     }
 
@@ -303,12 +244,7 @@ public:
         requires detail::StopEntryMember<Handle, StopEntry, EntryMember>
     void unregister_stop(Handle &handle) noexcept {
         FIBER_ASSERT(in_loop());
-        StopEntry &entry = handle.*EntryMember;
-        if (!entry.registered_) {
-            return;
-        }
-        detail::queue_remove(&entry.node_);
-        entry.registered_ = false;
+        stop_queue_.erase(handle.*EntryMember);
     }
 
     Poller &poller() noexcept { return poller_; }
@@ -328,6 +264,9 @@ public:
 
 private:
     friend class EventLoopGroup;
+
+    using DeferQueue = common::IntrusiveList<DeferEntry, offsetof(DeferEntry, node_)>;
+    using StopQueue = common::IntrusiveList<StopEntry, offsetof(StopEntry, node_)>;
 
     static thread_local EventLoop *current_;
 
@@ -372,15 +311,12 @@ private:
     void notify_wakeup();
     void enqueue_notify(NotifyNode *node);
     template<typename Handle, auto EntryMember, auto RunCb>
-    void enqueue_defer(Handle &handle, detail::Queue &queue) noexcept {
+    void enqueue_defer(Handle &handle, DeferQueue &queue) noexcept {
         DeferEntry &entry = handle.*EntryMember;
         entry.handle_offset_ = reinterpret_cast<char *>(&entry) - reinterpret_cast<char *>(&handle);
         entry.callback_ = &EventLoop::defer_trampoline<Handle, EntryMember, RunCb>;
-        if (entry.in_queue_) {
-            return;
-        }
-        entry.in_queue_ = true;
-        detail::queue_insert_tail(&queue, &entry.node_);
+        // push_back keeps an already queued entry where it is.
+        queue.push_back(entry);
     }
 
     // Runs one batch of cross-thread notifications. Entries that arrive while
@@ -403,11 +339,8 @@ private:
     // Entries stay in the loop queue until they run so cancellation, including
     // destruction from another callback, keeps working.
     void drain_defer() {
-        while (!detail::queue_empty(&local_queue_)) {
-            detail::Queue *node = detail::queue_head(&local_queue_);
-            detail::queue_remove(node);
-            auto *entry = queue_data(node, DeferEntry, node_);
-            entry->in_queue_ = false;
+        while (DeferEntry *entry = local_queue_.front()) {
+            local_queue_.erase(*entry);
             entry->callback_(entry);
         }
     }
@@ -424,10 +357,10 @@ private:
     MpscQueue<NotifyEntry *> notify_queue_;
     NotifyNode *pending_notify_ = nullptr;
     // Loop-thread only: timer heap operations.
-    detail::Queue local_queue_;
-    detail::Queue next_queue_;
+    DeferQueue local_queue_;
+    DeferQueue next_queue_;
     std::uint64_t turn_ = 0;
-    detail::Queue stop_queue_;
+    StopQueue stop_queue_;
     common::BinaryHeap<TimerEntry, offsetof(TimerEntry, node), TimerEntryCompare> timers_;
     Poller poller_;
     int event_fd_ = -1;

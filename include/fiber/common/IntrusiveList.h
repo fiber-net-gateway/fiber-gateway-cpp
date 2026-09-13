@@ -163,6 +163,22 @@ public:
         hook.unlink_self();
     }
 
+    // Moves every node of `other` to the back of this list, keeping their
+    // order; `other` is left empty. O(1): only the four ring seams are rewritten.
+    void splice_back(IntrusiveList &other) noexcept {
+        if (&other == this || other.empty()) {
+            return;
+        }
+        IntrusiveListHook *first = other.anchor_.next;
+        IntrusiveListHook *last = other.anchor_.prev;
+        first->prev = anchor_.prev;
+        anchor_.prev->next = first;
+        last->next = &anchor_;
+        anchor_.prev = last;
+        other.anchor_.next = &other.anchor_;
+        other.anchor_.prev = &other.anchor_;
+    }
+
 private:
     [[nodiscard]] static IntrusiveListHook &hook_of(T &owner) noexcept {
         return *reinterpret_cast<IntrusiveListHook *>(reinterpret_cast<std::uint8_t *>(&owner) + Offset);
