@@ -216,6 +216,9 @@ public:
     [[nodiscard]] bool valid() const noexcept { return event_fd_ >= 0 && poller_.valid(); }
     [[nodiscard]] bool running() const noexcept { return running_.load(std::memory_order_acquire); }
     [[nodiscard]] std::chrono::steady_clock::time_point now() const noexcept { return now_; }
+    // Incremented by every poll. Loop-thread only; lets budgeted consumers
+    // account work per turn and yield with post_next once their share is spent.
+    [[nodiscard]] std::uint64_t turn() const noexcept { return turn_; }
 
 
     template<typename Handle, auto EntryMember, auto RunCb>
@@ -227,17 +230,27 @@ public:
         enqueue_notify(&entry.node);
     }
 
+    // Runs in the current turn. The loop drains this queue to empty before it
+    // polls, so work posted here (including work posted by the callbacks it
+    // runs) never waits for the kernel. A callback that keeps re-posting itself
+    // here therefore never lets the loop poll; continuations that yield on
+    // purpose must use post_next instead.
     template<typename Handle, auto EntryMember, auto RunCb>
         requires detail::DeferEntryMember<Handle, DeferEntry, EntryMember> && detail::DeferCallback<Handle, RunCb>
     void post_local(Handle &handle) noexcept {
-        DeferEntry &entry = handle.*EntryMember;
-        entry.handle_offset_ = reinterpret_cast<char *>(&entry) - reinterpret_cast<char *>(&handle);
-        entry.callback_ = &EventLoop::defer_trampoline<Handle, EntryMember, RunCb>;
-        if (entry.in_queue_) {
-            return;
-        }
-        entry.in_queue_ = true;
-        detail::queue_insert_tail(&local_queue_, &entry.node_);
+        enqueue_defer<Handle, EntryMember, RunCb>(handle, local_queue_);
+    }
+
+    // Runs after the next poll (nginx posted_next_events semantics). A
+    // non-empty next queue makes that poll non-blocking; its entries are moved
+    // to the local queue right before the poll, so event callbacks run first
+    // and local work they post runs behind the moved entries. Kernel events,
+    // timers and stop therefore always interleave between two runs of the same
+    // continuation. An entry that is already queued keeps its position.
+    template<typename Handle, auto EntryMember, auto RunCb>
+        requires detail::DeferEntryMember<Handle, DeferEntry, EntryMember> && detail::DeferCallback<Handle, RunCb>
+    void post_next(Handle &handle) noexcept {
+        enqueue_defer<Handle, EntryMember, RunCb>(handle, next_queue_);
     }
 
     template<typename Handle, auto EntryMember>
@@ -358,29 +371,43 @@ private:
 
     void notify_wakeup();
     void enqueue_notify(NotifyNode *node);
-    void drain_notify(std::size_t &budget) {
+    template<typename Handle, auto EntryMember, auto RunCb>
+    void enqueue_defer(Handle &handle, detail::Queue &queue) noexcept {
+        DeferEntry &entry = handle.*EntryMember;
+        entry.handle_offset_ = reinterpret_cast<char *>(&entry) - reinterpret_cast<char *>(&handle);
+        entry.callback_ = &EventLoop::defer_trampoline<Handle, EntryMember, RunCb>;
+        if (entry.in_queue_) {
+            return;
+        }
+        entry.in_queue_ = true;
+        detail::queue_insert_tail(&queue, &entry.node_);
+    }
+
+    // Runs one batch of cross-thread notifications. Entries that arrive while
+    // the batch runs are picked up by the next turn, which polls without
+    // blocking.
+    void drain_notify() {
         if (!pending_notify_) {
             pending_notify_ = notify_queue_.try_pop_all();
         }
-        while (pending_notify_ && budget != 0) {
+        while (pending_notify_) {
             NotifyNode *node = pending_notify_;
             pending_notify_ = MpscQueue<NotifyEntry *>::next(node);
             NotifyEntry *entry = MpscQueue<NotifyEntry *>::unwrap(node);
             MpscQueue<NotifyEntry *>::reset(node);
-            --budget;
             entry->on_run(entry);
         }
     }
 
-    void drain_defer(std::size_t &budget) {
-        // Continuations may use the remaining turn budget. Keeping entries in
-        // the loop queue preserves cancellation, including callback destruction.
-        while (!detail::queue_empty(&local_queue_) && budget != 0) {
+    // Runs local work to empty, including entries posted while draining.
+    // Entries stay in the loop queue until they run so cancellation, including
+    // destruction from another callback, keeps working.
+    void drain_defer() {
+        while (!detail::queue_empty(&local_queue_)) {
             detail::Queue *node = detail::queue_head(&local_queue_);
             detail::queue_remove(node);
             auto *entry = queue_data(node, DeferEntry, node_);
             entry->in_queue_ = false;
-            --budget;
             entry->callback_(entry);
         }
     }
@@ -398,6 +425,8 @@ private:
     NotifyNode *pending_notify_ = nullptr;
     // Loop-thread only: timer heap operations.
     detail::Queue local_queue_;
+    detail::Queue next_queue_;
+    std::uint64_t turn_ = 0;
     detail::Queue stop_queue_;
     common::BinaryHeap<TimerEntry, offsetof(TimerEntry, node), TimerEntryCompare> timers_;
     Poller poller_;

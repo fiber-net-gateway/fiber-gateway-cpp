@@ -15,7 +15,9 @@ bool YieldAwaiter::await_suspend(std::coroutine_handle<> handle) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     handle_ = handle;
     armed_ = true;
-    loop_->post_local<YieldAwaiter, &YieldAwaiter::entry_, &YieldAwaiter::on_yield>(*this);
+    // Yield resumes after the next poll so pending kernel events, timers and
+    // other turns run in between.
+    loop_->post_next<YieldAwaiter, &YieldAwaiter::entry_, &YieldAwaiter::on_yield>(*this);
     return true;
 }
 

@@ -204,7 +204,7 @@ private:
     [[nodiscard]] OutboundFrame *front_frame() const noexcept {
         return priority_front_selected() ? priority_head_ : local_head_;
     }
-    void schedule_pump() noexcept;
+    void schedule_pump(bool next_turn = false) noexcept;
 
     static void on_pump_deferred(CatClientCore *client) noexcept;
     void drive_write() noexcept;

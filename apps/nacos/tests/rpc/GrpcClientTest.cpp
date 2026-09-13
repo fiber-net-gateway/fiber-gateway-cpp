@@ -15,6 +15,7 @@
 
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Task.h>
+#include <fiber/async/Yield.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/common/mem/IoBufChain.h>
@@ -448,6 +449,10 @@ DetachedTask run_client_lifecycle(fiber::event::EventLoop *loop, std::uint16_t p
 
     auto second_wait = co_await client.wait_closed();
     result.repeated_wait_succeeded = second_wait.has_value();
+    // The observer was spawned through the cross-thread queue and may enter
+    // only after the close completed; yield past one poll so it has observed
+    // the completed gate before its flag is read.
+    co_await fiber::async::yield();
     promise->set_value(std::move(result));
 }
 
