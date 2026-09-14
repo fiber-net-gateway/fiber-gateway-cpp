@@ -21,6 +21,10 @@ namespace fiber::http {
 class HttpExchange;
 }
 
+namespace fiber::compression {
+class GzipEncoder;
+}
+
 namespace fiber::http {
 
 struct GzipResponseWriterOptions {
@@ -63,8 +67,6 @@ public:
     [[nodiscard]] const GzipResponseWriterStats &stats() const noexcept { return stats_; }
 
 private:
-    struct CompressionState;
-
     enum class State : std::uint8_t {
         AwaitingFinalHeader,
         Bypass,
@@ -110,8 +112,6 @@ private:
                                                     bool add_vary) noexcept;
     common::IoResult<void> abort(common::IoErr reason) noexcept;
     void fail(common::IoErr error) noexcept;
-    static void *workspace_alloc(void *opaque, unsigned int items, unsigned int size) noexcept;
-    static void workspace_free(void *opaque, void *address) noexcept;
 
     static const HttpResponseWriter::Ops &writer_ops() noexcept;
 
@@ -120,7 +120,9 @@ private:
     HttpResponseWriter next_;
     HttpResponseWriter writer_;
     HttpHeaders filtered_headers_;
-    CompressionState *compression_ = nullptr;
+    // Pool-backed encoder (state + DEFLATE workspace in one allocation);
+    // ended with std::destroy_at() in the destructor.
+    compression::GzipEncoder *encoder_ = nullptr;
     mem::IoBuf output_;
     GzipResponseWriterStats stats_;
     State state_ = State::AwaitingFinalHeader;

@@ -2,8 +2,8 @@
 
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
-#include "script/std/Crc32.h"
 
+#include <fiber/common/util/Crc32.h>
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
 
@@ -143,17 +143,17 @@ AbiResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*
     // With keys -> deterministic bucket from CRC-32 over the non-empty key texts. A single
     // CRC instance is updated once per key in order (cumulative), matching Java. Key text
     // mirrors Jackson's asText() via node_as_text (null -> "null"); see NodeText.h.
-    std::uint32_t crc = 0xFFFFFFFFu;
+    fiber::util::Crc32 crc;
     for (std::uint32_t i = 1; i < args.argc; ++i) {
         std::string text;
         node_as_text(args.args[i], text);
         if (text.empty()) {
             continue;
         }
-        crc32_update(crc, text.data(), text.size());
+        crc.update(text);
     }
-    crc ^= 0xFFFFFFFFu;
-    bool hit = (static_cast<std::uint64_t>(crc) % 100u) < static_cast<std::uint64_t>(ratio);
+    const std::uint32_t crc_value = crc.value();
+    bool hit = (static_cast<std::uint64_t>(crc_value) % 100u) < static_cast<std::uint64_t>(ratio);
     return AbiResult::success(JsValue::make_boolean(hit));
 }
 

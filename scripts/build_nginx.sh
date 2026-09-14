@@ -3,8 +3,7 @@
 # Download and build nginx for local HTTP/1.1, HTTP/2, and HTTP/3 testing.
 #
 # Usage:
-#   cmake -S . -B build  # populate zlib under temp/_deps
-#   scripts/build_nginx.sh
+#   scripts/build_nginx.sh  # zlib reference sources are prepared on demand
 #
 # Optional environment variables:
 #   CC      C compiler passed to nginx's configure script.
@@ -26,7 +25,7 @@ cert_path="$cert_dir/cert.pem"
 key_path="$cert_dir/key.pem"
 boringssl_source_dir="$temp_dir/_deps/boringssl-src"
 boringssl_build_dir="$temp_dir/_deps/boringssl-build"
-zlib_source_dir="$temp_dir/_deps/zlib-src"
+zlib_source_dir="$temp_dir/zlib-reference/1.3.2"
 
 fail() {
     echo "error: $*" >&2
@@ -97,8 +96,9 @@ if [[ ! -x "$source_dir/configure" ]]; then
     tar -xzf "$archive_path" -C "$temp_dir"
 fi
 [[ -x "$source_dir/configure" ]] || fail "nginx configure script was not extracted"
-[[ -f "$zlib_source_dir/zlib.h" && -x "$zlib_source_dir/configure" ]] ||
-    fail "zlib sources not found; run 'cmake -S . -B build' from the project root first"
+# Prepare the pinned zlib reference sources (verified download, cached under
+# temp/zlib-reference/1.3.2); no CMake dependency download is involved.
+"$script_dir/prepare_zlib_reference.sh"
 
 echo "Configuring nginx with $c_compiler"
 cd "$source_dir"

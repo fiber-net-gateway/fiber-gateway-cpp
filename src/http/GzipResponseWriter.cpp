@@ -3,12 +3,13 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <new>
-
-#include <zlib.h>
+#include <span>
 
 #include <fiber/async/Yield.h>
 #include <fiber/common/Assert.h>
+#include <fiber/compression/GzipEncoder.h>
 #include <fiber/http/HttpExchange.h>
 
 namespace fiber::http {
@@ -17,10 +18,6 @@ namespace {
 
 constexpr std::size_t kOutputBufferSize = 16 * 1024;
 constexpr std::size_t kCompressionInputBudget = 256 * 1024;
-constexpr int kWindowBits = 15;
-constexpr int kMemoryLevel = 8;
-constexpr std::size_t kZlibWorkspaceSize =
-        8192 + 16 + (std::size_t{1} << (kWindowBits + 2)) + (std::size_t{1} << (kMemoryLevel + 9));
 
 std::string_view trim_ows(std::string_view value) noexcept {
     while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
@@ -207,36 +204,6 @@ bool response_status_is_compressible(int status_code, bool all_body_statuses) no
 
 } // namespace
 
-struct GzipResponseWriter::CompressionState {
-    z_stream stream{};
-    std::uint8_t *workspace = nullptr;
-    std::size_t workspace_offset = 0;
-    bool zlib_state_allocated = false;
-    bool initialized = false;
-};
-
-void *GzipResponseWriter::workspace_alloc(void *opaque, unsigned int items, unsigned int size) noexcept {
-    auto *compression = static_cast<GzipResponseWriter::CompressionState *>(opaque);
-    if (compression == nullptr || (size != 0 && items > std::numeric_limits<std::size_t>::max() / size)) {
-        return nullptr;
-    }
-    std::size_t bytes = static_cast<std::size_t>(items) * size;
-    if (items == 1 && bytes < 8192 && bytes % 512 != 0 && !compression->zlib_state_allocated) {
-        bytes = 8192;
-        compression->zlib_state_allocated = true;
-    }
-    constexpr std::size_t kAlignment = alignof(std::max_align_t);
-    constexpr std::size_t kAlignmentMask = kAlignment - 1;
-    const std::size_t offset = (compression->workspace_offset + kAlignmentMask) & ~kAlignmentMask;
-    if (offset > kZlibWorkspaceSize || bytes > kZlibWorkspaceSize - offset) {
-        return nullptr;
-    }
-    compression->workspace_offset = offset + bytes;
-    return compression->workspace + offset;
-}
-
-void GzipResponseWriter::workspace_free(void *, void *) noexcept {}
-
 GzipResponseWriter::GzipResponseWriter(HttpExchange &exchange, HttpResponseWriter next,
                                        const GzipResponseWriterOptions &options) noexcept :
     exchange_(&exchange), options_(options), next_(next), writer_(this, writer_ops()),
@@ -245,9 +212,11 @@ GzipResponseWriter::GzipResponseWriter(HttpExchange &exchange, HttpResponseWrite
 }
 
 GzipResponseWriter::~GzipResponseWriter() noexcept {
-    if (compression_ != nullptr && compression_->initialized) {
-        const int result = deflateEnd(&compression_->stream);
-        FIBER_ASSERT(result == Z_OK);
+    // Covers normal finish, failure, abort, and never-activated compression.
+    // The pool reclaims the memory; destroy_at ends the object lifetime
+    // without a second deallocation.
+    if (encoder_ != nullptr) {
+        std::destroy_at(encoder_);
     }
 }
 
@@ -413,35 +382,19 @@ common::IoResult<void> GzipResponseWriter::prepare_filtered_headers(const Outgoi
 }
 
 common::IoResult<void> GzipResponseWriter::initialize_compressor() noexcept {
-    if (compression_ != nullptr && compression_->initialized) {
+    if (encoder_ != nullptr) {
         return {};
     }
-    if (options_.compression_level < 1 || options_.compression_level > 9) {
-        return std::unexpected(common::IoErr::Invalid);
+    auto created = compression::GzipEncoder::create(exchange_->pool(),
+                                                    compression::GzipEncoderOptions{options_.compression_level});
+    if (!created) {
+        return std::unexpected(created.error());
     }
-    void *state_mem = exchange_->pool().alloc(sizeof(CompressionState), alignof(CompressionState));
-    if (state_mem == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    compression_ = new (state_mem) CompressionState{};
-    compression_->workspace =
-            static_cast<std::uint8_t *>(exchange_->pool().alloc(kZlibWorkspaceSize, alignof(std::max_align_t)));
-    if (compression_->workspace == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
+    encoder_ = *created;
     output_ = mem::IoBuf::allocate(kOutputBufferSize);
     if (!output_) {
         return std::unexpected(common::IoErr::NoMem);
     }
-    compression_->stream.zalloc = &GzipResponseWriter::workspace_alloc;
-    compression_->stream.zfree = &GzipResponseWriter::workspace_free;
-    compression_->stream.opaque = compression_;
-    const int result = deflateInit2(&compression_->stream, options_.compression_level, Z_DEFLATED, kWindowBits + 16,
-                                    kMemoryLevel, Z_DEFAULT_STRATEGY);
-    if (result != Z_OK) {
-        return std::unexpected(result == Z_MEM_ERROR ? common::IoErr::NoMem : common::IoErr::Invalid);
-    }
-    compression_->initialized = true;
     return {};
 }
 
@@ -484,32 +437,29 @@ async::Task<common::IoResult<void>> GzipResponseWriter::compress_input(const std
             input_since_yield_ = 0;
         }
         const std::size_t budget = kCompressionInputBudget - input_since_yield_;
-        const std::size_t slice =
-                std::min({len - offset, budget, static_cast<std::size_t>(std::numeric_limits<uInt>::max())});
-        compression_->stream.next_in = const_cast<Bytef *>(buf + offset);
-        compression_->stream.avail_in = static_cast<uInt>(slice);
-        while (compression_->stream.avail_in > 0) {
+        const std::size_t slice = std::min(len - offset, budget);
+        std::size_t consumed = 0;
+        while (consumed < slice) {
             if (output_.writable() == 0) {
                 auto drain_result = co_await drain_output(false, timeout);
                 if (!drain_result) {
                     co_return drain_result;
                 }
             }
-            compression_->stream.next_out = output_.writable_data();
-            compression_->stream.avail_out = static_cast<uInt>(output_.writable());
-            const uInt before = compression_->stream.avail_out;
-            const int result = deflate(&compression_->stream, Z_NO_FLUSH);
-            output_.commit(before - compression_->stream.avail_out);
-            if (result != Z_OK) {
-                fail(common::IoErr::Invalid);
-                co_return std::unexpected(common::IoErr::Invalid);
+            auto result = encoder_->write(std::span<const std::uint8_t>{buf + offset + consumed, slice - consumed},
+                                          std::span<std::uint8_t>{output_.writable_data(), output_.writable()});
+            if (!result) {
+                fail(result.error());
+                co_return std::unexpected(result.error());
             }
+            output_.commit(result->written);
+            consumed += result->consumed;
         }
         offset += slice;
-        stats_.input_bytes = slice > std::numeric_limits<std::size_t>::max() - stats_.input_bytes
+        stats_.input_bytes = consumed > std::numeric_limits<std::size_t>::max() - stats_.input_bytes
                                      ? std::numeric_limits<std::size_t>::max()
-                                     : stats_.input_bytes + slice;
-        input_since_yield_ += slice;
+                                     : stats_.input_bytes + consumed;
+        input_since_yield_ += consumed;
     }
     flush_pending_ = flush_pending_ || len != 0;
     co_return common::IoResult<void>{};
@@ -531,18 +481,13 @@ async::Task<common::IoResult<void>> GzipResponseWriter::sync_flush(std::chrono::
                 co_return drain_result;
             }
         }
-        compression_->stream.next_in = nullptr;
-        compression_->stream.avail_in = 0;
-        compression_->stream.next_out = output_.writable_data();
-        compression_->stream.avail_out = static_cast<uInt>(output_.writable());
-        const uInt before = compression_->stream.avail_out;
-        const int result = deflate(&compression_->stream, Z_SYNC_FLUSH);
-        output_.commit(before - compression_->stream.avail_out);
-        if (result != Z_OK) {
-            fail(common::IoErr::Invalid);
-            co_return std::unexpected(common::IoErr::Invalid);
+        auto result = encoder_->flush(std::span<std::uint8_t>{output_.writable_data(), output_.writable()});
+        if (!result) {
+            fail(result.error());
+            co_return std::unexpected(result.error());
         }
-        if (compression_->stream.avail_out != 0) {
+        output_.commit(result->written);
+        if (result->status == compression::EncodeStatus::Flushed) {
             break;
         }
     }
@@ -574,19 +519,14 @@ async::Task<common::IoResult<void>> GzipResponseWriter::finish(bool end_stream,
                 co_return drain_result;
             }
         }
-        compression_->stream.next_in = nullptr;
-        compression_->stream.avail_in = 0;
-        compression_->stream.next_out = output_.writable_data();
-        compression_->stream.avail_out = static_cast<uInt>(output_.writable());
-        const uInt before = compression_->stream.avail_out;
-        const int result = deflate(&compression_->stream, Z_FINISH);
-        output_.commit(before - compression_->stream.avail_out);
-        if (result == Z_STREAM_END) {
-            break;
+        auto result = encoder_->finish(std::span<std::uint8_t>{output_.writable_data(), output_.writable()});
+        if (!result) {
+            fail(result.error());
+            co_return std::unexpected(result.error());
         }
-        if (result != Z_OK || compression_->stream.avail_out != 0) {
-            fail(common::IoErr::Invalid);
-            co_return std::unexpected(common::IoErr::Invalid);
+        output_.commit(result->written);
+        if (result->status == compression::EncodeStatus::Finished) {
+            break;
         }
     }
     auto drain_result = co_await drain_output(end_stream, timeout);

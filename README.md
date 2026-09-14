@@ -198,9 +198,13 @@ benchmark invocation.
 | `FIBER_STATIC_LIBCXX` | `ON` | Statically link libc++ runtimes when `FIBER_USE_LIBCXX=ON`. |
 
 `FIBER_FETCH_DEPS=OFF` disables fallback downloads for optional GoogleTest and
-jemalloc dependencies. BoringSSL, the zlib source, and protobuf are still
-populated by `cmake/Deps.cmake`; use `FIBER_DEPS_DIR` to point at a reusable or
-pre-populated source cache.
+jemalloc dependencies. BoringSSL and protobuf are still populated by
+`cmake/Deps.cmake`; use `FIBER_DEPS_DIR` to point at a reusable or
+pre-populated source cache. zlib is no longer a build dependency: gzip
+compression uses the in-tree port in `src/compression/`, and tooling that
+needs real zlib sources (e.g. `scripts/build_nginx.sh`) prepares the pinned
+1.3.2 reference under `temp/zlib-reference/` via
+`scripts/prepare_zlib_reference.sh`.
 
 All downloaded source archives are SHA-256 verified. Restricted-network and
 downstream builds can replace an archive URL and its expected digest without
@@ -209,7 +213,6 @@ patching Fiber by setting the corresponding cache variables:
 | Dependency | URL variable | SHA-256 variable |
 | --- | --- | --- |
 | BoringSSL | `FIBER_BORINGSSL_URL` | `FIBER_BORINGSSL_SHA256` |
-| zlib | `FIBER_ZLIB_URL` | `FIBER_ZLIB_SHA256` |
 | protobuf | `FIBER_PROTOBUF_URL` | `FIBER_PROTOBUF_SHA256` |
 | GoogleTest | `FIBER_GOOGLETEST_URL` | `FIBER_GOOGLETEST_SHA256` |
 | jemalloc | `FIBER_JEMALLOC_URL` | `FIBER_JEMALLOC_SHA256` |

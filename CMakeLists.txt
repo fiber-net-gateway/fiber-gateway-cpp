@@ -36,8 +36,8 @@ configure_file(cmake/FiberPlatformConfig.h.in
 
 file(GLOB_RECURSE CPP_SRC_LIST CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
 
-# HTTP compression has a private zlib dependency. Keep it out of fiber_lib so
-# applications that do not use compression do not inherit zlib at link time.
+# HTTP compression is optional. Keep it out of fiber_lib so applications can
+# exclude it entirely via FIBER_BUILD_HTTP_COMPRESSION=OFF.
 list(REMOVE_ITEM CPP_SRC_LIST
     "${CMAKE_CURRENT_LIST_DIR}/src/http/GzipResponseWriter.cpp")
 
@@ -149,16 +149,13 @@ if (FIBER_ENABLE_LTO)
 endif()
 
 if (FIBER_BUILD_HTTP_COMPRESSION)
-    fiber_prepare_zlib_target()
     add_library(fiber_http_compression STATIC
         "${CMAKE_CURRENT_LIST_DIR}/src/http/GzipResponseWriter.cpp")
     target_include_directories(fiber_http_compression
         PUBLIC
             "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>"
             "$<INSTALL_INTERFACE:include>")
-    target_link_libraries(fiber_http_compression
-        PUBLIC fiber_lib
-        PRIVATE ZLIB::ZLIBSTATIC)
+    target_link_libraries(fiber_http_compression PUBLIC fiber_lib)
     set_target_properties(fiber_http_compression PROPERTIES FOLDER "fiber/http")
     if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
         set_property(TARGET fiber_http_compression PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -201,10 +198,23 @@ if(FIBER_BUILD_TESTS)
         file(GLOB FIBER_TEST_SOURCES CONFIGURE_DEPENDS
             "${CMAKE_CURRENT_LIST_DIR}/tests/*Test.cpp")
         list(SORT FIBER_TEST_SOURCES)
+        if (NOT FIBER_BUILD_HTTP_COMPRESSION)
+            # The gzip writer tests require the optional writer target.
+            list(REMOVE_ITEM FIBER_TEST_SOURCES
+                "${CMAKE_CURRENT_LIST_DIR}/tests/GzipResponseWriterTest.cpp")
+        endif()
         if (FIBER_TEST_SOURCES)
             add_executable(fiber_tests ${FIBER_TEST_SOURCES})
             target_include_directories(fiber_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src)
             target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main)
+            if (FIBER_BUILD_HTTP_COMPRESSION)
+                target_link_libraries(fiber_tests PRIVATE fiber_http_compression)
+            endif()
+            # Differential oracle: version-controlled zlib 1.3.2 sources
+            # compiled with a fiber_test_zlib_ symbol prefix.
+            include(cmake/FiberZlibReference.cmake)
+            fiber_add_zlib_reference()
+            target_link_libraries(fiber_tests PRIVATE fiber_zlib_reference_objects)
             fiber_link_runtime_allocator(fiber_tests)
             if (FIBER_ENABLE_LTO AND FIBER_IPO_SUPPORTED)
                 set_property(TARGET fiber_tests PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
