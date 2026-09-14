@@ -44,10 +44,14 @@ fiber_add_app(lite_nginx
 if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     include(GoogleTest)
 
+    # Test-only zlib 1.3.2 reference objects backing support/ZlibReference.h.
+    include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/FiberZlibReference.cmake")
+    fiber_add_zlib_reference()
+
     add_executable(lite_nginx_tests
         "${CMAKE_CURRENT_LIST_DIR}/tests/LiteNginxConfigTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/LiteNginxRuntimeTest.cpp")
-    target_link_libraries(lite_nginx_tests PRIVATE lite_nginx_core ZLIB::ZLIBSTATIC GTest::gtest_main)
+    target_link_libraries(lite_nginx_tests PRIVATE lite_nginx_core fiber_zlib_reference_objects GTest::gtest_main)
     target_include_directories(lite_nginx_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
     target_compile_definitions(lite_nginx_tests PRIVATE
         FIBER_LITE_NGINX_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")

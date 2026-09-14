@@ -22,9 +22,9 @@
 #include <unistd.h>
 #include <vector>
 
-#include <zlib.h>
-
 #include <openssl/sha.h>
+
+#include "support/ZlibReference.h"
 
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
@@ -323,23 +323,13 @@ std::string decode_chunked_body(std::string_view response) {
 }
 
 std::string gunzip_body(std::string_view compressed) {
-    z_stream stream{};
-    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
-        return {};
-    }
-    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(compressed.data()));
-    stream.avail_in = static_cast<uInt>(compressed.size());
-    std::string output;
-    std::array<char, 4096> buffer{};
-    int result = Z_OK;
-    while (result == Z_OK) {
-        stream.next_out = reinterpret_cast<Bytef *>(buffer.data());
-        stream.avail_out = static_cast<uInt>(buffer.size());
-        result = inflate(&stream, Z_NO_FLUSH);
-        output.append(buffer.data(), buffer.size() - stream.avail_out);
-    }
-    const int end_result = inflateEnd(&stream);
-    return result == Z_STREAM_END && end_result == Z_OK ? output : std::string{};
+    // Full-member decode through the independent zlib 1.3.2 reference: the
+    // result must end on a validated trailer with no trailing bytes. Failures
+    // surface as a gtest expectation plus an empty body, keeping historical
+    // call-site comparisons working.
+    const fiber::test::ZlibReferenceResult decoded = fiber::test::zlib_reference_gunzip(compressed);
+    EXPECT_TRUE(decoded.ok) << "gunzip failed, zlib status " << decoded.z_status;
+    return decoded.ok ? decoded.output : std::string{};
 }
 
 std::uint16_t reserve_loopback_port() {

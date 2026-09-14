@@ -245,6 +245,9 @@ cmake --build build-benchmark-all \
   -j4
 ```
 
+注：`FETCHCONTENT_SOURCE_DIR_ZLIB` 行反映当时的构建配置；zlib 已不再作为
+CMake 依赖下载，当前源码树复现时应删除该行（结果不受影响）。
+
 OpenResty 的完整 configure 参数保存在每个结果目录的 `openresty-version.txt` 或
 `nginx-version.txt` 中。测试二进制路径为：
 

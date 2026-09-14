@@ -2,8 +2,8 @@
 
 #include <fiber/script/std/NodeText.h>
 #include <fiber/script/std/StdLibrary.h>
-#include "script/std/Crc32.h"
 
+#include <fiber/common/util/Crc32.h>
 #include <fiber/script/JsValue.h>
 #include <fiber/script/Library.h>
 #include <fiber/script/gc/GcInternal.h>
@@ -39,7 +39,7 @@ AbiResult crc32_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*/
     if (text.empty()) {
         return AbiResult::success(JsValue::make_integer(0));
     }
-    return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(crc32_bytes(text.data(), text.size()))));
+    return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(fiber::util::Crc32::compute(text))));
 }
 
 // ---- hash.md5 / sha1 / sha256 ----
