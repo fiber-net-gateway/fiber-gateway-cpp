@@ -157,6 +157,10 @@ public:
     [[nodiscard]] bool in_loop() const noexcept { return current_or_null() == this; }
     [[nodiscard]] bool valid() const noexcept { return event_fd_ >= 0 && poller_.valid(); }
     [[nodiscard]] bool running() const noexcept { return running_.load(std::memory_order_acquire); }
+    // True once stop() has been requested for the current run (any thread); the
+    // next run() resets it. Loop-affine adoption paths use this to refuse
+    // taking over work on a loop that is going away.
+    [[nodiscard]] bool stopping() const noexcept { return stop_requested_.load(std::memory_order_acquire); }
     [[nodiscard]] std::chrono::steady_clock::time_point now() const noexcept { return now_; }
     // Incremented by every poll. Loop-thread only; lets budgeted consumers
     // account work per turn and yield with post_next once their share is spent.
@@ -231,7 +235,7 @@ public:
         FIBER_ASSERT(in_loop());
         StopEntry &entry = handle.*EntryMember;
         FIBER_ASSERT(!entry.node_.linked());
-        if (stop_requested_.load(std::memory_order_acquire)) {
+        if (stopping()) {
             return false;
         }
         entry.handle_offset_ = reinterpret_cast<char *>(&entry) - reinterpret_cast<char *>(&handle);

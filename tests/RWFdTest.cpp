@@ -829,7 +829,7 @@ TEST(RWFdTest, HandoverDetachesAndReadoptsOnTargetLoop) {
     EXPECT_EQ(result.err, fiber::common::IoErr::None);
 }
 
-TEST(RWFdTest, AdoptionTakesLifecycleEvenWithoutSubscription) {
+TEST(RWFdTest, RejectsAdoptionOntoStoppingLoop) {
     int fds[2] = {-1, -1};
     EXPECT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
 
@@ -845,18 +845,16 @@ TEST(RWFdTest, AdoptionTakesLifecycleEvenWithoutSubscription) {
     origin_loop.run();
 
     fiber::async::spawn(target_loop, [&]() -> DetachedTask {
-        // Adopt without subscribing: no ADD ever happens, but adoption took
-        // over the lifecycle — the new loop's stop hook must close the fd.
-        EXPECT_EQ(rwfd.adopt_loop(target_loop), fiber::common::IoErr::None);
-        EXPECT_FALSE(rwfd.efd_.registered());
+        // The target loop is asked to stop before the adoption runs: nobody
+        // would clean up after it there, so adoption is refused and the fd is
+        // closed by the adoption itself.
         target_loop.stop();
+        EXPECT_EQ(rwfd.adopt_loop(target_loop), fiber::common::IoErr::Canceled);
+        EXPECT_FALSE(rwfd.valid());
         co_return;
     });
     target_loop.run();
 
-    // The target loop stopped with no subscription in between: the fd was
-    // closed by the stop hook instead of lingering valid and unowned.
-    EXPECT_FALSE(rwfd.valid());
     if (fds[1] >= 0) {
         (void) ::close(fds[1]);
     }

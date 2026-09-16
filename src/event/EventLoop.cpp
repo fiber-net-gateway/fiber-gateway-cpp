@@ -143,6 +143,13 @@ void EventLoop::run_prepared() {
         run_once();
     } while (!stop_requested_.load(std::memory_order_acquire) && event_fd_ >= 0);
     drain_stop();
+    // fd ownership contract: fd wrappers close themselves before the loop
+    // stops; only operation-level stop hooks (pending accepts/connects and
+    // terminal notifications) run in drain_stop above, and they remove their
+    // own registrations. Nothing but this loop's wakeup entry may remain
+    // (absent when its bootstrap registration failed and closed the fd).
+    FIBER_ASSERT_MSG(poller_.size() == (event_fd_ >= 0 ? std::size_t{1} : std::size_t{0}),
+                     "poller registrations outlive loop stop");
     current_ = prev;
     running_.store(false, std::memory_order_release);
 }
