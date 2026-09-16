@@ -419,10 +419,10 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, fiber::http::HttpResp
         co_return;
     }
 
+    // Recyclability is judged solely by ClientHttp1Exchange at destruction: no-body
+    // responses (HEAD/1xx/204/304) are already response_complete_ at header time, so
+    // releasing here lets the exchange destructor pool-or-destroy on its own.
     if (no_response_body) {
-        if (location.reuse_connection) {
-            (void) co_await upstream_exchange.discard_response_body(location.read_timeout);
-        }
         co_return;
     }
     if (has_content_length && response_content_length == 0) {
@@ -547,9 +547,10 @@ ProxyHandler::handle(fiber::http::HttpExchange &exchange, fiber::http::HttpRespo
     }
 
     record_client_abort(log_context);
-    if (acquired.conn != nullptr && acquired.conn->valid()) {
-        acquired.conn->close();
-    }
+    // Destroying the proxy coroutine frame above already failed the in-flight exchange
+    // (ClientHttp1Exchange::~ClientHttp1Exchange → fail_exchange → not reusable). The
+    // lease destructor closes the connection on the loop the fd is bound to; the proxy
+    // never decides pool-vs-destroy itself.
 }
 
 } // namespace fiber::lite_nginx::proxy

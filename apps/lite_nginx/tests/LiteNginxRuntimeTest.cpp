@@ -1005,6 +1005,139 @@ private:
     std::thread thread_{};
 };
 
+// One keep-alive upstream connection across two requests: serves the first response, parks on
+// the second request without answering, and reports whether the proxy closed the connection.
+// The parked second exchange is the one the client-abort path must tear down while the
+// connection is checked out of the pool.
+class KeepAliveAbortUpstream {
+public:
+    KeepAliveAbortUpstream(std::string first_response, std::promise<std::string> *first_request,
+                           std::promise<std::string> *second_request, std::promise<bool> *closed_promise) :
+        first_response_(std::move(first_response)), first_request_(first_request), second_request_(second_request),
+        closed_promise_(closed_promise) {
+        listener_fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        EXPECT_GE(listener_fd_, 0);
+        if (listener_fd_ < 0) {
+            publish(false);
+            return;
+        }
+
+        int yes = 1;
+        ::setsockopt(listener_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(0);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (::bind(listener_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 ||
+            ::listen(listener_fd_, 16) != 0) {
+            ADD_FAILURE() << "keep-alive abort upstream listen failed: " << errno;
+            ::close(listener_fd_);
+            listener_fd_ = -1;
+            publish(false);
+            return;
+        }
+
+        sockaddr_in bound{};
+        socklen_t len = sizeof(bound);
+        if (::getsockname(listener_fd_, reinterpret_cast<sockaddr *>(&bound), &len) != 0) {
+            ADD_FAILURE() << "keep-alive abort upstream getsockname failed: " << errno;
+            ::close(listener_fd_);
+            listener_fd_ = -1;
+            publish(false);
+            return;
+        }
+        port_ = ntohs(bound.sin_port);
+
+        thread_ = std::thread([this]() {
+            const int client = ::accept4(listener_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+            if (client < 0) {
+                publish(false);
+                return;
+            }
+            ++accept_count_;
+            client_fd_.store(client, std::memory_order_release);
+
+            timeval tv{};
+            tv.tv_sec = 5;
+            ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+            std::string request = read_http_request(client);
+            if (!consume(first_request_, request)) {
+                publish(false);
+            } else if (!send_all(client, first_response_)) {
+                publish(false);
+            } else if (!consume(second_request_, read_http_request(client))) {
+                publish(false);
+            } else {
+                char byte = 0;
+                const ssize_t rc = ::recv(client, &byte, 1, 0);
+                publish(rc == 0);
+            }
+
+            if (client_fd_.exchange(-1, std::memory_order_acq_rel) == client) {
+                ::shutdown(client, SHUT_RDWR);
+                ::close(client);
+            }
+        });
+    }
+
+    ~KeepAliveAbortUpstream() {
+        if (listener_fd_ >= 0) {
+            ::shutdown(listener_fd_, SHUT_RDWR);
+            ::close(listener_fd_);
+        }
+        const int client = client_fd_.exchange(-1, std::memory_order_acq_rel);
+        if (client >= 0) {
+            ::shutdown(client, SHUT_RDWR);
+            ::close(client);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        publish(false);
+    }
+
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+    [[nodiscard]] int accept_count() const noexcept { return accept_count_.load(); }
+
+private:
+    static bool consume(std::promise<std::string> *&promise, const std::string &request) {
+        if (request.empty()) {
+            return false;
+        }
+        if (promise != nullptr) {
+            promise->set_value(request);
+            promise = nullptr;
+        }
+        return true;
+    }
+
+    void publish(bool closed) {
+        if (first_request_ != nullptr) {
+            first_request_->set_value({});
+            first_request_ = nullptr;
+        }
+        if (second_request_ != nullptr) {
+            second_request_->set_value({});
+            second_request_ = nullptr;
+        }
+        if (closed_promise_ != nullptr) {
+            closed_promise_->set_value(closed);
+            closed_promise_ = nullptr;
+        }
+    }
+
+    int listener_fd_ = -1;
+    std::atomic<int> client_fd_{-1};
+    std::uint16_t port_ = 0;
+    std::string first_response_;
+    std::promise<std::string> *first_request_ = nullptr;
+    std::promise<std::string> *second_request_ = nullptr;
+    std::promise<bool> *closed_promise_ = nullptr;
+    std::atomic<int> accept_count_{0};
+    std::thread thread_{};
+};
+
 // Minimal UDP nameserver on loopback: answers every A query with 127.0.0.1 and every other
 // query type with an empty NOERROR answer. Lets runtime tests use DNS-name upstreams without
 // depending on the host's resolver, which is what the DnsService consults for name peers.
@@ -2131,6 +2264,89 @@ http {
 
     ASSERT_EQ(closed_future.wait_for(3s), std::future_status::ready);
     EXPECT_TRUE(closed_future.get());
+}
+
+// worker_processes 2 makes the accept loop's round-robin put consecutive client connections on
+// different workers: the first request warms the pool with an upstream connection homed on
+// worker A's core, the second runs on worker B and must acquire it by stealing across loops
+// (the fd is adopted onto B before the lease is delivered). Aborting the second client while
+// its response is pending then exercises the close_on_client_abort teardown on the borrowing
+// loop: the frame destruction fails the in-flight exchange and ProxyHandler's
+// acquired.conn->close() runs where the fd is bound, never on worker A.
+TEST(LiteNginxRuntimeTest, ClosesStolenUpstreamConnectionWhenClientAborts) {
+    std::promise<std::string> first_request;
+    std::promise<std::string> second_request;
+    std::promise<bool> upstream_closed;
+    auto first_future = first_request.get_future();
+    auto second_future = second_request.get_future();
+    auto closed_future = upstream_closed.get_future();
+    KeepAliveAbortUpstream upstream("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nfirst",
+                                    &first_request, &second_request, &upstream_closed);
+    ASSERT_NE(upstream.port(), 0);
+
+    std::uint16_t port = reserve_loopback_port();
+    ASSERT_NE(port, 0);
+    std::string config_text = R"(
+worker_processes 2;
+http {
+    listen 127.0.0.1:LISTEN_PORT;
+
+    connection_pool {
+        keepalive_size 2;
+        keepalive_timeout 30s;
+        steal on;
+    }
+
+    server {
+        server_name localhost;
+        proxy_close_on_client_abort on;
+        location /* {
+            proxy_pass http://127.0.0.1:UPSTREAM_PORT;
+        }
+    }
+}
+)";
+    config_text.replace(config_text.find("LISTEN_PORT"), sizeof("LISTEN_PORT") - 1, std::to_string(port));
+    config_text.replace(config_text.find("UPSTREAM_PORT"), sizeof("UPSTREAM_PORT") - 1,
+                        std::to_string(upstream.port()));
+
+    auto config = fiber::lite_nginx::config::ConfigLoader::load_from_string(config_text, "client_abort_stolen.conf");
+    ASSERT_TRUE(config.has_value()) << config.error().message;
+    auto runtime = fiber::lite_nginx::runtime::RuntimeBuilder::build(*config);
+    ASSERT_TRUE(runtime.has_value()) << runtime.error().message;
+    EXPECT_TRUE(runtime->connection_pool.steal);
+    EXPECT_TRUE(runtime->servers[0].locations[0].close_on_client_abort);
+    RuntimeHarness harness(*runtime);
+
+    // Worker A: complete response, returning the upstream connection to A's pool core.
+    int client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kWarmRequest =
+            "GET /warm HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kWarmRequest));
+    const std::string warm_response = recv_http_response(client);
+    ::close(client);
+    ASSERT_EQ(first_future.wait_for(3s), std::future_status::ready);
+    EXPECT_NE(warm_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos) << warm_response;
+
+    // Worker B: steals A's idle connection and parks in read_header awaiting the response.
+    client = connect_client(harness.port());
+    ASSERT_GE(client, 0);
+    static constexpr std::string_view kSlowRequest =
+            "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_TRUE(send_all(client, kSlowRequest));
+    ASSERT_EQ(second_future.wait_for(3s), std::future_status::ready);
+    EXPECT_NE(second_future.get().find("GET /slow"), std::string::npos);
+    // One upstream accept for two proxied requests: the second rode the stolen connection.
+    EXPECT_EQ(upstream.accept_count(), 1);
+
+    linger reset_on_close{1, 0};
+    ASSERT_EQ(::setsockopt(client, SOL_SOCKET, SO_LINGER, &reset_on_close, sizeof(reset_on_close)), 0);
+    ::close(client);
+
+    ASSERT_EQ(closed_future.wait_for(3s), std::future_status::ready);
+    EXPECT_TRUE(closed_future.get());
+    EXPECT_EQ(upstream.accept_count(), 1);
 }
 
 TEST(LiteNginxRuntimeTest, ProxiesHttp1WebSocketUpgradeByDefault) {
