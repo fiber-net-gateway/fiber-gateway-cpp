@@ -88,10 +88,11 @@ public:
     [[nodiscard]] fiber::common::IoResult<size_t> try_writev(const struct iovec *iov, int iovcnt) noexcept;
 
 private:
-    fiber::common::IoErr read_once(void *buf, size_t len, size_t &out) noexcept;
-    fiber::common::IoErr write_once(const void *buf, size_t len, size_t &out) noexcept;
-    fiber::common::IoErr readv_once(const struct iovec *iov, int iovcnt, size_t &out) noexcept;
-    fiber::common::IoErr writev_once(const struct iovec *iov, int iovcnt, size_t &out) noexcept;
+    // One syscall each; the fd arrives from the RWFd I/O wrapper.
+    fiber::common::IoErr read_once(int socket_fd, void *buf, size_t len, size_t &out) noexcept;
+    fiber::common::IoErr write_once(int socket_fd, const void *buf, size_t len, size_t &out) noexcept;
+    fiber::common::IoErr readv_once(int socket_fd, const struct iovec *iov, int iovcnt, size_t &out) noexcept;
+    fiber::common::IoErr writev_once(int socket_fd, const struct iovec *iov, int iovcnt, size_t &out) noexcept;
 
     // Marks stream state after one direction's syscall result and feeds the
     // direction readiness back through `state`.
