@@ -67,8 +67,9 @@ void record_callback(void *raw_ctx, fiber::common::IoErr err) noexcept {
 fiber::common::IoResult<std::size_t> raw_recv_once(fiber::net::detail::RWFd &rwfd, void *buf,
                                                    std::size_t len) noexcept {
     return rwfd.read(
-            [&](fiber::net::detail::RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<std::size_t> {
-                const auto out = ::recv(rwfd.fd(), buf, len, MSG_DONTWAIT);
+            [&](int socket_fd,
+                fiber::net::detail::RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<std::size_t> {
+                const auto out = ::recv(socket_fd, buf, len, MSG_DONTWAIT);
                 if (out >= 0) {
                     if (static_cast<std::size_t>(out) < len) {
                         state.mark_blocked();
@@ -740,7 +741,8 @@ struct ReplaceSubscription {
         // WouldBlock marks it Blocked, which is the only legal subscription
         // moment under the contract.
         (void) self.fd.write(
-                [](fiber::net::detail::RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<std::size_t> {
+                [](int,
+                   fiber::net::detail::RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<std::size_t> {
                     state.mark_blocked();
                     return std::unexpected(fiber::common::IoErr::WouldBlock);
                 });

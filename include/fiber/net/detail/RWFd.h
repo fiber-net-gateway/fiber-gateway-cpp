@@ -78,20 +78,22 @@ public:
     // ------------------------------------------------------------------
     // Synchronous I/O wrappers. They assert the current loop, always run the
     // lambda exactly once (never suppressed by readiness, never registered,
-    // never waiting) and let the lambda feed the direction state back through
-    // IoStateUpdate. Error/EOF interpretation stays in the lambda's layer.
+    // never waiting), hand it the owned fd so callers need no RWFd capture
+    // just to reach it, and let the lambda feed the direction state back
+    // through IoStateUpdate. Error/EOF interpretation stays in the lambda's
+    // layer.
     // ------------------------------------------------------------------
     template<typename F>
-    [[nodiscard]] auto read(F io) noexcept(noexcept(io(std::declval<IoStateUpdate &>()))) {
+    [[nodiscard]] auto read(F io) noexcept(noexcept(io(std::declval<int>(), std::declval<IoStateUpdate &>()))) {
         FIBER_ASSERT(current_loop().in_loop());
         IoStateUpdate update{read_event_.state};
-        return io(update);
+        return io(efd_.fd(), update);
     }
     template<typename F>
-    [[nodiscard]] auto write(F io) noexcept(noexcept(io(std::declval<IoStateUpdate &>()))) {
+    [[nodiscard]] auto write(F io) noexcept(noexcept(io(std::declval<int>(), std::declval<IoStateUpdate &>()))) {
         FIBER_ASSERT(current_loop().in_loop());
         IoStateUpdate update{write_event_.state};
-        return io(update);
+        return io(efd_.fd(), update);
     }
 
     // Inline, allocation-free state feedback for read/write lambdas.

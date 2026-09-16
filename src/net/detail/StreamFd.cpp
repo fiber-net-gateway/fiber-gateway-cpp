@@ -436,9 +436,9 @@ fiber::common::IoResult<size_t> StreamFd::try_read(void *buf, size_t len) noexce
     if (len == 0) {
         return 0;
     }
-    return rwfd_.read([&](RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<size_t> {
+    return rwfd_.read([&](int socket_fd, RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<size_t> {
         size_t out = 0;
-        const auto err = read_once(buf, len, out);
+        const auto err = read_once(socket_fd, buf, len, out);
         finish_stream_read(state, err, out, len);
         if (err != fiber::common::IoErr::None) {
             return std::unexpected(err);
@@ -457,9 +457,9 @@ fiber::common::IoResult<size_t> StreamFd::try_write(const void *buf, size_t len)
     if (len == 0) {
         return 0;
     }
-    return rwfd_.write([&](RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<size_t> {
+    return rwfd_.write([&](int socket_fd, RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<size_t> {
         size_t out = 0;
-        const auto err = write_once(buf, len, out);
+        const auto err = write_once(socket_fd, buf, len, out);
         finish_stream_write(state, err);
         if (err != fiber::common::IoErr::None) {
             return std::unexpected(err);
@@ -485,9 +485,9 @@ fiber::common::IoResult<size_t> StreamFd::try_readv(const struct iovec *iov, int
     if (len == 0) {
         return 0;
     }
-    return rwfd_.read([&](RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<size_t> {
+    return rwfd_.read([&](int socket_fd, RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<size_t> {
         size_t out = 0;
-        const auto err = readv_once(iov, iovcnt, out);
+        const auto err = readv_once(socket_fd, iov, iovcnt, out);
         finish_stream_read(state, err, out, len);
         if (err != fiber::common::IoErr::None) {
             return std::unexpected(err);
@@ -513,9 +513,9 @@ fiber::common::IoResult<size_t> StreamFd::try_writev(const struct iovec *iov, in
     if (len == 0) {
         return 0;
     }
-    return rwfd_.write([&](RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<size_t> {
+    return rwfd_.write([&](int socket_fd, RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<size_t> {
         size_t out = 0;
-        const auto err = writev_once(iov, iovcnt, out);
+        const auto err = writev_once(socket_fd, iov, iovcnt, out);
         finish_stream_write(state, err);
         if (err != fiber::common::IoErr::None) {
             return std::unexpected(err);
@@ -524,9 +524,8 @@ fiber::common::IoResult<size_t> StreamFd::try_writev(const struct iovec *iov, in
     });
 }
 
-fiber::common::IoErr StreamFd::read_once(void *buf, size_t len, size_t &out) noexcept {
+fiber::common::IoErr StreamFd::read_once(int socket_fd, void *buf, size_t len, size_t &out) noexcept {
     out = 0;
-    int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
         return fiber::common::IoErr::BadFd;
     }
@@ -547,9 +546,8 @@ fiber::common::IoErr StreamFd::read_once(void *buf, size_t len, size_t &out) noe
     }
 }
 
-fiber::common::IoErr StreamFd::write_once(const void *buf, size_t len, size_t &out) noexcept {
+fiber::common::IoErr StreamFd::write_once(int socket_fd, const void *buf, size_t len, size_t &out) noexcept {
     out = 0;
-    int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
         return fiber::common::IoErr::BadFd;
     }
@@ -570,9 +568,8 @@ fiber::common::IoErr StreamFd::write_once(const void *buf, size_t len, size_t &o
     }
 }
 
-fiber::common::IoErr StreamFd::readv_once(const struct iovec *iov, int iovcnt, size_t &out) noexcept {
+fiber::common::IoErr StreamFd::readv_once(int socket_fd, const struct iovec *iov, int iovcnt, size_t &out) noexcept {
     out = 0;
-    int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
         return fiber::common::IoErr::BadFd;
     }
@@ -596,9 +593,8 @@ fiber::common::IoErr StreamFd::readv_once(const struct iovec *iov, int iovcnt, s
     }
 }
 
-fiber::common::IoErr StreamFd::writev_once(const struct iovec *iov, int iovcnt, size_t &out) noexcept {
+fiber::common::IoErr StreamFd::writev_once(int socket_fd, const struct iovec *iov, int iovcnt, size_t &out) noexcept {
     out = 0;
-    int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
         return fiber::common::IoErr::BadFd;
     }
