@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <sys/epoll.h>
+#include <thread>
 #include <type_traits>
 
 #include "../common/IoError.h"
@@ -53,6 +54,13 @@ public:
 
     bool valid() const;
 
+    // All poller operations belong to one thread: the constructing thread,
+    // re-anchored by rebind_owner_thread() when an EventLoop hands its poller
+    // to the thread that runs the loop (EventLoop objects are constructed on
+    // one thread and run on another). Debug builds assert the affinity so a
+    // cross-thread add/mod/del/wait fails loudly instead of racing the batch.
+    void rebind_owner_thread() noexcept { owner_thread_ = std::this_thread::get_id(); }
+
     fiber::common::IoErr add(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr mod(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr del(Item &item);
@@ -68,6 +76,7 @@ public:
 private:
     enum class WaitBackend : std::uint8_t { Unknown, EpollPwait2, TimerFd };
 
+    void assert_owner_thread() const noexcept;
     void invalidate_batch(const Item &item) noexcept;
 
     int wait_impl(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
@@ -83,6 +92,7 @@ private:
     int batch_count_ = 0;
     WaitBackend wait_backend_ = WaitBackend::Unknown;
     std::chrono::steady_clock::time_point armed_deadline_ = std::chrono::steady_clock::time_point::max();
+    std::thread::id owner_thread_{};
 };
 
 constexpr Poller::Event operator|(Poller::Event left, Poller::Event right) noexcept {

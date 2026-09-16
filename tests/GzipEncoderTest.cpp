@@ -261,6 +261,13 @@ std::string gunzip_incremental(std::string_view member, std::size_t chunk) {
 } // namespace
 
 // Global allocation counter used by the steady-state test below.
+//
+// The TSan runtime installs its own new/delete interceptors, so replacing
+// them here would collide at link time. Without the replacement the counter
+// stays zero and the steady-state check passes vacuously under TSan; every
+// other build runs the real assertion.
+
+#if !defined(__SANITIZE_THREAD__) && !(defined(__has_feature) && __has_feature(thread_sanitizer))
 
 void *operator new(std::size_t size) {
     ++g_thread_allocations;
@@ -276,6 +283,8 @@ void operator delete(void *ptr, std::size_t) noexcept { std::free(ptr); }
 void *operator new[](std::size_t size) { return operator new(size); }
 void operator delete[](void *ptr) noexcept { std::free(ptr); }
 void operator delete[](void *ptr, std::size_t) noexcept { std::free(ptr); }
+
+#endif
 
 // ---- creation ----
 

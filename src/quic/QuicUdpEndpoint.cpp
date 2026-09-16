@@ -810,6 +810,14 @@ common::IoResult<void> QuicUdpEndpoint::send_direct_datagram(const std::uint8_t 
     if (*sent != len) {
         return std::unexpected(common::IoErr::Invalid);
     }
+    // A successful direct send proves the socket is writable. The write
+    // direction is Ready now and takes no readiness notification, so mirror
+    // one for the scheduler: without this, a registered write callback would
+    // wait for a Blocked→Ready transition that never comes.
+    if (write_blocked_) {
+        write_ready_ = true;
+        schedule_io_pump();
+    }
     return {};
 }
 
@@ -885,14 +893,23 @@ common::IoErr QuicUdpEndpoint::sync_socket_callbacks() noexcept {
     // The socket has persistent ET interest. Subscribe to write notifications
     // only after socket backpressure; pacing and congestion use their own wakeups.
     const bool want_write = write_blocked_ && send_scheduler_.has_work() && !closing_;
-    if (want_read && !read_callback_registered_) {
+    // A direction whose fd still tests Ready must be advanced by pumping, not
+    // by subscribing: a Ready direction takes no subscription and produces no
+    // Blocked→Ready transition to fire one. Treat it as an immediate wakeup.
+    if (want_read && !read_callback_registered_ && socket_->read_ready()) {
+        read_ready_ = true;
+        io_pump_again_ = true;
+    } else if (want_read && !read_callback_registered_) {
         const common::IoErr err = socket_->set_read_callback(&QuicUdpEndpoint::on_socket_read_ready, this);
         if (err != common::IoErr::None) {
             return err;
         }
         read_callback_registered_ = true;
     }
-    if (want_write && !write_callback_registered_) {
+    if (want_write && !write_callback_registered_ && socket_->write_ready()) {
+        write_ready_ = true;
+        io_pump_again_ = true;
+    } else if (want_write && !write_callback_registered_) {
         const common::IoErr err = socket_->set_write_callback(&QuicUdpEndpoint::on_socket_write_ready, this);
         if (err != common::IoErr::None) {
             return err;

@@ -249,6 +249,7 @@ DetachedTask run_hold_server(fiber::event::EventLoop *loop, std::size_t accept_c
 }
 
 DetachedTask run_reset_after_accept_server(fiber::event::EventLoop *loop, std::promise<std::uint16_t> *port_promise,
+                                           std::shared_ptr<std::atomic_bool> allow_reset,
                                            std::promise<fiber::common::IoErr> *result_promise) {
     fiber::net::TcpListener listener(*loop);
     fiber::net::ListenOptions options{};
@@ -276,6 +277,12 @@ DetachedTask run_reset_after_accept_server(fiber::event::EventLoop *loop, std::p
 
     int client = accept_result->release_fd();
     listener.close();
+    // Hold the accepted connection open until the borrower has stolen it: a
+    // pooled idle connection observes a peer reset while parked and is then
+    // dropped at home instead of being handed out.
+    while (!allow_reset->load(std::memory_order_acquire)) {
+        co_await fiber::async::sleep(1ms);
+    }
     linger reset_linger{1, 0};
     if (::setsockopt(client, SOL_SOCKET, SO_LINGER, &reset_linger, sizeof(reset_linger)) != 0) {
         const fiber::common::IoErr err = fiber::common::io_err_from_errno(errno);
@@ -533,6 +540,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, StealsIdleConnectionFromOtherLoopAndRe
         borrowed.reset();
 
         fiber::async::spawn(group.at(0), [&, borrowed_ok, home_conn]() -> DetachedTask {
+            // The return journey hops through the borrower's next loop turn
+            // before the entry lands home: give it that turn here.
+            co_await fiber::async::sleep(10ms);
             auto returned = co_await set.acquire(key);
             const bool returned_ok =
                     returned.valid() && returned.hit() && returned.has_connection() && returned.get() == home_conn;
@@ -937,7 +947,7 @@ TEST(StealableHttp1ConnectionPoolSetTest, ClearAllowsBorrowedConnectionToReturnH
     server_group.join();
 }
 
-TEST(StealableHttp1ConnectionPoolSetTest, ShutdownDropsBorrowedConnectionOnReturn) {
+TEST(StealableHttp1ConnectionPoolSetTest, ShutdownWaitsForBorrowedLeaseAndDropsItOnReturn) {
     fiber::event::EventLoopGroup server_group(1);
     auto server_state = std::make_shared<HoldServerState>();
     std::promise<std::uint16_t> server_port_promise;
@@ -1005,8 +1015,13 @@ TEST(StealableHttp1ConnectionPoolSetTest, ShutdownDropsBorrowedConnectionOnRetur
         co_await set.shutdown_async();
         shutdown_done_promise.set_value();
     });
-    shutdown_done_future.get();
+    // The shutdown contract covers borrowed leases: it must not complete
+    // while the stolen connection is still out.
+    EXPECT_EQ(shutdown_done_future.wait_for(100ms), std::future_status::timeout);
     allow_reset->store(true, std::memory_order_release);
+    // Returning the lease walks the in-flight detach/return messages home;
+    // shutdown completes only once they have landed.
+    shutdown_done_future.get();
     EXPECT_TRUE(final_future.get());
 
     server_state->stop.store(true, std::memory_order_release);
@@ -1087,6 +1102,9 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionHeldByOneLoopMakesOt
     allow_release->store(true, std::memory_order_release);
     cleanup_future.get();
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {
+        // The return journey hops through the borrower's next loop turn
+        // before the entry lands home: give it that turn here.
+        co_await fiber::async::sleep(10ms);
         auto returned = co_await set.acquire(key);
         if (returned.hit() && returned.has_connection()) {
             returned.connection().close();
@@ -1111,10 +1129,12 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
     std::promise<fiber::common::IoErr> server_result_promise;
     auto server_port_future = server_port_promise.get_future();
     auto server_result_future = server_result_promise.get_future();
+    auto allow_reset = std::make_shared<std::atomic_bool>(false);
 
     server_group.start();
     fiber::async::spawn(server_group.at(0), [&]() {
-        return run_reset_after_accept_server(&server_group.at(0), &server_port_promise, &server_result_promise);
+        return run_reset_after_accept_server(&server_group.at(0), &server_port_promise, allow_reset,
+                                             &server_result_promise);
     });
 
     const std::uint16_t port = server_port_future.get();
@@ -1128,6 +1148,8 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
 
     std::promise<void> home_ready_promise;
     auto home_ready_future = home_ready_promise.get_future();
+    std::promise<bool> borrowed_ready_promise;
+    auto borrowed_ready_future = borrowed_ready_promise.get_future();
     std::promise<bool> borrower_failed_promise;
     auto borrower_failed_future = borrower_failed_promise.get_future();
     std::promise<bool> dropped_promise;
@@ -1148,8 +1170,10 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
 
     fiber::async::spawn(group.at(1), [&]() -> DetachedTask {
         auto borrowed = co_await set.acquire(key);
+        const bool borrowed_ok = borrowed.hit() && borrowed.has_connection();
+        borrowed_ready_promise.set_value(borrowed_ok);
         bool failed = false;
-        if (borrowed.hit() && borrowed.has_connection()) {
+        if (borrowed_ok) {
             fiber::mem::BufPool pool;
             fiber::http::HttpHeaders headers(pool);
             headers.add_view("host", "example.com");
@@ -1172,6 +1196,10 @@ TEST(StealableHttp1ConnectionPoolSetTest, BorrowedConnectionFailureOnBorrowerLoo
         co_return;
     });
 
+    // The pooled entry must be stolen while healthy; only then does the server
+    // reset it, so the exchange fails on the borrower loop.
+    ASSERT_TRUE(borrowed_ready_future.get());
+    allow_reset->store(true, std::memory_order_release);
     EXPECT_TRUE(borrower_failed_future.get());
 
     fiber::async::spawn(group.at(0), [&]() -> DetachedTask {

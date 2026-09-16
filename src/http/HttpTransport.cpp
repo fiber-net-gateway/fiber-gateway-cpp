@@ -123,6 +123,16 @@ common::IoErr TcpTransport::clear_terminal_callback(ReadyCallback callback, void
     return stream_.clear_terminal_callback(callback, ctx);
 }
 
+bool TcpTransport::read_ready() const noexcept { return stream_.read_ready(); }
+
+bool TcpTransport::write_ready() const noexcept { return stream_.write_ready(); }
+
+common::IoErr TcpTransport::detach_for_handover() noexcept { return stream_.detach_for_handover(); }
+
+common::IoErr TcpTransport::adopt_loop(event::EventLoop &loop) noexcept { return stream_.adopt_loop(loop); }
+
+common::IoErr TcpTransport::ensure_state_observation() noexcept { return stream_.ensure_state_observation(); }
+
 common::IoErr TcpTransport::poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept {
     out = 0;
     wait_event = event::IoEvent::None;
@@ -351,6 +361,21 @@ common::IoErr TlsTransport::clear_write_callback(ReadyCallback callback, void *c
 common::IoErr TlsTransport::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.clear_terminal_callback(callback, ctx);
 }
+
+// Pending decrypted plaintext behaves like a ready fd: a poll_read makes
+// progress without waiting, so callers must advance it instead of subscribing.
+bool TlsTransport::read_ready() const noexcept { return stream_.has_pending_read() || stream_.read_ready(); }
+
+bool TlsTransport::write_ready() const noexcept { return stream_.write_ready(); }
+
+common::IoErr TlsTransport::detach_for_handover() noexcept {
+    FIBER_ASSERT(pending_write_kind_ == PendingWriteKind::None);
+    return stream_.detach_for_handover();
+}
+
+common::IoErr TlsTransport::adopt_loop(event::EventLoop &loop) noexcept { return stream_.adopt_loop(loop); }
+
+common::IoErr TlsTransport::ensure_state_observation() noexcept { return stream_.ensure_state_observation(); }
 
 common::IoErr TlsTransport::poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept {
     out = 0;

@@ -4,8 +4,9 @@
 
 namespace fiber::net::detail {
 
-Efd::Efd(fiber::event::EventLoop &loop, void *owner, EventCallback callback, fiber::event::Poller::Mode mode) noexcept :
-    loop_(loop), owner_(owner), callback_(callback), mode_(mode) {
+Efd::Efd(fiber::event::EventLoop &owner_loop, void *sink, EventCallback callback,
+         fiber::event::Poller::Mode mode) noexcept :
+    owner_loop_(owner_loop), current_loop_(&owner_loop), sink_(sink), callback_(callback), mode_(mode) {
     item_.efd = this;
     item_.callback = &Efd::on_poller_event;
 }
@@ -16,7 +17,7 @@ Efd::~Efd() {
     }
 
     if (registered_) {
-        if (!loop_.in_loop()) {
+        if (!current_loop_->in_loop()) {
             FIBER_ASSERT(false);
             return;
         }
@@ -30,8 +31,8 @@ Efd::~Efd() {
     ::close(fd);
 }
 
-void Efd::set_owner(void *owner, EventCallback callback) noexcept {
-    owner_ = owner;
+void Efd::set_event_sink(void *sink, EventCallback callback) noexcept {
+    sink_ = sink;
     callback_ = callback;
 }
 
@@ -61,8 +62,10 @@ void Efd::close_fd() noexcept {
         return;
     }
     if (registered_) {
-        FIBER_ASSERT(loop_.in_loop());
-        loop_.poller().del(item_);
+        FIBER_ASSERT(current_loop_->in_loop());
+        // Closing the fd removes the kernel registration even if this DEL
+        // fails (e.g. EBADF from a racing close), so the error is dropped.
+        (void) current_loop_->poller().del(item_);
         registered_ = false;
         ++epoch_;
     }
@@ -70,6 +73,35 @@ void Efd::close_fd() noexcept {
     fd_ = -1;
     watching_ = fiber::event::IoEvent::None;
     ::close(fd);
+}
+
+fiber::common::IoErr Efd::detach_from_current_loop() noexcept {
+    if (!registered_) {
+        watching_ = fiber::event::IoEvent::None;
+        return fiber::common::IoErr::None;
+    }
+    if (fd_ < 0) {
+        return fiber::common::IoErr::BadFd;
+    }
+    FIBER_ASSERT(current_loop_->in_loop());
+    fiber::common::IoErr err = current_loop_->poller().del(item_);
+    // The poller batch no longer references this item either way; on failure
+    // the kernel registration is unknown, so callers must close the fd instead
+    // of publishing the object.
+    registered_ = false;
+    ++epoch_;
+    watching_ = fiber::event::IoEvent::None;
+    if (err != fiber::common::IoErr::None) {
+        return err;
+    }
+    return fiber::common::IoErr::None;
+}
+
+void Efd::adopt_loop(fiber::event::EventLoop &loop) noexcept {
+    FIBER_ASSERT(loop.in_loop());
+    FIBER_ASSERT(!registered_);
+    FIBER_ASSERT(watching_ == fiber::event::IoEvent::None);
+    current_loop_ = &loop;
 }
 
 fiber::common::IoErr Efd::unwatch_all() noexcept {
@@ -80,8 +112,8 @@ fiber::common::IoErr Efd::unwatch_all() noexcept {
     if (fd_ < 0) {
         return fiber::common::IoErr::BadFd;
     }
-    FIBER_ASSERT(loop_.in_loop());
-    fiber::common::IoErr err = loop_.poller().del(item_);
+    FIBER_ASSERT(current_loop_->in_loop());
+    fiber::common::IoErr err = current_loop_->poller().del(item_);
     if (err != fiber::common::IoErr::None) {
         return err;
     }
@@ -95,7 +127,7 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
     if (fd_ < 0) {
         return fiber::common::IoErr::BadFd;
     }
-    FIBER_ASSERT(loop_.in_loop());
+    FIBER_ASSERT(current_loop_->in_loop());
 
     if (desired == watching_ && (fiber::event::any(desired) || !registered_)) {
         return fiber::common::IoErr::None;
@@ -106,7 +138,7 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
             watching_ = fiber::event::IoEvent::None;
             return fiber::common::IoErr::None;
         }
-        fiber::common::IoErr err = loop_.poller().del(item_);
+        fiber::common::IoErr err = current_loop_->poller().del(item_);
         if (err != fiber::common::IoErr::None) {
             return err;
         }
@@ -118,14 +150,14 @@ fiber::common::IoErr Efd::watch_set(fiber::event::IoEvent desired) noexcept {
 
     fiber::common::IoErr err = fiber::common::IoErr::None;
     if (!registered_) {
-        err = loop_.poller().add(fd_, desired, &item_, mode_);
+        err = current_loop_->poller().add(fd_, desired, &item_, mode_);
         if (err != fiber::common::IoErr::None) {
             return err;
         }
         registered_ = true;
         ++epoch_;
     } else {
-        err = loop_.poller().mod(fd_, desired, &item_, mode_);
+        err = current_loop_->poller().mod(fd_, desired, &item_, mode_);
         if (err != fiber::common::IoErr::None) {
             return err;
         }
@@ -148,7 +180,7 @@ void Efd::on_poller_event(fiber::event::Poller::Item *item, int fd, fiber::event
     if (!efd->callback_) {
         return;
     }
-    efd->callback_(efd->owner_, events);
+    efd->callback_(efd->sink_, events);
 }
 
 } // namespace fiber::net::detail

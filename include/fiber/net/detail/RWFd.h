@@ -1,11 +1,9 @@
 #ifndef FIBER_NET_DETAIL_RW_FD_H
 #define FIBER_NET_DETAIL_RW_FD_H
 
-#include <atomic>
 #include <chrono>
 #include <coroutine>
 #include <cstdint>
-#include <new>
 
 #include "../../common/Assert.h"
 #include "../../common/IoError.h"
@@ -18,34 +16,54 @@ namespace fiber::net::detail {
 
 class RWFd;
 
+// Completion bridge shared by the local-thread wait awaiters. A waiter is
+// installed as an ordinary direction subscription (`on_event` + this ctx), so
+// it obeys the same subscription identity and close rules as business
+// callbacks; close() completes it without touching the RWFd again.
 struct RWFdWaiterBase {
     using CompleteCallback = void (*)(RWFdWaiterBase *waiter, fiber::common::IoErr err) noexcept;
 
+    static void on_event(void *ctx, fiber::common::IoErr err) noexcept;
+
     RWFd *rwfd_ = nullptr;
     fiber::event::IoEvent event_{fiber::event::IoEvent::None};
-    fiber::common::IoErr err_{fiber::common::IoErr::None};
-    std::coroutine_handle<> coro_ = nullptr;
     CompleteCallback complete_callback_ = nullptr;
-
-    static void on_event(void *ctx, fiber::common::IoErr err) noexcept;
-    void complete(fiber::common::IoErr err) noexcept;
+    std::coroutine_handle<> coro_ = nullptr;
 };
 
-struct RWFdLocalThreadWaiter : RWFdWaiterBase {};
-struct RWFdCrossThreadWaiter;
-
-enum class RWFdWaiterState : std::uint8_t {
-    Notify_Watch,
-    Notify_Resume,
-    Watching_Event,
-    Request_Cancel,
-    Waiting_Cancel,
-    Canceled,
-};
-
+// Per-direction readiness and its (at most one) subscription.
+//
+// State transitions:
+//   Unknown/Blocked -> Ready : kernel ready hint; notifies a subscriber once.
+//   Ready -> Ready          : never notifies.
+//   Ready -> Blocked/...    : only via the I/O state feedback of read/write.
+// EOF, half-close and fatal errors are NOT tracked here; the adapter layer
+// (StreamFd) owns them and receives the raw kernel stream bits through the
+// stream event sink instead.
 class RWFd : public common::NonCopyable, public common::NonMovable {
 public:
     using ReadyCallback = void (*)(void *ctx, fiber::common::IoErr err) noexcept;
+    // Raw ReadHangup/Terminal kernel bits this layer does not interpret.
+    using StreamEventCallback = void (*)(void *ctx, fiber::event::IoEvent events) noexcept;
+    // Adapter-layer wait veto, consulted before suspending a waiter: true means
+    // proceed without waiting (like an observed Ready), false means continue
+    // with the ordinary readiness wait, an error completes the wait with it.
+    using StreamWaitGate = fiber::common::IoResult<bool> (*)(void *ctx, fiber::event::IoEvent direction) noexcept;
+
+    // Direction subscriptions detached by detach_for_close(), completed after
+    // the adapter layer ran its own terminal completion. complete() only uses
+    // the stored locals: a preceding completion may have destroyed the RWFd.
+    struct DetachedCompletions {
+        ReadyCallback read_callback = nullptr;
+        void *read_ctx = nullptr;
+        ReadyCallback write_callback = nullptr;
+        void *write_ctx = nullptr;
+
+        void complete(fiber::common::IoErr err) const noexcept;
+    };
+
+    enum class State : std::uint8_t { Unknown, Ready, Blocked };
+    enum class Kind : std::uint8_t { Raw, Stream, Datagram };
 
     template<fiber::event::IoEvent Event>
     class WaitAwaiter;
@@ -53,49 +71,92 @@ public:
     using WaitReadableAwaiter = WaitAwaiter<fiber::event::IoEvent::Read>;
     using WaitWritableAwaiter = WaitAwaiter<fiber::event::IoEvent::Write>;
 
-    enum class Kind : std::uint8_t { Raw, Stream, Datagram };
-    explicit RWFd(fiber::event::EventLoop &loop, Kind kind = Kind::Raw);
-    RWFd(fiber::event::EventLoop &loop, int fd, Kind kind = Kind::Raw);
-
-    // Raw fd consumers opt out of cached syscall suppression. Off-loop I/O
-    // automatically makes this choice sticky until the next attach.
-    void use_external_io() noexcept { external_io_.store(true, std::memory_order_release); }
-    common::IoErr prepare_io(event::IoEvent direction) noexcept;
-    void finish_io(event::IoEvent direction, common::IoErr error, bool exhausted = false) noexcept;
+    explicit RWFd(fiber::event::EventLoop &owner_loop, Kind kind = Kind::Raw);
+    RWFd(fiber::event::EventLoop &owner_loop, int fd, Kind kind = Kind::Raw);
     ~RWFd();
+
+    // ------------------------------------------------------------------
+    // Synchronous I/O wrappers. They assert the current loop, always run the
+    // lambda exactly once (never suppressed by readiness, never registered,
+    // never waiting) and let the lambda feed the direction state back through
+    // IoStateUpdate. Error/EOF interpretation stays in the lambda's layer.
+    // ------------------------------------------------------------------
+    template<typename F>
+    [[nodiscard]] auto read(F io) noexcept(noexcept(io(std::declval<IoStateUpdate &>()))) {
+        FIBER_ASSERT(current_loop().in_loop());
+        IoStateUpdate update{read_event_.state};
+        return io(update);
+    }
+    template<typename F>
+    [[nodiscard]] auto write(F io) noexcept(noexcept(io(std::declval<IoStateUpdate &>()))) {
+        FIBER_ASSERT(current_loop().in_loop());
+        IoStateUpdate update{write_event_.state};
+        return io(update);
+    }
+
+    // Inline, allocation-free state feedback for read/write lambdas.
+    class IoStateUpdate {
+    public:
+        void mark_ready() noexcept { state_ = State::Ready; }
+        void mark_blocked() noexcept { state_ = State::Blocked; }
+
+    private:
+        friend class RWFd;
+        explicit IoStateUpdate(State &state) noexcept : state_(state) {}
+        State &state_;
+    };
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] int fd() const noexcept;
+    [[nodiscard]] fiber::event::EventLoop &owner_loop() const noexcept;
+    [[nodiscard]] fiber::event::EventLoop &current_loop() const noexcept;
+    // Current-loop alias for adapters that never hand over.
     [[nodiscard]] fiber::event::EventLoop &loop() const noexcept;
-    [[nodiscard]] bool terminal() const noexcept { return terminal_; }
-    // Owner-loop view of whether the peer has closed its write side or the
-    // connection has terminated. Lets idle pooled connections be discarded
-    // before a request is written onto a dead socket.
-    [[nodiscard]] bool peer_closed() const noexcept { return read_hangup_ || terminal_; }
-    [[nodiscard]] fiber::common::IoErr terminal_error() const noexcept { return terminal_error_; }
+    [[nodiscard]] Kind kind() const noexcept { return kind_; }
+
+    [[nodiscard]] State read_state() const noexcept { return read_event_.state; }
+    [[nodiscard]] State write_state() const noexcept { return write_event_.state; }
+    // True while the fd is registered with the current loop's poller.
+    [[nodiscard]] bool registered() const noexcept { return efd_.registered(); }
 
     fiber::common::IoErr attach(int fd) noexcept;
     int release_fd() noexcept;
     void close();
+    // close() split in two so an adapter layer can run its own terminal
+    // completion between detaching and completing the direction subscriptions.
+    [[nodiscard]] DetachedCompletions detach_for_close() noexcept;
 
-    // Read/write subscriptions persist, but readiness is delivered once per
-    // kernel hint or newly installed subscription. Budgeted consumers must post
-    // their own continuation; clearing a subscription does not clear readiness.
-    // Setters never invoke callbacks synchronously. Callback contexts must outlive
-    // their cancellation notification (or be removed before close).
-    // Read/write callbacks receive None on readiness and Canceled when the fd is
-    // closed. The terminal callback is one-shot and independent from both
-    // directions; it observes ERR/HUP or an explicit terminal syscall error, but
-    // not RDHUP/EOF. After removing its callback slot, a callback may
-    // synchronously destroy this RWFd; event dispatch stops immediately in that
-    // case. Clear operations only remove the matching callback and ctx.
+    // Installs the adapter-layer sink that receives raw ReadHangup/Terminal
+    // kernel bits (stream termination semantics live above this class), and
+    // the gate consulted by the wait awaiters (known EOF/terminal must not
+    // wait for a further edge).
+    void set_stream_event_sink(void *ctx, StreamEventCallback callback) noexcept;
+    void set_stream_wait_gate(void *ctx, StreamWaitGate gate) noexcept;
+    // Ensures the fd listens for stream-state bits (RDHUP; ERR/HUP arrive with
+    // any registration). Used by adapter/pool state observation, not by the
+    // ordinary read/write subscriptions.
+    fiber::common::IoErr ensure_state_observation() noexcept;
+
+    // Subscriptions are persistent, transition-only (Unknown/Blocked -> Ready)
+    // and require the direction not to be Ready: a Ready caller must advance
+    // by doing I/O, not by waiting for another edge. Installing ensures the
+    // direction is listened for (first demand ADDs, later demands extend by
+    // MOD). Setters never invoke callbacks inline and never queue a ready
+    // notification. Clearing removes only a matching callback/ctx pair and
+    // keeps both readiness and kernel interest.
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
-    fiber::common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
-    fiber::common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
-    void mark_terminal(fiber::common::IoErr error) noexcept;
+
+    // Handover, see Efd. detach requires no remaining subscriptions on the
+    // current loop; adopt resets both direction states to Unknown and is the
+    // only point where readiness history is dropped. Adoption also installs
+    // the new loop's stop hook (lifecycle takeover is immediate even though
+    // the epoll ADD stays lazy); it fails and closes the fd when the target
+    // loop is already stopping.
+    fiber::common::IoErr detach_for_handover() noexcept;
+    fiber::common::IoErr adopt_loop(fiber::event::EventLoop &loop) noexcept;
 
     [[nodiscard]] WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -104,7 +165,6 @@ public:
 
 private:
     friend struct RWFdWaiterBase;
-    friend struct RWFdCrossThreadWaiter;
 
     template<fiber::event::IoEvent Event>
     friend class WaitAwaiter;
@@ -126,63 +186,46 @@ private:
         bool owner_destroyed_ = false;
     };
 
-    common::IoResult<bool> begin_wait(RWFdWaiterBase *waiter) noexcept;
-    fiber::common::IoErr cancel_wait(RWFdWaiterBase *waiter) noexcept;
-    bool remove_callback(fiber::event::IoEvent event, ReadyCallback callback, void *ctx) noexcept;
+    struct Event {
+        ReadyCallback callback = nullptr;
+        void *ctx = nullptr;
+        State state = State::Unknown;
+    };
 
-    static void on_efd_events(void *owner, fiber::event::IoEvent events);
-    void handle_events(fiber::event::IoEvent events);
+    fiber::common::IoErr install_callback(Event &event, std::uint64_t &generation, fiber::event::IoEvent direction,
+                                          ReadyCallback callback, void *ctx) noexcept;
+    bool remove_callback(Event &event, std::uint64_t &generation, fiber::event::IoEvent direction,
+                         ReadyCallback callback, void *ctx) noexcept;
+    fiber::common::IoErr ensure_listening(fiber::event::IoEvent events) noexcept;
+    fiber::common::IoErr begin_wait(RWFdWaiterBase *waiter) noexcept;
+    void cancel_wait(RWFdWaiterBase *waiter) noexcept;
     [[nodiscard]] bool has_callbacks() const noexcept;
-    [[nodiscard]] fiber::event::IoEvent active_events() const noexcept;
-    common::IoErr ensure_registered() noexcept;
-    common::IoResult<bool> check_ready(event::IoEvent direction) noexcept;
-    common::IoErr install_callback(event::IoEvent direction, ReadyCallback callback, void *ctx) noexcept;
-    void queue_ready(event::IoEvent events) noexcept;
-    void dispatch_ready(event::IoEvent events);
-    static void on_deferred_ready(RWFd *owner) noexcept;
+
+    static void on_efd_events(void *sink, fiber::event::IoEvent events);
     static void on_loop_stop(RWFd *owner) noexcept;
-    enum class Readiness : std::uint8_t { Unknown, Ready, Blocked };
-    Readiness read_ready_ = Readiness::Unknown;
-    Readiness write_ready_ = Readiness::Unknown;
-    const Kind kind_;
-    std::atomic<bool> external_io_;
-    bool read_hangup_ = false;
+    void handle_events(fiber::event::IoEvent events);
+
+    Event read_event_{};
+    Event write_event_{};
     std::uint64_t read_generation_ = 0;
     std::uint64_t write_generation_ = 0;
-    std::uint64_t terminal_generation_ = 0;
-    event::IoEvent pending_ready_ = event::IoEvent::None;
-    event::EventLoop::DeferEntry ready_entry_{};
+    // Destroyed-observer flag of the active dispatch guard, see DispatchGuard.
+    bool *dispatch_destroyed_observer_ = nullptr;
+    const Kind kind_;
+    void *stream_sink_ctx_ = nullptr;
+    StreamEventCallback stream_sink_ = nullptr;
+    void *stream_gate_ctx_ = nullptr;
+    StreamWaitGate stream_gate_ = nullptr;
     event::EventLoop::StopEntry stop_entry_{};
 
     Efd efd_;
-    ReadyCallback read_callback_ = nullptr;
-    void *read_callback_ctx_ = nullptr;
-    ReadyCallback write_callback_ = nullptr;
-    void *write_callback_ctx_ = nullptr;
-    ReadyCallback terminal_callback_ = nullptr;
-    void *terminal_callback_ctx_ = nullptr;
-    fiber::common::IoErr terminal_error_ = fiber::common::IoErr::None;
-    bool terminal_ = false;
-    bool *dispatch_destroyed_observer_ = nullptr;
 };
 
-struct RWFdCrossThreadWaiter : RWFdWaiterBase {
-    fiber::event::EventLoop *loop_ = nullptr;
-    fiber::event::EventLoop::NotifyEntry notify_entry_{};
-    fiber::event::EventLoop::NotifyEntry cancel_entry_{};
-    std::atomic<RWFdWaiterState> state_{RWFdWaiterState::Notify_Watch};
-
-    void cancel_wait() noexcept;
-
-    static void on_complete(RWFdWaiterBase *base, fiber::common::IoErr err) noexcept;
-    static void do_notify_resume(RWFdCrossThreadWaiter *waiter) noexcept;
-    static void on_notify_watch(RWFdCrossThreadWaiter *waiter) noexcept;
-    static void on_notify_cancel(RWFdCrossThreadWaiter *waiter) noexcept;
-    static void on_notify_resume(RWFdCrossThreadWaiter *waiter) noexcept;
-};
-
+// Local awaiter: waits, times out, cancels and resumes entirely on the fd's
+// current loop. Cross-loop use must hand the fd over first; await_suspend
+// asserts the calling thread is the current loop.
 template<fiber::event::IoEvent Event>
-class RWFd::WaitAwaiter : public RWFdLocalThreadWaiter {
+class RWFd::WaitAwaiter : public RWFdWaiterBase {
 public:
     explicit WaitAwaiter(RWFd &rwfd, std::chrono::milliseconds timeout) noexcept : timeout_(timeout) {
         static_assert(Event == fiber::event::IoEvent::Read || Event == fiber::event::IoEvent::Write);
@@ -199,18 +242,12 @@ public:
     ~WaitAwaiter() {
         cancel_timer();
         if (!waiting_) {
-            FIBER_ASSERT(waiter_ == nullptr);
             return;
         }
-        if (waiter_) {
-            FIBER_ASSERT(!rwfd_->loop().in_loop());
-            auto *waiter = waiter_;
-            waiter_ = nullptr;
-            waiter->cancel_wait();
-            return;
-        }
-        FIBER_ASSERT(rwfd_->loop().in_loop());
-        (void) rwfd_->cancel_wait(this);
+        FIBER_ASSERT(loop_ != nullptr);
+        FIBER_ASSERT(loop_->in_loop());
+        waiting_ = false;
+        rwfd_->cancel_wait(this);
     }
 
     bool await_ready() noexcept {
@@ -218,46 +255,42 @@ public:
             return false;
         }
         err_ = fiber::common::IoErr::TimedOut;
-        completed_ = true;
         return true;
     }
 
     bool await_suspend(std::coroutine_handle<> handle) noexcept {
+        FIBER_ASSERT(rwfd_->current_loop().in_loop());
+        loop_ = &rwfd_->current_loop();
         coro_ = handle;
-        err_ = fiber::common::IoErr::None;
-        completed_ = false;
-        waiting_ = true;
-        origin_loop_ = &fiber::event::EventLoop::current();
 
-        if (rwfd_->loop().in_loop()) {
-            auto result = rwfd_->begin_wait(this);
-            if (!result || !*result) {
-                err_ = result ? fiber::common::IoErr::None : result.error();
-                completed_ = true;
-                waiting_ = false;
+        // Adapter-layer states the raw readiness must not override: a known
+        // EOF completes a read wait immediately, a terminal stream completes
+        // both directions with its recorded error.
+        if (rwfd_->stream_gate_ != nullptr) {
+            const auto gated = rwfd_->stream_gate_(rwfd_->stream_gate_ctx_, Event);
+            if (!gated) {
+                err_ = gated.error();
                 return false;
             }
-            arm_timer();
-            return true;
+            if (*gated) {
+                err_ = fiber::common::IoErr::None;
+                return false;
+            }
         }
 
-        rwfd_->use_external_io();
-        auto *waiter = new (std::nothrow) RWFdCrossThreadWaiter();
-        if (!waiter) {
-            err_ = fiber::common::IoErr::NoMem;
-            completed_ = true;
-            waiting_ = false;
+        const auto state = Event == fiber::event::IoEvent::Read ? rwfd_->read_state() : rwfd_->write_state();
+        if (state == State::Ready) {
+            // Ready: try I/O instead of waiting for another edge.
+            err_ = fiber::common::IoErr::None;
             return false;
         }
-        waiter->rwfd_ = rwfd_;
-        waiter->event_ = Event;
-        waiter->coro_ = handle;
-        waiter->complete_callback_ = &RWFdCrossThreadWaiter::on_complete;
-        waiter->loop_ = origin_loop_;
-        waiter_ = waiter;
-        rwfd_->loop()
-                .post<RWFdCrossThreadWaiter, &RWFdCrossThreadWaiter::notify_entry_,
-                      &RWFdCrossThreadWaiter::on_notify_watch>(*waiter);
+
+        const auto installed = rwfd_->begin_wait(this);
+        if (installed != fiber::common::IoErr::None) {
+            err_ = installed;
+            return false;
+        }
+        waiting_ = true;
         arm_timer();
         return true;
     }
@@ -265,25 +298,10 @@ public:
     fiber::common::IoResult<void> await_resume() noexcept {
         waiting_ = false;
         cancel_timer();
-        if (completed_) {
-            completed_ = false;
-            if (err_ == fiber::common::IoErr::None) {
-                return {};
-            }
-            return std::unexpected(err_);
-        }
-
-        fiber::common::IoErr err = err_;
-        RWFdCrossThreadWaiter *waiter = waiter_;
-        if (waiter) {
-            err = waiter->err_;
-            waiter_ = nullptr;
-            delete waiter;
-        }
-        if (err == fiber::common::IoErr::None) {
+        if (err_ == fiber::common::IoErr::None) {
             return {};
         }
-        return std::unexpected(err);
+        return std::unexpected(err_);
     }
 
 private:
@@ -291,23 +309,23 @@ private:
         if (timeout_ == std::chrono::milliseconds::max()) {
             return;
         }
-        FIBER_ASSERT(origin_loop_ != nullptr);
-        origin_loop_->post_at<WaitAwaiter, &WaitAwaiter::timer_entry_, &WaitAwaiter::on_timeout>(
-                origin_loop_->now() + timeout_, *this);
+        loop_->post_at<WaitAwaiter, &WaitAwaiter::timer_entry_, &WaitAwaiter::on_timeout>(loop_->now() + timeout_,
+                                                                                          *this);
     }
 
     void cancel_timer() noexcept {
         if (!timer_entry_.is_in_heap()) {
             return;
         }
-        FIBER_ASSERT(origin_loop_ != nullptr);
-        FIBER_ASSERT(origin_loop_->in_loop());
-        origin_loop_->cancel<WaitAwaiter, &WaitAwaiter::timer_entry_>(*this);
+        FIBER_ASSERT(loop_ != nullptr);
+        FIBER_ASSERT(loop_->in_loop());
+        loop_->cancel<WaitAwaiter, &WaitAwaiter::timer_entry_>(*this);
     }
 
     static void on_complete(RWFdWaiterBase *base, fiber::common::IoErr err) noexcept {
-        auto *awaiter = static_cast<WaitAwaiter *>(static_cast<RWFdLocalThreadWaiter *>(base));
+        auto *awaiter = static_cast<WaitAwaiter *>(base);
         awaiter->err_ = err;
+        awaiter->waiting_ = false;
         awaiter->cancel_timer();
         awaiter->coro_.resume();
     }
@@ -315,25 +333,17 @@ private:
     static void on_timeout(WaitAwaiter *awaiter) noexcept {
         FIBER_ASSERT(awaiter != nullptr);
         FIBER_ASSERT(awaiter->waiting_);
-
-        if (awaiter->waiter_) {
-            RWFdCrossThreadWaiter *waiter = awaiter->waiter_;
-            awaiter->waiter_ = nullptr;
-            waiter->cancel_wait();
-        } else {
-            (void) awaiter->rwfd_->cancel_wait(awaiter);
-        }
         awaiter->waiting_ = false;
         awaiter->err_ = fiber::common::IoErr::TimedOut;
+        awaiter->rwfd_->cancel_wait(awaiter);
         awaiter->coro_.resume();
     }
 
     std::chrono::milliseconds timeout_{};
-    fiber::event::EventLoop *origin_loop_ = nullptr;
+    fiber::event::EventLoop *loop_ = nullptr;
     fiber::event::EventLoop::TimerEntry timer_entry_{};
+    fiber::common::IoErr err_ = fiber::common::IoErr::None;
     bool waiting_ = false;
-    bool completed_ = false;
-    RWFdCrossThreadWaiter *waiter_ = nullptr;
 };
 
 } // namespace fiber::net::detail

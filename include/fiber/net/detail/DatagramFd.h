@@ -65,6 +65,10 @@ public:
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
+    // Direction readiness. A Ready direction must be advanced by doing I/O;
+    // subscribing for it violates the subscription contract.
+    [[nodiscard]] bool read_ready() const noexcept;
+    [[nodiscard]] bool write_ready() const noexcept;
     [[nodiscard]] WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] WaitWritableAwaiter

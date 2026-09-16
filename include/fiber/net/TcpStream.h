@@ -50,9 +50,19 @@ public:
     [[nodiscard]] const SocketAddress &remote_addr() const noexcept;
     [[nodiscard]] bool terminal() const noexcept;
     [[nodiscard]] bool peer_closed() const noexcept;
+    [[nodiscard]] bool read_ready() const noexcept;
+    [[nodiscard]] bool write_ready() const noexcept;
     [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
     int release_fd() noexcept;
     void close();
+
+    // Loop handover, see detail::RWFd: DEL on the current loop, adopt on the
+    // target loop; no subscriptions may remain.
+    fiber::common::IoErr detach_for_handover() noexcept;
+    fiber::common::IoErr adopt_loop(fiber::event::EventLoop &loop) noexcept;
+    // Idle-pool observation, see detail::StreamFd: listen for the stream-state
+    // bits without subscribing a direction callback.
+    fiber::common::IoErr ensure_state_observation() noexcept;
 
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;

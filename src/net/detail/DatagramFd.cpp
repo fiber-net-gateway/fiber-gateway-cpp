@@ -348,7 +348,7 @@ DatagramFd::~DatagramFd() {
     if (!rwfd_.valid()) {
         return;
     }
-    if (rwfd_.loop().in_loop()) {
+    if (rwfd_.current_loop().in_loop()) {
         close();
         return;
     }
@@ -569,41 +569,45 @@ fiber::common::IoResult<size_t> DatagramFd::try_recv_packets(UdpPacketRecvSlot *
         msg.msg_controllen = controls[i].bytes.size();
     }
 
-    const auto ready_err = rwfd_.prepare_io(event::IoEvent::Read);
-    if (ready_err != common::IoErr::None) {
-        return std::unexpected(ready_err);
-    }
-
-    for (;;) {
-        const int rc = ::recvmmsg(socket_fd, messages.data(), static_cast<unsigned int>(count), MSG_DONTWAIT, nullptr);
-        if (rc >= 0) {
-            rwfd_.finish_io(event::IoEvent::Read, common::IoErr::None);
-            for (int i = 0; i < rc; ++i) {
-                SocketAddress peer;
-                const msghdr &msg = messages[static_cast<size_t>(i)].msg_hdr;
-                if (!SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&peers[static_cast<size_t>(i)]),
-                                                  msg.msg_namelen, peer)) {
-                    return std::unexpected(fiber::common::IoErr::NotSupported);
-                }
-                UdpPacketRecvResult &result = slots[static_cast<size_t>(i)].result;
-                result.size = messages[static_cast<size_t>(i)].msg_len;
-                result.peer = peer;
-                result.truncated = (msg.msg_flags & MSG_TRUNC) != 0;
-                parse_control_messages(msg, local_addr_, result);
+    const auto batch = rwfd_.read([&](RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<int> {
+        for (;;) {
+            const int rc =
+                    ::recvmmsg(socket_fd, messages.data(), static_cast<unsigned int>(count), MSG_DONTWAIT, nullptr);
+            if (rc >= 0) {
+                // Even a partial batch never proves the queue drained: only
+                // EAGAIN does, so any packet success stays Ready.
+                state.mark_ready();
+                return rc;
             }
-            return static_cast<size_t>(rc);
-        }
 
-        const int err = errno;
-        if (err == EINTR) {
-            continue;
+            const int err = errno;
+            if (err == EINTR) {
+                continue;
+            }
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                state.mark_blocked();
+                return std::unexpected(fiber::common::IoErr::WouldBlock);
+            }
+            return std::unexpected(fiber::common::io_err_from_errno(err));
         }
-        if (err == EAGAIN || err == EWOULDBLOCK) {
-            rwfd_.finish_io(event::IoEvent::Read, common::IoErr::WouldBlock);
-            return std::unexpected(fiber::common::IoErr::WouldBlock);
-        }
-        return std::unexpected(fiber::common::io_err_from_errno(err));
+    });
+    if (!batch) {
+        return std::unexpected(batch.error());
     }
+    for (int i = 0; i < *batch; ++i) {
+        SocketAddress peer;
+        const msghdr &msg = messages[static_cast<size_t>(i)].msg_hdr;
+        if (!SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&peers[static_cast<size_t>(i)]),
+                                          msg.msg_namelen, peer)) {
+            return std::unexpected(fiber::common::IoErr::NotSupported);
+        }
+        UdpPacketRecvResult &result = slots[static_cast<size_t>(i)].result;
+        result.size = messages[static_cast<size_t>(i)].msg_len;
+        result.peer = peer;
+        result.truncated = (msg.msg_flags & MSG_TRUNC) != 0;
+        parse_control_messages(msg, local_addr_, result);
+    }
+    return static_cast<size_t>(*batch);
 }
 
 fiber::common::IoResult<size_t> DatagramFd::try_send_packets(const UdpPacketSendSpec *specs, size_t count) noexcept {
@@ -654,28 +658,26 @@ fiber::common::IoResult<size_t> DatagramFd::try_send_packets(const UdpPacketSend
         build_send_control(spec, controls[i].bytes, msg);
     }
 
-    const auto ready_err = rwfd_.prepare_io(event::IoEvent::Write);
-    if (ready_err != common::IoErr::None) {
-        return std::unexpected(ready_err);
-    }
+    return rwfd_.write([&](RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<int> {
+        for (;;) {
+            const int rc = ::sendmmsg(socket_fd, messages.data(), static_cast<unsigned int>(count), MSG_DONTWAIT);
+            if (rc >= 0) {
+                // A partial batch does not prove send space exhausted.
+                state.mark_ready();
+                return rc;
+            }
 
-    for (;;) {
-        const int rc = ::sendmmsg(socket_fd, messages.data(), static_cast<unsigned int>(count), MSG_DONTWAIT);
-        if (rc >= 0) {
-            rwfd_.finish_io(event::IoEvent::Write, common::IoErr::None);
-            return static_cast<size_t>(rc);
+            const int err = errno;
+            if (err == EINTR) {
+                continue;
+            }
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                state.mark_blocked();
+                return std::unexpected(fiber::common::IoErr::WouldBlock);
+            }
+            return std::unexpected(fiber::common::io_err_from_errno(err));
         }
-
-        const int err = errno;
-        if (err == EINTR) {
-            continue;
-        }
-        if (err == EAGAIN || err == EWOULDBLOCK) {
-            rwfd_.finish_io(event::IoEvent::Write, common::IoErr::WouldBlock);
-            return std::unexpected(fiber::common::IoErr::WouldBlock);
-        }
-        return std::unexpected(fiber::common::io_err_from_errno(err));
-    }
+    });
 }
 
 fiber::common::IoErr DatagramFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
@@ -694,56 +696,63 @@ fiber::common::IoErr DatagramFd::clear_write_callback(ReadyCallback callback, vo
     return rwfd_.clear_write_callback(callback, ctx);
 }
 
+bool DatagramFd::read_ready() const noexcept { return rwfd_.read_state() == RWFd::State::Ready; }
+
+bool DatagramFd::write_ready() const noexcept { return rwfd_.write_state() == RWFd::State::Ready; }
+
 fiber::common::IoErr DatagramFd::recv_packet_once(void *buf, size_t len, UdpPacketRecvResult &out) noexcept {
     int socket_fd = rwfd_.fd();
     if (socket_fd < 0) {
         return fiber::common::IoErr::BadFd;
     }
 
-    const auto ready_err = rwfd_.prepare_io(event::IoEvent::Read);
-    if (ready_err != common::IoErr::None) {
-        return ready_err;
-    }
+    sockaddr_storage peer{};
+    iovec iov{};
+    iov.iov_base = buf;
+    iov.iov_len = len;
+    alignas(cmsghdr) std::array<unsigned char, kRecvControlCapacity> control{};
+    msghdr msg{};
+    msg.msg_name = &peer;
+    msg.msg_namelen = sizeof(peer);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.data();
+    msg.msg_controllen = control.size();
 
-    for (;;) {
-        sockaddr_storage peer{};
-        iovec iov{};
-        iov.iov_base = buf;
-        iov.iov_len = len;
-        alignas(cmsghdr) std::array<unsigned char, kRecvControlCapacity> control{};
-        msghdr msg{};
-        msg.msg_name = &peer;
-        msg.msg_namelen = sizeof(peer);
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = control.data();
-        msg.msg_controllen = control.size();
-
-        ssize_t rc = ::recvmsg(socket_fd, &msg, MSG_DONTWAIT);
-        if (rc >= 0) {
-            rwfd_.finish_io(event::IoEvent::Read, common::IoErr::None);
-            SocketAddress parsed_peer;
-            if (!SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&peer), msg.msg_namelen,
-                                              parsed_peer)) {
-                return fiber::common::IoErr::NotSupported;
+    const auto packet = rwfd_.read([&](RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<ssize_t> {
+        for (;;) {
+            ssize_t rc = ::recvmsg(socket_fd, &msg, MSG_DONTWAIT);
+            if (rc >= 0) {
+                // Short, zero-length and truncated packets say nothing about
+                // the queue; only EAGAIN proves it drained.
+                state.mark_ready();
+                return rc;
             }
-            out.size = static_cast<size_t>(rc);
-            out.peer = parsed_peer;
-            out.truncated = (msg.msg_flags & MSG_TRUNC) != 0;
-            parse_control_messages(msg, local_addr_, out);
-            return fiber::common::IoErr::None;
-        }
 
-        int err = errno;
-        if (err == EINTR) {
-            continue;
+            int err = errno;
+            if (err == EINTR) {
+                continue;
+            }
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                state.mark_blocked();
+                return std::unexpected(fiber::common::IoErr::WouldBlock);
+            }
+            return std::unexpected(fiber::common::io_err_from_errno(err));
         }
-        if (err == EAGAIN || err == EWOULDBLOCK) {
-            rwfd_.finish_io(event::IoEvent::Read, common::IoErr::WouldBlock);
-            return fiber::common::IoErr::WouldBlock;
-        }
-        return fiber::common::io_err_from_errno(err);
+    });
+    if (!packet) {
+        return packet.error();
     }
+
+    SocketAddress parsed_peer;
+    if (!SocketAddress::from_sockaddr(reinterpret_cast<const sockaddr *>(&peer), msg.msg_namelen, parsed_peer)) {
+        return fiber::common::IoErr::NotSupported;
+    }
+    out.size = static_cast<size_t>(*packet);
+    out.peer = parsed_peer;
+    out.truncated = (msg.msg_flags & MSG_TRUNC) != 0;
+    parse_control_messages(msg, local_addr_, out);
+    return fiber::common::IoErr::None;
 }
 
 fiber::common::IoErr DatagramFd::send_packet_once(const UdpPacketSendSpec &spec, size_t &out) noexcept {
@@ -775,37 +784,38 @@ fiber::common::IoErr DatagramFd::send_packet_once(const UdpPacketSendSpec &spec,
         iov_count = 1;
     }
 
-    const auto ready_err = rwfd_.prepare_io(event::IoEvent::Write);
-    if (ready_err != common::IoErr::None) {
-        return ready_err;
+    msghdr msg{};
+    alignas(cmsghdr) std::array<unsigned char, kSendControlCapacity> control{};
+    msg.msg_name = &peer_storage;
+    msg.msg_namelen = peer_len;
+    msg.msg_iov = const_cast<iovec *>(iov);
+    msg.msg_iovlen = static_cast<std::size_t>(iov_count);
+    build_send_control(spec, control, msg);
+
+    const auto sent = rwfd_.write([&](RWFd::IoStateUpdate &state) noexcept -> fiber::common::IoResult<ssize_t> {
+        for (;;) {
+            ssize_t rc = ::sendmsg(socket_fd, &msg, MSG_DONTWAIT);
+            if (rc >= 0) {
+                state.mark_ready();
+                return rc;
+            }
+
+            int err = errno;
+            if (err == EINTR) {
+                continue;
+            }
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                state.mark_blocked();
+                return std::unexpected(fiber::common::IoErr::WouldBlock);
+            }
+            return std::unexpected(fiber::common::io_err_from_errno(err));
+        }
+    });
+    if (!sent) {
+        return sent.error();
     }
-
-    for (;;) {
-        msghdr msg{};
-        alignas(cmsghdr) std::array<unsigned char, kSendControlCapacity> control{};
-        msg.msg_name = &peer_storage;
-        msg.msg_namelen = peer_len;
-        msg.msg_iov = const_cast<iovec *>(iov);
-        msg.msg_iovlen = static_cast<std::size_t>(iov_count);
-        build_send_control(spec, control, msg);
-
-        ssize_t rc = ::sendmsg(socket_fd, &msg, MSG_DONTWAIT);
-        if (rc >= 0) {
-            rwfd_.finish_io(event::IoEvent::Write, common::IoErr::None);
-            out = static_cast<size_t>(rc);
-            return fiber::common::IoErr::None;
-        }
-
-        int err = errno;
-        if (err == EINTR) {
-            continue;
-        }
-        if (err == EAGAIN || err == EWOULDBLOCK) {
-            rwfd_.finish_io(event::IoEvent::Write, common::IoErr::WouldBlock);
-            return fiber::common::IoErr::WouldBlock;
-        }
-        return fiber::common::io_err_from_errno(err);
-    }
+    out = static_cast<size_t>(*sent);
+    return fiber::common::IoErr::None;
 }
 
 } // namespace fiber::net::detail

@@ -1,5 +1,11 @@
 # Stream ET/active_ Design Update
 
+Historical proposal. The confirmed design for the next refactor is
+[Efd / RWFd ownership and readiness-transition subscriptions](efd_rwfd_refactor.md)
+(2026-09-15, implementation pending). Its single-loop ownership, three-state
+readiness, and explicit subscription contract supersede the atomic `active_`
+and cross-loop behavior proposed below.
+
 Goal: optional ET mode for streams with a lightweight `active_` bit cache to
 reduce redundant epoll wakeups while keeping cross-loop read/write semantics.
 
@@ -59,4 +65,3 @@ Per-item flags are needed; ET cannot be global. Add to `Poller::Item`:
 - `bool edge_triggered = false;`
 
 Update `Poller::to_epoll_events` to OR `EPOLLET` when `edge_triggered` is true.
-

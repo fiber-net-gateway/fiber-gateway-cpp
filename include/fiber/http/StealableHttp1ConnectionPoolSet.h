@@ -26,6 +26,10 @@ public:
     using Options = Http1ConnectionPoolCore::Options;
 
     class AcquireAwaiter;
+    // Cross-thread steal journey: created by AcquireAwaiter when the hunt
+    // leaves the caller's shard, moved into the returned Lease on success, and
+    // reused as the return vehicle. Defined in the .cpp.
+    class State;
 
     class Lease : public common::NonCopyable {
     public:
@@ -52,14 +56,16 @@ public:
         enum class Kind : std::uint8_t { Empty, Local, Remote };
 
         explicit Lease(Http1ConnectionPoolCore::Lease &&local) noexcept;
-        Lease(Http1ConnectionPoolCore &home_core, Http1ConnectionPoolEntry &entry,
-              const HttpConnectionGroupKey &key) noexcept;
+        Lease(Http1ConnectionPoolCore &home_core, Http1ConnectionPoolEntry &entry, const HttpConnectionGroupKey &key,
+              State *journey) noexcept;
 
         Kind kind_ = Kind::Empty;
         Http1ConnectionPoolCore::Lease local_{};
         Http1ConnectionPoolEntry *entry_ = nullptr;
         Http1ConnectionPoolCore *home_core_ = nullptr;
         std::optional<HttpConnectionGroupKey> key_{};
+        // Return vehicle of a remote-steal lease; null for local leases.
+        State *journey_ = nullptr;
     };
 
     explicit StealableHttp1ConnectionPoolSet(event::EventLoopGroup &group) noexcept;
@@ -158,8 +164,7 @@ public:
 
 private:
     friend class StealableHttp1ConnectionPoolSet;
-
-    class State;
+    friend class StealableHttp1ConnectionPoolSet::State;
 
     [[nodiscard]] Shard &target_shard() const noexcept;
     [[nodiscard]] bool prepare() noexcept;

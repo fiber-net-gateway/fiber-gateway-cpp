@@ -82,7 +82,8 @@ TEST(PollerTest, EventReadinessPreemptsInfiniteDeadline) {
     const int count = wait_no_intr(poller, events, 2, std::chrono::steady_clock::time_point::max());
 
     ASSERT_EQ(count, 1);
-    EXPECT_EQ(events[0].data.ptr, &event_fd.item);
+    const void *event_ptr = events[0].data.ptr; // epoll_event is packed: read via a local
+    EXPECT_EQ(event_ptr, &event_fd.item);
     EXPECT_TRUE(event_fd.drain());
 }
 
@@ -162,7 +163,8 @@ TEST(PollerTest, InfiniteDeadlineDisarmsPreviousTimer) {
 
     ASSERT_TRUE(signal_ok.load(std::memory_order_acquire));
     ASSERT_EQ(count, 1);
-    EXPECT_EQ(events[0].data.ptr, &event_fd.item);
+    const void *event_ptr = events[0].data.ptr; // epoll_event is packed: read via a local
+    EXPECT_EQ(event_ptr, &event_fd.item);
     EXPECT_TRUE(event_fd.drain());
     EXPECT_GE(elapsed, 15ms);
     EXPECT_LT(elapsed, 1s);
@@ -175,14 +177,17 @@ TEST(PollerTest, DeleteBlanksReturnedEventAndReAddDeliversAgain) {
     ASSERT_TRUE(event_fd.signal());
     epoll_event events[2]{};
     ASSERT_EQ(wait_no_intr(poller, events, 2, std::chrono::steady_clock::now() + 1s), 1);
-    ASSERT_EQ(events[0].data.ptr, &event_fd.item);
+    const void *event_ptr = events[0].data.ptr; // epoll_event is packed: read via a local
+    ASSERT_EQ(event_ptr, &event_fd.item);
     ASSERT_EQ(poller.del(event_fd.item), fiber::common::IoErr::None);
-    EXPECT_EQ(events[0].data.ptr, nullptr);
+    event_ptr = events[0].data.ptr;
+    EXPECT_EQ(event_ptr, nullptr);
     EXPECT_FALSE(event_fd.item.registered());
     ASSERT_EQ(poller.add(event_fd.fd, fiber::event::Poller::Event::Read, &event_fd.item), fiber::common::IoErr::None);
     EXPECT_TRUE(event_fd.item.registered());
     ASSERT_EQ(wait_no_intr(poller, events, 2, std::chrono::steady_clock::now() + 1s), 1);
-    EXPECT_EQ(events[0].data.ptr, &event_fd.item);
+    event_ptr = events[0].data.ptr;
+    EXPECT_EQ(event_ptr, &event_fd.item);
     EXPECT_EQ(poller.del(event_fd.item), fiber::common::IoErr::None);
 }
 
@@ -195,7 +200,8 @@ TEST(PollerTest, DeleteOutsideBatchDoesNotTouchStaleArray) {
     ASSERT_EQ(wait_no_intr(poller, events, 2, std::chrono::steady_clock::now() + 1s), 1);
     poller.end_batch();
     ASSERT_EQ(poller.del(event_fd.item), fiber::common::IoErr::None);
-    EXPECT_EQ(events[0].data.ptr, &event_fd.item);
+    const void *event_ptr = events[0].data.ptr; // epoll_event is packed: read via a local
+    EXPECT_EQ(event_ptr, &event_fd.item);
 }
 
 TEST(PollerTest, FailedAddDoesNotPublishItemAndCanBeRetried) {
@@ -221,7 +227,8 @@ TEST(PollerTest, FailedDeleteStillInvalidatesReturnedEvent) {
     ::close(event_fd.fd);
     event_fd.fd = -1;
     EXPECT_NE(poller.del(event_fd.item), fiber::common::IoErr::None);
-    EXPECT_EQ(events[0].data.ptr, nullptr);
+    const void *event_ptr = events[0].data.ptr; // epoll_event is packed: read via a local
+    EXPECT_EQ(event_ptr, nullptr);
     EXPECT_FALSE(event_fd.item.registered());
 }
 
@@ -238,8 +245,11 @@ TEST(PollerTest, DeleteOfSiblingBlanksOnlyItsEntries) {
     ASSERT_EQ(poller.del(second.item), fiber::common::IoErr::None);
     int survivors = 0;
     for (int i = 0; i < 2; ++i) {
-        EXPECT_NE(events[i].data.ptr, &second.item);
-        if (events[i].data.ptr == &first.item) {
+        // epoll_event is packed (align 4): read data.ptr through a local so the
+        // comparison never binds a reference to the misaligned member.
+        const void *event_ptr = events[i].data.ptr;
+        EXPECT_NE(event_ptr, &second.item);
+        if (event_ptr == &first.item) {
             ++survivors;
         }
     }

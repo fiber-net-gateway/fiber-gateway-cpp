@@ -45,6 +45,23 @@ public:
     virtual common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept = 0;
     virtual common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept = 0;
 
+    // Direction readiness of the underlying fd. A Ready direction must be
+    // advanced by doing I/O; installing a readiness subscription for it
+    // violates the subscription contract.
+    [[nodiscard]] virtual bool read_ready() const noexcept { return false; }
+    [[nodiscard]] virtual bool write_ready() const noexcept { return false; }
+
+    // Loop handover, see net::detail::RWFd. detach runs on the current loop
+    // and requires no active I/O, subscriptions or pending buffers; adopt runs
+    // on the target loop thread.
+    virtual common::IoErr detach_for_handover() noexcept = 0;
+    virtual common::IoErr adopt_loop(event::EventLoop &loop) noexcept = 0;
+
+    // Idle-pool observation: ensure the fd listens for the stream-state bits
+    // (peer hangup) without subscribing a direction callback, so a parked
+    // connection whose peer went away is detected instead of handed out.
+    [[nodiscard]] virtual common::IoErr ensure_state_observation() noexcept { return common::IoErr::None; }
+
     // poll_* performs one non-suspending transport operation. wait_event is set
     // only when WouldBlock is returned. For TLS it may be the opposite physical
     // direction from the logical operation. Buffers passed to a TLS operation
@@ -98,6 +115,11 @@ public:
     common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;
+    [[nodiscard]] bool read_ready() const noexcept override;
+    [[nodiscard]] bool write_ready() const noexcept override;
+    common::IoErr detach_for_handover() noexcept override;
+    common::IoErr adopt_loop(event::EventLoop &loop) noexcept override;
+    [[nodiscard]] common::IoErr ensure_state_observation() noexcept override;
     common::IoErr poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept override;
     common::IoErr poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
     common::IoErr poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept override;
@@ -151,6 +173,11 @@ public:
     common::IoErr clear_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;
+    [[nodiscard]] bool read_ready() const noexcept override;
+    [[nodiscard]] bool write_ready() const noexcept override;
+    common::IoErr detach_for_handover() noexcept override;
+    common::IoErr adopt_loop(event::EventLoop &loop) noexcept override;
+    [[nodiscard]] common::IoErr ensure_state_observation() noexcept override;
     common::IoErr poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept override;
     common::IoErr poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
     common::IoErr poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept override;

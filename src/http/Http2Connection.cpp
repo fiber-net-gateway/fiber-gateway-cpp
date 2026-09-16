@@ -597,8 +597,34 @@ void Http2Connection::drive_io() noexcept {
 
 common::IoErr Http2Connection::sync_transport_callbacks() noexcept {
     event::IoEvent wanted = inbound_io_.wait_event | outbound_wait_event_;
-    const bool want_read = event::any(wanted & event::IoEvent::Read);
-    const bool want_write = event::any(wanted & event::IoEvent::Write);
+    bool want_read = event::any(wanted & event::IoEvent::Read);
+    bool want_write = event::any(wanted & event::IoEvent::Write);
+
+    // A direction that still tests Ready must be advanced by doing I/O, not by
+    // subscribing: the subscription contract rejects a Ready direction. TLS can
+    // report WouldBlock for one logical direction while the other physical fd
+    // direction stayed Ready (e.g. SSL_read blocked on a BIO write that fully
+    // drained the socket buffer). Mirror handle_transport_ready's hint updates
+    // and let the pump retry instead of installing a subscription.
+    event::IoEvent ready_events = event::IoEvent::None;
+    if (want_read && transport_->read_ready()) {
+        ready_events |= event::IoEvent::Read;
+    }
+    if (want_write && transport_->write_ready()) {
+        ready_events |= event::IoEvent::Write;
+    }
+    if (ready_events != event::IoEvent::None) {
+        const bool wakes_inbound = event::any(inbound_io_.wait_event & ready_events);
+        const bool wakes_outbound = event::any(outbound_wait_event_ & ready_events);
+        inbound_io_.ready_hint = inbound_io_.ready_hint || wakes_inbound;
+        outbound_ready_hint_ = outbound_ready_hint_ || wakes_outbound;
+        if (wakes_inbound != wakes_outbound) {
+            prefer_write_ = wakes_outbound;
+        }
+        io_pump_again_ = true;
+        want_read = want_read && !event::any(ready_events & event::IoEvent::Read);
+        want_write = want_write && !event::any(ready_events & event::IoEvent::Write);
+    }
 
     if (want_read && !physical_read_registered_) {
         common::IoErr err = transport_->set_read_callback(&Http2Connection::on_transport_read_ready, this);
