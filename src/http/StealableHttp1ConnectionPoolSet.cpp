@@ -132,7 +132,11 @@ private:
     event::EventLoop::NotifyEntry resume_notify_{};
 };
 
-class StealableHttp1ConnectionPoolSet::AcquireAwaiter::State : public common::NonCopyable, public common::NonMovable {
+// Cross-thread steal journey. Phase one (owned by AcquireAwaiter): walk the
+// shard ring and steal an entry on its home loop. Phase two (owned by the
+// returned Lease): carry the entry home. Cancellation only exists in phase
+// one; the awaiter destructor CAS-cancels and the State deletes itself.
+class StealableHttp1ConnectionPoolSet::State : public common::NonCopyable, public common::NonMovable {
 public:
     State(AcquireAwaiter &awaiter, std::coroutine_handle<> handle) noexcept :
         awaiter_(&awaiter), set_(awaiter.set_), caller_loop_(awaiter.caller_loop_), handle_(handle),
@@ -146,6 +150,8 @@ public:
 
     ~State() {
         FIBER_ASSERT(!registered_);
+        // Every delete path nulls the result first: phase one only ends
+        // deleted without a result, phase two hands it to the home pool.
         FIBER_ASSERT(result_entry_ == nullptr);
         FIBER_ASSERT(result_home_core_ == nullptr);
     }
@@ -179,26 +185,92 @@ public:
         }
     }
 
-    Lease take_result() noexcept {
+    // Hands the outcome to the caller loop. On a remote steal the State
+    // itself travels with the lease as the return vehicle (`journey`); the
+    // caller keeps it alive until the entry goes home. The active-acquire
+    // window spans that whole journey: shutdown waits for borrowed leases and
+    // in-flight returns, not only for the acquire up to delivery. Otherwise
+    // the State dies with the acquire.
+    Lease take_result(State *&journey) noexcept {
         FIBER_ASSERT(caller_loop_ != nullptr);
         FIBER_ASSERT(caller_loop_->in_loop());
         FIBER_ASSERT(status_.load(std::memory_order_acquire) == Status::Resumed);
 
         Lease result;
         if (result_entry_ && result_home_core_) {
-            result = Lease(*result_home_core_, *result_entry_, key_);
-            result_entry_ = nullptr;
-            result_home_core_ = nullptr;
+            // The entry left its home loop detached (handover protocol): bind
+            // it to this loop. First use re-registers lazily. The State keeps
+            // the entry pointers: it is the return vehicle until the lease
+            // goes home.
+            const common::IoErr adopted = result_entry_->connection()->adopt_loop(*caller_loop_);
+            if (adopted == common::IoErr::None) {
+                result = Lease(*result_home_core_, *result_entry_, key_, this);
+                journey = this;
+            } else {
+                // The caller loop is already stopping and refused the
+                // adoption, which closed the connection. No lease is
+                // delivered — the shutdown race returns an empty lease the
+                // same way — and the entry recycles at home with this State
+                // as the journey vehicle.
+                post_to(result_home_core_->loop(), Dispatch::ReturnHome);
+                journey = this;
+            }
         } else {
             result = Lease(std::move(local_fallback_));
+            journey = nullptr;
+            // Local outcome: the acquire ends here and now.
+            finish_registered();
         }
-        finish_registered();
+        // The awaiter and its coroutine die with the acquire; the return
+        // journey must never touch them.
+        awaiter_ = nullptr;
+        handle_ = {};
         return result;
+    }
+
+    // Phase two, entered from Lease::reset on the loop the connection was
+    // adopted to. The reset can run inside this fd's own event dispatch (the
+    // exchange coroutine completes from a read callback); detaching and
+    // publishing there would let the home loop re-arm the fd underneath a
+    // live dispatch. A posted notify runs on this loop's next turn, after any
+    // in-flight dispatch has unwound.
+    void return_home() noexcept {
+        FIBER_ASSERT(caller_loop_ != nullptr);
+        FIBER_ASSERT(caller_loop_->in_loop());
+        FIBER_ASSERT(result_entry_ != nullptr);
+        FIBER_ASSERT(result_home_core_ != nullptr);
+        post_to(*caller_loop_, Dispatch::DetachAndReturn);
+    }
+
+    void detach_and_return() noexcept {
+        FIBER_ASSERT(caller_loop_->in_loop());
+        FIBER_ASSERT(result_entry_ != nullptr);
+        FIBER_ASSERT(result_home_core_ != nullptr);
+
+        Http1ClientConnection *conn = result_entry_->connection();
+        if (conn != nullptr && !conn->loop_detached() && conn->valid()) {
+            // The fd is still bound to this loop: detach it — or close it,
+            // when the connection is no longer reusable — before the entry
+            // crosses threads. A detach failure already closed it inside.
+            if (conn->idle()) {
+                (void) conn->prepare_loop_handover();
+            } else {
+                conn->close();
+            }
+        }
+        post_to(result_home_core_->loop(), Dispatch::ReturnHome);
     }
 
 private:
     enum class Status : std::uint8_t { Stealing, ResumeQueued, Resumed, Canceled };
-    enum class Dispatch : std::uint8_t { TrySteal, ResumeCaller, ReturnCanceledEntry, FinalizeCanceled };
+    enum class Dispatch : std::uint8_t {
+        TrySteal,
+        ResumeCaller,
+        ReturnCanceledEntry,
+        FinalizeCanceled,
+        DetachAndReturn,
+        ReturnHome
+    };
 
     [[nodiscard]] Shard &target_shard() const noexcept {
         FIBER_ASSERT(cursor_ != nullptr);
@@ -236,6 +308,12 @@ private:
             case Dispatch::FinalizeCanceled:
                 state->finalize_canceled();
                 return;
+            case Dispatch::DetachAndReturn:
+                state->detach_and_return();
+                return;
+            case Dispatch::ReturnHome:
+                state->arrive_home();
+                return;
         }
     }
 
@@ -251,6 +329,14 @@ private:
 #endif
         result_home_core_ = &target_shard().core;
         result_entry_ = result_home_core_->try_steal_idle_entry(key_);
+        if (result_entry_ && result_entry_->connection()->prepare_loop_handover() != common::IoErr::None) {
+            // The handover detach failed and closed the connection: hand the
+            // entry back for recycling and keep hunting. The canceled-entry
+            // path below also routes through accept_returned_entry, which
+            // re-adopts entries that left their loop detached.
+            result_home_core_->accept_returned_entry(*result_entry_, key_);
+            result_entry_ = nullptr;
+        }
         if (result_entry_) {
 #if FIBER_ENABLE_BENCHMARK_TRACE
             set_->trace_remote_hit();
@@ -342,6 +428,22 @@ private:
         delete this;
     }
 
+    void arrive_home() noexcept {
+        FIBER_ASSERT(result_entry_ != nullptr);
+        FIBER_ASSERT(result_home_core_ != nullptr);
+        FIBER_ASSERT(result_home_core_->loop().in_loop());
+
+        Http1ConnectionPoolEntry *entry = std::exchange(result_entry_, nullptr);
+        Http1ConnectionPoolCore *home_core = std::exchange(result_home_core_, nullptr);
+        const HttpConnectionGroupKey key = key_;
+        // The journey ends here; the home pool owns the entry from this point.
+        // The active-acquire window ends with it, so a completed shutdown has
+        // seen every borrowed lease and in-flight return message land.
+        finish_registered();
+        delete this;
+        home_core->accept_returned_entry(*entry, key);
+    }
+
     void finish_registered() noexcept {
         FIBER_ASSERT(registered_);
         registered_ = false;
@@ -368,16 +470,17 @@ StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore::Lease &&l
     kind_(Kind::Local), local_(std::move(local)) {}
 
 StealableHttp1ConnectionPoolSet::Lease::Lease(Http1ConnectionPoolCore &home_core, Http1ConnectionPoolEntry &entry,
-                                              const HttpConnectionGroupKey &key) noexcept :
-    kind_(Kind::Remote), entry_(&entry), home_core_(&home_core), key_(key) {}
+                                              const HttpConnectionGroupKey &key, State *journey) noexcept :
+    kind_(Kind::Remote), entry_(&entry), home_core_(&home_core), key_(key), journey_(journey) {}
 
 StealableHttp1ConnectionPoolSet::Lease::Lease(Lease &&other) noexcept :
     kind_(other.kind_), local_(std::move(other.local_)), entry_(other.entry_), home_core_(other.home_core_),
-    key_(std::move(other.key_)) {
+    key_(std::move(other.key_)), journey_(other.journey_) {
     other.kind_ = Kind::Empty;
     other.entry_ = nullptr;
     other.home_core_ = nullptr;
     other.key_.reset();
+    other.journey_ = nullptr;
 }
 
 StealableHttp1ConnectionPoolSet::Lease &StealableHttp1ConnectionPoolSet::Lease::operator=(Lease &&other) noexcept {
@@ -390,10 +493,12 @@ StealableHttp1ConnectionPoolSet::Lease &StealableHttp1ConnectionPoolSet::Lease::
     entry_ = other.entry_;
     home_core_ = other.home_core_;
     key_ = std::move(other.key_);
+    journey_ = other.journey_;
     other.kind_ = Kind::Empty;
     other.entry_ = nullptr;
     other.home_core_ = nullptr;
     other.key_.reset();
+    other.journey_ = nullptr;
     return *this;
 }
 
@@ -493,13 +598,17 @@ void StealableHttp1ConnectionPoolSet::Lease::reset() noexcept {
         return;
     }
 
-    if (kind_ == Kind::Remote && entry_ && home_core_ && key_.has_value()) {
-        auto *current_loop = event::EventLoop::current_or_null();
-        if (current_loop == &home_core_->loop()) {
-            home_core_->accept_returned_entry(*entry_, *key_);
-        } else {
-            entry_->post_remote_return(*home_core_, *key_);
-        }
+    if (kind_ == Kind::Remote) {
+        // A remote lease's connection was adopted to the caller loop; the
+        // return journey detaches (or closes) it there and publishes the
+        // entry to its home pool. Resetting from any other loop violates the
+        // handover contract.
+        FIBER_ASSERT(journey_ != nullptr);
+        FIBER_ASSERT(entry_ != nullptr);
+        FIBER_ASSERT(home_core_ != nullptr);
+        FIBER_ASSERT(key_.has_value());
+        State *journey = std::exchange(journey_, nullptr);
+        journey->return_home();
     }
 
     kind_ = Kind::Empty;
@@ -649,8 +758,12 @@ StealableHttp1ConnectionPoolSet::Lease StealableHttp1ConnectionPoolSet::AcquireA
     FIBER_ASSERT(completed_);
     if (state_) {
         State *state = std::exchange(state_, nullptr);
-        Lease result = state->take_result();
-        delete state;
+        State *journey = nullptr;
+        Lease result = state->take_result(journey);
+        if (!journey) {
+            // Local fallback outcome: no cross-loop return journey to keep.
+            delete state;
+        }
         return result;
     }
     return std::move(result_);

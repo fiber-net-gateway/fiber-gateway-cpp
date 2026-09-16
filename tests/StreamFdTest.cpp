@@ -3,11 +3,13 @@
 #include <csignal>
 #include <cstdlib>
 #include <future>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/common/IoError.h>
 #include <fiber/event/EventLoop.h>
@@ -106,17 +108,27 @@ int run_cross_loop_broken_pipe_child() {
         auto *stream = new fiber::net::detail::StreamFd(group.at(0), fds[0]);
         std::promise<fiber::common::IoErr> result_promise;
         auto result_future = result_promise.get_future();
-        fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
-            const char payload[] = "ping";
-            auto result = stream->try_write(payload, sizeof(payload) - 1U);
-            result_promise.set_value(result ? fiber::common::IoErr::None : result.error());
+        fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+            // Cross-loop I/O goes through the handover protocol: detach on the
+            // owning loop, adopt on the target loop, then operate there.
+            if (stream->detach_for_handover() != fiber::common::IoErr::None) {
+                result_promise.set_value(fiber::common::IoErr::Invalid);
+                co_return;
+            }
+            fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
+                stream->adopt_loop(group.at(1));
+                const char payload[] = "ping";
+                auto result = stream->try_write(payload, sizeof(payload) - 1U);
+                result_promise.set_value(result ? fiber::common::IoErr::None : result.error());
+                co_return;
+            });
             co_return;
         });
 
         const fiber::common::IoErr err = result_future.get();
         std::promise<bool> close_promise;
         auto close_future = close_promise.get_future();
-        fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
             const bool terminal = stream->terminal();
             stream->close();
             delete stream;
@@ -126,7 +138,8 @@ int run_cross_loop_broken_pipe_child() {
         const bool terminal = close_future.get();
         group.stop();
         group.join();
-        _exit(err == fiber::common::IoErr::BrokenPipe && !terminal ? 0 : 32);
+        // A fatal write error marks the stream terminal on the operating loop.
+        _exit(err == fiber::common::IoErr::BrokenPipe && terminal ? 0 : 32);
     }
 
     ::close(fds[0]);
@@ -149,9 +162,7 @@ TEST(StreamFdTest, TryWriteReturnsBrokenPipeInsteadOfSigpipe) { EXPECT_EQ(run_br
 
 TEST(StreamFdTest, TryWritevReturnsBrokenPipeInsteadOfSigpipe) { EXPECT_EQ(run_broken_pipe_child(true), 0); }
 
-TEST(StreamFdTest, CrossLoopTryWriteReturnsBrokenPipeWithoutTouchingOwnerPoller) {
-    EXPECT_EQ(run_cross_loop_broken_pipe_child(), 0);
-}
+TEST(StreamFdTest, CrossLoopWriteAfterHandoverReturnsBrokenPipe) { EXPECT_EQ(run_cross_loop_broken_pipe_child(), 0); }
 
 namespace {
 using namespace std::chrono_literals;
@@ -186,7 +197,8 @@ TEST(StreamFdTest, ShortReadSuppressesEmptyProbeAndNextPacketWakesReader) {
         char data[16]{};
         auto first = stream.try_read(data, sizeof(data));
         EXPECT_TRUE(first && *first == 1);
-        EXPECT_EQ(stream.rwfd().prepare_io(IoEvent::Read), IoErr::WouldBlock);
+        // The short read proved the receive side drained; no probe needed.
+        EXPECT_FALSE(stream.read_ready());
         EXPECT_EQ(::send(fds[1], "b", 1, 0), 1);
         auto second = co_await stream.read(data, sizeof(data), 500ms);
         EXPECT_TRUE(second && *second == 1);
@@ -252,6 +264,81 @@ TEST(StreamFdTest, DataThenHalfCloseDrainsEofAndStillAllowsReply) {
     loop.run();
 }
 
+TEST(StreamFdTest, HalfCloseShortReadThenWaitCompletesWithoutNewEdge) {
+    // RDHUP was consumed together with the data edge. A short read parks the
+    // readiness at Blocked, and no further edge can arrive — the known
+    // half-close must complete the next read wait (reads can no longer block)
+    // instead of timing out, all the way to EOF.
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    EtWatchdog watchdog{loop};
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        watchdog.arm();
+        fiber::net::detail::StreamFd stream(loop, fds[0]);
+        EXPECT_EQ(stream.ensure_state_observation(), fiber::common::IoErr::None);
+        EXPECT_EQ(::send(fds[1], "abcdefgh", 8, 0), 8);
+        EXPECT_EQ(::shutdown(fds[1], SHUT_WR), 0);
+        auto ready = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(ready);
+        char data[100]{};
+        auto short_read = stream.try_read(data, sizeof(data));
+        EXPECT_TRUE(short_read && *short_read == 8);
+        EXPECT_TRUE(stream.peer_hangup());
+        EXPECT_FALSE(stream.read_ready());
+        auto still_readable = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(still_readable);
+        auto eof_read = stream.try_read(data, sizeof(data));
+        EXPECT_TRUE(eof_read && *eof_read == 0);
+        EXPECT_TRUE(stream.eof());
+        EXPECT_FALSE(stream.terminal());
+        stream.close();
+        ::close(fds[1]);
+        watchdog.finish();
+    });
+    loop.run();
+}
+
+TEST(StreamFdTest, HupWithBufferedDataLetsWaitsDrainRemainingThenEof) {
+    // A full peer close reports a Terminal hint alongside the data edge. The
+    // hint must not turn read waits into an error while buffered bytes are
+    // still readable: data first, then EOF.
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    EtWatchdog watchdog{loop};
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        watchdog.arm();
+        fiber::net::detail::StreamFd stream(loop, fds[0]);
+        EXPECT_EQ(stream.ensure_state_observation(), fiber::common::IoErr::None);
+        EXPECT_EQ(::send(fds[1], "abcdefgh", 8, 0), 8);
+        EXPECT_EQ(::close(fds[1]), 0);
+        fds[1] = -1;
+        auto ready = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(ready);
+        char data[16]{};
+        auto first = stream.try_read(data, 4);
+        EXPECT_TRUE(first && *first == 4);
+        EXPECT_TRUE(stream.terminal());
+        // The terminal hint must not fail this wait: the direction is still
+        // readable with buffered bytes.
+        auto drain_wait = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(drain_wait);
+        auto rest = stream.try_read(data, 8);
+        EXPECT_TRUE(rest && *rest == 4);
+        // Now the short read parked the readiness at Blocked with the hint
+        // still recorded; the wait must complete anyway.
+        auto after = co_await stream.wait_readable(500ms);
+        EXPECT_TRUE(after);
+        auto eof_read = stream.try_read(data, sizeof(data));
+        EXPECT_TRUE(eof_read && *eof_read == 0);
+        EXPECT_TRUE(stream.eof());
+        stream.close();
+        watchdog.finish();
+    });
+    loop.run();
+}
+
 TEST(StreamFdTest, ZeroLengthReadDoesNotConsumeReadiness) {
     int fds[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
@@ -271,4 +358,148 @@ TEST(StreamFdTest, ZeroLengthReadDoesNotConsumeReadiness) {
         co_return;
     });
     loop.run();
+}
+
+namespace {
+
+bool create_connected_tcp_sockets(int &server_fd, int &client_fd) {
+    server_fd = -1;
+    client_fd = -1;
+    int listener_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (listener_fd < 0) {
+        return false;
+    }
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::bind(listener_fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0 ||
+        ::listen(listener_fd, 1) != 0) {
+        (void) ::close(listener_fd);
+        return false;
+    }
+
+    socklen_t address_len = sizeof(address);
+    if (::getsockname(listener_fd, reinterpret_cast<sockaddr *>(&address), &address_len) != 0) {
+        (void) ::close(listener_fd);
+        return false;
+    }
+
+    client_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (client_fd < 0 || ::connect(client_fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        if (client_fd >= 0) {
+            (void) ::close(client_fd);
+            client_fd = -1;
+        }
+        (void) ::close(listener_fd);
+        return false;
+    }
+
+    server_fd = ::accept4(listener_fd, nullptr, nullptr, SOCK_CLOEXEC);
+    (void) ::close(listener_fd);
+    if (server_fd < 0) {
+        (void) ::close(client_fd);
+        client_fd = -1;
+        return false;
+    }
+    return true;
+}
+
+struct TerminalCallbackResult {
+    int calls = 0;
+    IoErr err = IoErr::Invalid;
+};
+
+void record_terminal_callback(void *raw_ctx, IoErr err) noexcept {
+    auto *ctx = static_cast<TerminalCallbackResult *>(raw_ctx);
+    ++ctx->calls;
+    ctx->err = err;
+}
+
+} // namespace
+
+TEST(StreamFdTest, PeerWriteHalfCloseIsReadableButNotTerminal) {
+    int server_fd = -1;
+    int client_fd = -1;
+    ASSERT_TRUE(create_connected_tcp_sockets(server_fd, client_fd));
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::StreamFd stream(loop, server_fd);
+    TerminalCallbackResult terminal_result;
+    bool terminal_before_close = true;
+    bool peer_closed_observed = false;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        // The terminal subscription also arms the read-hangup observation.
+        EXPECT_EQ(stream.set_terminal_callback(&record_terminal_callback, &terminal_result), IoErr::None);
+        EXPECT_EQ(::shutdown(client_fd, SHUT_WR), 0);
+        for (int i = 0; i < 100 && !stream.peer_closed(); ++i) {
+            co_await fiber::async::sleep(1ms);
+        }
+        peer_closed_observed = stream.peer_closed();
+        char data[8]{};
+        auto eof = co_await stream.read(data, sizeof(data), 500ms);
+        EXPECT_TRUE(eof && *eof == 0);
+        terminal_before_close = stream.terminal();
+        EXPECT_EQ(terminal_result.calls, 0);
+        stream.close();
+        ::close(client_fd);
+        client_fd = -1;
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    if (client_fd >= 0) {
+        (void) ::close(client_fd);
+    }
+    EXPECT_TRUE(peer_closed_observed);
+    EXPECT_FALSE(terminal_before_close);
+    // close() completes the still-registered terminal subscription.
+    EXPECT_EQ(terminal_result.calls, 1);
+    EXPECT_EQ(terminal_result.err, IoErr::Canceled);
+}
+
+TEST(StreamFdTest, PeerResetMarksTerminalAndNotifiesOnce) {
+    int server_fd = -1;
+    int client_fd = -1;
+    ASSERT_TRUE(create_connected_tcp_sockets(server_fd, client_fd));
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::StreamFd stream(loop, server_fd);
+    TerminalCallbackResult terminal_result;
+    bool reset_sent = false;
+    bool terminal_before_close = false;
+    int calls_before_close = 0;
+
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        EXPECT_EQ(stream.set_terminal_callback(&record_terminal_callback, &terminal_result), IoErr::None);
+        linger reset_linger{1, 0};
+        if (::setsockopt(client_fd, SOL_SOCKET, SO_LINGER, &reset_linger, sizeof(reset_linger)) == 0) {
+            reset_sent = true;
+            (void) ::close(client_fd);
+            client_fd = -1;
+        }
+        for (int i = 0; i < 100 && terminal_result.calls == 0; ++i) {
+            co_await fiber::async::sleep(1ms);
+        }
+        terminal_before_close = stream.terminal();
+        calls_before_close = terminal_result.calls;
+        stream.close();
+        if (client_fd >= 0) {
+            (void) ::close(client_fd);
+            client_fd = -1;
+        }
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    if (client_fd >= 0) {
+        (void) ::close(client_fd);
+    }
+    EXPECT_TRUE(reset_sent);
+    EXPECT_EQ(calls_before_close, 1);
+    EXPECT_TRUE(terminal_before_close);
+    EXPECT_EQ(terminal_result.calls, 1);
 }

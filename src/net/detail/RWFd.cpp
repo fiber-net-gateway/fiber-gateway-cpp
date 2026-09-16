@@ -1,7 +1,5 @@
 #include <fiber/net/detail/RWFd.h>
 
-#include <cerrno>
-#include <poll.h>
 #include <utility>
 
 namespace fiber::net::detail {
@@ -23,22 +21,21 @@ RWFd::DispatchGuard::~DispatchGuard() noexcept {
 void RWFdWaiterBase::on_event(void *ctx, fiber::common::IoErr err) noexcept {
     auto *waiter = static_cast<RWFdWaiterBase *>(ctx);
     FIBER_ASSERT(waiter != nullptr);
-    fiber::common::IoErr clear_err = waiter->rwfd_->cancel_wait(waiter);
-    if (err == fiber::common::IoErr::None && clear_err != fiber::common::IoErr::None) {
-        err = clear_err;
+    if (err == fiber::common::IoErr::None) {
+        // Normal transition: drop this subscription before completing; the
+        // direction's readiness and kernel interest are untouched.
+        (void) waiter->rwfd_->cancel_wait(waiter);
     }
-    waiter->complete(err);
+    // Canceled completions arrive from close(), which has already detached the
+    // waiter; the RWFd may be destroyed by then and must not be touched.
+    FIBER_ASSERT(waiter->complete_callback_ != nullptr);
+    waiter->complete_callback_(waiter, err);
 }
 
-void RWFdWaiterBase::complete(fiber::common::IoErr err) noexcept {
-    FIBER_ASSERT(complete_callback_ != nullptr);
-    complete_callback_(this, err);
-}
+RWFd::RWFd(event::EventLoop &owner_loop, Kind kind) :
+    kind_(kind), efd_(owner_loop, this, &RWFd::on_efd_events, event::Poller::Mode::Edge) {}
 
-RWFd::RWFd(event::EventLoop &loop, Kind kind) :
-    kind_(kind), external_io_(kind == Kind::Raw), efd_(loop, this, &RWFd::on_efd_events, event::Poller::Mode::Edge) {}
-
-RWFd::RWFd(event::EventLoop &loop, int socket, Kind kind) : RWFd(loop, kind) {
+RWFd::RWFd(event::EventLoop &owner_loop, int socket, Kind kind) : RWFd(owner_loop, kind) {
     const auto err = attach(socket);
     FIBER_ASSERT(err == common::IoErr::None);
 }
@@ -48,519 +45,295 @@ RWFd::~RWFd() {
         *dispatch_destroyed_observer_ = true;
         dispatch_destroyed_observer_ = nullptr;
     }
-    if (loop().in_loop()) {
+    if (efd_.current_loop().in_loop()) {
         close();
     } else {
-        FIBER_ASSERT(!efd_.registered() && !has_callbacks() && !ready_entry_.is_in_queue());
+        // Off the current loop only a fully detached object may die: the
+        // handover protocol guarantees there is no registration or subscription
+        // left for any loop to dispatch through.
+        FIBER_ASSERT(!efd_.registered() && !has_callbacks());
     }
 }
 
 bool RWFd::valid() const noexcept { return efd_.valid(); }
 int RWFd::fd() const noexcept { return efd_.fd(); }
-event::EventLoop &RWFd::loop() const noexcept { return efd_.loop(); }
+event::EventLoop &RWFd::owner_loop() const noexcept { return efd_.owner_loop(); }
+event::EventLoop &RWFd::current_loop() const noexcept { return efd_.current_loop(); }
+event::EventLoop &RWFd::loop() const noexcept { return efd_.current_loop(); }
 
 common::IoErr RWFd::attach(int socket) noexcept {
     const auto err = efd_.attach(socket);
     if (err == common::IoErr::None) {
-        terminal_ = false;
-        terminal_error_ = common::IoErr::None;
-        read_ready_ = write_ready_ = Readiness::Unknown;
-        read_hangup_ = false;
-        external_io_.store(kind_ == Kind::Raw, std::memory_order_release);
+        read_event_.state = State::Unknown;
+        write_event_.state = State::Unknown;
     }
     return err;
 }
 
 int RWFd::release_fd() noexcept {
+    // An fd with no poller registration and no stop entry belongs to no loop:
+    // the constructing thread may release it during a startup rollback.
+    FIBER_ASSERT((!efd_.registered() && !stop_entry_.is_registered()) || efd_.current_loop().in_loop());
     FIBER_ASSERT(!has_callbacks());
     if (efd_.registered() && efd_.unwatch_all() != common::IoErr::None) {
         return -1;
     }
-    if (ready_entry_.is_in_queue()) {
-        loop().cancel<RWFd, &RWFd::ready_entry_>(*this);
-    }
     if (stop_entry_.is_registered()) {
-        loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
+        efd_.current_loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
     }
-    pending_ready_ = event::IoEvent::None;
+    read_event_.state = State::Unknown;
+    write_event_.state = State::Unknown;
     return efd_.release_fd();
 }
 
 void RWFd::on_loop_stop(RWFd *owner) noexcept { owner->close(); }
 
-common::IoErr RWFd::ensure_registered() noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    event::IoEvent interest = event::IoEvent::Read | event::IoEvent::Write | event::IoEvent::Terminal;
-    if (kind_ != Kind::Datagram) {
-        interest |= event::IoEvent::ReadHangup;
-    }
-    const auto err = efd_.watch_set(interest);
-    if (err == common::IoErr::None && !stop_entry_.is_registered()) {
-        if (!loop().register_stop<RWFd, &RWFd::stop_entry_, &RWFd::on_loop_stop>(*this)) {
-            return common::IoErr::Canceled;
-        }
-    }
-    return err;
+void RWFd::set_stream_event_sink(void *ctx, StreamEventCallback callback) noexcept {
+    FIBER_ASSERT(callback != nullptr);
+    stream_sink_ctx_ = ctx;
+    stream_sink_ = callback;
 }
 
-common::IoErr RWFd::prepare_io(event::IoEvent direction) noexcept {
-    if (!valid()) {
-        return common::IoErr::BadFd;
-    }
-    if (!loop().in_loop()) {
-        use_external_io();
+void RWFd::set_stream_wait_gate(void *ctx, StreamWaitGate gate) noexcept {
+    FIBER_ASSERT(gate != nullptr);
+    stream_gate_ctx_ = ctx;
+    stream_gate_ = gate;
+}
+
+common::IoErr RWFd::ensure_state_observation() noexcept {
+    if (kind_ != Kind::Stream) {
         return common::IoErr::None;
     }
-    const auto err = ensure_registered();
-    if (err != common::IoErr::None) {
-        return err;
-    }
-    if (!external_io_.load(std::memory_order_acquire)) {
-        const auto state = direction == event::IoEvent::Read ? read_ready_ : write_ready_;
-        if (state == Readiness::Blocked && !terminal_) {
-            return common::IoErr::WouldBlock;
-        }
-    }
-    return common::IoErr::None;
+    return ensure_listening(event::IoEvent::ReadHangup);
 }
 
-void RWFd::finish_io(event::IoEvent direction, common::IoErr err, bool exhausted) noexcept {
-    if (!loop().in_loop()) {
-        return;
-    }
-    auto &state = direction == event::IoEvent::Read ? read_ready_ : write_ready_;
-    if (err == common::IoErr::WouldBlock) {
-        state = Readiness::Blocked;
-    } else if (err == common::IoErr::None) {
-        const bool drained = direction == event::IoEvent::Read && exhausted && !read_hangup_ && !terminal_ &&
-                             !external_io_.load(std::memory_order_acquire);
-        state = drained ? Readiness::Blocked : Readiness::Ready;
-    } else if (err == common::IoErr::ConnReset || err == common::IoErr::BrokenPipe ||
-               err == common::IoErr::NotConnected || err == common::IoErr::ConnAborted) {
-        mark_terminal(err);
-    }
-    if (state == Readiness::Blocked) {
-        pending_ready_ &= ~direction;
-    }
-}
-
-common::IoResult<bool> RWFd::check_ready(event::IoEvent direction) noexcept {
-    if (direction == event::IoEvent::Terminal) {
-        return terminal_;
-    }
-    if (external_io_.load(std::memory_order_acquire)) {
-        pollfd descriptor{.fd = fd(),
-                          .events = static_cast<short>(direction == event::IoEvent::Read ? POLLIN : POLLOUT)};
-        int result;
-        do {
-            result = ::poll(&descriptor, 1, 0);
-        } while (result < 0 && errno == EINTR);
-        if (result < 0) {
-            return std::unexpected(common::io_err_from_errno(errno));
-        }
-        if (descriptor.revents & POLLNVAL) {
-            return std::unexpected(common::IoErr::BadFd);
-        }
-        return descriptor.revents != 0;
-    }
-    return terminal_ || (direction == event::IoEvent::Read ? read_ready_ : write_ready_) == Readiness::Ready;
-}
-
-void RWFd::close() {
-    FIBER_ASSERT(loop().in_loop());
-    if (ready_entry_.is_in_queue()) {
-        loop().cancel<RWFd, &RWFd::ready_entry_>(*this);
-    }
+RWFd::DetachedCompletions RWFd::detach_for_close() noexcept {
+    FIBER_ASSERT(efd_.current_loop().in_loop());
     if (stop_entry_.is_registered()) {
-        loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
+        efd_.current_loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
     }
-    pending_ready_ = event::IoEvent::None;
-    const auto read_callback = std::exchange(read_callback_, nullptr);
-    void *read_ctx = std::exchange(read_callback_ctx_, nullptr);
-    const auto write_callback = std::exchange(write_callback_, nullptr);
-    void *write_ctx = std::exchange(write_callback_ctx_, nullptr);
-    const auto terminal_callback = std::exchange(terminal_callback_, nullptr);
-    void *terminal_ctx = std::exchange(terminal_callback_ctx_, nullptr);
+    DetachedCompletions detached;
+    detached.read_callback = std::exchange(read_event_.callback, nullptr);
+    detached.read_ctx = std::exchange(read_event_.ctx, nullptr);
+    detached.write_callback = std::exchange(write_event_.callback, nullptr);
+    detached.write_ctx = std::exchange(write_event_.ctx, nullptr);
     if (read_generation_ != UINT64_MAX) {
         ++read_generation_;
     }
     if (write_generation_ != UINT64_MAX) {
         ++write_generation_;
     }
-    if (terminal_generation_ != UINT64_MAX) {
-        ++terminal_generation_;
-    }
-    if (!terminal_) {
-        terminal_ = true;
-        terminal_error_ = common::IoErr::Canceled;
-    }
-    const auto error = terminal_error_;
     efd_.close_fd();
-    // All state is detached before a completion may destroy this object.
-    auto complete_closed = [](ReadyCallback callback, void *ctx) noexcept {
-        if (callback == &RWFdWaiterBase::on_event) {
-            // The waiter has already been detached. In particular, its RWFd
-            // may have been destroyed by the preceding terminal completion.
-            static_cast<RWFdWaiterBase *>(ctx)->complete(common::IoErr::Canceled);
-        } else if (callback) {
-            callback(ctx, common::IoErr::Canceled);
-        }
-    };
-    if (terminal_callback) {
-        terminal_callback(terminal_ctx, error);
-    }
-    complete_closed(read_callback, read_ctx);
-    complete_closed(write_callback, write_ctx);
+    return detached;
 }
 
-common::IoErr RWFd::install_callback(event::IoEvent direction, ReadyCallback callback, void *ctx) noexcept {
-    FIBER_ASSERT(loop().in_loop());
+void RWFd::DetachedCompletions::complete(common::IoErr err) const noexcept {
+    auto complete_one = [err](ReadyCallback callback, void *ctx) noexcept {
+        if (callback == &RWFdWaiterBase::on_event) {
+            // The waiter has already been detached. In particular, its RWFd may
+            // be gone by the time the previous completion ran.
+            auto *waiter = static_cast<RWFdWaiterBase *>(ctx);
+            waiter->complete_callback_(waiter, err);
+        } else if (callback) {
+            callback(ctx, err);
+        }
+    };
+    complete_one(read_callback, read_ctx);
+    complete_one(write_callback, write_ctx);
+}
+
+void RWFd::close() { detach_for_close().complete(common::IoErr::Canceled); }
+
+common::IoErr RWFd::ensure_listening(event::IoEvent events) noexcept {
+    FIBER_ASSERT(efd_.current_loop().in_loop());
+    if (!valid()) {
+        return common::IoErr::BadFd;
+    }
+    // The stop hook outlives individual interests: register it first so a
+    // later watch failure never leaves a registration without cleanup.
+    if (!stop_entry_.is_registered() &&
+        !efd_.current_loop().register_stop<RWFd, &RWFd::stop_entry_, &RWFd::on_loop_stop>(*this)) {
+        return common::IoErr::Canceled;
+    }
+    return efd_.watch_add(events);
+}
+
+common::IoErr RWFd::install_callback(Event &event, std::uint64_t &generation, event::IoEvent direction,
+                                     ReadyCallback callback, void *ctx) noexcept {
+    FIBER_ASSERT(efd_.current_loop().in_loop());
     if (!callback) {
         return common::IoErr::Invalid;
     }
-    auto &slot = direction == event::IoEvent::Read    ? read_callback_
-                 : direction == event::IoEvent::Write ? write_callback_
-                                                      : terminal_callback_;
-    auto &context = direction == event::IoEvent::Read    ? read_callback_ctx_
-                    : direction == event::IoEvent::Write ? write_callback_ctx_
-                                                         : terminal_callback_ctx_;
-    auto &generation = direction == event::IoEvent::Read    ? read_generation_
-                       : direction == event::IoEvent::Write ? write_generation_
-                                                            : terminal_generation_;
-    if (slot) {
+    // A Ready caller must advance by doing I/O, not by subscribing for another
+    // edge, and only one subscription may exist per direction at a time.
+    FIBER_ASSERT(event.state != State::Ready);
+    if (event.callback) {
         return common::IoErr::Busy;
     }
     if (generation == UINT64_MAX) {
         return common::IoErr::Invalid;
     }
-    const auto err = ensure_registered();
+    const auto err = ensure_listening(direction);
     if (err != common::IoErr::None) {
         return err;
     }
-    auto ready = check_ready(direction);
-    if (!ready) {
-        return ready.error();
-    }
-    slot = callback;
-    context = ctx;
+    event.callback = callback;
+    event.ctx = ctx;
     ++generation;
-    if (*ready) {
-        queue_ready(direction);
-    }
     return common::IoErr::None;
 }
 
-common::IoErr RWFd::set_read_callback(ReadyCallback cb, void *ctx) noexcept {
-    return install_callback(event::IoEvent::Read, cb, ctx);
-}
-common::IoErr RWFd::set_write_callback(ReadyCallback cb, void *ctx) noexcept {
-    return install_callback(event::IoEvent::Write, cb, ctx);
-}
-common::IoErr RWFd::set_terminal_callback(ReadyCallback cb, void *ctx) noexcept {
-    return install_callback(event::IoEvent::Terminal, cb, ctx);
+common::IoErr RWFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    return install_callback(read_event_, read_generation_, event::IoEvent::Read, callback, ctx);
 }
 
-bool RWFd::remove_callback(event::IoEvent direction, ReadyCallback callback, void *ctx) noexcept {
-    auto &slot = direction == event::IoEvent::Read    ? read_callback_
-                 : direction == event::IoEvent::Write ? write_callback_
-                                                      : terminal_callback_;
-    auto &context = direction == event::IoEvent::Read    ? read_callback_ctx_
-                    : direction == event::IoEvent::Write ? write_callback_ctx_
-                                                         : terminal_callback_ctx_;
-    auto &generation = direction == event::IoEvent::Read    ? read_generation_
-                       : direction == event::IoEvent::Write ? write_generation_
-                                                            : terminal_generation_;
-    if (slot != callback || context != ctx) {
+common::IoErr RWFd::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    return install_callback(write_event_, write_generation_, event::IoEvent::Write, callback, ctx);
+}
+
+bool RWFd::remove_callback(Event &event, std::uint64_t &generation, event::IoEvent direction, ReadyCallback callback,
+                           void *ctx) noexcept {
+    (void) direction;
+    if (event.callback != callback || event.ctx != ctx) {
         return false;
     }
-    slot = nullptr;
-    context = nullptr;
+    event.callback = nullptr;
+    event.ctx = nullptr;
     // Saturation rejects later subscriptions instead of wrapping their identity.
     if (generation != UINT64_MAX) {
         ++generation;
     }
-    pending_ready_ &= ~direction;
-    if (!event::any(pending_ready_) && ready_entry_.is_in_queue()) {
-        loop().cancel<RWFd, &RWFd::ready_entry_>(*this);
-    }
     return true;
 }
 
-common::IoErr RWFd::clear_read_callback(ReadyCallback cb, void *ctx) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    if (!cb) {
+common::IoErr RWFd::clear_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    FIBER_ASSERT(efd_.current_loop().in_loop());
+    if (!callback) {
         return common::IoErr::Invalid;
     }
-    (void) remove_callback(event::IoEvent::Read, cb, ctx);
-    return common::IoErr::None;
-}
-common::IoErr RWFd::clear_write_callback(ReadyCallback cb, void *ctx) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    if (!cb) {
-        return common::IoErr::Invalid;
-    }
-    (void) remove_callback(event::IoEvent::Write, cb, ctx);
-    return common::IoErr::None;
-}
-common::IoErr RWFd::clear_terminal_callback(ReadyCallback cb, void *ctx) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    if (!cb) {
-        return common::IoErr::Invalid;
-    }
-    (void) remove_callback(event::IoEvent::Terminal, cb, ctx);
+    (void) remove_callback(read_event_, read_generation_, event::IoEvent::Read, callback, ctx);
     return common::IoErr::None;
 }
 
-void RWFd::mark_terminal(common::IoErr error) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    if (terminal_) {
-        return;
+common::IoErr RWFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
+    FIBER_ASSERT(efd_.current_loop().in_loop());
+    if (!callback) {
+        return common::IoErr::Invalid;
     }
-    terminal_ = true;
-    terminal_error_ = error == common::IoErr::None ? common::IoErr::Unknown : error;
-    read_ready_ = write_ready_ = Readiness::Ready;
-    queue_ready(active_events());
+    (void) remove_callback(write_event_, write_generation_, event::IoEvent::Write, callback, ctx);
+    return common::IoErr::None;
+}
+
+common::IoErr RWFd::detach_for_handover() noexcept {
+    FIBER_ASSERT(efd_.current_loop().in_loop());
+    FIBER_ASSERT(!has_callbacks());
+    const auto err = efd_.detach_from_current_loop();
+    if (err != common::IoErr::None) {
+        return err;
+    }
+    if (stop_entry_.is_registered()) {
+        efd_.current_loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
+    }
+    return common::IoErr::None;
+}
+
+common::IoErr RWFd::adopt_loop(event::EventLoop &loop) noexcept {
+    efd_.adopt_loop(loop);
+    read_event_.state = State::Unknown;
+    write_event_.state = State::Unknown;
+    // Taking over the current loop takes over the lifecycle with it: the stop
+    // hook is installed at adoption, so an fd that never subscribes (and so
+    // never ADDs) is still closed when the loop stops. Lazy ADD does not mean
+    // a lazy lifecycle.
+    if (!stop_entry_.is_registered() && !loop.register_stop<RWFd, &RWFd::stop_entry_, &RWFd::on_loop_stop>(*this)) {
+        // The target loop is already stopping; nobody would run a later
+        // cleanup. Close here and report the failed adoption.
+        close();
+        return common::IoErr::Canceled;
+    }
+    return common::IoErr::None;
 }
 
 RWFd::WaitReadableAwaiter RWFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return WaitReadableAwaiter(*this, timeout);
 }
+
 RWFd::WaitWritableAwaiter RWFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return WaitWritableAwaiter(*this, timeout);
 }
 
-common::IoResult<bool> RWFd::begin_wait(RWFdWaiterBase *waiter) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    const auto direction = waiter->event_;
-    if ((direction == event::IoEvent::Read ? read_callback_ : write_callback_)) {
-        return std::unexpected(common::IoErr::Busy);
+common::IoErr RWFd::begin_wait(RWFdWaiterBase *waiter) noexcept {
+    if (waiter->event_ == event::IoEvent::Read) {
+        return install_callback(read_event_, read_generation_, event::IoEvent::Read, &RWFdWaiterBase::on_event, waiter);
     }
-    const auto err = ensure_registered();
-    if (err != common::IoErr::None) {
-        return std::unexpected(err);
-    }
-    auto ready = check_ready(direction);
-    if (!ready) {
-        return std::unexpected(ready.error());
-    }
-    if (*ready) {
-        return false;
-    }
-    // install_callback cannot run the callback synchronously.
-    const auto installed = install_callback(direction, &RWFdWaiterBase::on_event, waiter);
-    if (installed != common::IoErr::None) {
-        return std::unexpected(installed);
-    }
-    return true;
+    return install_callback(write_event_, write_generation_, event::IoEvent::Write, &RWFdWaiterBase::on_event, waiter);
 }
 
-common::IoErr RWFd::cancel_wait(RWFdWaiterBase *waiter) noexcept {
-    FIBER_ASSERT(loop().in_loop());
-    (void) remove_callback(waiter->event_, &RWFdWaiterBase::on_event, waiter);
-    return common::IoErr::None;
-}
-
-void RWFd::queue_ready(event::IoEvent events) noexcept {
-    pending_ready_ |= events;
-    if (event::any(pending_ready_)) {
-        loop().post_local<RWFd, &RWFd::ready_entry_, &RWFd::on_deferred_ready>(*this);
-    }
-}
-
-void RWFd::on_deferred_ready(RWFd *owner) noexcept {
-    auto events = std::exchange(owner->pending_ready_, event::IoEvent::None);
-    if (!owner->external_io_.load(std::memory_order_acquire)) {
-        if (owner->read_ready_ == Readiness::Blocked) {
-            events &= ~event::IoEvent::Read;
-        }
-        if (owner->write_ready_ == Readiness::Blocked) {
-            events &= ~event::IoEvent::Write;
-        }
-    }
-    owner->dispatch_ready(events);
+void RWFd::cancel_wait(RWFdWaiterBase *waiter) noexcept {
+    FIBER_ASSERT(efd_.current_loop().in_loop());
+    (void) remove_callback(waiter->event_ == event::IoEvent::Read ? read_event_ : write_event_,
+                           waiter->event_ == event::IoEvent::Read ? read_generation_ : write_generation_,
+                           waiter->event_, &RWFdWaiterBase::on_event, waiter);
 }
 
 void RWFd::on_efd_events(void *owner, event::IoEvent events) { static_cast<RWFd *>(owner)->handle_events(events); }
 
 void RWFd::handle_events(event::IoEvent events) {
-    FIBER_ASSERT(loop().in_loop());
+    FIBER_ASSERT(efd_.current_loop().in_loop());
+    if (!valid()) {
+        return;
+    }
+
+    DispatchGuard guard(*this);
+    const auto epoch = efd_.epoch();
+
+    // Raw stream bits this layer does not interpret: forwarded to the adapter
+    // sink first so observable stream state settles before business callbacks.
+    const event::IoEvent stream_bits = events & (event::IoEvent::ReadHangup | event::IoEvent::Terminal);
+    // A read-side hangup still delivers buffered data and then EOF; a terminal
+    // event fails both directions' pending operations.
     if (event::any(events & event::IoEvent::ReadHangup)) {
-        read_hangup_ = true;
         events |= event::IoEvent::Read;
     }
     if (event::any(events & event::IoEvent::Terminal)) {
-        if (!terminal_) {
-            terminal_ = true;
-            terminal_error_ = common::IoErr::Unknown;
-        }
         events |= event::IoEvent::Read | event::IoEvent::Write;
     }
+
+    // Record every transition first. Callbacks may immediately run I/O and
+    // re-mark their direction; a later step must not clobber that result.
+    const bool read_transition = event::any(events & event::IoEvent::Read) && read_event_.state != State::Ready;
+    const bool write_transition = event::any(events & event::IoEvent::Write) && write_event_.state != State::Ready;
     if (event::any(events & event::IoEvent::Read)) {
-        read_ready_ = Readiness::Ready;
+        read_event_.state = State::Ready;
     }
     if (event::any(events & event::IoEvent::Write)) {
-        write_ready_ = Readiness::Ready;
+        write_event_.state = State::Ready;
     }
-    pending_ready_ &= ~events;
-    if (!event::any(pending_ready_) && ready_entry_.is_in_queue()) {
-        loop().cancel<RWFd, &RWFd::ready_entry_>(*this);
-    }
-    dispatch_ready(events);
-}
-
-void RWFd::dispatch_ready(event::IoEvent events) {
-    if (!event::any(events)) {
-        return;
-    }
-    DispatchGuard guard(*this);
-    const auto epoch = efd_.epoch();
     const auto read_generation = read_generation_;
     const auto write_generation = write_generation_;
-    if (event::any(events & event::IoEvent::Terminal) && terminal_callback_) {
-        auto callback = terminal_callback_;
-        void *ctx = terminal_callback_ctx_;
-        (void) remove_callback(event::IoEvent::Terminal, callback, ctx);
-        callback(ctx, terminal_error_);
+
+    if (stream_sink_ != nullptr && event::any(stream_bits)) {
+        stream_sink_(stream_sink_ctx_, stream_bits);
         if (guard.owner_destroyed() || !valid() || efd_.epoch() != epoch) {
             return;
         }
     }
-    if (event::any(events & event::IoEvent::Read) && read_callback_ && read_generation == read_generation_) {
-        read_callback_(read_callback_ctx_, common::IoErr::None);
+
+    // Ready -> Ready never re-notifies; a subscription installed while this
+    // dispatch was running has a newer generation and is not notified either.
+    if (read_transition && read_event_.callback != nullptr && read_generation_ == read_generation) {
+        read_event_.callback(read_event_.ctx, common::IoErr::None);
         if (guard.owner_destroyed() || !valid() || efd_.epoch() != epoch) {
             return;
         }
     }
-    if (event::any(events & event::IoEvent::Write) && write_callback_ && write_generation == write_generation_) {
-        write_callback_(write_callback_ctx_, common::IoErr::None);
+    if (write_transition && write_event_.callback != nullptr && write_generation_ == write_generation) {
+        write_event_.callback(write_event_.ctx, common::IoErr::None);
     }
 }
 
-bool RWFd::has_callbacks() const noexcept { return read_callback_ || write_callback_ || terminal_callback_; }
-
-event::IoEvent RWFd::active_events() const noexcept {
-    event::IoEvent events = event::IoEvent::None;
-    if (read_callback_) {
-        events |= event::IoEvent::Read;
-    }
-    if (write_callback_) {
-        events |= event::IoEvent::Write;
-    }
-    if (terminal_callback_) {
-        events |= event::IoEvent::Terminal;
-    }
-    return events;
-}
-
-void RWFdCrossThreadWaiter::on_complete(RWFdWaiterBase *base, fiber::common::IoErr err) noexcept {
-    auto *waiter = static_cast<RWFdCrossThreadWaiter *>(base);
-    waiter->err_ = err;
-    do_notify_resume(waiter);
-}
-
-void RWFdCrossThreadWaiter::on_notify_cancel(RWFdCrossThreadWaiter *waiter) noexcept {
-    RWFdWaiterState state = waiter->state_.load(std::memory_order_relaxed);
-    RWFd *rwfd = waiter->rwfd_;
-    FIBER_ASSERT(rwfd->loop().in_loop());
-    if (state == RWFdWaiterState::Request_Cancel) {
-        (void) rwfd->cancel_wait(waiter);
-    } else {
-        FIBER_ASSERT(state == RWFdWaiterState::Waiting_Cancel);
-    }
-    delete waiter;
-}
-
-void RWFdCrossThreadWaiter::cancel_wait() noexcept {
-    RWFdWaiterState state = state_.load(std::memory_order_acquire);
-    RWFdWaiterState expected;
-    for (;;) {
-        switch (state) {
-            case RWFdWaiterState::Notify_Watch:
-            case RWFdWaiterState::Notify_Resume:
-                expected = RWFdWaiterState::Canceled;
-                break;
-            case RWFdWaiterState::Watching_Event:
-                expected = RWFdWaiterState::Request_Cancel;
-                break;
-            case RWFdWaiterState::Request_Cancel:
-            case RWFdWaiterState::Waiting_Cancel:
-            case RWFdWaiterState::Canceled:
-                return;
-            default:
-                return;
-        }
-        if (state_.compare_exchange_weak(state, expected, std::memory_order_acq_rel, std::memory_order_acquire)) {
-            break;
-        }
-    }
-
-    if (expected == RWFdWaiterState::Request_Cancel) {
-        rwfd_->loop()
-                .post<RWFdCrossThreadWaiter, &RWFdCrossThreadWaiter::cancel_entry_,
-                      &RWFdCrossThreadWaiter::on_notify_cancel>(*this);
-    }
-}
-
-void RWFdCrossThreadWaiter::do_notify_resume(RWFdCrossThreadWaiter *waiter) noexcept {
-    RWFdWaiterState state = waiter->state_.load(std::memory_order_acquire);
-    RWFdWaiterState expected;
-
-    for (;;) {
-        switch (state) {
-            case RWFdWaiterState::Watching_Event:
-                expected = RWFdWaiterState::Notify_Resume;
-                break;
-            case RWFdWaiterState::Request_Cancel:
-                expected = RWFdWaiterState::Waiting_Cancel;
-                break;
-            case RWFdWaiterState::Notify_Resume:
-            case RWFdWaiterState::Waiting_Cancel:
-            case RWFdWaiterState::Canceled:
-                return;
-            default:
-                return;
-        }
-        if (waiter->state_.compare_exchange_weak(state, expected, std::memory_order_acq_rel,
-                                                 std::memory_order_acquire)) {
-            break;
-        }
-    }
-
-    if (expected == RWFdWaiterState::Notify_Resume) {
-        waiter->loop_->post<RWFdCrossThreadWaiter, &RWFdCrossThreadWaiter::cancel_entry_,
-                            &RWFdCrossThreadWaiter::on_notify_resume>(*waiter);
-    }
-}
-
-void RWFdCrossThreadWaiter::on_notify_watch(RWFdCrossThreadWaiter *waiter) noexcept {
-    FIBER_ASSERT(waiter);
-    FIBER_ASSERT(waiter->rwfd_);
-
-    RWFdWaiterState old = waiter->state_.exchange(RWFdWaiterState::Watching_Event, std::memory_order_acq_rel);
-    if (old == RWFdWaiterState::Canceled) {
-        delete waiter;
-        return;
-    }
-    FIBER_ASSERT(old == RWFdWaiterState::Notify_Watch);
-
-    RWFd *rwfd = waiter->rwfd_;
-    auto result = rwfd->begin_wait(waiter);
-    if (!result || !*result) {
-        waiter->err_ = result ? fiber::common::IoErr::None : result.error();
-        do_notify_resume(waiter);
-    }
-}
-
-void RWFdCrossThreadWaiter::on_notify_resume(RWFdCrossThreadWaiter *waiter) noexcept {
-    FIBER_ASSERT(waiter);
-    FIBER_ASSERT(waiter->loop_->in_loop());
-
-    if (waiter->state_.load(std::memory_order_relaxed) == RWFdWaiterState::Canceled) {
-        delete waiter;
-        return;
-    }
-
-    waiter->coro_.resume();
+bool RWFd::has_callbacks() const noexcept {
+    return read_event_.callback != nullptr || write_event_.callback != nullptr;
 }
 
 template class RWFd::WaitAwaiter<fiber::event::IoEvent::Read>;

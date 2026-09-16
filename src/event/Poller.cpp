@@ -8,7 +8,10 @@
 #include <cstdint>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
+#include <thread>
 #include <unistd.h>
+
+#include <fiber/common/Assert.h>
 
 #include "fiber/FiberPlatformConfig.h"
 
@@ -70,6 +73,7 @@ std::uint32_t to_epoll_events(Poller::Event events, Poller::Mode mode) {
 } // namespace
 
 Poller::Poller() {
+    owner_thread_ = std::this_thread::get_id();
     epoll_fd_ = ::epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd_ < 0) {
         return;
@@ -96,6 +100,11 @@ Poller::~Poller() {
 
 bool Poller::valid() const { return epoll_fd_ >= 0; }
 
+void Poller::assert_owner_thread() const noexcept {
+    FIBER_ASSERT_MSG(owner_thread_ == std::this_thread::get_id(),
+                     "poller operations belong to the owning loop's thread");
+}
+
 void Poller::invalidate_batch(const Item &item) noexcept {
     for (int i = 0; i < batch_count_; ++i) {
         if (batch_[i].data.ptr == &item) {
@@ -105,6 +114,7 @@ void Poller::invalidate_batch(const Item &item) noexcept {
 }
 
 fiber::common::IoErr Poller::add(int fd, Event events, Item *item, Mode mode) {
+    assert_owner_thread();
     if (!item || item->registered_) {
         return fiber::common::IoErr::Invalid;
     }
@@ -121,6 +131,7 @@ fiber::common::IoErr Poller::add(int fd, Event events, Item *item, Mode mode) {
 }
 
 fiber::common::IoErr Poller::mod(int fd, Event events, Item *item, Mode mode) {
+    assert_owner_thread();
     if (!item || !item->registered_ || item->fd_ != fd) {
         return fiber::common::IoErr::Invalid;
     }
@@ -135,6 +146,7 @@ fiber::common::IoErr Poller::mod(int fd, Event events, Item *item, Mode mode) {
 }
 
 fiber::common::IoErr Poller::del(Item &item) {
+    assert_owner_thread();
     if (!item.registered_) {
         return fiber::common::IoErr::Invalid;
     }
@@ -149,6 +161,7 @@ fiber::common::IoErr Poller::del(Item &item) {
 }
 
 int Poller::wait(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline) {
+    assert_owner_thread();
     end_batch();
     const int count = wait_impl(events, max_events, deadline);
     if (count > 0) {

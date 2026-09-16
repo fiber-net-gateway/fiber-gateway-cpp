@@ -40,19 +40,13 @@ EventLoop::NotifyEntry::NotifyEntry() : node(this) {}
 EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(group), group_index_(group_index) {
     wakeup_entry_.loop = this;
     wakeup_entry_.callback = &EventLoop::on_wakeup;
+    // Only the fd is created here. The poller registration happens in
+    // run_once(), on the loop's own thread: an EventLoop object is often
+    // constructed on one thread and run on another, and every poller
+    // operation — including this bootstrap ADD — belongs to the running
+    // thread. A wakeup written before the first turn is still delivered:
+    // the interest is level-triggered.
     event_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (event_fd_ < 0) {
-        return;
-    }
-    if (!poller_.valid()) {
-        ::close(event_fd_);
-        event_fd_ = -1;
-        return;
-    }
-    if (poller_.add(event_fd_, IoEvent::Read, &wakeup_entry_) != fiber::common::IoErr::None) {
-        ::close(event_fd_);
-        event_fd_ = -1;
-    }
 }
 
 EventLoop::~EventLoop() {
@@ -141,10 +135,13 @@ void EventLoop::run_prepared() {
     running_.store(true, std::memory_order_release);
     EventLoop *prev = current_;
     current_ = this;
+    // The running thread owns the poller from here on; the object itself may
+    // have been constructed on a different thread.
+    poller_.rebind_owner_thread();
     now_ = std::chrono::steady_clock::now();
     do {
         run_once();
-    } while (!stop_requested_.load(std::memory_order_acquire));
+    } while (!stop_requested_.load(std::memory_order_acquire) && event_fd_ >= 0);
     drain_stop();
     current_ = prev;
     running_.store(false, std::memory_order_release);
@@ -152,6 +149,14 @@ void EventLoop::run_prepared() {
 
 void EventLoop::run_once() {
     if (event_fd_ < 0 || !poller_.valid()) {
+        return;
+    }
+    if (!wakeup_entry_.registered() &&
+        poller_.add(event_fd_, IoEvent::Read, &wakeup_entry_) != fiber::common::IoErr::None) {
+        // Without the wakeup registration cross-thread posts could never be
+        // drained; the loop cannot run. run_prepared() stops on the invalid fd.
+        ::close(event_fd_);
+        event_fd_ = -1;
         return;
     }
     now_ = std::chrono::steady_clock::now();

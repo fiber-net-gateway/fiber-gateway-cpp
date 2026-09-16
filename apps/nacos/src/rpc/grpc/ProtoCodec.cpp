@@ -126,9 +126,9 @@ common::IoResult<void> decode(std::string_view bytes, google::protobuf::MessageL
 common::IoResult<void> decode(const mem::IoBufChain &chain, google::protobuf::MessageLite &out) noexcept {
     const std::size_t n = chain.readable_bytes();
     if (n == 0) {
-        if (!out.ParseFromArray(nullptr, 0)) {
-            return std::unexpected(common::IoErr::Invalid);
-        }
+        // Parsing zero bytes yields the default instance; Clear() is that,
+        // without passing a null pointer into protobuf's memcpy path.
+        out.Clear();
         return {};
     }
 

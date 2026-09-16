@@ -40,6 +40,10 @@ public:
         return clear_callback(terminal_callback_, terminal_callback_ctx_, callback, ctx);
     }
 
+    // Loop handover is a real-fd concept; fakes never move loops.
+    common::IoErr detach_for_handover() noexcept override { return common::IoErr::NotSupported; }
+    common::IoErr adopt_loop(event::EventLoop &) noexcept override { return common::IoErr::None; }
+
     [[nodiscard]] bool terminal() const noexcept override { return terminal_; }
 
     common::IoErr poll_read(void *, std::size_t, std::size_t &out, event::IoEvent &wait_event) noexcept override {

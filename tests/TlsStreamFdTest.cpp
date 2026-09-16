@@ -164,6 +164,9 @@ DetachedTask close_tls_streams(fiber::net::detail::TlsStreamFd *server_stream,
         delete server_stream;
     }
     if (client_stream) {
+        // The client stream may come back detached from another loop: adopt it
+        // here before it is torn down on this loop.
+        client_stream->adopt_loop(fiber::event::EventLoop::current());
         client_stream->close();
         delete client_stream;
     }
@@ -199,6 +202,9 @@ DetachedTask run_tls_server(fiber::net::detail::TlsStreamFd *server_stream, cons
 
 DetachedTask run_tls_client(fiber::net::detail::TlsStreamFd *client_stream, const fiber::net::TlsClientParam &param,
                             std::promise<fiber::common::IoResult<std::string>> *done) {
+    // The stream was constructed on another loop: take it over here before
+    // the handshake re-registers the fd on this loop.
+    client_stream->adopt_loop(fiber::event::EventLoop::current());
     auto handshake_result = co_await client_stream->handshake(param);
     if (!handshake_result) {
         done->set_value(std::unexpected(handshake_result.error()));
@@ -256,6 +262,9 @@ DetachedTask write_tls_after_server_reset(fiber::net::detail::TlsStreamFd *clien
                                           const fiber::net::TlsClientParam &param,
                                           std::atomic_bool *client_handshake_done, std::atomic_bool *server_closed,
                                           std::promise<fiber::common::IoErr> *done) {
+    // The stream was constructed on another loop: take it over here before
+    // the handshake re-registers the fd on this loop.
+    client_stream->adopt_loop(fiber::event::EventLoop::current());
     auto handshake_result = co_await client_stream->handshake(param);
     client_handshake_done->store(true, std::memory_order_release);
     if (!handshake_result) {
@@ -310,6 +319,16 @@ TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
     EXPECT_EQ(*server_result, "ping");
     EXPECT_EQ(*client_result, "pong");
 
+    // Return the client stream to loop 0 before both streams die there.
+    std::promise<fiber::common::IoErr> handback_promise;
+    auto handback_future = handback_promise.get_future();
+    fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
+        handback_promise.set_value(client_stream->detach_for_handover());
+        co_return;
+    });
+    ASSERT_EQ(handback_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(handback_future.get(), fiber::common::IoErr::None);
+
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() { return close_tls_streams(server_stream, client_stream, &close_promise); });
@@ -358,6 +377,16 @@ TEST(TlsStreamFdTest, CrossLoopWriteFailureDoesNotTouchOwnerPoller) {
     ASSERT_EQ(client_future.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(server_future.get(), fiber::common::IoErr::None);
     EXPECT_NE(client_future.get(), fiber::common::IoErr::None);
+
+    // Return the client stream to loop 0 before both streams die there.
+    std::promise<fiber::common::IoErr> handback_promise;
+    auto handback_future = handback_promise.get_future();
+    fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
+        handback_promise.set_value(client_stream->detach_for_handover());
+        co_return;
+    });
+    ASSERT_EQ(handback_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(handback_future.get(), fiber::common::IoErr::None);
 
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();

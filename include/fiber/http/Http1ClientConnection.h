@@ -52,6 +52,20 @@ public:
             const HttpClientTlsOptions &tls, const net::TcpSocketOptions &tcp = net::kNoDelayTcpSocketOptions) noexcept;
     void close() noexcept;
 
+    // Loop handover for pool steal/return, see net::detail::RWFd. prepare runs
+    // on the loop the transport is currently bound to and requires a connected
+    // idle connection with no exchange in flight; on failure the connection is
+    // closed and must be recycled instead of published. adopt runs on the
+    // target loop thread before any further use. Between the two the connection
+    // is registered nowhere (loop_detached()).
+    [[nodiscard]] common::IoErr prepare_loop_handover() noexcept;
+    [[nodiscard]] common::IoErr adopt_loop(event::EventLoop &loop) noexcept;
+    [[nodiscard]] bool loop_detached() const noexcept { return loop_detached_; }
+    // Arms the idle peer-close observation (stream-state bits) while the
+    // connection sits in a pool. Requires an adopted, connected-idle
+    // connection; runs on its bound loop.
+    [[nodiscard]] common::IoErr observe_idle_state() noexcept;
+
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool idle() const noexcept;
     [[nodiscard]] bool busy() const noexcept;
@@ -156,12 +170,16 @@ private:
     event::EventLoop *loop_ = nullptr;
     net::SocketAddress peer_addr_{};
     std::unique_ptr<HttpTransport> transport_;
+    // The loop the transport's fd is currently registered on: the home loop,
+    // or a borrower's after adopt_loop. Null once the transport is gone.
+    event::EventLoop *fd_loop_ = nullptr;
     event::EventLoop *active_loop_ = nullptr;
     IoAwaiter *reader_ = nullptr;
     IoAwaiter *writer_ = nullptr;
     std::uint64_t request_count_ = 0;
     State state_ = State::Init;
     bool keepalive_usable_ = false;
+    bool loop_detached_ = false;
 };
 
 } // namespace fiber::http

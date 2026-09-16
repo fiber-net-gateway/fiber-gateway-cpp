@@ -4245,7 +4245,9 @@ fiber::common::IoErr feed_settings_frame(fiber::http::Http2Connection &connectio
     if (!buf) {
         return fiber::common::IoErr::NoMem;
     }
-    std::memcpy(buf.writable_data(), payload.data(), payload.size());
+    if (!payload.empty()) {
+        std::memcpy(buf.writable_data(), payload.data(), payload.size());
+    }
     buf.commit(payload.size());
     return connection.handle_settings_payload(header, buf, 0, payload.size());
 }

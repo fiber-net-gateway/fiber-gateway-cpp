@@ -2643,15 +2643,26 @@ TEST(QuicUdpEndpointTest, DetachClearsFramesAndSuppressesNewPendingFrames) {
     pending->type = fiber::quic::QuicFrameType::Ping;
     sending->type = fiber::quic::QuicFrameType::MaxData;
     sent->type = fiber::quic::QuicFrameType::RetireConnectionId;
-    space.pending_frames.push_back(*pending);
-    space.sending_frames.push_back(*sending);
-    space.sent_frames.push_back(*sent);
 
     fiber::quic::QuicPath *path = connection->active_path();
     ASSERT_NE(path, nullptr);
     path_pending->type = fiber::quic::QuicFrameType::PathResponse;
     path_pending->path = path;
-    path->pending_frames.push_back(*path_pending);
+
+    // The frame queues belong to the endpoint loop's send scheduler, which
+    // keeps pumping a still-ready socket after the injected datagram: stage
+    // the test frames there so setup never races the pump.
+    std::promise<void> frames_pushed_promise;
+    auto frames_pushed = frames_pushed_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        space.pending_frames.push_back(*pending);
+        space.sending_frames.push_back(*sending);
+        space.sent_frames.push_back(*sent);
+        path->pending_frames.push_back(*path_pending);
+        frames_pushed_promise.set_value();
+        co_return;
+    });
+    ASSERT_EQ(frames_pushed.wait_for(std::chrono::seconds(2)), std::future_status::ready);
 
     ASSERT_TRUE(remove_connection_on_loop(group, endpoint, dcid));
 

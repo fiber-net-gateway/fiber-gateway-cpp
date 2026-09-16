@@ -257,6 +257,15 @@ void TlsStreamFd::close() {
     busy_ = false;
 }
 
+fiber::common::IoErr TlsStreamFd::detach_for_handover() noexcept {
+    FIBER_ASSERT(!busy_);
+    return stream_fd_.detach_for_handover();
+}
+
+fiber::common::IoErr TlsStreamFd::adopt_loop(fiber::event::EventLoop &loop) noexcept {
+    return stream_fd_.adopt_loop(loop);
+}
+
 fiber::common::IoErr TlsStreamFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_fd_.set_read_callback(callback, ctx);
 }

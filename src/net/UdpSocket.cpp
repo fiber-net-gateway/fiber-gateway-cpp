@@ -80,6 +80,10 @@ fiber::common::IoErr UdpSocket::clear_write_callback(ReadyCallback callback, voi
     return socket_.clear_write_callback(callback, ctx);
 }
 
+bool UdpSocket::read_ready() const noexcept { return socket_.read_ready(); }
+
+bool UdpSocket::write_ready() const noexcept { return socket_.write_ready(); }
+
 UdpSocket::WaitReadableAwaiter UdpSocket::wait_readable(std::chrono::milliseconds timeout) noexcept {
     return socket_.wait_readable(timeout);
 }

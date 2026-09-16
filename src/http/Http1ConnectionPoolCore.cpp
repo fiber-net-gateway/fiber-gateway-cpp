@@ -171,6 +171,12 @@ void Http1ConnectionPoolCore::accept_returned_entry(Http1ConnectionPoolEntry &en
                                                     const HttpConnectionGroupKey &key) noexcept {
     FIBER_ASSERT(loop_ != nullptr);
     FIBER_ASSERT(loop_->in_loop());
+    // A returned entry may arrive detached from another loop (handover
+    // protocol): re-bind the fd here first, so every later path — park or
+    // recycle — tears a transport down on this loop.
+    if (entry.has_connection() && entry.connection()->loop_detached()) {
+        entry.connection()->adopt_loop(*loop_);
+    }
     if (shutdown_effective()) {
         recycle_entry(&entry);
         return;
@@ -272,7 +278,6 @@ Http1ConnectionPoolEntry *Http1ConnectionPoolCore::allocate_entry() noexcept {
         entry->bucket_ = nullptr;
         entry->idle_since_ = {};
         entry->next_free_ = nullptr;
-        entry->clear_remote_return_state();
         return entry;
     }
     return new (std::nothrow) Http1ConnectionPoolEntry();
@@ -293,7 +298,6 @@ void Http1ConnectionPoolCore::recycle_entry(Http1ConnectionPoolEntry *entry) noe
         return;
     }
     entry->destroy_connection();
-    entry->clear_remote_return_state();
     entry->bucket_ = nullptr;
     entry->idle_since_ = {};
     entry->next_free_ = free_entry_head_;
@@ -365,6 +369,12 @@ void Http1ConnectionPoolCore::park_entry(Http1ConnectionPoolEntry &entry, const 
     }
     while (idle_total_ > options_.max_idle_total) {
         evict_global_oldest();
+    }
+    if (entry.global_hook_.linked()) {
+        // Parked: listen for the peer going away without a direction
+        // callback, so a dead idle connection is dropped on the next acquire
+        // instead of handed out.
+        (void) conn->observe_idle_state();
     }
     arm_expiry_timer_if_needed();
 }

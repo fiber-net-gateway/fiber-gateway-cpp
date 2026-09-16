@@ -61,6 +61,8 @@ const SocketAddress &TcpStream::remote_addr() const noexcept { return remote_add
 
 bool TcpStream::terminal() const noexcept { return stream_.terminal(); }
 bool TcpStream::peer_closed() const noexcept { return stream_.peer_closed(); }
+bool TcpStream::read_ready() const noexcept { return stream_.read_ready(); }
+bool TcpStream::write_ready() const noexcept { return stream_.write_ready(); }
 
 fiber::common::IoErr TcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
     return detail::apply_tcp_socket_options(fd(), options);
@@ -69,6 +71,12 @@ fiber::common::IoErr TcpStream::apply_socket_options(const TcpSocketOptions &opt
 int TcpStream::release_fd() noexcept { return stream_.release_fd(); }
 
 void TcpStream::close() { stream_.close(); }
+
+fiber::common::IoErr TcpStream::detach_for_handover() noexcept { return stream_.detach_for_handover(); }
+
+fiber::common::IoErr TcpStream::adopt_loop(fiber::event::EventLoop &loop) noexcept { return stream_.adopt_loop(loop); }
+
+fiber::common::IoErr TcpStream::ensure_state_observation() noexcept { return stream_.ensure_state_observation(); }
 
 fiber::common::IoErr TcpStream::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.set_read_callback(callback, ctx);

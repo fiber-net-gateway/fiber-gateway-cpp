@@ -1174,6 +1174,10 @@ DetachedTask run_read_content_length_body_on_borrowed_connection_client(fiber::h
         co_return;
     }
 
+    // The fd left its home loop via the handover protocol: adopt it here
+    // before the first use re-registers it on this loop.
+    connection->adopt_loop(fiber::event::EventLoop::current());
+
     fiber::mem::BufPool pool;
     fiber::http::HttpHeaders headers(pool);
     headers.add_view("host", "example.com");
@@ -1938,6 +1942,16 @@ TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnecti
     });
     ASSERT_EQ(connect_future.get(), fiber::common::IoErr::None);
 
+    // Detach the fd from its home loop before the borrower adopts it — the
+    // same protocol the stealable pool applies around a cross-thread steal.
+    std::promise<fiber::common::IoErr> detach_promise;
+    auto detach_future = detach_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        detach_promise.set_value(connection->prepare_loop_handover());
+        co_return;
+    });
+    ASSERT_EQ(detach_future.get(), fiber::common::IoErr::None);
+
     std::promise<ReadBodyOutcome> client_result_promise;
     auto client_result_future = client_result_promise.get_future();
     fiber::async::spawn(group.at(1), [&]() {
@@ -1955,9 +1969,19 @@ TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnecti
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);
 
+    // Hand the idle fd back to its home loop before the connection dies there.
+    std::promise<fiber::common::IoErr> handback_promise;
+    auto handback_future = handback_promise.get_future();
+    fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
+        handback_promise.set_value(connection->prepare_loop_handover());
+        co_return;
+    });
+    ASSERT_EQ(handback_future.get(), fiber::common::IoErr::None);
+
     std::promise<void> close_promise;
     auto close_future = close_promise.get_future();
     fiber::async::spawn(group.at(0), [&]() -> fiber::async::DetachedTask {
+        connection->adopt_loop(group.at(0));
         delete connection;
         connection = nullptr;
         close_promise.set_value();

@@ -251,6 +251,7 @@ Http1ClientConnection::connect_impl(std::optional<net::SocketAddress> peer,
 
     peer_addr_ = std::move(connected_peer);
     transport_ = std::move(transport);
+    fd_loop_ = loop_;
     state_ = State::ConnectedIdle;
     keepalive_usable_ = true;
     co_return common::IoResult<void>{};
@@ -269,7 +270,6 @@ void Http1ClientConnection::mark_unusable() noexcept {
 
 void Http1ClientConnection::close() noexcept {
     FIBER_ASSERT(loop_ != nullptr);
-    FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(state_ != State::Busy);
     FIBER_ASSERT(state_ != State::Connecting);
     FIBER_ASSERT(active_loop_ == nullptr);
@@ -277,9 +277,69 @@ void Http1ClientConnection::close() noexcept {
     FIBER_ASSERT(writer_ == nullptr);
     mark_unusable();
     if (transport_) {
+        // Transport teardown detaches every registration, so it runs on the
+        // loop the fd is currently bound to — the home loop or a borrower's.
+        FIBER_ASSERT(fd_loop_ != nullptr);
+        FIBER_ASSERT(fd_loop_->in_loop());
         transport_->close();
         transport_.reset();
+    } else {
+        // Without a transport there is no fd loop: the object itself still
+        // belongs to its home loop.
+        FIBER_ASSERT(loop_->in_loop());
     }
+    fd_loop_ = nullptr;
+    loop_detached_ = false;
+}
+
+common::IoErr Http1ClientConnection::prepare_loop_handover() noexcept {
+    FIBER_ASSERT(state_ == State::ConnectedIdle);
+    FIBER_ASSERT(active_loop_ == nullptr);
+    FIBER_ASSERT(reader_ == nullptr);
+    FIBER_ASSERT(writer_ == nullptr);
+    if (!transport_) {
+        return common::IoErr::BadFd;
+    }
+    FIBER_ASSERT(fd_loop_ != nullptr);
+    FIBER_ASSERT(fd_loop_->in_loop());
+    const common::IoErr err = transport_->detach_for_handover();
+    if (err != common::IoErr::None) {
+        // The kernel registration is unknown: close here instead of
+        // publishing the object to another loop.
+        close();
+        return err;
+    }
+    loop_detached_ = true;
+    return common::IoErr::None;
+}
+
+common::IoErr Http1ClientConnection::adopt_loop(event::EventLoop &loop) noexcept {
+    FIBER_ASSERT(loop.in_loop());
+    if (!transport_ || !loop_detached_) {
+        return common::IoErr::None;
+    }
+    // Bind the fd loop first: a refused adoption already closed the transport
+    // fd, and the resulting teardown below must run on this loop.
+    fd_loop_ = &loop;
+    loop_detached_ = false;
+    const common::IoErr err = transport_->adopt_loop(loop);
+    if (err != common::IoErr::None) {
+        // The target loop is already stopping and refused the stop hook, so
+        // the transport's fd was closed by the failed adoption. Finish the
+        // teardown here so the entry can travel home and recycle.
+        close();
+        return err;
+    }
+    return common::IoErr::None;
+}
+
+common::IoErr Http1ClientConnection::observe_idle_state() noexcept {
+    if (!transport_ || loop_detached_ || state_ != State::ConnectedIdle) {
+        return common::IoErr::None;
+    }
+    FIBER_ASSERT(fd_loop_ != nullptr);
+    FIBER_ASSERT(fd_loop_->in_loop());
+    return transport_->ensure_state_observation();
 }
 
 bool Http1ClientConnection::valid() const noexcept { return transport_ && transport_->valid(); }

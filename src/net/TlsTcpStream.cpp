@@ -23,12 +23,22 @@ bool TlsTcpStream::has_pending_read() const noexcept { return stream_.has_pendin
 
 bool TlsTcpStream::terminal() const noexcept { return stream_.terminal(); }
 bool TlsTcpStream::peer_closed() const noexcept { return stream_.peer_closed(); }
+bool TlsTcpStream::read_ready() const noexcept { return stream_.read_ready(); }
+bool TlsTcpStream::write_ready() const noexcept { return stream_.write_ready(); }
 
 fiber::common::IoErr TlsTcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
     return detail::apply_tcp_socket_options(fd(), options);
 }
 
 void TlsTcpStream::close() { stream_.close(); }
+
+fiber::common::IoErr TlsTcpStream::detach_for_handover() noexcept { return stream_.detach_for_handover(); }
+
+fiber::common::IoErr TlsTcpStream::adopt_loop(fiber::event::EventLoop &loop) noexcept {
+    return stream_.adopt_loop(loop);
+}
+
+fiber::common::IoErr TlsTcpStream::ensure_state_observation() noexcept { return stream_.ensure_state_observation(); }
 
 fiber::common::IoErr TlsTcpStream::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_.set_read_callback(callback, ctx);

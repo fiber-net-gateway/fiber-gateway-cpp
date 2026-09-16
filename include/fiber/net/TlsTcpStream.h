@@ -38,8 +38,17 @@ public:
     [[nodiscard]] bool has_pending_read() const noexcept;
     [[nodiscard]] bool terminal() const noexcept;
     [[nodiscard]] bool peer_closed() const noexcept;
+    [[nodiscard]] bool read_ready() const noexcept;
+    [[nodiscard]] bool write_ready() const noexcept;
     [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
     void close();
+
+    // Loop handover, see detail::RWFd. Requires no in-flight SSL call or
+    // pending subscriptions.
+    fiber::common::IoErr detach_for_handover() noexcept;
+    fiber::common::IoErr adopt_loop(fiber::event::EventLoop &loop) noexcept;
+    // Idle-pool observation, see detail::TlsStreamFd.
+    fiber::common::IoErr ensure_state_observation() noexcept;
 
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;

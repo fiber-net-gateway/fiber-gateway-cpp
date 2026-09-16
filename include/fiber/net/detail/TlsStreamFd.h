@@ -38,7 +38,18 @@ public:
     [[nodiscard]] bool has_pending_read() const noexcept;
     [[nodiscard]] bool terminal() const noexcept { return stream_fd_.terminal(); }
     [[nodiscard]] bool peer_closed() const noexcept { return stream_fd_.peer_closed(); }
+    [[nodiscard]] bool read_ready() const noexcept { return stream_fd_.read_ready(); }
+    [[nodiscard]] bool write_ready() const noexcept { return stream_fd_.write_ready(); }
     void close();
+
+    // Loop handover, see StreamFd. Requires no in-flight SSL call or pending
+    // subscriptions; TLS and stream states travel with the object.
+    fiber::common::IoErr detach_for_handover() noexcept;
+    fiber::common::IoErr adopt_loop(fiber::event::EventLoop &loop) noexcept;
+
+    // Idle-pool observation, see StreamFd: listen for the stream-state bits
+    // without subscribing a direction callback.
+    fiber::common::IoErr ensure_state_observation() noexcept { return stream_fd_.ensure_state_observation(); }
 
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
