@@ -2,6 +2,7 @@
 #define FIBER_EVENT_POLLER_H
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <sys/epoll.h>
 #include <thread>
@@ -54,6 +55,11 @@ public:
 
     bool valid() const;
 
+    // Number of registered items; loop-thread only. The loop asserts this is
+    // down to its own wakeup entry before it stops: fd wrappers must have
+    // closed their registrations by then.
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+
     // All poller operations belong to one thread: the constructing thread,
     // re-anchored by rebind_owner_thread() when an EventLoop hands its poller
     // to the thread that runs the loop (EventLoop objects are constructed on
@@ -88,6 +94,7 @@ private:
 
     int epoll_fd_ = -1;
     int timer_fd_ = -1;
+    std::size_t size_ = 0;
     epoll_event *batch_ = nullptr;
     int batch_count_ = 0;
     WaitBackend wait_backend_ = WaitBackend::Unknown;

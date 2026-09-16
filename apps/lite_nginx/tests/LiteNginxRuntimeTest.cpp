@@ -1014,12 +1014,16 @@ public:
         group_.start();
         std::promise<std::uint16_t> ready;
         auto ready_future = ready.get_future();
-        fiber::async::spawn(group_.at(0), [this, &ready]() { return serve(&ready); });
+        fiber::async::spawn(group_.at(0), [this, &ready]() { return serve(&ready, &done_); });
         port_ = ready_future.get();
     }
 
     ~StubNameserver() {
         stop_.store(true, std::memory_order_release);
+        // serve() observes stop_ on its 200ms recv cycle and closes its socket.
+        // Every fd must be closed before the loop stops, so wait for it here
+        // instead of relying on loop-stop cleanup.
+        done_.get_future().get();
         group_.stop();
         group_.join();
     }
@@ -1055,11 +1059,12 @@ private:
         return 0;
     }
 
-    fiber::async::DetachedTask serve(std::promise<std::uint16_t> *ready) {
+    fiber::async::DetachedTask serve(std::promise<std::uint16_t> *ready, std::promise<void> *done) {
         fiber::net::UdpSocket socket(group_.at(0));
         auto bind_result = socket.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0), {});
         if (!bind_result) {
             ready->set_value(0);
+            done->set_value();
             co_return;
         }
         ready->set_value(socket.local_addr().port());
@@ -1095,9 +1100,11 @@ private:
             (void) co_await socket.send_to(response.data(), response.size(), received->peer, 1s);
         }
         socket.close();
+        done->set_value();
     }
 
     fiber::event::EventLoopGroup group_{1};
+    std::promise<void> done_{};
     std::atomic_bool stop_{false};
     std::atomic<std::size_t> queries_{0};
     std::uint16_t port_ = 0;

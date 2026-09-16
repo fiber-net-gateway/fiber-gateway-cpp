@@ -71,22 +71,17 @@ common::IoErr RWFd::attach(int socket) noexcept {
 }
 
 int RWFd::release_fd() noexcept {
-    // An fd with no poller registration and no stop entry belongs to no loop:
-    // the constructing thread may release it during a startup rollback.
-    FIBER_ASSERT((!efd_.registered() && !stop_entry_.is_registered()) || efd_.current_loop().in_loop());
+    // An fd with no poller registration belongs to no loop: the constructing
+    // thread may release it during a startup rollback.
+    FIBER_ASSERT(!efd_.registered() || efd_.current_loop().in_loop());
     FIBER_ASSERT(!has_callbacks());
     if (efd_.registered() && efd_.unwatch_all() != common::IoErr::None) {
         return -1;
-    }
-    if (stop_entry_.is_registered()) {
-        efd_.current_loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
     }
     read_event_.state = State::Unknown;
     write_event_.state = State::Unknown;
     return efd_.release_fd();
 }
-
-void RWFd::on_loop_stop(RWFd *owner) noexcept { owner->close(); }
 
 void RWFd::set_stream_event_sink(void *ctx, StreamEventCallback callback) noexcept {
     FIBER_ASSERT(callback != nullptr);
@@ -109,9 +104,6 @@ common::IoErr RWFd::ensure_state_observation() noexcept {
 
 RWFd::DetachedCompletions RWFd::detach_for_close() noexcept {
     FIBER_ASSERT(efd_.current_loop().in_loop());
-    if (stop_entry_.is_registered()) {
-        efd_.current_loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
-    }
     DetachedCompletions detached;
     detached.read_callback = std::exchange(read_event_.callback, nullptr);
     detached.read_ctx = std::exchange(read_event_.ctx, nullptr);
@@ -148,12 +140,6 @@ common::IoErr RWFd::ensure_listening(event::IoEvent events) noexcept {
     FIBER_ASSERT(efd_.current_loop().in_loop());
     if (!valid()) {
         return common::IoErr::BadFd;
-    }
-    // The stop hook outlives individual interests: register it first so a
-    // later watch failure never leaves a registration without cleanup.
-    if (!stop_entry_.is_registered() &&
-        !efd_.current_loop().register_stop<RWFd, &RWFd::stop_entry_, &RWFd::on_loop_stop>(*this)) {
-        return common::IoErr::Canceled;
     }
     return efd_.watch_add(events);
 }
@@ -227,27 +213,17 @@ common::IoErr RWFd::clear_write_callback(ReadyCallback callback, void *ctx) noex
 common::IoErr RWFd::detach_for_handover() noexcept {
     FIBER_ASSERT(efd_.current_loop().in_loop());
     FIBER_ASSERT(!has_callbacks());
-    const auto err = efd_.detach_from_current_loop();
-    if (err != common::IoErr::None) {
-        return err;
-    }
-    if (stop_entry_.is_registered()) {
-        efd_.current_loop().unregister_stop<RWFd, &RWFd::stop_entry_>(*this);
-    }
-    return common::IoErr::None;
+    return efd_.detach_from_current_loop();
 }
 
 common::IoErr RWFd::adopt_loop(event::EventLoop &loop) noexcept {
     efd_.adopt_loop(loop);
     read_event_.state = State::Unknown;
     write_event_.state = State::Unknown;
-    // Taking over the current loop takes over the lifecycle with it: the stop
-    // hook is installed at adoption, so an fd that never subscribes (and so
-    // never ADDs) is still closed when the loop stops. Lazy ADD does not mean
-    // a lazy lifecycle.
-    if (!stop_entry_.is_registered() && !loop.register_stop<RWFd, &RWFd::stop_entry_, &RWFd::on_loop_stop>(*this)) {
-        // The target loop is already stopping; nobody would run a later
-        // cleanup. Close here and report the failed adoption.
+    // The fd is closed by its owner before the loop stops; adoption onto a
+    // loop that is already stopping is refused up front, because nobody would
+    // run a later cleanup there.
+    if (loop.stopping()) {
         close();
         return common::IoErr::Canceled;
     }

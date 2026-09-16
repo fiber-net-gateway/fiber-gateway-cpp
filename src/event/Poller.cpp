@@ -127,6 +127,7 @@ fiber::common::IoErr Poller::add(int fd, Event events, Item *item, Mode mode) {
     item->fd_ = fd;
     item->interested_ = events;
     item->registered_ = true;
+    ++size_;
     return fiber::common::IoErr::None;
 }
 
@@ -154,6 +155,7 @@ fiber::common::IoErr Poller::del(Item &item) {
     // failed EPOLL_CTL_DEL (e.g. fd already closed) still cannot redeliver.
     invalidate_batch(item);
     item.registered_ = false;
+    --size_;
     if (::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, item.fd_, nullptr) == 0) {
         return fiber::common::IoErr::None;
     }

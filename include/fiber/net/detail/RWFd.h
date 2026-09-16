@@ -151,10 +151,8 @@ public:
 
     // Handover, see Efd. detach requires no remaining subscriptions on the
     // current loop; adopt resets both direction states to Unknown and is the
-    // only point where readiness history is dropped. Adoption also installs
-    // the new loop's stop hook (lifecycle takeover is immediate even though
-    // the epoll ADD stays lazy); it fails and closes the fd when the target
-    // loop is already stopping.
+    // only point where readiness history is dropped. Adoption is refused (and
+    // the fd closed) when the target loop is already stopping.
     fiber::common::IoErr detach_for_handover() noexcept;
     fiber::common::IoErr adopt_loop(fiber::event::EventLoop &loop) noexcept;
 
@@ -202,7 +200,6 @@ private:
     [[nodiscard]] bool has_callbacks() const noexcept;
 
     static void on_efd_events(void *sink, fiber::event::IoEvent events);
-    static void on_loop_stop(RWFd *owner) noexcept;
     void handle_events(fiber::event::IoEvent events);
 
     Event read_event_{};
@@ -216,7 +213,6 @@ private:
     StreamEventCallback stream_sink_ = nullptr;
     void *stream_gate_ctx_ = nullptr;
     StreamWaitGate stream_gate_ = nullptr;
-    event::EventLoop::StopEntry stop_entry_{};
 
     Efd efd_;
 };
