@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "../async/Task.h"
+#include "../async/WaitAwaiter.h"
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
@@ -153,7 +154,15 @@ private:
     ResponseChannelClosedAwaiter *response_channel_waiter_ = nullptr;
 };
 
-class HttpExchange::ResponseChannelClosedAwaiter : public common::NonCopyable, public common::NonMovable {
+// Parks a coroutine on the io's one-shot channel-closed notification. The io
+// side stays a plain query plus set/clear callback; this adapter adds the
+// suspension machinery via WaitAwaiter: retractable local-defer resume, so a
+// coroutine hard-destroyed by when_any with a queued resume still tears down
+// safely. The io may fire the notification synchronously from inside
+// registration (H2 when the channel is already closed); the waiter claims the
+// exchange slot and parks before registering so that completion finds a
+// consistent waiter.
+class HttpExchange::ResponseChannelClosedAwaiter : public fiber::async::WaitAwaiter {
 public:
     explicit ResponseChannelClosedAwaiter(HttpExchange &exchange) noexcept;
     ~ResponseChannelClosedAwaiter() noexcept;
@@ -161,33 +170,13 @@ public:
     bool await_ready() noexcept;
     bool await_suspend(std::coroutine_handle<> continuation) noexcept;
     common::IoResult<void> await_resume() noexcept;
-    [[nodiscard]] bool completed() const noexcept { return completed_; }
 
 private:
-    enum class State : std::uint8_t {
-        Created,
-        Arming,
-        Armed,
-        ResumeQueued,
-        Ready,
-        Completed,
-        Abandoned,
-    };
-
     static void on_response_channel_closed(void *ctx) noexcept;
-    static void on_resume(ResponseChannelClosedAwaiter *awaiter) noexcept;
-
-    void detach_waiter() noexcept;
-    void make_ready(common::IoErr error) noexcept;
+    static void detach_from_exchange(fiber::async::WaitAwaiter &base) noexcept;
 
     HttpExchange *exchange_ = nullptr;
     HttpExchangeIo *registered_io_ = nullptr;
-    event::EventLoop *loop_ = nullptr;
-    std::coroutine_handle<> continuation_{};
-    event::EventLoop::DeferEntry resume_entry_{};
-    common::IoErr result_error_ = common::IoErr::None;
-    State state_ = State::Created;
-    bool completed_ = false;
 };
 
 using HttpHandler = std::function<fiber::async::Task<void>(HttpExchange &)>;
