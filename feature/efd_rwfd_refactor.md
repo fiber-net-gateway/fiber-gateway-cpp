@@ -230,6 +230,7 @@ StreamFd 不再简单把 terminal/peer_closed 查询转发给 RWFd。它保存�
 - RWFd 向适配层传递必要的内核事件信息，但不把它们缓存为连接终止状态。若现有 `IoEvent::Terminal` 合并 ERR/HUP 不足以表达处理差异，应在事件转换层保留所需区别。
 - StreamFd 先更新可观察的流状态，再完成业务通知。终止通知独立于普通 `Unknown/Blocked → Ready` 条件，不能因为 Event 已是 Ready 而漏掉错误或关闭。
 - 已知 EOF/error 时，上层等待立即得到对应的可读结束/错误结果，不安装一个等待新边沿的普通 callback。当前 StreamFd 直接别名 RWFd awaiter 的方式需要相应调整。
+  - 修订（2026-09-17）：等待门由 RWFd 存储钩子（`set_stream_wait_gate`）改为 RWFd 等待 awaiter 的按调用构造参数（`StreamWaitGate` 值，fn+ctx，默认空）。RWFd 契约不再携带流语义，StreamFd 经 `stream_wait_gate()` 每次显式传入，DatagramFd/Raw 传默认值；三态语义（放行/继续/错误）与咨询顺序（先于 readiness）不变。
 - terminal 迟订阅继续保证能够观察已发生的终止，并保持 setter 不内联调用业务回调。若需排队，由 StreamFd 自己管理；这不恢复 RWFd 的 Ready 补发机制。
 - syscall/BIO 栈内的错误反馈先记录状态；任何可能销毁 SSL/stream 的业务完成都在安全边界进行，不能在 BIO 调用未退出时释放 SSL。
 - timeout、单个 waiter 取消、参数错误不自动使 stream 永久终止。

@@ -38,17 +38,35 @@ struct RWFdWaiterBase {
 //   Ready -> Ready          : never notifies.
 //   Ready -> Blocked/...    : only via the I/O state feedback of read/write.
 // EOF, half-close and fatal errors are NOT tracked here; the adapter layer
-// (StreamFd) owns them and receives the raw kernel stream bits through the
-// stream event sink instead.
+// (StreamFd) owns them, receives the raw kernel stream bits through the
+// stream event sink, and supplies a per-call wait veto via StreamWaitGate.
 class RWFd : public common::NonCopyable, public common::NonMovable {
 public:
     using ReadyCallback = void (*)(void *ctx, fiber::common::IoErr err) noexcept;
     // Raw ReadHangup/Terminal kernel bits this layer does not interpret.
     using StreamEventCallback = void (*)(void *ctx, fiber::event::IoEvent events) noexcept;
-    // Adapter-layer wait veto, consulted before suspending a waiter: true means
-    // proceed without waiting (like an observed Ready), false means continue
-    // with the ordinary readiness wait, an error completes the wait with it.
-    using StreamWaitGate = fiber::common::IoResult<bool> (*)(void *ctx, fiber::event::IoEvent direction) noexcept;
+    // Adapter-supplied wait veto, passed per wait call by the stream adapter
+    // (RWFd stores nothing): true means proceed without waiting (like an
+    // observed Ready), false means continue with the ordinary readiness wait,
+    // an error completes the wait with it.
+    struct StreamWaitGate {
+        using Fn = fiber::common::IoResult<bool> (*)(void *ctx, fiber::event::IoEvent direction) noexcept;
+
+        // Ctors instead of default member initializers: this nested type is
+        // used in default arguments and members of sibling nested classes,
+        // whose NSDMIs stay unavailable while RWFd is incomplete.
+        StreamWaitGate() noexcept : fn(nullptr), ctx(nullptr) {}
+        StreamWaitGate(Fn gate_fn, void *gate_ctx) noexcept : fn(gate_fn), ctx(gate_ctx) {}
+
+        explicit operator bool() const noexcept { return fn != nullptr; }
+        fiber::common::IoResult<bool> operator()(fiber::event::IoEvent direction) const noexcept {
+            FIBER_ASSERT(fn != nullptr);
+            return fn(ctx, direction);
+        }
+
+        Fn fn;
+        void *ctx;
+    };
 
     // Direction subscriptions detached by detach_for_close(), completed after
     // the adapter layer ran its own terminal completion. complete() only uses
@@ -129,11 +147,8 @@ public:
     [[nodiscard]] DetachedCompletions detach_for_close() noexcept;
 
     // Installs the adapter-layer sink that receives raw ReadHangup/Terminal
-    // kernel bits (stream termination semantics live above this class), and
-    // the gate consulted by the wait awaiters (known EOF/terminal must not
-    // wait for a further edge).
+    // kernel bits (stream termination semantics live above this class).
     void set_stream_event_sink(void *ctx, StreamEventCallback callback) noexcept;
-    void set_stream_wait_gate(void *ctx, StreamWaitGate gate) noexcept;
     // Ensures the fd listens for stream-state bits (RDHUP; ERR/HUP arrive with
     // any registration). Used by adapter/pool state observation, not by the
     // ordinary read/write subscriptions.
@@ -159,9 +174,11 @@ public:
     fiber::common::IoErr adopt_loop(fiber::event::EventLoop &loop) noexcept;
 
     [[nodiscard]] WaitReadableAwaiter
-    wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max(),
+                  StreamWaitGate gate = {}) noexcept;
     [[nodiscard]] WaitWritableAwaiter
-    wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
+    wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max(),
+                  StreamWaitGate gate = {}) noexcept;
 
 private:
     friend struct RWFdWaiterBase;
@@ -213,8 +230,6 @@ private:
     const Kind kind_;
     void *stream_sink_ctx_ = nullptr;
     StreamEventCallback stream_sink_ = nullptr;
-    void *stream_gate_ctx_ = nullptr;
-    StreamWaitGate stream_gate_ = nullptr;
 
     Efd efd_;
 };
@@ -225,7 +240,8 @@ private:
 template<fiber::event::IoEvent Event>
 class RWFd::WaitAwaiter : public RWFdWaiterBase {
 public:
-    explicit WaitAwaiter(RWFd &rwfd, std::chrono::milliseconds timeout) noexcept : timeout_(timeout) {
+    explicit WaitAwaiter(RWFd &rwfd, std::chrono::milliseconds timeout, StreamWaitGate gate = {}) noexcept :
+        timeout_(timeout), gate_(gate) {
         static_assert(Event == fiber::event::IoEvent::Read || Event == fiber::event::IoEvent::Write);
         rwfd_ = &rwfd;
         event_ = Event;
@@ -261,11 +277,11 @@ public:
         loop_ = &rwfd_->current_loop();
         coro_ = handle;
 
-        // Adapter-layer states the raw readiness must not override: a known
-        // EOF completes a read wait immediately, a terminal stream completes
-        // both directions with its recorded error.
-        if (rwfd_->stream_gate_ != nullptr) {
-            const auto gated = rwfd_->stream_gate_(rwfd_->stream_gate_ctx_, Event);
+        // Adapter-supplied stream states the raw readiness must not override:
+        // a known EOF completes a read wait immediately, a terminal stream
+        // completes both directions with its recorded error.
+        if (gate_) {
+            const auto gated = gate_(Event);
             if (!gated) {
                 err_ = gated.error();
                 return false;
@@ -338,6 +354,9 @@ private:
     }
 
     std::chrono::milliseconds timeout_{};
+    // No NSDMI: the sibling nested type's member initializers are unavailable
+    // while RWFd is incomplete; the ctor mem-initializes it unconditionally.
+    StreamWaitGate gate_;
     fiber::event::EventLoop *loop_ = nullptr;
     fiber::event::EventLoop::TimerEntry timer_entry_{};
     fiber::common::IoErr err_ = fiber::common::IoErr::None;

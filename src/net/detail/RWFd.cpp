@@ -89,12 +89,6 @@ void RWFd::set_stream_event_sink(void *ctx, StreamEventCallback callback) noexce
     stream_sink_ = callback;
 }
 
-void RWFd::set_stream_wait_gate(void *ctx, StreamWaitGate gate) noexcept {
-    FIBER_ASSERT(gate != nullptr);
-    stream_gate_ctx_ = ctx;
-    stream_gate_ = gate;
-}
-
 common::IoErr RWFd::ensure_state_observation() noexcept {
     if (kind_ != Kind::Stream) {
         return common::IoErr::None;
@@ -230,12 +224,12 @@ common::IoErr RWFd::adopt_loop(event::EventLoop &loop) noexcept {
     return common::IoErr::None;
 }
 
-RWFd::WaitReadableAwaiter RWFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
-    return WaitReadableAwaiter(*this, timeout);
+RWFd::WaitReadableAwaiter RWFd::wait_readable(std::chrono::milliseconds timeout, StreamWaitGate gate) noexcept {
+    return WaitReadableAwaiter(*this, timeout, gate);
 }
 
-RWFd::WaitWritableAwaiter RWFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
-    return WaitWritableAwaiter(*this, timeout);
+RWFd::WaitWritableAwaiter RWFd::wait_writable(std::chrono::milliseconds timeout, StreamWaitGate gate) noexcept {
+    return WaitWritableAwaiter(*this, timeout, gate);
 }
 
 common::IoErr RWFd::begin_wait(RWFdWaiterBase *waiter) noexcept {
