@@ -292,10 +292,17 @@ private:
     template<std::size_t Index>
     void find_async_winner() noexcept {
         if constexpr (Index < kAwaiterCount) {
-            const auto &awaiter = Storage::template awaiter<Index>();
-            if (awaiter.completed()) {
-                FIBER_ASSERT(winner_ == kNoWinner);
+            // Several alternatives may legitimately report completed here: a
+            // notification-style awaiter (WaitAwaiter-derived) settles
+            // completed() at the trigger instant while its resume is only
+            // queued, and another alternative can finish in that same stack
+            // before the queued resume drains. Take the lowest completed
+            // index, matching find_ready's arming-phase order; destroying the
+            // losers retracts their queued resumes, so the parent still runs
+            // on exactly one.
+            if (Storage::template awaiter<Index>().completed()) {
                 winner_ = Index;
+                return;
             }
             find_async_winner<Index + 1>();
         }
