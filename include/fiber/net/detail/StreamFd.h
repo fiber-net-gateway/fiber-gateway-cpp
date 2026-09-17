@@ -112,7 +112,6 @@ private:
     // states must not park on a further readiness edge.
     [[nodiscard]] RWFd::StreamWaitGate stream_wait_gate() noexcept { return {&StreamFd::on_rwfd_wait_gate, this}; }
     static void on_deferred_terminal_notify(StreamFd *self) noexcept;
-    static void on_loop_stop(StreamFd *self) noexcept;
 
     RWFd rwfd_;
     bool eof_ = false;
@@ -124,7 +123,6 @@ private:
     // Destroyed-observer of the active terminal notification.
     bool *terminal_dispatch_observer_ = nullptr;
     fiber::event::EventLoop::DeferEntry terminal_notify_entry_{};
-    fiber::event::EventLoop::StopEntry stop_entry_{};
 };
 
 } // namespace fiber::net::detail
