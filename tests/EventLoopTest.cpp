@@ -3,6 +3,7 @@
 #include <chrono>
 #include <future>
 #include <sys/eventfd.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -160,4 +161,42 @@ TEST(EventLoopTest, CallbackCanDestroyAnotherItemInSameKernelBatch) {
     });
     loop.run();
     EXPECT_EQ(context.calls, 1);
+}
+
+namespace {
+struct ObservePollTime : fiber::event::Poller::Item {
+    fiber::event::EventLoop *loop = nullptr;
+    std::chrono::steady_clock::time_point signaled_at{};
+    std::uint64_t turn_before_wait = 0;
+    bool called = false;
+    static void on_event(fiber::event::Poller::Item *raw, int, fiber::event::IoEvent) noexcept {
+        auto *self = static_cast<ObservePollTime *>(raw);
+        self->called = true;
+        EXPECT_GE(self->loop->now(), self->signaled_at);
+        EXPECT_EQ(self->loop->turn(), self->turn_before_wait + 1);
+        EXPECT_EQ(self->loop->poller().del(*self), fiber::common::IoErr::None);
+        self->loop->stop();
+    }
+};
+} // namespace
+
+TEST(EventLoopTest, CallbackObservesTimeAndTurnUpdatedAfterWait) {
+    fiber::event::EventLoop loop;
+    ObservePollTime item;
+    item.loop = &loop;
+    item.callback = &ObservePollTime::on_event;
+    const int fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(loop.poller().add(fd, fiber::event::IoEvent::Read, &item), fiber::common::IoErr::None);
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        item.turn_before_wait = loop.turn();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        item.signaled_at = std::chrono::steady_clock::now();
+        const std::uint64_t value = 1;
+        EXPECT_EQ(::write(fd, &value, sizeof(value)), static_cast<ssize_t>(sizeof(value)));
+        co_return;
+    });
+    loop.run();
+    ::close(fd);
+    EXPECT_TRUE(item.called);
 }

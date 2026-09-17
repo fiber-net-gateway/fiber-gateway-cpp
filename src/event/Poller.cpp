@@ -23,6 +23,23 @@ constexpr std::uint32_t to_mask(Poller::Event events) { return static_cast<std::
 
 constexpr std::uint32_t to_mask(Poller::Mode mode) { return static_cast<std::uint32_t>(mode); }
 
+Poller::Event to_io_event(std::uint32_t events, Poller::Event interested) {
+    Poller::Event mask = Poller::Event::None;
+    if (events & (EPOLLIN | EPOLLPRI)) {
+        mask |= Poller::Event::Read;
+    }
+    if (events & EPOLLRDHUP) {
+        mask |= Poller::Event::Read | Poller::Event::ReadHangup;
+    }
+    if (events & EPOLLOUT) {
+        mask |= Poller::Event::Write;
+    }
+    if (events & (EPOLLERR | EPOLLHUP)) {
+        mask |= interested | Poller::Event::Terminal;
+    }
+    return mask;
+}
+
 struct KernelTimespec {
     std::int64_t tv_sec = 0;
     std::int64_t tv_nsec = 0;
@@ -106,7 +123,7 @@ void Poller::assert_owner_thread() const noexcept {
 }
 
 void Poller::invalidate_batch(const Item &item) noexcept {
-    for (int i = 0; i < batch_count_; ++i) {
+    for (int i = batch_next_; i < batch_count_; ++i) {
         if (batch_[i].data.ptr == &item) {
             batch_[i].data.ptr = nullptr;
         }
@@ -162,15 +179,42 @@ fiber::common::IoErr Poller::del(Item &item) {
     return fiber::common::io_err_from_errno(errno);
 }
 
-int Poller::wait(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline) {
+int Poller::wait(std::chrono::steady_clock::time_point deadline) {
     assert_owner_thread();
-    end_batch();
-    const int count = wait_impl(events, max_events, deadline);
+    FIBER_ASSERT_MSG(!dispatching_, "poller wait cannot run during dispatch");
+    batch_next_ = 0;
+    batch_count_ = 0;
+    const int count = wait_impl(batch_, kMaxEvents, deadline);
     if (count > 0) {
-        batch_ = events;
         batch_count_ = count;
     }
     return count;
+}
+
+void Poller::dispatch() noexcept {
+    assert_owner_thread();
+    FIBER_ASSERT_MSG(!dispatching_, "poller dispatch cannot be recursive");
+    dispatching_ = true;
+    while (batch_next_ < batch_count_) {
+        // Consume before entering user code: del() only scans the remaining
+        // entries, and the callback may destroy this item as well as its peers.
+        const epoll_event event = batch_[batch_next_++];
+        auto *item = static_cast<Item *>(event.data.ptr);
+        if (!item) {
+            continue;
+        }
+        const Event io = to_io_event(event.events, item->interested_);
+        if (!any(io)) {
+            continue;
+        }
+        const auto callback = item->callback;
+        const int fd = item->fd();
+        callback(item, fd, io);
+        // Do not access item after invoking its callback.
+    }
+    batch_count_ = 0;
+    batch_next_ = 0;
+    dispatching_ = false;
 }
 
 int Poller::wait_impl(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline) {
