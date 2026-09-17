@@ -75,7 +75,6 @@ bool is_fatal_stream_error(fiber::common::IoErr err) noexcept {
 
 StreamFd::StreamFd(fiber::event::EventLoop &owner_loop, int fd) : rwfd_(owner_loop, fd, RWFd::Kind::Stream) {
     rwfd_.set_stream_event_sink(this, &StreamFd::on_rwfd_stream_event);
-    rwfd_.set_stream_wait_gate(this, &StreamFd::on_rwfd_wait_gate);
 }
 
 StreamFd::~StreamFd() {
@@ -227,6 +226,8 @@ void StreamFd::on_rwfd_stream_event(void *raw_ctx, fiber::event::IoEvent events)
     }
 }
 
+// Per-call wait veto handed to the RWFd wait awaiters through
+// stream_wait_gate(); consults the recorded stream state before a waiter parks.
 fiber::common::IoResult<bool> StreamFd::on_rwfd_wait_gate(void *raw_ctx, fiber::event::IoEvent direction) noexcept {
     auto *self = static_cast<StreamFd *>(raw_ctx);
     if (direction == fiber::event::IoEvent::Read) {
@@ -314,7 +315,7 @@ StreamFd::IoTask StreamFd::read(void *buf, size_t len, std::chrono::milliseconds
         if (!remaining) {
             co_return std::unexpected(remaining.error());
         }
-        auto wait_result = co_await rwfd_.wait_readable(*remaining);
+        auto wait_result = co_await rwfd_.wait_readable(*remaining, stream_wait_gate());
         if (!wait_result) {
             co_return std::unexpected(wait_result.error());
         }
@@ -332,7 +333,7 @@ StreamFd::IoTask StreamFd::write(const void *buf, size_t len, std::chrono::milli
         if (!remaining) {
             co_return std::unexpected(remaining.error());
         }
-        auto wait_result = co_await rwfd_.wait_writable(*remaining);
+        auto wait_result = co_await rwfd_.wait_writable(*remaining, stream_wait_gate());
         if (!wait_result) {
             co_return std::unexpected(wait_result.error());
         }
@@ -353,7 +354,7 @@ StreamFd::IoTask StreamFd::readv(const struct iovec *iov, int iovcnt, std::chron
         if (!remaining) {
             co_return std::unexpected(remaining.error());
         }
-        auto wait_result = co_await rwfd_.wait_readable(*remaining);
+        auto wait_result = co_await rwfd_.wait_readable(*remaining, stream_wait_gate());
         if (!wait_result) {
             co_return std::unexpected(wait_result.error());
         }
@@ -371,7 +372,7 @@ StreamFd::IoTask StreamFd::writev(const struct iovec *iov, int iovcnt, std::chro
         if (!remaining) {
             co_return std::unexpected(remaining.error());
         }
-        auto wait_result = co_await rwfd_.wait_writable(*remaining);
+        auto wait_result = co_await rwfd_.wait_writable(*remaining, stream_wait_gate());
         if (!wait_result) {
             co_return std::unexpected(wait_result.error());
         }
@@ -379,11 +380,11 @@ StreamFd::IoTask StreamFd::writev(const struct iovec *iov, int iovcnt, std::chro
 }
 
 StreamFd::WaitReadableAwaiter StreamFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
-    return rwfd_.wait_readable(timeout);
+    return rwfd_.wait_readable(timeout, stream_wait_gate());
 }
 
 StreamFd::WaitWritableAwaiter StreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
-    return rwfd_.wait_writable(timeout);
+    return rwfd_.wait_writable(timeout, stream_wait_gate());
 }
 
 void StreamFd::finish_stream_read(RWFd::IoStateUpdate &state, fiber::common::IoErr err, size_t out,

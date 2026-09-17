@@ -107,6 +107,10 @@ private:
 
     static void on_rwfd_stream_event(void *ctx, fiber::event::IoEvent events) noexcept;
     static fiber::common::IoResult<bool> on_rwfd_wait_gate(void *ctx, fiber::event::IoEvent direction) noexcept;
+
+    // Veto passed into every RWFd wait this adapter starts: known stream
+    // states must not park on a further readiness edge.
+    [[nodiscard]] RWFd::StreamWaitGate stream_wait_gate() noexcept { return {&StreamFd::on_rwfd_wait_gate, this}; }
     static void on_deferred_terminal_notify(StreamFd *self) noexcept;
     static void on_loop_stop(StreamFd *self) noexcept;
 

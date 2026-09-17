@@ -27,6 +27,12 @@ using namespace std::chrono_literals;
 
 void noop_ready_callback(void *, fiber::common::IoErr) noexcept {}
 
+fiber::common::IoResult<bool> gate_proceed(void *, fiber::event::IoEvent) noexcept { return true; }
+fiber::common::IoResult<bool> gate_pass(void *, fiber::event::IoEvent) noexcept { return false; }
+fiber::common::IoResult<bool> gate_fail(void *, fiber::event::IoEvent) noexcept {
+    return std::unexpected(fiber::common::IoErr::ConnReset);
+}
+
 struct ReplaceDuringDispatchCtx {
     fiber::event::EventLoop *loop = nullptr;
     fiber::net::detail::RWFd *current = nullptr;
@@ -646,6 +652,64 @@ TEST(RWFdTest, NonPositiveTimeoutDoesNotRegisterCallback) {
     EXPECT_EQ(result.error(), fiber::common::IoErr::TimedOut);
     EXPECT_TRUE(callback_cleared);
     EXPECT_TRUE(never_registered);
+}
+
+TEST(RWFdTest, WaitGateProceedCompletesWithoutReadiness) {
+    int fds[2] = {-1, -1};
+    EXPECT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, fds[0]);
+    fiber::common::IoResult<void> result = std::unexpected(fiber::common::IoErr::Invalid);
+    bool callback_cleared = false;
+    bool never_registered = true;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        // No data was written: without the gate the wait would park until the
+        // timeout; a proceeding gate completes it without any edge.
+        result = co_await rwfd.wait_readable(200ms, {&gate_proceed, nullptr});
+        never_registered = !rwfd.efd_.registered();
+        callback_cleared = rwfd.read_event_.callback == nullptr;
+        rwfd.close();
+        (void) ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_TRUE(result);
+    EXPECT_TRUE(callback_cleared);
+    EXPECT_TRUE(never_registered);
+}
+
+TEST(RWFdTest, WaitGateErrorFailsWaitImmediately) {
+    int fds[2] = {-1, -1};
+    EXPECT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+
+    fiber::event::EventLoop loop;
+    fiber::net::detail::RWFd rwfd(loop, fds[0]);
+    fiber::common::IoResult<void> gated = std::unexpected(fiber::common::IoErr::Invalid);
+    fiber::common::IoResult<void> passed = std::unexpected(fiber::common::IoErr::Invalid);
+    bool callback_cleared = false;
+
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        gated = co_await rwfd.wait_readable(200ms, {&gate_fail, nullptr});
+        // A passing gate falls through to the ordinary readiness wait, which
+        // times out with nothing to read.
+        passed = co_await rwfd.wait_readable(10ms, {&gate_pass, nullptr});
+        callback_cleared = rwfd.read_event_.callback == nullptr;
+        rwfd.close();
+        (void) ::close(fds[1]);
+        loop.stop();
+        co_return;
+    });
+
+    loop.run();
+    EXPECT_FALSE(gated);
+    EXPECT_EQ(gated.error(), fiber::common::IoErr::ConnReset);
+    EXPECT_FALSE(passed);
+    EXPECT_EQ(passed.error(), fiber::common::IoErr::TimedOut);
+    EXPECT_TRUE(callback_cleared);
 }
 
 TEST(RWFdTest, CloseCancelsTimedWaiter) {
