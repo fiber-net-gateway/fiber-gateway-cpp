@@ -78,92 +78,87 @@ HttpExchange::ResponseChannelClosedAwaiter HttpExchange::wait_response_channel_c
 }
 
 HttpExchange::ResponseChannelClosedAwaiter::ResponseChannelClosedAwaiter(HttpExchange &exchange) noexcept :
+    fiber::async::WaitAwaiter(std::chrono::steady_clock::time_point::max(),
+                              &ResponseChannelClosedAwaiter::detach_from_exchange, common::IoErr::WouldBlock),
     exchange_(&exchange) {}
 
 HttpExchange::ResponseChannelClosedAwaiter::~ResponseChannelClosedAwaiter() noexcept {
-    if (resume_entry_.is_in_queue()) {
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        loop_->cancel<ResponseChannelClosedAwaiter, &ResponseChannelClosedAwaiter::resume_entry_>(*this);
+    // A wait that parked, or whose resume is still queued, holds loop state;
+    // both are torn down on the awaiter's own loop.
+    if (loop() != nullptr) {
+        FIBER_ASSERT(loop()->in_loop());
     }
-    if (registered_io_ != nullptr) {
-        FIBER_ASSERT(loop_ != nullptr);
-        FIBER_ASSERT(loop_->in_loop());
-        common::IoErr err = registered_io_->clear_response_channel_closed_callback(
-                &ResponseChannelClosedAwaiter::on_response_channel_closed, this);
-        FIBER_ASSERT(err == common::IoErr::None);
-        registered_io_ = nullptr;
-    }
-    detach_waiter();
-    if (state_ != State::Completed) {
-        state_ = State::Abandoned;
-    }
+    detach();
 }
 
 bool HttpExchange::ResponseChannelClosedAwaiter::await_ready() noexcept {
-    FIBER_ASSERT(state_ == State::Created);
+    FIBER_ASSERT(!completed());
     FIBER_ASSERT(exchange_ != nullptr);
 
-    loop_ = event::EventLoop::current_or_null();
-    if (loop_ == nullptr || exchange_->io_ == nullptr) {
-        make_ready(common::IoErr::Invalid);
+    if (event::EventLoop::current_or_null() == nullptr || exchange_->io_ == nullptr) {
+        set_result(common::IoErr::Invalid);
+        mark_completed();
         return true;
     }
     if (exchange_->response_channel_waiter_ != nullptr) {
-        make_ready(common::IoErr::Busy);
+        set_result(common::IoErr::Busy);
+        mark_completed();
         return true;
     }
     if (exchange_->io_->response_channel_closed()) {
-        make_ready(common::IoErr::None);
+        set_result(common::IoErr::None);
+        mark_completed();
         return true;
     }
     return false;
 }
 
 bool HttpExchange::ResponseChannelClosedAwaiter::await_suspend(std::coroutine_handle<> continuation) noexcept {
-    FIBER_ASSERT(state_ == State::Created);
+    FIBER_ASSERT(!completed());
     FIBER_ASSERT(exchange_ != nullptr);
-    FIBER_ASSERT(loop_ != nullptr);
-    FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(exchange_->io_ != nullptr);
 
+    event::EventLoop *loop = event::EventLoop::current_or_null();
+    FIBER_ASSERT(loop != nullptr);
+    FIBER_ASSERT(loop->in_loop());
+
     if (exchange_->response_channel_waiter_ != nullptr) {
-        make_ready(common::IoErr::Busy);
+        set_result(common::IoErr::Busy);
+        mark_completed();
         return false;
     }
 
-    continuation_ = continuation;
-    registered_io_ = exchange_->io_;
+    // Claim the waiter slot and park before registering: the io may fire the
+    // notification synchronously from inside registration, and that completion
+    // must find a consistent waiter.
     exchange_->response_channel_waiter_ = this;
-    state_ = State::Arming;
+    registered_io_ = exchange_->io_;
+    begin_wait(continuation, *loop);
 
     common::IoErr err = registered_io_->set_response_channel_closed_callback(
             &ResponseChannelClosedAwaiter::on_response_channel_closed, this);
     if (err != common::IoErr::None) {
-        FIBER_ASSERT(state_ == State::Arming);
-        registered_io_ = nullptr;
-        detach_waiter();
-        make_ready(err);
+        // Registration never took hold, so nothing can fire. Mark complete and
+        // detach by hand rather than complete(), which would post a resume for
+        // a handle we are about to resume inline.
+        set_result(err);
+        mark_completed();
+        detach();
         return false;
-    }
-    if (state_ == State::Arming) {
-        state_ = State::Armed;
-    } else {
-        FIBER_ASSERT(state_ == State::ResumeQueued);
     }
     return true;
 }
 
 common::IoResult<void> HttpExchange::ResponseChannelClosedAwaiter::await_resume() noexcept {
-    FIBER_ASSERT(state_ == State::Ready);
-    FIBER_ASSERT(completed_);
+    FIBER_ASSERT(completed());
     FIBER_ASSERT(registered_io_ == nullptr);
-    state_ = State::Completed;
-    continuation_ = {};
-    detach_waiter();
+    end_wait();
+    detach();
     exchange_ = nullptr;
-    if (result_error_ != common::IoErr::None) {
-        return std::unexpected(result_error_);
+    common::IoErr error = result();
+    FIBER_ASSERT(error != common::IoErr::WouldBlock);
+    if (error != common::IoErr::None) {
+        return std::unexpected(error);
     }
     return {};
 }
@@ -171,39 +166,29 @@ common::IoResult<void> HttpExchange::ResponseChannelClosedAwaiter::await_resume(
 void HttpExchange::ResponseChannelClosedAwaiter::on_response_channel_closed(void *ctx) noexcept {
     auto *awaiter = static_cast<ResponseChannelClosedAwaiter *>(ctx);
     FIBER_ASSERT(awaiter != nullptr);
-    FIBER_ASSERT(awaiter->loop_ != nullptr);
-    FIBER_ASSERT(awaiter->loop_->in_loop());
-    FIBER_ASSERT(awaiter->state_ == State::Arming || awaiter->state_ == State::Armed);
+    FIBER_ASSERT(awaiter->loop() != nullptr);
+    FIBER_ASSERT(awaiter->loop()->in_loop());
 
+    // The io dropped its callback slot before firing; only the exchange slot
+    // is left to release, which complete()'s detach handles.
     awaiter->registered_io_ = nullptr;
-    awaiter->state_ = State::ResumeQueued;
-    awaiter->loop_->post_local<ResponseChannelClosedAwaiter, &ResponseChannelClosedAwaiter::resume_entry_,
-                               &ResponseChannelClosedAwaiter::on_resume>(*awaiter);
+    awaiter->complete(common::IoErr::None);
 }
 
-void HttpExchange::ResponseChannelClosedAwaiter::on_resume(ResponseChannelClosedAwaiter *awaiter) noexcept {
-    FIBER_ASSERT(awaiter != nullptr);
-    FIBER_ASSERT(awaiter->loop_ != nullptr);
-    FIBER_ASSERT(awaiter->loop_->in_loop());
-    FIBER_ASSERT(awaiter->state_ == State::ResumeQueued);
-
-    awaiter->make_ready(common::IoErr::None);
-    std::coroutine_handle<> continuation = awaiter->continuation_;
-    awaiter->continuation_ = {};
-    FIBER_ASSERT(continuation);
-    continuation.resume();
-}
-
-void HttpExchange::ResponseChannelClosedAwaiter::detach_waiter() noexcept {
-    if (exchange_ != nullptr && exchange_->response_channel_waiter_ == this) {
-        exchange_->response_channel_waiter_ = nullptr;
+void HttpExchange::ResponseChannelClosedAwaiter::detach_from_exchange(fiber::async::WaitAwaiter &base) noexcept {
+    auto &self = static_cast<ResponseChannelClosedAwaiter &>(base);
+    if (self.registered_io_ != nullptr) {
+        // Registered and not yet fired: the io still holds the callback.
+        FIBER_ASSERT(self.loop() != nullptr);
+        FIBER_ASSERT(self.loop()->in_loop());
+        common::IoErr err = self.registered_io_->clear_response_channel_closed_callback(
+                &ResponseChannelClosedAwaiter::on_response_channel_closed, &self);
+        FIBER_ASSERT(err == common::IoErr::None);
+        self.registered_io_ = nullptr;
     }
-}
-
-void HttpExchange::ResponseChannelClosedAwaiter::make_ready(common::IoErr error) noexcept {
-    result_error_ = error;
-    completed_ = true;
-    state_ = State::Ready;
+    if (self.exchange_ != nullptr && self.exchange_->response_channel_waiter_ == &self) {
+        self.exchange_->response_channel_waiter_ = nullptr;
+    }
 }
 
 void HttpExchange::record_io_error(common::IoErr error) noexcept {
