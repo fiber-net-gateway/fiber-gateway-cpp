@@ -65,21 +65,22 @@ public:
             return;
         }
         cancel_pending();
-        if (stop_entry_.is_registered()) {
-            loop().template unregister_stop<AcceptFd, &AcceptFd::stop_entry_>(*this);
-        }
         auto *waiter = waiter_;
         waiter_ = nullptr;
-        std::coroutine_handle<> handle{};
-        if (waiter) {
+        if (waiter != nullptr) {
             waiter->result_ = std::unexpected(fiber::common::IoErr::Canceled);
             waiter->waiting_ = false;
-            handle = waiter->handle_;
-            waiter->handle_ = {};
         }
         efd_.close_fd();
-        if (handle) {
-            handle.resume();
+        if (waiter != nullptr) {
+            // Deferred wake: the resumed continuation must not run inside
+            // close(), which may sit in a destructor stack. The wake entry
+            // lives in the awaiter and its callback touches nothing else, so
+            // this object may already be gone when it runs. close() only runs
+            // on a live loop and every run_once drains the defer queues, so
+            // the wake always executes before the loop can exit.
+            loop().template post_local<AcceptAwaiter, &AcceptAwaiter::wake_entry_, &AcceptAwaiter::on_deferred_wake>(
+                    *waiter);
         }
     }
 
@@ -100,6 +101,12 @@ private:
             awaiter->result_ = std::unexpected(fiber::common::IoErr::BadFd);
             return false;
         }
+        if (loop().stopping()) {
+            // A stopping loop never polls again; parking here would strand the
+            // coroutine past the post-stop poller assertion.
+            awaiter->result_ = std::unexpected(fiber::common::IoErr::Canceled);
+            return false;
+        }
         if (waiter_) {
             awaiter->result_ = std::unexpected(fiber::common::IoErr::Busy);
             return false;
@@ -107,11 +114,6 @@ private:
         const auto watch_err = watch_read();
         if (watch_err != fiber::common::IoErr::None) {
             awaiter->result_ = std::unexpected(watch_err);
-            return false;
-        }
-        if (!stop_entry_.is_registered() &&
-            !loop().template register_stop<AcceptFd, &AcceptFd::stop_entry_, &AcceptFd::on_stop>(*this)) {
-            awaiter->result_ = std::unexpected(fiber::common::IoErr::Canceled);
             return false;
         }
         if (loop().now() < retry_after_ || consecutive_ >= 64) {
@@ -164,7 +166,6 @@ private:
 
     fiber::common::IoErr watch_read() { return efd_.watch_set(fiber::event::IoEvent::Read); }
 
-    static void on_stop(AcceptFd *owner) noexcept { owner->close(); }
     static void on_retry(AcceptFd *owner) noexcept {
         owner->consecutive_ = 0;
         owner->handle_acceptable();
@@ -218,7 +219,6 @@ private:
     std::chrono::steady_clock::time_point retry_after_{};
     fiber::event::EventLoop::DeferEntry continue_entry_{};
     fiber::event::EventLoop::TimerEntry retry_entry_{};
-    fiber::event::EventLoop::StopEntry stop_entry_{};
 };
 
 template<typename Traits>
@@ -232,6 +232,12 @@ public:
     AcceptAwaiter &operator=(AcceptAwaiter &&) = delete;
 
     ~AcceptAwaiter() {
+        if (wake_entry_.is_in_queue()) {
+            // close() queued the deferred wake; the coroutine is being
+            // destroyed before it ran, so there is nothing left to resume.
+            FIBER_ASSERT(loop_ != nullptr);
+            loop_->template cancel<AcceptAwaiter, &AcceptAwaiter::wake_entry_>(*this);
+        }
         if (!waiting_) {
             return;
         }
@@ -242,6 +248,7 @@ public:
     bool await_ready() noexcept { return false; }
 
     bool await_suspend(std::coroutine_handle<> handle) {
+        loop_ = &acceptor_->loop();
         handle_ = handle;
         return acceptor_->begin_wait(this);
     }
@@ -251,9 +258,21 @@ public:
 private:
     friend class AcceptFd;
 
+    // Close-side deferred wake: completes a detached waiter without running
+    // its continuation inside AcceptFd::close().
+    static void on_deferred_wake(AcceptAwaiter *self) noexcept {
+        auto handle = self->handle_;
+        self->handle_ = {};
+        if (handle) {
+            handle.resume();
+        }
+    }
+
     AcceptFd *acceptor_ = nullptr;
+    fiber::event::EventLoop *loop_ = nullptr;
     std::coroutine_handle<> handle_{};
     fiber::common::IoResult<AcceptResult> result_{};
+    fiber::event::EventLoop::DeferEntry wake_entry_{};
     bool waiting_ = false;
 };
 

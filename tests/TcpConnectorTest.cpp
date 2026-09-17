@@ -495,7 +495,8 @@ TEST(TcpConnectorTest, AwaiterDestructionClosesPendingAttempts) {
     EXPECT_TRUE(outcome.first_peer_closed);
 }
 
-DetachedTask run_loop_shutdown(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
+DetachedTask run_stopping_refusal(FakeConnectState *state, std::promise<ConnectorOutcome> *promise) {
+    fiber::event::EventLoop::current().stop();
     std::array<FakeAddress, 1> addresses{{{state, fiber::net::IpFamily::V6, 0}}};
     fiber::net::HappyEyeballsOptions options;
     options.connection_attempt_delay = 10ms;
@@ -509,26 +510,21 @@ DetachedTask run_loop_shutdown(FakeConnectState *state, std::promise<ConnectorOu
     promise->set_value(outcome);
 }
 
-TEST(TcpConnectorTest, EventLoopShutdownCancelsAndClosesPendingAttempts) {
+TEST(TcpConnectorTest, StoppingLoopRefusesToArmConnect) {
+    // fd ownership contract: no in-flight connect may exist when the loop
+    // stops. Arming on an already-stopping loop is refused with Canceled
+    // before any attempt socket is launched.
     FakeConnectState state;
-    std::promise<void> started_promise;
-    auto started_future = started_promise.get_future();
-    state.first_launch = &started_promise;
-
     fiber::event::EventLoopGroup group(1);
     std::promise<ConnectorOutcome> promise;
     auto future = promise.get_future();
     group.start();
-    fiber::async::spawn(group.at(0), [&]() { return run_loop_shutdown(&state, &promise); });
-    ASSERT_EQ(started_future.wait_for(1s), std::future_status::ready);
-    group.stop();
-    ASSERT_EQ(future.wait_for(1s), std::future_status::ready);
+    fiber::async::spawn(group.at(0), [&]() { return run_stopping_refusal(&state, &promise); });
     ConnectorOutcome outcome = future.get();
     group.join();
 
     EXPECT_EQ(outcome.error, fiber::common::IoErr::Canceled);
-    EXPECT_EQ(outcome.launch_count, 1);
-    EXPECT_TRUE(outcome.first_peer_closed);
+    EXPECT_EQ(outcome.launch_count, 0);
 }
 
 fiber::common::IoResult<std::uint16_t> bound_port(int fd) noexcept {

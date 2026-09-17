@@ -61,7 +61,6 @@ public:
         }
         if (!waiting_) {
             FIBER_ASSERT(!timer_entry_.is_in_heap());
-            FIBER_ASSERT(!stop_entry_.is_registered());
             return;
         }
         FIBER_ASSERT(loop_ != nullptr);
@@ -84,7 +83,10 @@ public:
         }
 
         waiting_ = true;
-        if (!loop_->register_stop<ConnectAwaiter, &ConnectAwaiter::stop_entry_, &ConnectAwaiter::on_loop_stop>(*this)) {
+        if (loop_->stopping()) {
+            // A stopping loop never polls again; refusing here keeps any
+            // attempt socket from being launched into a loop that is going
+            // away.
             waiting_ = false;
             result_ = std::unexpected(make_error(common::IoErr::Canceled));
             completed_ = true;
@@ -424,9 +426,6 @@ private:
         if (timer_entry_.is_in_heap()) {
             loop_->cancel<ConnectAwaiter, &ConnectAwaiter::timer_entry_>(*this);
         }
-        if (stop_entry_.is_registered()) {
-            loop_->unregister_stop<ConnectAwaiter, &ConnectAwaiter::stop_entry_>(*this);
-        }
     }
 
     void close_attempts() noexcept {
@@ -510,14 +509,6 @@ private:
         connect->schedule_timer();
     }
 
-    static void on_loop_stop(ConnectAwaiter *connect) noexcept {
-        if (connect != nullptr && connect->waiting_) {
-            // Stop callbacks run after the final poll batch and the loop does not drain deferred
-            // callbacks afterward, so resume inline at this safe point.
-            connect->complete_error(common::IoErr::Canceled, false);
-        }
-    }
-
     static void on_resume(ConnectAwaiter *connect) noexcept {
         if (connect == nullptr) {
             return;
@@ -540,7 +531,6 @@ private:
     std::coroutine_handle<> handle_{};
     event::EventLoop::TimerEntry timer_entry_{};
     event::EventLoop::DeferEntry resume_entry_{};
-    event::EventLoop::StopEntry stop_entry_{};
     ConnectResult result_{std::unexpected(HappyEyeballsConnectError{})};
     TimePoint deadline_ = TimePoint::max();
     TimePoint last_attempt_at_ = TimePoint::max();
