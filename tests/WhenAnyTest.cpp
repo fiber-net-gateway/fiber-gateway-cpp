@@ -12,6 +12,7 @@
 #include <fiber/async/Task.h>
 #include <fiber/async/TaskSelect.h>
 #include <fiber/async/Timeout.h>
+#include <fiber/async/WaitAwaiter.h>
 #include <fiber/async/WaitGroup.h>
 #include <fiber/async/Watch.h>
 #include <fiber/async/WhenAny.h>
@@ -125,6 +126,48 @@ public:
     void await_resume() const noexcept {}
 };
 
+// Mimics a WaitAwaiter-derived notification awaiter (HttpExchange's
+// ResponseChannelClosedAwaiter shape): complete() settles completed() at the
+// fire instant while the parent resume is only queued, and registration
+// exposes the slot so a third party can fire the notification mid-flight.
+class NotifyAwaiter final : public fiber::async::WaitAwaiter {
+public:
+    NotifyAwaiter(bool *fired, bool *resumed, NotifyAwaiter **slot) noexcept :
+        WaitAwaiter(std::chrono::steady_clock::time_point::max(), &NotifyAwaiter::on_detach), fired_(fired),
+        resumed_(resumed), slot_(slot) {}
+
+    NotifyAwaiter(const NotifyAwaiter &) = delete;
+    NotifyAwaiter &operator=(const NotifyAwaiter &) = delete;
+    NotifyAwaiter(NotifyAwaiter &&) = delete;
+    NotifyAwaiter &operator=(NotifyAwaiter &&) = delete;
+
+    bool await_ready() noexcept { return false; }
+
+    bool await_suspend(std::coroutine_handle<> continuation) noexcept {
+        *slot_ = this;
+        begin_wait(continuation, fiber::event::EventLoop::current());
+        return true;
+    }
+
+    void await_resume() noexcept {
+        FIBER_ASSERT(completed());
+        end_wait();
+        *resumed_ = true;
+    }
+
+    void notify(fiber::common::IoErr result) noexcept {
+        *fired_ = true;
+        complete(result);
+    }
+
+private:
+    static void on_detach(fiber::async::WaitAwaiter &) noexcept {}
+
+    bool *fired_;
+    bool *resumed_;
+    NotifyAwaiter **slot_;
+};
+
 class MoveOnlyResult {
 public:
     explicit MoveOnlyResult(int value) noexcept : value_(value) {}
@@ -172,9 +215,22 @@ fiber::async::Task<void> immediate_void_task(bool *started) {
     co_return;
 }
 
+// Fires the notification inside its own stack and then finishes, so the task's
+// final_suspend resumes when_any inline while the notify awaiter sits
+// completed-with-queued-resume: the same single-stack shape an io dispatch
+// produces when a terminal notification fires before the in-flight operation's
+// failure wake resumes the task.
+fiber::async::Task<int> task_firing_notification(NotifyAwaiter **slot, bool *finished, bool *frame_destroyed) {
+    DestructionFlag flag(frame_destroyed);
+    (*slot)->notify(fiber::common::IoErr::None);
+    *finished = true;
+    co_return 7;
+}
+
 static_assert(fiber::async::SelectableAwaiter<ImmediateIntAwaiter>);
 static_assert(fiber::async::SelectableAwaiter<PendingAwaiter>);
 static_assert(fiber::async::SelectableAwaiter<SuspendFalseAwaiter>);
+static_assert(fiber::async::SelectableAwaiter<NotifyAwaiter>);
 static_assert(fiber::async::SelectableAwaiter<fiber::async::SleepAwaiter>);
 static_assert(fiber::async::SelectableAwaiter<fiber::async::YieldAwaiter>);
 static_assert(fiber::async::SelectableAwaiter<fiber::async::WaitGroup::JoinAwaiter>);
@@ -352,5 +408,68 @@ TEST(WhenAnyTest, SupportsNonMovableAwaitersResultsCancellationAndNesting) {
     EXPECT_TRUE(outcome.loser_task_frame_destroyed);
     EXPECT_FALSE(outcome.loser_task_finished);
     EXPECT_TRUE(outcome.void_task_started);
+    group.join();
+}
+
+namespace {
+
+struct TiedCompletionOutcome {
+    std::size_t winner_index = 0;
+    bool notify_fired = false;
+    bool notify_resumed = false;
+    bool task_finished = false;
+    bool task_frame_destroyed = false;
+    bool drain_survived = false;
+};
+
+DetachedTask exercise_tied_completion(std::promise<TiedCompletionOutcome> *promise) {
+    TiedCompletionOutcome outcome;
+    bool notify_fired = false;
+    bool notify_resumed = false;
+    NotifyAwaiter *slot = nullptr;
+
+    auto tied = co_await fiber::async::when_any(
+            [&]() { return NotifyAwaiter(&notify_fired, &notify_resumed, &slot); },
+            [&]() {
+                return task_firing_notification(&slot, &outcome.task_finished, &outcome.task_frame_destroyed).select();
+            });
+    outcome.winner_index = tied.index();
+
+    // Drain a loop turn: the notify awaiter's retracted resume must not fire a
+    // second parent resume here.
+    co_await fiber::async::yield();
+    outcome.drain_survived = true;
+
+    outcome.notify_fired = notify_fired;
+    outcome.notify_resumed = notify_resumed;
+    promise->set_value(outcome);
+    fiber::event::EventLoop::current().stop();
+    co_return;
+}
+
+} // namespace
+
+TEST(WhenAnyTest, TiedNotificationAndTaskCompletionPicksLowestIndex) {
+    fiber::event::EventLoopGroup group(1);
+    std::promise<TiedCompletionOutcome> promise;
+    auto future = promise.get_future();
+
+    group.start();
+    fiber::async::spawn(group.at(0), [&]() { return exercise_tied_completion(&promise); });
+
+    if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        group.stop();
+        group.join();
+        FAIL() << "tied-completion exercise did not finish in time";
+        return;
+    }
+
+    TiedCompletionOutcome outcome = future.get();
+    EXPECT_EQ(outcome.winner_index, 0U);
+    EXPECT_TRUE(outcome.notify_fired);
+    EXPECT_TRUE(outcome.notify_resumed);
+    EXPECT_TRUE(outcome.task_finished);
+    EXPECT_TRUE(outcome.task_frame_destroyed);
+    EXPECT_TRUE(outcome.drain_survived);
     group.join();
 }
