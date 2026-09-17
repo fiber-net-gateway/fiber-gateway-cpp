@@ -88,9 +88,8 @@ StreamFd::~StreamFd() {
     }
     // Off-loop destruction is legal only for a detached object: the handover
     // protocol adopts it on a loop and closes it there, so nothing may remain
-    // subscribed, queued or hook-registered here.
-    FIBER_ASSERT(!rwfd_.registered() && terminal_callback_ == nullptr && !terminal_notify_entry_.is_in_queue() &&
-                 !stop_entry_.is_registered());
+    // subscribed or queued here.
+    FIBER_ASSERT(!rwfd_.registered() && terminal_callback_ == nullptr && !terminal_notify_entry_.is_in_queue());
 }
 
 bool StreamFd::valid() const noexcept { return rwfd_.valid(); }
@@ -107,15 +106,10 @@ RWFd &StreamFd::rwfd() noexcept { return rwfd_; }
 
 int StreamFd::release_fd() noexcept { return rwfd_.release_fd(); }
 
-void StreamFd::on_loop_stop(StreamFd *self) noexcept { self->close(); }
-
 void StreamFd::close() {
     FIBER_ASSERT(rwfd_.current_loop().in_loop());
     if (terminal_notify_entry_.is_in_queue()) {
         rwfd_.current_loop().cancel<StreamFd, &StreamFd::terminal_notify_entry_>(*this);
-    }
-    if (stop_entry_.is_registered()) {
-        rwfd_.current_loop().unregister_stop<StreamFd, &StreamFd::stop_entry_>(*this);
     }
     const auto terminal_callback = std::exchange(terminal_callback_, nullptr);
     void *terminal_ctx = std::exchange(terminal_callback_ctx_, nullptr);
@@ -154,10 +148,6 @@ fiber::common::IoErr StreamFd::set_terminal_callback(ReadyCallback callback, voi
     if (observed != fiber::common::IoErr::None) {
         return observed;
     }
-    if (!stop_entry_.is_registered() &&
-        !rwfd_.current_loop().register_stop<StreamFd, &StreamFd::stop_entry_, &StreamFd::on_loop_stop>(*this)) {
-        return fiber::common::IoErr::Canceled;
-    }
     terminal_callback_ = callback;
     terminal_callback_ctx_ = ctx;
     if (terminal_) {
@@ -188,9 +178,6 @@ fiber::common::IoErr StreamFd::clear_terminal_callback(ReadyCallback callback, v
     terminal_callback_ = nullptr;
     terminal_callback_ctx_ = nullptr;
     // A queued late-subscription completion finds an empty slot and no-ops.
-    if (!terminal_notify_entry_.is_in_queue() && stop_entry_.is_registered()) {
-        rwfd_.current_loop().unregister_stop<StreamFd, &StreamFd::stop_entry_>(*this);
-    }
     return fiber::common::IoErr::None;
 }
 
@@ -201,9 +188,6 @@ fiber::common::IoErr StreamFd::detach_for_handover() noexcept {
     FIBER_ASSERT(terminal_callback_ == nullptr);
     if (terminal_notify_entry_.is_in_queue()) {
         rwfd_.current_loop().cancel<StreamFd, &StreamFd::terminal_notify_entry_>(*this);
-    }
-    if (stop_entry_.is_registered()) {
-        rwfd_.current_loop().unregister_stop<StreamFd, &StreamFd::stop_entry_>(*this);
     }
     return rwfd_.detach_for_handover();
 }
@@ -286,9 +270,6 @@ void StreamFd::run_terminal_notification() noexcept {
     FIBER_ASSERT(terminal_);
     const auto callback = std::exchange(terminal_callback_, nullptr);
     void *ctx = std::exchange(terminal_callback_ctx_, nullptr);
-    if (stop_entry_.is_registered() && !terminal_notify_entry_.is_in_queue()) {
-        rwfd_.current_loop().unregister_stop<StreamFd, &StreamFd::stop_entry_>(*this);
-    }
     if (callback == nullptr) {
         return;
     }
