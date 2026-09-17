@@ -12,29 +12,6 @@ namespace fiber::event {
 
 thread_local EventLoop *EventLoop::current_ = nullptr;
 
-namespace {
-
-constexpr std::uint32_t to_mask(IoEvent events) { return static_cast<std::uint32_t>(events); }
-
-IoEvent to_io_event(std::uint32_t events, IoEvent interested) {
-    IoEvent mask = Poller::Event::None;
-    if (events & (EPOLLIN | EPOLLPRI)) {
-        mask |= IoEvent::Read;
-    }
-    if (events & EPOLLRDHUP) {
-        mask |= IoEvent::Read | IoEvent::ReadHangup;
-    }
-    if (events & EPOLLOUT) {
-        mask |= IoEvent::Write;
-    }
-    if (events & (EPOLLERR | EPOLLHUP)) {
-        mask |= interested | IoEvent::Terminal;
-    }
-    return mask;
-}
-
-} // namespace
-
 EventLoop::NotifyEntry::NotifyEntry() : node(this) {}
 
 EventLoop::EventLoop(EventLoopGroup *group, std::size_t group_index) : group_(group), group_index_(group_index) {
@@ -179,10 +156,7 @@ void EventLoop::run_once() {
     }
     const bool runnable = has_next || pending_notify_ || stop_requested_.load(std::memory_order_acquire);
     const auto deadline = runnable ? now_ : next_deadline();
-    constexpr int kMaxEvents = 64;
-    epoll_event events[kMaxEvents];
-
-    int count = poller_.wait(events, kMaxEvents, deadline);
+    int count = poller_.wait(deadline);
     now_ = std::chrono::steady_clock::now();
     ++turn_;
     if (count < 0) {
@@ -192,19 +166,7 @@ void EventLoop::run_once() {
         return;
     }
 
-    for (int i = 0; i < count; ++i) {
-        // Blanked by Poller::del() when a callback removed the item mid-batch.
-        auto *item = static_cast<Poller::Item *>(events[i].data.ptr);
-        if (!item) {
-            continue;
-        }
-        IoEvent io = to_io_event(events[i].events, item->interested_);
-        if (to_mask(io) == 0) {
-            continue;
-        }
-        item->callback(item, item->fd(), io);
-    }
-    poller_.end_batch();
+    poller_.dispatch();
     drain_defer();
 }
 

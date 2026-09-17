@@ -29,7 +29,7 @@ public:
 
     // Registered items are addressed directly through epoll_event::data.ptr.
     // An item must stay alive until del() returns; del() also blanks any entry
-    // still pointing at it in the batch most recently returned by wait(), so
+    // still pointing at it in the undispatched part of the current batch, so
     // a callback may destroy other items from the same kernel batch.
     struct Item : common::NonCopyable, common::NonMovable {
         using Callback = void (*)(Item *, int fd, Event);
@@ -42,7 +42,6 @@ public:
         int fd_{};
         Event interested_{Event::None};
         bool registered_ = false;
-        friend class EventLoop;
     };
 
     Poller();
@@ -70,14 +69,13 @@ public:
     fiber::common::IoErr add(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr mod(int fd, Event events, Item *item, Mode mode = Mode::None);
     fiber::common::IoErr del(Item &item);
-    // Returns ready events with data.ptr set to the registered Item (nullptr
-    // entries must be skipped). The array stays the "current batch" until
-    // end_batch() is called or the next wait() begins.
-    int wait(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
-    void end_batch() noexcept {
-        batch_ = nullptr;
-        batch_count_ = 0;
-    }
+    // Wait into an internal fixed-size batch without invoking callbacks. A new
+    // wait replaces any undispatched batch. Returns the ready count or -1.
+    // Neither wait nor dispatch may be called recursively from a callback.
+    int wait(std::chrono::steady_clock::time_point deadline);
+    // Consume the current batch and clear it. Callbacks may add/mod/del items,
+    // including deleting themselves or other items from this batch.
+    void dispatch() noexcept;
 
 private:
     enum class WaitBackend : std::uint8_t { Unknown, EpollPwait2, TimerFd };
@@ -95,8 +93,11 @@ private:
     int epoll_fd_ = -1;
     int timer_fd_ = -1;
     std::size_t size_ = 0;
-    epoll_event *batch_ = nullptr;
+    static constexpr int kMaxEvents = 64;
+    epoll_event batch_[kMaxEvents];
     int batch_count_ = 0;
+    int batch_next_ = 0;
+    bool dispatching_ = false;
     WaitBackend wait_backend_ = WaitBackend::Unknown;
     std::chrono::steady_clock::time_point armed_deadline_ = std::chrono::steady_clock::time_point::max();
     std::thread::id owner_thread_{};
