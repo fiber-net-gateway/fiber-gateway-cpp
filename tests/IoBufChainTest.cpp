@@ -502,4 +502,97 @@ TEST(IoBufChainTest, EmptyCompleteCanBeTransferred) {
     EXPECT_TRUE(dst.complete());
 }
 
+TEST(IoBufChainTest, TrimEndShrinksTailNodeInPlace) {
+    IoBufNodePool pool;
+    IoBufChain chain(pool);
+    ASSERT_TRUE(chain.append(IoBuf::allocate(16)));
+    chain.commit_back(8); // "committed" node: 8 readable, 8 writable-accounted
+
+    chain.trim_end(3);
+    EXPECT_EQ(chain.readable_bytes(), 5u);
+    EXPECT_EQ(chain.size(), 1u);
+    EXPECT_EQ(chain.back()->readable(), 5u);
+    // Trimmed tail returns to the writable accounting.
+    EXPECT_EQ(chain.writable_bytes(), 11u);
+}
+
+TEST(IoBufChainTest, TrimEndReleasesFullyTrimmedTailNodes) {
+    IoBufNodePool pool;
+    IoBufChain chain(pool);
+    IoBuf buf1 = IoBuf::allocate(8);
+    IoBuf buf2 = IoBuf::allocate(8);
+    IoBuf buf3 = IoBuf::allocate(8);
+    std::memcpy(buf1.writable_data(), "aaaa", 4);
+    std::memcpy(buf2.writable_data(), "bbbb", 4);
+    std::memcpy(buf3.writable_data(), "cccc", 4);
+    buf1.commit(4);
+    buf2.commit(4);
+    buf3.commit(4);
+    ASSERT_TRUE(chain.append(std::move(buf1)));
+    ASSERT_TRUE(chain.append(std::move(buf2)));
+    ASSERT_TRUE(chain.append(std::move(buf3)));
+
+    // Trim 4 (all of node3) + 2 (half of node2).
+    chain.trim_end(6);
+    EXPECT_EQ(readable_string(chain), "aaaabb");
+    EXPECT_EQ(chain.size(), 2u);
+    EXPECT_EQ(chain.back()->readable(), 2u);
+
+    // Trim everything: the chain empties and releases all nodes.
+    chain.trim_end(6);
+    EXPECT_TRUE(chain.empty());
+    EXPECT_EQ(chain.readable_bytes(), 0u);
+    EXPECT_EQ(chain.size(), 0u);
+    EXPECT_EQ(chain.front(), nullptr);
+    EXPECT_EQ(chain.back(), nullptr);
+    EXPECT_EQ(readable_string(chain), "");
+}
+
+TEST(IoBufChainTest, CommitTailroomPublishesBytesWrittenOutOfBand) {
+    IoBufNodePool pool;
+    IoBufChain chain(pool);
+    // A node delivered by a transport read: all bytes committed before the
+    // node entered the chain; its tailroom is in the writable accounting.
+    IoBuf buf = IoBuf::allocate(16);
+    std::memcpy(buf.writable_data(), "payload", 7);
+    buf.commit(7);
+    ASSERT_TRUE(chain.append(std::move(buf)));
+    ASSERT_EQ(chain.readable_bytes(), 7u);
+    ASSERT_EQ(chain.writable_bytes(), 9u);
+
+    // Write into the tailroom out-of-band (e.g. a seal in place), then
+    // publish those bytes as readable.
+    std::memcpy(chain.back()->writable_data(), "XY", 2);
+    chain.commit_tailroom(2);
+
+    EXPECT_EQ(readable_string(chain), "payloadXY");
+    EXPECT_EQ(chain.readable_bytes(), 9u);
+    EXPECT_EQ(chain.writable_bytes(), 7u);
+}
+
+TEST(IoBufChainTest, FrontNodeWalksReadableSpansInOrder) {
+    IoBufNodePool pool;
+    IoBufChain empty(pool);
+    EXPECT_EQ(empty.front_node(), nullptr);
+
+    IoBufChain chain(pool);
+    for (const char *piece: {"aaaa", "bb", "cccc"}) {
+        IoBuf buf = IoBuf::allocate(std::strlen(piece));
+        std::memcpy(buf.writable_data(), piece, std::strlen(piece));
+        buf.commit(std::strlen(piece));
+        ASSERT_TRUE(chain.append(std::move(buf)));
+    }
+
+    // The walk via front_node()/next covers exactly the readable bytes,
+    // in chain order.
+    std::size_t nodes = 0;
+    std::string walked;
+    for (const fiber::mem::IoBufNode *node = chain.front_node(); node != nullptr; node = node->next) {
+        walked.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+        ++nodes;
+    }
+    EXPECT_EQ(nodes, chain.size());
+    EXPECT_EQ(walked, "aaaabbcccc");
+}
+
 } // namespace

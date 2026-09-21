@@ -85,6 +85,10 @@ public:
     void reset() noexcept;
     void consume(std::size_t bytes) noexcept;
     void commit(std::size_t bytes) noexcept;
+    // Shrinks the readable tail by `bytes`; bytes <= readable(). The inverse
+    // of commit: in-place transforms that shrink data (e.g. peeling an AEAD
+    // tag) reuse the storage instead of re-slicing.
+    void uncommit(std::size_t bytes) noexcept;
     void swap(IoBuf &other) noexcept;
 
     [[nodiscard]] IoBuf retain_slice(std::size_t offset, std::size_t len) const noexcept;

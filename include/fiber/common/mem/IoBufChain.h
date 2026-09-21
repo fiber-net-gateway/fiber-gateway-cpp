@@ -75,6 +75,19 @@ public:
     void consume_and_compact(std::size_t bytes) noexcept;
     void commit(std::size_t bytes) noexcept;
     void commit_back(std::size_t bytes) noexcept;
+    // Shrinks the readable tail by `bytes` (bytes <= readable_bytes()):
+    // trims the tail node in place, releasing fully-trimmed tail nodes.
+    // In-place record transforms that shrink data (peeling an AEAD tag +
+    // padding) reuse the storage instead of re-slicing.
+    void trim_end(std::size_t bytes) noexcept;
+    // Commits `bytes` of the tail node's physical tailroom as readable. The
+    // caller must have written those bytes (e.g. an in-place record transform
+    // that grew data — an AEAD tag sealed into the tailroom). Accounting-wise
+    // this matches commit_back (a node's tailroom is always inside the
+    // chain's writable accounting); the distinct name documents the caller's
+    // intent: the bytes were produced out-of-band, not by a transport read
+    // into the writable region.
+    void commit_tailroom(std::size_t bytes) noexcept;
     void mark_complete() noexcept;
     void clear_complete() noexcept;
     [[nodiscard]] IoBufNode *pop_front_node() noexcept;
@@ -84,6 +97,10 @@ public:
 
     [[nodiscard]] IoBuf *front() noexcept;
     [[nodiscard]] const IoBuf *front() const noexcept;
+    // Head chain node (null when empty); the list links via IoBufNode::next.
+    // Read-only structural access for callers walking a chain's readable
+    // regions (e.g. locating a contiguous span across nodes).
+    [[nodiscard]] const IoBufNode *front_node() const noexcept { return head_; }
     [[nodiscard]] IoBuf *back() noexcept;
     [[nodiscard]] const IoBuf *back() const noexcept;
     [[nodiscard]] IoBuf *first_readable() noexcept;
