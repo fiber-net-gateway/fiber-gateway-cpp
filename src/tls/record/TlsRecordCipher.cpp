@@ -12,45 +12,28 @@ struct SuiteSpec {
     std::size_t iv_len = 0; // static iv (1.3, 12) or fixed iv (1.2, 4)
 };
 
-// (suite, kind) pairing for the nine implemented combinations; a null aead
-// rejects every other pairing at init.
+// (suite, kind) pairing resolved through the shared registry
+// (handshake/TlsCipherSuites.h); a null aead rejects every other pairing at
+// init. The nine implemented combinations and their key/iv lengths all live
+// in kTlsSuiteRegistry — this only maps the AEAD pick.
 [[nodiscard]] SuiteSpec suite_spec(TlsCipherSuiteId suite, TlsRecordProtectionKind kind) noexcept {
-    switch (suite) {
-        case TlsCipherSuiteId::TlsAes128GcmSha256:
-            if (kind == TlsRecordProtectionKind::Tls13) {
-                return {EVP_aead_aes_128_gcm(), 16, 12};
-            }
-            return {};
-        case TlsCipherSuiteId::TlsAes256GcmSha384:
-            if (kind == TlsRecordProtectionKind::Tls13) {
-                return {EVP_aead_aes_256_gcm(), 32, 12};
-            }
-            return {};
-        case TlsCipherSuiteId::TlsChacha20Poly1305Sha256:
-            if (kind == TlsRecordProtectionKind::Tls13) {
-                return {EVP_aead_chacha20_poly1305(), 32, 12};
-            }
-            return {};
-        case TlsCipherSuiteId::EcdheEcdsaAes128GcmSha256:
-        case TlsCipherSuiteId::EcdheRsaAes128GcmSha256:
-            if (kind == TlsRecordProtectionKind::Tls12) {
-                return {EVP_aead_aes_128_gcm(), 16, 4};
-            }
-            return {};
-        case TlsCipherSuiteId::EcdheEcdsaAes256GcmSha384:
-        case TlsCipherSuiteId::EcdheRsaAes256GcmSha384:
-            if (kind == TlsRecordProtectionKind::Tls12) {
-                return {EVP_aead_aes_256_gcm(), 32, 4};
-            }
-            return {};
-        case TlsCipherSuiteId::EcdheEcdsaChacha20Poly1305:
-        case TlsCipherSuiteId::EcdheRsaChacha20Poly1305:
-            if (kind == TlsRecordProtectionKind::Tls12) {
-                return {EVP_aead_chacha20_poly1305(), 32, 4};
-            }
-            return {};
+    const TlsSuiteInfo *info = tls_suite_info(suite);
+    if (info == nullptr || info->is_tls13 != (kind == TlsRecordProtectionKind::Tls13)) {
+        return {};
     }
-    return {};
+    const EVP_AEAD *aead = nullptr;
+    switch (info->aead) {
+        case TlsAeadAlgorithm::Aes128Gcm:
+            aead = EVP_aead_aes_128_gcm();
+            break;
+        case TlsAeadAlgorithm::Aes256Gcm:
+            aead = EVP_aead_aes_256_gcm();
+            break;
+        case TlsAeadAlgorithm::Chacha20Poly1305:
+            aead = EVP_aead_chacha20_poly1305();
+            break;
+    }
+    return {aead, info->key_len, static_cast<std::size_t>(info->is_tls13 ? 12 : 4)};
 }
 
 void store_be64(std::uint8_t *dst, std::uint64_t value) noexcept {
