@@ -297,6 +297,11 @@ void IoBuf::commit(std::size_t bytes) noexcept {
     last_ += bytes;
 }
 
+void IoBuf::uncommit(std::size_t bytes) noexcept {
+    FIBER_ASSERT(bytes <= readable());
+    last_ -= bytes;
+}
+
 void IoBuf::swap(IoBuf &other) noexcept {
     std::swap(control_, other.control_);
     std::swap(view_begin_, other.view_begin_);

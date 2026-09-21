@@ -189,4 +189,20 @@ TEST(IoBufTest, OrdinaryStorageCannotBeAttachedToStorageBudget) {
     EXPECT_EQ(budget.retained_capacity(), 0U);
 }
 
+TEST(IoBufTest, UncommitShrinksReadableTailRestoringWritable) {
+    IoBuf buf = IoBuf::allocate(32);
+    std::memcpy(buf.writable_data(), "hello world", 11);
+    buf.commit(11);
+
+    buf.uncommit(6); // peel a fake 6-byte trailer
+    EXPECT_EQ(readable_view(buf), "hello");
+    EXPECT_EQ(buf.readable(), 5u);
+    EXPECT_EQ(buf.writable(), 27u);
+
+    // The peeled tail is writable again: rewrite and re-commit.
+    std::memcpy(buf.writable_data(), "!!!", 3);
+    buf.commit(3);
+    EXPECT_EQ(readable_view(buf), "hello!!!");
+}
+
 } // namespace

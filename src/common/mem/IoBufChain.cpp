@@ -461,6 +461,45 @@ void IoBufChain::commit_back(std::size_t bytes) noexcept {
     readable_bytes_ += bytes;
 }
 
+void IoBufChain::trim_end(std::size_t bytes) noexcept {
+    FIBER_ASSERT(bytes <= readable_bytes_);
+    readable_bytes_ -= bytes;
+    while (bytes > 0) {
+        FIBER_ASSERT(tail_ != nullptr);
+        const std::size_t readable = tail_->buf.readable();
+        if (bytes < readable) {
+            tail_->buf.uncommit(bytes);
+            writable_bytes_ += bytes; // the returned tailroom re-enters the accounting
+            return;
+        }
+        bytes -= readable;
+        tail_->buf.uncommit(readable);
+
+        // The tail node's readable span is fully trimmed: release it.
+        IoBufNode *prev = nullptr;
+        for (IoBufNode *node = head_; node != tail_; node = node->next) {
+            prev = node;
+        }
+        writable_bytes_ -= tail_->buf.writable();
+        if (prev != nullptr) {
+            prev->next = nullptr;
+        } else {
+            head_ = nullptr;
+        }
+        node_pool().release(tail_);
+        tail_ = prev;
+        --size_;
+    }
+}
+
+void IoBufChain::commit_tailroom(std::size_t bytes) noexcept {
+    FIBER_ASSERT(tail_ != nullptr);
+    FIBER_ASSERT(bytes <= tail_->buf.tailroom());
+    tail_->buf.commit(bytes);
+    writable_bytes_ -= bytes;
+    readable_bytes_ += bytes;
+}
+
 void IoBufChain::mark_complete() noexcept { complete_ = true; }
 
 void IoBufChain::clear_complete() noexcept { complete_ = false; }
