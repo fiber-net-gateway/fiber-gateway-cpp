@@ -2,7 +2,8 @@
 
 日期：2026-09-20
 分支：`tls`
-状态：设计定稿（实现未开始）
+状态：设计定稿；修订 2（2026-09-21）：引擎层定为**三相位引擎**（客户端/服务端握手引擎 +
+连接引擎，§3.3）。record 分帧/保护与握手编解码（decode 侧）已实现（03/04/05 号）
 
 ## 1. 目标与范围
 
@@ -48,7 +49,8 @@ common ← tls ← net（fd 胶水层） ← http
 include/fiber/tls/
 ├── TlsTypes.h                 # ContentType、Alert(desc/severity)、IoErr 之外的 TLS 专用错误码、公共常量
 ├── TlsVersion.h               # 协议版本枚举 + 版本协商结果
-├── TlsEngine.h                # 核心：字节进/字节出的同步协议引擎（组合 record + handshake FSM）
+├── TlsConnectedState.h        # 握手→连接的移交 DTO：version/suite/读写双 cipher 实例/alpn/对端证书视图/session_resumed
+├── TlsConnectedEngine.h       # 连接相位引擎：吞入 ConnectedState；app data 路径 + KeyUpdate + NST 钩子 + close_notify
 ├── TlsConfig.h                # 不可变成参：角色、ALPN、SNI、groups/suites 偏好、超时无关的策略项
 ├── TlsCredentials.h           # 证书/私钥材料（PEM 原文或已解析视图），net 旧栈 TlsCredential 的无 SSL 版
 ├── TlsTrustAnchors.h          # 信任锚材料，net 旧栈 TrustStore 的无 SSL 版
@@ -62,7 +64,9 @@ include/fiber/tls/
 │   ├── TlsRecord.h            # record 头视图 + 定长常量（2^14 等）
 │   ├── TlsRecordReader.h      # 流式分帧：输入字节流 → record 视图（跨 feed 重组、长度校验、空记录规则）
 │   ├── TlsRecordWriter.h      # 出向分片与编码（含加密开销预算）
-│   └── TlsRecordCipher.h      # 方向级保护状态：1.3 AEAD(静态 IV⊕seq) / 1.2 GCM(explicit nonce)；序列号管理
+│   ├── TlsRecordCipher.h      # 方向级保护状态：1.3 AEAD(静态 IV⊕seq) / 1.2 GCM(explicit nonce)；序列号管理；
+│   │                          #   seal_scatter/open_gather span 原语（tag 外置 → 原地免 unique）
+│   └── TlsRecordCipherChain.h # 链适配：IoBufChain 一条记录四形态（转录/原地 × seal/open）；跨节点退化转录
 ├── handshake/                 # —— 握手层 ——
 │   ├── TlsHandshakeMessage.h  # 消息类型枚举 + 各 body POD（含 1.3 专属：EE/CertificateRequest/NewSessionTicket/KeyUpdate）
 │   ├── TlsHandshakeCodec.h    # 上述消息的 encode/decode
@@ -70,10 +74,13 @@ include/fiber/tls/
 │   │                          #   alpn/server_name/signature_algorithms/supported_groups/renegotiation_info/…
 │   ├── TlsCipherSuites.h      # suite/group/sigalg 注册表 + 双版本协商选择逻辑
 │   ├── TlsTranscript.h        # 跑动哈希：1.3 按 hash 算法持有（cert_req 分叉）、1.2 handshake_messages 缓冲
-│   ├── TlsClientHandshake.h   # 客户端 FSM（1.2/1.3 双分支）
-│   ├── TlsServerHandshake.h   # 服务端 FSM（1.2/1.3 双分支）
+│   ├── TlsClientHandshakeEngine.h  # 客户端握手引擎（字节进/字节出；1.2/1.3 为内部子流程，非第三维
+│   │                          #   拆分；0-RTT 早数据写路径封在此内；成功产出 TlsConnectedState）
+│   ├── TlsServerHandshakeEngine.h  # 服务端握手引擎（同形状；NST 发送、0-RTT 接受与 anti-replay）
 │   └── TlsPsk.h               # 1.3 PSK/票据/0-RTT 参数推导 + binder 计算；1.2 ticket 封装
-└── detail/                    # 内部跨编译单元共享头（保持无 openssl）
+└── detail/                    # 内部跨编译单元共享头（保持无 openssl）：TlsHandshakeContext——
+                              # 双握手引擎的共享组合根（record IO 驱动/transcript/密钥调度调用/
+                              # flight 组装/alert 选择/CCS 处理/协商结果落地）
 
 src/tls/                       # 与 include 同构；另外：
 └── crypto/ 中允许内部适配头（如 TlsCryptoPrimitives.h：EVP_AEAD/HKDF/HMAC/SHA/RAND 的薄封装，
@@ -89,21 +96,59 @@ tests/
 feature/tls/                   # 实现过程文档（本系列，见 §7）
 ```
 
-### 3.3 引擎 API 形状（示意，非定稿）
+### 3.3 引擎层：三相位引擎（修订 2 定稿，2026-09-21）
+
+**拆分**：`TlsClientHandshakeEngine` / `TlsServerHandshakeEngine` / `TlsConnectedEngine`
+三个具体类，无公共基类、无虚函数。三者**不对等**：前两个是角色二选一的握手相位，
+第三个是两者共同的输出相位。
+
+**为什么这么拆**：
+
+1. **握手天然不对称**（flight 结构、证书出示/验证方向、0-RTT 收发、NST 收发、1.2 CCS
+   时序全部镜像）——合并实现等于每个状态迁移带 `is_client_` 分叉；
+2. **连接相位状态性质不同**：仅双方向 cipher 实例 + Reader/Writer；transcript 与 1.2
+   handshake_messages 缓冲随握手引擎一起消亡，不跟随连接存活。行为基本对称，不对称点
+   （NST 收/发、post-handshake CertificateRequest）以配置钩子注入而非子类表达；
+3. **相位边界 = 类型边界 = 所有权边界**：握手引擎成功输出 `TlsConnectedState`
+   （version、suite、读写双 cipher 实例、alpn、对端证书视图、session_resumed…），
+   ConnectedEngine 吞入——消除"引擎延迟销毁晚于共享资源"这类 UAF 的模糊地带。
+
+**统一驱动形状**（三引擎同形：同步、无 fd、无协程；feed 对端字节 / drain 我方字节 /
+take 应用明文，三段式事件输出）：
 
 ```cpp
 namespace fiber::tls {
 
-// 同步、无 fd、无 coroutine —— 由 net 层的 fd 胶水驱动。
-// feed 对端字节 / emit 我方字节 / 取出应用明文，三段式事件输出。
-class TlsEngine {
+class TlsClientHandshakeEngine {
 public:
-    enum class Event : std::uint8_t { /* HandshakeDone, AppData, Outbound, Alert, Closed, … */ };
-    // feed()/drain_outbound()/take_plaintext() … 详细签名在实现 02/03 号文档时定稿
+    // Event::HandshakeDone 携带 TlsConnectedState；0-RTT 期间暴露 early-data 写接口
+};
+class TlsServerHandshakeEngine { /* 同形；Event 携带 ConnectedState */ };
+class TlsConnectedEngine {
+public:
+    explicit TlsConnectedEngine(TlsConnectedState &&state) noexcept;
+    // app data 收发路径；KeyUpdate（收→换读 cipher；request→换写+回发）；
+    // NST 钩子（服务端发/客户端收+写会话缓存）；close_notify 生命周期
 };
 
 } // namespace fiber::tls
 ```
+
+**防重复约束**：双握手引擎的共享件——record IO 驱动、transcript、密钥调度调用、flight
+组装/缓冲、alert 选择、CCS 处理、版本/suite 协商结果落地——收敛在
+`detail/TlsHandshakeContext`（共享组合根），两个引擎保持薄 FSM；禁止各自全自给。
+
+**两个边界决策**：
+
+- **版本是内部子流程，不是第三维拆分**：版本中途才确定（客户端读到 ServerHello、服务端
+  读到 ClientHello 的 supported_versions 之后），引擎必须版本无起点；1.2/1.3 各一条子
+  流程共享 context，不拆 ClientHandshakeEngine12/13 四个类；
+- **0-RTT 封在客户端握手引擎内**：early data 用 client_early secret 写、被拒可弃——
+  早数据写路径与抗回滚状态留在 ClientHandshakeEngine 内部，成功后随 ConnectedState
+  移交；不让 ConnectedEngine 提前出生、双引擎并存。
+
+**net 集成形状不变**（§4）：`TlsEngineStream` 胶水在 `HandshakeDone` 事件处把驱动对象
+从握手引擎换成 ConnectedEngine（同形状直换，无继承）；`TlsTcpStream` 公共 API 签名不变。
 
 ## 4. 集成层归属（第二阶段）
 
@@ -140,14 +185,15 @@ fd 驱动的异步胶水（record 读写挂到 `RWFd`、握手 awaiter、close_n
 
 | 编号 | 主题 | 对应目录 |
 |---|---|---|
-| 01 | 目录设计（本文） | — |
+| 01 | 目录设计（本文；修订 2 = 三相位引擎定稿） | — |
 | 02 | crypto 适配层 + 密钥调度 | `crypto/` |
-| 03 | 记录层 | `record/` |
-| 04 | 消息/扩展编解码 + suite 注册表 | `handshake/`(codec 部分) |
-| 05 | 客户端握手 FSM | `handshake/TlsClientHandshake` |
-| 06 | 服务端握手 FSM | `handshake/TlsServerHandshake` |
-| 07 | 恢复：ticket/PSK/0-RTT | `handshake/TlsPsk`、`TlsSessionState` |
-| 08 | net 集成与旧栈替换 | `src/net/detail` 胶水层 |
-| 09 | 互通与回归测试报告 | `tests/Tls*` |
+| 03 | 记录层：分帧 Reader/Writer（**已完成**） | `record/` |
+| 04 | 消息/扩展编解码 + suite 注册表（**decode 侧已完成**） | `handshake/`(codec 部分) |
+| 05 | 记录保护：cipher + IoBufChain 四形态（**已完成**；编号被占用，原 05/06 顺延） | `record/` |
+| 06 | 客户端握手引擎 | `handshake/TlsClientHandshakeEngine` |
+| 07 | 服务端握手引擎 | `handshake/TlsServerHandshakeEngine` |
+| 08 | 恢复：ticket/PSK/0-RTT | `handshake/TlsPsk`、`TlsSessionState` |
+| 09 | net 集成与旧栈替换 | `src/net/detail` 胶水层 |
+| 10 | 互通与回归测试报告 | `tests/Tls*` |
 
 实现顺序即编号顺序（02/03/04 可交错，codec 类先行——它们是 FSM 的输入）。
