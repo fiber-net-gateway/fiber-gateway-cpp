@@ -12,7 +12,8 @@
 
 #include "TlsRfc8448Constants.h"
 
-#include <fiber/tls/crypto/TlsKeySchedule.h>
+#include <fiber/tls/crypto/Tls12KeySchedule.h>
+#include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/record/TlsRecordCipher.h>
 
 using namespace fiber::tls;

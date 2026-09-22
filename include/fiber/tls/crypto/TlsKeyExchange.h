@@ -1,15 +1,21 @@
 #ifndef FIBER_TLS_CRYPTO_TLS_KEY_EXCHANGE_H
 #define FIBER_TLS_CRYPTO_TLS_KEY_EXCHANGE_H
 
-// (EC)DHE ephemeral key exchange for the TLS handshake: X25519 (preferred)
-// and P-256. One instance per handshake; the server keeps its instance across
-// a HelloRetryRequest (its key_share stays valid), the client discards and
-// rebuilds on HRR. The server's long-term signing key is NOT this type — it
-// belongs to TlsSignature's credential material (02 §5).
+// (EC)DHE / KEM key exchange for the TLS handshake. Abstract base: one
+// subclass per group (src side), constructed via the create() factory —
+// structure mirrors BoringSSL's SSLKeyShare (ssl/ssl_key_share.cc). The API
+// follows its KEM-unified shape (Generate/Encap/Decap): classical DH groups
+// implement encap as the composite "keygen + shared secret" and decap as pure
+// shared-secret recovery; PQ groups (future) genuinely fork the two. One
+// instance per handshake; the client discards and rebuilds across a
+// HelloRetryRequest / a 1.2 SKE group switch. The server's long-term signing
+// key is NOT this type — it belongs to TlsSignature's credential material
+// (02 §5).
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 
 #include "../../common/IoError.h"
@@ -43,30 +49,32 @@ struct TlsKxShared {
 
 class TlsKeyExchange : public common::NonCopyable, common::NonMovable {
 public:
-    // Asserts group is X25519 or Secp256r1 — the negotiated set; anything
-    // else is an engine bug (FFDHE is out of scope, negotiation skips it).
-    explicit TlsKeyExchange(TlsNamedGroup group) noexcept;
-    ~TlsKeyExchange(); // wipes private material
+    // Factory. A group outside {X25519, Secp256r1} is an engine bug
+    // (FIBER_ASSERT — the negotiated set; FFDHE is out of scope, negotiation
+    // skips it); allocation failure returns NoMem. The returned instance has
+    // NOT yet run generate().
+    [[nodiscard]] static common::IoResult<std::unique_ptr<TlsKeyExchange>> create(TlsNamedGroup group) noexcept;
 
-    // Generates a fresh ephemeral keypair. X25519 cannot fail; P-256 fails
-    // only on allocation.
-    [[nodiscard]] common::IoResult<void> generate() noexcept;
+    virtual ~TlsKeyExchange(); // wipes private material
 
-    [[nodiscard]] const TlsKeySharePub &public_value() const noexcept; // asserts generated
+    [[nodiscard]] virtual TlsNamedGroup group() const noexcept = 0;
 
-    // Derives the 32-byte shared secret from the peer's public value.
-    // Length/encoding violations and off-curve points are BadPeerData.
-    [[nodiscard]] TlsKxShared shared_secret(std::span<const std::uint8_t> peer_public) const noexcept;
+    // Client CH: generates a fresh ephemeral keypair; public_value() becomes
+    // available afterwards. X25519 cannot fail; P-256 fails only on
+    // allocation.
+    [[nodiscard]] virtual common::IoResult<void> generate() noexcept = 0;
+    [[nodiscard]] virtual const TlsKeySharePub &public_value() const noexcept = 0; // asserts generated
 
-    // Explicit cleanup; also run by the destructor.
-    void wipe() noexcept;
+    // Server side (consumed by 07): one step from the peer's key_share to our
+    // own share (public_value() becomes available) + the shared secret —
+    // classical DH composite: keygen + scalar-mult. Requires the instance has
+    // NOT run generate(); on failure the instance stays ungenerated.
+    [[nodiscard]] virtual TlsKxShared encap(std::span<const std::uint8_t> peer_public) noexcept = 0;
 
-private:
-    TlsNamedGroup group_;
-    std::array<std::uint8_t, 32> x25519_priv_{}; // X25519: private scalar in place, no pimpl
-    TlsKeySharePub pub_{};
-    void *p256_ = nullptr; // EVP_PKEY* (P-256), hidden behind the adapter
-    bool generated_ = false;
+    // Client receiving the peer share (1.3 SH / 1.2 SKE): recovers the 32-byte
+    // shared secret. Length/encoding violations and off-curve points are
+    // BadPeerData. Requires generate() has run.
+    [[nodiscard]] virtual TlsKxShared decap(std::span<const std::uint8_t> peer_public) noexcept = 0;
 };
 
 } // namespace fiber::tls

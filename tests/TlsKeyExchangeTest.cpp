@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include <openssl/ec.h>
@@ -11,6 +12,14 @@
 using namespace fiber::tls;
 
 namespace {
+
+// Factory wrapper: allocation cannot realistically fail here, so a null
+// return surfaces as the very next assertion.
+std::unique_ptr<TlsKeyExchange> make_kx(TlsNamedGroup group) {
+    auto made = TlsKeyExchange::create(group);
+    EXPECT_TRUE(made.has_value());
+    return made.has_value() ? std::move(*made) : nullptr;
+}
 
 std::vector<std::uint8_t> ramp(std::size_t len, std::uint8_t seed) {
     std::vector<std::uint8_t> out(len);
@@ -37,44 +46,51 @@ std::vector<std::uint8_t> p256_bad_point(std::uint8_t x_last_byte, std::uint8_t 
 // ---------------------------------------------------------------------------
 
 TEST(TlsKeyExchange, X25519AgreesBothWays) {
-    TlsKeyExchange a(TlsNamedGroup::X25519);
-    TlsKeyExchange b(TlsNamedGroup::X25519);
-    ASSERT_TRUE(a.generate().has_value());
-    ASSERT_TRUE(b.generate().has_value());
-    EXPECT_EQ(32u, a.public_value().len);
-    EXPECT_EQ(32u, b.public_value().len);
+    auto a = make_kx(TlsNamedGroup::X25519);
+    auto b = make_kx(TlsNamedGroup::X25519);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_NE(nullptr, b.get());
+    ASSERT_TRUE(a->generate().has_value());
+    ASSERT_TRUE(b->generate().has_value());
+    EXPECT_EQ(32u, a->public_value().len);
+    EXPECT_EQ(32u, b->public_value().len);
 
-    const TlsKxShared za = a.shared_secret(b.public_value().bytes());
-    const TlsKxShared zb = b.shared_secret(a.public_value().bytes());
+    const TlsKxShared za = a->decap(b->public_value().bytes());
+    const TlsKxShared zb = b->decap(a->public_value().bytes());
     EXPECT_EQ(TlsKxStatus::Ok, za.status);
     EXPECT_EQ(TlsKxStatus::Ok, zb.status);
     EXPECT_EQ(0, std::memcmp(za.z.data(), zb.z.data(), sizeof(za.z)));
 }
 
 TEST(TlsKeyExchange, X25519DistinctPairsGiveDistinctSecrets) {
-    TlsKeyExchange a(TlsNamedGroup::X25519), b(TlsNamedGroup::X25519), c(TlsNamedGroup::X25519),
-            d(TlsNamedGroup::X25519);
-    ASSERT_TRUE(a.generate().has_value());
-    ASSERT_TRUE(b.generate().has_value());
-    ASSERT_TRUE(c.generate().has_value());
-    ASSERT_TRUE(d.generate().has_value());
+    auto a = make_kx(TlsNamedGroup::X25519), b = make_kx(TlsNamedGroup::X25519), c = make_kx(TlsNamedGroup::X25519),
+         d = make_kx(TlsNamedGroup::X25519);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_NE(nullptr, b.get());
+    ASSERT_NE(nullptr, c.get());
+    ASSERT_NE(nullptr, d.get());
+    ASSERT_TRUE(a->generate().has_value());
+    ASSERT_TRUE(b->generate().has_value());
+    ASSERT_TRUE(c->generate().has_value());
+    ASSERT_TRUE(d->generate().has_value());
 
-    const TlsKxShared z1 = a.shared_secret(b.public_value().bytes());
-    const TlsKxShared z2 = c.shared_secret(d.public_value().bytes());
+    const TlsKxShared z1 = a->decap(b->public_value().bytes());
+    const TlsKxShared z2 = c->decap(d->public_value().bytes());
     ASSERT_EQ(TlsKxStatus::Ok, z1.status);
     ASSERT_EQ(TlsKxStatus::Ok, z2.status);
     EXPECT_NE(0, std::memcmp(z1.z.data(), z2.z.data(), sizeof(z1.z)));
 }
 
 TEST(TlsKeyExchange, X25519RejectsBadPeerData) {
-    TlsKeyExchange a(TlsNamedGroup::X25519);
-    ASSERT_TRUE(a.generate().has_value());
+    auto a = make_kx(TlsNamedGroup::X25519);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_TRUE(a->generate().has_value());
 
     // Wrong lengths.
-    EXPECT_EQ(TlsKxStatus::BadPeerData, a.shared_secret(ramp(31, 0)).status);
-    EXPECT_EQ(TlsKxStatus::BadPeerData, a.shared_secret(ramp(33, 0)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(ramp(31, 0)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(ramp(33, 0)).status);
     // All-zero public key: small-order point, RFC 7748 §6.1 rejection.
-    EXPECT_EQ(TlsKxStatus::BadPeerData, a.shared_secret(std::vector<std::uint8_t>(32, 0)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(std::vector<std::uint8_t>(32, 0)).status);
 }
 
 // ---------------------------------------------------------------------------
@@ -82,16 +98,18 @@ TEST(TlsKeyExchange, X25519RejectsBadPeerData) {
 // ---------------------------------------------------------------------------
 
 TEST(TlsKeyExchange, P256AgreesBothWays) {
-    TlsKeyExchange a(TlsNamedGroup::Secp256r1);
-    TlsKeyExchange b(TlsNamedGroup::Secp256r1);
-    ASSERT_TRUE(a.generate().has_value());
-    ASSERT_TRUE(b.generate().has_value());
-    EXPECT_EQ(65u, a.public_value().len);
-    EXPECT_EQ(0x04, a.public_value().buf[0]); // uncompressed marker
-    EXPECT_EQ(65u, b.public_value().len);
+    auto a = make_kx(TlsNamedGroup::Secp256r1);
+    auto b = make_kx(TlsNamedGroup::Secp256r1);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_NE(nullptr, b.get());
+    ASSERT_TRUE(a->generate().has_value());
+    ASSERT_TRUE(b->generate().has_value());
+    EXPECT_EQ(65u, a->public_value().len);
+    EXPECT_EQ(0x04, a->public_value().buf[0]); // uncompressed marker
+    EXPECT_EQ(65u, b->public_value().len);
 
-    const TlsKxShared za = a.shared_secret(b.public_value().bytes());
-    const TlsKxShared zb = b.shared_secret(a.public_value().bytes());
+    const TlsKxShared za = a->decap(b->public_value().bytes());
+    const TlsKxShared zb = b->decap(a->public_value().bytes());
     EXPECT_EQ(TlsKxStatus::Ok, za.status);
     EXPECT_EQ(TlsKxStatus::Ok, zb.status);
     EXPECT_EQ(0, std::memcmp(za.z.data(), zb.z.data(), sizeof(za.z)));
@@ -115,13 +133,14 @@ TEST(TlsKeyExchange, P256InteropWithBoringSSLDerive) {
     ASSERT_EQ(65u, EC_POINT_point2oct(EC_KEY_get0_group(peer_ec), EC_KEY_get0_public_key(peer_ec),
                                       POINT_CONVERSION_UNCOMPRESSED, peer_pub.data(), 65, nullptr));
 
-    TlsKeyExchange ours(TlsNamedGroup::Secp256r1);
-    ASSERT_TRUE(ours.generate().has_value());
-    const TlsKxShared z1 = ours.shared_secret(peer_pub);
+    auto ours = make_kx(TlsNamedGroup::Secp256r1);
+    ASSERT_NE(nullptr, ours.get());
+    ASSERT_TRUE(ours->generate().has_value());
+    const TlsKxShared z1 = ours->decap(peer_pub);
     ASSERT_EQ(TlsKxStatus::Ok, z1.status);
 
     // BoringSSL derives with our public key.
-    const auto our_pub = ours.public_value().bytes();
+    const auto our_pub = ours->public_value().bytes();
     ASSERT_EQ(65u, our_pub.size());
     EVP_PKEY_CTX *derive = EVP_PKEY_CTX_new(peer, nullptr);
     ASSERT_NE(nullptr, derive);
@@ -151,53 +170,118 @@ TEST(TlsKeyExchange, P256InteropWithBoringSSLDerive) {
 }
 
 TEST(TlsKeyExchange, P256RejectsBadPeerData) {
-    TlsKeyExchange a(TlsNamedGroup::Secp256r1);
-    ASSERT_TRUE(a.generate().has_value());
+    auto a = make_kx(TlsNamedGroup::Secp256r1);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_TRUE(a->generate().has_value());
 
     // Wrong lengths.
-    EXPECT_EQ(TlsKxStatus::BadPeerData, a.shared_secret(ramp(64, 0x04)).status);
-    EXPECT_EQ(TlsKxStatus::BadPeerData, a.shared_secret(ramp(66, 0x04)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(ramp(64, 0x04)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(ramp(66, 0x04)).status);
     // Compressed-point marker is not accepted.
     std::vector<std::uint8_t> compressed = ramp(65, 0);
     compressed[0] = 0x02;
-    EXPECT_EQ(TlsKxStatus::BadPeerData, a.shared_secret(compressed).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(compressed).status);
     // Off-curve points: (0,0) and (1,0).
-    EXPECT_EQ(TlsKxStatus::BadPeerData, a.shared_secret(p256_bad_point(0x00, 0x00)).status);
-    EXPECT_EQ(TlsKxStatus::BadPeerData, a.shared_secret(p256_bad_point(0x01, 0x00)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(p256_bad_point(0x00, 0x00)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(p256_bad_point(0x01, 0x00)).status);
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle
+// encap — the server-side composite (07's consumer; keygen + shared secret)
 // ---------------------------------------------------------------------------
 
-TEST(TlsKeyExchange, WipeAllowsRegeneration) {
-    TlsKeyExchange a(TlsNamedGroup::X25519);
-    TlsKeyExchange b(TlsNamedGroup::X25519);
-    ASSERT_TRUE(a.generate().has_value());
-    ASSERT_TRUE(b.generate().has_value());
-    const std::vector<std::uint8_t> first_pub(a.public_value().bytes().begin(), a.public_value().bytes().end());
+TEST(TlsKeyExchange, X25519EncapAgreesWithDecap) {
+    auto client = make_kx(TlsNamedGroup::X25519);
+    auto server = make_kx(TlsNamedGroup::X25519);
+    ASSERT_NE(nullptr, client.get());
+    ASSERT_NE(nullptr, server.get());
+    ASSERT_TRUE(client->generate().has_value());
 
-    a.wipe();
-    ASSERT_TRUE(a.generate().has_value());
+    const TlsKxShared zs = server->encap(client->public_value().bytes());
+    ASSERT_EQ(TlsKxStatus::Ok, zs.status);
+    EXPECT_EQ(TlsNamedGroup::X25519, server->group());
+    EXPECT_EQ(32u, server->public_value().len); // encap produced the share
+
+    const TlsKxShared zc = client->decap(server->public_value().bytes());
+    ASSERT_EQ(TlsKxStatus::Ok, zc.status);
+    EXPECT_EQ(0, std::memcmp(zs.z.data(), zc.z.data(), sizeof(zs.z)));
+}
+
+TEST(TlsKeyExchange, P256EncapAgreesWithDecap) {
+    auto client = make_kx(TlsNamedGroup::Secp256r1);
+    auto server = make_kx(TlsNamedGroup::Secp256r1);
+    ASSERT_NE(nullptr, client.get());
+    ASSERT_NE(nullptr, server.get());
+    ASSERT_TRUE(client->generate().has_value());
+
+    const TlsKxShared zs = server->encap(client->public_value().bytes());
+    ASSERT_EQ(TlsKxStatus::Ok, zs.status);
+    EXPECT_EQ(TlsNamedGroup::Secp256r1, server->group());
+    EXPECT_EQ(65u, server->public_value().len);
+    EXPECT_EQ(0x04, server->public_value().buf[0]);
+
+    const TlsKxShared zc = client->decap(server->public_value().bytes());
+    ASSERT_EQ(TlsKxStatus::Ok, zc.status);
+    EXPECT_EQ(0, std::memcmp(zs.z.data(), zc.z.data(), sizeof(zs.z)));
+}
+
+TEST(TlsKeyExchange, EncapRejectsBadPeerData) {
+    auto x = make_kx(TlsNamedGroup::X25519);
+    auto p = make_kx(TlsNamedGroup::Secp256r1);
+    ASSERT_NE(nullptr, x.get());
+    ASSERT_NE(nullptr, p.get());
+
+    // Wrong lengths.
+    EXPECT_EQ(TlsKxStatus::BadPeerData, x->encap(ramp(31, 0)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, x->encap(ramp(33, 0)).status);
+    // All-zero public key: small-order point rejection.
+    EXPECT_EQ(TlsKxStatus::BadPeerData, x->encap(std::vector<std::uint8_t>(32, 0)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, p->encap(ramp(64, 0x04)).status);
+    // Compressed-point marker is not accepted.
+    std::vector<std::uint8_t> compressed = ramp(65, 0);
+    compressed[0] = 0x02;
+    EXPECT_EQ(TlsKxStatus::BadPeerData, p->encap(compressed).status);
+    // Off-curve point: (0,0).
+    EXPECT_EQ(TlsKxStatus::BadPeerData, p->encap(p256_bad_point(0x00, 0x00)).status);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle: regeneration is instance replacement — destruction wipes
+// ---------------------------------------------------------------------------
+
+TEST(TlsKeyExchange, FreshInstanceGivesFreshPair) {
+    auto a = make_kx(TlsNamedGroup::X25519);
+    auto b = make_kx(TlsNamedGroup::X25519);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_NE(nullptr, b.get());
+    ASSERT_TRUE(a->generate().has_value());
+    ASSERT_TRUE(b->generate().has_value());
+    const std::vector<std::uint8_t> first_pub(a->public_value().bytes().begin(), a->public_value().bytes().end());
+
+    a = make_kx(TlsNamedGroup::X25519); // destruction wipes the old scalar
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_TRUE(a->generate().has_value());
 
     // Fresh keypair: shared secret still derivable and consistent.
-    const TlsKxShared za = a.shared_secret(b.public_value().bytes());
-    const TlsKxShared zb = b.shared_secret(a.public_value().bytes());
+    const TlsKxShared za = a->decap(b->public_value().bytes());
+    const TlsKxShared zb = b->decap(a->public_value().bytes());
     EXPECT_EQ(TlsKxStatus::Ok, za.status);
     EXPECT_EQ(TlsKxStatus::Ok, zb.status);
     EXPECT_EQ(0, std::memcmp(za.z.data(), zb.z.data(), sizeof(za.z)));
 
     // Regenerated X25519 keys collide with probability 2^-256-ish; the two
     // public values must not match.
-    EXPECT_NE(0, std::memcmp(first_pub.data(), a.public_value().bytes().data(), 32));
+    EXPECT_NE(0, std::memcmp(first_pub.data(), a->public_value().bytes().data(), 32));
 }
 
-TEST(TlsKeyExchange, P256WipeFreesTheKeyHandle) {
-    TlsKeyExchange a(TlsNamedGroup::Secp256r1);
-    ASSERT_TRUE(a.generate().has_value());
-    a.wipe();
-    ASSERT_TRUE(a.generate().has_value());
-    EXPECT_EQ(65u, a.public_value().len);
+TEST(TlsKeyExchange, P256FreshInstanceFreesTheKeyHandle) {
+    auto a = make_kx(TlsNamedGroup::Secp256r1);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_TRUE(a->generate().has_value());
+    a = make_kx(TlsNamedGroup::Secp256r1); // destruction frees the EVP_PKEY handle
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_TRUE(a->generate().has_value());
+    EXPECT_EQ(65u, a->public_value().len);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,36 +289,35 @@ TEST(TlsKeyExchange, P256WipeFreesTheKeyHandle) {
 // ---------------------------------------------------------------------------
 
 TEST(TlsKeyExchangeDeath, ContractViolations) {
-    EXPECT_DEATH((void) TlsKeyExchange(TlsNamedGroup::Secp384r1), "FIBER_ASSERT failed");
+    EXPECT_DEATH((void) TlsKeyExchange::create(TlsNamedGroup::Secp384r1), "FIBER_ASSERT failed");
 
     EXPECT_DEATH(
             {
-                TlsKeyExchange a(TlsNamedGroup::X25519);
-                (void) a.generate();
-                (void) a.generate(); // twice
+                auto a = make_kx(TlsNamedGroup::X25519);
+                (void) a->generate();
+                (void) a->generate(); // twice
             },
             "FIBER_ASSERT failed");
 
     EXPECT_DEATH(
             {
-                TlsKeyExchange a(TlsNamedGroup::X25519);
-                (void) a.public_value(); // before generate
+                auto a = make_kx(TlsNamedGroup::X25519);
+                (void) a->public_value(); // before generate
             },
             "FIBER_ASSERT failed");
 
     EXPECT_DEATH(
             {
-                TlsKeyExchange a(TlsNamedGroup::X25519);
-                (void) a.shared_secret(ramp(32, 0)); // before generate
+                auto a = make_kx(TlsNamedGroup::X25519);
+                (void) a->decap(ramp(32, 0)); // before generate
             },
             "FIBER_ASSERT failed");
 
     EXPECT_DEATH(
             {
-                TlsKeyExchange a(TlsNamedGroup::X25519);
-                (void) a.generate();
-                a.wipe();
-                (void) a.public_value(); // after wipe
+                auto a = make_kx(TlsNamedGroup::X25519);
+                (void) a->generate();
+                (void) a->encap(ramp(32, 0)); // after generate
             },
             "FIBER_ASSERT failed");
 }

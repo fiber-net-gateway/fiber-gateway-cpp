@@ -9,6 +9,18 @@
 
 namespace fiber::tls {
 
+common::IoResult<std::unique_ptr<TlsKeyExchange>> tls_client_kx_offer(TlsNamedGroup group) noexcept {
+    auto kx = TlsKeyExchange::create(group);
+    if (!kx.has_value()) {
+        return kx;
+    }
+    auto generated = (*kx)->generate();
+    if (!generated.has_value()) {
+        return std::unexpected(generated.error());
+    }
+    return kx;
+}
+
 bool tls_client_hello_build(TlsClientHelloState &hello, const TlsClientConfig &cfg, const TlsSessionOffer *session,
                             bool psk_offered, bool early_data_ext, bool second, std::uint16_t share_group,
                             std::span<const std::uint8_t> cookie) noexcept {
@@ -20,12 +32,12 @@ bool tls_client_hello_build(TlsClientHelloState &hello, const TlsClientConfig &c
         }
     }
 
-    hello.kx.reset();
-    hello.kx.emplace(static_cast<TlsNamedGroup>(share_group));
-    hello.kx_group = static_cast<TlsNamedGroup>(share_group);
-    if (!hello.kx->generate().has_value()) {
+    auto kx = tls_client_kx_offer(static_cast<TlsNamedGroup>(share_group));
+    if (!kx.has_value()) {
         return false;
     }
+    hello.kx = std::move(*kx);
+    hello.kx_group = static_cast<TlsNamedGroup>(share_group);
 
     TlsClientHelloInput in{};
     in.random = hello.client_random;

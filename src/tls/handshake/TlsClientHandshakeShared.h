@@ -11,12 +11,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <optional>
+#include <memory>
 #include <span>
 
 #include <fiber/tls/TlsConfig.h>
+#include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/crypto/TlsKeyExchange.h>
-#include <fiber/tls/crypto/TlsKeySchedule.h>
 #include <fiber/tls/crypto/TlsSignature.h>
 #include <fiber/tls/record/TlsRecordCipher.h>
 
@@ -85,7 +85,7 @@ struct TlsClientHelloState {
     std::array<std::uint8_t, kCap> ch{};
     std::size_t len = 0;
     std::size_t binder_off = 0; // message-relative binder-block offset (0 = no PSK)
-    std::optional<TlsKeyExchange> kx; // the share in `ch` (rebuilt at HRR / 1.2 SKE)
+    std::unique_ptr<TlsKeyExchange> kx; // the share in `ch` (rebuilt at HRR / 1.2 SKE)
     TlsNamedGroup kx_group = TlsNamedGroup::X25519; // group of the share in `ch`
     std::array<std::uint8_t, 32> client_random{};
     std::array<std::uint8_t, 32> session_id{};
@@ -111,6 +111,11 @@ struct TlsClientHandshakeOutcome {
 };
 
 // ---- ClientHello construction (CH1 in the outer shell, CH2 under HRR) ----
+
+// create + generate composed: the CH1 first flight, the HRR rebuild, and the
+// 1.2 SKE group switch all arrive here. Failure is an internal error
+// (allocation) — the engine maps it to internal_error.
+[[nodiscard]] common::IoResult<std::unique_ptr<TlsKeyExchange>> tls_client_kx_offer(TlsNamedGroup group) noexcept;
 
 // Rebuilds `hello.kx` for `share_group` (fresh keypair every call — the CH1
 // generator and the HRR rebuild both arrive here), encodes the hello into

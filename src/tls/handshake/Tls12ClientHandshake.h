@@ -26,6 +26,7 @@
 
 #include <fiber/tls/TlsConnectedState.h>
 #include <fiber/tls/TlsTypes.h>
+#include <fiber/tls/crypto/Tls12KeySchedule.h>
 #include <fiber/tls/handshake/TlsHandshakeCodec.h>
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
 
