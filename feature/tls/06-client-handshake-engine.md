@@ -480,6 +480,20 @@ TlsConfig 首版最小字段集、1.2 NST 校验+转录+忽略。
 11. **1.2 NST 互驱不可达**（§8.2）：1.2 server 仅在 client offer RFC 5077
     session_ticket 时发 NST，本引擎不 offer（08 范围），故"NST 到达被忽略"由
     FSM 边界校验覆盖；测试加 NOTE 说明。
+12. **引擎内部分叉为版本子对象**（§4 FSM，2026-09-22 行为等价重构）：
+    `TlsClientHandshakeEngine.cpp`（原 1648 行单 FSM）拆为外层薄壳 +
+    `Tls13ClientHandshake` + `Tls12ClientHandshake`（`src/tls/handshake/`
+    内部类型，公共 API 与头不变）。边界：外层持 ctx/保留 CH/调度/0-RTT 窗口
+    与终态通道，做首飞构造（含 PSK binder）与记录级路由，在**首个握手消息
+    检测点**（parse 头 → supported_versions/HRR 形态）以 `std::variant`
+    原地 mount 子对象并移交**原始消息**——SH 校验规则全部归子对象。HRR
+    循环（CH2 重建经共享 `TlsClientHandshakeShared` 的构造函数）归 1.3 子；
+    early-data 写窗口归外层（`write_early_data` 无版本分派，1.3 子经引用
+    在 SH/HRR/EOED 点关窗，1.2 分叉点直接关闭）。子对象经 Mount 引用集
+    回报终态，无虚基类；子对象各自析构擦除己方密钥。一处行为收紧：HRR
+    后到达 1.2 形态 SH（server 违反 RFC 8446 §4.1.4 的 1.3 承诺）原实现
+    会中途切进 1.2 子流程，现按 illegal_parameter 终止。07 服务端引擎
+    预期同形（收 CH → 检测 → 分叉）。
 
 BoringSSL 互驱测试侧经验（§8 harness 约定）：
 
