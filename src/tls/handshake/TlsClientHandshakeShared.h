@@ -1,0 +1,137 @@
+#ifndef FIBER_TLS_HANDSHAKE_TLS_CLIENT_HANDSHAKE_SHARED_H
+#define FIBER_TLS_HANDSHAKE_TLS_CLIENT_HANDSHAKE_SHARED_H
+
+// Version-neutral pieces shared by the client handshake engine's outer shell
+// and its two version sub-flows (06 §4.1): the offer tables every ServerHello
+// validation checks against, the retained-ClientHello state the fork hands
+// over, the 0-RTT write window, the terminal outcome channel, and the
+// ClientHello construction helpers (CH1 in the outer shell, CH2 in the 1.3
+// sub-flow's HRR path). Internal to src/tls.
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+
+#include <fiber/tls/TlsConfig.h>
+#include <fiber/tls/crypto/TlsKeyExchange.h>
+#include <fiber/tls/crypto/TlsKeySchedule.h>
+#include <fiber/tls/crypto/TlsSignature.h>
+#include <fiber/tls/record/TlsRecordCipher.h>
+
+namespace fiber::tls {
+
+// ---- engine-fixed offer tables (06 §5.4: registry constants, not config) ----
+
+// 1.3 suites first (preference order), then the ECDHE+AEAD 1.2 set the
+// supported_versions fallback can negotiate (0xC030 = ECDHE-RSA-AES256-GCM
+// — the IANA value; 0x0030 was never a suite).
+inline constexpr std::array<std::uint16_t, 9> kOfferedSuites{
+        0x1301, 0x1302, 0x1303, 0xC02F, 0xC030, 0xCCA8, 0xC02B, 0xC02C, 0xCCA9,
+};
+
+// Share order: X25519 leads (the CH1 share); P-256 is the HRR alternative.
+inline constexpr std::array<std::uint16_t, 2> kOfferedGroups{0x001D, 0x0017};
+
+// The CH signature_algorithms offer = the 02b 1.2 preference (a superset:
+// rsa_pkcs1_* only negotiates in 1.2; the 1.3 verify path gates by version).
+inline constexpr auto kOfferedSigalgs = [] {
+    std::array<std::uint16_t, kTls12SignaturePreference.size()> out{};
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<std::uint16_t>(kTls12SignaturePreference[i]);
+    }
+    return out;
+}();
+
+// Shared client-flight bounds (both sub-flows stage their flight in the
+// outer-owned scratch).
+inline constexpr std::size_t kClientMaxCrSigalgs = 16;
+inline constexpr std::size_t kClientMaxSigLen = 1024; // RSA-4096 signature bound
+
+[[nodiscard]] constexpr std::size_t tls_client_suite_offer_index(std::uint16_t raw) noexcept {
+    for (std::size_t i = 0; i < kOfferedSuites.size(); ++i) {
+        if (kOfferedSuites[i] == raw) {
+            return i;
+        }
+    }
+    return kOfferedSuites.size();
+}
+
+[[nodiscard]] constexpr bool tls_client_group_offered(std::uint16_t raw) noexcept {
+    return raw == kOfferedGroups[0] || raw == kOfferedGroups[1];
+}
+
+// The SKE/CV scheme must be one the CH offered (kOfferedSigalgs is a superset
+// of every 1.2- and 1.3-negotiable scheme).
+[[nodiscard]] constexpr bool tls_client_sigalg_offered(std::uint16_t raw) noexcept {
+    for (const std::uint16_t scheme: kOfferedSigalgs) {
+        if (scheme == raw) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---- pre-fork state owned by the outer shell, borrowed by the sub-flows ----
+
+// The retained ClientHello and its keying material. Outer-owned from
+// construction (the first flight is version-neutral); the forked sub-flow
+// borrows it MUTABLY — the 1.3 HRR path rewrites CH2 in place, the 1.2 SKE
+// path rebuilds the exchange onto the server's curve.
+struct TlsClientHelloState {
+    static constexpr std::size_t kCap = 8192; // retained ClientHello bytes
+
+    std::array<std::uint8_t, kCap> ch{};
+    std::size_t len = 0;
+    std::size_t binder_off = 0; // message-relative binder-block offset (0 = no PSK)
+    std::optional<TlsKeyExchange> kx; // the share in `ch` (rebuilt at HRR / 1.2 SKE)
+    TlsNamedGroup kx_group = TlsNamedGroup::X25519; // group of the share in `ch`
+    std::array<std::uint8_t, 32> client_random{};
+    std::array<std::uint8_t, 32> session_id{};
+};
+
+// The 0-RTT write window. Opened before the version is known (the early
+// flight follows CH1), so the outer shell owns it — write_early_data() needs
+// no version dispatch. Only the 1.3 sub-flow closes it (SH read point, HRR,
+// EOED); a 1.2 fork closes it at the read point in the outer shell.
+struct TlsClientEarlyWindow {
+    TlsRecordCipher write; // early-traffic cipher (initialized when offered)
+    std::size_t written = 0; // cumulative early bytes vs session->max_early_data
+    bool offered_ext = false; // early_data extension is in the CH
+    bool closed = false; // write_early_data() is no longer valid
+};
+
+// Terminal handshake outcome — written by whichever sub-flow ran (or by the
+// outer shell before the fork), read by the public API.
+struct TlsClientHandshakeOutcome {
+    bool done = false;
+    bool failed = false;
+    TlsAlertDesc alert = TlsAlertDesc::InternalError;
+};
+
+// ---- ClientHello construction (CH1 in the outer shell, CH2 under HRR) ----
+
+// Rebuilds `hello.kx` for `share_group` (fresh keypair every call — the CH1
+// generator and the HRR rebuild both arrive here), encodes the hello into
+// `hello.ch`, and draws fresh random/session_id bytes only when !second
+// (RFC 8446 §4.1.4: CH2 keeps CH1's). `psk_offered` requires `session` and
+// pre-fills the binder placeholder the caller backfills.
+[[nodiscard]] bool tls_client_hello_build(TlsClientHelloState &hello, const TlsClientConfig &cfg,
+                                          const TlsSessionOffer *session, bool psk_offered, bool early_data_ext,
+                                          bool second, std::uint16_t share_group,
+                                          std::span<const std::uint8_t> cookie) noexcept;
+
+// Computes and backfills the PSK binder over the truncated retained CH
+// (writes into hello.ch). Requires `sched` freshly set_psk'd: binder_key is
+// once-per-schedule, so HRR rebuilds the schedule before calling this again.
+[[nodiscard]] bool tls_client_backfill_psk_binder(TlsKeySchedule13 &sched, TlsClientHelloState &hello) noexcept;
+
+// Derives the early-traffic cipher from Hash(CH) — the pre-fork 0-RTT write
+// instance (both CH1-attached early data and the window the fork inherits).
+[[nodiscard]] bool tls_client_init_early_write(TlsKeySchedule13 &sched, const TlsSessionOffer &session,
+                                               const TlsClientHelloState &hello, TlsRecordCipher &write) noexcept;
+
+} // namespace fiber::tls
+
+#endif // FIBER_TLS_HANDSHAKE_TLS_CLIENT_HANDSHAKE_SHARED_H
