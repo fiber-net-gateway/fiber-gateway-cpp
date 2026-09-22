@@ -1,7 +1,9 @@
 #include <fiber/tls/handshake/TlsHandshakeCodec.h>
 
 #include <array>
+#include <cstring>
 
+#include <fiber/tls/TlsVersion.h>
 #include <fiber/tls/handshake/TlsExtensionCodec.h>
 
 namespace fiber::tls {
@@ -391,6 +393,981 @@ common::IoResult<void> tls_decode_client_hello(const std::uint8_t *body, std::si
 
     out = hello;
     return {};
+}
+
+// ====================================================================
+// 06 codec补齐：server flight decode + client flight encode
+// ====================================================================
+
+namespace {
+
+// ---- encode side: bounds-checked big-endian writer over caller scratch ----
+
+class TlsWriteCursor {
+public:
+    explicit TlsWriteCursor(std::span<std::uint8_t> dst) noexcept :
+        begin_(dst.data()), pos_(dst.data()), end_(dst.data() + dst.size()) {}
+
+    [[nodiscard]] std::size_t offset() const noexcept { return static_cast<std::size_t>(pos_ - begin_); }
+    [[nodiscard]] std::size_t remaining() const noexcept { return static_cast<std::size_t>(end_ - pos_); }
+
+    [[nodiscard]] bool u8(std::uint8_t value) noexcept {
+        if (remaining() < 1) {
+            return false;
+        }
+        *pos_++ = value;
+        return true;
+    }
+
+    [[nodiscard]] bool be16(std::uint16_t value) noexcept {
+        if (remaining() < 2) {
+            return false;
+        }
+        *pos_++ = static_cast<std::uint8_t>(value >> 8U);
+        *pos_++ = static_cast<std::uint8_t>(value);
+        return true;
+    }
+
+    [[nodiscard]] bool be24(std::uint32_t value) noexcept {
+        if (remaining() < 3) {
+            return false;
+        }
+        *pos_++ = static_cast<std::uint8_t>(value >> 16U);
+        *pos_++ = static_cast<std::uint8_t>(value >> 8U);
+        *pos_++ = static_cast<std::uint8_t>(value);
+        return true;
+    }
+
+    [[nodiscard]] bool be32(std::uint32_t value) noexcept {
+        if (remaining() < 4) {
+            return false;
+        }
+        *pos_++ = static_cast<std::uint8_t>(value >> 24U);
+        *pos_++ = static_cast<std::uint8_t>(value >> 16U);
+        *pos_++ = static_cast<std::uint8_t>(value >> 8U);
+        *pos_++ = static_cast<std::uint8_t>(value);
+        return true;
+    }
+
+    [[nodiscard]] bool bytes(std::span<const std::uint8_t> src) noexcept {
+        if (remaining() < src.size()) {
+            return false;
+        }
+        if (!src.empty()) {
+            std::memcpy(pos_, src.data(), src.size());
+            pos_ += src.size();
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool zero(std::size_t len) noexcept {
+        if (remaining() < len) {
+            return false;
+        }
+        if (len > 0) {
+            std::memset(pos_, 0, len);
+            pos_ += len;
+        }
+        return true;
+    }
+
+    // Extension head: type + payload length.
+    [[nodiscard]] bool ext(TlsExtensionType type, std::size_t payload_len) noexcept {
+        return be16(static_cast<std::uint16_t>(type)) && be16(static_cast<std::uint16_t>(payload_len));
+    }
+
+private:
+    std::uint8_t *begin_ = nullptr;
+    std::uint8_t *pos_ = nullptr;
+    std::uint8_t *end_ = nullptr;
+};
+
+template<std::size_t kCap>
+[[nodiscard]] bool ext_seen(const std::array<std::uint16_t, kCap> &seen, std::size_t count,
+                            std::uint16_t type) noexcept {
+    for (std::size_t i = 0; i < count; ++i) {
+        if (seen[i] == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// SH/EE ALPN payload: ProtocolNameList with EXACTLY one non-empty name (the
+// server's selection; RFC 7301 §3.1 — servers must not send >1).
+[[nodiscard]] common::IoResult<std::string_view> parse_alpn_single(std::span<const std::uint8_t> data) noexcept {
+    TlsReadCursor cursor(data.data(), data.size());
+    const auto list_len = cursor.read_be16();
+    if (!list_len.has_value() || list_len.value() != data.size() - 2) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::string_view picked{};
+    std::size_t count = 0;
+    TlsAlpnCursor walk({data.data() + 2, list_len.value()});
+    while (true) {
+        std::string_view name;
+        const auto has = walk.next(name);
+        if (!has.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (!has.value()) {
+            break;
+        }
+        picked = name;
+        ++count;
+    }
+    if (count != 1 || picked.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return picked;
+}
+
+// SH/HRR key_share payload: ServerHello carries one bare KeyShareEntry —
+// group then length-prefixed key_exchange; HelloRetryRequest carries only
+// the 2-byte selected_group. The length-prefixed list wrapper is
+// ClientHello-only (RFC 8446 §4.2.8 server_share / selected_group).
+[[nodiscard]] common::IoResult<void> parse_server_key_share(std::span<const std::uint8_t> data,
+                                                            TlsServerHello &out) noexcept {
+    TlsReadCursor cursor(data.data(), data.size());
+    const auto group = cursor.read_be16();
+    if (!group.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    out.has_key_share = true;
+    out.key_share_group = group.value();
+    if (cursor.empty()) {
+        out.key_share = {}; // the HRR selected_group form has no key portion
+        return {};
+    }
+    const auto key_len = cursor.read_be16();
+    if (!key_len.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto key = cursor.read_slice(key_len.value());
+    if (!key.has_value() || !cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    out.key_share = key.value();
+    return {};
+}
+
+inline constexpr std::size_t kMaxServerHelloExtensions = 16;
+inline constexpr std::size_t kMaxEncryptedExtensionsEntries = 32;
+
+[[nodiscard]] common::IoResult<void> parse_server_hello_extensions(std::span<const std::uint8_t> block,
+                                                                   TlsServerHello &hello) noexcept {
+    std::array<std::uint16_t, kMaxServerHelloExtensions> seen{};
+    std::size_t seen_count = 0;
+
+    TlsExtensionCursor cursor(block);
+    TlsExtensionView view;
+    while (true) {
+        const auto has = cursor.next(view);
+        if (!has.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (!has.value()) {
+            break;
+        }
+        if (ext_seen(seen, seen_count, view.type) || seen_count == seen.size()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        seen[seen_count++] = view.type;
+
+        switch (static_cast<TlsExtensionType>(view.type)) {
+            case TlsExtensionType::SupportedVersions:
+                if (view.data.size() != 2) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                hello.has_supported_version = true;
+                hello.supported_version =
+                        static_cast<std::uint16_t>((static_cast<std::uint16_t>(view.data[0]) << 8U) | view.data[1]);
+                break;
+            case TlsExtensionType::KeyShare:
+                if (!parse_server_key_share(view.data, hello).has_value()) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                break;
+            case TlsExtensionType::Cookie: {
+                // RFC 8446 §4.2.2: opaque cookie<1..2^16-1> — 2-byte prefix, non-empty.
+                TlsReadCursor cookie(view.data.data(), view.data.size());
+                const auto len = cookie.read_be16();
+                if (!len.has_value() || len.value() < 1 || len.value() != view.data.size() - 2) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                hello.has_cookie = true;
+                hello.cookie = std::span<const std::uint8_t>{view.data.data() + 2, len.value()};
+                break;
+            }
+            case TlsExtensionType::PreSharedKey:
+                if (view.data.size() != 2) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                hello.has_selected_identity = true;
+                hello.selected_identity =
+                        static_cast<std::uint16_t>((static_cast<std::uint16_t>(view.data[0]) << 8U) | view.data[1]);
+                break;
+            case TlsExtensionType::Alpn: {
+                const auto picked = parse_alpn_single(view.data);
+                if (!picked.has_value()) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                hello.has_alpn = true;
+                hello.alpn = picked.value();
+                break;
+            }
+            case TlsExtensionType::ExtendedMasterSecret:
+                if (!view.data.empty()) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                hello.has_extended_master_secret = true;
+                break;
+            case TlsExtensionType::RenegotiationInfo:
+                hello.has_renegotiation_info = true;
+                hello.renegotiation_info = view.data;
+                break;
+            default:
+                // Unknown or not-extracted extension: structurally covered by
+                // the block walk. Whether it is legal HERE (SH-exclusive in EE,
+                // post-1.2 extension in a 1.3 SH) is the engine's check.
+                break;
+        }
+    }
+    return {};
+}
+
+// Certificate list walk shared by both Certificate forms: 3-byte-length
+// entries from a 3-byte-length list, exact consumption, chain-count cap.
+// `with_entry_extensions` covers the 1.3 per-entry extension vector.
+template<typename Certs>
+[[nodiscard]] common::IoResult<void> parse_certificate_list(std::span<const std::uint8_t> list,
+                                                            bool with_entry_extensions, Certs &out) noexcept {
+    TlsReadCursor cursor(list.data(), list.size());
+    while (!cursor.empty()) {
+        if (out.cert_count == Certs::kMaxEntries) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        const auto cert_len = cursor.read_be24();
+        if (!cert_len.has_value() || cert_len.value() < 1) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        const auto cert = cursor.read_slice(cert_len.value());
+        if (!cert.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (with_entry_extensions) {
+            const auto ext_len = cursor.read_be16();
+            if (!ext_len.has_value() || !cursor.skip(ext_len.value()).has_value()) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+        }
+        out.certs[out.cert_count++] = cert.value();
+    }
+    return {};
+}
+
+// The CH encoder's fixed offers (06: engine registry constants, not config).
+inline constexpr std::uint16_t kClientOfferedVersions[] = {0x0304, 0x0303};
+inline constexpr std::size_t kClientOfferedVersionCount =
+        sizeof(kClientOfferedVersions) / sizeof(kClientOfferedVersions[0]);
+
+} // namespace
+
+common::IoResult<void> tls_decode_server_hello(const std::uint8_t *body, std::size_t len,
+                                               TlsServerHello &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsServerHello hello{};
+
+    const auto legacy_version = cursor.read_be16();
+    if (!legacy_version.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    hello.legacy_version = legacy_version.value();
+
+    const auto random = cursor.read_slice(32);
+    if (!random.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    hello.random = random.value();
+
+    const auto session_id_len = cursor.read_u8();
+    if (!session_id_len.has_value() || session_id_len.value() > 32) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto session_id = cursor.read_slice(session_id_len.value());
+    if (!session_id.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    hello.session_id = session_id.value();
+
+    const auto suite = cursor.read_be16();
+    if (!suite.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    hello.cipher_suite = suite.value();
+
+    const auto compression = cursor.read_u8();
+    if (!compression.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    hello.compression_method = compression.value();
+
+    // Extensions optional (1.2 SH); a present block must consume the body.
+    if (!cursor.empty()) {
+        const auto block_len = cursor.read_be16();
+        if (!block_len.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        const auto block = cursor.read_slice(block_len.value());
+        if (!block.has_value() || !cursor.empty()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        hello.extensions_block = block.value();
+        if (!parse_server_hello_extensions(block.value(), hello).has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
+    out = hello;
+    return {};
+}
+
+common::IoResult<void> tls_decode_encrypted_extensions(const std::uint8_t *body, std::size_t len,
+                                                       TlsEncryptedExtensions &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsEncryptedExtensions ee{};
+
+    const auto block_len = cursor.read_be16();
+    if (!block_len.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto block = cursor.read_slice(block_len.value());
+    if (!block.has_value() || !cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    ee.extensions_block = block.value();
+
+    std::array<std::uint16_t, kMaxEncryptedExtensionsEntries> seen{};
+    std::size_t seen_count = 0;
+    TlsExtensionCursor walk(block.value());
+    TlsExtensionView view;
+    while (true) {
+        const auto has = walk.next(view);
+        if (!has.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (!has.value()) {
+            break;
+        }
+        if (ext_seen(seen, seen_count, view.type) || seen_count == seen.size()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        seen[seen_count++] = view.type;
+
+        switch (static_cast<TlsExtensionType>(view.type)) {
+            case TlsExtensionType::Alpn: {
+                const auto picked = parse_alpn_single(view.data);
+                if (!picked.has_value()) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                ee.has_alpn = true;
+                ee.alpn = picked.value();
+                break;
+            }
+            case TlsExtensionType::EarlyData:
+                if (!view.data.empty()) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                ee.has_early_data = true;
+                break;
+            default:
+                break;
+        }
+    }
+
+    out = ee;
+    return {};
+}
+
+common::IoResult<void> tls_decode_certificate_13(const std::uint8_t *body, std::size_t len,
+                                                 TlsCertificate13 &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsCertificate13 cert{};
+
+    const auto ctx_len = cursor.read_u8();
+    if (!ctx_len.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto ctx = cursor.read_slice(ctx_len.value());
+    if (!ctx.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    cert.certificate_request_context = {reinterpret_cast<const char *>(ctx.value().data()), ctx.value().size()};
+
+    const auto list_len = cursor.read_be24();
+    if (!list_len.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto list = cursor.read_slice(list_len.value());
+    if (!list.has_value() || !cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!parse_certificate_list(list.value(), true, cert).has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    out = cert;
+    return {};
+}
+
+common::IoResult<void> tls_decode_certificate_12(const std::uint8_t *body, std::size_t len,
+                                                 TlsCertificate12 &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsCertificate12 cert{};
+
+    const auto list_len = cursor.read_be24();
+    if (!list_len.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto list = cursor.read_slice(list_len.value());
+    if (!list.has_value() || !cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!parse_certificate_list(list.value(), false, cert).has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    out = cert;
+    return {};
+}
+
+common::IoResult<void> tls_decode_certificate_request_13(const std::uint8_t *body, std::size_t len,
+                                                         TlsCertificateRequest13 &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsCertificateRequest13 request{};
+
+    const auto ctx_len = cursor.read_u8();
+    if (!ctx_len.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto ctx = cursor.read_slice(ctx_len.value());
+    if (!ctx.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    request.certificate_request_context = {reinterpret_cast<const char *>(ctx.value().data()), ctx.value().size()};
+
+    const auto block_len = cursor.read_be16();
+    if (!block_len.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto block = cursor.read_slice(block_len.value());
+    if (!block.has_value() || !cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    request.extensions_block = block.value();
+
+    std::array<std::uint16_t, kMaxEncryptedExtensionsEntries> seen{};
+    std::size_t seen_count = 0;
+    TlsExtensionCursor walk(block.value());
+    TlsExtensionView view;
+    while (true) {
+        const auto has = walk.next(view);
+        if (!has.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (!has.value()) {
+            break;
+        }
+        if (ext_seen(seen, seen_count, view.type) || seen_count == seen.size()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        seen[seen_count++] = view.type;
+
+        if (static_cast<TlsExtensionType>(view.type) == TlsExtensionType::SignatureAlgorithms) {
+            const auto schemes = parse_u16_list(view.data);
+            if (!schemes.has_value()) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            request.has_signature_algorithms = true;
+            request.signature_algorithms = schemes.value();
+        }
+    }
+    if (!request.has_signature_algorithms) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    out = request;
+    return {};
+}
+
+common::IoResult<void> tls_decode_certificate_request_12(const std::uint8_t *body, std::size_t len,
+                                                         TlsCertificateRequest12 &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsCertificateRequest12 request{};
+
+    const auto types_len = cursor.read_u8();
+    if (!types_len.has_value() || types_len.value() < 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto types = cursor.read_slice(types_len.value());
+    if (!types.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    request.certificate_types = types.value();
+
+    // Positional optional vectors (RFC 5246 §7.4.4 order: types, [sigalgs],
+    // [authorities]) — the wire is not self-describing here; every
+    // implementation parses positionally. Real 1.2 servers always send sigalgs.
+    // Unlike the extension form, the 1.2 sigalgs VECTOR is a bare u16 list
+    // with no inner length prefix.
+    if (!cursor.empty()) {
+        const auto sig_len = cursor.read_be16();
+        if (!sig_len.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        const auto sig = cursor.read_slice(sig_len.value());
+        if (!sig.has_value() || sig_len.value() < 2 || (sig_len.value() & 1U) != 0) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        request.has_signature_algorithms = true;
+        request.signature_algorithms = sig.value();
+    }
+    if (!cursor.empty()) {
+        const auto auth_len = cursor.read_be16();
+        if (!auth_len.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        const auto auth = cursor.read_slice(auth_len.value());
+        if (!auth.has_value()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        request.certificate_authorities = auth.value();
+    }
+    if (!cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    out = request;
+    return {};
+}
+
+common::IoResult<void> tls_decode_certificate_verify(const std::uint8_t *body, std::size_t len,
+                                                     TlsCertificateVerify &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsCertificateVerify verify{};
+
+    const auto scheme = cursor.read_be16();
+    if (!scheme.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    verify.algorithm = scheme.value();
+
+    const auto sig_len = cursor.read_be16();
+    if (!sig_len.has_value() || sig_len.value() < 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto sig = cursor.read_slice(sig_len.value());
+    if (!sig.has_value() || !cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    verify.signature = sig.value();
+
+    out = verify;
+    return {};
+}
+
+common::IoResult<void> tls_decode_finished(const std::uint8_t *body, std::size_t len, TlsFinished &out) noexcept {
+    if (len < 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    out.verify_data = std::span<const std::uint8_t>{body, len};
+    return {};
+}
+
+common::IoResult<void> tls_decode_server_key_exchange(const std::uint8_t *body, std::size_t len,
+                                                      TlsServerKeyExchange &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsServerKeyExchange ske{};
+
+    const auto curve_type = cursor.read_u8();
+    if (!curve_type.has_value() || curve_type.value() != 3) { // named_curve only
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    ske.curve_type = curve_type.value();
+
+    const auto group = cursor.read_be16();
+    if (!group.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    ske.named_group = group.value();
+
+    const auto point_len = cursor.read_u8();
+    if (!point_len.has_value() || point_len.value() < 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto point = cursor.read_slice(point_len.value());
+    if (!point.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    ske.public_key = point.value();
+
+    const auto scheme = cursor.read_be16();
+    if (!scheme.has_value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    ske.algorithm = scheme.value();
+
+    const auto sig_len = cursor.read_be16();
+    if (!sig_len.has_value() || sig_len.value() < 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto sig = cursor.read_slice(sig_len.value());
+    if (!sig.has_value() || !cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    ske.signature = sig.value();
+
+    out = ske;
+    return {};
+}
+
+// ---- encode ----
+
+common::IoResult<std::size_t> tls_client_hello_size(const TlsClientHelloInput &in) noexcept {
+    // Contract checks (mirror the encoder's shape requirements).
+    if (in.random.size() != 32 || in.session_id.size() > 32) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.cipher_suites.empty() || in.supported_groups.empty() || in.signature_algorithms.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.early_data && !in.has_psk) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.has_psk && in.psk_binder_len != 32 && in.psk_binder_len != 48) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    // Prefix-bound checks: every lengthened field must fit its prefix.
+    if (2 + 2 * in.cipher_suites.size() > 0xFFFF || 2 + 2 * in.supported_groups.size() > 0xFFFF ||
+        2 + 2 * in.signature_algorithms.size() > 0xFFFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.sni_host.size() > 0xFFFF - 7 || in.session_ticket.size() > 0xFFFF - 4 || in.key_share.size() > 0xFFFF - 6 ||
+        (!in.cookie.empty() && in.cookie.size() > 0xFFFF - 2) || (in.has_psk && in.psk_identity.size() > 0xFFFF - 6)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::size_t size = kTlsHandshakeHeaderSize + 2 + 32 + 1 + in.session_id.size() + 2 + 2 * in.cipher_suites.size() +
+                       1 + 1 + 2; // header, fixed fields, compression [null], ext-block len
+    if (!in.sni_host.empty()) {
+        size += 4 + 2 + 1 + 2 + in.sni_host.size();
+    }
+    if (in.offer_extended_master_secret) {
+        size += 4;
+    }
+    if (in.offer_renegotiation_info) {
+        size += 4 + 1;
+    }
+    if (!in.session_ticket.empty()) {
+        size += 4 + in.session_ticket.size();
+    }
+    if (!in.alpn.empty()) {
+        std::size_t list = 0;
+        for (const std::string_view name: in.alpn) {
+            list += 1 + name.size();
+        }
+        if (2 + list > 0xFFFF) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        size += 4 + 2 + list;
+    }
+    if (!in.cookie.empty()) {
+        size += 4 + 2 + in.cookie.size();
+    }
+    size += 4 + 2 + 2 * in.supported_groups.size();
+    size += 4 + 2 + 2 * in.signature_algorithms.size();
+    size += 4 + 1 + 2 * kClientOfferedVersionCount;
+    // psk_key_exchange_modes rides every CH (engine-fixed constant): a peer
+    // that never sees it marks the connection unresumable — BoringSSL's
+    // server skips NewSessionTicket issuance entirely (!accept_psk_mode).
+    size += 4 + 2;
+    if (!in.key_share.empty()) {
+        size += 4 + 2 + 2 + 2 + in.key_share.size();
+    }
+    if (in.early_data) {
+        size += 4;
+    }
+    if (in.has_psk) {
+        size += 4 + (2 + 2 + in.psk_identity.size() + 4) + (2 + 1 + in.psk_binder_len);
+    }
+    if (size - kTlsHandshakeHeaderSize > kTlsMaxHandshakeMessageSize) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return size;
+}
+
+common::IoResult<TlsClientHelloEncoded> tls_encode_client_hello(const TlsClientHelloInput &in,
+                                                                std::span<std::uint8_t> scratch) noexcept {
+    const auto size = tls_client_hello_size(in);
+    if (!size.has_value()) {
+        return std::unexpected(size.error());
+    }
+    if (scratch.size() < size.value()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    TlsClientHelloEncoded encoded{};
+
+    // Handshake header + fixed ClientHello fields.
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::ClientHello)) ||
+        !w.be24(static_cast<std::uint32_t>(size.value() - kTlsHandshakeHeaderSize)) ||
+        !w.be16(static_cast<std::uint16_t>(TlsProtocolVersion::Tls12)) || !w.bytes(in.random) ||
+        !w.u8(static_cast<std::uint8_t>(in.session_id.size())) || !w.bytes(in.session_id)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!w.be16(static_cast<std::uint16_t>(2 * in.cipher_suites.size()))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    for (const std::uint16_t suite: in.cipher_suites) {
+        if (!w.be16(suite)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (!w.u8(1) || !w.u8(0)) { // compression: exactly null
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    // Extension block: everything after this 2-byte length; the exact-size
+    // precheck makes the prefix computable without backpatching.
+    const std::size_t ext_block_len = size.value() - w.offset() - 2;
+    if (!w.be16(static_cast<std::uint16_t>(ext_block_len))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    // Deterministic order (pre_shared_key LAST — RFC 8446 §4.2.11).
+    if (!in.sni_host.empty()) {
+        const std::size_t name_len = in.sni_host.size();
+        if (!w.ext(TlsExtensionType::ServerName, 2 + 1 + 2 + name_len) ||
+            !w.be16(static_cast<std::uint16_t>(1 + 2 + name_len)) || !w.u8(0) ||
+            !w.be16(static_cast<std::uint16_t>(name_len)) ||
+            !w.bytes({reinterpret_cast<const std::uint8_t *>(in.sni_host.data()), name_len})) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (in.offer_extended_master_secret && !w.ext(TlsExtensionType::ExtendedMasterSecret, 0)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.offer_renegotiation_info) {
+        if (!w.ext(TlsExtensionType::RenegotiationInfo, 1) || !w.u8(0)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (!in.session_ticket.empty()) {
+        if (!w.ext(TlsExtensionType::SessionTicket, in.session_ticket.size()) || !w.bytes(in.session_ticket)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (!in.alpn.empty()) {
+        std::size_t list_len = 0;
+        for (const std::string_view name: in.alpn) {
+            list_len += 1 + name.size();
+        }
+        if (!w.ext(TlsExtensionType::Alpn, 2 + list_len) || !w.be16(static_cast<std::uint16_t>(list_len))) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        for (const std::string_view name: in.alpn) {
+            if (!w.u8(static_cast<std::uint8_t>(name.size())) ||
+                !w.bytes({reinterpret_cast<const std::uint8_t *>(name.data()), name.size()})) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+        }
+    }
+    if (!in.cookie.empty()) {
+        if (!w.ext(TlsExtensionType::Cookie, 2 + in.cookie.size()) ||
+            !w.be16(static_cast<std::uint16_t>(in.cookie.size())) || !w.bytes(in.cookie)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (!w.ext(TlsExtensionType::SupportedGroups, 2 + 2 * in.supported_groups.size()) ||
+        !w.be16(static_cast<std::uint16_t>(2 * in.supported_groups.size()))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    for (const std::uint16_t group: in.supported_groups) {
+        if (!w.be16(group)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (!w.ext(TlsExtensionType::SignatureAlgorithms, 2 + 2 * in.signature_algorithms.size()) ||
+        !w.be16(static_cast<std::uint16_t>(2 * in.signature_algorithms.size()))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    for (const std::uint16_t scheme: in.signature_algorithms) {
+        if (!w.be16(scheme)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (!w.ext(TlsExtensionType::SupportedVersions, 1 + 2 * kClientOfferedVersionCount) ||
+        !w.u8(static_cast<std::uint8_t>(2 * kClientOfferedVersionCount))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    for (const std::uint16_t version: kClientOfferedVersions) {
+        if (!w.be16(version)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    // Always offered — see the sizing comment above.
+    if (!w.ext(TlsExtensionType::PskKeyExchangeModes, 2) || !w.u8(1) || !w.u8(kTlsPskModePskDheKe)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!in.key_share.empty()) {
+        if (!w.ext(TlsExtensionType::KeyShare, 2 + 2 + 2 + in.key_share.size()) ||
+            !w.be16(static_cast<std::uint16_t>(2 + 2 + in.key_share.size())) || !w.be16(in.key_share_group) ||
+            !w.be16(static_cast<std::uint16_t>(in.key_share.size())) || !w.bytes(in.key_share)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (in.early_data && !w.ext(TlsExtensionType::EarlyData, 0)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.has_psk) {
+        if (!w.ext(TlsExtensionType::PreSharedKey,
+                   (2 + 2 + in.psk_identity.size() + 4) + (2 + 1 + in.psk_binder_len)) ||
+            !w.be16(static_cast<std::uint16_t>(2 + in.psk_identity.size() + 4)) ||
+            !w.be16(static_cast<std::uint16_t>(in.psk_identity.size())) || !w.bytes(in.psk_identity) ||
+            !w.be32(in.psk_obfuscated_ticket_age)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        encoded.binder_block_offset = w.offset();
+        if (!w.be16(static_cast<std::uint16_t>(1 + in.psk_binder_len)) ||
+            !w.u8(static_cast<std::uint8_t>(in.psk_binder_len)) || !w.zero(in.psk_binder_len)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+
+    encoded.len = w.offset();
+    return encoded;
+}
+
+common::IoResult<std::size_t> tls_encode_handshake_message(TlsHandshakeType type, std::span<const std::uint8_t> body,
+                                                           std::span<std::uint8_t> scratch) noexcept {
+    if (body.size() > kTlsMaxHandshakeMessageSize || scratch.size() < kTlsHandshakeHeaderSize + body.size()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(type)) || !w.be24(static_cast<std::uint32_t>(body.size())) || !w.bytes(body)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_certificate_13(std::span<const std::uint8_t> request_context,
+                                                        std::span<const std::span<const std::uint8_t>> certs,
+                                                        std::span<std::uint8_t> scratch) noexcept {
+    if (certs.size() > TlsCertificate13::kMaxEntries || request_context.size() > 0xFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::size_t list_len = 0;
+    for (const auto cert: certs) {
+        if (cert.size() < 1) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        list_len += 3 + cert.size() + 2;
+    }
+    const std::size_t body_len = 1 + request_context.size() + 3 + list_len;
+    if (body_len > kTlsMaxHandshakeMessageSize || scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::Certificate)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.u8(static_cast<std::uint8_t>(request_context.size())) ||
+        !w.bytes(request_context) || !w.be24(static_cast<std::uint32_t>(list_len))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    for (const auto cert: certs) {
+        if (!w.be24(static_cast<std::uint32_t>(cert.size())) || !w.bytes(cert) || !w.be16(0)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_certificate_12(std::span<const std::span<const std::uint8_t>> certs,
+                                                        std::span<std::uint8_t> scratch) noexcept {
+    if (certs.size() > TlsCertificate12::kMaxEntries) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::size_t list_len = 0;
+    for (const auto cert: certs) {
+        if (cert.size() < 1) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        list_len += 3 + cert.size();
+    }
+    const std::size_t body_len = 3 + list_len;
+    if (body_len > kTlsMaxHandshakeMessageSize || scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::Certificate)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.be24(static_cast<std::uint32_t>(list_len))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    for (const auto cert: certs) {
+        if (!w.be24(static_cast<std::uint32_t>(cert.size())) || !w.bytes(cert)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_certificate_verify(std::uint16_t scheme,
+                                                            std::span<const std::uint8_t> signature,
+                                                            std::span<std::uint8_t> scratch) noexcept {
+    if (signature.size() < 1 || signature.size() > 0xFFFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const std::size_t body_len = 2 + 2 + signature.size();
+    if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::CertificateVerify)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.be16(scheme) ||
+        !w.be16(static_cast<std::uint16_t>(signature.size())) || !w.bytes(signature)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_finished(std::span<const std::uint8_t> verify_data,
+                                                  std::span<std::uint8_t> scratch) noexcept {
+    if (verify_data.size() < 1 || verify_data.size() > kTlsMaxHandshakeMessageSize ||
+        scratch.size() < kTlsHandshakeHeaderSize + verify_data.size()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::Finished)) ||
+        !w.be24(static_cast<std::uint32_t>(verify_data.size())) || !w.bytes(verify_data)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_client_key_exchange(std::span<const std::uint8_t> point,
+                                                             std::span<std::uint8_t> scratch) noexcept {
+    if (point.size() < 1 || point.size() > 255 || scratch.size() < kTlsHandshakeHeaderSize + 1 + point.size()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::ClientKeyExchange)) ||
+        !w.be24(static_cast<std::uint32_t>(1 + point.size())) || !w.u8(static_cast<std::uint8_t>(point.size())) ||
+        !w.bytes(point)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
 }
 
 } // namespace fiber::tls

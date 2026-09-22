@@ -84,6 +84,31 @@ TlsRecordCipher::~TlsRecordCipher() {
     }
 }
 
+// Move core: steal the raw bytes, then zero the source. A zeroed EVP_AEAD_CTX
+// is uninitialized (the struct's own invariant), and initialized_ = false
+// turns the source destructor into a no-op — no double cleanup is possible.
+void TlsRecordCipher::move_from(TlsRecordCipher &src) noexcept {
+    std::memcpy(static_cast<void *>(&aead_ctx_), &src.aead_ctx_, sizeof aead_ctx_);
+    suite_ = src.suite_;
+    kind_ = src.kind_;
+    iv_ = src.iv_;
+    seq_ = src.seq_;
+    initialized_ = src.initialized_;
+    std::memset(static_cast<void *>(&src.aead_ctx_), 0, sizeof src.aead_ctx_);
+    src.seq_ = 0;
+    src.initialized_ = false;
+}
+
+TlsRecordCipher::TlsRecordCipher(TlsRecordCipher &&other) noexcept { move_from(other); }
+
+TlsRecordCipher &TlsRecordCipher::operator=(TlsRecordCipher &&other) noexcept {
+    if (this != &other) {
+        this->~TlsRecordCipher();
+        move_from(other);
+    }
+    return *this;
+}
+
 common::IoResult<void> TlsRecordCipher::init(TlsCipherSuiteId suite, TlsRecordProtectionKind kind,
                                              std::span<const std::uint8_t> key,
                                              std::span<const std::uint8_t> iv) noexcept {

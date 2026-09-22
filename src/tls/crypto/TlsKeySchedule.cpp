@@ -60,6 +60,7 @@ constexpr std::string_view kLabelServerHs = "s hs traffic";
 constexpr std::string_view kLabelClientApp = "c ap traffic";
 constexpr std::string_view kLabelServerApp = "s ap traffic";
 constexpr std::string_view kLabelResumptionMaster = "res master";
+constexpr std::string_view kLabelResumptionPsk = "resumption";
 constexpr std::string_view kLabelTrafficUpdate = "traffic upd";
 constexpr std::string_view kLabelFinished = "finished";
 constexpr std::string_view kLabelKey = "key";
@@ -307,6 +308,16 @@ common::IoResult<TlsSecret> tls13_key_update(const TlsSecret &current) noexcept 
     return derive_secret(current, kLabelTrafficUpdate, {}, hash, current.len());
 }
 
+common::IoResult<TlsSecret> tls13_resumption_psk(const TlsSecret &resumption_master,
+                                                 std::span<const std::uint8_t> nonce) noexcept {
+    FIBER_ASSERT(resumption_master.len() == 32 || resumption_master.len() == 48);
+    FIBER_ASSERT(nonce.size() <= 255);
+    const TlsHashAlgorithm hash = resumption_master.len() == 32 ? TlsHashAlgorithm::Sha256 : TlsHashAlgorithm::Sha384;
+    // Expand-Label(secret, label, context): here the nonce IS the context —
+    // unlike "finished"/"key"/"iv" whose empty context is a literal empty span.
+    return derive_secret(resumption_master, kLabelResumptionPsk, nonce, hash, resumption_master.len());
+}
+
 common::IoResult<void> tls13_finished_mac(const TlsSecret &traffic_secret,
                                           std::span<const std::uint8_t> transcript_hash,
                                           std::span<std::uint8_t> out_mac) noexcept {
@@ -368,20 +379,23 @@ namespace {
 
 // P_hash: A(0) = seed', A(i) = HMAC(secret, A(i-1)),
 // T(i) = HMAC(secret, A(i) || seed'), output = T(1) || T(2) || ...
-// seed' = label || seed, assembled on the stack (label <= 13, seed <= 64).
+// seed' = label || seed, assembled on the stack (label <= 22, seed <= 64).
 constexpr std::string_view kPrfLabelMaster = "master secret";
+constexpr std::string_view kPrfLabelExtendedMaster = "extended master secret";
 constexpr std::string_view kPrfLabelKeyExpansion = "key expansion";
 constexpr std::string_view kPrfLabelClientFinished = "client finished";
 constexpr std::string_view kPrfLabelServerFinished = "server finished";
+
+constexpr std::size_t kPrfLabelSeedCap = 96; // longest use: 22 + 48 (EMS session_hash)
 
 [[nodiscard]] bool prf(TlsHashAlgorithm hash, std::span<const std::uint8_t> secret, std::string_view label,
                        std::span<const std::uint8_t> seed, std::span<std::uint8_t> out) noexcept {
     const std::size_t hash_len = tls_hash_len(hash);
     FIBER_ASSERT(!out.empty() && out.size() <= 128); // largest consumer: key_block = 72
-    FIBER_ASSERT(kPrfLabelClientFinished.size() >= label.size()); // longest label we use (15)
-    FIBER_ASSERT(seed.size() <= 64);
+    FIBER_ASSERT(label.size() <= kPrfLabelExtendedMaster.size()); // longest label we use (22)
+    FIBER_ASSERT(label.size() + seed.size() <= kPrfLabelSeedCap);
 
-    std::array<std::uint8_t, 80> label_seed{};
+    std::array<std::uint8_t, kPrfLabelSeedCap> label_seed{};
     std::size_t label_seed_len = 0;
     std::memcpy(label_seed.data(), label.data(), label.size());
     std::memcpy(label_seed.data() + label.size(), seed.data(), seed.size());
@@ -397,7 +411,7 @@ constexpr std::string_view kPrfLabelServerFinished = "server finished";
     }
     for (std::size_t done = 0; ok && done < out.size(); done += hash_len) {
         TlsHmac hmac;
-        std::array<std::uint8_t, TlsSecret::kMaxLen + 80> block{};
+        std::array<std::uint8_t, TlsSecret::kMaxLen + kPrfLabelSeedCap> block{};
         std::memcpy(block.data(), a.data(), hash_len);
         std::memcpy(block.data() + hash_len, label_seed.data(), label_seed_len);
         ok = hmac.init(hash, secret) && hmac.update({block.data(), hash_len + label_seed_len}) &&
@@ -405,7 +419,19 @@ constexpr std::string_view kPrfLabelServerFinished = "server finished";
         tls_secure_wipe(block.data(), block.size());
         const std::size_t take = std::min(hash_len, out.size() - done);
         std::memcpy(out.data() + done, t.data(), take);
-        std::memcpy(a.data(), t.data(), hash_len);
+        if (done + hash_len < out.size()) {
+            // A(i+1) = HMAC(secret, A(i)) — a chain SEPARATE from the T
+            // outputs (RFC 5246 §5). Conflating the two (A(i+1) = T(i))
+            // still yields a deterministic PRF but diverges from every real
+            // peer from the second block on — first caught by interop.
+            TlsHmac chain;
+            std::array<std::uint8_t, TlsSecret::kMaxLen> next_a{};
+            ok = chain.init(hash, secret) && chain.update({a.data(), hash_len}) &&
+                 chain.final({next_a.data(), hash_len});
+            tls_secure_wipe(a.data(), hash_len);
+            std::memcpy(a.data(), next_a.data(), hash_len);
+            tls_secure_wipe(next_a.data(), next_a.size());
+        }
     }
     tls_secure_wipe(a.data(), a.size());
     tls_secure_wipe(t.data(), t.size());
@@ -432,6 +458,22 @@ common::IoResult<TlsSecret> tls12_master_secret(TlsCipherSuiteId suite, std::spa
         return std::unexpected(common::IoErr::Unknown);
     }
     tls_secure_wipe(seed.data(), seed.size());
+    TlsSecret secret = TlsSecret::from_bytes(out);
+    tls_secure_wipe(out.data(), out.size());
+    return secret;
+}
+
+common::IoResult<TlsSecret> tls12_extended_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_t> z,
+                                                         std::span<const std::uint8_t> session_hash) noexcept {
+    const TlsSuiteInfo &info = suite_info_or_assert(suite, false);
+    FIBER_ASSERT(z.size() == 32);
+    FIBER_ASSERT(session_hash.size() == tls_hash_len(info.hash));
+
+    std::array<std::uint8_t, 48> out{};
+    if (!prf(info.hash, z, kPrfLabelExtendedMaster, session_hash, out)) {
+        tls_secure_wipe(out.data(), out.size());
+        return std::unexpected(common::IoErr::Unknown);
+    }
     TlsSecret secret = TlsSecret::from_bytes(out);
     tls_secure_wipe(out.data(), out.size());
     return secret;

@@ -21,6 +21,7 @@
 #include <span>
 
 #include <openssl/hmac.h>
+#include <openssl/sha.h>
 
 #include <fiber/tls/handshake/TlsCipherSuites.h>
 
@@ -62,6 +63,31 @@ public:
 
 private:
     HMAC_CTX ctx_;
+};
+
+// Incremental SHA-256/SHA-384 — the running-hash primitive behind the
+// handshake transcript. The OpenSSL SHA contexts are pointer-free PODs, so
+// this class is trivially copyable: forking a transcript = copying the state
+// (TLS 1.3 post-handshake CertificateVerify forks the transcript this way).
+// final() writes hash_len bytes; out must have that capacity.
+class TlsHash {
+public:
+    TlsHash() noexcept = default;
+    TlsHash(const TlsHash &) noexcept = default;
+    TlsHash &operator=(const TlsHash &) noexcept = default;
+    ~TlsHash() = default;
+
+    [[nodiscard]] bool init(TlsHashAlgorithm hash) noexcept;
+    [[nodiscard]] bool update(std::span<const std::uint8_t> data) noexcept;
+    [[nodiscard]] bool final(std::span<std::uint8_t> out) noexcept;
+
+private:
+    TlsHashAlgorithm hash_ = TlsHashAlgorithm::Sha256;
+    bool inited_ = false;
+    union {
+        SHA256_CTX sha256;
+        SHA512_CTX sha384;
+    } ctx_{};
 };
 
 // CSPRNG. Never silently degrades: a false return is a failed handshake.
