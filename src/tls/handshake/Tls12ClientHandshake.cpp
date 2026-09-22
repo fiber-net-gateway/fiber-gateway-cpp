@@ -6,8 +6,8 @@
 #include "../crypto/TlsCryptoPrimitives.h"
 
 #include <fiber/tls/TlsVersion.h>
+#include <fiber/tls/crypto/Tls12KeySchedule.h>
 #include <fiber/tls/crypto/TlsCertificate.h>
-#include <fiber/tls/crypto/TlsKeySchedule.h>
 #include <fiber/tls/crypto/TlsSignature.h>
 #include <fiber/tls/record/TlsRecord.h>
 
@@ -266,15 +266,15 @@ void Tls12ClientHandshake::handle_server_key_exchange_12(std::span<const std::ui
     // curve arrives here, in the SKE).
     const auto group = static_cast<TlsNamedGroup>(ske.named_group);
     if (group != hello_.kx_group) {
-        hello_.kx.reset();
-        hello_.kx.emplace(group);
-        if (!hello_.kx->generate().has_value()) {
+        auto kx = tls_client_kx_offer(group);
+        if (!kx.has_value()) {
             fail(TlsAlertDesc::InternalError);
             return;
         }
+        hello_.kx = std::move(*kx);
         hello_.kx_group = group;
     }
-    const TlsKxShared z = hello_.kx->shared_secret(ske.public_key);
+    const TlsKxShared z = hello_.kx->decap(ske.public_key);
     if (z.status == TlsKxStatus::BadPeerData) {
         fail(TlsAlertDesc::IllegalParameter);
         return;

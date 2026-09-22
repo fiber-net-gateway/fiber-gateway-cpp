@@ -1,14 +1,13 @@
-#ifndef FIBER_TLS_CRYPTO_TLS_KEY_SCHEDULE_H
-#define FIBER_TLS_CRYPTO_TLS_KEY_SCHEDULE_H
+#ifndef FIBER_TLS_CRYPTO_TLS13_KEY_SCHEDULE_H
+#define FIBER_TLS_CRYPTO_TLS13_KEY_SCHEDULE_H
 
-// TLS key schedule: the TLS 1.3 HKDF tree (RFC 8446 §7.1), the TLS 1.2 PRF
-// material (RFC 5246 §5/§6.3), and the cipher-ready traffic keys both
-// versions derive. Pure keying-material logic: transcript hashes are INPUTS
-// here — the handshake context owns the running hash and snapshots it at the
-// right moments (feature/tls/02 §3.2). No OpenSSL types appear (the adapter
+// TLS 1.3 key schedule: the RFC 8446 §7.1 HKDF tree and the cipher-ready
+// traffic keys it derives (structure mirrors BoringSSL's ssl/tls13_enc.cc).
+// Pure keying-material logic: transcript hashes are INPUTS here — the
+// handshake context owns the running hash and snapshots it at the right
+// moments (feature/tls/02 §3.2). No OpenSSL types appear (the adapter
 // src/tls/crypto/TlsCryptoPrimitives.h is the only OpenSSL touchpoint).
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -17,50 +16,9 @@
 #include "../../common/NonCopyable.h"
 #include "../../common/NonMovable.h"
 #include "../handshake/TlsCipherSuites.h"
+#include "TlsSecret.h"
 
 namespace fiber::tls {
-
-// A keying-material value from the schedule (traffic secrets, master secrets,
-// PSKs). Capacity 48 covers SHA-384, the largest digest in scope. Move-only:
-// moving wipes the source; there is deliberately NO wiping destructor —
-// TlsSecret stays trivially destructible and wiping happens at explicit
-// handoff points (cipher init consumed the material, engine drops it) and in
-// the schedule object's own destructor (02 §8.1).
-class TlsSecret {
-public:
-    static constexpr std::size_t kMaxLen = 48;
-
-    TlsSecret() noexcept = default;
-    TlsSecret(const TlsSecret &) = delete;
-    TlsSecret &operator=(const TlsSecret &) = delete;
-    TlsSecret(TlsSecret &&other) noexcept;
-    TlsSecret &operator=(TlsSecret &&other) noexcept;
-
-    [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept { return {buf_.data(), len_}; }
-    [[nodiscard]] std::uint8_t len() const noexcept { return len_; }
-    [[nodiscard]] bool empty() const noexcept { return len_ == 0; }
-
-    // Explicit zeroing (OPENSSL_cleanse); idempotent.
-    void wipe() noexcept;
-
-    // Adopts a copy of the given bytes; size > kMaxLen is a contract violation.
-    [[nodiscard]] static TlsSecret from_bytes(std::span<const std::uint8_t> src) noexcept;
-
-private:
-    friend class TlsKeySchedule13; // fills via from_bytes; no other writers
-    std::array<std::uint8_t, kMaxLen> buf_{};
-    std::uint8_t len_ = 0;
-};
-
-// Cipher-ready material derived from a traffic secret (1.3) or sliced from
-// the 1.2 key_block. Plain data: consumed by TlsRecordCipher::init, which
-// copies it into the EVP_AEAD_CTX; the caller wipes it at that handoff.
-struct TlsTrafficKeys {
-    std::array<std::uint8_t, 32> key{};
-    std::array<std::uint8_t, 12> iv{}; // 1.3: static iv (12B); 1.2: fixed iv (iv_len = 4)
-    std::uint8_t key_len = 0;
-    std::uint8_t iv_len = 0; // 12 (1.3) / 4 (1.2)
-};
 
 enum class TlsPskBinderKind : std::uint8_t { External, Resumption };
 
@@ -133,7 +91,7 @@ private:
     TlsSecret master_secret_;
 };
 
-// ---- TLS 1.3 free functions ----
+// ---- free functions ----
 
 // key = Expand-Label(secret, "key", "", key_len); iv = (…, "iv", "", 12).
 // Asserts a 1.3 suite.
@@ -160,46 +118,6 @@ private:
                                                           std::span<const std::uint8_t> truncated_ch_hash,
                                                           std::span<std::uint8_t> out_mac) noexcept;
 
-// ---- TLS 1.2 (RFC 5246): free functions — the handshake flow itself
-// guarantees ordering, no staged machine needed. ----
-
-// master_secret = PRF(z, "master secret", client_random || server_random)[48].
-// z is the 32-byte ECDHE shared secret; both randoms are 32 bytes. Asserts a
-// 1.2 suite.
-[[nodiscard]] common::IoResult<TlsSecret> tls12_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_t> z,
-                                                              std::span<const std::uint8_t> client_random,
-                                                              std::span<const std::uint8_t> server_random) noexcept;
-
-// Extended master secret (RFC 7627 §4): when the peer echoed the
-// extended_master_secret extension, master_secret =
-// PRF(z, "extended master secret", session_hash)[48] instead. session_hash is
-// the suite-hash snapshot of the handshake_messages buffer through
-// ServerKeyExchange inclusive (NOT the client flight); its length is the
-// suite hash length (32/48). Asserts a 1.2 suite.
-[[nodiscard]] common::IoResult<TlsSecret>
-tls12_extended_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_t> z,
-                             std::span<const std::uint8_t> session_hash) noexcept;
-
-// Per-direction write material sliced from
-// PRF(master, "key expansion", server_random || client_random)
-// (seed order deliberately REVERSED vs the master secret):
-// client_key || server_key || client_fixed_iv(4) || server_fixed_iv(4).
-struct Tls12WriteKeys {
-    TlsTrafficKeys client;
-    TlsTrafficKeys server;
-};
-
-[[nodiscard]] common::IoResult<Tls12WriteKeys> tls12_key_block(TlsCipherSuiteId suite, const TlsSecret &master,
-                                                               std::span<const std::uint8_t> client_random,
-                                                               std::span<const std::uint8_t> server_random) noexcept;
-
-// verify_data = PRF(master, "client finished"/"server finished",
-// handshake_hash)[12]. The handshake hash is the suite-hash snapshot of the
-// 1.2 handshake_messages buffer.
-[[nodiscard]] common::IoResult<std::array<std::uint8_t, 12>>
-tls12_verify_data(TlsCipherSuiteId suite, const TlsSecret &master, bool client,
-                  std::span<const std::uint8_t> handshake_hash) noexcept;
-
 } // namespace fiber::tls
 
-#endif // FIBER_TLS_CRYPTO_TLS_KEY_SCHEDULE_H
+#endif // FIBER_TLS_CRYPTO_TLS13_KEY_SCHEDULE_H

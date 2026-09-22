@@ -192,6 +192,11 @@ seq 为 u64 无回绕之虞。故 1.2 不进 ConnectedState 的 secret 字段（
 
 ## 5. 密钥交换（TlsKeyExchange）
 
+> **结构已由 02c 重构**（2026-09-22）：单类+组分支 → 抽象基类 + 每组子类 +
+> `create()` 工厂，API 换成 KEM 统一形态 `generate`/`encap`/`decap`
+>（原 `shared_secret` 即 `decap`）。派生语义与本节的 Z 语义约定不变——详见
+> `02c-key-share-key-schedule-restructure.md` §5。
+
 - **X25519（首选组）**：raw 32B 标量，`curve25519.h` 三函数直调——**私钥可直接放
   POD**，不 pimpl。
 - **P-256（次选组）**：BoringSSL 路线 = EVP_PKEY（生成/导出/derive），句柄必须
@@ -234,6 +239,11 @@ seq 为 u64 无回绕之虞。故 1.2 不进 ConnectedState 的 secret 字段（
   形态对齐 05 cipher 的 `{Status, ...}` 结构体先例（比塞进 IoErr 更能携带协议语义）。
 
 ## 7. API 草案（签名级，无实现）
+
+> **结构已由 02c 重构**（2026-09-22）：KeySchedule 草案按版本拆成
+> `Tls13KeySchedule.h` / `Tls12KeySchedule.h`（共享 `TlsSecret.h`），
+> KeyExchange 草案换成抽象基类 + 工厂 + KEM 形态。函数清单与语义不变，
+> 现行签名以 02c §3/§5 为准。
 
 ### 7.1 suite 注册表（`TlsCipherSuites.h` 增补）
 

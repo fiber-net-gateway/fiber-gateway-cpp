@@ -6,8 +6,8 @@
 #include "../crypto/TlsCryptoPrimitives.h"
 
 #include <fiber/tls/TlsVersion.h>
+#include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/crypto/TlsCertificate.h>
-#include <fiber/tls/crypto/TlsKeySchedule.h>
 #include <fiber/tls/crypto/TlsSignature.h>
 #include <fiber/tls/handshake/TlsExtensionCodec.h>
 #include <fiber/tls/record/TlsRecord.h>
@@ -110,7 +110,7 @@ void Tls13ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
     }
     early_.closed = true;
 
-    const TlsKxShared z = hello_.kx->shared_secret(sh.key_share);
+    const TlsKxShared z = hello_.kx->decap(sh.key_share);
     if (z.status == TlsKxStatus::BadPeerData) {
         fail(TlsAlertDesc::IllegalParameter);
         return;

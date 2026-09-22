@@ -17,7 +17,7 @@
 
 #include "TlsVersion.h"
 #include "crypto/TlsCertificate.h"
-#include "crypto/TlsKeySchedule.h"
+#include "crypto/TlsSecret.h"
 #include "handshake/TlsCipherSuites.h"
 #include "record/TlsRecordCipher.h"
 

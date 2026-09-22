@@ -56,8 +56,10 @@ include/fiber/tls/
 ├── TlsTrustAnchors.h          # 信任锚材料，net 旧栈 TrustStore 的无 SSL 版
 ├── TlsSessionState.h          # 对外会话类型：可恢复参数（1.3 ticket/PSK、1.2 session）
 ├── crypto/                    # —— 密码学层（纯算法编排；openssl 适配在 src 侧）——
-│   ├── TlsKeySchedule.h       # 1.3 key schedule（early/handshake/master/traffic/resumption）+ 1.2 PRF/master secret/key block
-│   ├── TlsKeyExchange.h       # X25519/P-256 keypair + shared secret
+│   ├── TlsSecret.h            # TlsSecret（≤64B 定容密钥）+ TlsTrafficKeys —— 两版本共享的小头（02c）
+│   ├── Tls13KeySchedule.h     # 1.3 key schedule（staged machine + traffic keys/finished/binder/key_update/resumption）
+│   ├── Tls12KeySchedule.h     # 1.2 PRF/master secret（plain/EMS）/key block/verify_data + Tls12WriteKeys
+│   ├── TlsKeyExchange.h       # (EC)DHE/KEM 抽象基类 + create() 工厂（Generate/Encap/Decap；子类在 src 侧，02c）
 │   ├── TlsSignature.h         # 签名/验签：rsa_pss_rsae_*、ecdsa_secp256r1、ed25519；1.2 rsa_pkcs1
 │   └── TlsCertificate.h       # X509 解析、链构建验证、hostname 验证
 ├── record/                    # —— 记录层 ——
