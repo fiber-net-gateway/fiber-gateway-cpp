@@ -983,4 +983,67 @@ TEST(TlsRecordCipherScatter, AuthFailAndMalformed) {
               TlsRecordCipher::Status::Malformed);
 }
 
+// ---------------------------------------------------------------- move
+
+// TlsConnectedState carries both traffic ciphers out of the handshake engine
+// by move: the sequence number must travel with the instance (record-
+// protection continuity), and the moved-from instance must be inert (fresh
+// state, safe destructor, re-initializable per the single-shot init contract).
+TEST(TlsRecordCipherMove, StealsSequenceAndNeutralizesSource) {
+    for (const SuiteVectors &v: tls13_suites()) {
+        TlsRecordCipher cipher;
+        init_cipher(cipher, v);
+        const auto first = ramp(32, 0x40);
+        std::vector<std::uint8_t> wire(cipher.seal_output_size(first.size()));
+        ASSERT_EQ(cipher.seal(TlsContentType::Handshake, first, wire).status, TlsRecordCipher::Status::Ok);
+        ASSERT_EQ(cipher.sequence(), 1u);
+
+        // Move-construct: state travels, source goes inert.
+        TlsRecordCipher moved(std::move(cipher));
+        EXPECT_TRUE(moved.initialized());
+        EXPECT_EQ(moved.sequence(), 1u);
+        EXPECT_EQ(moved.suite(), v.suite);
+        EXPECT_FALSE(cipher.initialized());
+        EXPECT_EQ(cipher.sequence(), 0u);
+
+        // The moved instance continues the epoch: its record at seq=1 must
+        // match the hand-built expected wire — proof the key bytes traveled.
+        const auto second = ramp(48, 0x80);
+        std::vector<std::uint8_t> wire2(moved.seal_output_size(second.size()));
+        ASSERT_EQ(moved.seal(TlsContentType::ApplicationData, second, wire2).status, TlsRecordCipher::Status::Ok);
+        EXPECT_EQ(wire2, expected_tls13_payload(v.suite, v.key, v.iv, 1, TlsContentType::ApplicationData, second));
+
+        // Move-assign over an initialized target: target cleans up, then takes
+        // the source's place.
+        TlsRecordCipher target;
+        init_cipher(target, tls13_suites()[1]);
+        ASSERT_EQ(target.sequence(), 0u);
+        target = std::move(moved);
+        EXPECT_TRUE(target.initialized());
+        EXPECT_EQ(target.sequence(), 2u);
+        EXPECT_FALSE(moved.initialized());
+
+        // The moved-from instances are re-initializable (single-shot init
+        // contract applies to the fresh state) and destroy safely at scope end.
+        init_cipher(cipher, v);
+        EXPECT_TRUE(cipher.initialized());
+    }
+}
+
+TEST(TlsRecordCipherMove, Tls12ExplicitNonceContinuesAcrossMove) {
+    const SuiteVectors &v = tls12_suites()[0];
+    TlsRecordCipher cipher;
+    init_cipher(cipher, v);
+    const auto plain = ramp(20, 0x33);
+    std::vector<std::uint8_t> wire(cipher.seal_output_size(plain.size()));
+    ASSERT_EQ(cipher.seal(TlsContentType::ApplicationData, plain, wire).status, TlsRecordCipher::Status::Ok);
+
+    TlsRecordCipher moved(std::move(cipher));
+    const auto plain2 = ramp(20, 0x44);
+    std::vector<std::uint8_t> wire2(moved.seal_output_size(plain2.size()));
+    ASSERT_EQ(moved.seal(TlsContentType::ApplicationData, plain2, wire2).status, TlsRecordCipher::Status::Ok);
+    // 1.2's explicit nonce IS the sequence number on the wire.
+    EXPECT_EQ(wire2, expected_tls12_payload(v.suite, v.key, v.iv, 1, TlsContentType::ApplicationData, plain2));
+}
+
 } // namespace

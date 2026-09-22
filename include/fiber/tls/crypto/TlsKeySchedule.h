@@ -143,6 +143,11 @@ private:
 // — empty context, verified against BoringSSL's tls13_rotate_traffic_key
 // (02 §3.5). The secret's length carries the suite hash.
 [[nodiscard]] common::IoResult<TlsSecret> tls13_key_update(const TlsSecret &current) noexcept;
+// Resumption PSK: Expand-Label(resumption_master, "resumption", nonce) — the
+// NST-to-PSK derivation the 08 session layer consumes. The master secret's
+// length carries the suite hash; the ticket nonce is the HKDF context.
+[[nodiscard]] common::IoResult<TlsSecret> tls13_resumption_psk(const TlsSecret &resumption_master,
+                                                               std::span<const std::uint8_t> nonce) noexcept;
 // Finished MAC: HMAC(Expand-Label(traffic_secret, "finished", "", hash_len),
 // transcript_hash). out must have hash_len capacity (= secret.len()).
 [[nodiscard]] common::IoResult<void> tls13_finished_mac(const TlsSecret &traffic_secret,
@@ -164,6 +169,16 @@ private:
 [[nodiscard]] common::IoResult<TlsSecret> tls12_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_t> z,
                                                               std::span<const std::uint8_t> client_random,
                                                               std::span<const std::uint8_t> server_random) noexcept;
+
+// Extended master secret (RFC 7627 §4): when the peer echoed the
+// extended_master_secret extension, master_secret =
+// PRF(z, "extended master secret", session_hash)[48] instead. session_hash is
+// the suite-hash snapshot of the handshake_messages buffer through
+// ServerKeyExchange inclusive (NOT the client flight); its length is the
+// suite hash length (32/48). Asserts a 1.2 suite.
+[[nodiscard]] common::IoResult<TlsSecret>
+tls12_extended_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_t> z,
+                             std::span<const std::uint8_t> session_hash) noexcept;
 
 // Per-direction write material sliced from
 // PRF(master, "key expansion", server_random || client_random)

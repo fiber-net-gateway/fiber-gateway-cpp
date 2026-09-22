@@ -3,6 +3,9 @@
 #include <cstring>
 #include <vector>
 
+#include <openssl/ec.h>
+#include <openssl/evp.h>
+
 #include <fiber/tls/crypto/TlsKeyExchange.h>
 
 using namespace fiber::tls;
@@ -92,6 +95,59 @@ TEST(TlsKeyExchange, P256AgreesBothWays) {
     EXPECT_EQ(TlsKxStatus::Ok, za.status);
     EXPECT_EQ(TlsKxStatus::Ok, zb.status);
     EXPECT_EQ(0, std::memcmp(za.z.data(), zb.z.data(), sizeof(za.z)));
+}
+
+TEST(TlsKeyExchange, P256InteropWithBoringSSLDerive) {
+    // A raw BoringSSL EVP key pair on the other side: our shared secret must
+    // equal plain EVP_PKEY_derive over our public key — self-agreement alone
+    // would hide any encoding-level divergence.
+    EVP_PKEY_CTX *gen = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+    ASSERT_NE(nullptr, gen);
+    ASSERT_EQ(1, EVP_PKEY_keygen_init(gen));
+    ASSERT_EQ(1, EVP_PKEY_CTX_set_ec_paramgen_curve_nid(gen, NID_X9_62_prime256v1));
+    EVP_PKEY *peer = nullptr;
+    ASSERT_EQ(1, EVP_PKEY_keygen(gen, &peer));
+    EVP_PKEY_CTX_free(gen);
+
+    const EC_KEY *peer_ec = EVP_PKEY_get0_EC_KEY(peer);
+    ASSERT_NE(nullptr, peer_ec);
+    std::vector<std::uint8_t> peer_pub(65);
+    ASSERT_EQ(65u, EC_POINT_point2oct(EC_KEY_get0_group(peer_ec), EC_KEY_get0_public_key(peer_ec),
+                                      POINT_CONVERSION_UNCOMPRESSED, peer_pub.data(), 65, nullptr));
+
+    TlsKeyExchange ours(TlsNamedGroup::Secp256r1);
+    ASSERT_TRUE(ours.generate().has_value());
+    const TlsKxShared z1 = ours.shared_secret(peer_pub);
+    ASSERT_EQ(TlsKxStatus::Ok, z1.status);
+
+    // BoringSSL derives with our public key.
+    const auto our_pub = ours.public_value().bytes();
+    ASSERT_EQ(65u, our_pub.size());
+    EVP_PKEY_CTX *derive = EVP_PKEY_CTX_new(peer, nullptr);
+    ASSERT_NE(nullptr, derive);
+    ASSERT_EQ(1, EVP_PKEY_derive_init(derive));
+    EC_KEY *our_ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_POINT *our_point = nullptr;
+    ASSERT_NE(nullptr, our_ec);
+    our_point = EC_POINT_new(EC_KEY_get0_group(our_ec));
+    ASSERT_NE(nullptr, our_point);
+    ASSERT_EQ(1, EC_POINT_oct2point(EC_KEY_get0_group(our_ec), our_point, our_pub.data(), 65, nullptr));
+    ASSERT_EQ(1, EC_KEY_set_public_key(our_ec, our_point));
+    EC_POINT_free(our_point);
+    EVP_PKEY *our_pkey = EVP_PKEY_new();
+    ASSERT_NE(nullptr, our_pkey);
+    ASSERT_EQ(1, EVP_PKEY_assign_EC_KEY(our_pkey, our_ec));
+    ASSERT_EQ(1, EVP_PKEY_derive_set_peer(derive, our_pkey));
+
+    std::uint8_t z2[32];
+    std::size_t z2_len = sizeof(z2);
+    ASSERT_EQ(1, EVP_PKEY_derive(derive, z2, &z2_len));
+    EVP_PKEY_CTX_free(derive);
+    EVP_PKEY_free(our_pkey);
+    EVP_PKEY_free(peer);
+
+    ASSERT_EQ(32u, z2_len);
+    EXPECT_EQ(0, std::memcmp(z1.z.data(), z2, 32));
 }
 
 TEST(TlsKeyExchange, P256RejectsBadPeerData) {

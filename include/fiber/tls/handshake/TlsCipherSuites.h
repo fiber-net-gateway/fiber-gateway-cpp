@@ -16,7 +16,7 @@ enum class TlsCipherSuiteId : std::uint16_t {
     EcdheEcdsaAes128GcmSha256 = 0xC02B,
     EcdheEcdsaAes256GcmSha384 = 0xC02C,
     EcdheRsaAes128GcmSha256 = 0xC02F,
-    EcdheRsaAes256GcmSha384 = 0x0030,
+    EcdheRsaAes256GcmSha384 = 0xC030,
     EcdheEcdsaChacha20Poly1305 = 0xCCA9,
     EcdheRsaChacha20Poly1305 = 0xCCA8,
 };

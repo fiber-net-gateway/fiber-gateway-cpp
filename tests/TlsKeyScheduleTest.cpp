@@ -136,7 +136,7 @@ std::vector<std::uint8_t> ref_p_hash(TlsHashAlgorithm hash, std::span<const std:
     while (out.size() < len) {
         const std::vector<std::uint8_t> t = ref_hmac(hash, secret, concat({a, seed_label_seed}));
         out.insert(out.end(), t.begin(), t.end());
-        a = t;
+        a = ref_hmac(hash, secret, a); // A-chain is independent of the T outputs
     }
     out.resize(len);
     return out;
@@ -451,6 +451,38 @@ TEST(Tls12Prf, MasterKeyBlockVerifyDataMatchReference) {
         auto vd_s = tls12_verify_data(c.suite, *master, false, hh);
         ASSERT_TRUE(vd_s.has_value());
         expect_eq_bytes(*vd_s, ref_p_hash(c.hash, master->bytes(), label_seed("server finished", hh), 12));
+    }
+}
+
+// RFC 7627: extended_master_secret replaces the randoms seed with the
+// handshake-hash snapshot and the label — both must show up in the output.
+TEST(Tls12Prf, ExtendedMasterSecretMatchesReference) {
+    const struct {
+        TlsCipherSuiteId suite;
+        TlsHashAlgorithm hash;
+    } cases[] = {
+            {TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsHashAlgorithm::Sha256},
+            {TlsCipherSuiteId::EcdheRsaAes256GcmSha384, TlsHashAlgorithm::Sha384},
+    };
+    for (const auto &c: cases) {
+        const auto z = ramp(32, 0xA0);
+        const auto session_hash = ramp(ref_md_len(c.hash), 0xB0);
+        const auto cr = ramp(32, 0x70);
+        const auto sr = ramp(32, 0x80);
+
+        auto ems = tls12_extended_master_secret(c.suite, z, session_hash);
+        ASSERT_TRUE(ems.has_value());
+        EXPECT_EQ(48u, ems->len());
+        expect_eq_bytes(ems->bytes(), ref_p_hash(c.hash, z, label_seed("extended master secret", session_hash), 48));
+
+        // A distinct construction from the classic master secret (label and
+        // seed both differ), and the session_hash actually feeds it.
+        auto classic = tls12_master_secret(c.suite, z, cr, sr);
+        ASSERT_TRUE(classic.has_value());
+        EXPECT_NE(0, std::memcmp(ems->bytes().data(), classic->bytes().data(), 48));
+        auto other_hash = tls12_extended_master_secret(c.suite, z, ramp(ref_md_len(c.hash), 0xB1));
+        ASSERT_TRUE(other_hash.has_value());
+        EXPECT_NE(0, std::memcmp(ems->bytes().data(), other_hash->bytes().data(), 48));
     }
 }
 

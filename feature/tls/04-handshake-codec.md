@@ -2,7 +2,7 @@
 
 日期：2026-09-20
 分支：`tls`
-状态：**ClientHello 解码已完成**（ServerHello 及其余消息编解码待做）
+状态：**ClientHello 解码已完成**（ServerHello 及其余消息编解码已随 06 交付，见 06 §5.5）
 
 ## 1. 交付物
 

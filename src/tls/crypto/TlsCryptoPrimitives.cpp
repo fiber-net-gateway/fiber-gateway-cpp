@@ -98,6 +98,51 @@ bool TlsHmac::final(std::span<std::uint8_t> out) noexcept {
     return true;
 }
 
+bool TlsHash::init(TlsHashAlgorithm hash) noexcept {
+    inited_ = false;
+    if (hash == TlsHashAlgorithm::Sha256) {
+        if (SHA256_Init(&ctx_.sha256) != 1) {
+            drain_errors();
+            return false;
+        }
+    } else {
+        // SHA-384 shares SHA512_CTX (different IV / truncated output).
+        if (SHA384_Init(&ctx_.sha384) != 1) {
+            drain_errors();
+            return false;
+        }
+    }
+    hash_ = hash;
+    inited_ = true;
+    return true;
+}
+
+bool TlsHash::update(std::span<const std::uint8_t> data) noexcept {
+    FIBER_ASSERT(inited_);
+    if (data.empty()) {
+        return true;
+    }
+    const int ok = hash_ == TlsHashAlgorithm::Sha256 ? SHA256_Update(&ctx_.sha256, data.data(), data.size())
+                                                     : SHA384_Update(&ctx_.sha384, data.data(), data.size());
+    if (ok != 1) {
+        drain_errors();
+        return false;
+    }
+    return true;
+}
+
+bool TlsHash::final(std::span<std::uint8_t> out) noexcept {
+    FIBER_ASSERT(inited_);
+    FIBER_ASSERT(out.size() >= tls_hash_len(hash_));
+    const int ok = hash_ == TlsHashAlgorithm::Sha256 ? SHA256_Final(out.data(), &ctx_.sha256)
+                                                     : SHA384_Final(out.data(), &ctx_.sha384);
+    if (ok != 1) {
+        drain_errors();
+        return false;
+    }
+    return true;
+}
+
 bool tls_random_bytes(std::span<std::uint8_t> out) noexcept {
     if (RAND_bytes(out.data(), out.size()) != 1) {
         drain_errors();

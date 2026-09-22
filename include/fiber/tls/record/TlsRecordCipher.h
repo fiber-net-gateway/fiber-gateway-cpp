@@ -10,7 +10,6 @@
 
 #include "../../common/IoError.h"
 #include "../../common/NonCopyable.h"
-#include "../../common/NonMovable.h"
 #include "../handshake/TlsCipherSuites.h"
 #include "TlsRecord.h"
 
@@ -53,9 +52,17 @@ enum class TlsRecordProtectionKind : std::uint8_t { Tls13, Tls12 };
 // (1.3 by spec; 1.2 post-CCS conventional — the engine resets the writer's
 // legacy version), so both constructions hardcode 0x0303 in the AAD/outer
 // version; open takes the received header fields verbatim for AAD instead.
-class TlsRecordCipher : public common::NonCopyable, public common::NonMovable {
+// Movable (not copyable): the handshake engines hand their live traffic
+// ciphers to TlsConnectedState by move — a byte-steal plus a zeroing of the
+// source, valid because a zeroed EVP_AEAD_CTX is uninitialized and the moved-
+// from instance flags itself uninitialized (destructor becomes a no-op). The
+// sequence number travels with the instance, so record-protection continuity
+// across the handshake→connection phase boundary is structural.
+class TlsRecordCipher : public common::NonCopyable {
 public:
     TlsRecordCipher() noexcept = default;
+    TlsRecordCipher(TlsRecordCipher &&other) noexcept;
+    TlsRecordCipher &operator=(TlsRecordCipher &&other) noexcept;
     ~TlsRecordCipher();
 
     enum class Status : std::uint8_t {
@@ -156,6 +163,8 @@ public:
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 
 private:
+    void move_from(TlsRecordCipher &src) noexcept;
+
     EVP_AEAD_CTX aead_ctx_{}; // zeroed == uninitialized; cleanup-safe
     TlsCipherSuiteId suite_ = TlsCipherSuiteId::TlsAes128GcmSha256;
     TlsRecordProtectionKind kind_ = TlsRecordProtectionKind::Tls13;
