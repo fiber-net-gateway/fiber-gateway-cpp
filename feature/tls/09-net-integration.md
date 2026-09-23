@@ -210,3 +210,43 @@ secret 取向(cipher 本身已按端点取向——engine 的 move 语义保证 
        双侧 IllegalParameter(47)。修法=server 仅 CH 不含 1.3 时写(§4.1.3 原
        文条件);client 仅 `max_version >= 1.3` 时检查(1.3-capable client 才有
        资格认定"被降级";pinned-1.2 client 的 CH 不含 1.3 是真实意愿非被剥)。
+
+- **2026-09-23 slice 3**:TPK 装配 + http 透出 + 跨重启恢复 e2e + benchmark,2416
+  全量绿(2412 + 4 新);08 §10 装配遗留清零(归属定谳 = 每 endpoint 一个共享
+  service,理由见 08 §10)。
+  - **装配链(§6)**:`HttpServerTlsOptions::ticket_keys`(`{id, key_hex, created_ms}`
+    owning;空 = tickets off)→ `TcpEndpointBase::build_ticket_service()`(on_start
+    在 bind 之前校验:hex 恰 32 字符、hex 合法、id 唯一、≤kMaxKeys=8;失败 →
+    server 启动 Invalid,唯一失败点)→ 每 endpoint 一个共享 `TlsTicketService`
+    (免锁:mint 选 key = 时钟纯函数、lookup 暂存格 thread_local,跨 worker 共享
+    安全)→ H1/H2 endpoint 的 `make_tls_param()` 盖章 `param.ticket_service`
+    (定谳④唯一 net API 增量)→ `TlsStreamFd` Handshake staging 持 minter/lookup
+    适配器 → 引擎 ctor(null = 无 NST 无恢复,引擎原生)。H3 endpoint 不消费该
+    字段(QUIC 不在 09 范围);window policy 保持库默认 24h/7d(YAGNI)。
+  - `TlsTicketService::minter()/lookup()` 加 const(hook ABI 是 void\* ctx,const
+    仅在 thunk 内补回)——glue 持 param 的 const 指针。
+  - **测试 4 条**:net 级 BoringSSL socket 哨兵(blocking socketpair + 双
+    `BIO_new_socket(BIO_NOCLOSE)` + 5s `SO_RCVTIMEO` 界定挂起;1.3 NST 尾随
+    flight,需 poll+read slurp;1.2 ticket 在 flight 内被握手消化):
+    `UnconfiguredTicketServiceMintsNoSessionTicket`(无配置 → 客户端 stash 空,
+    定谳①)、`BoringsslClientResumesAcrossTicketServiceRebuild`(双版本:service_a
+    握手取票 → 同物料 service_b 重建 + `SSL_set_session` → reused)。http 级全栈
+    e2e(物料 → 校验 → service → param → glue → 引擎):
+    `RejectsBadTicketKeyMaterialBeforeListening`(31 字符 hex / 'z' / dup id /
+    9 把 → start Invalid;正例 good 集起停)、`ServesResumableTicketsAcrossServerRestart`
+    (server A 取票 + GET 200 → stop_and_join → server B 同物料重启 → resumer
+    reused + GET 200)。**坑**:`std::array<kMaxKeys>` staging 整体转 span 会把零填
+    尾部当 duplicate id-0 key → service invalid → 启动 Invalid(http 级首跑抓住);
+    修为 `span(material.data(), ticket_keys.size())` 只传前 N 条。
+  - **删 BIO(§7 项)确认**:slice 2 已退役 net 层 fd-BIO(`TlsStreamFd` 直走
+    StreamFd send,天然 MSG_NOSIGNAL);生产代码 grep 证实 BIO 仅存 crypto 原语层
+    (TlsSignature/TlsCertificate,允许面)。测试里的 `BIO_new_socket` 是 BoringSSL
+    哨兵客户端自身,非生产路径。
+  - **benchmark(#5 同机同法;lite 端口 18080→18081 避无关进程冲突)**:对照
+    openresty/nginx H2 四场景与 #5 偏差 ≤1% = 环境等价;lite H1(明文回归面)
+    +4~12%(环境略快,代码路径未动,无回归)。**lite H2(TLS 换芯信号)**:
+    GET 1K 158.8k(-11%)、GET 64K 10.2k(-54%)、GET 1M 704(-60%)、POST 343
+    (-60%);全部 0 错误 / 0 非 2xx。bulk 三场景绝对值与 #3(≈ a58cf18 之前)
+    几乎一致而对照零变化 → 回退主因假设 = 05 适配层 seal_scatter 跨 IoBufChain
+    节点退化转录,吃掉了 a58cf18 的跨节点零拷贝增益。§3 原计划"连接侧 v1 简路径,
+    benchmark 后再优化"如约到期:**恢复跨节点零拷贝 seal 是换芯后的首个优化项**。

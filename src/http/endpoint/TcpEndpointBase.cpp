@@ -8,6 +8,7 @@
 
 #include <fiber/async/Spawn.h>
 #include <fiber/common/Assert.h>
+#include <fiber/tls/TlsTicketService.h>
 
 namespace fiber::http {
 
@@ -25,6 +26,19 @@ common::IoResult<net::SocketAddress> resolve_local_addr(int fd) noexcept {
         return std::unexpected(common::IoErr::NotSupported);
     }
     return local;
+}
+
+int hex_digit(char c) noexcept {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
 }
 
 } // namespace
@@ -48,6 +62,54 @@ TcpEndpointBase::~TcpEndpointBase() {
     FIBER_ASSERT(std::all_of(workers_.begin(), workers_.end(), [](auto *worker) { return worker == nullptr; }));
 }
 
+common::IoResult<void> TcpEndpointBase::build_ticket_service() noexcept {
+    if (tls_.ticket_keys.empty()) {
+        return {};
+    }
+    if (tls_.ticket_keys.size() > tls::TlsTicketService::kMaxKeys) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::array<tls::TlsTicketKeyMaterial, tls::TlsTicketService::kMaxKeys> material{};
+    for (std::size_t i = 0; i < tls_.ticket_keys.size(); ++i) {
+        const HttpServerTlsTicketKey &configured = tls_.ticket_keys[i];
+        const std::string_view hex = configured.key_hex;
+        if (hex.size() != material[i].bytes.size() * 2) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        for (std::size_t j = 0; j < material[i].bytes.size(); ++j) {
+            const int high = hex_digit(hex[2 * j]);
+            const int low = hex_digit(hex[2 * j + 1]);
+            if (high < 0 || low < 0) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            material[i].bytes[j] = static_cast<std::uint8_t>((high << 4) | low);
+        }
+        for (std::size_t j = 0; j < i; ++j) {
+            if (material[j].id == configured.id) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+        }
+        material[i].id = configured.id;
+        material[i].created_ms = configured.created_ms;
+    }
+    // Window policy keeps the library defaults (24 h mint / 7 d retention):
+    // no deployment has asked to tune it, and the ticket timeout the mint
+    // side advertises (2 h) sits comfortably inside. Only the configured
+    // prefix of the staging array rides into the service — the zero-filled
+    // tail would arrive as duplicate id-0 keys.
+    const tls::TlsTicketKeyPolicy policy{};
+    auto service = std::unique_ptr<tls::TlsTicketService>(new (std::nothrow) tls::TlsTicketService(
+            std::span<const tls::TlsTicketKeyMaterial>(material.data(), tls_.ticket_keys.size()), policy));
+    if (service == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (!service->valid()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    ticket_service_ = std::move(service);
+    return {};
+}
+
 common::IoResult<void> TcpEndpointBase::on_start(Server &server) noexcept {
     FIBER_ASSERT(!listener_ || !listener_->valid());
     FIBER_ASSERT(std::all_of(workers_.begin(), workers_.end(), [](auto *worker) { return worker == nullptr; }));
@@ -55,6 +117,13 @@ common::IoResult<void> TcpEndpointBase::on_start(Server &server) noexcept {
     workers_.clear();
     next_worker_ = 0;
     server_ = &server;
+    ticket_service_.reset();
+
+    // Fail on bad ticket material before anything binds.
+    auto tickets = build_ticket_service();
+    if (!tickets) {
+        return std::unexpected(tickets.error());
+    }
 
     auto listener = std::unique_ptr<net::TcpListener>(new (std::nothrow) net::TcpListener(server.owner_loop()));
     if (!listener) {

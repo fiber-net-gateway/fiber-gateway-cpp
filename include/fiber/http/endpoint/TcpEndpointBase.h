@@ -17,6 +17,10 @@
 #include "../HttpTransport.h"
 #include "../Server.h"
 
+namespace fiber::tls {
+class TlsTicketService;
+}
+
 namespace fiber::http {
 
 class TcpEndpointBase;
@@ -90,10 +94,20 @@ protected:
     [[nodiscard]] Server &server() const noexcept { return *server_; }
     [[nodiscard]] const HttpServerTlsOptions &tls() const noexcept { return tls_; }
 
+    // The stateless-ticket service assembled from tls().ticket_keys at start
+    // (null when none were configured). Concrete make_tls_param() overrides
+    // stamp it into net::TlsServerParam::ticket_service; workers share the
+    // one instance (immutable, mint/open lock-free).
+    [[nodiscard]] tls::TlsTicketService *ticket_service() const noexcept { return ticket_service_.get(); }
+
 private:
     friend class TcpEndpointWorkerBase;
     static async::DetachedTask run_accepted(TcpEndpointBase *self, TcpEndpointWorkerBase *worker,
                                             net::AcceptResult accept) noexcept;
+
+    // Validates tls_.ticket_keys (hex width, unique ids, count bound) and
+    // builds the shared service. Anything wrong refuses the start.
+    [[nodiscard]] common::IoResult<void> build_ticket_service() noexcept;
 
     Server *server_ = nullptr;
     net::SocketAddress address_;
@@ -103,6 +117,7 @@ private:
 
     std::unique_ptr<net::TcpListener> listener_{};
     net::SocketAddress local_addr_{};
+    std::unique_ptr<tls::TlsTicketService> ticket_service_{};
     // Borrowed: the Server owns the workers and outlives the accept loop.
     std::vector<TcpEndpointWorkerBase *> workers_{};
     // Owner-loop only, so no atomic.

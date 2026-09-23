@@ -251,9 +251,15 @@ slice 3 新增(1.2 abbreviated):
 
 ## 10. 待拍板 / 遗留
 
-- 装配形态(09):每 loop 一个 service(免跨线程,物料同种子)vs 全局共享
+- ~~装配形态(09):每 loop 一个 service(免跨线程,物料同种子)vs 全局共享
   ——免锁重构后两者代码路径完全一致,纯归属选择;倾向每 loop(与 EventLoop
-  归属一致)。TPK 物料来源(配置文件/seed)与分发是 09 装配题。
+  归属一致)。TPK 物料来源(配置文件/seed)与分发是 09 装配题。~~ **已清零
+  (09 slice 3,2026-09-23)**:归属最终取**每 endpoint 一个共享 service**(更粗
+  于当初倾向的每 loop)——免锁重构后代码路径本就一致,endpoint 粒度让物料
+  校验有唯一失败点(server 启动 Invalid)且免掉分发;物料来源 =
+  `HttpServerTlsOptions::ticket_keys`(`{id, key_hex, created_ms}` 注入式,
+  hex 长度/唯一 id/≤8 校验在 `TcpEndpointBase::on_start`),详见 09 §6/§8。
+  HTTP/3 endpoint 不消费该字段(QUIC TLS 不在 09 换芯范围)。
 - 08 会话恢复至此收口:1.3 恢复 + 1.2 abbreviated 均为服务端 stateless,客户端
   票缓存与 session-id 缓存均定谳不做(§1)。
 

@@ -41,7 +41,10 @@ TcpEndpointWorkerBase *Http2Endpoint::make_worker(event::EventLoop &loop, std::s
 }
 
 net::TlsServerParam Http2Endpoint::make_tls_param() const noexcept {
-    return options_.allow_http1 ? make_http_server_tls_param(options_.tls) : make_http2_server_tls_param(options_.tls);
+    net::TlsServerParam param =
+            options_.allow_http1 ? make_http_server_tls_param(options_.tls) : make_http2_server_tls_param(options_.tls);
+    param.ticket_service = ticket_service();
+    return param;
 }
 
 Http2Endpoint::Protocol Http2Endpoint::select_protocol(std::string_view alpn) const noexcept {
