@@ -109,6 +109,29 @@ TlsServerAlpnResult tls_server_alpn_select(const TlsServerConfig &cfg, const Tls
     return TlsServerAlpnResult::Failed;
 }
 
+// Does the CH's ProtocolNameList still offer `proto`? A malformed list
+// counts as not offered (mirrors tls_server_alpn_select's walk). Used by the
+// resumption paths: a ticket's early_alpn binds only while the client keeps
+// offering it.
+bool tls_ch_offers_alpn(const TlsClientHello &ch, std::string_view proto) noexcept {
+    if (!ch.has_alpn || proto.empty()) {
+        return false;
+    }
+    const std::uint8_t *p = ch.alpn_list.data();
+    const std::uint8_t *const end = p + ch.alpn_list.size();
+    while (p < end) {
+        const std::uint16_t name_len = *p++;
+        if (static_cast<std::size_t>(name_len) > static_cast<std::size_t>(end - p)) {
+            return false;
+        }
+        if (name_len == proto.size() && std::string_view{reinterpret_cast<const char *>(p), name_len} == proto) {
+            return true;
+        }
+        p += name_len;
+    }
+    return false;
+}
+
 bool tls_server_cv_scheme_select(const TlsPrivateKey &key, const TlsClientHello &ch, TlsProtocolVersion version,
                                  TlsSignatureScheme &out) noexcept {
     if (!ch.has_signature_algorithms) {

@@ -13,8 +13,8 @@
 namespace fiber::tls {
 
 Tls12ServerHandshake::Tls12ServerHandshake(const Mount &mount) noexcept :
-    ctx_(mount.ctx), cfg_(mount.cfg), minter_(mount.minter), hello_(mount.hello), out_(mount.out),
-    scratch_(mount.scratch) {}
+    ctx_(mount.ctx), cfg_(mount.cfg), resumption_(mount.resumption), minter_(mount.minter), hello_(mount.hello),
+    out_(mount.out), scratch_(mount.scratch) {}
 
 Tls12ServerHandshake::~Tls12ServerHandshake() {
     // Explicit wipes at the handoff points the 02 contract names; the key
@@ -46,6 +46,14 @@ void Tls12ServerHandshake::start(const TlsClientHello &ch, std::span<const std::
     static constexpr std::array<std::uint8_t, 8> kDowngradeSentinel{0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01};
     std::memcpy(hello_.server_random.data() + 24, kDowngradeSentinel.data(), kDowngradeSentinel.size());
 
+    // The abbreviated shape first (08): a presented ticket the lookup
+    // accepts. Every miss falls through to the full handshake below — a
+    // rejected ticket is never a connection failure.
+    if (try_resume_12(ch)) {
+        send_abbreviated_flight_12(ch, body);
+        return;
+    }
+
     // Suite: server preference × client offer × the credential's key kind
     // (an RSA key drives ECDHE-RSA, a P-256/384 key ECDHE-ECDSA).
     if (!tls_server_suite_select_12(ch, *cfg_.key, suite_)) {
@@ -66,7 +74,10 @@ void Tls12ServerHandshake::start(const TlsClientHello &ch, std::span<const std::
     hello_.kx = std::move(*kx);
 
     ems_negotiated_ = ch.has_extended_master_secret;
-    ticket_wanted_ = minter_ != nullptr && ch.has_session_ticket;
+    // EMS rides the gate (08): tickets only ever mint for EMS sessions, so a
+    // non-EMS CH gets neither the SH echo nor an NST — no resumption offers
+    // across the RFC 7627 boundary can exist.
+    ticket_wanted_ = minter_ != nullptr && ch.has_session_ticket && ems_negotiated_;
 
     // ALPN: server preference walk; 1.2 carries the selection in the SH (the
     // 1.3 EE role), same outcome triple.
@@ -95,6 +106,156 @@ void Tls12ServerHandshake::start(const TlsClientHello &ch, std::span<const std::
 }
 
 // =====================================================================
+// Abbreviated acceptance (08): RFC 5077 ticket + RFC 5246 §7.3 resumed
+// shape. The lookup (stateless open: AAD name binding, tamper, expiry)
+// plus the local gates — each miss is a full-handshake fallback.
+// =====================================================================
+
+bool Tls12ServerHandshake::try_resume_12(const TlsClientHello &ch) noexcept {
+    // Structural preconditions: a presented ticket, a sid worth echoing (the
+    // client detects resumption by the echo — an empty sid cannot carry it),
+    // a lookup, and no mTLS (a resumed connection carries no client
+    // certificate; a client_trust config needs the real flight).
+    if (resumption_ == nullptr || resumption_->lookup == nullptr || cfg_.client_trust != nullptr ||
+        !ch.has_session_ticket || ch.session_ticket.empty() || ch.session_id.empty()) {
+        return false;
+    }
+    TlsResumedSession resumed{};
+    if (!resumption_->lookup(resumption_->ctx, ch.session_ticket, hello_.view.server_name, cfg_.now_unix_ms, resumed)) {
+        return false;
+    }
+    // The lookup is version-blind — only a 1.2-payload ticket resumes here.
+    if (resumed.version != TlsProtocolVersion::Tls12) {
+        return false;
+    }
+    // Suite: a 1.2 registry suite the CH still offers (the credential never
+    // signs on a resumed connection — the auth half of the name is moot).
+    const TlsSuiteInfo *info = tls_suite_info(resumed.suite);
+    if (info == nullptr || info->is_tls13 ||
+        !tls_server_list_contains(ch.cipher_suites, static_cast<std::uint16_t>(resumed.suite))) {
+        return false;
+    }
+    // EMS (RFC 7627 §5.3): tickets only exist for EMS sessions, and the
+    // resumption CH must still offer it — no cross-boundary resumption.
+    if (!ch.has_extended_master_secret) {
+        return false;
+    }
+    // ALPN binding: the ticket's protocol survives only while the client
+    // keeps offering it; a ticket without ALPN resumes without one.
+    if (!resumed.alpn.empty() && !tls_ch_offers_alpn(ch, resumed.alpn)) {
+        return false;
+    }
+
+    // Accept: copy the borrowed material immediately (the lookup's staging
+    // cell is single-shot) and reuse the master for this connection's keys.
+    master12_ = TlsSecret::from_bytes(resumed.psk); // the 48-byte master
+    if (master12_.empty()) {
+        return false; // empty secret = malformed payload; degrade, don't fail
+    }
+    auto keys = tls12_key_block(resumed.suite, master12_, ch.random, hello_.server_random);
+    if (!keys.has_value()) {
+        master12_.wipe();
+        return false;
+    }
+    suite_ = resumed.suite;
+    kb12_ = keys.value();
+    ems_negotiated_ = true; // the SH echoes what the minted session used
+    ticket_wanted_ = minter_ != nullptr; // presenting the ticket IS a 5077 offer
+    if (!resumed.alpn.empty()) {
+        FIBER_ASSERT(resumed.alpn.size() <= state_.alpn.size());
+        std::memcpy(state_.alpn.data(), resumed.alpn.data(), resumed.alpn.size());
+        state_.alpn_len = static_cast<std::uint16_t>(resumed.alpn.size());
+    }
+    resumed12_ = true;
+    return true;
+}
+
+// SH [NST] CCS Fin — the abbreviated server flight (RFC 5246 §7.3): the
+// ticket's suite and the reused master, the CH's sid echoed, a rotation NST
+// when a minter is wired, then the CCS + the server Finished FIRST (the
+// 1.3-style order — the client's Fin MACs ours in).
+void Tls12ServerHandshake::send_abbreviated_flight_12(const TlsClientHello &ch,
+                                                      std::span<const std::uint8_t> body) noexcept {
+    // The client's CCS + Finished arrive after our flight.
+    ctx_.set_inbound_mode(TlsInboundMode::Plaintext12);
+    if (!t12_.init(suite_info()->hash)) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
+    feed12(TlsHandshakeType::ClientHello, body);
+
+    // ---- ServerHello: the sid echo IS the resumption signal ----
+    TlsServerHelloInput sh{};
+    sh.random = hello_.server_random;
+    sh.session_id = ch.session_id;
+    sh.cipher_suite = static_cast<std::uint16_t>(suite_);
+    sh.tls13 = false;
+    sh.extended_master_secret = true; // the minted session's EMS, re-echoed
+    sh.renegotiation_info = true;
+    if (state_.alpn_len > 0) {
+        sh.alpn = std::string_view{reinterpret_cast<const char *>(state_.alpn.data()), state_.alpn_len};
+    }
+    sh.session_ticket = ticket_wanted_; // empty-payload echo; the NST follows
+    const auto sh_len = tls_encode_server_hello(sh, scratch_);
+    if (!sh_len.has_value() || !t12_.update({scratch_.data(), sh_len.value()}) ||
+        !emit_message({scratch_.data(), sh_len.value()})) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
+
+    // ---- NewSessionTicket (rotation, plaintext, before the CCS) ----
+    // The re-sealed master rides a fresh nonce; the server Fin MACs it in.
+    if (ticket_wanted_) {
+        TlsTicketRequest req{};
+        req.resumption_master = master12_.bytes(); // 1.2's resumption secret IS the master
+        req.ticket_nonce = 0;
+        req.suite = suite_;
+        req.alpn = state_.alpn_len > 0
+                           ? std::string_view{reinterpret_cast<const char *>(state_.alpn.data()), state_.alpn_len}
+                           : std::string_view{};
+        req.max_early_data = 0; // 0-RTT is a 1.3-only property
+        req.timeout_s = cfg_.session_timeout_s;
+        req.now_unix_ms = cfg_.now_unix_ms;
+        req.version = TlsProtocolVersion::Tls12;
+        req.name = hello_.view.server_name; // the CH's SNI over the retained copy — stable
+        const std::size_t ticket_len = minter_->mint(minter_->ctx, req, ticket_buf_);
+        if (ticket_len > 0 && ticket_len <= ticket_buf_.size()) {
+            const auto nst_len = tls_encode_new_session_ticket_12(cfg_.session_timeout_s,
+                                                                  {ticket_buf_.data(), ticket_len}, scratch_);
+            if (!nst_len.has_value() || !t12_.update({scratch_.data(), nst_len.value()}) ||
+                !emit_message({scratch_.data(), nst_len.value()})) {
+                fail(TlsAlertDesc::InternalError);
+                return;
+            }
+        }
+        // mint 0 = no rotation this connection; the SH echo already promised
+        // nothing the client cannot survive (it keeps the old ticket).
+    }
+
+    // ---- CCS + write-cipher swap ----
+    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), kb12_.server)) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
+
+    // ---- server Finished (sealed; MAC over CH‖SH‖NST — the client Fin,
+    // still to come, MACs this message in too) ----
+    snapshot12();
+    auto verify = tls12_verify_data(suite_, master12_, false, {hash_buf_.data(), hash_len()});
+    if (!verify.has_value()) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
+    const auto fin_len = tls_encode_finished({verify->data(), verify->size()}, scratch_);
+    if (!fin_len.has_value() || !t12_.update({scratch_.data(), fin_len.value()}) ||
+        !emit_message({scratch_.data(), fin_len.value()})) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
+    st_ = St::ExpectClientCcs12;
+}
+
+// =====================================================================
 // Server flight: SH Cert SKE [CertReq] SHD (RFC 5246 §7.3 order — the
 // CertificateRequest follows ServerKeyExchange, immediately before SHD)
 // =====================================================================
@@ -103,7 +264,12 @@ void Tls12ServerHandshake::send_server_flight_12(const TlsClientHello &ch) noexc
     // ---- ServerHello ----
     TlsServerHelloInput sh{};
     sh.random = hello_.server_random;
-    sh.session_id = ch.session_id;
+    // An EMPTY sid: echoing the CH's non-empty sid IS the resumption signal
+    // (RFC 5246 §7.4.1.3) — a client holding a session with that sid would
+    // expect the abbreviated flight and reject the Certificate that follows.
+    // This server is stateless (no id cache), so the full shape never
+    // resumes by id. The abbreviated shape is the one legal echo.
+    sh.session_id = std::span<const std::uint8_t>{};
     sh.cipher_suite = static_cast<std::uint16_t>(suite_);
     sh.tls13 = false;
     sh.extended_master_secret = ems_negotiated_;
@@ -410,8 +576,9 @@ void Tls12ServerHandshake::handle_client_finished_12(std::span<const std::uint8_
         fail(TlsAlertDesc::DecodeError); // 1.2 verify_data is always 12 bytes
         return;
     }
-    // verify_data MACs the message list through the client flight (the CCS is
-    // not a handshake message) — snapshotted before the client Fin is fed.
+    // verify_data MACs the message list through whatever preceded it (the
+    // CCS is not a handshake message) — snapshotted before the client Fin is
+    // fed. Full shape: CH..client flight; abbreviated: CH‖SH‖NST‖server Fin.
     snapshot12();
     const auto expected = tls12_verify_data(suite_, master12_, true, {hash_buf_.data(), hash_len()});
     if (!expected.has_value()) {
@@ -423,6 +590,11 @@ void Tls12ServerHandshake::handle_client_finished_12(std::span<const std::uint8_
         return;
     }
     feed12(TlsHandshakeType::Finished, body);
+    if (resumed12_) {
+        // The abbreviated flight already went out — the client Fin closes it.
+        finish_1_2();
+        return;
+    }
     if (!send_final_flight_12()) {
         return; // the flight raised its own alert
     }
@@ -493,7 +665,7 @@ void Tls12ServerHandshake::finish_1_2() noexcept {
     state_.read_cipher = std::move(ctx_.read_cipher());
     state_.write_cipher = std::move(ctx_.write_cipher());
     state_.tls12_master = std::move(master12_);
-    state_.session_resumed = false;
+    state_.session_resumed = resumed12_;
     state_.early_data_accepted = false;
     state_.peer_chain = std::move(peer_chain_);
     wipe_kb12(); // both ciphers hold the key_block material now

@@ -1,4 +1,4 @@
-# TLS 自研实现 · 08 会话恢复(slice 1:无状态 NST 下发;slice 2:lookup 恢复接线)
+# TLS 自研实现 · 08 会话恢复(slice 1:无状态 NST 下发;slice 2:lookup 恢复接线;slice 3:1.2 abbreviated 服务端)
 
 ## 1. 范围与定谳
 
@@ -7,16 +7,19 @@
 即全部恢复状态,以 ticket protection key(TPK)做 AEAD 加密认证;恢复时服务端只验证
 票据合法性,不存在"是否下发过"的记忆判断。**slice 2 补齐 lookup 半边与恢复接线**
 (§7):`TlsResumptionLookup` 真实现接进 07 引擎,1.3 票据全链路恢复——零格式改动。
+**slice 3 补齐 1.2 abbreviated 服务端**(§8):同一套 TPK 物料与容器,1.2 票按
+RFC 5077 恢复为无证书、无密钥交换的缩短握手。
 
 后移到后续 slice 的内容:
 
-- 1.2 abbreviated handshake 双侧(RFC 5077 恢复路径;lookup 已把 1.2 票恒判
-  miss→全握手回退,abbreviated 是下一 slice);
 - 09 net 集成换芯时的服务装配(每 loop 一个 service 或跨 loop 共享,§5)。
 
 客户端取票入会话缓存经用户定谳**不做**(无需求,2026-09-23):06 客户端不缓存
 票据、不主动发起恢复;恢复场景 = 服务端 lookup 半边 + 对端客户端(e2e 以
-BoringSSL 客户端或手工 `TlsSessionOffer` 驱动,§7/§8 已是此形态)。
+BoringSSL 客户端或手工 `TlsSessionOffer` 驱动,§7/§9 已是此形态)。1.2 侧经同批
+定谳收窄为**仅服务端 stateless ticket abbreviated**(2026-09-23):服务端 session-id
+有状态缓存不做(与无状态契约冲突且无需求),客户端票缓存不做;1.2+(EC)DHE 恢复
+(非标准组合)不涉及。
 
 ## 2. 无状态契约(三条,设计即钉死)
 
@@ -128,20 +131,63 @@ OpenStatus open(span<const u8> ticket, string_view name, i64 now,
 
 真实现 = `TlsTicketService::lookup()` 适配对 + `lookup_thunk`:
 
-- `open(identity, name, now, contents)` + **版本门**:仅 1.3 票走 1.3 PSK 路径;
-  1.2 票 / Rejected / Expired 全部 miss → 全握手回退(1.2 abbreviated 属后续
-  slice)。清单 1/2/3 由此兑现。
+- `open(identity, name, now, contents)` — 非 Ok(错名/篡改/过期)全部 miss →
+  全握手回退。清单 1/2/3 由此兑现。slice 3 起钩子**version-blind**(原 slice 2
+  在 thunk 内置"仅 1.3 票"版本门,现已上提到各引擎:1.3 引擎 lookup 后校验
+  `resumed.version == Tls13` 否则 `PskOutcome::Reject`;1.2 引擎在 §8 接受级联的
+  version 门里校验 `== Tls12`——错版票对两引擎都是普通 miss)。
 - 命中时 `TlsResumedSession` 全字段映射:psk=`contents.secret.bytes()`(引擎立即
-  拷进 `TlsSecret`)、suite、alpn、age_add、max_early_data、issued_ms;随后引擎
-  既有级联接管:清单 4(suite 门)、5(binder 恒校验,mismatch=fatal)、6(恒 0
-  ⇒ 无 early_data 扩展)。
+  拷进 `TlsSecret`;双语义——1.3:预派生 PSK;1.2:48B master)、**version**
+  (slice 3 新增,引擎门输入)、suite、alpn、age_add、max_early_data、issued_ms;
+  随后引擎既有级联接管:清单 4(suite 门)、5(binder 恒校验,mismatch=fatal)、
+  6(恒 0 ⇒ 无 early_data 扩展)。
 - **借用安全**:thunk 内开的票停 `thread_local TlsTicketContents t_staged_resumption`
   暂存格——栈变量随 thunk 返回即悬空,而引擎在 hook 返回之后才消费;引擎在同一
   步内读完,同线程下一次 lookup 覆盖,单飞不并发。
 
-## 8. 测试(2384 全绿;票据面 16 + lookup 面 2 单测 + 3 e2e + EE 重钉)
+## 8. 1.2 abbreviated 服务端(slice 3,2026-09-23;RFC 5246 §7.3 + RFC 5077)
 
-`tests/TlsTicketServiceTest.cpp`(16 个单测,slice 1 的 14 个 + lookup 2 个):
+范围 = §1 定谳:仅服务端 stateless ticket 恢复。CH 出示票据 → lookup 接受 →
+SH(sid 回显、票 suite/ALPN、EMS)[NST 轮换] CCS server-Fin,客户端回 CCS + Fin;
+无 Cert/SKE/SHD/CKE,master 复用,key_block =
+`tls12_key_block(suite, master, client_random, server_random)`。任一门不过 →
+全握手回退,**永不因票据问题失败连接**。
+
+**EMS 走 mint 门(容器格式零改动)**:1.2 发票门 = `minter && has_session_ticket &&
+ems_negotiated_`——只有 EMS 会话发票 ⇒ RFC 7627 §5.3 禁止的跨 EMS 恢复在本体系
+不存在;恢复侧 SH 恒回显 EMS,且 CH 须 offer EMS 否则 miss。容器无需 EMS 位。
+
+**接受级联 `try_resume_12`**(短路序):结构前置(lookup 非空、非 mTLS——
+`client_trust != nullptr` 恒全握手、票非空、sid 非空)→ open(AAD 名绑定/篡改/过期
+在容器内)→ version 门(`== Tls12`)→ suite 门(`tls_suite_info` 非空、非 1.3
+专属、CH offered;credential 无关——恢复连接不签名)→ EMS 门(CH 须 offer)→
+ALPN 门(票有 alpn ⇒ CH 须仍 offer,借共享 `tls_ch_offers_alpn`;票无 ⇒ 无
+alpn,绑定语义)。接受即:`master12_` = 票内 48B、kb12_ 派生、suite/alpn 继承、
+`ticket_wanted_ = minter`(出示票据本身就是 5077 offer ⇒ 恢复恒轮换)。无 age 门
+(1.2 无 obfuscated_ticket_age;过期已在 open 内)。
+
+**飞行 `send_abbreviated_flight_12`**:SH(sid 回显、票 suite、EMS、空 RI、alpn、
+ticket ext 空回显)→ NST 轮换(明文、CCS 前,`resumption_master` = master 本体)
+→ CCS + write 侧换 `kb12_.server` → **server Finished 先发**(1.3 式顺序;MAC 覆盖
+CH‖SH‖NST‖serverFin)→ `ExpectClientCcs12`。client Fin 验证通过且 `resumed12_`
+→ 直达完成(不再发 final flight);`state_.session_resumed = true`。
+
+**sid 回显语义(slice 3 的 wire 修复)**:SH 回显非空 sid 是客户端判定恢复的
+唯一信号(BoringSSL:SH sid 匹配 offered session 的 sid ⇒ session_reused,期待
+abbreviated flight)。全握手回退若照抄回显,持票客户端收到 Certificate 即
+UNEXPECTED_MESSAGE("got type 11, wanted type 4")。修:1.2 全握手恒发**空 sid**
+(无 id 缓存的无状态服务器,RFC 5246 §7.4.1.3 空 sid = 不可按 id 恢复);abbreviated
+SH 是唯一合法回显。1.3 不受影响(legacy_session_id 回显是 RFC 8446 强制)。06 自研
+1.2 客户端本就不校验 SH sid("server's own choice"),零影响。
+
+**安全权衡(定谳在案)**:恢复连接无 PFS(master 复用,RFC 5077 固有,OpenSSL
+stateless 同);TPK 泄露对 1.2 = master 直接暴露(对比 1.3 票存预派生 PSK、恢复
+仍过 (EC)DHE);票重放可再建恢复握手,但 1.2 无 0-RTT、无数据注入面(§2 契约
+第 1 条在 1.2 侧无对应物)。
+
+## 9. 测试(2387 全量绿;票据面 17 单测 + 无状态恢复 e2e 5 + EE 重钉)
+
+`tests/TlsTicketServiceTest.cpp`(17 个单测,slice 1 的 14 个 + lookup 3 个):
 EmptyKeySetIsInvalid(valid false + mint 恒 0)、DuplicateIdsAreInvalid、
 OverflowKeepsNewestEight(10 把注入 → 保留最新 8,mint 选最新)、
 RandomKeyMintsFreshMaterial(熵新鲜 + 可构造可开票)、
@@ -168,10 +214,11 @@ alpn 256、version=Tls11、out 过小)。
 
 slice 2 新增:
 
-- `TlsTicketServiceTest` lookup 面 2 个:**LookupThunkResumes13Ticket**
-  (lookup() 命中:psk == `tls13_resumption_psk(master,{0})`、suite/alpn=="h2"/
-  age_add/issued 全字段回读)、**LookupThunkMissesOnWrongNameTamperExpiryOr12**
-  (错名 / ct 翻位 / 4s 票 5s 后过期 / 1.2 票 / 空 key service 全 false)。
+- `TlsTicketServiceTest` lookup 面:**LookupThunkResumes13Ticket**(lookup() 命中:
+  psk == `tls13_resumption_psk(master,{0})`、suite/alpn=="h2"/age_add/issued 全
+  字段回读)、**LookupThunkMissesOnWrongNameTamperExpiryOr12**(错名 / ct 翻位 /
+  4s 票 5s 后过期 / 1.2 票 / 空 key service 全 false;slice 3 改名
+  LookupThunkMissesOnWrongNameTamperOrExpiry 并去 1.2 用例——1.2 票不再是 miss)。
 - `TlsServerHandshakeEngineTest` 无状态恢复 e2e 3 条(RecordingServiceLookup 包
   装 thunk,记录 called/seen_name/seen_now_ms):**StatelessResume13WithBoringClient**
   ——hop1 BoringClient(collect_tickets+send_sni)mint+NST 消化,hop2 set_session
@@ -184,18 +231,33 @@ slice 2 新增:
   ("other.example")出示(BoringSSL 会话使用不按名字设门,跨 SNI 仍 offer——已核
   其源码),AAD 名绑定拒 → 全握手成功、!resumed、reused==0、recorder 见新名
   (miss 归因服务端 AAD 拒,非客户端未带)。
-- `TlsHandshakeCodecTest` EE server_name ack 重钉为零长度扩展体 + 负测(见 §10
+- `TlsHandshakeCodecTest` EE server_name ack 重钉为零长度扩展体 + 负测(见 §11
   wire bug 修复)。
 
-## 9. 待拍板 / 遗留
+slice 3 新增(1.2 abbreviated):
+
+- `TlsTicketServiceTest`:**LookupThunkResumes12TicketWithMaster**——1.2 票经
+  lookup() 命中:version==Tls12、psk==48B master 原文、suite/alpn/issued 回读
+  (钩子 version-blind 的直接验证);**LookupThunkResumes13Ticket** 补 version 断言。
+- `TlsServerHandshakeEngineTest` e2e 2 条:**StatelessResume12WithBoringClient**
+  ——hop1 BoringClient(tls12_only + collect_tickets + send_sni)全握手 mint 出票,
+  SSL_read 消化 NST;hop2 set_session 重连:version==Tls12、session_resumed、
+  SSL_session_reused==1、peer_chain 空、recorder 收 name=="example.com"/
+  now==kRefNowMs、轮换 NST 已消化(g_new_sessions==2)、app ping/pong 双向
+  round-trip(证明 master 复用 + key_block 派生与 BoringSSL 客户端逐字节一致);
+  **CrossVhostTicket12FallsBackToFull**——hop2 换 SNI("other.example")出示同一票:
+  AAD 名绑定拒 → 全握手成功、!session_resumed、reused==0、recorder 见新名
+  (兼作 §8 空sid 修复的行为验证:回退客户端不再误判恢复)。
+
+## 10. 待拍板 / 遗留
 
 - 装配形态(09):每 loop 一个 service(免跨线程,物料同种子)vs 全局共享
   ——免锁重构后两者代码路径完全一致,纯归属选择;倾向每 loop(与 EventLoop
   归属一致)。TPK 物料来源(配置文件/seed)与分发是 09 装配题。
-- 1.2 abbreviated handshake 双侧——下一 slice。客户端取票缓存已定谳不做
-  (无需求,§1)。
+- 08 会话恢复至此收口:1.3 恢复 + 1.2 abbreviated 均为服务端 stateless,客户端
+  票缓存与 session-id 缓存均定谳不做(§1)。
 
-## 10. 实施记录
+## 11. 实施记录
 
 - **2026-09-23 slice 1**:TlsConfig.h(TlsTicketRequest +version/name)、新增
   include/fiber/tls/TlsTicketService.h + src/tls/session/TlsTicketService.cpp
@@ -233,4 +295,15 @@ slice 2 新增:
   `CBS_len(contents)==0` 严格校验)。修四处:编码器 ack 分支(零长度)、头注释、
   decode 严格化(带载荷 → Invalid)、单测重钉 + 负测。2384 全量绿。
 - **2026-09-23 定谳:客户端取票缓存不做**(无需求)——06 客户端不缓存票据、
-  不发 PSK offer;后续仅剩 1.2 abbreviated 双侧与 09 装配。
+  不发 PSK offer;后续仅剩 1.2 abbreviated 服务端与 09 装配。
+- **2026-09-23 slice 3:1.2 abbreviated 服务端**。TlsConfig.h(TlsResumedSession
+  +version,psk 双语义注)、lookup thunk version-blind 化(版本门上提两引擎,
+  §7)、Tls12ServerHandshake 双形态(Mount +resumption、try_resume_12 接受级联、
+  send_abbreviated_flight_12、resumed12_ 客户端 Fin 直达完成、恢复恒轮换)、
+  共享 `tls_ch_offers_alpn`、1.2 发票门收紧为 `minter && has_session_ticket &&
+  ems_negotiated_`(EMS 走 mint 门,格式零改动)、单测 +1 + e2e 2(§9)。
+  自查修复 **sid 回显 wire bug**:全握手回退曾照抄回显 CH 的非空 sid——持票
+  客户端以 sid 匹配判"已恢复"、期待 abbreviated flight,收到 Certificate 即
+  UNEXPECTED_MESSAGE(handshake.cc:117 "got type 11, wanted type 4";
+  CrossVhostTicket12FallsBackToFull 红)。修为全握手恒发空 sid(§8 语义)。
+  2387 全量绿(两轮)。

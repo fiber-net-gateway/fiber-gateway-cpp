@@ -129,6 +129,11 @@ enum class TlsServerAlpnResult : std::uint8_t { None, Matched, Failed };
 [[nodiscard]] TlsServerAlpnResult tls_server_alpn_select(const TlsServerConfig &cfg, const TlsClientHello &ch,
                                                          std::string_view &out) noexcept;
 
+// Does the CH's ProtocolNameList still offer `proto`? (Resumption paths: a
+// ticket's early_alpn binds only while the client keeps offering it; a
+// malformed list counts as not offered.)
+[[nodiscard]] bool tls_ch_offers_alpn(const TlsClientHello &ch, std::string_view proto) noexcept;
+
 // CertificateVerify scheme: first kTls13SignaturePreference/kTls12Signature-
 // Preference entry the local key supports that the CH offered.
 [[nodiscard]] bool tls_server_cv_scheme_select(const TlsPrivateKey &key, const TlsClientHello &ch,

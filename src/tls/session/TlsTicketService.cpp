@@ -469,19 +469,19 @@ TlsResumptionLookup TlsTicketService::lookup() noexcept { return TlsResumptionLo
 // same handshake step; the same thread's next lookup overwrites the cell).
 thread_local TlsTicketContents t_staged_resumption;
 
-// A miss (false) is always safe: the engine drops the pre_shared_key offer
-// and runs a full handshake. Rejected, Expired, and the 1.2-container
-// version all land here — the 1.2 abbreviated-handshake path is a later
-// slice; until then a 1.2 ticket is simply not resumable through this hook.
+// A miss (false) is always safe: the engine drops the resumption offer and
+// runs a full handshake. Rejected and Expired opens land here. The hook is
+// version-blind: both ticket kinds map straight through (`version` says
+// which payload it was; each engine rejects the other version's ticket).
 bool TlsTicketService::lookup_thunk(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
                                     std::int64_t now_unix_ms, TlsResumedSession &out) noexcept {
     auto &self = *static_cast<TlsTicketService *>(ctx);
     TlsTicketContents &contents = t_staged_resumption;
-    if (self.open(identity, name, now_unix_ms, contents) != OpenStatus::Ok ||
-        contents.version != TlsProtocolVersion::Tls13) {
+    if (self.open(identity, name, now_unix_ms, contents) != OpenStatus::Ok) {
         return false;
     }
-    out.psk = contents.secret.bytes();
+    out.psk = contents.secret.bytes(); // 1.3: the derived PSK; 1.2: the master
+    out.version = contents.version;
     out.suite = contents.suite;
     out.alpn = contents.alpn_view();
     out.ticket_age_add = contents.ticket_age_add;

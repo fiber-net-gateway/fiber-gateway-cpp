@@ -3,10 +3,15 @@
 
 // TLS 1.2 server sub-flow (07 §4.3) — internal to the server engine. The
 // outer TlsServerHandshakeEngine forks here when the ClientHello offers
-// 0x0303 and not 0x0304: the SH flight (SH [CertReq] Cert SKE SHD), the
-// client flight ([Cert] CKE [CV]) plaintext, the client-CCS read swap, the
-// client Finished check, and the final flight ([NST] CCS server Fin).
-// Always a full handshake — 1.2 resumption belongs to 08 (§10.7).
+// 0x0303 and not 0x0304. Two shapes:
+//   full        — SH [CertReq] Cert SKE SHD, client flight ([Cert] CKE [CV])
+//                 plaintext, the client-CCS read swap, the client Finished
+//                 check, final flight ([NST] CCS server Fin);
+//   abbreviated — the CH presented a stateless ticket the lookup accepted
+//                 (08): SH (sid echo, the ticket's suite/ALPN) [NST] CCS
+//                 server Fin — no certificate flight, no key exchange, the
+//                 master reused, then the client's CCS + Finished. Every
+//                 gate miss degrades to the full shape, never a failure.
 //
 // Mounted by value into the outer's std::variant — never moved, never
 // copied. Long-lived state is BORROWED through Mount; only flow state is
@@ -37,6 +42,7 @@ public:
     struct Mount {
         TlsHandshakeContext &ctx; // shared record pipeline
         const TlsServerConfig &cfg;
+        const TlsResumptionLookup *resumption; // nullptr = never resume (full handshake)
         const TlsTicketMinter *minter; // nullptr = never mint an NST
         TlsServerHelloState &hello; // retained CH + the SKE exchange + server_random
         TlsServerHandshakeOutcome &out; // terminal channel
@@ -74,6 +80,7 @@ private:
     // ---- borrowed (Mount) ----
     TlsHandshakeContext &ctx_;
     const TlsServerConfig &cfg_;
+    const TlsResumptionLookup *resumption_;
     const TlsTicketMinter *minter_;
     TlsServerHelloState &hello_;
     TlsServerHandshakeOutcome &out_;
@@ -88,7 +95,10 @@ private:
     TlsSecret master12_{};
     Tls12WriteKeys kb12_{}; // key_block; wiped once both ciphers hold the material
     bool ems_negotiated_ = false;
-    bool ticket_wanted_ = false; // the CH offered 5077 AND a minter is wired
+    // The CH offered 5077 AND a minter is wired AND the session is EMS (08:
+    // tickets only ever mint for EMS sessions, so the NST gate inherits it).
+    bool ticket_wanted_ = false;
+    bool resumed12_ = false; // this connection runs the abbreviated shape
     bool peer_sent_cert12_ = false; // the client's Certificate was non-empty
     std::array<std::uint8_t, 1024> ticket_buf_{}; // the minter's staging (NST body)
     TlsCertificateChain peer_chain_; // the mTLS client chain (empty otherwise)
@@ -152,6 +162,12 @@ private:
     }
 
     // ---- flight builders / handlers ----
+
+    // Abbreviated acceptance (08): the lookup + version/suite/EMS/ALPN/sid
+    // gates. True = master12_/suite_/kb12_/alpn wired for the abbreviated
+    // flight; false = run the full shape (a miss is never a failure).
+    [[nodiscard]] bool try_resume_12(const TlsClientHello &ch) noexcept;
+    void send_abbreviated_flight_12(const TlsClientHello &ch, std::span<const std::uint8_t> body) noexcept;
 
     void send_server_flight_12(const TlsClientHello &ch) noexcept; // SH [CR] Cert SKE SHD
     void handle_client_certificate_12(std::span<const std::uint8_t> body) noexcept; // mTLS

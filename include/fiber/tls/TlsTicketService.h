@@ -132,14 +132,14 @@ public:
     [[nodiscard]] TlsTicketMinter minter() noexcept;
     static std::size_t mint_thunk(void *ctx, const TlsTicketRequest &req, std::span<std::uint8_t> out) noexcept;
 
-    // The TlsResumptionLookup adapter the 07 engine takes (borrowed like
-    // minter()): opens the presented identity against the CH's SNI and the
-    // engine clock. Only TLS 1.3 tickets drive the 1.3 PSK path — a 1.2
-    // ticket and every Rejected/Expired open are misses, so the handshake
-    // falls back to a full one (1.2 tickets wait for the abbreviated-
-    // handshake slice). The out spans borrow a thread-local staging cell
-    // (the engine reads them right after the call returns; the same
-    // thread's next lookup overwrites the cell).
+    // The TlsResumptionLookup adapter both 07 version sub-flows take (borrowed
+    // like minter()): opens the presented identity against the CH's SNI and
+    // the engine clock. Version-blind — the result carries the payload's
+    // version and each engine rejects a ticket minted for the other one. A
+    // Rejected/Expired open is a miss, so the handshake falls back to a full
+    // one. The out spans borrow a thread-local staging cell (the engine reads
+    // them right after the call returns; the same thread's next lookup
+    // overwrites the cell).
     [[nodiscard]] TlsResumptionLookup lookup() noexcept;
     static bool lookup_thunk(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
                              std::int64_t now_unix_ms, TlsResumedSession &out) noexcept;

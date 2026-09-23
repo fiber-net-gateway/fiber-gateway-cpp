@@ -270,8 +270,8 @@ void TlsServerHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
             fail_local(TlsAlertDesc::HandshakeFailure); // RFC 5246 §7.4.1.4
             return;
         }
-        auto &sub = flow.emplace<Tls12ServerHandshake>(
-                Tls12ServerHandshake::Mount{ctx, cfg, minter, hello, out, {scratch.data(), scratch.size()}});
+        auto &sub = flow.emplace<Tls12ServerHandshake>(Tls12ServerHandshake::Mount{
+                ctx, cfg, resumption, minter, hello, out, {scratch.data(), scratch.size()}});
         sub.start(ch, {hello.ch.data(), hello.ch_len});
         return;
     }

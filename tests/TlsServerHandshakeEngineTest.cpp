@@ -2168,3 +2168,108 @@ TEST(TlsServerTicketService, StatelessResumeOurPair) {
     ASSERT_EQ(sizeof(kPong) - 1, opened_back.size());
     EXPECT_EQ(0, std::memcmp(kPong, opened_back.data(), opened_back.size()));
 }
+
+// The 1.2 mirror: hop 1 mints a master-bearing stateless ticket (EMS
+// negotiated — the mint gate), hop 2 presents it in the CH's session_ticket
+// extension with the stashed random sid, and the abbreviated handshake runs
+// on the reused master: the SH echoes the sid, no certificate or key
+// exchange flies, and the server Finished goes FIRST — the client's MACs it
+// in. App data both ways proves the re-derived key block matches.
+TEST(TlsServerTicketService, StatelessResume12WithBoringClient) {
+    CollectedSessionsGuard guard;
+    ServerMaterial material;
+    const TlsServerConfig cfg = material.config();
+    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+    RecordingServiceLookup recorder{.service = service};
+    const TlsTicketMinter minter = service.minter();
+    const TlsResumptionLookup lookup = recorder.hook();
+
+    // hop 1 (1.2): full handshake; the cleartext NST lands in the stash.
+    {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
+        ASSERT_NE(nullptr, client);
+        TlsServerHandshakeEngine engine(cfg, nullptr, &minter, material.pool);
+        ASSERT_TRUE(drive(*client, engine, false));
+        std::array<char, 64> sink{};
+        (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        ASSERT_EQ(1u, g_new_sessions.size());
+    }
+
+    auto client = BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
+    ASSERT_NE(nullptr, client);
+    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
+    ASSERT_TRUE(drive(*client, engine, false));
+    EXPECT_FALSE(engine.failed());
+
+    TlsConnectedState state = engine.take_state();
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+    EXPECT_TRUE(state.session_resumed);
+    EXPECT_EQ(1, SSL_session_reused(client->ssl()));
+    EXPECT_TRUE(state.peer_chain.empty()); // abbreviated: no certificate flight
+    EXPECT_TRUE(recorder.called);
+    EXPECT_EQ("example.com", recorder.seen_name);
+    EXPECT_EQ(certfix::kRefNowMs, recorder.seen_now_ms);
+
+    // The abbreviated flight rotated the ticket (fresh nonce over the same
+    // master) — the NST rides before the CCS, so drive() already digested it.
+    std::array<char, 64> sink{};
+    (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+    EXPECT_EQ(2u, g_new_sessions.size());
+
+    // App data over the resumed connection, both directions.
+    const char kPing[] = "ping stateless12";
+    ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
+    const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
+    ASSERT_EQ(sizeof(kPing) - 1, ping.size());
+    EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
+
+    const char kPong[] = "pong stateless12";
+    const std::vector<std::uint8_t> pong =
+            seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+    ASSERT_FALSE(pong.empty());
+    ASSERT_TRUE(client->ship(pong));
+    const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+    ASSERT_GT(got, 0);
+    EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+}
+
+// The 1.2 wrong-vhost fallback: the AAD name binding misses inside the
+// lookup, the handshake degrades to a full 1.2 one (the client re-keys from
+// scratch), and the miss is attributed to the binding, not a skipped offer.
+TEST(TlsServerTicketService, CrossVhostTicket12FallsBackToFull) {
+    CollectedSessionsGuard guard;
+    ServerMaterial material;
+    const TlsServerConfig cfg = material.config();
+    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+    RecordingServiceLookup recorder{.service = service};
+    const TlsTicketMinter minter = service.minter();
+    const TlsResumptionLookup lookup = recorder.hook();
+
+    // hop 1 mints under "example.com".
+    {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
+        ASSERT_NE(nullptr, client);
+        TlsServerHandshakeEngine engine(cfg, nullptr, &minter, material.pool);
+        ASSERT_TRUE(drive(*client, engine, false));
+        std::array<char, 64> sink{};
+        (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        ASSERT_EQ(1u, g_new_sessions.size());
+    }
+
+    // hop 2: a different vhost presents the ticket.
+    auto client = BoringClient::make(
+            ClientOptions{.trust_pem = nullptr, .host = "other.example", .tls12_only = true, .send_sni = true});
+    ASSERT_NE(nullptr, client);
+    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
+    ASSERT_TRUE(drive(*client, engine, false));
+    EXPECT_FALSE(engine.failed());
+
+    TlsConnectedState state = engine.take_state();
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+    EXPECT_FALSE(state.session_resumed);
+    EXPECT_EQ(0, SSL_session_reused(client->ssl()));
+    EXPECT_TRUE(recorder.called);
+    EXPECT_EQ("other.example", recorder.seen_name);
+}
