@@ -154,6 +154,11 @@ TlsInboundStep TlsHandshakeContext::take_record(TlsRecord &&record) noexcept {
                 ++plaintext_records_13_ > kMaxPlaintextHandshakeRecords13) {
                 return step_fatal(TlsAlertDesc::UnexpectedMessage);
             }
+            if (mode_ == TlsInboundMode::Plaintext13 && early_skip_armed_) {
+                // Post-HRR early-data skip, type variant: the first plaintext
+                // handshake record is CH2 — the skip window ends with it.
+                early_skip_armed_ = false;
+            }
             if (mode_ == TlsInboundMode::Sealed12) {
                 // 1.2 preserves the record type under encryption; the AAD-bound
                 // inner type is this outer Handshake by construction.
@@ -166,6 +171,16 @@ TlsInboundStep TlsHandshakeContext::take_record(TlsRecord &&record) noexcept {
             return route_current(std::move(record));
         }
         case TlsContentType::ApplicationData: {
+            if (mode_ == TlsInboundMode::Plaintext13 && early_skip_armed_) {
+                // Post-HRR early-data skip (RFC 8446 §4.2.10): undecryptable
+                // in-flight 0-RTT records are discarded by type up to the
+                // budget while CH2 is owed.
+                early_used_ += record.length;
+                if (early_used_ > early_budget_) {
+                    return step_fatal(TlsAlertDesc::UnexpectedMessage);
+                }
+                return step_need_more();
+            }
             if (mode_ != TlsInboundMode::Sealed13 && mode_ != TlsInboundMode::Sealed12) {
                 // Unencrypted app data is never legitimate inside a handshake.
                 return step_fatal(TlsAlertDesc::UnexpectedMessage);
@@ -187,9 +202,25 @@ TlsInboundStep TlsHandshakeContext::open_current(TlsRecord &record) noexcept {
             tls_record_open_in_place(read_cipher_, record.type, record.legacy_version, record.length, record.payload,
                                      {open_scratch_.data(), dst_len});
     if (result.open.status != TlsRecordCipher::Status::Ok) {
+        if (early_skip_armed_ && result.open.status == TlsRecordCipher::Status::AuthFail) {
+            // Rejected-0-RTT trial open (RFC 8446 §4.2.10): this record was
+            // sealed under early keys we never derived — discard it up to the
+            // ciphertext budget and keep pumping for the client's second
+            // flight. Malformed framing stays fatal.
+            early_used_ += record.length;
+            if (early_used_ > early_budget_) {
+                return step_fatal(TlsAlertDesc::UnexpectedMessage);
+            }
+            return step_need_more();
+        }
         // AuthFail and pre-decryption Malformed both collapse to
         // bad_record_mac — no decrypt-oracle distinction is surfaced.
         return step_fatal(TlsAlertDesc::BadRecordMac);
+    }
+    if (early_skip_armed_) {
+        // The first record that opens under the handshake key IS the client's
+        // second flight (Fin or its first sealed message).
+        early_skip_armed_ = false;
     }
     current_ = std::move(record);
     has_current_ = true;
@@ -227,8 +258,30 @@ TlsInboundStep TlsHandshakeContext::open_current(TlsRecord &record) noexcept {
         step.close_notify = plain_[1] == static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify);
         return step;
     }
+    if (result.open.inner_type == TlsContentType::ApplicationData && early_sink_armed_) {
+        // Accepted-0-RTT window: the content bytes (the inner type byte and
+        // padding are already stripped) are 0-RTT application data — budget,
+        // copy into the sink, and keep pumping records.
+        early_used_ += plain_len_;
+        if (early_used_ > early_budget_) {
+            return step_fatal(TlsAlertDesc::UnexpectedMessage);
+        }
+        if (plain_len_ > 0) {
+            mem::IoBuf fragment = mem::IoBuf::allocate(plain_len_);
+            if (!fragment.valid()) {
+                return step_fatal(TlsAlertDesc::InternalError);
+            }
+            std::memcpy(fragment.writable_data(), plain_, plain_len_);
+            fragment.commit(plain_len_);
+            if (!early_sink_->append(std::move(fragment))) {
+                return step_fatal(TlsAlertDesc::InternalError);
+            }
+        }
+        current_off_ = plain_len_; // consumed as early data
+        return step_need_more();
+    }
     if (result.open.inner_type != TlsContentType::Handshake) {
-        // Inner CCS or app data inside a handshake record: unexpected (06 §2.6).
+        // Inner CCS or app data outside the early window: unexpected (06 §2.6).
         return step_fatal(TlsAlertDesc::UnexpectedMessage);
     }
     return step_need_more();

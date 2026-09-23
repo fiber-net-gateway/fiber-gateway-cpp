@@ -111,14 +111,27 @@ std::vector<std::uint8_t> expected_tls13_payload(TlsCipherSuiteId suite, const s
     return out;
 }
 
-// RFC 5288 §3: nonce = fixed_iv || BE64(seq); AAD = BE64(seq) || type ||
-// 0x0303 || BE16(plain_len); wire = BE64(seq) || AEAD(plain) || tag.
+// RFC 5288 §3 (GCM suites): nonce = fixed_iv || BE64(seq); AAD = BE64(seq) ||
+// type || 0x0303 || BE16(plain_len); wire = BE64(seq) || AEAD(plain) || tag.
+// RFC 7905 §2 (ChaCha20 suites): nonce = the full 12-byte iv XOR BE64(seq) in
+// its low half (the 1.3 construction); NO nonce bytes on the wire, so the
+// wire is AEAD(plain) || tag alone (plain + 16).
 std::vector<std::uint8_t> expected_tls12_payload(TlsCipherSuiteId suite, const std::vector<std::uint8_t> &key,
                                                  const std::vector<std::uint8_t> &fixed_iv, std::uint64_t seq,
                                                  TlsContentType inner_type, const std::vector<std::uint8_t> &plain) {
+    const bool chacha = suite == TlsCipherSuiteId::EcdheRsaChacha20Poly1305 ||
+                        suite == TlsCipherSuiteId::EcdheEcdsaChacha20Poly1305;
     std::array<std::uint8_t, 12> nonce{};
-    std::memcpy(nonce.data(), fixed_iv.data(), 4);
-    store_be64(nonce.data() + 4, seq);
+    std::memcpy(nonce.data(), fixed_iv.data(), chacha ? 12 : 4);
+    if (chacha) {
+        std::array<std::uint8_t, 8> seq_be{};
+        store_be64(seq_be.data(), seq);
+        for (int i = 0; i < 8; ++i) {
+            nonce[4 + i] ^= seq_be[i];
+        }
+    } else {
+        store_be64(nonce.data() + 4, seq);
+    }
 
     std::array<std::uint8_t, 13> aad{};
     store_be64(aad.data(), seq);
@@ -140,6 +153,9 @@ std::vector<std::uint8_t> expected_tls12_payload(TlsCipherSuiteId suite, const s
     EVP_AEAD_CTX_cleanup(&ctx);
     EXPECT_EQ(written, plain.size() + 16);
 
+    if (chacha) {
+        return sealed;
+    }
     std::vector<std::uint8_t> out(plain.size() + 24);
     store_be64(out.data(), seq);
     std::memcpy(out.data() + 8, sealed.data(), sealed.size());
@@ -174,13 +190,31 @@ const std::vector<SuiteVectors> &tls12_suites() {
             {TlsCipherSuiteId::EcdheRsaAes256GcmSha384, TlsRecordProtectionKind::Tls12,
              key_iv("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"), key_iv("11121314")},
             {TlsCipherSuiteId::EcdheRsaChacha20Poly1305, TlsRecordProtectionKind::Tls12,
-             key_iv("21022dda596ed5d9acd890e3c63f5051a1b2c3d4e5f60718293a4b5c6d7e8f90"), key_iv("11121314")},
+             key_iv("21022dda596ed5d9acd890e3c63f5051a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+             key_iv("1112131415161718191a1b1c")}, // RFC 7905: 12-byte implicit IV
     };
     return suites;
 }
 
 void init_cipher(TlsRecordCipher &cipher, const SuiteVectors &v) {
     EXPECT_TRUE(cipher.init(v.suite, v.kind, v.key, v.iv).has_value());
+}
+
+const std::vector<SuiteVectors> &all_suites(); // defined below, beside the scatter tests
+
+// The wire form's explicit-nonce prefix length for a suite/kind pair: 8 for
+// 1.2 GCM (RFC 5288), 0 for 1.3 and 1.2 ChaCha20 (RFC 7905 §2).
+std::size_t wire_nonce_len(const SuiteVectors &v) {
+    if (v.kind == TlsRecordProtectionKind::Tls13) {
+        return 0;
+    }
+    switch (v.suite) {
+        case TlsCipherSuiteId::EcdheRsaChacha20Poly1305:
+        case TlsCipherSuiteId::EcdheEcdsaChacha20Poly1305:
+            return 0;
+        default:
+            return 8;
+    }
 }
 
 // ---------------------------------------------------------------- init
@@ -257,12 +291,13 @@ TEST_P(TlsRecordCipherKat, OpenRestoresPlaintextAndType) {
                                   ? expected_tls13_payload(v.suite, v.key, v.iv, 0, type, plain)
                                   : expected_tls12_payload(v.suite, v.key, v.iv, 0, type, plain);
 
-    // In place (1.2: dst starts past the explicit nonce). 1.2 has no inner
-    // type: the received outer type IS the record type, so it must match the
-    // type the record was sealed with; 1.3 always opens with outer 23.
+    // In place (1.2 GCM: dst starts past the explicit nonce; 1.2 ChaCha and
+    // 1.3 are in place with no prefix). 1.2 has no inner type: the received
+    // outer type IS the record type, so it must match the type the record was
+    // sealed with; 1.3 always opens with outer 23.
     const bool tls13 = v.kind == TlsRecordProtectionKind::Tls13;
     const TlsContentType outer = tls13 ? TlsContentType::ApplicationData : type;
-    const std::size_t nonce_prefix = tls13 ? 0 : 8;
+    const std::size_t nonce_prefix = wire_nonce_len(v);
     std::vector<std::uint8_t> buf(expected);
     auto r = cipher.open(outer, 0x0303, static_cast<std::uint16_t>(expected.size()), buf,
                          std::span<std::uint8_t>(buf.data() + nonce_prefix, expected.size() - nonce_prefix));
@@ -308,12 +343,25 @@ TEST(TlsRecordCipherSizes, BoundariesPerKind) {
     EXPECT_EQ(c12.open_output_size(100), 76u);
     EXPECT_EQ(c12.min_ciphertext_size(), 24u);
     EXPECT_EQ(c12.max_ciphertext_size(), fiber::tls::kTlsMaxPlaintextSize + 2048u);
+    EXPECT_EQ(c13.explicit_nonce_len(), 0u);
+    EXPECT_EQ(c12.explicit_nonce_len(), 8u); // RFC 5288 GCM form
+
+    // 1.2 ChaCha20 (RFC 7905 §2): no wire nonce — overhead is the tag alone.
+    TlsRecordCipher cc12;
+    init_cipher(cc12, tls12_suites()[2]);
+    EXPECT_EQ(cc12.explicit_nonce_len(), 0u);
+    EXPECT_EQ(cc12.seal_output_size(0), 16u);
+    EXPECT_EQ(cc12.seal_output_size(fiber::tls::kTlsMaxPlaintextSize), fiber::tls::kTlsMaxPlaintextSize + 16);
+    EXPECT_EQ(cc12.open_output_size(16), 0u);
+    EXPECT_EQ(cc12.open_output_size(100), 84u);
+    EXPECT_EQ(cc12.min_ciphertext_size(), 16u);
+    EXPECT_EQ(cc12.max_ciphertext_size(), fiber::tls::kTlsMaxPlaintextSize + 2048u);
 }
 
 // ------------------------------------------------------- §10.4: roundtrip
 
 TEST(TlsRecordCipherRoundTrip, SequenceAdvanceAndCiphertextUniqueness) {
-    for (const SuiteVectors &v: tls13_suites()) {
+    for (const SuiteVectors &v: all_suites()) {
         TlsRecordCipher seal_side;
         init_cipher(seal_side, v);
         TlsRecordCipher open_side;
@@ -334,8 +382,8 @@ TEST(TlsRecordCipherRoundTrip, SequenceAdvanceAndCiphertextUniqueness) {
                 }
                 prev = wire;
 
-                if (v.kind == TlsRecordProtectionKind::Tls12) {
-                    // explicit nonce is BE64(seq)
+                if (wire_nonce_len(v) == 8) {
+                    // 1.2 GCM: the explicit nonce is BE64(seq) on the wire
                     EXPECT_EQ(wire[0], 0u);
                     EXPECT_EQ(wire[7], static_cast<std::uint8_t>(seq));
                 }
@@ -769,17 +817,19 @@ TEST(TlsRecordCipherEndToEnd, Tls12FreshNodeOrchestration) {
     ASSERT_NE(front, nullptr);
     ASSERT_EQ(front->readable(), r.record.length);
 
-    // Open in place: ciphertext = the full payload (with nonce prefix), the
-    // plaintext lands past the nonce; the chain view is adjusted afterwards.
+    // Open in place: ciphertext = the full payload (with nonce prefix for
+    // GCM), the plaintext lands past the nonce; the chain view is adjusted
+    // afterwards.
     const std::uint8_t *wire = front->readable_data();
-    const std::uint16_t body_len = static_cast<std::uint16_t>(r.record.length - 8);
+    const std::size_t expl = open_side.explicit_nonce_len();
+    const std::uint16_t body_len = static_cast<std::uint16_t>(r.record.length - 16 - expl);
     const auto o = open_side.open(TlsContentType::ApplicationData, 0x0303, r.record.length,
                                   std::span<const std::uint8_t>(wire, r.record.length),
-                                  std::span<std::uint8_t>(const_cast<std::uint8_t *>(wire) + 8, body_len));
+                                  std::span<std::uint8_t>(const_cast<std::uint8_t *>(wire) + expl, body_len));
     ASSERT_EQ(o.status, TlsRecordCipher::Status::Ok);
     EXPECT_EQ(o.inner_type, TlsContentType::ApplicationData);
-    r.record.payload.consume(8); // drop the explicit nonce
-    r.record.payload.trim_end(body_len - o.plain_len);
+    r.record.payload.consume(expl); // drop the explicit nonce (GCM only; 0 for ChaCha)
+    r.record.payload.trim_end(r.record.length - expl - o.plain_len); // then the tag
 
     EXPECT_EQ(r.record.payload.readable_bytes(), plain.size());
     std::vector<std::uint8_t> received;
@@ -809,26 +859,28 @@ TEST(TlsRecordCipherScatter, SealScatterMatchesSeal) {
         const auto plain = ramp(77, 0x60);
         const bool tls13 = v.kind == TlsRecordProtectionKind::Tls13;
         const TlsContentType type = tls13 ? TlsContentType::ApplicationData : TlsContentType::Handshake;
-        const std::size_t off = tls13 ? 0 : 8;
+        const std::size_t off = wire_nonce_len(v); // 8 only for 1.2 GCM
 
         TlsRecordCipher reference;
         init_cipher(reference, v);
         std::vector<std::uint8_t> wire(reference.seal_output_size(plain.size()));
         ASSERT_EQ(reference.seal(type, plain, wire).status, TlsRecordCipher::Status::Ok);
 
-        // Disjoint outputs: three separate buffers (no prefix for 1.3).
+        // Disjoint outputs: three separate buffers (no prefix for 1.3 and
+        // 1.2 ChaCha — neither puts nonce bytes on the wire).
         TlsRecordCipher scatter;
         init_cipher(scatter, v);
         std::vector<std::uint8_t> ct(plain.size());
         std::vector<std::uint8_t> prefix(8);
         std::vector<std::uint8_t> tag(17);
-        const std::span<std::uint8_t> prefix_out = tls13 ? std::span<std::uint8_t>{} : std::span<std::uint8_t>(prefix);
+        const std::span<std::uint8_t> prefix_out =
+                off > 0 ? std::span<std::uint8_t>(prefix) : std::span<std::uint8_t>{};
         const auto r = scatter.seal_scatter(type, plain, ct, prefix_out, tag);
         ASSERT_EQ(r.status, TlsRecordCipher::Status::Ok);
         ASSERT_EQ(r.out_len, wire.size());
         EXPECT_EQ(ct, std::vector<std::uint8_t>(wire.begin() + off, wire.begin() + off + plain.size()));
         EXPECT_EQ(std::vector<std::uint8_t>(prefix.begin(), prefix.begin() + off),
-                  std::vector<std::uint8_t>(wire.begin(), wire.begin() + off)); // 1.2 nonce prefix
+                  std::vector<std::uint8_t>(wire.begin(), wire.begin() + off)); // 1.2-GCM nonce prefix
         EXPECT_EQ(std::vector<std::uint8_t>(tag.begin(), tag.begin() + r.out_len - off - plain.size()),
                   std::vector<std::uint8_t>(wire.begin() + off + plain.size(), wire.end()));
 
@@ -858,7 +910,7 @@ TEST(TlsRecordCipherScatter, OpenScatterRestoresPlaintext) {
         std::vector<std::uint8_t> wire(sealer.seal_output_size(plain.size()));
         ASSERT_EQ(sealer.seal(type, plain, wire).status, TlsRecordCipher::Status::Ok);
         const std::uint16_t length = static_cast<std::uint16_t>(wire.size());
-        const std::size_t off = tls13 ? 0 : 8;
+        const std::size_t off = wire_nonce_len(v); // 8 only for 1.2 GCM
         const std::size_t body_len = wire.size() - off - 16;
         const std::span<const std::uint8_t> nonce{wire.data(), off};
         const std::span<const std::uint8_t> body{wire.data() + off, body_len};
@@ -897,23 +949,25 @@ TEST(TlsRecordCipherScatter, EmptyPlaintextCrossFormRoundTrip) {
         const TlsContentType type = TlsContentType::Alert;
 
         // Scatter seal of an empty plaintext, regular open restores.
+        const std::size_t off = wire_nonce_len(v); // 8 only for 1.2 GCM
         TlsRecordCipher scatter;
         init_cipher(scatter, v);
         std::vector<std::uint8_t> prefix(8);
         std::vector<std::uint8_t> tag(17);
-        const std::span<std::uint8_t> prefix_out = tls13 ? std::span<std::uint8_t>{} : std::span<std::uint8_t>(prefix);
+        const std::span<std::uint8_t> prefix_out =
+                off > 0 ? std::span<std::uint8_t>(prefix) : std::span<std::uint8_t>{};
         std::vector<std::uint8_t> wire(scatter.seal_output_size(0));
         const auto r = scatter.seal_scatter(type, {}, std::span<std::uint8_t>(wire.data(), 0), prefix_out, tag);
         ASSERT_EQ(r.status, TlsRecordCipher::Status::Ok);
         const std::size_t tag_len = tls13 ? 17 : 16;
-        std::memcpy(wire.data() + (tls13 ? 0 : 8), tag.data(), tag_len);
-        if (!tls13) {
-            std::memcpy(wire.data(), prefix.data(), 8);
+        std::memcpy(wire.data() + off, tag.data(), tag_len);
+        if (off > 0) {
+            std::memcpy(wire.data(), prefix.data(), off);
         }
 
         TlsRecordCipher opener;
         init_cipher(opener, v);
-        const std::size_t open_off = tls13 ? 0 : 8; // 1.2 in-place dst sits past the nonce
+        const std::size_t open_off = off; // 1.2-GCM in-place dst sits past the nonce
         const auto o = opener.open(tls13 ? TlsContentType::ApplicationData : type, 0x0303,
                                    static_cast<std::uint16_t>(wire.size()), wire,
                                    std::span<std::uint8_t>(wire.data() + open_off, wire.size() - open_off));
@@ -929,7 +983,6 @@ TEST(TlsRecordCipherScatter, EmptyPlaintextCrossFormRoundTrip) {
         init_cipher(opener2, v);
         std::vector<std::uint8_t> wire2(sealer.seal_output_size(0));
         ASSERT_EQ(sealer.seal(type, {}, wire2).status, TlsRecordCipher::Status::Ok);
-        const std::size_t off = tls13 ? 0 : 8;
         const std::size_t body_len = wire2.size() - off - 16;
         const auto o2 = opener2.open_scatter(tls13 ? TlsContentType::ApplicationData : type, 0x0303,
                                              static_cast<std::uint16_t>(wire2.size()),

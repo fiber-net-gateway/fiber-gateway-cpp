@@ -933,6 +933,8 @@ common::IoResult<void> tls_decode_certificate_request_12(const std::uint8_t *bod
         request.signature_algorithms = sig.value();
     }
     if (!cursor.empty()) {
+        // certificate_authorities: u16-length vector (RFC 5246 §7.4.4 — the
+        // u24 form died with RFC 2246; 4346/5246 both say <0..2^16-1>).
         const auto auth_len = cursor.read_be16();
         if (!auth_len.has_value()) {
             return std::unexpected(common::IoErr::Invalid);
@@ -1365,6 +1367,284 @@ common::IoResult<std::size_t> tls_encode_client_key_exchange(std::span<const std
     if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::ClientKeyExchange)) ||
         !w.be24(static_cast<std::uint32_t>(1 + point.size())) || !w.u8(static_cast<std::uint8_t>(point.size())) ||
         !w.bytes(point)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
+common::IoResult<void> tls_decode_client_key_exchange(const std::uint8_t *body, std::size_t len,
+                                                      TlsClientKeyExchange &out) noexcept {
+    TlsReadCursor cursor(body, len);
+    TlsClientKeyExchange cke{};
+
+    const auto point_len = cursor.read_u8();
+    if (!point_len.has_value() || point_len.value() < 1) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const auto point = cursor.read_slice(point_len.value());
+    if (!point.has_value() || !cursor.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    cke.public_key = point.value();
+
+    out = cke;
+    return {};
+}
+
+// ====================================================================
+// 07 codec补齐：server flight encode + client flight decode
+// ====================================================================
+
+common::IoResult<std::size_t> tls_encode_server_hello(const TlsServerHelloInput &in,
+                                                      std::span<std::uint8_t> scratch) noexcept {
+    // Contract checks (mirror the encoder's shape requirements).
+    if (in.random.size() != 32 || in.session_id.size() > 32) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!in.alpn.empty() && in.alpn.size() > 0xFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.key_share.size() > 0xFFFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    std::size_t ext_len = 0;
+    if (in.tls13) {
+        // key_share (server share, or the bare selected_group when empty — HRR)
+        // -> supported_versions -> pre_shared_key LAST (RFC 8446 §4.2.11).
+        ext_len += 4 + 2 + (in.key_share.empty() ? 0 : 2 + in.key_share.size());
+        ext_len += 4 + 2;
+        if (in.selected_identity) {
+            ext_len += 4 + 2;
+        }
+    } else {
+        if (in.extended_master_secret) {
+            ext_len += 4;
+        }
+        if (in.renegotiation_info) {
+            ext_len += 4 + 1;
+        }
+        if (!in.alpn.empty()) {
+            ext_len += 4 + 2 + 1 + in.alpn.size();
+        }
+        if (in.session_ticket) {
+            ext_len += 4; // RFC 5077 §3.2: the SH echo is empty-payload
+        }
+    }
+
+    const std::size_t body_len = 2 + 32 + 1 + in.session_id.size() + 2 + 1 + 2 + ext_len;
+    if (body_len > kTlsMaxHandshakeMessageSize || scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::ServerHello)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) ||
+        !w.be16(static_cast<std::uint16_t>(TlsProtocolVersion::Tls12)) || !w.bytes(in.random) ||
+        !w.u8(static_cast<std::uint8_t>(in.session_id.size())) || !w.bytes(in.session_id) || !w.be16(in.cipher_suite) ||
+        !w.u8(0) || !w.be16(static_cast<std::uint16_t>(ext_len))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    if (in.tls13) {
+        if (!w.ext(TlsExtensionType::KeyShare, 2 + (in.key_share.empty() ? 0 : 2 + in.key_share.size())) ||
+            !w.be16(in.key_share_group)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (!in.key_share.empty() &&
+            (!w.be16(static_cast<std::uint16_t>(in.key_share.size())) || !w.bytes(in.key_share))) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (!w.ext(TlsExtensionType::SupportedVersions, 2) || !w.be16(0x0304)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (in.selected_identity && (!w.ext(TlsExtensionType::PreSharedKey, 2) || !w.be16(in.identity))) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    } else {
+        if (in.extended_master_secret && !w.ext(TlsExtensionType::ExtendedMasterSecret, 0)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        if (in.renegotiation_info) {
+            if (!w.ext(TlsExtensionType::RenegotiationInfo, 1) || !w.u8(0)) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+        }
+        if (!in.alpn.empty()) {
+            if (!w.ext(TlsExtensionType::Alpn, 2 + 1 + in.alpn.size()) ||
+                !w.be16(static_cast<std::uint16_t>(1 + in.alpn.size())) ||
+                !w.u8(static_cast<std::uint8_t>(in.alpn.size())) ||
+                !w.bytes({reinterpret_cast<const std::uint8_t *>(in.alpn.data()), in.alpn.size()})) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+        }
+        if (in.session_ticket && !w.ext(TlsExtensionType::SessionTicket, 0)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_encrypted_extensions(const TlsEncryptedExtensionsInput &in,
+                                                              std::span<std::uint8_t> scratch) noexcept {
+    if (!in.alpn.empty() && in.alpn.size() > 0xFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::size_t ext_len = 0;
+    if (in.acknowledge_server_name) {
+        ext_len += 4 + 2;
+    }
+    if (!in.alpn.empty()) {
+        ext_len += 4 + 2 + 1 + in.alpn.size();
+    }
+    if (in.early_data) {
+        ext_len += 4;
+    }
+
+    const std::size_t body_len = 2 + ext_len;
+    if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::EncryptedExtensions)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.be16(static_cast<std::uint16_t>(ext_len))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.acknowledge_server_name && (!w.ext(TlsExtensionType::ServerName, 2) || !w.be16(0))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!in.alpn.empty()) {
+        if (!w.ext(TlsExtensionType::Alpn, 2 + 1 + in.alpn.size()) ||
+            !w.be16(static_cast<std::uint16_t>(1 + in.alpn.size())) ||
+            !w.u8(static_cast<std::uint8_t>(in.alpn.size())) ||
+            !w.bytes({reinterpret_cast<const std::uint8_t *>(in.alpn.data()), in.alpn.size()})) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (in.early_data && !w.ext(TlsExtensionType::EarlyData, 0)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_certificate_request_13(std::span<const std::uint16_t> signature_algorithms,
+                                                                std::span<std::uint8_t> scratch) noexcept {
+    if (signature_algorithms.empty() || 2 + 2 * signature_algorithms.size() > 0xFFFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const std::size_t ext_len = 4 + 2 + 2 * signature_algorithms.size();
+    const std::size_t body_len = 1 + 2 + ext_len;
+    if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::CertificateRequest)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.u8(0) || !w.be16(static_cast<std::uint16_t>(ext_len)) ||
+        !w.ext(TlsExtensionType::SignatureAlgorithms, 2 + 2 * signature_algorithms.size()) ||
+        !w.be16(static_cast<std::uint16_t>(2 * signature_algorithms.size()))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    for (const std::uint16_t scheme: signature_algorithms) {
+        if (!w.be16(scheme)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_certificate_request_12(std::span<const std::uint16_t> signature_algorithms,
+                                                                std::span<std::uint8_t> scratch) noexcept {
+    if (signature_algorithms.empty() || 2 + 2 * signature_algorithms.size() > 0xFFFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    // types{rsa_sign(1), ecdsa_sign(64)} + sigalgs vector + EMPTY authorities.
+    const std::size_t body_len = 1 + 2 + 2 + 2 * signature_algorithms.size() + 2;
+    if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::CertificateRequest)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.u8(2) || !w.u8(1) || !w.u8(64) ||
+        !w.be16(static_cast<std::uint16_t>(2 * signature_algorithms.size()))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    for (const std::uint16_t scheme: signature_algorithms) {
+        if (!w.be16(scheme)) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    }
+    if (!w.be16(0)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_server_key_exchange(const TlsServerKeyExchangeInput &in,
+                                                             std::span<std::uint8_t> scratch) noexcept {
+    if (in.public_key.size() < 1 || in.public_key.size() > 255 || in.signature.empty() ||
+        in.signature.size() > 0xFFFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const std::size_t body_len = 1 + 2 + 1 + in.public_key.size() + 2 + 2 + in.signature.size();
+    if (body_len > kTlsMaxHandshakeMessageSize || scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::ServerKeyExchange)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.u8(3) || !w.be16(in.named_group) ||
+        !w.u8(static_cast<std::uint8_t>(in.public_key.size())) || !w.bytes(in.public_key) || !w.be16(in.scheme) ||
+        !w.be16(static_cast<std::uint16_t>(in.signature.size())) || !w.bytes(in.signature)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_new_session_ticket_13(const TlsNewSessionTicket13Input &in,
+                                                               std::span<std::uint8_t> scratch) noexcept {
+    if (in.ticket.empty() || in.ticket.size() > 0xFFFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::size_t ext_len = 0;
+    if (in.max_early_data != 0) {
+        ext_len += 4 + 4;
+    }
+    const std::size_t body_len = 4 + 4 + 1 + 1 + 2 + in.ticket.size() + 2 + ext_len;
+    if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::NewSessionTicket)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.be32(in.lifetime_s) || !w.be32(in.ticket_age_add) ||
+        !w.u8(1) || !w.u8(in.ticket_nonce) || !w.be16(static_cast<std::uint16_t>(in.ticket.size())) ||
+        !w.bytes(in.ticket) || !w.be16(static_cast<std::uint16_t>(ext_len))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (in.max_early_data != 0 && (!w.ext(TlsExtensionType::EarlyData, 4) || !w.be32(in.max_early_data))) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
+common::IoResult<std::size_t> tls_encode_new_session_ticket_12(std::uint32_t lifetime_s,
+                                                               std::span<const std::uint8_t> ticket,
+                                                               std::span<std::uint8_t> scratch) noexcept {
+    if (ticket.empty() || ticket.size() > 0xFFFF) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    const std::size_t body_len = 4 + 2 + ticket.size();
+    if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::NewSessionTicket)) ||
+        !w.be24(static_cast<std::uint32_t>(body_len)) || !w.be32(lifetime_s) ||
+        !w.be16(static_cast<std::uint16_t>(ticket.size())) || !w.bytes(ticket)) {
         return std::unexpected(common::IoErr::Invalid);
     }
     return w.offset();

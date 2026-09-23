@@ -87,6 +87,26 @@ struct TlsKeyShareView {
 [[nodiscard]] common::IoResult<bool> tls_find_client_key_share(std::span<const std::uint8_t> client_shares,
                                                                TlsNamedGroup group, TlsKeyShareView &out) noexcept;
 
+// RFC 8446 §4.2.11 PskIdentity: opaque identity<1..2^16-1> + u32
+// obfuscated_ticket_age. Borrowed view into the identities vector body.
+struct TlsPskIdentityView {
+    std::span<const std::uint8_t> identity{};
+    std::uint32_t obfuscated_ticket_age = 0;
+};
+
+// Indexes into a pre_shared_key identities vector body (the server walks the
+// client's offer at each index until a ticket lookup hits). Engaged false:
+// fewer than index+1 well-formed entries. Disengaged: malformed vector —
+// the ClientHello decode already guarantees an exact walk, so this is a
+// defensive re-walk of exactly index+1 entries.
+[[nodiscard]] common::IoResult<bool> tls_psk_identity_at(std::span<const std::uint8_t> psk_identities,
+                                                         std::size_t index, TlsPskIdentityView &out) noexcept;
+
+// Indexes into a pre_shared_key binders vector body (per-entry 1-byte length
+// prefix). Engaged false: fewer than index+1 entries. Disengaged: malformed.
+[[nodiscard]] common::IoResult<bool> tls_psk_binder_at(std::span<const std::uint8_t> psk_binders, std::size_t index,
+                                                       std::span<const std::uint8_t> &out) noexcept;
+
 // RFC 8446 §4.2.9 mode bytes (psk_ke = 0, psk_dhe_ke = 1).
 inline constexpr std::uint8_t kTlsPskModePskKe = 0;
 inline constexpr std::uint8_t kTlsPskModePskDheKe = 1;

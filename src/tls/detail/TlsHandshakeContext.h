@@ -117,6 +117,44 @@ public:
     [[nodiscard]] TlsRecordCipher &read_cipher() noexcept { return read_cipher_; }
     [[nodiscard]] TlsRecordCipher &write_cipher() noexcept { return write_cipher_; }
 
+    // ---- 0-RTT early data (RFC 8446 §4.2.10; engine-driven windows) ----
+
+    // Sink: the read cipher IS the early instance (0-RTT accepted). Inner
+    // application_data content is decrypted, budget-checked in PLAINTEXT
+    // content bytes (kMaxEarlyDataAccepted; over → unexpected_message,
+    // RFC 8446 §4.6.1), and copied into `out`. The window ends when the
+    // engine disarms at EndOfEarlyData.
+    void arm_early_data_sink(mem::IoBufChain &out, std::size_t budget) noexcept {
+        early_sink_ = &out;
+        early_budget_ = budget;
+        early_used_ = 0;
+        early_sink_armed_ = true;
+    }
+
+    // Skip: 0-RTT rejected but the client may still have early records in
+    // flight. In Sealed13 auth-failing outer application_data records are
+    // silently discarded (budget counts CIPHERTEXT bytes — the plaintext is
+    // unknowable — kMaxEarlyDataSkipped); the first successful open is the
+    // start of the client's second flight and ends the window. In Plaintext13
+    // (post-HRR, awaiting CH2) outer application_data records are skipped by
+    // type alone — no key exists to try — and the first handshake record ends
+    // the window.
+    void arm_early_data_skip(std::size_t budget) noexcept {
+        early_sink_ = nullptr;
+        early_budget_ = budget;
+        early_used_ = 0;
+        early_skip_armed_ = true;
+    }
+
+    void disarm_early_data() noexcept {
+        early_sink_armed_ = false;
+        early_skip_armed_ = false;
+        early_sink_ = nullptr;
+    }
+
+    // Sink-window content bytes handed over so far (tests/diagnostics).
+    [[nodiscard]] std::size_t early_data_received() const noexcept { return early_sink_armed_ ? early_used_ : 0; }
+
     // ---- failure ----
 
     // Encodes a fatal alert into out_ (sealed when the write cipher is
@@ -159,6 +197,12 @@ private:
     std::size_t plaintext_records_13_ = 0;
     bool has_current_ = false;
     bool failed_ = false;
+    // ---- 0-RTT window state (see the arm/disarm API above) ----
+    mem::IoBufChain *early_sink_ = nullptr; // sink target while armed
+    std::size_t early_budget_ = 0; // content (sink) / ciphertext (skip) ceiling
+    std::size_t early_used_ = 0;
+    bool early_sink_armed_ = false;
+    bool early_skip_armed_ = false;
     // In-place-open / materialization scratch; also the straddle destination
     // for tls_record_open_in_place.
     std::array<std::uint8_t, kOpenScratchSize> open_scratch_{};

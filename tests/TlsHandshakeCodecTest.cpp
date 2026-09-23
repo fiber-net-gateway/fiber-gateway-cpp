@@ -26,18 +26,28 @@ using fiber::tls::tls_decode_certificate_request_12;
 using fiber::tls::tls_decode_certificate_request_13;
 using fiber::tls::tls_decode_certificate_verify;
 using fiber::tls::tls_decode_client_hello;
+using fiber::tls::tls_decode_client_key_exchange;
 using fiber::tls::tls_decode_encrypted_extensions;
 using fiber::tls::tls_decode_finished;
 using fiber::tls::tls_decode_server_hello;
 using fiber::tls::tls_decode_server_key_exchange;
 using fiber::tls::tls_encode_certificate_12;
 using fiber::tls::tls_encode_certificate_13;
+using fiber::tls::tls_encode_certificate_request_12;
+using fiber::tls::tls_encode_certificate_request_13;
 using fiber::tls::tls_encode_certificate_verify;
 using fiber::tls::tls_encode_client_hello;
 using fiber::tls::tls_encode_client_key_exchange;
+using fiber::tls::tls_encode_encrypted_extensions;
 using fiber::tls::tls_encode_finished;
 using fiber::tls::tls_encode_handshake_message;
+using fiber::tls::tls_encode_new_session_ticket_12;
+using fiber::tls::tls_encode_new_session_ticket_13;
+using fiber::tls::tls_encode_server_hello;
+using fiber::tls::tls_encode_server_key_exchange;
 using fiber::tls::tls_is_hello_retry_request;
+using fiber::tls::tls_psk_binder_at;
+using fiber::tls::tls_psk_identity_at;
 using fiber::tls::TlsCertificate12;
 using fiber::tls::TlsCertificate13;
 using fiber::tls::TlsCertificateRequest12;
@@ -46,11 +56,17 @@ using fiber::tls::TlsCertificateVerify;
 using fiber::tls::TlsClientHello;
 using fiber::tls::TlsClientHelloEncoded;
 using fiber::tls::TlsClientHelloInput;
+using fiber::tls::TlsClientKeyExchange;
 using fiber::tls::TlsEncryptedExtensions;
+using fiber::tls::TlsEncryptedExtensionsInput;
 using fiber::tls::TlsFinished;
 using fiber::tls::TlsHandshakeType;
+using fiber::tls::TlsNewSessionTicket13Input;
+using fiber::tls::TlsPskIdentityView;
 using fiber::tls::TlsServerHello;
+using fiber::tls::TlsServerHelloInput;
 using fiber::tls::TlsServerKeyExchange;
+using fiber::tls::TlsServerKeyExchangeInput;
 
 void put_u8(std::vector<std::uint8_t> &out, std::uint8_t value) { out.push_back(value); }
 
@@ -291,7 +307,8 @@ TEST(ServerHelloDecode, MalformedTable) {
         EXPECT_FALSE(tls_decode_server_hello(body.data(), body.size(), out).has_value());
     };
 
-    bad(std::vector<std::uint8_t>(plain_sh_body().begin(), plain_sh_body().end() - 5)); // truncated mid-extension
+    const auto truncated_exts = plain_sh_body();
+    bad(std::vector<std::uint8_t>(truncated_exts.begin(), truncated_exts.end() - 5)); // truncated mid-extension
     bad(build_server_hello({kRandom32.data(), 31}, kSessionId, 0x1301, plain_sh_exts())); // random 31 bytes
     {
         auto body = plain_sh_body();
@@ -346,7 +363,8 @@ TEST(ServerHelloDecode, MalformedTable) {
     { // failure leaves `out` untouched
         TlsServerHello sentinel;
         sentinel.cipher_suite = 0xBEEF;
-        const auto truncated = std::vector<std::uint8_t>(plain_sh_body().begin(), plain_sh_body().begin() + 40);
+        const auto whole = plain_sh_body();
+        const auto truncated = std::vector<std::uint8_t>(whole.begin(), whole.begin() + 40);
         EXPECT_FALSE(tls_decode_server_hello(truncated.data(), truncated.size(), sentinel).has_value());
         EXPECT_EQ(sentinel.cipher_suite, 0xBEEFu);
     }
@@ -938,6 +956,417 @@ TEST(FlightEncode, ClientKeyExchange12PointForms) {
     const std::vector<std::uint8_t> huge(256, 0x01);
     EXPECT_FALSE(tls_encode_client_key_exchange(huge, scratch).has_value());
     EXPECT_FALSE(tls_encode_client_key_exchange(point, {scratch.data(), 4u + 1u + 65u - 1}).has_value());
+}
+
+// ---- 07 server flight encoders ----
+
+std::vector<std::uint16_t> extension_order(std::span<const std::uint8_t> block) {
+    std::vector<std::uint16_t> order;
+    fiber::tls::TlsExtensionCursor cursor(block);
+    fiber::tls::TlsExtensionView view;
+    while (true) {
+        const auto has = cursor.next(view);
+        if (!has.has_value() || !has.value()) {
+            break;
+        }
+        order.push_back(view.type);
+    }
+    return order;
+}
+
+TEST(ServerFlightEncode, ServerHello13RoundTrip) {
+    std::vector<std::uint8_t> scratch(512, 0);
+    const std::vector<std::uint8_t> random(32, 0x5A);
+    const std::vector<std::uint8_t> session_id(32, 0x33);
+    const std::vector<std::uint8_t> share(32, 0x77);
+
+    TlsServerHelloInput in{};
+    in.random = random;
+    in.session_id = session_id;
+    in.cipher_suite = 0x1301;
+    in.tls13 = true;
+    in.key_share_group = 0x001D;
+    in.key_share = share;
+    in.selected_identity = true;
+    in.identity = 0;
+
+    const auto len = tls_encode_server_hello(in, scratch);
+    ASSERT_TRUE(len.has_value());
+    EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::ServerHello));
+    // legacy_version 0x0303 + compression null live at fixed offsets.
+    EXPECT_EQ(scratch[4], 0x03);
+    EXPECT_EQ(scratch[5], 0x03);
+    EXPECT_EQ(scratch[38], static_cast<std::uint8_t>(session_id.size()));
+    EXPECT_EQ(scratch[39 + session_id.size()], 0x13);
+    EXPECT_EQ(scratch[40 + session_id.size()], 0x01);
+    EXPECT_EQ(scratch[41 + session_id.size()], 0); // compression
+
+    TlsServerHello sh{};
+    ASSERT_TRUE(tls_decode_server_hello(scratch.data() + 4, len.value() - 4, sh).has_value());
+    EXPECT_EQ(sh.legacy_version, 0x0303);
+    EXPECT_EQ(0, std::memcmp(sh.random.data(), random.data(), 32));
+    ASSERT_EQ(sh.session_id.size(), 32u);
+    EXPECT_EQ(0, std::memcmp(sh.session_id.data(), session_id.data(), 32));
+    EXPECT_EQ(sh.cipher_suite, 0x1301);
+    EXPECT_EQ(sh.compression_method, 0);
+    EXPECT_TRUE(sh.has_supported_version);
+    EXPECT_EQ(sh.supported_version, 0x0304);
+    EXPECT_TRUE(sh.has_key_share);
+    EXPECT_EQ(sh.key_share_group, 0x001D);
+    ASSERT_EQ(sh.key_share.size(), 32u);
+    EXPECT_EQ(0, std::memcmp(sh.key_share.data(), share.data(), 32));
+    EXPECT_TRUE(sh.has_selected_identity);
+    EXPECT_EQ(sh.selected_identity, 0);
+    // RFC 8446 §4.2.11: pre_shared_key must be the LAST extension.
+    const auto order = extension_order(sh.extensions_block);
+    EXPECT_EQ(order, (std::vector<std::uint16_t>{51, 43, 41}));
+
+    // Without PSK: key_share -> supported_versions only.
+    in.selected_identity = false;
+    const auto len2 = tls_encode_server_hello(in, scratch);
+    ASSERT_TRUE(len2.has_value());
+    ASSERT_TRUE(tls_decode_server_hello(scratch.data() + 4, len2.value() - 4, sh).has_value());
+    EXPECT_FALSE(sh.has_selected_identity);
+    EXPECT_EQ(extension_order(sh.extensions_block), (std::vector<std::uint16_t>{51, 43}));
+}
+
+TEST(ServerFlightEncode, ServerHelloHrrForm) {
+    std::vector<std::uint8_t> scratch(256, 0);
+    // The material must outlive `in`: TlsServerHelloInput borrows spans.
+    const std::vector<std::uint8_t> session_id(32, 0xEE);
+    TlsServerHelloInput in{};
+    in.random = std::span<const std::uint8_t>{kTlsHelloRetryRandom.data(), kTlsHelloRetryRandom.size()};
+    in.session_id = session_id;
+    in.cipher_suite = 0x1302;
+    in.tls13 = true;
+    in.key_share_group = 0x0017; // selected_group; empty key_share = HRR form
+
+    const auto len = tls_encode_server_hello(in, scratch);
+    ASSERT_TRUE(len.has_value());
+    TlsServerHello sh{};
+    ASSERT_TRUE(tls_decode_server_hello(scratch.data() + 4, len.value() - 4, sh).has_value());
+    EXPECT_TRUE(tls_is_hello_retry_request(sh.random));
+    EXPECT_TRUE(sh.has_supported_version);
+    EXPECT_EQ(sh.supported_version, 0x0304);
+    EXPECT_TRUE(sh.has_key_share);
+    EXPECT_EQ(sh.key_share_group, 0x0017);
+    EXPECT_TRUE(sh.key_share.empty()); // selected_group form: no key bytes
+    EXPECT_EQ(extension_order(sh.extensions_block), (std::vector<std::uint16_t>{51, 43}));
+}
+
+TEST(ServerFlightEncode, ServerHello12RoundTrip) {
+    std::vector<std::uint8_t> scratch(512, 0);
+    const std::vector<std::uint8_t> random(32, 0x9C);
+    const std::vector<std::uint8_t> session_id(16, 0x11);
+
+    TlsServerHelloInput in{};
+    in.random = random;
+    in.session_id = session_id;
+    in.cipher_suite = 0xC02F;
+    in.tls13 = false;
+    in.extended_master_secret = true;
+    in.renegotiation_info = true;
+    in.alpn = "h2";
+    in.session_ticket = true;
+
+    const auto len = tls_encode_server_hello(in, scratch);
+    ASSERT_TRUE(len.has_value());
+    TlsServerHello sh{};
+    ASSERT_TRUE(tls_decode_server_hello(scratch.data() + 4, len.value() - 4, sh).has_value());
+    EXPECT_EQ(sh.cipher_suite, 0xC02F);
+    EXPECT_FALSE(sh.has_supported_version);
+    EXPECT_FALSE(sh.has_key_share);
+    EXPECT_TRUE(sh.has_extended_master_secret);
+    EXPECT_TRUE(sh.has_renegotiation_info);
+    ASSERT_EQ(sh.renegotiation_info.size(), 1u); // empty renegotiated_connection
+    EXPECT_EQ(sh.renegotiation_info[0], 0);
+    EXPECT_TRUE(sh.has_alpn);
+    EXPECT_EQ(sh.alpn, "h2");
+    // extension order per the BoringSSL kExtensions walk: ems, ri, alpn, ticket
+    EXPECT_EQ(extension_order(sh.extensions_block), (std::vector<std::uint16_t>{23, 0xFF01, 16, 35}));
+
+    // Minimal 1.2 SH: renegotiation_info only.
+    in.extended_master_secret = false;
+    in.alpn = {};
+    in.session_ticket = false;
+    const auto len2 = tls_encode_server_hello(in, scratch);
+    ASSERT_TRUE(len2.has_value());
+    ASSERT_TRUE(tls_decode_server_hello(scratch.data() + 4, len2.value() - 4, sh).has_value());
+    EXPECT_EQ(extension_order(sh.extensions_block), (std::vector<std::uint16_t>{0xFF01}));
+}
+
+TEST(ServerFlightEncode, ServerHelloRejectsBadInput) {
+    std::vector<std::uint8_t> scratch(512, 0);
+    // The material must outlive `in`: TlsServerHelloInput borrows spans.
+    const std::vector<std::uint8_t> random31(31, 0x01); // wrong size
+    const std::vector<std::uint8_t> random32(32, 0x01);
+    const std::vector<std::uint8_t> session_id33(33, 0x02); // > 32
+    TlsServerHelloInput in{};
+    in.random = random31;
+    in.session_id = {};
+    in.cipher_suite = 0x1301;
+    in.tls13 = true;
+    EXPECT_FALSE(tls_encode_server_hello(in, scratch).has_value());
+
+    in.random = random32;
+    in.session_id = session_id33;
+    EXPECT_FALSE(tls_encode_server_hello(in, scratch).has_value());
+
+    in.session_id = {};
+    const auto len = tls_encode_server_hello(in, scratch);
+    ASSERT_TRUE(len.has_value());
+    EXPECT_FALSE(tls_encode_server_hello(in, {scratch.data(), len.value() - 1}).has_value()); // tight scratch
+}
+
+TEST(ServerFlightEncode, EncryptedExtensionsRoundTrip) {
+    std::vector<std::uint8_t> scratch(256, 0);
+
+    TlsEncryptedExtensionsInput in{};
+    in.acknowledge_server_name = true;
+    in.alpn = "h2";
+    in.early_data = true;
+
+    const auto len = tls_encode_encrypted_extensions(in, scratch);
+    ASSERT_TRUE(len.has_value());
+    EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::EncryptedExtensions));
+
+    TlsEncryptedExtensions ee{};
+    ASSERT_TRUE(tls_decode_encrypted_extensions(scratch.data() + 4, len.value() - 4, ee).has_value());
+    EXPECT_TRUE(ee.has_alpn);
+    EXPECT_EQ(ee.alpn, "h2");
+    EXPECT_TRUE(ee.has_early_data);
+    // server_name ack: a 2-byte empty ServerNameList, before alpn and early_data.
+    ASSERT_GE(ee.extensions_block.size(), 8u);
+    EXPECT_EQ(ee.extensions_block[0], 0x00); // type low byte (0)
+    EXPECT_EQ(ee.extensions_block[1], 0x00);
+    EXPECT_EQ(ee.extensions_block[2], 0x00); // payload length 2
+    EXPECT_EQ(ee.extensions_block[3], 0x02);
+    EXPECT_EQ(ee.extensions_block[4], 0x00); // ServerNameList length 0
+    EXPECT_EQ(ee.extensions_block[5], 0x00);
+    EXPECT_EQ(extension_order(ee.extensions_block), (std::vector<std::uint16_t>{0, 16, 42}));
+
+    // Empty EE is valid: u16 zero extension block only.
+    const auto bare = tls_encode_encrypted_extensions(TlsEncryptedExtensionsInput{}, scratch);
+    ASSERT_TRUE(bare.has_value());
+    EXPECT_EQ(bare.value(), 4u + 2u);
+}
+
+TEST(ServerFlightEncode, CertificateRequestRoundTrip) {
+    std::vector<std::uint8_t> scratch(512, 0);
+    const std::vector<std::uint16_t> schemes{0x0403, 0x0804, 0x0401};
+
+    // 1.3: context length 0 + signature_algorithms-only extension block.
+    const auto len13 = tls_encode_certificate_request_13(schemes, scratch);
+    ASSERT_TRUE(len13.has_value());
+    EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::CertificateRequest));
+    TlsCertificateRequest13 req13{};
+    ASSERT_TRUE(tls_decode_certificate_request_13(scratch.data() + 4, len13.value() - 4, req13).has_value());
+    EXPECT_TRUE(req13.certificate_request_context.empty());
+    EXPECT_TRUE(req13.has_signature_algorithms);
+    ASSERT_EQ(req13.signature_algorithms.size(), 6u);
+    EXPECT_EQ(req13.signature_algorithms[0], 0x04);
+    EXPECT_EQ(req13.signature_algorithms[1], 0x03);
+    EXPECT_EQ(extension_order(req13.extensions_block), (std::vector<std::uint16_t>{13}));
+
+    // 1.2: types{1, 64} + sigalgs vector + empty authorities (u16 length 0).
+    const auto len12 = tls_encode_certificate_request_12(schemes, scratch);
+    ASSERT_TRUE(len12.has_value());
+    TlsCertificateRequest12 req12{};
+    ASSERT_TRUE(tls_decode_certificate_request_12(scratch.data() + 4, len12.value() - 4, req12).has_value());
+    ASSERT_EQ(req12.certificate_types.size(), 2u);
+    EXPECT_EQ(req12.certificate_types[0], 1);
+    EXPECT_EQ(req12.certificate_types[1], 64);
+    EXPECT_TRUE(req12.has_signature_algorithms);
+    ASSERT_EQ(req12.signature_algorithms.size(), 6u);
+    EXPECT_TRUE(req12.certificate_authorities.empty());
+    // The trailing empty vector is present on the wire: u16 0 length.
+    EXPECT_EQ(len12.value(), 4u + 1u + 2u + 2u + 6u + 2u);
+
+    // Contract violations.
+    EXPECT_FALSE(tls_encode_certificate_request_13({}, scratch).has_value());
+    EXPECT_FALSE(tls_encode_certificate_request_12({}, scratch).has_value());
+}
+
+TEST(ServerFlightEncode, ServerKeyExchangeRoundTrip) {
+    std::vector<std::uint8_t> scratch(512, 0);
+    const std::vector<std::uint8_t> point(65, 0x04);
+    const std::vector<std::uint8_t> sig{0x01, 0x02, 0x03, 0x04};
+
+    TlsServerKeyExchangeInput in{};
+    in.named_group = 0x0017;
+    in.public_key = point;
+    in.scheme = 0x0403;
+    in.signature = sig;
+
+    const auto len = tls_encode_server_key_exchange(in, scratch);
+    ASSERT_TRUE(len.has_value());
+    EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::ServerKeyExchange));
+
+    TlsServerKeyExchange ske{};
+    ASSERT_TRUE(tls_decode_server_key_exchange(scratch.data() + 4, len.value() - 4, ske).has_value());
+    EXPECT_EQ(ske.curve_type, 3);
+    EXPECT_EQ(ske.named_group, 0x0017);
+    ASSERT_EQ(ske.public_key.size(), point.size());
+    EXPECT_EQ(0, std::memcmp(ske.public_key.data(), point.data(), point.size()));
+    EXPECT_EQ(ske.algorithm, 0x0403);
+    EXPECT_EQ(ske.signature.size(), sig.size());
+    EXPECT_EQ(0, std::memcmp(ske.signature.data(), sig.data(), sig.size()));
+
+    in.public_key = {};
+    EXPECT_FALSE(tls_encode_server_key_exchange(in, scratch).has_value());
+    in.public_key = point;
+    in.signature = {};
+    EXPECT_FALSE(tls_encode_server_key_exchange(in, scratch).has_value());
+}
+
+void put_u32(std::vector<std::uint8_t> &out, std::uint32_t value) {
+    out.push_back(static_cast<std::uint8_t>(value >> 24));
+    out.push_back(static_cast<std::uint8_t>(value >> 16));
+    out.push_back(static_cast<std::uint8_t>(value >> 8));
+    out.push_back(static_cast<std::uint8_t>(value));
+}
+
+TEST(ServerFlightEncode, NewSessionTicket13) {
+    std::vector<std::uint8_t> scratch(512, 0);
+    const std::vector<std::uint8_t> ticket{0xC0, 0xFF, 0xEE};
+
+    TlsNewSessionTicket13Input in{};
+    in.lifetime_s = 7200;
+    in.ticket_age_add = 0x11223344;
+    in.ticket_nonce = 0;
+    in.ticket = ticket;
+    in.max_early_data = 14336;
+
+    const auto len = tls_encode_new_session_ticket_13(in, scratch);
+    ASSERT_TRUE(len.has_value());
+    EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::NewSessionTicket));
+
+    // Expected body assembled independently: lifetime, age_add, nonce
+    // (u8 len 1 + 1 byte), ticket (u16 len), extensions{early_data u32}.
+    std::vector<std::uint8_t> expected;
+    put_u32(expected, 7200);
+    put_u32(expected, 0x11223344);
+    expected.push_back(1);
+    expected.push_back(0);
+    put_u16(expected, static_cast<std::uint16_t>(ticket.size()));
+    expected.insert(expected.end(), ticket.begin(), ticket.end());
+    put_u16(expected, 8); // extension block length
+    put_u16(expected, 42); // early_data
+    put_u16(expected, 4);
+    put_u32(expected, 14336);
+
+    ASSERT_EQ(len.value(), 4u + expected.size());
+    EXPECT_EQ(0, std::memcmp(scratch.data() + 4, expected.data(), expected.size()));
+
+    // max_early_data == 0 => empty extension block, no early_data entry.
+    in.max_early_data = 0;
+    const auto len2 = tls_encode_new_session_ticket_13(in, scratch);
+    ASSERT_TRUE(len2.has_value());
+    ASSERT_GE(len2.value(), 4u + 13u);
+    const std::size_t body2 = len2.value() - 4;
+    EXPECT_EQ(scratch[4 + body2 - 1], 0); // ext block len low byte 0
+    EXPECT_EQ(scratch[4 + body2 - 2], 0);
+
+    // Contract violations: empty ticket, oversized ticket (>0xFFFF).
+    in.ticket = {};
+    EXPECT_FALSE(tls_encode_new_session_ticket_13(in, scratch).has_value());
+}
+
+TEST(ServerFlightEncode, NewSessionTicket12) {
+    std::vector<std::uint8_t> scratch(512, 0);
+    const std::vector<std::uint8_t> ticket{0xAA, 0xBB, 0xCC, 0xDD, 0xEE};
+
+    const auto len = tls_encode_new_session_ticket_12(86400, ticket, scratch);
+    ASSERT_TRUE(len.has_value());
+
+    std::vector<std::uint8_t> expected;
+    put_u32(expected, 86400);
+    put_u16(expected, static_cast<std::uint16_t>(ticket.size()));
+    expected.insert(expected.end(), ticket.begin(), ticket.end());
+    ASSERT_EQ(len.value(), 4u + expected.size());
+    EXPECT_EQ(0, std::memcmp(scratch.data() + 4, expected.data(), expected.size()));
+
+    EXPECT_FALSE(tls_encode_new_session_ticket_12(100, {}, scratch).has_value());
+}
+
+TEST(ClientFlightDecode, ClientKeyExchange12) {
+    // Round-trip against our own encoder.
+    std::vector<std::uint8_t> scratch(300, 0);
+    const std::vector<std::uint8_t> point(65, 0x04);
+    const auto len = tls_encode_client_key_exchange(point, scratch);
+    ASSERT_TRUE(len.has_value());
+
+    TlsClientKeyExchange cke{};
+    ASSERT_TRUE(tls_decode_client_key_exchange(scratch.data() + 4, len.value() - 4, cke).has_value());
+    ASSERT_EQ(cke.public_key.size(), point.size());
+    EXPECT_EQ(0, std::memcmp(cke.public_key.data(), point.data(), point.size()));
+
+    // Truncated body, zero-length point, trailing bytes all fail.
+    EXPECT_FALSE(tls_decode_client_key_exchange(scratch.data() + 4, 0, cke).has_value());
+    const std::uint8_t zero_len[] = {0x00};
+    EXPECT_FALSE(tls_decode_client_key_exchange(zero_len, sizeof(zero_len), cke).has_value());
+    const std::uint8_t trailing[] = {0x01, 0xAB, 0xCD};
+    EXPECT_FALSE(tls_decode_client_key_exchange(trailing, sizeof(trailing), cke).has_value());
+}
+
+TEST(PskWalk, IdentityAndBinderAtIndex) {
+    // identities: two entries — {0xA1} age 100, {0xB1, 0xB2} age 0xFFFFFFF0.
+    std::vector<std::uint8_t> identities;
+    put_u16(identities, 1);
+    identities.push_back(0xA1);
+    put_u32(identities, 100);
+    put_u16(identities, 2);
+    identities.push_back(0xB1);
+    identities.push_back(0xB2);
+    put_u32(identities, 0xFFFFFFF0);
+
+    TlsPskIdentityView view{};
+    const auto first = tls_psk_identity_at(identities, 0, view);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_EQ(view.identity.size(), 1u);
+    EXPECT_EQ(view.identity[0], 0xA1);
+    EXPECT_EQ(view.obfuscated_ticket_age, 100u);
+
+    const auto second = tls_psk_identity_at(identities, 1, view);
+    ASSERT_TRUE(second.has_value());
+    ASSERT_EQ(view.identity.size(), 2u);
+    EXPECT_EQ(view.identity[0], 0xB1);
+    EXPECT_EQ(view.obfuscated_ticket_age, 0xFFFFFFF0u);
+
+    const auto third = tls_psk_identity_at(identities, 2, view);
+    ASSERT_TRUE(third.has_value());
+    EXPECT_FALSE(third.value()); // out of range: engaged false
+
+    // Truncated age fails the walk.
+    const std::uint8_t truncated[] = {0x00, 0x01, 0xA1, 0x00};
+    EXPECT_FALSE(tls_psk_identity_at(truncated, 0, view).has_value());
+
+    // binders: two entries — 32-byte and 48-byte (the two suite hash lengths).
+    std::vector<std::uint8_t> binders;
+    binders.push_back(32);
+    binders.insert(binders.end(), 32, 0x11);
+    binders.push_back(48);
+    binders.insert(binders.end(), 48, 0x22);
+
+    std::span<const std::uint8_t> binder{};
+    const auto b0 = tls_psk_binder_at(binders, 0, binder);
+    ASSERT_TRUE(b0.has_value());
+    ASSERT_TRUE(b0.value());
+    ASSERT_EQ(binder.size(), 32u);
+    EXPECT_EQ(binder[0], 0x11);
+
+    const auto b1 = tls_psk_binder_at(binders, 1, binder);
+    ASSERT_TRUE(b1.has_value());
+    ASSERT_TRUE(b1.value());
+    ASSERT_EQ(binder.size(), 48u);
+    EXPECT_EQ(binder[0], 0x22);
+
+    const auto b2 = tls_psk_binder_at(binders, 2, binder);
+    ASSERT_TRUE(b2.has_value());
+    EXPECT_FALSE(b2.value());
+
+    const std::uint8_t bad_binder[] = {5, 0x01};
+    EXPECT_FALSE(tls_psk_binder_at(bad_binder, 0, binder).has_value());
 }
 
 } // namespace
