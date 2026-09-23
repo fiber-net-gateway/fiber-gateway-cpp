@@ -205,10 +205,13 @@ Tls13ServerHandshake::PskOutcome Tls13ServerHandshake::try_accept_psk(const TlsC
         return PskOutcome::Reject; // no/oversized identity — drop the ticket
     }
 
-    // ---- lookup (hook owns the returned bytes; miss = full handshake) ----
+    // ---- lookup (hook owns the returned bytes; miss = full handshake). The
+    // CH's SNI rides along so the stateless open can check the ticket's AAD
+    // name binding, and now_unix_ms is the same clock snapshot the age gate
+    // below uses — the lookup's expiry and the gate can never disagree. ----
     TlsResumedSession resumed{};
     if (resumption_ == nullptr || resumption_->lookup == nullptr ||
-        !resumption_->lookup(resumption_->ctx, id.identity, resumed)) {
+        !resumption_->lookup(resumption_->ctx, id.identity, hello_.view.server_name, cfg_.now_unix_ms, resumed)) {
         return PskOutcome::Reject;
     }
 

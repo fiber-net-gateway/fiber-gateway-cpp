@@ -1,18 +1,22 @@
-# TLS 自研实现 · 08 会话恢复(slice 1:无状态双版本 NST 下发)
+# TLS 自研实现 · 08 会话恢复(slice 1:无状态 NST 下发;slice 2:lookup 恢复接线)
 
 ## 1. 范围与定谳
 
-08 原案(会话恢复全案)在本 slice 收窄为**服务端 NewSessionTicket 下发**,TLS 1.3 与
-TLS 1.2 双版本,并按用户定谳做成**无状态**:服务端不存储任何已下发票据;票据本体即
-全部恢复状态,以 ticket protection key(TPK)做 AEAD 加密认证;恢复时服务端只验证
-票据合法性,不存在"是否下发过"的记忆判断。
+08 原案(会话恢复全案)在 slice 1 收窄为**服务端 NewSessionTicket 下发**,TLS 1.3
+与 TLS 1.2 双版本,并按用户定谳做成**无状态**:服务端不存储任何已下发票据;票据本体
+即全部恢复状态,以 ticket protection key(TPK)做 AEAD 加密认证;恢复时服务端只验证
+票据合法性,不存在"是否下发过"的记忆判断。**slice 2 补齐 lookup 半边与恢复接线**
+(§7):`TlsResumptionLookup` 真实现接进 07 引擎,1.3 票据全链路恢复——零格式改动。
 
 后移到后续 slice 的内容:
 
-- lookup 半边 + 恢复接线(本文 §7 已冻结 open() 验证清单,届时**零格式改动**);
-- 客户端取票入会话缓存(06 引擎侧);
-- 1.2 abbreviated handshake 双侧(RFC 5077 恢复路径);
+- 1.2 abbreviated handshake 双侧(RFC 5077 恢复路径;lookup 已把 1.2 票恒判
+  miss→全握手回退,abbreviated 是下一 slice);
 - 09 net 集成换芯时的服务装配(每 loop 一个 service 或跨 loop 共享,§5)。
+
+客户端取票入会话缓存经用户定谳**不做**(无需求,2026-09-23):06 客户端不缓存
+票据、不主动发起恢复;恢复场景 = 服务端 lookup 半边 + 对端客户端(e2e 以
+BoringSSL 客户端或手工 `TlsSessionOffer` 驱动,§7/§8 已是此形态)。
 
 ## 2. 无状态契约(三条,设计即钉死)
 
@@ -113,21 +117,31 @@ OpenStatus open(span<const u8> ticket, string_view name, i64 now,
 - **1.2**(`Tls12ServerHandshake::send_final_flight_12`):Fin 之前、明文 NST;
   门 = CH offered 5077(`ticket_wanted_`)AND minter 非空。追加同两字段。
 
-## 7. 冻结的 lookup 验证清单(后续 slice 的验收基线,零格式改动)
+## 7. lookup 半边(2026-09-23 slice 2 实施;验证清单原样兑现,零格式改动)
 
-将来 `TlsResumptionLookup` 的真实现 = `open(identity, CH 的 SNI, now, contents)`
-+ 引擎侧既有 binder/age 门,具体:
+`TlsResumptionLookup` 签名扩两参:`(ctx, identity, name, now_unix_ms, out)`。
+`name` = CH 的 SNI(stateless open 据此核 AAD 名绑定),由引擎传
+`hello_.view.server_name`(借 16KiB CH 保留数组,HRR 后 CH2 re-decode 同栈 view
+仍有效);`now_unix_ms` = `cfg_.now_unix_ms`(与 age 门同一时钟快照,过载判定
+与 age 门永不冲突)。out spans 借 hook 存储、**调用返回后被引擎读取**——契约注释
+由错误的"返回前消费"修正。
 
-1. open Rejected → 全握手回退(PSK identity 拒);
-2. open Expired → 同上(区别仅在语义与统计);
-3. contents.version ≠ 引擎协商版本 → 拒;
-4. contents.suite ∉ 本连接可用 → 拒(07 已有 suite 一致性门);
-5. 1.3 恢复用 contents.secret 作 PSK 走 PSK+DHE(binder 恒校验);
-6. max_early_data == 0(无状态期恒 0)⇒ 不发 early_data 扩展。
+真实现 = `TlsTicketService::lookup()` 适配对 + `lookup_thunk`:
 
-## 8. 测试(2379 全绿;票据面 16)
+- `open(identity, name, now, contents)` + **版本门**:仅 1.3 票走 1.3 PSK 路径;
+  1.2 票 / Rejected / Expired 全部 miss → 全握手回退(1.2 abbreviated 属后续
+  slice)。清单 1/2/3 由此兑现。
+- 命中时 `TlsResumedSession` 全字段映射:psk=`contents.secret.bytes()`(引擎立即
+  拷进 `TlsSecret`)、suite、alpn、age_add、max_early_data、issued_ms;随后引擎
+  既有级联接管:清单 4(suite 门)、5(binder 恒校验,mismatch=fatal)、6(恒 0
+  ⇒ 无 early_data 扩展)。
+- **借用安全**:thunk 内开的票停 `thread_local TlsTicketContents t_staged_resumption`
+  暂存格——栈变量随 thunk 返回即悬空,而引擎在 hook 返回之后才消费;引擎在同一
+  步内读完,同线程下一次 lookup 覆盖,单飞不并发。
 
-`tests/TlsTicketServiceTest.cpp`(14 个单测):
+## 8. 测试(2384 全绿;票据面 16 + lookup 面 2 单测 + 3 e2e + EE 重钉)
+
+`tests/TlsTicketServiceTest.cpp`(16 个单测,slice 1 的 14 个 + lookup 2 个):
 EmptyKeySetIsInvalid(valid false + mint 恒 0)、DuplicateIdsAreInvalid、
 OverflowKeepsNewestEight(10 把注入 → 保留最新 8,mint 选最新)、
 RandomKeyMintsFreshMaterial(熵新鲜 + 可构造可开票)、
@@ -152,12 +166,34 @@ alpn 256、version=Tls11、out 过小)。
   握手后开票 == Ok,version==Tls12、secret==state.tls12_master(48B);空名
   Rejected(SNI 已上线)。
 
+slice 2 新增:
+
+- `TlsTicketServiceTest` lookup 面 2 个:**LookupThunkResumes13Ticket**
+  (lookup() 命中:psk == `tls13_resumption_psk(master,{0})`、suite/alpn=="h2"/
+  age_add/issued 全字段回读)、**LookupThunkMissesOnWrongNameTamperExpiryOr12**
+  (错名 / ct 翻位 / 4s 票 5s 后过期 / 1.2 票 / 空 key service 全 false)。
+- `TlsServerHandshakeEngineTest` 无状态恢复 e2e 3 条(RecordingServiceLookup 包
+  装 thunk,记录 called/seen_name/seen_now_ms):**StatelessResume13WithBoringClient**
+  ——hop1 BoringClient(collect_tickets+send_sni)mint+NST 消化,hop2 set_session
+  重连:session_resumed、SSL_session_reused==1、lookup 收 name=="example.com" 与
+  now==kRefNowMs、二跳再 mint、app 数据双向 round-trip(证明 psk-not-master 派生
+  与客户端 RFC 推导逐字节一致);**StatelessResumeOurPair**——DualMaterial hop1
+  pump 抓票 → open 回读 → 手构 TlsSessionOffer(身份/age_add/suite/psk)→ hop2
+  `service.lookup()` 接线 pump+tail:双侧 resumed、app secrets 相等、再 mint 新票
+  且可开;**CrossVhostTicketFallsBackToFull**——hop1 票在 hop2 换 SNI
+  ("other.example")出示(BoringSSL 会话使用不按名字设门,跨 SNI 仍 offer——已核
+  其源码),AAD 名绑定拒 → 全握手成功、!resumed、reused==0、recorder 见新名
+  (miss 归因服务端 AAD 拒,非客户端未带)。
+- `TlsHandshakeCodecTest` EE server_name ack 重钉为零长度扩展体 + 负测(见 §10
+  wire bug 修复)。
+
 ## 9. 待拍板 / 遗留
 
 - 装配形态(09):每 loop 一个 service(免跨线程,物料同种子)vs 全局共享
   ——免锁重构后两者代码路径完全一致,纯归属选择;倾向每 loop(与 EventLoop
   归属一致)。TPK 物料来源(配置文件/seed)与分发是 09 装配题。
-- 1.2 abbreviated 双侧与客户端缓存接线随 lookup slice 一起做。
+- 1.2 abbreviated handshake 双侧——下一 slice。客户端取票缓存已定谳不做
+  (无需求,§1)。
 
 ## 10. 实施记录
 
@@ -182,3 +218,19 @@ alpn 256、version=Tls11、out 过小)。
   引擎 TU,再引一次不扩大编译面。现为成员直排:零堆分配、少一层间接、
   valid()==(key_count_!=0)、Key::live 标志删除;失败路径无 delete,只 cleanup
   已 init 的 ctx 并归零 count。API 与测试零改动,2379 全量绿。
+- **2026-09-23 slice 2:lookup 半边 + 恢复接线**。TlsConfig.h(TlsResumptionLookup
+  +name/+now 两参,借用契约修正为"返回后消费")、TlsTicketService::lookup()/
+  lookup_thunk(thread_local 暂存,见 §7)、Tls13ServerHandshake try_accept_psk 接
+  线(identity[0] miss → PskOutcome::Reject 全握手回退)、单测 2 + e2e 3 + EE 重钉
+  (见 §8)。自查修复:thunk 首版栈上 TlsTicketContents 返回即悬空(引擎在 hook
+  返回后才读 resumed,测试红:psk 读到栈残骸、binder over garbage)→ 改暂存格。
+  **07 遗留 wire bug 一并修复(EE server_name ack)**:07 的 EE 编码器写 2 字节空
+  ServerNameList(RFC 6066 1.2 形态 `00 00 00 02 00 00`),而 RFC 8446 §4.2.1
+  要求 1.3 EE 的 server_name ack 为**零长度扩展体**(无 ServerNameList)。此前未
+  暴露:07 的 1.3 BoringSSL 互驱从不发 SNI(send_sni 只用于 1.2/双引擎测试),自家
+  06 client decode 对 server_name 走 default 全忽略——两端口对称地错。slice 2 的
+  send_sni e2e 一上 BoringSSL 即报 ERROR_PARSING_EXTENSION(ext 0;extensions.cc
+  `CBS_len(contents)==0` 严格校验)。修四处:编码器 ack 分支(零长度)、头注释、
+  decode 严格化(带载荷 → Invalid)、单测重钉 + 负测。2384 全量绿。
+- **2026-09-23 定谳:客户端取票缓存不做**(无需求)——06 客户端不缓存票据、
+  不发 PSK offer;后续仅剩 1.2 abbreviated 双侧与 09 装配。

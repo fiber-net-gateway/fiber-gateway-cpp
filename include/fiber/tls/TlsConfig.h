@@ -76,7 +76,13 @@ struct TlsResumedSession { // all-borrowed views; the lookup caller owns the byt
     std::int64_t ticket_issued_ms = 0; // for the age-window check (60 s skew, §10.4)
 };
 struct TlsResumptionLookup {
-    bool (*lookup)(void *ctx, std::span<const std::uint8_t> identity, TlsResumedSession &out) noexcept = nullptr;
+    // name = the CH's SNI (the stateless ticket binds it into its AAD),
+    // now_unix_ms = the engine's clock for the expiry check — the same
+    // snapshot the age gate uses. The out spans borrow the hook's storage
+    // and must stay valid until the caller has consumed them (the engine
+    // reads them right after the call returns).
+    bool (*lookup)(void *ctx, std::span<const std::uint8_t> identity, std::string_view name, std::int64_t now_unix_ms,
+                   TlsResumedSession &out) noexcept = nullptr;
     void *ctx = nullptr;
 };
 

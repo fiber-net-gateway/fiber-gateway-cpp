@@ -457,4 +457,37 @@ TlsTicketService::OpenStatus TlsTicketService::open(std::span<const std::uint8_t
     return OpenStatus::Ok;
 }
 
+// =====================================================================
+// Lookup — the engine-facing resumption half (08 §7)
+// =====================================================================
+
+TlsResumptionLookup TlsTicketService::lookup() noexcept { return TlsResumptionLookup{&lookup_thunk, this}; }
+
+// The returned spans must outlive the hook's frame — the engine reads them
+// right AFTER the call returns — so the opened ticket parks in this
+// thread-local staging cell (an engine consumes its lookup result within the
+// same handshake step; the same thread's next lookup overwrites the cell).
+thread_local TlsTicketContents t_staged_resumption;
+
+// A miss (false) is always safe: the engine drops the pre_shared_key offer
+// and runs a full handshake. Rejected, Expired, and the 1.2-container
+// version all land here — the 1.2 abbreviated-handshake path is a later
+// slice; until then a 1.2 ticket is simply not resumable through this hook.
+bool TlsTicketService::lookup_thunk(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
+                                    std::int64_t now_unix_ms, TlsResumedSession &out) noexcept {
+    auto &self = *static_cast<TlsTicketService *>(ctx);
+    TlsTicketContents &contents = t_staged_resumption;
+    if (self.open(identity, name, now_unix_ms, contents) != OpenStatus::Ok ||
+        contents.version != TlsProtocolVersion::Tls13) {
+        return false;
+    }
+    out.psk = contents.secret.bytes();
+    out.suite = contents.suite;
+    out.alpn = contents.alpn_view();
+    out.ticket_age_add = contents.ticket_age_add;
+    out.max_early_data = contents.max_early_data;
+    out.ticket_issued_ms = contents.issued_ms;
+    return true;
+}
+
 } // namespace fiber::tls
