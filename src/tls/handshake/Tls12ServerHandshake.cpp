@@ -447,6 +447,8 @@ bool Tls12ServerHandshake::send_final_flight_12() noexcept {
         req.max_early_data = 0; // 0-RTT is a 1.3-only property
         req.timeout_s = cfg_.session_timeout_s;
         req.now_unix_ms = cfg_.now_unix_ms;
+        req.version = TlsProtocolVersion::Tls12;
+        req.name = hello_.view.server_name; // the CH's SNI over the retained copy — stable
         const std::size_t ticket_len = minter_->mint(minter_->ctx, req, ticket_buf_);
         if (ticket_len > 0 && ticket_len <= ticket_buf_.size()) {
             const auto nst_len = tls_encode_new_session_ticket_12(cfg_.session_timeout_s,

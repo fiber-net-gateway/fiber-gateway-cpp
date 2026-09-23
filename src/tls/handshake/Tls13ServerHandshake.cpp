@@ -870,15 +870,19 @@ void Tls13ServerHandshake::finish_1_3() noexcept {
                                         (static_cast<std::uint32_t>(age_add[2]) << 8) |
                                         static_cast<std::uint32_t>(age_add[3]);
         const std::size_t cap = scratch_.size() / 2;
-        const TlsTicketRequest request{
-                resumption_master_.bytes(),
-                0,
-                suite_,
-                std::string_view{reinterpret_cast<const char *>(state_.alpn.data()), state_.alpn_len},
-                age_add_v,
-                cfg_.enable_early_data ? kMaxEarlyDataAccepted : 0,
-                cfg_.session_timeout_s,
-                cfg_.now_unix_ms};
+        TlsTicketRequest request{};
+        request.resumption_master = resumption_master_.bytes();
+        request.ticket_nonce = 0;
+        request.suite = suite_;
+        request.alpn = std::string_view{reinterpret_cast<const char *>(state_.alpn.data()), state_.alpn_len};
+        request.ticket_age_add = age_add_v;
+        request.max_early_data = cfg_.enable_early_data ? kMaxEarlyDataAccepted : 0;
+        request.timeout_s = cfg_.session_timeout_s;
+        request.now_unix_ms = cfg_.now_unix_ms;
+        request.version = TlsProtocolVersion::Tls13;
+        // The CH's SNI rides the retained copy (hello_.ch) — stable storage,
+        // and the minter call is synchronous, so the borrow is sound.
+        request.name = hello_.view.server_name;
         const std::size_t ticket_len = minter_->mint(minter_->ctx, request, {scratch_.data() + cap, cap});
         if (ticket_len == 0) {
             // The hook declined (e.g. no session store) — no NST this connection.

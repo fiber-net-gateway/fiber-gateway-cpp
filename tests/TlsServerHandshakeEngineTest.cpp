@@ -37,6 +37,7 @@
 #include <fiber/common/mem/IoBufChain.h>
 #include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/TlsConnectedState.h>
+#include <fiber/tls/TlsTicketService.h>
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/crypto/TlsKeyExchange.h>
 #include <fiber/tls/crypto/TlsSignature.h>
@@ -68,8 +69,12 @@ using fiber::tls::TlsSecret;
 using fiber::tls::TlsServerConfig;
 using fiber::tls::TlsServerHandshakeEngine;
 using fiber::tls::TlsSessionOffer;
+using fiber::tls::TlsTicketContents;
+using fiber::tls::TlsTicketKeyMaterial;
+using fiber::tls::TlsTicketKeyPolicy;
 using fiber::tls::TlsTicketMinter;
 using fiber::tls::TlsTicketRequest;
+using fiber::tls::TlsTicketService;
 using fiber::tls::TlsTrustStore;
 using ClientEvent = TlsClientHandshakeEngine::Event;
 using Event = TlsServerHandshakeEngine::Event;
@@ -122,6 +127,7 @@ struct ClientOptions {
     const char *groups = nullptr; // non-null: restrict/reorder groups (HRR trigger)
     bool client_cert = false; // load the kClientRsaPem credential (mTLS)
     bool collect_tickets = false; // stash sessions the NSTs carry (PSK/0-RTT tests)
+    bool send_sni = false; // put opt.host on the wire as SNI (ticket-name-binding tests)
 };
 
 class BoringClient {
@@ -163,6 +169,9 @@ public:
         client->wbio_ = BIO_new(BIO_s_mem());
         SSL_set_bio(client->ssl_, client->rbio_, client->wbio_);
         if (opt.trust_pem != nullptr && SSL_set1_host(client->ssl_, opt.host) != 1) {
+            return nullptr;
+        }
+        if (opt.send_sni && SSL_set_tlsext_host_name(client->ssl_, opt.host) != 1) {
             return nullptr;
         }
         if (opt.groups != nullptr && SSL_set1_groups_list(client->ssl_, opt.groups) != 1) {
@@ -1834,4 +1843,103 @@ TEST(TlsServerHandshakeSurface, NullCredentialFailsConstruction) {
     EXPECT_TRUE(engine.done());
     EXPECT_TRUE(engine.failed());
     EXPECT_EQ(TlsAlertDesc::InternalError, engine.failure_alert());
+}
+
+// ---- stateless ticket minting through the real engines (08 slice 1) ----
+
+// Wraps TlsTicketService's minter hook to keep a copy of every minted blob:
+// the NST's on-wire bytes are sealed (1.3) or handshake-MAC'd (1.2), so the
+// capture is the only place both the blob and its provenance are visible.
+struct CapturingServiceMinter {
+    TlsTicketService &service;
+    std::vector<std::uint8_t> ticket;
+    bool called = false;
+
+    static std::size_t mint(void *ctx, const TlsTicketRequest &req, std::span<std::uint8_t> out) noexcept {
+        auto &self = *static_cast<CapturingServiceMinter *>(ctx);
+        self.called = true;
+        const std::size_t len = TlsTicketService::mint_thunk(&self.service, req, out);
+        if (len > 0) {
+            self.ticket.assign(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(len));
+        }
+        return len;
+    }
+    [[nodiscard]] TlsTicketMinter hook() noexcept { return TlsTicketMinter{&mint, this}; }
+};
+
+// The full 1.3 handshake mints a stateless ticket carrying the DERIVED psk
+// and the CH's SNI in the AAD — the future lookup consumes exactly this.
+TEST(TlsServerTicketService, Mint13ThroughEngineBindsSniAndCarriesPsk) {
+    DualMaterial dual;
+    const std::array<TlsTicketKeyMaterial, 1> ticket_keys{{
+            {.id = 1,
+             .bytes = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+             .created_ms = certfix::kRefNowMs},
+    }};
+    TlsTicketService service(ticket_keys, TlsTicketKeyPolicy{});
+    ASSERT_TRUE(service.valid());
+    CapturingServiceMinter capture{.service = service};
+    const TlsTicketMinter minter = capture.hook();
+
+    TlsServerHandshakeEngine server(dual.server_material.config(), nullptr, &minter, dual.server_material.pool);
+    TlsClientHandshakeEngine client(dual.client_cfg, nullptr, dual.server_material.pool);
+    std::vector<std::uint8_t> tail;
+    ASSERT_TRUE(pump(client, server, &tail));
+    EXPECT_TRUE(capture.called); // 1.3 always mints one ticket after client Fin
+    ASSERT_FALSE(capture.ticket.empty());
+
+    const TlsConnectedState state = server.take_state();
+    TlsTicketContents contents;
+    ASSERT_EQ(TlsTicketService::OpenStatus::Ok,
+              service.open(capture.ticket, "example.com", certfix::kRefNowMs + 1000, contents));
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, contents.version);
+    EXPECT_EQ(state.suite, contents.suite);
+    EXPECT_EQ("h2", contents.alpn_view());
+    EXPECT_EQ(certfix::kRefNowMs, contents.issued_ms);
+    EXPECT_EQ(7200u, contents.timeout_s);
+    // PSK symmetry with the client's own NST-side derivation.
+    const std::array<std::uint8_t, 1> nonce{0};
+    const auto psk = fiber::tls::tls13_resumption_psk(state.resumption_master, nonce);
+    ASSERT_TRUE(psk.has_value());
+    EXPECT_TRUE(secrets_equal(*psk, contents.secret));
+    // Another vhost cannot use the ticket.
+    TlsTicketContents wrong;
+    EXPECT_EQ(TlsTicketService::OpenStatus::Rejected,
+              service.open(capture.ticket, "other.example", certfix::kRefNowMs, wrong));
+}
+
+// A TLS 1.2 BoringSSL client that offers session tickets (SNI on the wire)
+// gets a stateless ticket carrying the 48-byte master secret.
+TEST(TlsServerTicketService, Mint12ThroughEngineCarriesMaster) {
+    auto client = BoringClient::make(ClientOptions{.tls12_only = true, .send_sni = true});
+    ASSERT_NE(nullptr, client);
+    ServerMaterial material;
+    const std::array<TlsTicketKeyMaterial, 1> ticket_keys{{
+            {.id = 1,
+             .bytes = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+             .created_ms = certfix::kRefNowMs},
+    }};
+    TlsTicketService service(ticket_keys, TlsTicketKeyPolicy{});
+    CapturingServiceMinter capture{.service = service};
+    const TlsTicketMinter minter = capture.hook();
+
+    TlsServerHandshakeEngine engine(material.config(), nullptr, &minter, material.pool);
+    ASSERT_TRUE(drive(*client, engine, false));
+    EXPECT_TRUE(capture.called);
+    ASSERT_FALSE(capture.ticket.empty());
+
+    const TlsConnectedState state = engine.take_state();
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+
+    TlsTicketContents contents;
+    ASSERT_EQ(TlsTicketService::OpenStatus::Ok,
+              service.open(capture.ticket, "example.com", certfix::kRefNowMs + 1000, contents));
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, contents.version);
+    EXPECT_EQ(state.suite, contents.suite);
+    EXPECT_EQ("h2", contents.alpn_view());
+    ASSERT_EQ(48u, contents.secret.len());
+    EXPECT_TRUE(secrets_equal(state.tls12_master, contents.secret));
+    // SNI was sent, so the empty name is not this ticket's name.
+    TlsTicketContents wrong;
+    EXPECT_EQ(TlsTicketService::OpenStatus::Rejected, service.open(capture.ticket, "", certfix::kRefNowMs, wrong));
 }
