@@ -765,6 +765,14 @@ common::IoResult<void> tls_decode_encrypted_extensions(const std::uint8_t *body,
         seen[seen_count++] = view.type;
 
         switch (static_cast<TlsExtensionType>(view.type)) {
+            case TlsExtensionType::ServerName:
+                // RFC 8446 §4.2.1: the EE server_name ack carries no
+                // ServerNameList — any payload (e.g. the RFC 6066 1.2 form)
+                // is malformed.
+                if (!view.data.empty()) {
+                    return std::unexpected(common::IoErr::Invalid);
+                }
+                break;
             case TlsExtensionType::Alpn: {
                 const auto picked = parse_alpn_single(view.data);
                 if (!picked.has_value()) {
@@ -1492,7 +1500,7 @@ common::IoResult<std::size_t> tls_encode_encrypted_extensions(const TlsEncrypted
     }
     std::size_t ext_len = 0;
     if (in.acknowledge_server_name) {
-        ext_len += 4 + 2;
+        ext_len += 4; // the ack is an EMPTY extension (RFC 8446 §4.2.1)
     }
     if (!in.alpn.empty()) {
         ext_len += 4 + 2 + 1 + in.alpn.size();
@@ -1511,7 +1519,7 @@ common::IoResult<std::size_t> tls_encode_encrypted_extensions(const TlsEncrypted
         !w.be24(static_cast<std::uint32_t>(body_len)) || !w.be16(static_cast<std::uint16_t>(ext_len))) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (in.acknowledge_server_name && (!w.ext(TlsExtensionType::ServerName, 2) || !w.be16(0))) {
+    if (in.acknowledge_server_name && !w.ext(TlsExtensionType::ServerName, 0)) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (!in.alpn.empty()) {

@@ -181,9 +181,9 @@ struct TlsServerHelloInput {
 [[nodiscard]] common::IoResult<std::size_t> tls_encode_server_hello(const TlsServerHelloInput &in,
                                                                     std::span<std::uint8_t> scratch) noexcept;
 
-// EncryptedExtensions: [server_name empty-list echo][alpn][early_data] in
-// that order. All presence-driven; server_name acks the CH's SNI with a
-// 2-byte empty ServerNameList (RFC 6066 §3).
+// EncryptedExtensions: [server_name echo][alpn][early_data] in that order.
+// All presence-driven; server_name acks the CH's SNI with an EMPTY extension
+// (RFC 8446 §4.2.1 — no ServerNameList; a payload is malformed at 1.3).
 struct TlsEncryptedExtensionsInput {
     bool acknowledge_server_name = false;
     std::string_view alpn; // non-empty => selected protocol

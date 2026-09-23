@@ -684,3 +684,11 @@ NST）；1.2 恒全握手（恢复归 08）；NST 恒 1 张（nonce=0）。
   临时 vector 语句尾析构 → encoder 内 heap-use-after-free。修：具名局部保活。
   全量顺序跑 2067 绿、ASan 全量（除既有 Http3 UAF 一例）2066 绿、ctest
   2361/2361。
+- **07 遗留 wire bug（08 slice 2 修复，2026-09-23）：EE server_name ack 形态**。
+  本档 §7 EE 编码器把 server_name ack 写成 2 字节空 ServerNameList（RFC 6066
+  的 1.2 形态 `00 00 00 02 00 00`）；RFC 8446 §4.2.1 要求 1.3 EE 的 ack 为**零
+  长度扩展体**。当时未暴露：07 的 1.3 BoringSSL 互驱从不发 SNI，自家 06 client
+  decode 对 server_name 走 default 全忽略——收发两端口对称地错，互驱全绿。08
+  slice 2 的 send_sni e2e 一上真 BoringSSL 客户端即 ERROR_PARSING_EXTENSION
+  （extensions.cc 对 server_name 要求 `CBS_len(contents)==0`）。已修：编码器
+  零长度 ack + decode 严格化（带载荷 → Invalid）+ 单测重钉/负测，详见 08 §10。
