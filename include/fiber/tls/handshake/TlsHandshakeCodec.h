@@ -68,6 +68,11 @@ namespace fiber::tls {
 [[nodiscard]] common::IoResult<void> tls_decode_server_key_exchange(const std::uint8_t *body, std::size_t len,
                                                                     TlsServerKeyExchange &out) noexcept;
 
+// 1.2 ECDHE ClientKeyExchange body: the 1-byte-length-prefixed client point,
+// exact walk. Point length/curve validity is the engine's + KX decap's check.
+[[nodiscard]] common::IoResult<void> tls_decode_client_key_exchange(const std::uint8_t *body, std::size_t len,
+                                                                    TlsClientKeyExchange &out) noexcept;
+
 // ---- encode（06 契约：写入调用方 scratch，返回长度；分配归 context）----
 
 // Everything the ClientHello encoder needs. All spans borrow caller data for
@@ -144,6 +149,95 @@ tls_encode_certificate_12(std::span<const std::span<const std::uint8_t>> certs,
 // the raw encoded public value (X25519: 32 bytes; P-256: 65 uncompressed).
 [[nodiscard]] common::IoResult<std::size_t> tls_encode_client_key_exchange(std::span<const std::uint8_t> point,
                                                                            std::span<std::uint8_t> scratch) noexcept;
+
+// ---- encode（07 补充：server flight）----
+
+// Everything the ServerHello encoder needs; one struct covers the three wire
+// forms. `tls13` selects the extension set:
+//   true  — key_share (server share, or the HRR selected_group form when
+//           key_share is empty; the HRR sentinel random arrives via `random`),
+//           supported_versions (0x0304, engine-fixed), then pre_shared_key
+//           LAST iff selected_identity (RFC 8446 §4.2.11 ordering);
+//   false — the 1.2 set [extended_master_secret][renegotiation_info]
+//           [alpn][session_ticket] in that order (BoringSSL kExtensions walk).
+// legacy_version (0x0303) and compression (null) are fixed by both RFCs.
+struct TlsServerHelloInput {
+    std::span<const std::uint8_t> random; // exactly 32 (HRR: kTlsHelloRetryRandom)
+    std::span<const std::uint8_t> session_id; // 0..32 (echo the CH's)
+    std::uint16_t cipher_suite = 0; // raw wire value
+    bool tls13 = false;
+    // 1.3 fields:
+    std::uint16_t key_share_group = 0; // raw group id
+    std::span<const std::uint8_t> key_share; // non-empty => server share
+    bool selected_identity = false; // pre_shared_key echo (always LAST)
+    std::uint16_t identity = 0;
+    // 1.2 fields:
+    bool extended_master_secret = false; // echo iff the CH offered
+    bool renegotiation_info = true; // always on for 1.2 (empty vector)
+    std::string_view alpn; // non-empty => selected protocol
+    bool session_ticket = false; // RFC 5077 echo (always the empty-payload form)
+};
+
+[[nodiscard]] common::IoResult<std::size_t> tls_encode_server_hello(const TlsServerHelloInput &in,
+                                                                    std::span<std::uint8_t> scratch) noexcept;
+
+// EncryptedExtensions: [server_name empty-list echo][alpn][early_data] in
+// that order. All presence-driven; server_name acks the CH's SNI with a
+// 2-byte empty ServerNameList (RFC 6066 §3).
+struct TlsEncryptedExtensionsInput {
+    bool acknowledge_server_name = false;
+    std::string_view alpn; // non-empty => selected protocol
+    bool early_data = false; // empty extension (0-RTT accepted)
+};
+
+[[nodiscard]] common::IoResult<std::size_t> tls_encode_encrypted_extensions(const TlsEncryptedExtensionsInput &in,
+                                                                            std::span<std::uint8_t> scratch) noexcept;
+
+// CertificateRequest. The 1.3 form: 1-byte context length 0 + an extension
+// block with exactly signature_algorithms. The 1.2 form (RFC 5246 §7.4.4):
+// certificate_types {rsa_sign(1), ecdsa_sign(64)} (engine-fixed) + the u16
+// sigalgs vector + an EMPTY certificate_authorities vector (u16 length 0 —
+// any CA acceptable; the u24 form died with RFC 2246). sigalgs must be
+// non-empty in both forms.
+[[nodiscard]] common::IoResult<std::size_t>
+tls_encode_certificate_request_13(std::span<const std::uint16_t> signature_algorithms,
+                                  std::span<std::uint8_t> scratch) noexcept;
+[[nodiscard]] common::IoResult<std::size_t>
+tls_encode_certificate_request_12(std::span<const std::uint16_t> signature_algorithms,
+                                  std::span<std::uint8_t> scratch) noexcept;
+
+// 1.2 ECDHE ServerKeyExchange: curve_type(3, fixed) + group + the 1-byte
+// length-prefixed server point + scheme + signature. The engine signs
+// client_random ‖ server_random ‖ ServerECDHParams separately; this encoder
+// only frames.
+struct TlsServerKeyExchangeInput {
+    std::uint16_t named_group = 0; // raw
+    std::span<const std::uint8_t> public_key; // 1..255 (raw point)
+    std::uint16_t scheme = 0; // raw
+    std::span<const std::uint8_t> signature; // non-empty
+};
+
+[[nodiscard]] common::IoResult<std::size_t> tls_encode_server_key_exchange(const TlsServerKeyExchangeInput &in,
+                                                                           std::span<std::uint8_t> scratch) noexcept;
+
+// NewSessionTicket. 1.3 (RFC 8446 §4.6.1): u32 lifetime + u32 ticket_age_add
+// + 1-byte-length nonce (the engine-fixed sequence number, so always 1 byte)
+// + u16 ticket + extensions {[early_data: u32 max_early_data]} — the
+// extension is omitted when max_early_data == 0. 1.2 (RFC 5077 §3.3):
+// u32 lifetime + u16 ticket, sent in cleartext before the server CCS.
+struct TlsNewSessionTicket13Input {
+    std::uint32_t lifetime_s = 0;
+    std::uint32_t ticket_age_add = 0;
+    std::uint8_t ticket_nonce = 0; // the sequence number
+    std::span<const std::uint8_t> ticket; // 1..65535
+    std::uint32_t max_early_data = 0; // 0 => omit the early_data extension
+};
+
+[[nodiscard]] common::IoResult<std::size_t> tls_encode_new_session_ticket_13(const TlsNewSessionTicket13Input &in,
+                                                                             std::span<std::uint8_t> scratch) noexcept;
+[[nodiscard]] common::IoResult<std::size_t> tls_encode_new_session_ticket_12(std::uint32_t lifetime_s,
+                                                                             std::span<const std::uint8_t> ticket,
+                                                                             std::span<std::uint8_t> scratch) noexcept;
 
 } // namespace fiber::tls
 

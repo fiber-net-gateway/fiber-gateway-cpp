@@ -40,7 +40,9 @@ tls12_extended_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_
 // Per-direction write material sliced from
 // PRF(master, "key expansion", server_random || client_random)
 // (seed order deliberately REVERSED vs the master secret):
-// client_key || server_key || client_fixed_iv(4) || server_fixed_iv(4).
+// client_key || server_key || client_fixed_iv || server_fixed_iv, where the
+// fixed IV length is suite-shaped — 4 (RFC 5288 GCM) or 12 (RFC 7905 §2
+// ChaCha20, whose whole nonce is implicit).
 struct Tls12WriteKeys {
     TlsTrafficKeys client;
     TlsTrafficKeys server;

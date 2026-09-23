@@ -10,6 +10,7 @@
 #include "tls/handshake/TlsTranscript.h"
 
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
+#include "TlsRfc8448Constants.h"
 
 using namespace fiber::tls;
 
@@ -134,6 +135,24 @@ TEST(TlsTranscript13, RestartMessageHashMatchesHandBuilt) {
         ASSERT_TRUE(transcript.snapshot_digest({got.data(), len}));
         expect_digest({got.data(), len}, ref_digest(hash, {synthesized, hrr, ch2}));
     }
+}
+
+// RFC 8448 §5 (HelloRetryRequest) vector: the restarted transcript equals
+// the trace's "tls13 c hs traffic" context hash. Pins the §4.4.1 substitution
+// against the RFC end to end — the constants are machine-generated
+// (tests/TlsRfc8448Constants.h via temp/gen8448.py, re-verified with hashlib).
+TEST(TlsTranscript13, Rfc8448Section5RestartMatchesTrace) {
+    TlsTranscript13 transcript;
+    ASSERT_TRUE(transcript.init(TlsHashAlgorithm::Sha256));
+    ASSERT_TRUE(transcript.update(std::span<const std::uint8_t>{rfc8448::kS5Ch1}));
+    ASSERT_TRUE(transcript.restart_message_hash());
+    ASSERT_TRUE(transcript.update(std::span<const std::uint8_t>{rfc8448::kS5Hrr}));
+    ASSERT_TRUE(transcript.update(std::span<const std::uint8_t>{rfc8448::kS5Ch2}));
+    ASSERT_TRUE(transcript.update(std::span<const std::uint8_t>{rfc8448::kS5Sh2}));
+
+    std::array<std::uint8_t, 32> got{};
+    ASSERT_TRUE(transcript.snapshot_digest(got));
+    expect_digest(got, std::span<const std::uint8_t>{rfc8448::kS5HashCh2Sh2});
 }
 
 TEST(TlsTranscript13, ContractViolationsFail) {

@@ -239,6 +239,13 @@ struct TlsServerKeyExchange {
     std::span<const std::uint8_t> signature{};
 };
 
+// ---- 1.2 ECDHE ClientKeyExchange (RFC 4492 §5.7): the client's public point
+// with its 1-byte length prefix; the curve is whatever the server's SKE
+// named. Length/encoding validity is the engine's + KX decap's check. ----
+struct TlsClientKeyExchange {
+    std::span<const std::uint8_t> public_key{};
+};
+
 } // namespace fiber::tls
 
 #endif // FIBER_TLS_HANDSHAKE_TLS_HANDSHAKE_MESSAGE_H

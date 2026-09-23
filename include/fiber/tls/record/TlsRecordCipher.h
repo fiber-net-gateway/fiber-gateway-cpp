@@ -16,9 +16,11 @@
 namespace fiber::tls {
 
 // Which record-protection construction the instance applies. TLS 1.3
-// (RFC 8446 §5.2) and TLS 1.2 AEAD (RFC 5288 GCM / RFC 7905 ChaCha20,
-// same shape) differ in nonce derivation, AAD and payload framing; the AEAD
-// itself is absorbed by EVP_AEAD_CTX.
+// (RFC 8446 §5.2) and TLS 1.2 AEAD differ in nonce derivation, AAD and
+// payload framing; within 1.2 the two AEADs ALSO differ in the nonce form
+// (RFC 5288 GCM: 4-byte fixed IV + 8-byte explicit nonce on the wire;
+// RFC 7905 §2 ChaCha20: a 12-byte implicit IV, none of it on the wire).
+// The AEAD itself is absorbed by EVP_AEAD_CTX.
 enum class TlsRecordProtectionKind : std::uint8_t { Tls13, Tls12 };
 
 // Record-protection primitive: raw key material + byte ranges in, protected
@@ -39,11 +41,11 @@ enum class TlsRecordProtectionKind : std::uint8_t { Tls13, Tls12 };
 //   seal 1.3   dst.data() == plaintext.data()      (inner-type byte written
 //              into dst at plaintext_len — may be past the plaintext span
 //              but inside dst's capacity, i.e. the node's tailroom)
-//   seal 1.2   dst.data() + 8 == plaintext.data()  (8-byte explicit nonce
-//              written at dst's head)
+//   seal 1.2   dst.data() + explicit_nonce_len() == plaintext.data() (the
+//              GCM explicit nonce at dst's head; 0 for ChaCha, so in-place)
 //   open 1.3   dst.data() == ciphertext.data()
-//   open 1.2   dst.data() == ciphertext.data() + 8 (past the explicit nonce;
-//              the plaintext always lands at dst.data())
+//   open 1.2   dst.data() == ciphertext.data() + explicit_nonce_len()
+//              (the plaintext always lands at dst.data(); ChaCha in-place)
 // With a disjoint dst, seal 1.3 performs the only memcpy (the EVP takes one
 // input region, so the inner-type byte is appended first); seal/open 1.2 and
 // open 1.3 are moved natively by the EVP (out != in, no overlap).
@@ -94,12 +96,14 @@ public:
     // ---- size computation (pure; callers size their buffers from these) ----
 
     // Capacity dst must have for seal: exact overhead, plaintext + 17 (1.3:
-    // inner type + tag) or + 24 (1.2: explicit nonce + tag).
+    // inner type + tag) or + 16 + explicit_nonce_len() (1.2: tag, plus the
+    // GCM explicit nonce).
     [[nodiscard]] std::size_t seal_output_size(std::size_t plaintext_len) const noexcept;
-    // Capacity dst must have for open. 1.2 is exact (ciphertext_len - 24).
-    // 1.3 is a capacity requirement of ciphertext_len - 16 — the EVP output
-    // workspace includes the inner type and zero padding, which are then
-    // stripped; the actual plaintext is OpenResult::plain_len.
+    // Capacity dst must have for open. 1.2 is exact
+    // (ciphertext_len - 16 - explicit_nonce_len()). 1.3 is a capacity
+    // requirement of ciphertext_len - 16 — the EVP output workspace includes
+    // the inner type and zero padding, which are then stripped; the actual
+    // plaintext is OpenResult::plain_len.
     [[nodiscard]] std::size_t open_output_size(std::size_t ciphertext_len) const noexcept;
     // Pre-decryption ciphertext length bounds, checked before any crypto.
     [[nodiscard]] std::size_t min_ciphertext_size() const noexcept;
@@ -157,6 +161,9 @@ public:
 
     // ---- queries ----
 
+    // The 1.2 wire nonce: 8 explicit bytes for GCM suites (RFC 5288), 0 for
+    // ChaCha20-Poly1305 (RFC 7905 §2 implicit IV). Always 0 at 1.3.
+    [[nodiscard]] std::size_t explicit_nonce_len() const noexcept { return explicit_nonce_len_; }
     [[nodiscard]] std::uint64_t sequence() const noexcept { return seq_; }
     [[nodiscard]] TlsCipherSuiteId suite() const noexcept { return suite_; }
     [[nodiscard]] TlsRecordProtectionKind kind() const noexcept { return kind_; }
@@ -168,7 +175,8 @@ private:
     EVP_AEAD_CTX aead_ctx_{}; // zeroed == uninitialized; cleanup-safe
     TlsCipherSuiteId suite_ = TlsCipherSuiteId::TlsAes128GcmSha256;
     TlsRecordProtectionKind kind_ = TlsRecordProtectionKind::Tls13;
-    std::array<std::uint8_t, 12> iv_{}; // 1.3 static iv (12) / 1.2 fixed iv (4)
+    std::array<std::uint8_t, 12> iv_{}; // 1.3 static iv (12) / 1.2 iv (GCM 4, ChaCha 12)
+    std::uint8_t explicit_nonce_len_ = 0; // 1.2 GCM: 8; 1.3 & 1.2 ChaCha: 0
     std::uint64_t seq_ = 0;
     bool initialized_ = false;
 };

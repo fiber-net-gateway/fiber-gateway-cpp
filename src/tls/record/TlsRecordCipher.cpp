@@ -9,7 +9,8 @@ namespace {
 struct SuiteSpec {
     const EVP_AEAD *aead = nullptr;
     std::size_t key_len = 0;
-    std::size_t iv_len = 0; // static iv (1.3, 12) or fixed iv (1.2, 4)
+    std::size_t iv_len = 0; // static iv (1.3, 12); 1.2: fixed iv (GCM, 4) or implicit iv (ChaCha, 12)
+    std::size_t explicit_nonce_len = 0; // 1.2 GCM carries 8 explicit nonce bytes (RFC 5288)
 };
 
 // (suite, kind) pairing resolved through the shared registry
@@ -33,7 +34,11 @@ struct SuiteSpec {
             aead = EVP_aead_chacha20_poly1305();
             break;
     }
-    return {aead, info->key_len, static_cast<std::size_t>(info->is_tls13 ? 12 : 4)};
+    // RFC 7905 §2: 1.2 ChaCha20 derives the whole 12-byte nonce implicitly
+    // (fixed IV XOR sequence) — nothing on the wire, unlike GCM's 4+8 split.
+    const bool chacha = info->aead == TlsAeadAlgorithm::Chacha20Poly1305;
+    return {aead, info->key_len, static_cast<std::size_t>(info->is_tls13 || chacha ? 12 : 4),
+            static_cast<std::size_t>(!info->is_tls13 && !chacha ? 8 : 0)};
 }
 
 void store_be64(std::uint8_t *dst, std::uint64_t value) noexcept {
@@ -92,6 +97,7 @@ void TlsRecordCipher::move_from(TlsRecordCipher &src) noexcept {
     suite_ = src.suite_;
     kind_ = src.kind_;
     iv_ = src.iv_;
+    explicit_nonce_len_ = src.explicit_nonce_len_;
     seq_ = src.seq_;
     initialized_ = src.initialized_;
     std::memset(static_cast<void *>(&src.aead_ctx_), 0, sizeof src.aead_ctx_);
@@ -126,21 +132,22 @@ common::IoResult<void> TlsRecordCipher::init(TlsCipherSuiteId suite, TlsRecordPr
     suite_ = suite;
     kind_ = kind;
     std::memcpy(iv_.data(), iv.data(), spec.iv_len);
+    explicit_nonce_len_ = static_cast<std::uint8_t>(spec.explicit_nonce_len);
     seq_ = 0;
     initialized_ = true;
     return {};
 }
 
 std::size_t TlsRecordCipher::seal_output_size(std::size_t plaintext_len) const noexcept {
-    return plaintext_len + (kind_ == TlsRecordProtectionKind::Tls13 ? 17 : 24);
+    return plaintext_len + (kind_ == TlsRecordProtectionKind::Tls13 ? 17 : 16 + explicit_nonce_len_);
 }
 
 std::size_t TlsRecordCipher::open_output_size(std::size_t ciphertext_len) const noexcept {
-    return ciphertext_len - (kind_ == TlsRecordProtectionKind::Tls13 ? 16 : 24);
+    return ciphertext_len - (kind_ == TlsRecordProtectionKind::Tls13 ? 16 : 16 + explicit_nonce_len_);
 }
 
 std::size_t TlsRecordCipher::min_ciphertext_size() const noexcept {
-    return kind_ == TlsRecordProtectionKind::Tls13 ? 17 : 24;
+    return kind_ == TlsRecordProtectionKind::Tls13 ? 17 : 16 + explicit_nonce_len_;
 }
 
 std::size_t TlsRecordCipher::max_ciphertext_size() const noexcept {
@@ -180,6 +187,28 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
                               plaintext.size() + 1, aad.data(), aad_len) != 1) {
             return {Status::AuthFail, 0};
         }
+    } else if (explicit_nonce_len_ == 0) {
+        // RFC 7905 §2: nonce = 12-byte implicit IV XOR sequence — the 1.3
+        // construction with the 1.2 AAD; nothing precedes the ciphertext.
+        if (regions_overlap(dst.data(), dst.size(), plaintext.data(), plaintext.size())) {
+            FIBER_ASSERT(dst.data() == plaintext.data());
+        }
+
+        std::memcpy(nonce.data(), iv_.data(), 12);
+        store_be64(nonce.data() + 4, load_be64(nonce.data() + 4) ^ seq_);
+
+        store_be64(aad.data(), seq_);
+        aad[8] = static_cast<std::uint8_t>(inner_type);
+        aad[9] = 0x03;
+        aad[10] = 0x03;
+        aad[11] = static_cast<std::uint8_t>(plaintext.size() >> 8);
+        aad[12] = static_cast<std::uint8_t>(plaintext.size());
+        aad_len = 13;
+
+        if (EVP_AEAD_CTX_seal(&aead_ctx_, dst.data(), &written, dst.size(), nonce.data(), 12, plaintext.data(),
+                              plaintext.size(), aad.data(), aad_len) != 1) {
+            return {Status::AuthFail, 0};
+        }
     } else {
         if (regions_overlap(dst.data(), dst.size(), plaintext.data(), plaintext.size())) {
             FIBER_ASSERT(dst.data() + 8 == plaintext.data());
@@ -203,9 +232,9 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
         }
     }
 
-    // 1.3: EVP output is the whole payload. 1.2: EVP output excludes the
-    // 8-byte nonce prefix written at dst's head.
-    FIBER_ASSERT(kind_ == TlsRecordProtectionKind::Tls13 ? written == out_len : written == out_len - 8);
+    // 1.3 and 1.2-ChaCha: EVP output is the whole payload. 1.2-GCM: EVP
+    // output excludes the 8-byte nonce prefix written at dst's head.
+    FIBER_ASSERT(written == out_len - explicit_nonce_len_);
     ++seq_;
     return {Status::Ok, out_len};
 }
@@ -258,6 +287,34 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
     }
 
     FIBER_ASSERT(dst.size() >= open_output_size(length));
+    if (explicit_nonce_len_ == 0) {
+        // RFC 7905 §2 implicit nonce; the whole payload is body + tag.
+        if (regions_overlap(dst.data(), dst.size(), ciphertext.data(), ciphertext.size())) {
+            FIBER_ASSERT(dst.data() == ciphertext.data());
+        }
+
+        std::memcpy(nonce.data(), iv_.data(), 12);
+        store_be64(nonce.data() + 4, load_be64(nonce.data() + 4) ^ seq_);
+
+        store_be64(aad.data(), seq_);
+        aad[8] = static_cast<std::uint8_t>(outer_type);
+        aad[9] = static_cast<std::uint8_t>(legacy_version >> 8);
+        aad[10] = static_cast<std::uint8_t>(legacy_version);
+        const std::uint16_t plain_len = static_cast<std::uint16_t>(length - 16);
+        aad[11] = static_cast<std::uint8_t>(plain_len >> 8);
+        aad[12] = static_cast<std::uint8_t>(plain_len);
+        aad_len = 13;
+
+        if (EVP_AEAD_CTX_open(&aead_ctx_, dst.data(), &written, dst.size(), nonce.data(), 12, ciphertext.data(), length,
+                              aad.data(), aad_len) != 1) {
+            return {Status::AuthFail, TlsContentType::ApplicationData, 0};
+        }
+        FIBER_ASSERT(written == plain_len);
+
+        ++seq_;
+        return {Status::Ok, outer_type, written};
+    }
+
     if (regions_overlap(dst.data(), dst.size(), ciphertext.data(), ciphertext.size())) {
         FIBER_ASSERT(dst.data() == ciphertext.data() + 8);
     }
@@ -327,16 +384,21 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal_scatter(TlsContentType inner_t
                                  static_cast<std::uint16_t>(out_len));
         aad_len = kTlsRecordHeaderSize;
     } else {
-        FIBER_ASSERT(dst_prefix.size() >= 8);
+        FIBER_ASSERT(dst_prefix.size() >= explicit_nonce_len_); // 0 (empty span) for ChaCha
         FIBER_ASSERT(dst_tag.size() >= 16);
-        FIBER_ASSERT(!regions_overlap(dst_prefix.data(), 8, dst_ct.data(), dst_ct.size()));
+        if (explicit_nonce_len_ > 0) {
+            FIBER_ASSERT(!regions_overlap(dst_prefix.data(), 8, dst_ct.data(), dst_ct.size()));
+            store_be64(dst_prefix.data(), seq_); // explicit nonce = BE64(seq)
+            std::memcpy(nonce.data(), iv_.data(), iv_len);
+            std::memcpy(nonce.data() + 4, dst_prefix.data(), 8);
+        } else {
+            // RFC 7905 §2 implicit nonce — the 1.3 construction.
+            std::memcpy(nonce.data(), iv_.data(), 12);
+            store_be64(nonce.data() + 4, load_be64(nonce.data() + 4) ^ seq_);
+        }
         if (regions_overlap(dst_ct.data(), dst_ct.size(), plaintext.data(), plaintext.size())) {
             FIBER_ASSERT(dst_ct.data() == plaintext.data());
         }
-
-        store_be64(dst_prefix.data(), seq_); // explicit nonce = BE64(seq)
-        std::memcpy(nonce.data(), iv_.data(), iv_len);
-        std::memcpy(nonce.data() + 4, dst_prefix.data(), 8);
 
         store_be64(aad.data(), seq_);
         aad[8] = static_cast<std::uint8_t>(inner_type);
@@ -347,8 +409,9 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal_scatter(TlsContentType inner_t
         aad_len = 13;
     }
 
-    // The AEAD nonce is always 12 bytes here: 1.3 static iv, 1.2 fixed iv
-    // (4) || explicit nonce (8) — not iv_len, which is the 1.2 fixed-iv size.
+    // The AEAD nonce is always 12 bytes here: 1.3 static iv / 1.2-ChaCha
+    // implicit iv, or 1.2-GCM fixed iv (4) || explicit nonce (8) — not
+    // iv_len, which is the 1.2 fixed-iv size.
     if (EVP_AEAD_CTX_seal_scatter(&aead_ctx_, dst_ct.data(), dst_tag.data(), &tag_written, dst_tag.size(), nonce.data(),
                                   12, plaintext.data(), plaintext.size(), extra_in, extra_in_len, aad.data(),
                                   aad_len) != 1) {
@@ -406,17 +469,23 @@ TlsRecordCipher::open_scatter(TlsContentType outer_type, std::uint16_t legacy_ve
         return result;
     }
 
-    FIBER_ASSERT(explicit_nonce.size() >= 8);
-    FIBER_ASSERT(body.size() >= length - 24);
+    FIBER_ASSERT(explicit_nonce.size() >= explicit_nonce_len_); // 0 (empty span) for ChaCha
+    FIBER_ASSERT(body.size() >= length - 16 - explicit_nonce_len_);
     FIBER_ASSERT(tag.size() >= 16);
     FIBER_ASSERT(dst.size() >= open_output_size(length));
     if (regions_overlap(dst.data(), dst.size(), body.data(), body.size())) {
         FIBER_ASSERT(dst.data() == body.data());
     }
 
-    const std::uint16_t plain_len = static_cast<std::uint16_t>(length - 24);
-    std::memcpy(nonce.data(), iv_.data(), iv_len);
-    std::memcpy(nonce.data() + 4, explicit_nonce.data(), 8);
+    const std::uint16_t plain_len = static_cast<std::uint16_t>(length - 16 - explicit_nonce_len_);
+    if (explicit_nonce_len_ > 0) {
+        std::memcpy(nonce.data(), iv_.data(), iv_len);
+        std::memcpy(nonce.data() + 4, explicit_nonce.data(), 8);
+    } else {
+        // RFC 7905 §2 implicit nonce — the 1.3 construction.
+        std::memcpy(nonce.data(), iv_.data(), 12);
+        store_be64(nonce.data() + 4, load_be64(nonce.data() + 4) ^ seq_);
+    }
 
     store_be64(aad.data(), seq_);
     aad[8] = static_cast<std::uint8_t>(outer_type);

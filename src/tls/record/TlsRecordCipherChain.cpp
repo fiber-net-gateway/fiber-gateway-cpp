@@ -51,7 +51,7 @@ void chain_copy_region(const mem::IoBufChain &chain, std::size_t offset, std::si
 } // namespace
 
 std::size_t tls_record_open_dst_size(const TlsRecordCipher &cipher, std::uint16_t length) noexcept {
-    return length - (cipher.kind() == TlsRecordProtectionKind::Tls12 ? 8 : 0);
+    return length - (cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0);
 }
 
 TlsRecordCipher::OpenResult tls_record_open_transcribe(TlsRecordCipher &cipher, TlsContentType outer_type,
@@ -61,12 +61,12 @@ TlsRecordCipher::OpenResult tls_record_open_transcribe(TlsRecordCipher &cipher, 
     FIBER_ASSERT(payload.readable_bytes() == length);
     FIBER_ASSERT(dst.size() >= tls_record_open_dst_size(cipher, length));
 
-    const bool tls12 = cipher.kind() == TlsRecordProtectionKind::Tls12;
-    const std::size_t body_off = tls12 ? 8 : 0; // past the 1.2 explicit nonce
-    const std::size_t body_len = length - (tls12 ? 24 : 16);
+    const std::size_t expl = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
+    const std::size_t body_off = expl; // past the 1.2-GCM explicit nonce
+    const std::size_t body_len = length - 16 - expl;
     std::array<std::uint8_t, 8> nonce_prefix{};
 
-    if (tls12) {
+    if (expl > 0) {
         // The nonce is only read to build the AEAD nonce — it never belongs
         // in dst. Eight bytes, so staging it on the stack beats requiring the
         // region to be contiguous.
@@ -101,9 +101,9 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
     FIBER_ASSERT(payload.readable_bytes() == length);
     FIBER_ASSERT(dst.size() >= tls_record_open_dst_size(cipher, length));
 
-    const bool tls12 = cipher.kind() == TlsRecordProtectionKind::Tls12;
-    const std::size_t body_off = tls12 ? 8 : 0;
-    const std::size_t body_len = length - (tls12 ? 24 : 16);
+    const std::size_t expl = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
+    const std::size_t body_off = expl;
+    const std::size_t body_len = length - 16 - expl;
 
     const std::uint8_t *body = nullptr;
     const std::uint8_t *tag = nullptr;
@@ -115,7 +115,7 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
     // In place over the record's own bytes — the only mutation of the chain.
     auto *body_mut = const_cast<std::uint8_t *>(body);
     TlsRecordCipher::OpenResult result;
-    if (tls12) {
+    if (expl > 0) {
         std::array<std::uint8_t, 8> nonce_prefix{};
         chain_copy_region(payload, 0, 8, nonce_prefix.data());
         result = cipher.open_scatter(outer_type, legacy_version, length, nonce_prefix, {body, body_len}, {tag, 16},
@@ -127,11 +127,13 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
     if (result.status != TlsRecordCipher::Status::Ok) {
         return {result, false}; // touched bytes zeroed by the AEAD; view untouched
     }
-    // Shrink the view: drop the tag plus the 1.2 nonce prefix / the 1.3
+    // Shrink the view: drop the tag plus the 1.2-GCM nonce prefix / the 1.3
     // inner type and padding.
-    if (tls12) {
+    if (expl > 0) {
         payload.consume(8);
         payload.trim_end(16);
+    } else if (cipher.kind() == TlsRecordProtectionKind::Tls12) {
+        payload.trim_end(16); // 1.2 ChaCha: no nonce prefix, tag only
     } else {
         payload.trim_end(length - result.plain_len);
     }
@@ -145,8 +147,8 @@ TlsRecordCipher::SealResult tls_record_seal_transcribe(TlsRecordCipher &cipher, 
     FIBER_ASSERT(plain <= kTlsMaxPlaintextSize);
     FIBER_ASSERT(dst.size() >= cipher.seal_output_size(plain));
 
-    const bool tls12 = cipher.kind() == TlsRecordProtectionKind::Tls12;
-    const std::size_t off = tls12 ? 8 : 0; // 1.2 explicit-nonce prefix
+    const std::size_t off =
+            cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0; // 1.2-GCM prefix
     const std::uint8_t *pt = nullptr;
     if (chain_contiguous(plaintext, 0, plain, &pt)) {
         // Disjoint dst: the EVP move is the transcription itself.

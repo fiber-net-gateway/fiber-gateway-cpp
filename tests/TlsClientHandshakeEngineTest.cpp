@@ -310,6 +310,12 @@ bool feed_bytes(TlsClientHandshakeEngine &engine, std::span<const std::uint8_t> 
 struct DriveLog {
     std::vector<std::uint8_t> client_to_server;
     std::vector<std::uint8_t> server_to_client;
+    // Records after the terminal message of the final flight — fed to nobody.
+    // A 0-RTT-accepting BoringSSL server seals its NewSessionTicket HALF-RTT
+    // (application keys, write seq 0) and flushes it with the ServerHello
+    // flight (tls13_server.cc do_send_half_rtt_ticket); the engine finishes at
+    // the server Finished, so the NST record lands here.
+    std::vector<std::uint8_t> server_tail;
 };
 
 bool drive(BoringServer &server, TlsClientHandshakeEngine &engine, bool sliced, DriveLog &log) {
@@ -337,9 +343,28 @@ bool drive(BoringServer &server, TlsClientHandshakeEngine &engine, bool sliced, 
             break; // no progress available; the engine decides success below
         }
         log.server_to_client.insert(log.server_to_client.end(), flight.begin(), flight.end());
-        Event event = Event::None;
-        if (!feed_bytes(engine, flight, sliced, event)) {
-            return false;
+        // Record-granular feed: a flight can carry records past the engine's
+        // terminal message (a 0-RTT-accepting BoringSSL server seals its
+        // NewSessionTicket HALF-RTT — application keys, write seq 0 — and
+        // flushes it behind the server Finished; see do_send_half_rtt_ticket).
+        // Those records stay unfed and land in the tail log.
+        std::size_t roff = 0;
+        while (roff < flight.size() && !engine.done()) {
+            std::size_t chunk = flight.size() - roff;
+            if (roff + fiber::tls::kTlsRecordHeaderSize < flight.size()) {
+                const std::size_t rlen = (static_cast<std::size_t>(flight[roff + 3]) << 8) | flight[roff + 4];
+                if (roff + fiber::tls::kTlsRecordHeaderSize + rlen <= flight.size()) {
+                    chunk = fiber::tls::kTlsRecordHeaderSize + rlen; // one complete record
+                }
+            }
+            Event event = Event::None;
+            if (!feed_bytes(engine, {flight.data() + roff, chunk}, sliced, event)) {
+                return false;
+            }
+            roff += chunk;
+        }
+        if (roff < flight.size()) {
+            log.server_tail.assign(flight.begin() + static_cast<std::ptrdiff_t>(roff), flight.end());
         }
     }
     return engine.done() && !engine.failed();
@@ -1117,7 +1142,13 @@ TEST(TlsClientHandshake13Psk, EarlyDataAccepted) {
     // The window is closed at Done: no more early writes on this engine.
     EXPECT_FALSE(engine.write_early_data({reinterpret_cast<const std::uint8_t *>("x"), 1}).has_value());
 
-    EXPECT_EQ(1, server2->handshake_step()); // consumes EOED + client Fin
+    // The server consumed EndOfEarlyData + the client Finished when this
+    // handshake_step processed the rbio (a decrypt failure on either would
+    // fail the step): EOED opened under the EARLY keys (RFC 8446 §4.5 — the
+    // sequence continues the early-data records) and Fin under the fresh
+    // client_hs sequence. With the second flight consumed the handshake is
+    // genuinely complete, not the 0-RTT early-return.
+    EXPECT_EQ(1, server2->handshake_step());
     EXPECT_EQ(1, SSL_early_data_accepted(server2->ssl()));
     EXPECT_EQ(1, SSL_session_reused(server2->ssl()));
 
@@ -1126,6 +1157,27 @@ TEST(TlsClientHandshake13Psk, EarlyDataAccepted) {
     const int got = SSL_read(server2->ssl(), early.data(), static_cast<int>(early.size()));
     ASSERT_GT(got, 0);
     EXPECT_EQ(0, std::memcmp(request.data(), early.data(), request.size()));
+    // No further app data was pending: only EOED/Fin rode in the rbio.
+    std::array<char, 64> sink{};
+    ASSERT_EQ(SSL_ERROR_WANT_READ, SSL_get_error(server2->ssl(), SSL_read(server2->ssl(), sink.data(), sizeof sink)));
+
+    // The half-RTT NST rode out with the SH flight; the engine finished at
+    // the server Finished and never fed it. Open it through the connected
+    // state's read cipher — this advances the application-key sequence to
+    // where the server's app records start.
+    open_and_discard_records(state, log.server_tail);
+
+    ASSERT_EQ(4, SSL_write(server2->ssl(), "ping", 4)); // server_app0 write: post-EOED keys
+    const std::vector<std::uint8_t> sealed = server2->drain_wbio();
+    ASSERT_GT(sealed.size(), fiber::tls::kTlsRecordHeaderSize);
+    const std::size_t rec_len = (static_cast<std::size_t>(sealed[3]) << 8) | sealed[4];
+    std::array<std::uint8_t, fiber::tls::kTlsMaxPlaintextSize> open_dst{};
+    const auto opened = state.read_cipher.open(
+            fiber::tls::TlsContentType::ApplicationData, (static_cast<std::uint16_t>(sealed[1]) << 8) | sealed[2],
+            static_cast<std::uint16_t>(rec_len), {sealed.data() + fiber::tls::kTlsRecordHeaderSize, rec_len}, open_dst);
+    ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
+    ASSERT_EQ(4u, opened.plain_len);
+    EXPECT_EQ(0, std::memcmp("ping", open_dst.data(), 4));
 }
 
 TEST(TlsClientHandshake13Psk, EarlyDataRejectedStillResumes) {

@@ -569,11 +569,34 @@ bool Tls13ClientHandshake::send_client_certificate_13() noexcept {
 void Tls13ClientHandshake::finish_1_3() noexcept {
     // Application secrets over Hash(CH..server Fin) — the transcript already
     // includes the verified Fin. The read side swaps to a fresh server_app0
-    // instance now; the write side rides client_hs for the flight below and
-    // swaps last (06 §5.3).
+    // instance now; the write side stays on whatever the incoming state left
+    // (early cipher on the accepted 0-RTT path, client_hs otherwise) until
+    // EndOfEarlyData — sealed with the 0-RTT keys, sequence continuing the
+    // early-data records — is out, then swaps to a fresh client_hs instance
+    // for Certificate/Finished and last to client_app0 (06 §5.3, RFC 8446
+    // §4.5: "encrypted under keys derived from the
+    // client_early_traffic_secret").
     snapshot13();
     if (!sched_->application_secrets({hash_buf_.data(), hash_len()}, client_app0_, server_app0_).has_value() ||
-        !swap_cipher(ctx_.read_cipher(), server_app0_) || !swap_cipher(ctx_.write_cipher(), client_hs_)) {
+        !swap_cipher(ctx_.read_cipher(), server_app0_)) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
+    if (early_.offered_ext && psk_accepted_ && ee_early_data_) {
+        // EndOfEarlyData closes the accepted 0-RTT window: sealed with the
+        // EARLY instance (`early_.write` — ctx_.write_cipher() is not yet
+        // live on this path), its record sequence continuing the early-data
+        // records (RFC 8446 §4.5).
+        const auto eoed =
+                tls_encode_handshake_message(TlsHandshakeType::EndOfEarlyData, {}, {scratch_.data(), scratch_.size()});
+        if (!eoed.has_value() || !t13_.update({scratch_.data(), eoed.value()}) ||
+            !ctx_.emit(TlsContentType::Handshake, {scratch_.data(), eoed.value()}, &early_.write).has_value()) {
+            fail(TlsAlertDesc::InternalError);
+            return;
+        }
+    }
+    early_.closed = true;
+    if (!swap_cipher(ctx_.write_cipher(), client_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -591,17 +614,6 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
         fail(TlsAlertDesc::HandshakeFailure);
         return;
     }
-    if (early_.offered_ext && psk_accepted_ && ee_early_data_) {
-        // EndOfEarlyData closes the accepted 0-RTT window.
-        const auto eoed =
-                tls_encode_handshake_message(TlsHandshakeType::EndOfEarlyData, {}, {scratch_.data(), scratch_.size()});
-        if (!eoed.has_value() || !t13_.update({scratch_.data(), eoed.value()}) ||
-            !emit_message({scratch_.data(), eoed.value()})) {
-            fail(TlsAlertDesc::InternalError);
-            return;
-        }
-    }
-    early_.closed = true;
 
     // client Finished — MAC over the transcript before itself.
     snapshot13();

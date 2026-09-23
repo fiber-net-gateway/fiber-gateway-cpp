@@ -43,6 +43,63 @@ struct TlsSessionOffer {
     std::size_t max_early_data = 0; // 0 = no early_data extension
 };
 
+// ---- server handshake inputs (07 §3.2) ----
+
+// All-borrowed views that must outlive the engine (the net glue holds the
+// config). Immutable by contract; suite/group/sigalg preferences stay
+// engine-fixed registry constants (§10.2: server preference order, not
+// config).
+struct TlsServerConfig {
+    const TlsCertificateChain *chain = nullptr; // required (no PSK-only mode)
+    const TlsPrivateKey *key = nullptr; // paired with chain (02b)
+    std::span<const std::string_view> alpn; // supported protocols, order = preference; empty = ignore ALPN
+    // mTLS: client_trust == nullptr does not request a client certificate;
+    // require_client_cert decides whether an empty chain is fatal.
+    const TlsTrustStore *client_trust = nullptr;
+    bool require_client_cert = false;
+    std::int64_t now_unix_ms = 0; // certificate validity + ticket-age snapshot; the engine has no clock
+    bool enable_early_data = false; // 0-RTT master switch (off until anti-replay exists, §10.6)
+    std::uint32_t session_timeout_s = 7200; // NST lifetime
+};
+
+// Resumption lookup hook (08 boundary): identity → a borrowed projection of
+// the decrypted resumption parameters. 08's real implementation does ticket
+// decryption + anti-replay; the test side uses an in-memory table. Returning
+// false = miss (the handshake continues as a full one).
+struct TlsResumedSession { // all-borrowed views; the lookup caller owns the bytes
+    std::span<const std::uint8_t> psk; // resumption PSK (08 derives it from the NST)
+    TlsCipherSuiteId suite = TlsCipherSuiteId::TlsAes128GcmSha256; // binds the binder + transcript hash
+    std::string_view alpn; // the ticket's early_alpn (empty = none)
+    std::uint32_t ticket_age_add = 0;
+    std::uint32_t max_early_data = 0; // 0 = this ticket allows no 0-RTT
+    std::int64_t ticket_issued_ms = 0; // for the age-window check (60 s skew, §10.4)
+};
+struct TlsResumptionLookup {
+    bool (*lookup)(void *ctx, std::span<const std::uint8_t> identity, TlsResumedSession &out) noexcept = nullptr;
+    void *ctx = nullptr;
+};
+
+// Ticket minting hook (08 boundary): write one opaque ticket into out and
+// return its length; 0 = send no NST this connection. 08's real
+// implementation does AEAD encryption; the test side serializes the
+// TlsTicketRequest into the ticket bytes (a ticket is an opaque blob to the
+// client — interop does not constrain the format).
+struct TlsTicketRequest {
+    std::span<const std::uint8_t> resumption_master; // this connection's resumption secret
+    std::uint8_t ticket_nonce = 0; // = the sequence number (1.3; §10.9: always one ticket, nonce 0)
+    TlsCipherSuiteId suite = TlsCipherSuiteId::TlsAes128GcmSha256;
+    std::string_view alpn; // the negotiated protocol (early_alpn semantics)
+    std::uint32_t ticket_age_add = 0; // the NST's obfuscation key — bind it into the ticket so a
+                                      // later lookup can reproduce the age arithmetic
+    std::uint32_t max_early_data = 0; // enable_early_data ? 14336 : 0
+    std::uint32_t timeout_s = 0;
+    std::int64_t now_unix_ms = 0;
+};
+struct TlsTicketMinter {
+    std::size_t (*mint)(void *ctx, const TlsTicketRequest &, std::span<std::uint8_t> out) noexcept = nullptr;
+    void *ctx = nullptr;
+};
+
 } // namespace fiber::tls
 
 #endif // FIBER_TLS_TLS_CONFIG_H

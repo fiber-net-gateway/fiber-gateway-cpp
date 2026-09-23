@@ -180,6 +180,28 @@ TEST(TlsKeySchedule13, Rfc8448Section3Tree) {
     expect_secret(*resumption, as_span(rfc8448::kS3ResMaster));
 }
 
+// RFC 8448 §5 (HelloRetryRequest, no PSK): the schedule runs unchanged over
+// the restarted transcript — h1 is Hash(msg_hash(Hash(CH1)) || HRR || CH2 ||
+// SH2) (kS5HashCh2Sh2, pinned in TlsTranscriptTest) and z is the P-256
+// secret. §5 adds no new derivation rule; this pins that the whole staged
+// machine consumes the restarted transcript identically to BoringSSL.
+TEST(TlsKeySchedule13, Rfc8448Section5HrrTree) {
+    TlsKeySchedule13 ks(TlsCipherSuiteId::TlsAes128GcmSha256);
+
+    TlsSecret c_hs, s_hs, c_ap, s_ap;
+    ASSERT_TRUE(ks.handshake_secrets(as_span(rfc8448::kS5Z), as_span(rfc8448::kS5HashCh2Sh2), c_hs, s_hs).has_value());
+    expect_secret(c_hs, as_span(rfc8448::kS5ClientHsSecret));
+    expect_secret(s_hs, as_span(rfc8448::kS5ServerHsSecret));
+
+    ASSERT_TRUE(ks.application_secrets(as_span(rfc8448::kS5HashCh2ServerFin), c_ap, s_ap).has_value());
+    expect_secret(c_ap, as_span(rfc8448::kS5ClientAppSecret));
+    expect_secret(s_ap, as_span(rfc8448::kS5ServerAppSecret));
+
+    auto resumption = ks.resumption_master_secret(as_span(rfc8448::kS5HashCh2ClientFin));
+    ASSERT_TRUE(resumption.has_value());
+    expect_secret(*resumption, as_span(rfc8448::kS5ResMaster));
+}
+
 TEST(TlsKeySchedule13, EmptyPskEqualsNoPsk) {
     TlsKeySchedule13 plain(TlsCipherSuiteId::TlsAes128GcmSha256);
     TlsKeySchedule13 empty_psk(TlsCipherSuiteId::TlsAes128GcmSha256);
@@ -420,9 +442,11 @@ TEST(Tls12Prf, MasterKeyBlockVerifyDataMatchReference) {
         TlsCipherSuiteId suite;
         TlsHashAlgorithm hash;
         std::uint8_t key_len;
+        std::uint8_t iv_len; // fixed-IV slice: 4 GCM / 12 ChaCha (RFC 7905 §2)
     } cases[] = {
-            {TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsHashAlgorithm::Sha256, 16},
-            {TlsCipherSuiteId::EcdheRsaAes256GcmSha384, TlsHashAlgorithm::Sha384, 32},
+            {TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsHashAlgorithm::Sha256, 16, 4},
+            {TlsCipherSuiteId::EcdheRsaAes256GcmSha384, TlsHashAlgorithm::Sha384, 32, 4},
+            {TlsCipherSuiteId::EcdheRsaChacha20Poly1305, TlsHashAlgorithm::Sha256, 32, 12},
     };
     for (const auto &c: cases) {
         const auto z = ramp(32, 0x60);
@@ -435,15 +459,17 @@ TEST(Tls12Prf, MasterKeyBlockVerifyDataMatchReference) {
         EXPECT_EQ(48u, master->len());
         expect_eq_bytes(master->bytes(), ref_p_hash(c.hash, z, label_seed("master secret", concat({cr, sr})), 48));
 
-        const std::size_t block_len = 2 * c.key_len + 8;
+        const std::size_t block_len = 2 * c.key_len + 2 * c.iv_len;
         const auto ref_block =
                 ref_p_hash(c.hash, master->bytes(), label_seed("key expansion", concat({sr, cr})), block_len);
         auto keys = tls12_key_block(c.suite, *master, cr, sr);
         ASSERT_TRUE(keys.has_value());
+        EXPECT_EQ(c.iv_len, keys->client.iv_len);
+        EXPECT_EQ(c.iv_len, keys->server.iv_len);
         expect_eq_bytes({keys->client.key.data(), c.key_len}, {ref_block.data(), c.key_len});
         expect_eq_bytes({keys->server.key.data(), c.key_len}, {ref_block.data() + c.key_len, c.key_len});
-        expect_eq_bytes({keys->client.iv.data(), 4}, {ref_block.data() + 2 * c.key_len, 4});
-        expect_eq_bytes({keys->server.iv.data(), 4}, {ref_block.data() + 2 * c.key_len + 4, 4});
+        expect_eq_bytes({keys->client.iv.data(), c.iv_len}, {ref_block.data() + 2 * c.key_len, c.iv_len});
+        expect_eq_bytes({keys->server.iv.data(), c.iv_len}, {ref_block.data() + 2 * c.key_len + c.iv_len, c.iv_len});
 
         auto vd_c = tls12_verify_data(c.suite, *master, true, hh);
         ASSERT_TRUE(vd_c.has_value());
@@ -502,11 +528,11 @@ TEST(Tls12KeyBlock, DirectionalMaterialPinnedByRecordCipher) {
 
     TlsRecordCipher writer, peer_reader, wrong_reader;
     ASSERT_TRUE(writer.init(suite, TlsRecordProtectionKind::Tls12, {keys->client.key.data(), keys->client.key_len},
-                            {keys->client.iv.data(), 4})
+                            {keys->client.iv.data(), keys->client.iv_len})
                         .has_value());
     ASSERT_TRUE(peer_reader
                         .init(suite, TlsRecordProtectionKind::Tls12, {keys->client.key.data(), keys->client.key_len},
-                              {keys->client.iv.data(), 4})
+                              {keys->client.iv.data(), keys->client.iv_len})
                         .has_value());
     ASSERT_TRUE(wrong_reader
                         .init(suite, TlsRecordProtectionKind::Tls12, {keys->server.key.data(), keys->server.key_len},

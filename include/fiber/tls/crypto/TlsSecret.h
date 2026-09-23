@@ -55,9 +55,9 @@ private:
 // copies it into the EVP_AEAD_CTX; the caller wipes it at that handoff.
 struct TlsTrafficKeys {
     std::array<std::uint8_t, 32> key{};
-    std::array<std::uint8_t, 12> iv{}; // 1.3: static iv (12B); 1.2: fixed iv (iv_len = 4)
+    std::array<std::uint8_t, 12> iv{}; // 1.3: static iv (12B); 1.2: fixed iv (4 GCM / 12 ChaCha)
     std::uint8_t key_len = 0;
-    std::uint8_t iv_len = 0; // 12 (1.3) / 4 (1.2)
+    std::uint8_t iv_len = 0; // 12 (1.3) / 4|12 (1.2 GCM|ChaCha)
 };
 
 } // namespace fiber::tls

@@ -54,6 +54,15 @@ const KindVec &tls12_vec() {
     return v;
 }
 
+// The 1.2 ChaCha20 form (RFC 7905 §2): 12-byte implicit IV, no wire nonce —
+// exercises the same chain shapes with the nonce prefix length at 0.
+const KindVec &tls12_chacha_vec() {
+    static const KindVec v{TlsCipherSuiteId::EcdheRsaChacha20Poly1305, TlsRecordProtectionKind::Tls12,
+                           key_iv("21022dda596ed5d9acd890e3c63f5051a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+                           key_iv("1112131415161718191a1b1c")};
+    return v;
+}
+
 std::vector<std::uint8_t> ramp(std::size_t len, std::uint8_t seed) {
     std::vector<std::uint8_t> out(len);
     for (std::size_t i = 0; i < len; ++i) {
@@ -132,7 +141,7 @@ TEST(TlsRecordChainSizes, OpenDstSizePerKind) {
 // ---------------------------------------------------------------- open: transcribe
 
 TEST(TlsRecordChainOpen, TranscribeLeavesTheChainUntouched) {
-    for (const KindVec *v: {&tls13_vec(), &tls12_vec()}) {
+    for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
         TlsRecordCipher seal_side;
         init_cipher(seal_side, *v);
         TlsRecordCipher opener;
@@ -163,14 +172,14 @@ TEST(TlsRecordChainOpen, TranscribeAcrossStraddlingTopologies) {
     const std::size_t plain_len = 100;
     const auto plain = ramp(plain_len, 0x20);
 
-    for (const KindVec *v: {&tls13_vec(), &tls12_vec()}) {
+    for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
         TlsRecordCipher seal_side;
         init_cipher(seal_side, *v);
 
         const TlsContentType type = TlsContentType::ApplicationData;
         const auto wire = seal_wire(seal_side, type, plain);
 
-        const std::size_t off = is_tls12(seal_side) ? 8 : 0;
+        const std::size_t off = seal_side.explicit_nonce_len();
         const std::size_t body_end = wire.size() - 16; // tag starts here
 
         // Mid-body split (staged), tag straddling split (staged), three nodes
@@ -198,7 +207,7 @@ TEST(TlsRecordChainOpen, TranscribeAcrossStraddlingTopologies) {
 // ---------------------------------------------------------------- open: in place
 
 TEST(TlsRecordChainOpen, InPlaceShrinksTheChainView) {
-    for (const KindVec *v: {&tls13_vec(), &tls12_vec()}) {
+    for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
         TlsRecordCipher seal_side;
         init_cipher(seal_side, *v);
         TlsRecordCipher opener;
@@ -227,7 +236,7 @@ TEST(TlsRecordChainOpen, InPlaceShrinksTheChainView) {
 // The scatter win: the body ends exactly at a node boundary and the tag lives
 // in the NEXT node — still zero-copy in place.
 TEST(TlsRecordChainOpen, InPlaceWorksWhenTagIsInNextNode) {
-    for (const KindVec *v: {&tls13_vec(), &tls12_vec()}) {
+    for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
         TlsRecordCipher seal_side;
         init_cipher(seal_side, *v);
         TlsRecordCipher opener;
@@ -302,7 +311,7 @@ TEST(TlsRecordChainOpen, AuthFailDoesNotAdvanceSequence) {
 // ---------------------------------------------------------------- seal
 
 TEST(TlsRecordChainSeal, TranscribeMatchesSeal) {
-    for (const KindVec *v: {&tls13_vec(), &tls12_vec()}) {
+    for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
         const auto plain = ramp(120, 0x70);
         const TlsContentType type = TlsContentType::Alert;
 
@@ -336,7 +345,7 @@ TEST(TlsRecordChainSeal, TranscribeMatchesSeal) {
 }
 
 TEST(TlsRecordChainSeal, InPlaceSplitsWireIntoHeaderChainTailer) {
-    for (const KindVec *v: {&tls13_vec(), &tls12_vec()}) {
+    for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
         const auto plain = ramp(80, 0x80);
         const TlsContentType type = TlsContentType::ApplicationData;
 
@@ -346,11 +355,11 @@ TEST(TlsRecordChainSeal, InPlaceSplitsWireIntoHeaderChainTailer) {
 
         TlsRecordCipher chain_cipher;
         init_cipher(chain_cipher, *v);
-        const std::size_t off = is_tls12(chain_cipher) ? 8 : 0;
+        const std::size_t off = chain_cipher.explicit_nonce_len();
 
         IoBufNodePool pool;
         IoBufChain chain = make_chain(pool, {plain});
-        std::vector<std::uint8_t> header(is_tls12(chain_cipher) ? 8 : 0);
+        std::vector<std::uint8_t> header(chain_cipher.explicit_nonce_len());
         std::vector<std::uint8_t> tailer(17);
         std::vector<std::uint8_t> dst(chain_cipher.seal_output_size(plain.size()));
 
@@ -432,14 +441,14 @@ TEST(TlsRecordChainSeal, StraddlingDegradesToTranscribe) {
 }
 
 TEST(TlsRecordChainSeal, EmptyPlaintextBothForms) {
-    for (const KindVec *v: {&tls13_vec(), &tls12_vec()}) {
+    for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
         TlsRecordCipher reference;
         init_cipher(reference, *v);
         const auto wire = seal_wire(reference, TlsContentType::Alert, {});
 
         TlsRecordCipher chain_cipher;
         init_cipher(chain_cipher, *v);
-        const std::size_t off = is_tls12(chain_cipher) ? 8 : 0;
+        const std::size_t off = chain_cipher.explicit_nonce_len();
 
         IoBufNodePool pool;
         IoBufChain empty(pool);
@@ -452,7 +461,7 @@ TEST(TlsRecordChainSeal, EmptyPlaintextBothForms) {
 
         // The in-place form runs at seq 1 — the reference seals again to match.
         const auto wire_seq1 = seal_wire(reference, TlsContentType::Alert, {});
-        std::vector<std::uint8_t> header(is_tls12(chain_cipher) ? 8 : 0);
+        std::vector<std::uint8_t> header(chain_cipher.explicit_nonce_len());
         std::vector<std::uint8_t> tailer(17);
         std::vector<std::uint8_t> dst2(chain_cipher.seal_output_size(0));
         const auto r2 =
@@ -469,7 +478,7 @@ TEST(TlsRecordChainSeal, EmptyPlaintextBothForms) {
 // ------------------------------------- full stack: in-place seal -> reader -> in-place open
 
 TEST(TlsRecordChainRoundTrip, InPlaceSealFeedsInPlaceOpen) {
-    for (const KindVec *v: {&tls13_vec(), &tls12_vec()}) {
+    for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
         TlsRecordCipher seal_side;
         init_cipher(seal_side, *v);
         TlsRecordCipher open_side;
@@ -477,11 +486,11 @@ TEST(TlsRecordChainRoundTrip, InPlaceSealFeedsInPlaceOpen) {
 
         const auto plain = ramp(150, 0xB0);
         const TlsContentType type = TlsContentType::ApplicationData;
-        const std::size_t off = is_tls12(seal_side) ? 8 : 0;
+        const std::size_t off = seal_side.explicit_nonce_len();
 
         IoBufNodePool pool;
         IoBufChain chain = make_chain(pool, {plain});
-        std::vector<std::uint8_t> header(is_tls12(seal_side) ? 8 : 0);
+        std::vector<std::uint8_t> header(seal_side.explicit_nonce_len());
         std::vector<std::uint8_t> tailer(17);
         std::vector<std::uint8_t> scratch(seal_side.seal_output_size(plain.size()));
         const auto s = fiber::tls::tls_record_seal_in_place(seal_side, type, chain, header, tailer, scratch);
