@@ -1135,15 +1135,23 @@ TEST(ServerFlightEncode, EncryptedExtensionsRoundTrip) {
     EXPECT_TRUE(ee.has_alpn);
     EXPECT_EQ(ee.alpn, "h2");
     EXPECT_TRUE(ee.has_early_data);
-    // server_name ack: a 2-byte empty ServerNameList, before alpn and early_data.
-    ASSERT_GE(ee.extensions_block.size(), 8u);
+    // server_name ack: an EMPTY extension (RFC 8446 §4.2.1 — no ServerNameList;
+    // BoringSSL rejects any payload), before alpn and early_data.
+    ASSERT_GE(ee.extensions_block.size(), 4u);
     EXPECT_EQ(ee.extensions_block[0], 0x00); // type low byte (0)
     EXPECT_EQ(ee.extensions_block[1], 0x00);
-    EXPECT_EQ(ee.extensions_block[2], 0x00); // payload length 2
-    EXPECT_EQ(ee.extensions_block[3], 0x02);
-    EXPECT_EQ(ee.extensions_block[4], 0x00); // ServerNameList length 0
-    EXPECT_EQ(ee.extensions_block[5], 0x00);
+    EXPECT_EQ(ee.extensions_block[2], 0x00); // payload length 0
+    EXPECT_EQ(ee.extensions_block[3], 0x00);
     EXPECT_EQ(extension_order(ee.extensions_block), (std::vector<std::uint16_t>{0, 16, 42}));
+
+    // A server_name ack WITH a payload (the RFC 6066 1.2 list form) fails
+    // decode — malformed at 1.3.
+    std::vector<std::uint8_t> bad = {0x08, 0x00, 0x00, 0x08, // header, body len 8
+                                     0x00, 0x06, // extension block length 6
+                                     0x00, 0x00, 0x00, 0x02, // server_name, payload len 2
+                                     0x00, 0x00}; // the 1.2 empty ServerNameList
+    TlsEncryptedExtensions bad_ee{};
+    EXPECT_FALSE(tls_decode_encrypted_extensions(bad.data() + 4, bad.size() - 4, bad_ee).has_value());
 
     // Empty EE is valid: u16 zero extension block only.
     const auto bare = tls_encode_encrypted_extensions(TlsEncryptedExtensionsInput{}, scratch);
