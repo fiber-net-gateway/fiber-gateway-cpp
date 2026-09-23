@@ -1110,7 +1110,12 @@ public:
         return blob.size();
     }
 
-    static bool lookup(void *ctx, std::span<const std::uint8_t> identity, TlsResumedSession &out) noexcept {
+    static bool lookup(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
+                       std::int64_t now_unix_ms, TlsResumedSession &out) noexcept {
+        // The in-memory store is identity-keyed only; the SNI/expiry pair is
+        // the stateless open's contract, not this table's.
+        (void) name;
+        (void) now_unix_ms;
         const auto &self = *static_cast<TestSessionStore *>(ctx);
         if (self.miss_everything) {
             return false;
@@ -1942,4 +1947,224 @@ TEST(TlsServerTicketService, Mint12ThroughEngineCarriesMaster) {
     // SNI was sent, so the empty name is not this ticket's name.
     TlsTicketContents wrong;
     EXPECT_EQ(TlsTicketService::OpenStatus::Rejected, service.open(capture.ticket, "", certfix::kRefNowMs, wrong));
+}
+
+// ---- stateless resumption through the real service (08 lookup half) ----
+
+namespace {
+
+// The shared single-key material for the stateless tests, born at the fixed
+// test clock so the default windows cover both hops.
+std::array<TlsTicketKeyMaterial, 1> stateless_keys() {
+    return {{
+            {.id = 1,
+             .bytes = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+             .created_ms = certfix::kRefNowMs},
+    }};
+}
+
+// Wraps the service's lookup hook and records what the engine passed: the
+// CH's SNI and the engine's clock snapshot.
+struct RecordingServiceLookup {
+    TlsTicketService &service;
+    bool called = false;
+    std::string seen_name;
+    std::int64_t seen_now_ms = 0;
+
+    static bool lookup(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
+                       std::int64_t now_unix_ms, TlsResumedSession &out) noexcept {
+        auto &self = *static_cast<RecordingServiceLookup *>(ctx);
+        self.called = true;
+        self.seen_name.assign(name);
+        self.seen_now_ms = now_unix_ms;
+        return TlsTicketService::lookup_thunk(&self.service, identity, name, now_unix_ms, out);
+    }
+    [[nodiscard]] TlsResumptionLookup hook() noexcept { return TlsResumptionLookup{&lookup, this}; }
+};
+
+} // namespace
+
+// The real end-to-end loop: hop 1 mints a stateless ticket with the CH's SNI
+// bound into its AAD; BoringSSL digests the NST and derives its PSK the RFC
+// way (Expand-Label over the nonce — the mint's exact counterpart); hop 2
+// offers the ticket back, the lookup opens it against hop 2's CH SNI, and
+// the handshake resumes over the sealed PSK — binder verification included.
+TEST(TlsServerTicketService, StatelessResume13WithBoringClient) {
+    CollectedSessionsGuard guard;
+    ServerMaterial material;
+    const TlsServerConfig cfg = material.config();
+    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+    RecordingServiceLookup recorder{.service = service};
+    const TlsTicketMinter minter = service.minter();
+    const TlsResumptionLookup lookup = recorder.hook();
+
+    // hop 1: full handshake; the NST lands in the client's session stash.
+    {
+        auto client = BoringClient::make(ClientOptions{.collect_tickets = true, .send_sni = true});
+        ASSERT_NE(nullptr, client);
+        TlsServerHandshakeEngine engine(cfg, nullptr, &minter, material.pool);
+        ASSERT_TRUE(drive(*client, engine, false));
+        std::array<char, 64> sink{};
+        (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        ASSERT_EQ(1u, g_new_sessions.size());
+    }
+
+    // hop 2: same SNI, the stashed session set — the PSK offer rides the ticket.
+    auto client = BoringClient::make(ClientOptions{.collect_tickets = true, .send_sni = true});
+    ASSERT_NE(nullptr, client);
+    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
+    ASSERT_TRUE(drive(*client, engine, false));
+    EXPECT_FALSE(engine.failed());
+
+    TlsConnectedState state = engine.take_state();
+    EXPECT_TRUE(state.session_resumed);
+    EXPECT_EQ(1, SSL_session_reused(client->ssl()));
+    EXPECT_TRUE(state.peer_chain.empty()); // PSK resume: no certificate flight
+    EXPECT_FALSE(state.early_data_accepted);
+    // The engine handed the lookup the CH's SNI and its clock snapshot (the
+    // same one the age gate uses).
+    EXPECT_TRUE(recorder.called);
+    EXPECT_EQ("example.com", recorder.seen_name);
+    EXPECT_EQ(certfix::kRefNowMs, recorder.seen_now_ms);
+
+    // The resumed connection minted — and the client digested — a fresh
+    // stateless ticket of its own.
+    std::array<char, 64> sink{};
+    (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+    EXPECT_EQ(2u, g_new_sessions.size());
+
+    // App data over the resumed connection, both directions.
+    const char kPing[] = "ping stateless";
+    ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
+    const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
+    ASSERT_EQ(sizeof(kPing) - 1, ping.size());
+    EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
+
+    const char kPong[] = "pong stateless";
+    const std::vector<std::uint8_t> pong =
+            seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+    ASSERT_FALSE(pong.empty());
+    ASSERT_TRUE(client->ship(pong));
+    const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+    ASSERT_GT(got, 0);
+    EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+}
+
+// The wrong-vhost fallback: BoringSSL offers the ticket regardless of the new
+// SNI (its session use is not name-gated), the lookup opens it against hop 2's
+// CH SNI, and the AAD name binding rejects it — the handshake degrades to a
+// full one, never a failure. Verification is off: the credential is
+// example.com's; the test is the ticket, not the chain.
+TEST(TlsServerTicketService, CrossVhostTicketFallsBackToFull) {
+    CollectedSessionsGuard guard;
+    ServerMaterial material;
+    const TlsServerConfig cfg = material.config();
+    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+    RecordingServiceLookup recorder{.service = service};
+    const TlsTicketMinter minter = service.minter();
+    const TlsResumptionLookup lookup = recorder.hook();
+
+    // hop 1 mints under "example.com".
+    {
+        auto client = BoringClient::make(ClientOptions{.collect_tickets = true, .send_sni = true});
+        ASSERT_NE(nullptr, client);
+        TlsServerHandshakeEngine engine(cfg, nullptr, &minter, material.pool);
+        ASSERT_TRUE(drive(*client, engine, false));
+        std::array<char, 64> sink{};
+        (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        ASSERT_EQ(1u, g_new_sessions.size());
+    }
+
+    // hop 2: a different vhost presents the ticket.
+    auto client = BoringClient::make(
+            ClientOptions{.trust_pem = nullptr, .host = "other.example", .collect_tickets = true, .send_sni = true});
+    ASSERT_NE(nullptr, client);
+    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
+    ASSERT_TRUE(drive(*client, engine, false));
+    EXPECT_FALSE(engine.failed());
+
+    TlsConnectedState state = engine.take_state();
+    EXPECT_FALSE(state.session_resumed);
+    EXPECT_EQ(0, SSL_session_reused(client->ssl()));
+    // The lookup ran and saw the new vhost's SNI — the miss is the AAD
+    // binding, not a skipped offer.
+    EXPECT_TRUE(recorder.called);
+    EXPECT_EQ("other.example", recorder.seen_name);
+}
+
+// Both FSMs ours with the real service: hop 1's captured ticket opens back
+// into the exact offer a future 08 client-side cache would build from the
+// NST side, hop 2 resumes through lookup(), and the pair re-derives one set
+// of application secrets.
+TEST(TlsServerTicketService, StatelessResumeOurPair) {
+    DualMaterial dual;
+    const TlsServerConfig cfg = dual.server_material.config();
+    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+    CapturingServiceMinter capture{.service = service};
+    const TlsTicketMinter minter = capture.hook();
+
+    // hop 1: mint exactly one stateless ticket.
+    {
+        TlsServerHandshakeEngine server(cfg, nullptr, &minter, dual.server_material.pool);
+        TlsClientHandshakeEngine client(dual.client_cfg, nullptr, dual.server_material.pool);
+        ASSERT_TRUE(pump(client, server));
+        EXPECT_FALSE(server.failed());
+    }
+    ASSERT_TRUE(capture.called);
+    const std::vector<std::uint8_t> ticket = capture.ticket; // copy: hop 2 re-mints into the capture
+
+    // The offer mirrors the opened ticket (elapsed 0 → the obfuscated age is
+    // the age_add) — psk included, straight out of the sealed payload.
+    TlsTicketContents contents;
+    ASSERT_EQ(TlsTicketService::OpenStatus::Ok, service.open(ticket, "example.com", certfix::kRefNowMs, contents));
+    TlsSessionOffer offer;
+    offer.identity = ticket;
+    offer.obfuscated_ticket_age = contents.ticket_age_add;
+    offer.suite = contents.suite;
+    offer.psk = contents.secret.bytes();
+    offer.max_early_data = contents.max_early_data;
+
+    const TlsResumptionLookup lookup = service.lookup();
+    TlsServerHandshakeEngine server(cfg, &lookup, &minter, dual.server_material.pool);
+    TlsClientHandshakeEngine client(dual.client_cfg, &offer, dual.server_material.pool);
+    std::vector<std::uint8_t> tail; // the post-done NST
+    ASSERT_TRUE(pump(client, server, &tail));
+    EXPECT_FALSE(server.failed());
+    EXPECT_FALSE(client.failed());
+
+    TlsConnectedState server_state = server.take_state();
+    TlsConnectedState client_state = client.take_state();
+    EXPECT_TRUE(server_state.session_resumed);
+    EXPECT_TRUE(client_state.session_resumed);
+    EXPECT_FALSE(server_state.early_data_accepted);
+    EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
+    EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
+
+    // The resumed connection minted another (distinct-nonce) ticket.
+    EXPECT_TRUE(capture.called);
+    ASSERT_FALSE(capture.ticket.empty());
+    EXPECT_NE(ticket, capture.ticket);
+    TlsTicketContents reissued;
+    EXPECT_EQ(TlsTicketService::OpenStatus::Ok,
+              service.open(capture.ticket, "example.com", certfix::kRefNowMs, reissued));
+
+    // App data through the moved ciphers, both directions.
+    const char kPing[] = "ping ours-stateless";
+    const std::vector<std::uint8_t> ping = seal_app_record(
+            client_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPing), sizeof(kPing) - 1});
+    ASSERT_FALSE(ping.empty());
+    const std::vector<std::uint8_t> opened = open_app_records(server_state.read_cipher, ping);
+    ASSERT_EQ(sizeof(kPing) - 1, opened.size());
+    EXPECT_EQ(0, std::memcmp(kPing, opened.data(), opened.size()));
+
+    ASSERT_TRUE(open_and_discard(client_state.read_cipher, tail)); // the NST at seq 0
+    const char kPong[] = "pong ours-stateless";
+    const std::vector<std::uint8_t> pong = seal_app_record(
+            server_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+    ASSERT_FALSE(pong.empty());
+    const std::vector<std::uint8_t> opened_back = open_app_records(client_state.read_cipher, pong);
+    ASSERT_EQ(sizeof(kPong) - 1, opened_back.size());
+    EXPECT_EQ(0, std::memcmp(kPong, opened_back.data(), opened_back.size()));
 }

@@ -357,3 +357,61 @@ TEST(TlsTicketService, BadInputsMintNothing) {
     // An out buffer too small for the container.
     EXPECT_EQ(0u, mint_len(fx.request13(), 16));
 }
+
+// ---- lookup thunk (the engine-facing resumption half) ----
+
+TEST(TlsTicketService, LookupThunkResumes13Ticket) {
+    Fixture fx;
+    TlsTicketService service(fx.keys(), TlsTicketKeyPolicy{});
+    const std::vector<std::uint8_t> ticket = fx.mint(service, fx.request13());
+
+    const TlsResumptionLookup lookup = service.lookup();
+    ASSERT_NE(nullptr, lookup.lookup);
+    TlsResumedSession resumed;
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, resumed));
+    // The engine consumes the psk view synchronously — it must be the sealed
+    // pre-derived PSK, i.e. exactly what the client derives from the NST.
+    const std::array<std::uint8_t, 1> nonce{0};
+    const auto psk = tls13_resumption_psk(TlsSecret::from_bytes(fx.master13), nonce);
+    ASSERT_TRUE(psk.has_value());
+    EXPECT_EQ(0, std::memcmp(psk->bytes().data(), resumed.psk.data(), psk->len()));
+    EXPECT_EQ(psk->len(), resumed.psk.size());
+    EXPECT_EQ(TlsCipherSuiteId::TlsAes128GcmSha256, resumed.suite);
+    EXPECT_EQ("h2", resumed.alpn);
+    EXPECT_EQ(0xdeadbeefu, resumed.ticket_age_add);
+    EXPECT_EQ(0u, resumed.max_early_data);
+    EXPECT_EQ(kNow, resumed.ticket_issued_ms);
+}
+
+// Every non-1.3-Ok open is a miss (false): wrong vhost name, tamper, session
+// expiry, and the 1.2 container (its abbreviated handshake is a later slice)
+// all fall back to a full handshake.
+TEST(TlsTicketService, LookupThunkMissesOnWrongNameTamperExpiryOr12) {
+    Fixture fx;
+    TlsTicketService service(fx.keys(), TlsTicketKeyPolicy{});
+    const TlsResumptionLookup lookup = service.lookup();
+    TlsResumedSession resumed;
+
+    // Wrong vhost name — the AAD binding rejects before any decryption.
+    const std::vector<std::uint8_t> other = fx.mint(service, fx.request13("other.example"));
+    EXPECT_FALSE(lookup.lookup(lookup.ctx, other, "example.com", kNow, resumed));
+
+    // Tampered ciphertext.
+    std::vector<std::uint8_t> bad = fx.mint(service, fx.request13());
+    bad[kHeaderLen + 2] ^= 0xA5;
+    EXPECT_FALSE(lookup.lookup(lookup.ctx, bad, "example.com", kNow, resumed));
+
+    // Session timeout: a 5 s ticket offered 6 s later (the key window is the
+    // default 24 h, so this isolates the payload's own timeout).
+    const std::vector<std::uint8_t> expired = fx.mint(service, fx.request13("example.com", 5, kNow));
+    EXPECT_FALSE(lookup.lookup(lookup.ctx, expired, "example.com", kNow + 6'000, resumed));
+
+    // A 1.2 ticket is not a 1.3 PSK.
+    EXPECT_FALSE(lookup.lookup(lookup.ctx, fx.mint(service, fx.request12()), "example.com", kNow, resumed));
+
+    // An invalid service (no keys) misses everything — never fatal: this very
+    // ticket is unknown key material to it.
+    TlsTicketService empty(std::span<const TlsTicketKeyMaterial>{}, TlsTicketKeyPolicy{});
+    const TlsResumptionLookup empty_lookup = empty.lookup();
+    EXPECT_FALSE(empty_lookup.lookup(empty_lookup.ctx, fx.mint(service, fx.request13()), "example.com", kNow, resumed));
+}
