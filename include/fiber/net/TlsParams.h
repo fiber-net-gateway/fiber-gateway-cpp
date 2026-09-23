@@ -11,6 +11,10 @@
 
 #include "../common/IoError.h"
 
+namespace fiber::tls {
+class TlsTicketService;
+}
+
 namespace fiber::net {
 
 class TlsCredential;
@@ -190,6 +194,14 @@ struct TlsServerParam {
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3
     bool enable_early_data = false;
+    // Stateless session tickets (09 §6): non-null wires the service's minter
+    // and lookup into the handshake — the server then sends NewSessionTickets
+    // (1.3) / session tickets (1.2) and resumes from presented ones. Null (the
+    // default) = no tickets minted and no resumption: every connection is a
+    // full handshake. Borrowed like the other members: the pointee must stay
+    // valid until the handshake co_returns. Immutable after construction, and
+    // mint/open are lock-free, so one service may be shared by every worker.
+    const tls::TlsTicketService *ticket_service = nullptr;
 
     [[nodiscard]] bool enabled() const noexcept { return configure_callback != nullptr; }
 };

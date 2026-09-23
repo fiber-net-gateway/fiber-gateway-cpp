@@ -30,6 +30,11 @@
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/detail/TlsStreamFd.h>
+#include <fiber/tls/TlsTicketService.h>
+
+#include <openssl/ssl.h>
+
+#include <poll.h>
 
 namespace {
 
@@ -1066,6 +1071,273 @@ TEST(TlsStreamFdTest, TlsTransportAbandonPendingWriteDropsChainReference) {
     ASSERT_TRUE(client_result);
     EXPECT_TRUE(client_result->different_chain_busy_before);
     EXPECT_TRUE(client_result->empty_chain_ready_after);
+}
+
+// ---- stateless ticket assembly (09 slice 3): a BoringSSL socket oracle ----
+//
+// The tests below drive OUR TlsStreamFd server from a real BoringSSL client
+// over the socketpair (blocking I/O on the test thread; the server runs on an
+// EventLoopGroup thread). BoringSSL's session stash is the observable: the
+// new-session callback fires exactly when a NewSessionTicket (1.3) or
+// session-ticket handshake message (1.2) arrives, so "no service configured
+// → no ticket" and "same material after a rebuild → resumption" are both
+// assertable against an independent implementation.
+
+std::vector<SSL_SESSION *> &stashed_sessions() {
+    static std::vector<SSL_SESSION *> stash;
+    return stash;
+}
+
+int stash_new_session(SSL *, SSL_SESSION *sess) noexcept {
+    stashed_sessions().push_back(sess);
+    return 1; // the stash took ownership
+}
+
+struct StashedSessionsGuard {
+    ~StashedSessionsGuard() {
+        for (SSL_SESSION *sess: stashed_sessions()) {
+            SSL_SESSION_free(sess);
+        }
+        stashed_sessions().clear();
+    }
+};
+
+struct BsslSocketClient {
+    SSL_CTX *ctx = nullptr;
+    SSL *ssl = nullptr;
+
+    // tls12_only pins the version; collect_tickets routes received tickets
+    // into the stash above.
+    static bool make(bool tls12_only, bool collect_tickets, std::unique_ptr<BsslSocketClient> &out) {
+        auto client = std::unique_ptr<BsslSocketClient>(new BsslSocketClient);
+        client->ctx = SSL_CTX_new(TLS_client_method());
+        if (client->ctx == nullptr) {
+            return false;
+        }
+        SSL_CTX_set_verify(client->ctx, SSL_VERIFY_NONE, nullptr); // self-signed test credential
+        if (tls12_only) {
+            SSL_CTX_set_min_proto_version(client->ctx, TLS1_2_VERSION);
+            SSL_CTX_set_max_proto_version(client->ctx, TLS1_2_VERSION);
+        } else {
+            SSL_CTX_set_min_proto_version(client->ctx, TLS1_3_VERSION);
+            SSL_CTX_set_max_proto_version(client->ctx, TLS1_3_VERSION);
+        }
+        if (collect_tickets) {
+            SSL_CTX_set_session_cache_mode(client->ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+            SSL_CTX_sess_set_new_cb(client->ctx, &stash_new_session);
+        }
+        client->ssl = SSL_new(client->ctx);
+        if (client->ssl == nullptr) {
+            return false;
+        }
+        SSL_set_connect_state(client->ssl);
+        out = std::move(client);
+        return true;
+    }
+
+    ~BsslSocketClient() {
+        if (ssl != nullptr) {
+            SSL_free(ssl);
+        }
+        if (ctx != nullptr) {
+            SSL_CTX_free(ctx);
+        }
+    }
+
+    BsslSocketClient() = default;
+    BsslSocketClient(const BsslSocketClient &) = delete;
+    BsslSocketClient &operator=(const BsslSocketClient &) = delete;
+
+    void attach_fd(int fd) { SSL_set_bio(ssl, BIO_new_socket(fd, BIO_NOCLOSE), BIO_new_socket(fd, BIO_NOCLOSE)); }
+
+    bool handshake() { return SSL_do_handshake(ssl) == 1; }
+
+    bool round_trip(const char *request, const char *expect_reply) {
+        const int request_len = static_cast<int>(std::strlen(request));
+        if (SSL_write(ssl, request, request_len) != request_len) {
+            return false;
+        }
+        char buffer[64] = {};
+        const int got = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+        if (got != static_cast<int>(std::strlen(expect_reply))) {
+            return false;
+        }
+        return std::memcmp(buffer, expect_reply, static_cast<std::size_t>(got)) == 0;
+    }
+
+    // The 1.3 NST trails the handshake flight; process pending records (the
+    // read path digests handshake messages and fires the stash callback)
+    // until the stash holds a session or the wire stays quiet past the
+    // deadline. Returns true when at least one session was stashed.
+    bool slurp_tickets(int fd, int attempts, int per_attempt_ms) {
+        for (int i = 0; i < attempts && stashed_sessions().empty(); ++i) {
+            pollfd watched{.fd = fd, .events = POLLIN, .revents = 0};
+            if (::poll(&watched, 1, per_attempt_ms) == 1 && (watched.revents & POLLIN) != 0) {
+                char scratch[512];
+                (void) SSL_read(ssl, scratch, sizeof(scratch));
+            }
+        }
+        return !stashed_sessions().empty();
+    }
+};
+
+// Bounds every blocking client read so a wedged server fails the test
+// instead of hanging it.
+void arm_receive_timeout(int fd) {
+    timeval timeout{.tv_sec = 5, .tv_usec = 0};
+    (void) ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+}
+
+// One server stream against one external blocking client: handshake, then a
+// ping/pong exchange, then teardown. Returns the server's observed request.
+// await_ticket keeps reading (bounded) after the round trip so a trailing
+// 1.3 NST reaches the stash before the fd closes.
+std::string run_server_against_bssl_client(fiber::event::EventLoopGroup &group, int server_fd,
+                                           fiber::net::TlsServerParam &param, BsslSocketClient &client, int client_fd,
+                                           std::string_view expect_request, bool await_ticket) {
+    auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), server_fd);
+    std::promise<fiber::common::IoResult<std::string>> server_promise;
+    auto server_future = server_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return run_tls_server(server_stream, param, &server_promise); });
+
+    if (!client.handshake()) {
+        return "client-handshake-failed";
+    }
+    if (!client.round_trip(expect_request.data(), "pong")) {
+        return "client-round-trip-failed";
+    }
+    if (await_ticket && !client.slurp_tickets(client_fd, 20, 100)) {
+        return "no-ticket-received";
+    }
+
+    std::string observed;
+    if (server_future.wait_for(5s) == std::future_status::ready) {
+        auto result = server_future.get();
+        observed = result ? *result : "server-error";
+    } else {
+        observed = "server-timeout";
+    }
+
+    // Our close_notify only (no wait for the peer's — nobody drives the
+    // server read side anymore), then the fd; the server stream is torn down
+    // on its own loop.
+    (void) SSL_shutdown(client.ssl);
+    ::close(client_fd);
+    std::promise<void> close_done;
+    auto close_future = close_done.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_tls_streams(server_stream, nullptr, &close_done); });
+    (void) close_future.wait_for(2s);
+    return observed;
+}
+
+// Decision 1 (09 §1): no ticket service configured → the server never sends
+// a NewSessionTicket. BoringSSL's stash staying empty is the proof; the
+// handshake and app data still flow.
+TEST(TlsStreamFdTest, UnconfiguredTicketServiceMintsNoSessionTicket) {
+    SigpipeGuard sigpipe_guard;
+    StashedSessionsGuard stash_guard;
+    TempFile cert("cert", kSelfSignedCertPem);
+    TempFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
+    EXPECT_EQ(tls_pair->server_options.ticket_service, nullptr); // the default under test
+
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+    arm_receive_timeout(fds[1]);
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::unique_ptr<BsslSocketClient> client;
+    ASSERT_TRUE(BsslSocketClient::make(false, true, client));
+    client->attach_fd(fds[1]);
+
+    const std::string observed =
+            run_server_against_bssl_client(group, fds[0], tls_pair->server_options, *client, fds[1], "ping", false);
+    EXPECT_EQ(observed, "ping");
+    EXPECT_TRUE(stashed_sessions().empty());
+
+    group.stop();
+    group.join();
+}
+
+// The stateless contract end to end: a ticket minted under one service stays
+// openable by a FRESH service built from the same material (a restart), and
+// BoringSSL resumes through it. Both protocol versions.
+TEST(TlsStreamFdTest, BoringsslClientResumesAcrossTicketServiceRebuild) {
+    SigpipeGuard sigpipe_guard;
+    StashedSessionsGuard stash_guard;
+    TempFile cert("cert", kSelfSignedCertPem);
+    TempFile key("key", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    for (const bool tls12_only: {false, true}) {
+        SCOPED_TRACE(tls12_only ? "tls12" : "tls13");
+        stashed_sessions().clear();
+
+        // Fixed material, born a minute ago (inside the mint window). The
+        // phase-2 service is built from the same bytes — that is the restart.
+        std::array<fiber::tls::TlsTicketKeyMaterial, 1> material{};
+        material[0].id = 7;
+        material[0].created_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::system_clock::now().time_since_epoch())
+                                         .count() -
+                                 60'000;
+        for (std::size_t i = 0; i < material[0].bytes.size(); ++i) {
+            material[0].bytes[i] = static_cast<std::uint8_t>(i);
+        }
+        const fiber::tls::TlsTicketKeyPolicy policy{};
+
+        // Phase 1: full handshake against service A; the client banks the
+        // ticket.
+        fiber::tls::TlsTicketService service_a({material}, policy);
+        ASSERT_TRUE(service_a.valid());
+        fiber::net::TlsServerParam param = tls_pair->server_options;
+        param.ticket_service = &service_a;
+
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        arm_receive_timeout(fds[1]);
+
+        std::unique_ptr<BsslSocketClient> collector;
+        ASSERT_TRUE(BsslSocketClient::make(tls12_only, true, collector));
+        collector->attach_fd(fds[1]);
+        EXPECT_EQ(run_server_against_bssl_client(group, fds[0], param, *collector, fds[1], "ping", true), "ping");
+        // The 1.2 ticket rides the flight (consumed by the handshake); the
+        // 1.3 NST may trail it — the helper slurped either way.
+        ASSERT_EQ(stashed_sessions().size(), 1u) << "exactly one ticket minted";
+        SSL_SESSION *banked = stashed_sessions().back();
+
+        // Phase 2: a brand-new service from the same material, a brand-new
+        // stream — the client presents the banked ticket and must resume.
+        fiber::tls::TlsTicketService service_b({material}, policy);
+        ASSERT_TRUE(service_b.valid());
+        param.ticket_service = &service_b;
+
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        arm_receive_timeout(fds[1]);
+
+        std::unique_ptr<BsslSocketClient> resumer;
+        ASSERT_TRUE(BsslSocketClient::make(tls12_only, false, resumer));
+        resumer->attach_fd(fds[1]);
+        ASSERT_EQ(SSL_set_session(resumer->ssl, banked), 1);
+        EXPECT_EQ(run_server_against_bssl_client(group, fds[0], param, *resumer, fds[1], "ping", false), "ping");
+        EXPECT_EQ(SSL_session_reused(resumer->ssl), 1) << "the rebuilt service resumed the banked ticket";
+    }
+
+    group.stop();
+    group.join();
 }
 
 } // namespace

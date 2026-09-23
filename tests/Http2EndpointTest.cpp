@@ -33,11 +33,15 @@
 #include <fiber/net/SocketAddress.h>
 #include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/tls/TlsTicketService.h>
+
+#include <openssl/ssl.h>
 
 namespace {
 
 using fiber::async::DetachedTask;
 using fiber::http::Http2Endpoint;
+using fiber::http::HttpServerTlsTicketKey;
 using fiber::http::Server;
 using namespace std::chrono_literals;
 
@@ -1048,6 +1052,225 @@ TEST(Http2EndpointTest, StreamedAutoBodyThroughPipeCompletes) {
     group.join();
     client_group.stop();
     client_group.join();
+}
+
+// ---- stateless ticket material: validation + full-stack resumption (09 §6) ----
+
+std::vector<SSL_SESSION *> &stashed_sessions() {
+    static std::vector<SSL_SESSION *> stash;
+    return stash;
+}
+
+int stash_new_session(SSL *, SSL_SESSION *sess) noexcept {
+    stashed_sessions().push_back(sess);
+    return 1; // the stash took ownership
+}
+
+struct StashedSessionsGuard {
+    ~StashedSessionsGuard() {
+        for (SSL_SESSION *sess: stashed_sessions()) {
+            SSL_SESSION_free(sess);
+        }
+        stashed_sessions().clear();
+    }
+};
+
+HttpServerTlsTicketKey ticket_key(std::uint32_t id) {
+    return HttpServerTlsTicketKey{
+            .id = id,
+            .key_hex = "00112233445566778899aabbccddeeff",
+            .created_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count() -
+                          60'000,
+    };
+}
+
+// A blocking BoringSSL client speaking raw HTTP/1.1 over the negotiated
+// "http/1.1" ALPN — an independent oracle for the endpoint-assembled ticket
+// service. resume_from banks a previously stashed session.
+struct RawTlsHttpClient {
+    SSL_CTX *ctx = nullptr;
+    SSL *ssl = nullptr;
+    int fd = -1;
+
+    static bool make(bool collect_tickets, std::unique_ptr<RawTlsHttpClient> &out) {
+        auto client = std::unique_ptr<RawTlsHttpClient>(new RawTlsHttpClient);
+        client->ctx = SSL_CTX_new(TLS_client_method());
+        if (client->ctx == nullptr) {
+            return false;
+        }
+        SSL_CTX_set_verify(client->ctx, SSL_VERIFY_NONE, nullptr); // self-signed test credential
+        if (collect_tickets) {
+            SSL_CTX_set_session_cache_mode(client->ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+            SSL_CTX_sess_set_new_cb(client->ctx, &stash_new_session);
+        }
+        client->ssl = SSL_new(client->ctx);
+        if (client->ssl == nullptr) {
+            return false;
+        }
+        SSL_set_connect_state(client->ssl);
+        // Split literals: \x08h would greedily parse as one hex escape.
+        static const unsigned char kProtos[] = "\x08"
+                                               "http/1.1";
+        if (SSL_set_alpn_protos(client->ssl, kProtos, sizeof(kProtos) - 1) != 0) {
+            return false;
+        }
+        out = std::move(client);
+        return true;
+    }
+
+    ~RawTlsHttpClient() {
+        if (ssl != nullptr) {
+            SSL_free(ssl);
+        }
+        if (ctx != nullptr) {
+            SSL_CTX_free(ctx);
+        }
+        if (fd >= 0) {
+            ::close(fd);
+        }
+    }
+
+    RawTlsHttpClient() = default;
+    RawTlsHttpClient(const RawTlsHttpClient &) = delete;
+    RawTlsHttpClient &operator=(const RawTlsHttpClient &) = delete;
+
+    bool connect(std::uint16_t port) {
+        fd = connect_to(port);
+        if (fd < 0) {
+            return false;
+        }
+        timeval timeout{.tv_sec = 5, .tv_usec = 0};
+        (void) ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        SSL_set_bio(ssl, BIO_new_socket(fd, BIO_NOCLOSE), BIO_new_socket(fd, BIO_NOCLOSE));
+        return SSL_do_handshake(ssl) == 1;
+    }
+
+    void resume_from(SSL_SESSION *session) { (void) SSL_set_session(ssl, session); }
+
+    [[nodiscard]] bool reused() const { return SSL_session_reused(ssl) == 1; }
+
+    // GET with Connection: close; returns true when the 200 status line came
+    // back. Any trailing NewSessionTicket rides the read path on the way.
+    bool get_and_expect_ok() {
+        static const char kRequest[] = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        if (SSL_write(ssl, kRequest, static_cast<int>(sizeof(kRequest) - 1)) !=
+            static_cast<int>(sizeof(kRequest) - 1)) {
+            return false;
+        }
+        char buffer[2048];
+        const int got = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+        return got > 0 && std::memcmp(buffer, "HTTP/1.1 200", 12) == 0;
+    }
+};
+
+// Bad material refuses the start before anything binds (09 §6 validation).
+TEST(Http2EndpointTest, RejectsBadTicketKeyMaterialBeforeListening) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    auto credential = make_credential();
+    ASSERT_NE(credential, nullptr);
+
+    std::vector<std::vector<HttpServerTlsTicketKey>> bad_sets;
+    HttpServerTlsTicketKey wrong_width = ticket_key(1);
+    wrong_width.key_hex.pop_back(); // 31 chars
+    bad_sets.push_back({wrong_width});
+    HttpServerTlsTicketKey not_hex = ticket_key(1);
+    not_hex.key_hex[0] = 'z';
+    bad_sets.push_back({not_hex});
+    bad_sets.push_back({ticket_key(1), ticket_key(1)}); // duplicate id
+    bad_sets.push_back({ticket_key(1), ticket_key(2), ticket_key(3), ticket_key(4), ticket_key(5), ticket_key(6),
+                        ticket_key(7), ticket_key(8), ticket_key(9)}); // one past the bound
+
+    for (const auto &keys: bad_sets) {
+        Server server(group.at(0), fiber::http::HttpHandler{});
+        Http2Endpoint::Options options;
+        options.address = fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), 0);
+        options.tls = tls_options(*credential);
+        options.tls.ticket_keys = keys;
+        auto *endpoint = server.add_endpoint<Http2Endpoint>(options);
+        ASSERT_NE(endpoint, nullptr);
+        auto started = server.start();
+        ASSERT_FALSE(started);
+        EXPECT_EQ(started.error(), fiber::common::IoErr::Invalid);
+    }
+
+    // Valid material starts cleanly (via the serve-future helper — a bare
+    // stop() would not wait out the state machine).
+    Http2Endpoint::Options good_options;
+    good_options.tls = tls_options(*credential);
+    good_options.tls.ticket_keys = {ticket_key(1), ticket_key(2)};
+    good_options.allow_http1 = true;
+    good_options.handler = [](fiber::http::HttpExchange &exchange) { return write_text(exchange, 200, "ok"); };
+    auto good = start_server(group, std::move(good_options));
+    ASSERT_NE(good.server, nullptr);
+    good.stop_and_join();
+
+    group.stop();
+    group.join();
+}
+
+// The full assembly over a real listener: options carry hex material, the
+// endpoint builds the service, a BoringSSL client banks a ticket and — after
+// the server is stopped and a NEW one started from the same material —
+// resumes with it (stateless: the new process would hold no session state).
+TEST(Http2EndpointTest, ServesResumableTicketsAcrossServerRestart) {
+    StashedSessionsGuard stash_guard;
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    auto credential = make_credential();
+    ASSERT_NE(credential, nullptr);
+
+    const std::vector<HttpServerTlsTicketKey> keys = {ticket_key(4)};
+    auto tls_with_tickets = tls_options(*credential);
+    tls_with_tickets.ticket_keys = keys; // the shared material
+
+    // Server A: the client completes a full handshake, banks the ticket, and
+    // pulls one response over HTTP/1.1.
+    auto first = start_server(
+            group,
+            Http2Endpoint::Options{
+                    .tls = tls_with_tickets,
+                    .allow_http1 = true,
+                    .handler = [](fiber::http::HttpExchange &exchange) { return write_text(exchange, 200, "tickets"); },
+            });
+    ASSERT_NE(first.server, nullptr);
+
+    std::unique_ptr<RawTlsHttpClient> collector;
+    ASSERT_TRUE(RawTlsHttpClient::make(true, collector));
+    ASSERT_TRUE(collector->connect(first.port));
+    EXPECT_TRUE(collector->get_and_expect_ok());
+    ASSERT_FALSE(stashed_sessions().empty()) << "the endpoint-minted ticket reached the client";
+    SSL_SESSION *banked = stashed_sessions().back();
+    collector.reset();
+
+    first.stop_and_join();
+
+    // Server B: a fresh process shape — same ticket material, nothing else
+    // carried over. The client resumes and gets its response.
+    auto second = start_server(
+            group,
+            Http2Endpoint::Options{
+                    .tls = tls_with_tickets,
+                    .allow_http1 = true,
+                    .handler = [](fiber::http::HttpExchange &exchange) { return write_text(exchange, 200, "resumed"); },
+            });
+    ASSERT_NE(second.server, nullptr);
+
+    std::unique_ptr<RawTlsHttpClient> resumer;
+    ASSERT_TRUE(RawTlsHttpClient::make(false, resumer));
+    resumer->resume_from(banked);
+    ASSERT_TRUE(resumer->connect(second.port));
+    EXPECT_TRUE(resumer->reused()) << "the restarted server resumed the stateless ticket";
+    EXPECT_TRUE(resumer->get_and_expect_ok());
+    resumer.reset();
+
+    second.stop_and_join();
+    group.stop();
+    group.join();
 }
 
 } // namespace

@@ -129,7 +129,7 @@ public:
 
     // The TlsTicketMinter adapter the 07 engines take (borrowed: keep the
     // service alive for the engine's lifetime).
-    [[nodiscard]] TlsTicketMinter minter() noexcept;
+    [[nodiscard]] TlsTicketMinter minter() const noexcept;
     static std::size_t mint_thunk(void *ctx, const TlsTicketRequest &req, std::span<std::uint8_t> out) noexcept;
 
     // The TlsResumptionLookup adapter both 07 version sub-flows take (borrowed
@@ -140,7 +140,7 @@ public:
     // one. The out spans borrow a thread-local staging cell (the engine reads
     // them right after the call returns; the same thread's next lookup
     // overwrites the cell).
-    [[nodiscard]] TlsResumptionLookup lookup() noexcept;
+    [[nodiscard]] TlsResumptionLookup lookup() const noexcept;
     static bool lookup_thunk(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
                              std::int64_t now_unix_ms, TlsResumedSession &out) noexcept;
 

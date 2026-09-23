@@ -31,7 +31,11 @@ TcpEndpointWorkerBase *Http1Endpoint::make_worker(event::EventLoop &loop, std::s
     return new (std::nothrow) Http1EndpointWorker(loop);
 }
 
-net::TlsServerParam Http1Endpoint::make_tls_param() const noexcept { return make_http1_server_tls_param(options_.tls); }
+net::TlsServerParam Http1Endpoint::make_tls_param() const noexcept {
+    net::TlsServerParam param = make_http1_server_tls_param(options_.tls);
+    param.ticket_service = ticket_service();
+    return param;
+}
 
 async::Task<void> Http1Endpoint::serve_connection(TcpEndpointWorkerBase &base_worker,
                                                   std::unique_ptr<HttpTransport> transport) noexcept {

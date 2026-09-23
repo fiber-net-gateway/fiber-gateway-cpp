@@ -15,6 +15,7 @@
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
 #include <fiber/tls/TlsConfig.h>
+#include <fiber/tls/TlsTicketService.h>
 #include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
 #include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 
@@ -94,6 +95,10 @@ struct TlsStreamFd::Handshake {
     const TlsServerParam *param = nullptr; // server only
     tls::TlsClientConfig client_cfg{};
     tls::TlsServerConfig server_cfg{};
+    // Ticket service adapters (09 §6): filled from param.ticket_service, the
+    // borrowed fn+ctx pairs die with this staging alongside the engine.
+    tls::TlsTicketMinter minter{};
+    tls::TlsResumptionLookup lookup{};
     common::IoErr callback_error = common::IoErr::None;
     std::array<std::uint8_t, 16> ip_bytes{}; // client verify_ip backing
     tls::TlsClientHandshakeEngine *client = nullptr;
@@ -328,10 +333,18 @@ common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param) no
     staging->param = &param;
     staging->selector.select = &TlsStreamFd::select_server_config;
     staging->selector.ctx = staging;
+    // Session tickets (09 §6): the service's adapters are staged here so the
+    // engine borrows them for the handshake. Unconfigured stays null — no NST,
+    // no resumption (decision 1) — which the engine treats natively.
+    if (param.ticket_service != nullptr) {
+        staging->minter = param.ticket_service->minter();
+        staging->lookup = param.ticket_service->lookup();
+    }
     // Credentials arrive per ClientHello through the selector, so the
     // template config passes only the selector-mode invariant checks.
-    staging->server =
-            new (std::nothrow) tls::TlsServerHandshakeEngine(cfg, nullptr, nullptr, *pool, &staging->selector);
+    staging->server = new (std::nothrow) tls::TlsServerHandshakeEngine(
+            cfg, param.ticket_service != nullptr ? &staging->lookup : nullptr,
+            param.ticket_service != nullptr ? &staging->minter : nullptr, *pool, &staging->selector);
     if (staging->server == nullptr) {
         delete staging;
         delete pool;
