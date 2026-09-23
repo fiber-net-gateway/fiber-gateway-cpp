@@ -66,14 +66,18 @@ struct TlsServerConfig {
 // Resumption lookup hook (08 boundary): identity → a borrowed projection of
 // the decrypted resumption parameters. 08's real implementation does ticket
 // decryption + anti-replay; the test side uses an in-memory table. Returning
-// false = miss (the handshake continues as a full one).
+// false = miss (the handshake continues as a full one). The hook serves BOTH
+// version sub-flows and is version-blind: `version` in the result says which
+// payload came out, and each engine rejects a ticket minted for the other
+// version (miss → full handshake).
 struct TlsResumedSession { // all-borrowed views; the lookup caller owns the bytes
-    std::span<const std::uint8_t> psk; // resumption PSK (08 derives it from the NST)
+    std::span<const std::uint8_t> psk; // 1.3: the resumption PSK; 1.2: the 48-byte master secret
+    TlsProtocolVersion version = TlsProtocolVersion::Tls13;
     TlsCipherSuiteId suite = TlsCipherSuiteId::TlsAes128GcmSha256; // binds the binder + transcript hash
     std::string_view alpn; // the ticket's early_alpn (empty = none)
-    std::uint32_t ticket_age_add = 0;
-    std::uint32_t max_early_data = 0; // 0 = this ticket allows no 0-RTT
-    std::int64_t ticket_issued_ms = 0; // for the age-window check (60 s skew, §10.4)
+    std::uint32_t ticket_age_add = 0; // 1.3 only
+    std::uint32_t max_early_data = 0; // 0 = this ticket allows no 0-RTT (1.3 only)
+    std::int64_t ticket_issued_ms = 0; // 1.3: the age-window check; 1.2: expiry only (in open)
 };
 struct TlsResumptionLookup {
     // name = the CH's SNI (the stateless ticket binds it into its AAD),

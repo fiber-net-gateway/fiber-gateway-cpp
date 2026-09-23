@@ -369,6 +369,7 @@ TEST(TlsTicketService, LookupThunkResumes13Ticket) {
     ASSERT_NE(nullptr, lookup.lookup);
     TlsResumedSession resumed;
     EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, resumed));
+    EXPECT_EQ(TlsProtocolVersion::Tls13, resumed.version); // the 1.3 engine's gate input
     // The engine consumes the psk view synchronously — it must be the sealed
     // pre-derived PSK, i.e. exactly what the client derives from the NST.
     const std::array<std::uint8_t, 1> nonce{0};
@@ -383,10 +384,28 @@ TEST(TlsTicketService, LookupThunkResumes13Ticket) {
     EXPECT_EQ(kNow, resumed.ticket_issued_ms);
 }
 
-// Every non-1.3-Ok open is a miss (false): wrong vhost name, tamper, session
-// expiry, and the 1.2 container (its abbreviated handshake is a later slice)
-// all fall back to a full handshake.
-TEST(TlsTicketService, LookupThunkMissesOnWrongNameTamperExpiryOr12) {
+// The hook is version-blind: a 1.2 ticket maps straight through with the
+// master as `psk` and its own version — the 1.2 engine's abbreviated gates
+// (and the 1.3 engine's version gate) consume exactly this shape.
+TEST(TlsTicketService, LookupThunkResumes12TicketWithMaster) {
+    Fixture fx;
+    TlsTicketService service(fx.keys(), TlsTicketKeyPolicy{});
+    const std::vector<std::uint8_t> ticket = fx.mint(service, fx.request12());
+
+    const TlsResumptionLookup lookup = service.lookup();
+    TlsResumedSession resumed;
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, resumed));
+    EXPECT_EQ(TlsProtocolVersion::Tls12, resumed.version);
+    ASSERT_EQ(fx.master12.size(), resumed.psk.size());
+    EXPECT_EQ(0, std::memcmp(fx.master12.data(), resumed.psk.data(), fx.master12.size()));
+    EXPECT_EQ(TlsCipherSuiteId::TlsAes128GcmSha256, resumed.suite);
+    EXPECT_EQ("h2", resumed.alpn);
+    EXPECT_EQ(kNow, resumed.ticket_issued_ms);
+}
+
+// Every non-Ok open is a miss (false): wrong vhost name, tamper, and session
+// expiry all fall back to a full handshake.
+TEST(TlsTicketService, LookupThunkMissesOnWrongNameTamperOrExpiry) {
     Fixture fx;
     TlsTicketService service(fx.keys(), TlsTicketKeyPolicy{});
     const TlsResumptionLookup lookup = service.lookup();
@@ -405,9 +424,6 @@ TEST(TlsTicketService, LookupThunkMissesOnWrongNameTamperExpiryOr12) {
     // default 24 h, so this isolates the payload's own timeout).
     const std::vector<std::uint8_t> expired = fx.mint(service, fx.request13("example.com", 5, kNow));
     EXPECT_FALSE(lookup.lookup(lookup.ctx, expired, "example.com", kNow + 6'000, resumed));
-
-    // A 1.2 ticket is not a 1.3 PSK.
-    EXPECT_FALSE(lookup.lookup(lookup.ctx, fx.mint(service, fx.request12()), "example.com", kNow, resumed));
 
     // An invalid service (no keys) misses everything — never fatal: this very
     // ticket is unknown key material to it.

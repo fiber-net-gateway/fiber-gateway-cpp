@@ -215,6 +215,12 @@ Tls13ServerHandshake::PskOutcome Tls13ServerHandshake::try_accept_psk(const TlsC
         return PskOutcome::Reject;
     }
 
+    // ---- version gate: the lookup is version-blind, so a 1.2 ticket offered
+    // in a 1.3 CH (never legitimate, always possible) is a plain miss. ----
+    if (resumed.version != TlsProtocolVersion::Tls13) {
+        return PskOutcome::Reject;
+    }
+
     // ---- suite gate: the ticket's suite must be a 1.3 suite the CH offered ----
     const TlsSuiteInfo *info = tls_suite_info(resumed.suite);
     if (info == nullptr || !info->is_tls13 ||
