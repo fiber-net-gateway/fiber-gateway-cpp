@@ -11,6 +11,7 @@
 #include <span>
 #include <string_view>
 
+#include "TlsVersion.h"
 #include "crypto/TlsCertificate.h"
 #include "crypto/TlsSignature.h"
 #include "handshake/TlsCipherSuites.h"
@@ -80,10 +81,10 @@ struct TlsResumptionLookup {
 };
 
 // Ticket minting hook (08 boundary): write one opaque ticket into out and
-// return its length; 0 = send no NST this connection. 08's real
-// implementation does AEAD encryption; the test side serializes the
-// TlsTicketRequest into the ticket bytes (a ticket is an opaque blob to the
-// client — interop does not constrain the format).
+// return its length; 0 = send no NST this connection. The stateless
+// implementation is TlsTicketService (08 §3): the ticket blob is the AEAD-
+// sealed resumption state itself — the server stores nothing about issued
+// tickets. Test-side minters serialize the request or file it in a table.
 struct TlsTicketRequest {
     std::span<const std::uint8_t> resumption_master; // this connection's resumption secret
     std::uint8_t ticket_nonce = 0; // = the sequence number (1.3; §10.9: always one ticket, nonce 0)
@@ -94,6 +95,8 @@ struct TlsTicketRequest {
     std::uint32_t max_early_data = 0; // enable_early_data ? 14336 : 0
     std::uint32_t timeout_s = 0;
     std::int64_t now_unix_ms = 0;
+    TlsProtocolVersion version = TlsProtocolVersion::Tls13; // selects the payload field set
+    std::string_view name; // the CH's SNI — bound into the ticket AAD (cross-vhost replay guard)
 };
 struct TlsTicketMinter {
     std::size_t (*mint)(void *ctx, const TlsTicketRequest &, std::span<std::uint8_t> out) noexcept = nullptr;
