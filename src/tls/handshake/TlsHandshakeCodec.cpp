@@ -667,9 +667,13 @@ template<typename Certs>
 }
 
 // The CH encoder's fixed offers (06: engine registry constants, not config).
+// 09 §4.2 narrows the supported_versions list to the config bounds; an empty
+// offered_versions span keeps the engine-fixed default.
 inline constexpr std::uint16_t kClientOfferedVersions[] = {0x0304, 0x0303};
-inline constexpr std::size_t kClientOfferedVersionCount =
-        sizeof(kClientOfferedVersions) / sizeof(kClientOfferedVersions[0]);
+
+inline constexpr std::span<const std::uint16_t> effective_offered_versions(const TlsClientHelloInput &in) noexcept {
+    return in.offered_versions.empty() ? std::span<const std::uint16_t>{kClientOfferedVersions} : in.offered_versions;
+}
 
 } // namespace
 
@@ -1096,7 +1100,11 @@ common::IoResult<std::size_t> tls_client_hello_size(const TlsClientHelloInput &i
     }
     size += 4 + 2 + 2 * in.supported_groups.size();
     size += 4 + 2 + 2 * in.signature_algorithms.size();
-    size += 4 + 1 + 2 * kClientOfferedVersionCount;
+    const std::span<const std::uint16_t> versions = effective_offered_versions(in);
+    if (versions.empty() || versions.size() > 127) { // vector length is a 1-byte prefix
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    size += 4 + 1 + 2 * versions.size();
     // psk_key_exchange_modes rides every CH (engine-fixed constant): a peer
     // that never sees it marks the connection unresumable — BoringSSL's
     // server skips NewSessionTicket issuance entirely (!accept_psk_mode).
@@ -1217,11 +1225,12 @@ common::IoResult<TlsClientHelloEncoded> tls_encode_client_hello(const TlsClientH
             return std::unexpected(common::IoErr::Invalid);
         }
     }
-    if (!w.ext(TlsExtensionType::SupportedVersions, 1 + 2 * kClientOfferedVersionCount) ||
-        !w.u8(static_cast<std::uint8_t>(2 * kClientOfferedVersionCount))) {
+    const std::span<const std::uint16_t> versions = effective_offered_versions(in);
+    if (!w.ext(TlsExtensionType::SupportedVersions, 1 + 2 * versions.size()) ||
+        !w.u8(static_cast<std::uint8_t>(2 * versions.size()))) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    for (const std::uint16_t version: kClientOfferedVersions) {
+    for (const std::uint16_t version: versions) {
         if (!w.be16(version)) {
             return std::unexpected(common::IoErr::Invalid);
         }

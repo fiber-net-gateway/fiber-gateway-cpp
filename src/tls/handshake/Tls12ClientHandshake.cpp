@@ -39,9 +39,13 @@ void Tls12ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
     }
     // RFC 8446 §4.1.3 downgrade sentinel: a 1.3-capable server forced down to
     // 1.2 flags itself with DOWNGRD||0x01 in the last 8 random bytes — the
-    // downgrade was injected, the handshake is dead.
+    // downgrade was injected, the handshake is dead. Only a 1.3-capable
+    // client checks: one pinned to 1.2 never offered 1.3, so its CH "not
+    // supporting 1.3" is genuine, not a strip (and such servers send the
+    // sentinel per §4.1.3 — harmless to us).
     static constexpr std::array<std::uint8_t, 8> kDowngradeSentinel{0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01};
-    if (std::memcmp(sh.random.data() + 24, kDowngradeSentinel.data(), kDowngradeSentinel.size()) == 0) {
+    if (cfg_.max_version >= kTlsVersionTls13 &&
+        std::memcmp(sh.random.data() + 24, kDowngradeSentinel.data(), kDowngradeSentinel.size()) == 0) {
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }
@@ -204,7 +208,10 @@ void Tls12ClientHandshake::handle_certificate_12(std::span<const std::uint8_t> b
     feed12(TlsHandshakeType::Certificate, body);
 
     if (cfg_.verify_peer) {
-        const auto verification = tls_verify_chain(peer_chain_, *cfg_.trust, TlsCertPurpose::SslServer, cfg_.sni_host,
+        // The check name is check_host when set, else the SNI send name
+        // (09 §4.3: the net layer's server_name/verify_name split).
+        const std::string_view check_host = cfg_.check_host.empty() ? cfg_.sni_host : cfg_.check_host;
+        const auto verification = tls_verify_chain(peer_chain_, *cfg_.trust, TlsCertPurpose::SslServer, check_host,
                                                    cfg_.verify_ip, cfg_.now_unix_ms);
         if (!verification.has_value()) {
             fail(TlsAlertDesc::InternalError);

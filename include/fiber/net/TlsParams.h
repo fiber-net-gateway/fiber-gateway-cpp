@@ -90,16 +90,14 @@ struct TlsClientSecurity {
 };
 
 struct TlsClientParam {
-    // Every member is applied synchronously when the client SSL is created
-    // (TlsSslFactory::create_client / QuicTlsSession::init_client), before the
-    // handshake coroutine ever suspends — BoringSSL copies what it needs out of
-    // alpn/server_name/verify_name during that call (create_client() copies the
-    // hostname into a bounded stack buffer itself, since it does not rely on
-    // the view being NUL-terminated), so nothing here needs to stay valid past
-    // create_client() returning, let alone for the whole handshake. Operation
-    // policy such as handshake timeout, session caching, and early data belongs
-    // to the transport driving the handshake rather than this TLS parameter
-    // object.
+    // Members are applied when the handshake starts (the QUIC path copies
+    // what it needs inside create_client; the TCP engine path stages borrowed
+    // views into the per-connection handshake state). Either way the param,
+    // the storage its alpn span points into, and the pointees of security
+    // (credential, trust store) must stay valid until the handshake
+    // co_returns — like TlsServerParam below. Operation policy such as
+    // handshake timeout, session caching, and early data belongs to the
+    // transport driving the handshake rather than this TLS parameter object.
     TlsClientSecurity security{};
     int min_version = 0x0303; // TLS 1.2
     int max_version = 0x0304; // TLS 1.3

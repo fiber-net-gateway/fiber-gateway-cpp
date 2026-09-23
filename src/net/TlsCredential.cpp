@@ -1,17 +1,14 @@
 #include <fiber/net/TlsCredential.h>
 
-#include <cstddef>
-#include <limits>
+#include <cstdio>
 #include <new>
+#include <string>
 
-#include <openssl/bio.h>
 #include <openssl/err.h>
-#include <openssl/mem.h>
-#include <openssl/pem.h>
+#include <openssl/evp.h>
 #include <openssl/pool.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
-#include <openssl/x509.h>
 
 namespace fiber::net {
 
@@ -23,118 +20,49 @@ public:
     ~OpenSslErrorQueueScope() noexcept { ERR_clear_error(); }
 };
 
-BIO *open_pem_bio(const TlsPemSource &source) noexcept {
+// PEM material for one source as contiguous text. Content sources copy the
+// string; File sources read the whole file (bounded sanity check included).
+common::IoErr read_pem_text(const TlsPemSource &source, std::string &out) noexcept {
     switch (source.kind) {
-        case TlsPemSourceKind::File:
-            return source.value.empty() ? nullptr : BIO_new_file(source.value.c_str(), "rb");
         case TlsPemSourceKind::Content:
-            if (source.value.empty() ||
-                source.value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-                return nullptr;
+            if (source.value.empty() || source.value.size() > (1u << 22)) {
+                return common::IoErr::Invalid;
             }
-            return BIO_new_mem_buf(source.value.data(), static_cast<int>(source.value.size()));
+            out.assign(source.value);
+            return common::IoErr::None;
+        case TlsPemSourceKind::File: {
+            if (source.value.empty()) {
+                return common::IoErr::Invalid;
+            }
+            std::FILE *file = std::fopen(source.value.c_str(), "rb");
+            if (file == nullptr) {
+                return common::IoErr::NotFound;
+            }
+            char chunk[4096];
+            std::size_t got = 0;
+            while ((got = std::fread(chunk, 1, sizeof chunk, file)) > 0) {
+                out.append(chunk, got);
+                if (out.size() > (1u << 22)) {
+                    break;
+                }
+            }
+            const bool ok = std::ferror(file) == 0 && !out.empty() && out.size() <= (1u << 22);
+            std::fclose(file);
+            return ok ? common::IoErr::None : common::IoErr::Invalid;
+        }
         case TlsPemSourceKind::None:
-            return nullptr;
+            return common::IoErr::Invalid;
     }
-    return nullptr;
-}
-
-void free_crypto_buffers(CRYPTO_BUFFER **buffers, std::size_t count) noexcept {
-    if (!buffers) {
-        return;
-    }
-    for (std::size_t i = 0; i < count; ++i) {
-        CRYPTO_BUFFER_free(buffers[i]);
-    }
-    OPENSSL_free(buffers);
-}
-
-common::IoErr load_certificate_chain(SSL_CREDENTIAL *credential, const TlsPemSource &source,
-                                     std::array<std::uint8_t, 32> &session_identity) noexcept {
-    BIO *bio = open_pem_bio(source);
-    if (!bio) {
-        return common::IoErr::Invalid;
-    }
-    STACK_OF(X509_INFO) *infos = PEM_X509_INFO_read_bio(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    if (!infos) {
-        return common::IoErr::Invalid;
-    }
-
-    const std::size_t count = sk_X509_INFO_num(infos);
-    if (count == 0 || count > std::numeric_limits<std::size_t>::max() / sizeof(CRYPTO_BUFFER *)) {
-        sk_X509_INFO_pop_free(infos, X509_INFO_free);
-        return common::IoErr::Invalid;
-    }
-    auto **buffers = static_cast<CRYPTO_BUFFER **>(OPENSSL_zalloc(count * sizeof(CRYPTO_BUFFER *)));
-    if (!buffers) {
-        sk_X509_INFO_pop_free(infos, X509_INFO_free);
-        return common::IoErr::NoMem;
-    }
-
-    common::IoErr error = common::IoErr::None;
-    std::size_t loaded = 0;
-    for (; loaded < count; ++loaded) {
-        X509_INFO *info = sk_X509_INFO_value(infos, loaded);
-        if (!info || !info->x509 || info->crl || info->x_pkey) {
-            error = common::IoErr::Invalid;
-            break;
-        }
-        const int der_len = i2d_X509(info->x509, nullptr);
-        if (der_len <= 0) {
-            error = common::IoErr::Invalid;
-            break;
-        }
-        auto *der = static_cast<std::uint8_t *>(OPENSSL_malloc(static_cast<std::size_t>(der_len)));
-        if (!der) {
-            error = common::IoErr::NoMem;
-            break;
-        }
-        std::uint8_t *cursor = der;
-        if (i2d_X509(info->x509, &cursor) != der_len) {
-            OPENSSL_free(der);
-            error = common::IoErr::Invalid;
-            break;
-        }
-        buffers[loaded] = CRYPTO_BUFFER_new(der, static_cast<std::size_t>(der_len), nullptr);
-        if (loaded == 0) {
-            SHA256(der, static_cast<std::size_t>(der_len), session_identity.data());
-        }
-        OPENSSL_free(der);
-        if (!buffers[loaded]) {
-            error = common::IoErr::NoMem;
-            break;
-        }
-    }
-
-    if (error == common::IoErr::None && SSL_CREDENTIAL_set1_cert_chain(credential, buffers, count) != 1) {
-        error = common::IoErr::Invalid;
-    }
-    free_crypto_buffers(buffers, loaded);
-    sk_X509_INFO_pop_free(infos, X509_INFO_free);
-    return error;
-}
-
-common::IoErr load_private_key(SSL_CREDENTIAL *credential, const TlsPemSource &source) noexcept {
-    BIO *bio = open_pem_bio(source);
-    if (!bio) {
-        return common::IoErr::Invalid;
-    }
-    EVP_PKEY *key = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    if (!key) {
-        return common::IoErr::Invalid;
-    }
-    const bool ok = SSL_CREDENTIAL_set1_private_key(credential, key) == 1;
-    EVP_PKEY_free(key);
-    return ok ? common::IoErr::None : common::IoErr::Invalid;
+    return common::IoErr::Invalid;
 }
 
 } // namespace
 
 TlsCredential::~TlsCredential() {
-    SSL_CREDENTIAL_free(credential_);
-    credential_ = nullptr;
+    if (ssl_bridge_ != nullptr) {
+        SSL_CREDENTIAL_free(ssl_bridge_);
+        ssl_bridge_ = nullptr;
+    }
 }
 
 common::IoResult<std::unique_ptr<TlsCredential>> TlsCredential::create(const TlsCredentialOptions &options) noexcept {
@@ -147,19 +75,80 @@ common::IoResult<std::unique_ptr<TlsCredential>> TlsCredential::create(const Tls
     if (!result) {
         return std::unexpected(common::IoErr::NoMem);
     }
-    result->credential_ = SSL_CREDENTIAL_new_x509();
-    if (!result->credential_) {
-        return std::unexpected(common::IoErr::NoMem);
+
+    std::string chain_pem;
+    std::string key_pem;
+    if (read_pem_text(options.certificate_chain, chain_pem) != common::IoErr::None ||
+        read_pem_text(options.private_key, key_pem) != common::IoErr::None) {
+        return std::unexpected(common::IoErr::Invalid);
     }
-    common::IoErr error =
-            load_certificate_chain(result->credential_, options.certificate_chain, result->session_identity_);
-    if (error == common::IoErr::None) {
-        error = load_private_key(result->credential_, options.private_key);
+    auto chain = tls::TlsCertificateChain::parse_pem_bundle({chain_pem.data(), chain_pem.size()});
+    if (!chain) {
+        return std::unexpected(chain.error());
     }
-    if (error != common::IoErr::None) {
-        return std::unexpected(error);
+    auto key = tls::TlsPrivateKey::parse_pem({key_pem.data(), key_pem.size()});
+    if (!key) {
+        return std::unexpected(key.error());
     }
+    // Pair check the SSL path got from SSL_CREDENTIAL_set1_private_key
+    // (BoringSSL rejects a key that does not match the chain); the tls
+    // setters do not check, so validate here — same create-time rejection.
+    auto paired = chain->leaf().matches_private_key(*key);
+    if (!paired || !*paired) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    SHA256(chain->leaf().der().data(), chain->leaf().der().size(), result->session_identity_.data());
+    result->chain_ = std::move(*chain);
+    result->key_ = std::move(*key);
     return result;
+}
+
+SSL_CREDENTIAL *TlsCredential::ssl_credential() const noexcept {
+    if (ssl_bridge_ != nullptr) {
+        return ssl_bridge_;
+    }
+    SSL_CREDENTIAL *bridge = SSL_CREDENTIAL_new_x509();
+    if (bridge == nullptr) {
+        return nullptr;
+    }
+    // CRYPTO_BUFFER copies each certificate's exact DER — the same wire bytes
+    // the tls chain kept — and set1_cert_chain takes its own buffer refs, so
+    // the projection is independent of this object afterwards.
+    CRYPTO_BUFFER *buffers[tls::TlsCertificateChain::kMaxCerts]{};
+    std::size_t loaded = 0;
+    bool ok = true;
+    const auto append_buffer = [&buffers, &loaded, &ok](const tls::TlsCertificate &certificate) {
+        if (!ok) {
+            return;
+        }
+        const auto der = certificate.der();
+        buffers[loaded] = CRYPTO_BUFFER_new(der.data(), der.size(), nullptr);
+        if (buffers[loaded] == nullptr) {
+            ok = false;
+            return;
+        }
+        loaded++;
+    };
+    append_buffer(chain_.leaf());
+    for (const auto &certificate: chain_.intermediates()) {
+        append_buffer(certificate);
+    }
+    if (ok) {
+        ok = SSL_CREDENTIAL_set1_cert_chain(bridge, buffers, chain_.size()) == 1;
+    }
+    for (std::size_t i = 0; i < loaded; ++i) {
+        CRYPTO_BUFFER_free(buffers[i]);
+    }
+    if (ok) {
+        ok = SSL_CREDENTIAL_set1_private_key(bridge, static_cast<EVP_PKEY *>(key_.evp_pkey_handle())) == 1;
+    }
+    if (!ok) {
+        SSL_CREDENTIAL_free(bridge);
+        return nullptr;
+    }
+    ssl_bridge_ = bridge;
+    return bridge;
 }
 
 } // namespace fiber::net

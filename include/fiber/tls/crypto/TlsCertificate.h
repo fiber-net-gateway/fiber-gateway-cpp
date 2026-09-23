@@ -144,6 +144,19 @@ public:
     [[nodiscard]] static common::IoResult<TlsTrustStore>
     from_der_roots(std::span<const std::span<const std::uint8_t>> ders) noexcept;
 
+    // Process-wide system roots (09 §4.3): the SSL_CERT_FILE env override,
+    // then the standard distribution bundles; when none loads, OpenSSL's
+    // compiled-in default path lookup. Cached forever (success AND failure —
+    // a boot-time miss stays a miss); null only when even the fallback
+    // initializes nothing, i.e. this process has no usable system roots.
+    // The result is shared and never destroyed; thread-safe to call.
+    [[nodiscard]] static TlsTrustStore *system_default() noexcept;
+
+    // Borrowed X509_STORE* for QUIC's BoringSSL glue (09 net swap: the QUIC
+    // side still consumes OpenSSL objects; the pimpl stays opaque here).
+    // Null when the store is empty.
+    [[nodiscard]] void *x509_store_handle() const noexcept { return store_; }
+
 private:
     friend common::IoResult<TlsCertVerification> tls_verify_chain(const TlsCertificateChain &, const TlsTrustStore &,
                                                                   TlsCertPurpose, std::string_view,

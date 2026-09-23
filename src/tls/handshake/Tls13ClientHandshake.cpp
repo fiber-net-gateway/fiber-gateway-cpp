@@ -412,7 +412,10 @@ void Tls13ClientHandshake::handle_certificate_13(std::span<const std::uint8_t> b
     feed13(TlsHandshakeType::Certificate, body);
 
     if (cfg_.verify_peer) {
-        const auto verification = tls_verify_chain(peer_chain_, *cfg_.trust, TlsCertPurpose::SslServer, cfg_.sni_host,
+        // The check name is check_host when set, else the SNI send name
+        // (09 §4.3: the net layer's server_name/verify_name split).
+        const std::string_view check_host = cfg_.check_host.empty() ? cfg_.sni_host : cfg_.check_host;
+        const auto verification = tls_verify_chain(peer_chain_, *cfg_.trust, TlsCertPurpose::SslServer, check_host,
                                                    cfg_.verify_ip, cfg_.now_unix_ms);
         if (!verification.has_value()) {
             fail(TlsAlertDesc::InternalError);

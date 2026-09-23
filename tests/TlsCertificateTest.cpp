@@ -463,3 +463,14 @@ TEST(TlsVerifyChain, SharedStoreAcrossThreads) {
     t2.join();
     EXPECT_EQ(0, failures.load());
 }
+
+// The process-wide system store (09 §4.3): resolves on this machine, and
+// both calls hand back the SAME cached object (success is cached forever —
+// the filesystem is not walked twice).
+TEST(TlsTrustStoreSystem, SystemDefaultIsCachedPerProcess) {
+    TlsTrustStore *first = TlsTrustStore::system_default();
+    ASSERT_NE(nullptr, first);
+    EXPECT_NE(nullptr, first->x509_store_handle());
+    EXPECT_EQ(first, TlsTrustStore::system_default());
+    EXPECT_EQ(first->x509_store_handle(), TlsTrustStore::system_default()->x509_store_handle());
+}

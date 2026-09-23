@@ -35,8 +35,8 @@ struct TlsServerHandshakeEngine::Impl {
     static constexpr std::size_t kScratchCap = 32768; // server-flight staging (chains ≪ 32 KiB)
 
     Impl(const TlsServerConfig &config, const TlsResumptionLookup *resumption_lookup,
-         const TlsTicketMinter *ticket_minter) noexcept :
-        cfg(config), resumption(resumption_lookup), minter(ticket_minter) {}
+         const TlsTicketMinter *ticket_minter, const TlsServerConfigSource *config_source) noexcept :
+        cfg(config), resumption(resumption_lookup), minter(ticket_minter), source(config_source) {}
 
     // The mounted sub-flow's destructor wipes its own secrets; the key
     // exchange wipes itself; secrets already moved into a taken
@@ -46,6 +46,7 @@ struct TlsServerHandshakeEngine::Impl {
     TlsServerConfig cfg;
     const TlsResumptionLookup *resumption;
     const TlsTicketMinter *minter;
+    const TlsServerConfigSource *source; // optional per-CH selection (09 §4.1)
 
     // ---- pipeline + pre-fork state ----
     TlsHandshakeContext ctx;
@@ -133,9 +134,32 @@ struct TlsServerHandshakeEngine::Impl {
 // Construction (no first flight — the CH drives everything)
 // =====================================================================
 
+namespace {
+
+// The ctor invariants, re-checked verbatim after a selector swap (the
+// selected config is as much caller input as the ctor one). Version bounds
+// mirror the client engine's check (09 §4.2): domain {1.2, 1.3}, non-empty
+// ordered window.
+bool config_versions_hold(const TlsServerConfig &cfg) noexcept {
+    if (cfg.require_client_cert && cfg.client_trust == nullptr) {
+        return false;
+    }
+    return cfg.min_version <= cfg.max_version && cfg.min_version >= kTlsVersionTls12 &&
+           cfg.max_version <= kTlsVersionTls13;
+}
+bool config_invariants_hold(const TlsServerConfig &cfg) noexcept {
+    if (cfg.chain == nullptr || cfg.key == nullptr || cfg.chain->empty() || cfg.key->empty()) {
+        return false; // no PSK-only mode exists
+    }
+    return config_versions_hold(cfg);
+}
+
+} // namespace
+
 TlsServerHandshakeEngine::TlsServerHandshakeEngine(const TlsServerConfig &config, const TlsResumptionLookup *resumption,
-                                                   const TlsTicketMinter *minter, mem::IoBufNodePool &pool) noexcept {
-    impl_ = new (std::nothrow) Impl(config, resumption, minter);
+                                                   const TlsTicketMinter *minter, mem::IoBufNodePool &pool,
+                                                   const TlsServerConfigSource *source) noexcept {
+    impl_ = new (std::nothrow) Impl(config, resumption, minter, source);
     if (impl_ == nullptr) {
         return; // done()/failed() report the terminal state; no alert bytes
     }
@@ -147,12 +171,12 @@ TlsServerHandshakeEngine::TlsServerHandshakeEngine(const TlsServerConfig &config
     impl.ctx.set_legacy_version(kTlsRecordVersionTls12);
 
     // Configuration invariants at the boundary (no PSK-only mode exists).
-    if (impl.cfg.chain == nullptr || impl.cfg.key == nullptr || impl.cfg.chain->empty() || impl.cfg.key->empty()) {
+    // With a per-ClientHello selector the ctor config is a TEMPLATE:
+    // chain/key arrive with the selection (checked at the fork); only the
+    // version window and the mTLS coupling must already hold.
+    const bool selected_per_hello = source != nullptr && source->select != nullptr;
+    if (!((selected_per_hello && config_versions_hold(impl.cfg)) || config_invariants_hold(impl.cfg))) {
         impl.fail_local(TlsAlertDesc::InternalError); // configuration bug, not a protocol event
-        return;
-    }
-    if (impl.cfg.require_client_cert && impl.cfg.client_trust == nullptr) {
-        impl.fail_local(TlsAlertDesc::InternalError);
         return;
     }
 }
@@ -217,6 +241,11 @@ TlsConnectedState TlsServerHandshakeEngine::take_state() noexcept {
             impl_->flow);
 }
 
+mem::IoBufChain TlsServerHandshakeEngine::take_inbound_leftover() noexcept {
+    FIBER_ASSERT(impl_ != nullptr && impl_->out.done && !impl_->out.failed);
+    return impl_->ctx.take_inbound_leftover();
+}
+
 // =====================================================================
 // The fork: ClientHello version detection
 // =====================================================================
@@ -242,20 +271,38 @@ void TlsServerHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
     }
     const TlsClientHello &ch = hello.view;
 
+    // Per-ClientHello config selection (09 §4.1): the selector runs right
+    // after the decode, before any version/policy decision — the returned
+    // config drives THIS connection. The spans it hands back borrow caller
+    // staging that outlives the engine; null = the hello selects none (an
+    // SNI this host does not serve) → handshake_failure.
+    if (source != nullptr && source->select != nullptr) {
+        const TlsServerConfig *selected = source->select(source->ctx, ch);
+        if (selected == nullptr || !config_invariants_hold(*selected)) {
+            fail_local(TlsAlertDesc::HandshakeFailure);
+            return;
+        }
+        cfg = *selected;
+    }
+
     // Null compression only (RFC 8446 §4.1.2 / RFC 5246 §7.4.1.4); the alert
     // is version-shaped.
     const bool null_compression = ch.compression_methods.size() == 1 && ch.compression_methods[0] == 0;
 
-    // ---- version decision (07 §4.1) ----
+    // ---- version decision (07 §4.1, bounds added in 09 §4.2) ----
     // supported_versions carries the offer list when present; a client
-    // without it speaks its legacy_version. 1.3 first, then the 0x0303
+    // without it speaks its legacy_version. The offer must intersect the
+    // config window [min, max]; with the default {1.2, 1.3} window this is
+    // bit-identical to the 07 decision. 1.3 first, then the 0x0303
     // fallback, else protocol_version.
     const bool offers13 =
             ch.has_supported_versions && tls_server_list_contains(ch.supported_versions, kTlsVersionTls13);
     const bool offers12 = ch.has_supported_versions ? tls_server_list_contains(ch.supported_versions, kTlsVersionTls12)
                                                     : ch.legacy_version >= kTlsVersionTls12;
+    const bool allow13 = offers13 && cfg.max_version >= kTlsVersionTls13;
+    const bool allow12 = offers12 && cfg.min_version <= kTlsVersionTls12 && cfg.max_version >= kTlsVersionTls12;
 
-    if (offers13) {
+    if (allow13) {
         if (!null_compression) {
             fail_local(TlsAlertDesc::IllegalParameter);
             return;
@@ -265,7 +312,7 @@ void TlsServerHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
         sub.start(ch, {hello.ch.data(), hello.ch_len});
         return;
     }
-    if (offers12) {
+    if (allow12) {
         if (!null_compression) {
             fail_local(TlsAlertDesc::HandshakeFailure); // RFC 5246 §7.4.1.4
             return;

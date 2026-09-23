@@ -2273,3 +2273,104 @@ TEST(TlsServerTicketService, CrossVhostTicket12FallsBackToFull) {
     EXPECT_TRUE(recorder.called);
     EXPECT_EQ("other.example", recorder.seen_name);
 }
+
+// =====================================================================
+// 09 §4.1 — per-ClientHello config selection, §4.2 — version bounds
+// =====================================================================
+
+namespace {
+
+using fiber::tls::TlsServerConfigSource;
+
+// Selector harness: copies the decoded ClientHello view out of the call
+// (the engine's retained bytes are only guaranteed for the call) and
+// answers from caller staging.
+struct SelectorState {
+    const TlsServerConfig *answer = nullptr;
+    bool called = false;
+    bool seen_has_name = false;
+    std::string seen_name;
+    std::vector<std::string> seen_alpn;
+
+    static const TlsServerConfig *select(void *ctx, const fiber::tls::TlsClientHello &ch) noexcept {
+        auto *self = static_cast<SelectorState *>(ctx);
+        self->called = true;
+        self->seen_has_name = ch.has_server_name;
+        self->seen_name.assign(ch.server_name);
+        self->seen_alpn.clear();
+        for (std::size_t off = 0; off + 1 < ch.alpn_list.size();) {
+            const std::size_t len = ch.alpn_list[off];
+            if (off + 1 + len > ch.alpn_list.size()) {
+                break;
+            }
+            self->seen_alpn.emplace_back(reinterpret_cast<const char *>(ch.alpn_list.data()) + off + 1, len);
+            off += 1 + len;
+        }
+        return self->answer;
+    }
+
+    [[nodiscard]] TlsServerConfigSource source() noexcept {
+        return TlsServerConfigSource{&SelectorState::select, this};
+    }
+};
+
+} // namespace
+
+// The selected config drives the connection: the selector reads SNI + ALPN
+// off the ClientHello and hands back a staged config; the handshake that
+// follows is an ordinary full 1.3 one against the BoringSSL client.
+TEST(TlsServerHandshakeSelector, SelectsConfigFromClientHello) {
+    auto client = BoringClient::make(ClientOptions{.send_sni = true});
+    ASSERT_NE(nullptr, client);
+    ServerMaterial material;
+    const TlsServerConfig staged = material.config();
+    SelectorState selector{.answer = &staged};
+    const TlsServerConfigSource source = selector.source();
+
+    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool, &source);
+    ASSERT_TRUE(drive(*client, engine, false));
+
+    EXPECT_TRUE(selector.called);
+    EXPECT_TRUE(selector.seen_has_name);
+    EXPECT_EQ("example.com", selector.seen_name);
+    ASSERT_EQ(2u, selector.seen_alpn.size());
+    EXPECT_EQ("h2", selector.seen_alpn[0]);
+    EXPECT_EQ("http/1.1", selector.seen_alpn[1]);
+
+    TlsConnectedState state = engine.take_state();
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
+}
+
+// A null answer is the "no vhost for this SNI" case: handshake_failure,
+// nothing else runs.
+TEST(TlsServerHandshakeSelector, NullAnswerRefusesWithHandshakeFailure) {
+    auto client = BoringClient::make(ClientOptions{.send_sni = true});
+    ASSERT_NE(nullptr, client);
+    ServerMaterial material;
+    SelectorState selector{.answer = nullptr}; // the hello selects none
+    const TlsServerConfigSource source = selector.source();
+
+    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool, &source);
+    (void) drive(*client, engine, false); // the refusal is the expected path
+    ASSERT_TRUE(engine.done());
+    EXPECT_TRUE(engine.failed());
+    EXPECT_EQ(TlsAlertDesc::HandshakeFailure, engine.failure_alert());
+    EXPECT_TRUE(selector.called);
+}
+
+// The 1.2 fork gate: a tls12_only client against a config whose floor is
+// 1.3 answers protocol_version (the 07 behavior only when the window lets
+// 1.2 through).
+TEST(TlsServerHandshakeBounds, Tls12ClientBelowFloorRefused) {
+    auto client = BoringClient::make(ClientOptions{.tls12_only = true});
+    ASSERT_NE(nullptr, client);
+    ServerMaterial material;
+    TlsServerConfig cfg = material.config();
+    cfg.min_version = fiber::tls::kTlsVersionTls13;
+
+    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
+    (void) drive(*client, engine, false); // the refusal is the expected path
+    ASSERT_TRUE(engine.done());
+    EXPECT_TRUE(engine.failed());
+    EXPECT_EQ(TlsAlertDesc::ProtocolVersion, engine.failure_alert());
+}

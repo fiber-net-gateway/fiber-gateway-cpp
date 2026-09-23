@@ -95,6 +95,11 @@ public:
                                                      std::span<const std::uint8_t> content,
                                                      std::span<std::uint8_t> out) const noexcept;
 
+    // Borrowed EVP_PKEY* for the QUIC-side BoringSSL glue (09 net swap: QUIC
+    // still consumes OpenSSL objects). Null when empty. The handle stays
+    // valid for this object's lifetime and must not be freed by the caller.
+    [[nodiscard]] void *evp_pkey_handle() const noexcept { return impl_; }
+
 private:
     friend class TlsCertificate; // matches_private_key compares the raw handles
     void *impl_ = nullptr; // EVP_PKEY*

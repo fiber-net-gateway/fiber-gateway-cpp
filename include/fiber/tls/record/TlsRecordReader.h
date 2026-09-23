@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 #include "../../common/NonCopyable.h"
 #include "../../common/NonMovable.h"
@@ -60,6 +61,20 @@ public:
     [[nodiscard]] Result next() noexcept;
 
     [[nodiscard]] std::size_t pending_bytes() const noexcept { return pending_.readable_bytes(); }
+
+    // Hands the buffered unconsumed bytes over — the engine→connection
+    // handoff (09 §3): bytes fed past the terminal event (app data
+    // piggybacked behind the final flight) move into the TlsConnection the
+    // glue builds from the engine's state. A second take yields an empty
+    // chain; the reader stays bound to its node pool and keeps framing.
+    [[nodiscard]] mem::IoBufChain take_pending() noexcept {
+        mem::IoBufNodePool *pool = pending_.bound() ? &pending_.node_pool() : nullptr;
+        mem::IoBufChain out = std::move(pending_);
+        if (pool != nullptr) {
+            pending_ = mem::IoBufChain(*pool);
+        }
+        return out;
+    }
 
     void reset() noexcept;
 

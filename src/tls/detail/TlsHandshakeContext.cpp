@@ -107,6 +107,14 @@ TlsInboundStep TlsHandshakeContext::step() noexcept {
 TlsInboundStep TlsHandshakeContext::take_record(TlsRecord &&record) noexcept {
     switch (record.type) {
         case TlsContentType::Alert: {
+            if (mode_ == TlsInboundMode::Sealed12) {
+                // 1.2: alerts after the CCS fly sealed (RFC 5246 §6.2.3.3) —
+                // open first; the inner-alert branch of open_current decodes
+                // and routes. A plaintext alert there is unreachable by
+                // construction (the outer type under 1.2 encryption IS the
+                // AAD-bound inner type).
+                return open_current(record);
+            }
             if (record.length != 2) {
                 return step_fatal(TlsAlertDesc::DecodeError);
             }

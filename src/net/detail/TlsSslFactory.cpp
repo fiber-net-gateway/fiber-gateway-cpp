@@ -110,7 +110,7 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
             }
             trust_store = *system_store;
         }
-        if (SSL_set1_verify_cert_store(ssl, trust_store->store_) != 1) {
+        if (SSL_set1_verify_cert_store(ssl, trust_store->x509_store()) != 1) {
             return fail(common::IoErr::Invalid);
         }
         SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
@@ -136,8 +136,11 @@ common::IoResult<SSL *> TlsSslFactory::create_client(const TlsClientParam &param
         SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
     }
 
-    if (param.security.credential && SSL_add1_credential(ssl, param.security.credential->credential_) != 1) {
-        return fail(common::IoErr::Invalid);
+    if (param.security.credential != nullptr) {
+        SSL_CREDENTIAL *bridge = param.security.credential->ssl_credential();
+        if (bridge == nullptr || SSL_add1_credential(ssl, bridge) != 1) {
+            return fail(common::IoErr::Invalid);
+        }
     }
     error = configure_client_alpn(ssl, param.alpn);
     if (error != common::IoErr::None) {

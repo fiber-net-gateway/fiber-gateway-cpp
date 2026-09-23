@@ -31,9 +31,11 @@ Tls12ServerHandshake::~Tls12ServerHandshake() {
 
 void Tls12ServerHandshake::start(const TlsClientHello &ch, std::span<const std::uint8_t> body) noexcept {
     // ServerHello.random = gmt_unix_time(4) + random(28) per RFC 5246, with
-    // the RFC 8446 §4.1.3 downgrade sentinel in the last 8 bytes — a 1.2
-    // server fill carries DOWNGRD||0x01 unconditionally (BoringSSL
-    // ssl_fill_hello_random semantics; the 1.3-capable CLIENT checks it).
+    // the RFC 8446 §4.1.3 downgrade sentinel in the last 8 bytes when the
+    // ClientHello does not offer 1.3 — that is the exact §4.1.3 send
+    // condition (a CH whose supported_versions may have been stripped). A
+    // genuine 1.2-only client never checks the sentinel; a 1.3-capable
+    // client that receives it aborts, which is the point.
     if (!tls_random_bytes(hello_.server_random)) {
         fail(TlsAlertDesc::InternalError);
         return;
@@ -43,8 +45,12 @@ void Tls12ServerHandshake::start(const TlsClientHello &ch, std::span<const std::
     hello_.server_random[1] = static_cast<std::uint8_t>(gmt >> 16);
     hello_.server_random[2] = static_cast<std::uint8_t>(gmt >> 8);
     hello_.server_random[3] = static_cast<std::uint8_t>(gmt);
-    static constexpr std::array<std::uint8_t, 8> kDowngradeSentinel{0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01};
-    std::memcpy(hello_.server_random.data() + 24, kDowngradeSentinel.data(), kDowngradeSentinel.size());
+    const bool client_offers13 =
+            ch.has_supported_versions && tls_server_list_contains(ch.supported_versions, kTlsVersionTls13);
+    if (!client_offers13) {
+        static constexpr std::array<std::uint8_t, 8> kDowngradeSentinel{0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01};
+        std::memcpy(hello_.server_random.data() + 24, kDowngradeSentinel.data(), kDowngradeSentinel.size());
+    }
 
     // The abbreviated shape first (08): a presented ticket the lookup
     // accepts. Every miss falls through to the full handshake below — a

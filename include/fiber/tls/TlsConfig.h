@@ -15,6 +15,7 @@
 #include "crypto/TlsCertificate.h"
 #include "crypto/TlsSignature.h"
 #include "handshake/TlsCipherSuites.h"
+#include "handshake/TlsHandshakeMessage.h"
 
 namespace fiber::tls {
 
@@ -23,14 +24,22 @@ namespace fiber::tls {
 // record_size_limit and max_early_data policy stay engine-internal registry
 // constants until 09 asks for them (06 §5.4 YAGNI note).
 struct TlsClientConfig {
-    std::string_view sni_host; // SNI send name + certificate check name (SAN-only, 02b semantics)
+    std::string_view sni_host; // SNI send name + default certificate check name (SAN-only, 02b semantics)
     std::span<const std::uint8_t> verify_ip; // optional: IP check in place of host; when set, no SNI is sent
+    // Certificate check name when it differs from the SNI send name (09 §4.3:
+    // the net layer's server_name/verify_name split). Empty = sni_host.
+    std::string_view check_host;
     std::span<const std::string_view> alpn; // offered protocols, order = preference; empty = no ALPN
     const TlsCertificateChain *client_chain = nullptr; // mTLS, optional
     const TlsPrivateKey *client_key = nullptr; // mTLS, paired with the chain
     const TlsTrustStore *trust = nullptr; // trust anchors (02b), required
     bool verify_peer = true; // false is loopback-test only (lite_nginx parity)
     std::int64_t now_unix_ms = 0; // certificate validity snapshot; the engine has no clock
+    // Version bounds (09 §4.2). The offered supported_versions list narrows to
+    // [min, max] (domain {1.2, 1.3} — 1.3 is the implementation ceiling); a
+    // ServerHello negotiating outside the window is fatal protocol_version.
+    std::uint16_t min_version = kTlsVersionTls12;
+    std::uint16_t max_version = kTlsVersionTls13;
 };
 
 // Resumption attempt: a borrowed projection of 08's future TlsSessionState
@@ -61,6 +70,22 @@ struct TlsServerConfig {
     std::int64_t now_unix_ms = 0; // certificate validity + ticket-age snapshot; the engine has no clock
     bool enable_early_data = false; // 0-RTT master switch (off until anti-replay exists, §10.6)
     std::uint32_t session_timeout_s = 7200; // NST lifetime
+    // Version bounds (09 §4.2): the ClientHello fork gates on [min, max]
+    // (domain {1.2, 1.3}); no offered version inside the window →
+    // protocol_version.
+    std::uint16_t min_version = kTlsVersionTls12;
+    std::uint16_t max_version = kTlsVersionTls13;
+};
+
+// Per-ClientHello config selection (09 §4.1): the fork calls `select` right
+// after decoding the ClientHello (spans borrow the engine's retained copy —
+// valid for the call). Return the config that drives THIS connection (the
+// pointer is read immediately and copied; it may point at caller staging),
+// or null when the ClientHello selects none — an SNI the host does not
+// serve — which answers handshake_failure.
+struct TlsServerConfigSource {
+    const TlsServerConfig *(*select)(void *ctx, const TlsClientHello &client_hello) noexcept = nullptr;
+    void *ctx = nullptr;
 };
 
 // Resumption lookup hook (08 boundary): identity → a borrowed projection of
