@@ -81,6 +81,13 @@ public:
     // their sequence continuity). Requires done() && !failed().
     [[nodiscard]] TlsConnectedState take_state() noexcept;
 
+    // HandshakeDone: inbound bytes the handshake never consumed (app data
+    // piggybacked behind the final flight, or a post-handshake NST that
+    // arrived in the same feed — the engine stops stepping at done): feed
+    // them into the TlsConnection built from take_state(). A second take is
+    // empty.
+    [[nodiscard]] mem::IoBufChain take_inbound_leftover() noexcept;
+
 private:
     struct Impl;
     Impl *impl_ = nullptr; // src-side state; nullptr only on ctor failure

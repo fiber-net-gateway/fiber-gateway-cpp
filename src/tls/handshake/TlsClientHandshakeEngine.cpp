@@ -147,6 +147,15 @@ TlsClientHandshakeEngine::TlsClientHandshakeEngine(const TlsClientConfig &config
         impl.fail_local(TlsAlertDesc::InternalError); // configuration bug, not a protocol event
         return;
     }
+    // Version bounds invariant (09 §4.2): the domain is {1.2, 1.3} (1.3 is
+    // the implementation ceiling) and the window must be non-empty. Like the
+    // trust check above, this is a configuration bug — answer it up front,
+    // not as a mystery failure after the first flight.
+    if (impl.cfg.min_version > impl.cfg.max_version || impl.cfg.min_version < kTlsVersionTls12 ||
+        impl.cfg.max_version > kTlsVersionTls13) {
+        impl.fail_local(TlsAlertDesc::InternalError);
+        return;
+    }
 
     // PSK offers need the schedule (and its once-only binder key) before the
     // CH bytes exist; the suite comes from the offer, not negotiation.
@@ -255,6 +264,11 @@ TlsConnectedState TlsClientHandshakeEngine::take_state() noexcept {
             impl_->flow);
 }
 
+mem::IoBufChain TlsClientHandshakeEngine::take_inbound_leftover() noexcept {
+    FIBER_ASSERT(impl_ != nullptr && impl_->out.done && !impl_->out.failed);
+    return impl_->ctx.take_inbound_leftover();
+}
+
 // =====================================================================
 // The fork: ServerHello version detection
 // =====================================================================
@@ -273,9 +287,17 @@ void TlsClientHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
 
     // Version first (06 §4.2): supported_versions present → 1.3 semantics
     // (any other value is illegal_parameter); absent → the 1.2 sub-flow (the
-    // CH offers [0x0304, 0x0303], so a conforming 1.2-only peer lands there).
+    // CH offers the config window [max, min] descending, so a conforming
+    // 1.2-only peer lands there when the window allows it).
     if (sh.has_supported_version && sh.supported_version != kTlsVersionTls13) {
         fail_local(TlsAlertDesc::IllegalParameter);
+        return;
+    }
+    // The other half of the version gate (09 §4.2): a 1.3 negotiation above
+    // the config ceiling is fatal protocol_version (the peer ignored our
+    // narrowed offer; only reachable with a non-default max).
+    if (sh.has_supported_version && cfg.max_version < kTlsVersionTls13) {
+        fail_local(TlsAlertDesc::ProtocolVersion);
         return;
     }
     // 0x0303 for everything the client writes from here on — the peer's read
@@ -285,6 +307,15 @@ void TlsClientHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
     ctx.set_legacy_version(kTlsRecordVersionTls12);
 
     if (!sh.has_supported_version) {
+        // Version bounds (09 §4.2): a ServerHello without supported_versions
+        // negotiates 1.2 — fatal protocol_version when the config floor is
+        // above it. (With the default window the CH offered both, so a
+        // conforming peer lands here by choice; the gate only bites when the
+        // operator narrowed the floor.)
+        if (cfg.min_version > kTlsVersionTls12) {
+            fail_local(TlsAlertDesc::ProtocolVersion);
+            return;
+        }
         // A 1.2 negotiation kills any PSK/0-RTT offer at the read point;
         // the 1.2 sub-flow never sees the early window.
         early.closed = true;

@@ -1,16 +1,22 @@
 #include <fiber/net/detail/TlsStreamFd.h>
 
+#include <array>
 #include <cerrno>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
-#include <sys/socket.h>
+#include <cstring>
+#include <new>
+#include <sys/uio.h>
 
 #include <fiber/common/Assert.h>
-
-#include <openssl/bio.h>
-#include <openssl/ssl.h>
-
-#include "TlsRuntime.h"
-#include "TlsSslFactory.h"
+#include <fiber/net/IpAddress.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/net/TrustStore.h>
+#include <fiber/tls/TlsConfig.h>
+#include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
+#include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 
 namespace fiber::net::detail {
 
@@ -55,131 +61,55 @@ struct BusyResetGuard {
     }
 };
 
-// Unlinks a frame-local TlsServerHandshakeState from the SSL when the
-// handshake coroutine exits, so a later misuse of the SSL (e.g. SSL_read
-// implicitly driving a never-finished handshake) fails safe in the callbacks
-// instead of touching a dead coroutine frame. Watches TlsStreamFd::ssl_
-// through a pointer to the slot: if close() already freed the SSL, the ex_data
-// died with it and there is nothing to unlink.
-struct ServerStateGuard {
-    SSL **slot = nullptr;
-    bool wired = false;
+// Wire-read chunk for the engine feeds: large enough that a full flight or
+// jumbo app record lands in one try_read, one node's worth of memory.
+constexpr std::size_t kReadChunk = 32 * 1024;
+constexpr int kMaxIov = 16;
 
-    ~ServerStateGuard() {
-        if (wired && slot != nullptr && *slot != nullptr) {
-            TlsRuntime::set_server_handshake_state(*slot, nullptr);
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Custom TLS fd BIO.
-//
-// BoringSSL's built-in socket BIO (installed by SSL_set_fd) issues plain
-// write(2) syscalls without MSG_NOSIGNAL, so a TLS write to a peer that has
-// closed or reset the connection raises SIGPIPE and kills the process (e.g. the
-// GrpcStreamTest.CancelMidStream crash). This BIO mirrors the built-in socket
-// BIO exactly except its write callback uses ::send with MSG_NOSIGNAL, matching
-// StreamFd's send() path. SIGPIPE is suppressed at the write site and EPIPE is
-// returned instead, so every TLS caller (server+client, h2/h3/gRPC) is safe with
-// no process-wide signal disposition changes.
-//
-// BIO data borrows the stable StreamFd. All socket I/O updates its ET state;
-// SSL/BIO is destroyed before the stream. No per-operation allocation is needed.
-// ---------------------------------------------------------------------------
-
-// Mirrors BoringSSL's bio_errno_should_retry (crypto/bio/errno.cc): a -1 return
-// with a transient errno is reported as a retry so SSL_get_error surfaces
-// SSL_ERROR_WANT_READ/WRITE for the nonblocking event loop.
-int tls_bio_should_retry(int ret) noexcept {
-    if (ret != -1) {
-        return 0;
-    }
-    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOTCONN || errno == EPROTO ||
-           errno == EINPROGRESS || errno == EALREADY;
+// Certificate-validity snapshot: wall clock (the engines' now_unix_ms is a
+// real-time input; EventLoop::now() is a steady monotonic source).
+std::int64_t system_now_unix_ms() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
 }
 
-StreamFd &tls_bio_stream(BIO *b) noexcept { return *static_cast<StreamFd *>(BIO_get_data(b)); }
-int tls_bio_fd(BIO *b) noexcept { return tls_bio_stream(b).fd(); }
-
-extern "C" {
-
-static int tls_bio_read(BIO *b, char *out, int outl) noexcept {
-    const auto result = tls_bio_stream(b).try_read(out, static_cast<size_t>(outl));
-    const int ret = result ? static_cast<int>(*result) : -1;
-    if (!result) {
-        errno = common::io_err_to_errno(result.error());
-    }
-    BIO_clear_retry_flags(b);
-    if (ret <= 0 && tls_bio_should_retry(ret) != 0) {
-        BIO_set_retry_read(b);
-    }
-    return ret;
-}
-
-static int tls_bio_write(BIO *b, const char *in, int inl) noexcept {
-    const auto result = tls_bio_stream(b).try_write(in, static_cast<size_t>(inl));
-    const int ret = result ? static_cast<int>(*result) : -1;
-    if (!result) {
-        errno = common::io_err_to_errno(result.error());
-    }
-    BIO_clear_retry_flags(b);
-    if (ret <= 0 && tls_bio_should_retry(ret) != 0) {
-        BIO_set_retry_write(b);
-    }
-    return ret;
-}
-
-static long tls_bio_ctrl(BIO *b, int cmd, long num, void *ptr) noexcept {
-    switch (cmd) {
-        case BIO_C_SET_FD:
-            // Ownership and the borrowed StreamFd are installed explicitly.
-            return 0;
-        case BIO_C_GET_FD: {
-            if (BIO_get_init(b) == 0) {
-                return -1;
-            }
-            int fd = tls_bio_fd(b);
-            int *out = static_cast<int *>(ptr);
-            if (out != nullptr) {
-                *out = fd;
-            }
-            return fd;
-        }
-        case BIO_CTRL_GET_CLOSE:
-            return BIO_get_shutdown(b);
-        case BIO_CTRL_SET_CLOSE:
-            BIO_set_shutdown(b, static_cast<int>(num));
-            return 1;
-        case BIO_CTRL_FLUSH:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
-} // extern "C"
-
-const BIO_METHOD *tls_fd_bio_method() {
-    static const BIO_METHOD *method = []() -> const BIO_METHOD * {
-        BIO_METHOD *m = BIO_meth_new(BIO_TYPE_FD, "fiber tls fd");
-        if (m == nullptr) {
-            return nullptr;
-        }
-        BIO_meth_set_write(m, &tls_bio_write);
-        BIO_meth_set_read(m, &tls_bio_read);
-        BIO_meth_set_ctrl(m, &tls_bio_ctrl);
-        return m;
-    }();
-    return method;
+bool version_bounds_ok(int min_version, int max_version) noexcept {
+    const auto in_domain = [](int version) noexcept { return version == 0x0303 || version == 0x0304; };
+    return in_domain(min_version) && in_domain(max_version) && min_version <= max_version;
 }
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Handshake staging (09 §5).
+//
+// The staged configs borrow the caller's param material (TlsCredential, ALPN
+// backing storage, trust store) under the documented param contract: valid
+// until the handshake co_returns. select_server_config re-stages per
+// ClientHello through the param's configure callback and latches its error
+// for handshake_once to report after flushing the fatal alert.
+// ---------------------------------------------------------------------------
+
+struct TlsStreamFd::Handshake {
+    const TlsServerParam *param = nullptr; // server only
+    tls::TlsClientConfig client_cfg{};
+    tls::TlsServerConfig server_cfg{};
+    common::IoErr callback_error = common::IoErr::None;
+    std::array<std::uint8_t, 16> ip_bytes{}; // client verify_ip backing
+    tls::TlsClientHandshakeEngine *client = nullptr;
+    tls::TlsServerHandshakeEngine *server = nullptr;
+    tls::TlsServerConfigSource selector{};
+
+    ~Handshake() {
+        delete client;
+        delete server;
+    }
+};
+
 TlsStreamFd::TlsStreamFd(fiber::event::EventLoop &loop, int fd) : stream_fd_(loop, fd) {}
 
 TlsStreamFd::~TlsStreamFd() {
-    if (!stream_fd_.valid() && ssl_ == nullptr) {
+    if (!stream_fd_.valid() && hs_ == nullptr && conn_ == nullptr && pool_ == nullptr) {
         return;
     }
     if (loop().in_loop()) {
@@ -189,37 +119,6 @@ TlsStreamFd::~TlsStreamFd() {
     FIBER_ASSERT(false);
 }
 
-common::IoResult<void> TlsStreamFd::attach_ssl(SSL *ssl) noexcept {
-    if (!ssl) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    if (!stream_fd_.valid()) {
-        SSL_free(ssl);
-        return std::unexpected(common::IoErr::BadFd);
-    }
-    if (ssl_) {
-        SSL_free(ssl);
-        return std::unexpected(common::IoErr::Already);
-    }
-    ssl_ = ssl;
-    // Install a custom fd BIO (instead of SSL_set_fd's built-in socket BIO) so
-    // TLS writes use ::send(MSG_NOSIGNAL) and never raise SIGPIPE on a closed
-    // peer. The BIO does not own the fd (BIO_NOCLOSE); stream_fd_ does.
-    const BIO_METHOD *bio_method = tls_fd_bio_method();
-    BIO *bio = (bio_method != nullptr) ? BIO_new(bio_method) : nullptr;
-    if (bio == nullptr) {
-        SSL_free(ssl_);
-        ssl_ = nullptr;
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    BIO_set_data(bio, &stream_fd_);
-    BIO_set_shutdown(bio, BIO_NOCLOSE);
-    BIO_set_init(bio, 1);
-    SSL_set_bio(ssl_, bio, bio);
-    handshake_done_ = false;
-    return {};
-}
-
 bool TlsStreamFd::valid() const noexcept { return stream_fd_.valid(); }
 
 int TlsStreamFd::fd() const noexcept { return stream_fd_.fd(); }
@@ -227,34 +126,56 @@ int TlsStreamFd::fd() const noexcept { return stream_fd_.fd(); }
 fiber::event::EventLoop &TlsStreamFd::loop() const noexcept { return stream_fd_.loop(); }
 
 std::string_view TlsStreamFd::selected_alpn() const noexcept {
-    if (!ssl_) {
+    if (conn_ == nullptr) {
         return {};
     }
-    const unsigned char *proto = nullptr;
-    unsigned int proto_len = 0;
-    SSL_get0_alpn_selected(ssl_, &proto, &proto_len);
-    if (!proto || proto_len == 0) {
+    const std::span<const std::uint8_t> proto = conn_->alpn();
+    if (proto.empty()) {
         return {};
     }
-    return {reinterpret_cast<const char *>(proto), static_cast<std::size_t>(proto_len)};
+    return {reinterpret_cast<const char *>(proto.data()), proto.size()};
 }
 
 bool TlsStreamFd::handshake_done() const noexcept { return handshake_done_; }
 
-bool TlsStreamFd::has_pending_read() const noexcept { return ssl_ != nullptr && SSL_has_pending(ssl_) != 0; }
+bool TlsStreamFd::has_pending_read() const noexcept {
+    if (conn_ == nullptr) {
+        return false;
+    }
+    // Terminals included: a latched peer close_notify (EOF) or fatal is a read
+    // result that no socket byte will ever announce — the peer may have sent
+    // its last record in a feed we already consumed. Without this the
+    // transport's wait_readable would block on an edge that already fired.
+    return !early_data_.empty() || conn_->pending_plaintext() > 0 || conn_->peer_closed() || conn_->failed();
+}
 
 void TlsStreamFd::close() {
     FIBER_ASSERT(loop().in_loop());
-    if (ssl_) {
-        SSL_shutdown(ssl_);
-        SSL_free(ssl_);
-        ssl_ = nullptr;
-        handshake_done_ = false;
+    if (conn_ != nullptr) {
+        if (!conn_->failed() && !conn_->peer_closed()) {
+            (void) conn_->close_notify();
+        }
+        fiber::event::IoEvent event = fiber::event::IoEvent::None;
+        (void) flush_output(event); // best-effort single drain; fd may be gone
+        delete conn_;
+        conn_ = nullptr;
     }
+    delete hs_;
+    hs_ = nullptr;
+    // Return chain nodes to the pool before the pool itself dies.
+    out_pending_ = mem::IoBufChain{};
+    early_data_ = mem::IoBufChain{};
+    delete pool_;
+    pool_ = nullptr;
     if (stream_fd_.valid()) {
         stream_fd_.close();
     }
+    role_ = Role::None;
+    handshake_done_ = false;
+    shutdown_started_ = false;
     busy_ = false;
+    pending_write_ptr_ = nullptr;
+    pending_write_len_ = 0;
 }
 
 fiber::common::IoErr TlsStreamFd::detach_for_handover() noexcept {
@@ -288,6 +209,171 @@ fiber::common::IoErr TlsStreamFd::clear_write_callback(ReadyCallback callback, v
 
 fiber::common::IoErr TlsStreamFd::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
     return stream_fd_.clear_terminal_callback(callback, ctx);
+}
+
+common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) noexcept {
+    if (role_ != Role::None) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    if (!stream_fd_.valid()) {
+        return std::unexpected(common::IoErr::BadFd);
+    }
+    if (!version_bounds_ok(param.min_version, param.max_version)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    auto *pool = new (std::nothrow) mem::IoBufNodePool();
+    auto *staging = new (std::nothrow) Handshake();
+    if (pool == nullptr || staging == nullptr) {
+        delete staging;
+        delete pool;
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    auto &cfg = staging->client_cfg;
+    IpAddress server_ip{};
+    const bool server_name_is_ip = !param.server_name.empty() && IpAddress::parse(param.server_name, server_ip);
+    if (!param.server_name.empty() && !server_name_is_ip) {
+        cfg.sni_host = param.server_name;
+    }
+    if (param.security.verify_peer) {
+        // A null trust store means the process-wide system roots. Resolution
+        // happens once per process; NotFound reports that no system CA bundle
+        // exists on this host.
+        const TrustStore *trust_store = param.security.trust_store;
+        if (trust_store == nullptr) {
+            auto system_store = TrustStore::system_default();
+            if (!system_store) {
+                delete staging;
+                delete pool;
+                return std::unexpected(system_store.error());
+            }
+            trust_store = *system_store;
+        }
+        cfg.trust = &trust_store->tls_store();
+        const std::string_view verify_name = param.verify_name.empty() ? param.server_name : param.verify_name;
+        IpAddress verify_ip{};
+        if (!verify_name.empty() && IpAddress::parse(verify_name, verify_ip)) {
+            std::memcpy(staging->ip_bytes.data(), verify_ip.data(), verify_ip.byte_size());
+            cfg.verify_ip = {staging->ip_bytes.data(), verify_ip.byte_size()};
+        } else if (!verify_name.empty()) {
+            cfg.check_host = verify_name;
+        } else {
+            delete staging;
+            delete pool;
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    } else {
+        cfg.verify_peer = false;
+    }
+    if (param.security.credential != nullptr) {
+        cfg.client_chain = &param.security.credential->tls_chain();
+        cfg.client_key = &param.security.credential->tls_key();
+    }
+    cfg.alpn = param.alpn;
+    cfg.min_version = static_cast<std::uint16_t>(param.min_version);
+    cfg.max_version = static_cast<std::uint16_t>(param.max_version);
+    cfg.now_unix_ms = system_now_unix_ms();
+
+    staging->client = new (std::nothrow) tls::TlsClientHandshakeEngine(cfg, nullptr, *pool);
+    if (staging->client == nullptr) {
+        delete staging;
+        delete pool;
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    // A construction failure (entropy/allocation) is already terminal with
+    // any alert encoded — the handshake loop flushes it, then reports.
+
+    pool_ = pool;
+    hs_ = staging;
+    role_ = Role::Client;
+    handshake_done_ = false;
+    return {};
+}
+
+common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param) noexcept {
+    if (role_ != Role::None) {
+        return std::unexpected(common::IoErr::Already);
+    }
+    if (!stream_fd_.valid()) {
+        return std::unexpected(common::IoErr::BadFd);
+    }
+    if (!param.enabled() || !version_bounds_ok(param.min_version, param.max_version)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    // Client-certificate verification needs a trust store up front.
+    if (param.client_certificate_mode != TlsClientCertificateMode::None && param.trust_store == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    auto *pool = new (std::nothrow) mem::IoBufNodePool();
+    auto *staging = new (std::nothrow) Handshake();
+    if (pool == nullptr || staging == nullptr) {
+        delete staging;
+        delete pool;
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    auto &cfg = staging->server_cfg;
+    if (param.trust_store != nullptr) {
+        cfg.client_trust = &param.trust_store->tls_store();
+    }
+    cfg.require_client_cert = param.client_certificate_mode == TlsClientCertificateMode::Required;
+    cfg.alpn = param.alpn;
+    cfg.min_version = static_cast<std::uint16_t>(param.min_version);
+    cfg.max_version = static_cast<std::uint16_t>(param.max_version);
+    cfg.enable_early_data = param.enable_early_data;
+    cfg.now_unix_ms = system_now_unix_ms();
+
+    staging->param = &param;
+    staging->selector.select = &TlsStreamFd::select_server_config;
+    staging->selector.ctx = staging;
+    // Credentials arrive per ClientHello through the selector, so the
+    // template config passes only the selector-mode invariant checks.
+    staging->server =
+            new (std::nothrow) tls::TlsServerHandshakeEngine(cfg, nullptr, nullptr, *pool, &staging->selector);
+    if (staging->server == nullptr) {
+        delete staging;
+        delete pool;
+        return std::unexpected(common::IoErr::NoMem);
+    }
+
+    pool_ = pool;
+    hs_ = staging;
+    role_ = Role::Server;
+    handshake_done_ = false;
+    return {};
+}
+
+const tls::TlsServerConfig *TlsStreamFd::select_server_config(void *ctx,
+                                                              const tls::TlsClientHello &client_hello) noexcept {
+    auto *staging = static_cast<Handshake *>(ctx);
+    staging->callback_error = common::IoErr::None;
+    staging->server_cfg.chain = nullptr;
+    staging->server_cfg.key = nullptr;
+    std::size_t credential_count = 0;
+    TlsServerHandshakeConfig config(staging->server_cfg, credential_count);
+    // The decoded alpn_list is the ProtocolNameList BODY (1-byte length
+    // entries); TlsAlpnProtocolsView wants the wire form with the 2-byte
+    // list-length prefix, which sits immediately before the body in the
+    // engine's retained ClientHello copy (the decoder's structure checks
+    // guarantee the prefix is the exact body length).
+    TlsClientHelloView view{
+            .server_name = client_hello.has_server_name ? client_hello.server_name : std::string_view{},
+            .offered_alpn =
+                    client_hello.has_alpn && !client_hello.alpn_list.empty()
+                            ? TlsAlpnProtocolsView(client_hello.alpn_list.data() - 2, client_hello.alpn_list.size() + 2)
+                            : TlsAlpnProtocolsView{},
+    };
+    common::IoErr error = staging->param->configure_callback(staging->param->configure_ctx, config, view);
+    if (error == common::IoErr::None && credential_count == 0) {
+        error = common::IoErr::Invalid;
+    }
+    if (error != common::IoErr::None) {
+        staging->callback_error = error;
+        return nullptr; // the engine answers handshake_failure
+    }
+    return &staging->server_cfg;
 }
 
 TlsStreamFd::IoTask TlsStreamFd::read(void *buf, size_t len, std::chrono::milliseconds timeout) noexcept {
@@ -398,41 +484,16 @@ fiber::common::IoResult<size_t> TlsStreamFd::try_write(const void *buf, size_t l
     return std::unexpected(err);
 }
 
-common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) noexcept {
-    if (role_ != Role::None) {
-        return std::unexpected(common::IoErr::Already);
-    }
-    role_ = Role::Client;
-    auto ssl = TlsSslFactory::create_client(param);
-    if (!ssl) {
-        return std::unexpected(ssl.error());
-    }
-    return attach_ssl(*ssl);
-}
-
-common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param) noexcept {
-    if (role_ != Role::None) {
-        return std::unexpected(common::IoErr::Already);
-    }
-    role_ = Role::Server;
-    auto ssl = TlsSslFactory::create_server(param);
-    if (!ssl) {
-        return std::unexpected(ssl.error());
-    }
-    return attach_ssl(*ssl);
-}
-
 TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param, std::chrono::milliseconds timeout) {
-    return handshake_impl(start_client(param), timeout, nullptr);
+    return handshake_impl(start_client(param), timeout);
 }
 
 TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, std::chrono::milliseconds timeout) {
-    return handshake_impl(start_server(param), timeout, &param);
+    return handshake_impl(start_server(param), timeout);
 }
 
 TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(common::IoResult<void> start_result,
-                                                       std::chrono::milliseconds timeout,
-                                                       const TlsServerParam *server_param) {
+                                                       std::chrono::milliseconds timeout) {
     if (!start_result) {
         co_return std::unexpected(start_result.error());
     }
@@ -443,17 +504,6 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(common::IoResult<void> st
     busy_ = true;
     BusyResetGuard busy_reset(&busy_);
 
-    // The server handshake state lives in this coroutine frame: the SSL
-    // callbacks reach it through ex_data while the handshake (and thus this
-    // frame) is alive, and the guard unlinks it on every exit path. Client
-    // handshakes never fire the server callbacks, so the state stays idle.
-    TlsServerHandshakeState state{.param = server_param};
-    ServerStateGuard state_guard{.slot = &ssl_};
-    if (server_param != nullptr) {
-        TlsRuntime::set_server_handshake_state(ssl_, &state);
-        state_guard.wired = true;
-    }
-
     Deadline deadline = make_deadline(timeout);
     for (;;) {
         fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
@@ -462,9 +512,6 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(common::IoResult<void> st
             co_return fiber::common::IoResult<void>{};
         }
         if (err != fiber::common::IoErr::WouldBlock) {
-            if (state.callback_error != common::IoErr::None) {
-                co_return std::unexpected(state.callback_error);
-            }
             co_return std::unexpected(err);
         }
         auto remaining = remaining_timeout(deadline);
@@ -543,155 +590,252 @@ fiber::common::IoErr TlsStreamFd::poll_write(const void *buf, size_t len, size_t
 }
 
 fiber::common::IoErr TlsStreamFd::handshake_once(fiber::event::IoEvent &event) noexcept {
-    if (!stream_fd_.valid() || !ssl_) {
+    if (!stream_fd_.valid() || hs_ == nullptr) {
         return fiber::common::IoErr::BadFd;
     }
     if (handshake_done_) {
+        if (conn_ != nullptr && conn_->failed()) {
+            return fiber::common::IoErr::Invalid;
+        }
         return fiber::common::IoErr::None;
     }
     for (;;) {
-        int rc = SSL_do_handshake(ssl_);
-        if (rc == 1) {
-            handshake_done_ = true;
+        // Flights and alerts go out before anything else — including the
+        // fatal alert that ends a failed handshake (the failure return only
+        // happens once the wire is clean).
+        fiber::common::IoErr err = flush_output(event);
+        if (err != fiber::common::IoErr::None) {
+            return err;
+        }
+        // The success path falls through to this check on its second pass:
+        // tail output flushed, then done (a leftover-fed record violation
+        // surfacing as conn_->failed() reports Invalid here).
+        if (handshake_done_) {
+            if (conn_ != nullptr && conn_->failed()) {
+                return fiber::common::IoErr::Invalid;
+            }
             return fiber::common::IoErr::None;
         }
-        int err = SSL_get_error(ssl_, rc);
-        if (err == SSL_ERROR_WANT_READ) {
-            event = fiber::event::IoEvent::Read;
-            return fiber::common::IoErr::WouldBlock;
-        }
-        if (err == SSL_ERROR_WANT_WRITE) {
-            event = fiber::event::IoEvent::Write;
-            return fiber::common::IoErr::WouldBlock;
-        }
-        if (err == SSL_ERROR_ZERO_RETURN) {
-            return fiber::common::IoErr::ConnReset;
-        }
-        if (err == SSL_ERROR_SYSCALL) {
-            int sys_err = errno;
-            if (sys_err == EINTR) {
-                continue;
+
+        const bool done = role_ == Role::Client ? hs_->client->done() : hs_->server->done();
+        if (!done) {
+            err = feed_engine(event);
+            if (err != fiber::common::IoErr::None) {
+                return err;
             }
-            if (sys_err != 0) {
-                return fiber::common::io_err_from_errno(sys_err);
-            }
-            return fiber::common::IoErr::ConnReset;
+            continue;
         }
-        return fiber::common::IoErr::Invalid;
+        if (role_ == Role::Client ? hs_->client->failed() : hs_->server->failed()) {
+            // The alert (if any) is on the wire per the flush above; report
+            // the callback's error when one was latched, else the failure.
+            const common::IoErr callback_error = hs_->callback_error;
+            delete hs_;
+            hs_ = nullptr;
+            return callback_error != common::IoErr::None ? callback_error : fiber::common::IoErr::Invalid;
+        }
+
+        // Success: swap the handshake engine for the connected-phase engine.
+        // The engine's pending output (a TLS 1.3 client's Finished record is
+        // sealed after this feed and still lives in the engine's chain) must
+        // move into the glue's flush chain before the engine dies.
+        FIBER_ASSERT(out_pending_.append_chain(role_ == Role::Client ? hs_->client->take_output()
+                                                                     : hs_->server->take_output()));
+        tls::TlsConnectedState state = role_ == Role::Client ? hs_->client->take_state() : hs_->server->take_state();
+        mem::IoBufChain leftover =
+                role_ == Role::Client ? hs_->client->take_inbound_leftover() : hs_->server->take_inbound_leftover();
+        if (role_ == Role::Server) {
+            early_data_ = hs_->server->take_early_data();
+        }
+        conn_ = new (std::nothrow) tls::TlsConnection(role_ == Role::Client ? tls::TlsConnectionRole::Client
+                                                                            : tls::TlsConnectionRole::Server,
+                                                      std::move(state), *pool_);
+        delete hs_;
+        hs_ = nullptr;
+        if (conn_ == nullptr) {
+            return fiber::common::IoErr::NoMem;
+        }
+        if (!leftover.empty() && !conn_->feed(std::move(leftover))) {
+            return fiber::common::IoErr::NoMem;
+        }
+        conn_->pump();
+        handshake_done_ = true;
     }
 }
 
 fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) noexcept {
-    if (!stream_fd_.valid() || !ssl_) {
+    if (!stream_fd_.valid()) {
         return fiber::common::IoErr::BadFd;
     }
-    if (!handshake_done_) {
+    if (!handshake_done_ || conn_ == nullptr) {
+        // Nothing to close gracefully (never started / mid-handshake).
         return fiber::common::IoErr::None;
     }
-    for (;;) {
-        int rc = SSL_shutdown(ssl_);
-        if (rc == 1 || rc == 0) {
-            return fiber::common::IoErr::None;
+    if (!shutdown_started_) {
+        auto closed = conn_->close_notify();
+        if (!closed) {
+            return closed.error();
         }
-        int err = SSL_get_error(ssl_, rc);
-        if (err == SSL_ERROR_WANT_READ) {
-            event = fiber::event::IoEvent::Read;
-            return fiber::common::IoErr::WouldBlock;
-        }
-        if (err == SSL_ERROR_WANT_WRITE) {
-            event = fiber::event::IoEvent::Write;
-            return fiber::common::IoErr::WouldBlock;
-        }
-        if (err == SSL_ERROR_ZERO_RETURN) {
-            return fiber::common::IoErr::None;
-        }
-        if (err == SSL_ERROR_SYSCALL) {
-            int sys_err = errno;
-            if (sys_err == EINTR) {
-                continue;
-            }
-            if (sys_err != 0) {
-                return fiber::common::io_err_from_errno(sys_err);
-            }
-            return fiber::common::IoErr::Invalid;
-        }
-        return fiber::common::IoErr::Invalid;
+        shutdown_started_ = true;
     }
+    // Send our close_notify and be done: waiting for the peer's echo is the
+    // reader's business (read_once surfaces PeerClosed), not the closer's.
+    return flush_output(event);
 }
 
 fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept {
     out = 0;
-    if (!stream_fd_.valid() || !ssl_) {
+    if (!stream_fd_.valid() || conn_ == nullptr) {
         return fiber::common::IoErr::BadFd;
     }
+    if (len == 0) {
+        return fiber::common::IoErr::None;
+    }
     for (;;) {
-        int rc = SSL_read(ssl_, buf, static_cast<int>(len));
-        if (rc > 0) {
-            out = static_cast<size_t>(rc);
+        if (!early_data_.empty()) {
+            // Server 0-RTT: decrypted early data delivers before anything
+            // decrypted under the handshake keys.
+            const std::size_t readable = early_data_.readable_bytes();
+            const std::size_t bytes = readable < len ? readable : len;
+            std::memcpy(buf, early_data_.first_readable()->readable_data(), bytes);
+            early_data_.consume_and_compact(bytes);
+            out = bytes;
             return fiber::common::IoErr::None;
         }
-        int err = SSL_get_error(ssl_, rc);
-        if (err == SSL_ERROR_WANT_READ) {
-            event = fiber::event::IoEvent::Read;
-            return fiber::common::IoErr::WouldBlock;
+        std::size_t got = 0;
+        const auto status = conn_->read(buf, len, got);
+        switch (status) {
+            case tls::TlsConnection::ReadStatus::Ok:
+                out = got;
+                return fiber::common::IoErr::None;
+            case tls::TlsConnection::ReadStatus::PeerClosed:
+                return fiber::common::IoErr::None; // EOF (close_notify), out = 0
+            case tls::TlsConnection::ReadStatus::Fatal:
+                return fiber::common::IoErr::Invalid;
+            case tls::TlsConnection::ReadStatus::NeedMore:
+                break;
         }
-        if (err == SSL_ERROR_WANT_WRITE) {
-            event = fiber::event::IoEvent::Write;
-            return fiber::common::IoErr::WouldBlock;
+        mem::IoBuf chunk = mem::IoBuf::allocate(kReadChunk);
+        if (!chunk.valid()) {
+            return fiber::common::IoErr::NoMem;
         }
-        if (err == SSL_ERROR_ZERO_RETURN) {
-            return fiber::common::IoErr::None;
-        }
-        if (err == SSL_ERROR_SYSCALL) {
-            int sys_err = errno;
-            if (sys_err == EINTR) {
-                continue;
+        auto read_result = stream_fd_.try_read(chunk.writable_data(), chunk.writable());
+        if (!read_result) {
+            if (read_result.error() == fiber::common::IoErr::WouldBlock) {
+                event = fiber::event::IoEvent::Read;
+                return fiber::common::IoErr::WouldBlock;
             }
-            if (sys_err != 0) {
-                return fiber::common::io_err_from_errno(sys_err);
-            }
+            return read_result.error();
+        }
+        if (*read_result == 0) {
+            // EOF without close_notify: truncation.
             return fiber::common::IoErr::ConnReset;
         }
-        return fiber::common::IoErr::Invalid;
+        chunk.commit(*read_result);
+        if (!conn_->feed(std::move(chunk))) {
+            return fiber::common::IoErr::NoMem;
+        }
+        conn_->pump(); // may deliver plaintext or latch a terminal
+        if (conn_->failed()) {
+        }
     }
 }
 
 fiber::common::IoErr TlsStreamFd::write_once(const void *buf, size_t len, size_t &out,
                                              fiber::event::IoEvent &event) noexcept {
     out = 0;
-    if (!stream_fd_.valid() || !ssl_) {
+    if (!stream_fd_.valid() || conn_ == nullptr) {
         return fiber::common::IoErr::BadFd;
     }
-    for (;;) {
-        int rc = SSL_write(ssl_, buf, static_cast<int>(len));
-        if (rc > 0) {
-            out = static_cast<size_t>(rc);
-            return fiber::common::IoErr::None;
+    if (len == 0) {
+        return fiber::common::IoErr::None;
+    }
+    if (!out_pending_.empty()) {
+        // A sealed payload is still flushing: the retry must present the same
+        // (buf, len) — the BoringSSL WANT_WRITE contract every caller
+        // (HttpTransport's same-pointer poll_write retries included) follows.
+        if (buf != pending_write_ptr_ || len != pending_write_len_) {
+            return fiber::common::IoErr::Busy;
         }
-        int err = SSL_get_error(ssl_, rc);
-        if (err == SSL_ERROR_WANT_READ) {
+    } else {
+        auto sealed = conn_->write({static_cast<const std::uint8_t *>(buf), len});
+        if (!sealed) {
+            return sealed.error(); // terminal/closed (Invalid) or NoMem
+        }
+        pending_write_ptr_ = buf;
+        pending_write_len_ = len;
+    }
+    const fiber::common::IoErr err = flush_output(event);
+    if (err != fiber::common::IoErr::None) {
+        return err;
+    }
+    out = pending_write_len_;
+    pending_write_ptr_ = nullptr;
+    pending_write_len_ = 0;
+    return fiber::common::IoErr::None;
+}
+
+fiber::common::IoErr TlsStreamFd::flush_output(fiber::event::IoEvent &event) noexcept {
+    if (conn_ != nullptr) {
+        FIBER_ASSERT(out_pending_.append_chain(conn_->take_output()));
+    } else if (hs_ != nullptr) {
+        FIBER_ASSERT(out_pending_.append_chain(role_ == Role::Client ? hs_->client->take_output()
+                                                                     : hs_->server->take_output()));
+    }
+    while (!out_pending_.empty()) {
+        struct iovec iov[kMaxIov];
+        const int count = out_pending_.fill_write_iov(iov, kMaxIov);
+        if (count <= 0) {
+            break;
+        }
+        auto written = stream_fd_.try_writev(iov, count);
+        if (!written) {
+            if (written.error() == fiber::common::IoErr::WouldBlock) {
+                event = fiber::event::IoEvent::Write;
+                return fiber::common::IoErr::WouldBlock;
+            }
+            return written.error();
+        }
+        if (*written == 0) {
+            return fiber::common::IoErr::BrokenPipe;
+        }
+        // consume_and_compact: plain consume() leaves drained nodes linked,
+        // and empty() counts nodes — a zombie chain would wedge later
+        // writes behind the same-pointer retry contract.
+        out_pending_.consume_and_compact(*written);
+    }
+    return fiber::common::IoErr::None;
+}
+
+fiber::common::IoErr TlsStreamFd::feed_engine(fiber::event::IoEvent &event) noexcept {
+    mem::IoBuf chunk = mem::IoBuf::allocate(kReadChunk);
+    if (!chunk.valid()) {
+        return fiber::common::IoErr::NoMem;
+    }
+    auto read_result = stream_fd_.try_read(chunk.writable_data(), chunk.writable());
+    if (!read_result) {
+        if (read_result.error() == fiber::common::IoErr::WouldBlock) {
             event = fiber::event::IoEvent::Read;
             return fiber::common::IoErr::WouldBlock;
         }
-        if (err == SSL_ERROR_WANT_WRITE) {
-            event = fiber::event::IoEvent::Write;
-            return fiber::common::IoErr::WouldBlock;
-        }
-        if (err == SSL_ERROR_ZERO_RETURN) {
-            return fiber::common::IoErr::BrokenPipe;
-        }
-        if (err == SSL_ERROR_SYSCALL) {
-            int sys_err = errno;
-            if (sys_err == EINTR) {
-                continue;
-            }
-            if (sys_err != 0) {
-                return fiber::common::io_err_from_errno(sys_err);
-            }
-            return fiber::common::IoErr::BrokenPipe;
-        }
-        return fiber::common::IoErr::Invalid;
+        return read_result.error();
     }
+    if (*read_result == 0) {
+        // Plaintext EOF mid-handshake (no close_notify yet).
+        return fiber::common::IoErr::ConnReset;
+    }
+    chunk.commit(*read_result);
+    if (role_ == Role::Client) {
+        auto fed = hs_->client->feed(std::move(chunk));
+        if (!fed) {
+            return fed.error();
+        }
+    } else {
+        auto fed = hs_->server->feed(std::move(chunk));
+        if (!fed) {
+            return fed.error();
+        }
+    }
+    return fiber::common::IoErr::None;
 }
 
 } // namespace fiber::net::detail

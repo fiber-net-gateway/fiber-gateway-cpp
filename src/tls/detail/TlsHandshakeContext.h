@@ -25,6 +25,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 
 #include <fiber/common/IoError.h>
@@ -151,6 +152,26 @@ public:
         early_skip_armed_ = false;
         early_sink_ = nullptr;
     }
+
+    // ---- connected phase (09 §3; the TlsConnection reuse) ----
+
+    // App-data delivery for the connected phase: inner application_data
+    // plaintext (both versions — 1.2 preserves the record type under
+    // encryption, so opened outer app_data hits the same path) is copied
+    // into `out` with NO budget: the early-data ceiling is a 0-RTT window
+    // concept. Shares the sink plumbing with arm_early_data_sink; the
+    // caller keeps `out` alive as long as the context lives.
+    void arm_app_data_sink(mem::IoBufChain &out) noexcept {
+        early_sink_ = &out;
+        early_budget_ = std::numeric_limits<std::size_t>::max();
+        early_used_ = 0;
+        early_sink_armed_ = true;
+    }
+
+    // Inbound bytes fed past the terminal event but never consumed (app
+    // data piggybacked behind the final flight): handed to the connection
+    // object the glue builds here. A second take yields an empty chain.
+    [[nodiscard]] mem::IoBufChain take_inbound_leftover() noexcept { return reader_.take_pending(); }
 
     // Sink-window content bytes handed over so far (tests/diagnostics).
     [[nodiscard]] std::size_t early_data_received() const noexcept { return early_sink_armed_ ? early_used_ : 0; }

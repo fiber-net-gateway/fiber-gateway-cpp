@@ -13,9 +13,15 @@
 #include <openssl/x509.h>
 
 #include <climits>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include <fiber/common/Assert.h>
 #include <fiber/common/util/Base64.h>
@@ -417,6 +423,99 @@ common::IoResult<TlsTrustStore> TlsTrustStore::from_pem_bundle(std::span<const c
     TlsTrustStore anchors;
     anchors.store_ = store;
     return anchors;
+}
+
+namespace {
+
+// System root bundle candidate, mirroring net's TrustStore candidate walk
+// (09 §4.3 — both stacks must resolve the same file). SSL_CERT_FILE wins
+// when readable.
+const char *system_ca_bundle_candidate() noexcept {
+    if (const char *env = std::getenv("SSL_CERT_FILE")) {
+        if (env[0] != '\0' && ::access(env, R_OK) == 0) {
+            return env;
+        }
+    }
+    static constexpr const char *kCandidates[] = {
+            "/etc/ssl/certs/ca-certificates.crt",     "/etc/pki/tls/cert.pem",
+            "/etc/ssl/certs/ca-bundle.crt",           "/etc/ssl/cert.pem",
+            "/usr/local/share/certs/ca-root-nss.crt", "/etc/openssl/certs/ca-certificates.crt",
+    };
+    for (const char *candidate: kCandidates) {
+        if (::access(candidate, R_OK) == 0) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
+// One-shot configuration-file read (system bundles run ~200 KiB) into a
+// nothrow allocation; the 4 MiB bound is a sanity ceiling, not policy.
+std::unique_ptr<char[]> read_system_bundle(const char *path, std::size_t &out_len) noexcept {
+    std::FILE *file = std::fopen(path, "rb");
+    if (file == nullptr) {
+        return nullptr;
+    }
+    if (std::fseek(file, 0, SEEK_END) != 0) {
+        std::fclose(file);
+        return nullptr;
+    }
+    const long size = std::ftell(file);
+    if (size <= 0 || static_cast<unsigned long>(size) > (1u << 22) || std::fseek(file, 0, SEEK_SET) != 0) {
+        std::fclose(file);
+        return nullptr;
+    }
+    std::unique_ptr<char[]> pem(new (std::nothrow) char[static_cast<std::size_t>(size)]);
+    if (pem == nullptr ||
+        std::fread(pem.get(), 1, static_cast<std::size_t>(size), file) != static_cast<std::size_t>(size)) {
+        std::fclose(file);
+        return nullptr;
+    }
+    std::fclose(file);
+    out_len = static_cast<std::size_t>(size);
+    return pem;
+}
+
+} // namespace
+
+TlsTrustStore *TlsTrustStore::system_default() noexcept {
+    struct SystemCache {
+        TlsTrustStore store;
+        bool ok = false;
+
+        SystemCache() noexcept {
+            if (const char *path = system_ca_bundle_candidate()) {
+                std::size_t len = 0;
+                if (std::unique_ptr<char[]> pem = read_system_bundle(path, len)) {
+                    auto loaded = TlsTrustStore::from_pem_bundle({pem.get(), len});
+                    if (loaded.has_value()) {
+                        store = std::move(*loaded);
+                        ok = true;
+                        return;
+                    }
+                }
+            }
+            // No readable bundle (or it failed to parse): OpenSSL's
+            // compiled-in default path lookup.
+            X509_STORE *fallback = X509_STORE_new();
+            if (fallback == nullptr) {
+                ERR_clear_error();
+                return;
+            }
+            if (X509_STORE_set_default_paths(fallback) == 1) {
+                store.store_ = fallback;
+                ok = true;
+                return;
+            }
+            X509_STORE_free(fallback);
+            ERR_clear_error();
+        }
+    };
+    // Function-local static init is thread-safe; the holder caches both the
+    // resolved store and the miss — neither the filesystem nor the PEM
+    // parser runs more than once per process, and the result is never freed.
+    static SystemCache *const cached = new (std::nothrow) SystemCache{};
+    return cached != nullptr && cached->ok ? &cached->store : nullptr;
 }
 
 // ---- tls_verify_chain ----

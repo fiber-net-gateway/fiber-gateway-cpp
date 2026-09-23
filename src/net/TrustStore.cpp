@@ -1,63 +1,48 @@
 #include <fiber/net/TrustStore.h>
 
+#include <cstdio>
 #include <cstdlib>
-#include <limits>
 #include <new>
+#include <string>
 #include <unistd.h>
-
-#include <openssl/bio.h>
-#include <openssl/err.h>
-#include <openssl/pem.h>
-#include <openssl/x509.h>
 
 namespace fiber::net {
 
 namespace {
 
-class OpenSslErrorQueueScope {
-public:
-    OpenSslErrorQueueScope() noexcept { ERR_clear_error(); }
-    ~OpenSslErrorQueueScope() noexcept { ERR_clear_error(); }
-};
-
-common::IoErr load_content(X509_STORE *store, const std::string &pem) noexcept {
-    if (pem.empty() || pem.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+// Reads a File-kind PEM bundle (bounded sanity check; at least one readable
+// byte required — the tls parser then demands at least one CERTIFICATE
+// block, matching the old loader's loaded_any rule).
+common::IoErr read_file_bundle(const std::string &path, std::string &out) noexcept {
+    if (path.empty()) {
         return common::IoErr::Invalid;
     }
-    BIO *bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
-    if (!bio) {
-        return common::IoErr::NoMem;
+    std::FILE *file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr) {
+        return common::IoErr::NotFound;
     }
-    STACK_OF(X509_INFO) *infos = PEM_X509_INFO_read_bio(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    if (!infos) {
-        return common::IoErr::Invalid;
-    }
-
-    bool loaded_any = false;
-    bool valid = true;
-    const std::size_t count = sk_X509_INFO_num(infos);
-    for (std::size_t i = 0; i < count; ++i) {
-        X509_INFO *info = sk_X509_INFO_value(infos, i);
-        if (!info || !info->x509 || info->crl || info->x_pkey || X509_STORE_add_cert(store, info->x509) != 1) {
-            valid = false;
+    char chunk[4096];
+    std::size_t got = 0;
+    while ((got = std::fread(chunk, 1, sizeof chunk, file)) > 0) {
+        out.append(chunk, got);
+        if (out.size() > (1u << 22)) {
             break;
         }
-        loaded_any = true;
     }
-    sk_X509_INFO_pop_free(infos, X509_INFO_free);
-    return valid && loaded_any ? common::IoErr::None : common::IoErr::Invalid;
+    const bool ok = std::ferror(file) == 0 && !out.empty() && out.size() <= (1u << 22);
+    std::fclose(file);
+    return ok ? common::IoErr::None : common::IoErr::Invalid;
 }
 
 } // namespace
 
-TrustStore::~TrustStore() {
-    X509_STORE_free(store_);
-    store_ = nullptr;
+TrustStore::~TrustStore() = default;
+
+X509_STORE *TrustStore::x509_store() const noexcept {
+    return static_cast<X509_STORE *>(tls_store().x509_store_handle());
 }
 
 common::IoResult<std::unique_ptr<TrustStore>> TrustStore::create(const TrustStoreOptions &options) noexcept {
-    OpenSslErrorQueueScope error_queue_scope;
     if ((options.kind == TrustStoreSourceKind::System && !options.value.empty()) ||
         (options.kind != TrustStoreSourceKind::System && options.value.empty())) {
         return std::unexpected(common::IoErr::Invalid);
@@ -67,33 +52,43 @@ common::IoResult<std::unique_ptr<TrustStore>> TrustStore::create(const TrustStor
     if (!result) {
         return std::unexpected(common::IoErr::NoMem);
     }
-    result->store_ = X509_STORE_new();
-    if (!result->store_) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
 
-    common::IoErr error = common::IoErr::None;
     switch (options.kind) {
-        case TrustStoreSourceKind::System: {
-            const std::string &path = system_ca_bundle_path();
-            const int loaded = path.empty() ? X509_STORE_set_default_paths(result->store_)
-                                            : X509_STORE_load_locations(result->store_, path.c_str(), nullptr);
-            error = loaded == 1 ? common::IoErr::None : common::IoErr::Invalid;
-            break;
+        case TrustStoreSourceKind::System:
+            // Borrow the tls layer's process-wide cache: env override →
+            // distribution bundles → OpenSSL default paths, resolved once,
+            // failures cached. A null result means this host has no usable
+            // system roots at all.
+            result->shared_ = tls::TlsTrustStore::system_default();
+            if (result->shared_ == nullptr) {
+                return std::unexpected(common::IoErr::NotFound);
+            }
+            return result;
+        case TrustStoreSourceKind::File: {
+            std::string pem;
+            if (read_file_bundle(options.value, pem) != common::IoErr::None) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            auto store = tls::TlsTrustStore::from_pem_bundle({pem.data(), pem.size()});
+            if (!store) {
+                return std::unexpected(store.error());
+            }
+            result->owned_ = std::move(*store);
+            return result;
         }
-        case TrustStoreSourceKind::File:
-            error = X509_STORE_load_locations(result->store_, options.value.c_str(), nullptr) == 1
-                            ? common::IoErr::None
-                            : common::IoErr::Invalid;
-            break;
-        case TrustStoreSourceKind::Content:
-            error = load_content(result->store_, options.value);
-            break;
+        case TrustStoreSourceKind::Content: {
+            if (options.value.empty() || options.value.size() > (1u << 22)) {
+                return std::unexpected(common::IoErr::Invalid);
+            }
+            auto store = tls::TlsTrustStore::from_pem_bundle({options.value.data(), options.value.size()});
+            if (!store) {
+                return std::unexpected(store.error());
+            }
+            result->owned_ = std::move(*store);
+            return result;
+        }
     }
-    if (error != common::IoErr::None) {
-        return std::unexpected(error);
-    }
-    return result;
+    return std::unexpected(common::IoErr::Invalid);
 }
 
 const std::string &TrustStore::system_ca_bundle_path() noexcept {
@@ -124,19 +119,23 @@ common::IoResult<const TrustStore *> TrustStore::system_default() noexcept {
         common::IoErr error = common::IoErr::None;
 
         SystemStoreHolder() noexcept {
-            auto created = TrustStore::create(TrustStoreOptions::system());
-            if (created) {
-                store = created->release();
-            } else {
-                error = created.error();
+            TrustStore *created = new (std::nothrow) TrustStore();
+            if (created == nullptr) {
+                error = common::IoErr::NoMem;
+                return;
             }
+            created->shared_ = tls::TlsTrustStore::system_default();
+            if (created->shared_ == nullptr) {
+                error = common::IoErr::NotFound;
+            }
+            store = created; // never destroyed, success or failure
         }
     };
     // Function-local static init is thread-safe; the holder caches both the
     // resolved store and the failure so neither the filesystem nor the PEM
     // parser runs more than once per process.
     static const SystemStoreHolder holder{};
-    if (holder.store == nullptr) {
+    if (holder.store == nullptr || holder.error != common::IoErr::None) {
         return std::unexpected(holder.error);
     }
     return holder.store;

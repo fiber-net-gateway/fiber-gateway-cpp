@@ -333,9 +333,24 @@ bool drive(BoringServer &server, TlsClientHandshakeEngine &engine, bool sliced, 
         }
         if (!static_cast<bool>(SSL_is_init_finished(server.ssl()))) {
             if (server.handshake_step() < 0) {
-                ADD_FAILURE() << "BoringSSL server handshake failed mid-drive";
-                ERR_print_errors_fp(stderr);
-                return false;
+                // A deliberate version refusal lands here (the 09 §4.2 bounds
+                // tests): the server's fatal alert is still queued in its
+                // wbio — feed it so the engine reaches its terminal state,
+                // then let the caller's engine assertions decide whether the
+                // refusal was expected.
+                const std::vector<std::uint8_t> alert = server.drain_wbio();
+                log.server_to_client.insert(log.server_to_client.end(), alert.begin(), alert.end());
+                if (!alert.empty()) {
+                    Event last = Event::None;
+                    if (!feed_bytes(engine, alert, false, last)) {
+                        return false;
+                    }
+                }
+                if (!engine.done() || !engine.failed()) {
+                    ADD_FAILURE() << "BoringSSL server handshake failed mid-drive";
+                    ERR_print_errors_fp(stderr);
+                }
+                return engine.done() && engine.failed();
             }
         }
         const std::vector<std::uint8_t> flight = server.drain_wbio();
@@ -1216,4 +1231,162 @@ TEST(TlsClientHandshake13Psk, EarlyDataRejectedStillResumes) {
     EXPECT_EQ(1, server2->handshake_step());
     EXPECT_EQ(0, SSL_early_data_accepted(server2->ssl()));
     EXPECT_EQ(1, SSL_session_reused(server2->ssl()));
+}
+
+// =====================================================================
+// 09 §4.2 — version bounds, §4.3 — check_host split
+// =====================================================================
+
+// A 1.2-only server against a client whose floor is 1.3: the narrowed offer
+// carries only 0x0304, so the PEER refuses the ClientHello itself and the
+// engine relays the peer's protocol_version alert. (The engine-side gate —
+// a 1.2-style ServerHello despite the narrowed offer — needs a
+// non-conforming peer; the crafted-SH test below covers it.)
+TEST(TlsClientHandshakeBounds, Tls12OnlyServerRefusesNarrowedOffer) {
+    ClientMaterial material;
+    TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+    cfg.min_version = fiber::tls::kTlsVersionTls13;
+
+    auto server = BoringServer::make(ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"});
+    ASSERT_NE(nullptr, server);
+    TlsClientHandshakeEngine engine(cfg, nullptr, material.pool);
+    DriveLog log;
+    (void) drive(*server, engine, false, log); // the refusal is the expected path
+    ASSERT_TRUE(engine.done());
+    EXPECT_TRUE(engine.failed());
+    EXPECT_EQ(TlsAlertDesc::ProtocolVersion, engine.failure_alert()); // the peer's alert, relayed
+
+    const std::optional<int> peer_desc = last_alert_desc(log.server_to_client);
+    ASSERT_TRUE(peer_desc.has_value());
+    EXPECT_EQ(static_cast<int>(TlsAlertDesc::ProtocolVersion), *peer_desc);
+}
+
+// The engine-side floor gate: a ServerHello without supported_versions
+// (a 1.2 negotiation) against min_version = 1.3 answers protocol_version
+// from the fork, before any 1.2 sub-flow mounts. No honest peer produces
+// this shape after a [0x0304]-only offer — the SH is hand-crafted.
+TEST(TlsClientHandshakeBounds, Tls12ServerHelloBelowFloorRefusedAtFork) {
+    ClientMaterial material;
+    TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+    cfg.min_version = fiber::tls::kTlsVersionTls13;
+
+    TlsClientHandshakeEngine engine(cfg, nullptr, material.pool);
+    ASSERT_FALSE(engine.done());
+
+    // A minimal well-formed 1.2 ServerHello: legacy_version 0x0303, 32-byte
+    // random, empty session_id, suite 0xC02F, null compression, no extensions.
+    std::vector<std::uint8_t> body;
+    body.push_back(0x03);
+    body.push_back(0x03);
+    body.insert(body.end(), 32, 0x42); // random
+    body.push_back(0x00); // session_id length
+    body.push_back(0xC0);
+    body.push_back(0x2F); // cipher_suite
+    body.push_back(0x00); // compression null
+    body.push_back(0x00);
+    body.push_back(0x00); // empty extension block
+
+    std::vector<std::uint8_t> wire;
+    wire.push_back(22); // handshake record, plaintext first flight
+    wire.push_back(0x03);
+    wire.push_back(0x01);
+    wire.push_back(static_cast<std::uint8_t>((body.size() + 4) >> 8));
+    wire.push_back(static_cast<std::uint8_t>(body.size() + 4));
+    wire.push_back(2); // ServerHello
+    wire.push_back(static_cast<std::uint8_t>((body.size() >> 16) & 0xFF));
+    wire.push_back(static_cast<std::uint8_t>((body.size() >> 8) & 0xFF));
+    wire.push_back(static_cast<std::uint8_t>(body.size()));
+    wire.insert(wire.end(), body.begin(), body.end());
+
+    IoBuf buf = IoBuf::allocate(wire.size());
+    ASSERT_TRUE(buf.valid());
+    std::memcpy(buf.writable_data(), wire.data(), wire.size());
+    buf.commit(wire.size());
+    const IoResult<Event> event = engine.feed(std::move(buf));
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(Event::Failed, *event);
+    ASSERT_TRUE(engine.done());
+    EXPECT_TRUE(engine.failed());
+    EXPECT_EQ(TlsAlertDesc::ProtocolVersion, engine.failure_alert());
+
+    // Our fatal alert went out — an alert record (type 21) behind the still
+    // queued ClientHello flight, carrying {fatal, protocol_version}.
+    const std::vector<std::uint8_t> out = chain_bytes(engine.take_output());
+    ASSERT_GE(out.size(), fiber::tls::kTlsRecordHeaderSize + 2u);
+    bool alert_found = false;
+    for (std::size_t off = 0; off + fiber::tls::kTlsRecordHeaderSize <= out.size();) {
+        const std::size_t len = (static_cast<std::size_t>(out[off + 3]) << 8) | out[off + 4];
+        if (out[off] == 21 && len == 2 && off + fiber::tls::kTlsRecordHeaderSize + 2 <= out.size() &&
+            out[off + 5] == 2 && out[off + 6] == static_cast<std::uint8_t>(TlsAlertDesc::ProtocolVersion)) {
+            alert_found = true;
+            break;
+        }
+        off += fiber::tls::kTlsRecordHeaderSize + len;
+    }
+    EXPECT_TRUE(alert_found);
+}
+
+// The offer itself narrows: max_version = 1.2 puts only 0x0303 on the wire,
+// so a 1.3-only server refuses the ClientHello and the peer's
+// protocol_version alert fails the engine.
+TEST(TlsClientHandshakeBounds, NarrowedOfferExcludesTls13) {
+    ClientMaterial material;
+    TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+    cfg.max_version = fiber::tls::kTlsVersionTls12;
+
+    auto server = BoringServer::make(ServerOptions{}); // 1.3-only
+    ASSERT_NE(nullptr, server);
+    TlsClientHandshakeEngine engine(cfg, nullptr, material.pool);
+    DriveLog log;
+    (void) drive(*server, engine, false, log); // the refusal is the expected path
+    ASSERT_TRUE(engine.done());
+    EXPECT_TRUE(engine.failed());
+    EXPECT_EQ(TlsAlertDesc::ProtocolVersion, engine.failure_alert()); // the peer's alert
+}
+
+// The same narrowed offer against a 1.2 server completes at 1.2 — the window
+// is a window, not a pin.
+TEST(TlsClientHandshakeBounds, MaxTls12NegotiatesTls12) {
+    auto server = BoringServer::make(ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"});
+    ASSERT_NE(nullptr, server);
+    ClientMaterial material;
+    TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+    cfg.max_version = fiber::tls::kTlsVersionTls12;
+
+    TlsClientHandshakeEngine engine(cfg, nullptr, material.pool);
+    DriveLog log;
+    ASSERT_TRUE(drive(*server, engine, false, log));
+
+    TlsConnectedState state = engine.take_state();
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+}
+
+// check_host splits the certificate check name from the SNI send name
+// (09 §4.3): the SNI says one name, verification checks another. The
+// successful drive is the proof of the split — with no split the leaf's
+// SAN (example.com) would never match the SNI name.
+TEST(TlsClientHandshakeCheckHost, SeparateNameVerifiesAgainstCheckHost) {
+    auto server = BoringServer::make(ServerOptions{});
+    ASSERT_NE(nullptr, server);
+    ClientMaterial material;
+    TlsClientConfig cfg = material.config("sni-only.example", certfix::kRefNowMs);
+    cfg.check_host = "example.com";
+
+    TlsClientHandshakeEngine engine(cfg, nullptr, material.pool);
+    DriveLog log;
+    ASSERT_TRUE(drive(*server, engine, false, log));
+
+    TlsConnectedState state = engine.take_state();
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
+}
+
+// And the negative: a check_host the leaf does not match is bad_certificate
+// even though the SNI name on the wire is fine. "a.b" is two labels deep —
+// kLeafRsaPem's *.example.com wildcard covers exactly one label.
+TEST(TlsClientHandshakeCheckHost, WrongCheckHostSendsBadCertificate) {
+    ClientMaterial material;
+    TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+    cfg.check_host = "a.b.example.com";
+
+    expect_engine_failure(ServerOptions{}, cfg, material.pool, TlsAlertDesc::BadCertificate);
 }

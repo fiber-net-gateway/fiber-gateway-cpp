@@ -78,14 +78,16 @@ namespace fiber::tls {
 // Everything the ClientHello encoder needs. All spans borrow caller data for
 // the call only. Presence is span-driven: empty sni_host/alpn/session_ticket
 // omits the extension; non-empty key_share emits exactly one share entry.
-// supported_versions ([0x0304, 0x0303]) and psk_key_exchange_modes
-// (psk_dhe_ke) are engine-fixed constants, not inputs.
+// supported_versions defaults to the engine-fixed [0x0304, 0x0303] and
+// narrows to offered_versions (09 §4.2); psk_key_exchange_modes (psk_dhe_ke)
+// is an engine-fixed constant, not an input.
 struct TlsClientHelloInput {
     std::span<const std::uint8_t> random; // exactly 32
     std::span<const std::uint8_t> session_id; // 0..32
     std::span<const std::uint16_t> cipher_suites; // >= 1
     std::span<const std::uint16_t> supported_groups; // >= 1
     std::span<const std::uint16_t> signature_algorithms; // >= 1
+    std::span<const std::uint16_t> offered_versions; // empty = [0x0304, 0x0303]
     std::uint16_t key_share_group = 0; // raw group id
     std::span<const std::uint8_t> key_share; // non-empty => key_share extension
     std::string_view sni_host; // non-empty => server_name

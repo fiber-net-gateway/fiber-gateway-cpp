@@ -15,6 +15,12 @@
 // no NST minting (a client PSK offer then degrades safely to a full
 // handshake). Pool semantics as in 06: every chain binds to the caller's
 // IoBufNodePool and is destroyed on the owning loop.
+//
+// source (09 §4.1): optional per-ClientHello config selection. When set, the
+// fork calls select() right after decoding the ClientHello; null return =
+// the hello selects none → handshake_failure. The returned config's spans
+// borrow CALLER-owned material that must outlive the engine (net glue
+// staging), like every other input.
 
 #include <cstddef>
 #include <cstdint>
@@ -36,7 +42,8 @@ public:
     enum class Event : std::uint8_t { None, HandshakeDone, Failed }; // as in 06
 
     TlsServerHandshakeEngine(const TlsServerConfig &config, const TlsResumptionLookup *resumption,
-                             const TlsTicketMinter *minter, mem::IoBufNodePool &pool) noexcept;
+                             const TlsTicketMinter *minter, mem::IoBufNodePool &pool,
+                             const TlsServerConfigSource *source = nullptr) noexcept;
     ~TlsServerHandshakeEngine();
 
     // Client bytes in (any chunking). NoMem = connection-level failure;
@@ -55,6 +62,12 @@ public:
     [[nodiscard]] TlsAlertDesc failure_alert() const noexcept;
     // Requires done && !failed.
     [[nodiscard]] TlsConnectedState take_state() noexcept;
+
+    // Requires done && !failed. Inbound bytes the handshake never consumed
+    // (app data piggybacked behind the final flight — the engine stops
+    // stepping at HandshakeDone): feed them into the TlsConnection built
+    // from take_state(). A second take is empty.
+    [[nodiscard]] mem::IoBufChain take_inbound_leftover() noexcept;
 
 private:
     struct Impl;

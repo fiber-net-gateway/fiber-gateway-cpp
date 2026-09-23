@@ -45,6 +45,21 @@ bool tls_client_hello_build(TlsClientHelloState &hello, const TlsClientConfig &c
     in.cipher_suites = kOfferedSuites;
     in.supported_groups = kOfferedGroups;
     in.signature_algorithms = kOfferedSigalgs;
+    // supported_versions narrows to the config bounds (09 §4.2); the domain
+    // is {1.2, 1.3} with 1.3 the ceiling, so the list is 0-2 entries,
+    // descending. An empty window (min > max) fails the encode below.
+    std::array<std::uint16_t, 2> versions{};
+    std::size_t version_count = 0;
+    if (cfg.max_version >= kTlsVersionTls13 && cfg.min_version <= kTlsVersionTls13) {
+        versions[version_count++] = kTlsVersionTls13;
+    }
+    if (cfg.max_version >= kTlsVersionTls12 && cfg.min_version <= kTlsVersionTls12) {
+        versions[version_count++] = kTlsVersionTls12;
+    }
+    if (version_count == 0) {
+        return false; // empty window (min > max): no offer to send
+    }
+    in.offered_versions = {versions.data(), version_count};
     in.key_share_group = share_group;
     in.key_share = hello.kx->public_value().bytes();
     in.cookie = cookie;
