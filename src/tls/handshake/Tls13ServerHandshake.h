@@ -17,6 +17,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
 
@@ -67,6 +68,10 @@ public:
     // Requires done && !failed (the outer's take_state asserts it).
     [[nodiscard]] TlsConnectedState take_state() noexcept { return std::move(state_); }
 
+    // QUIC mode twin of take_state (the outer's take_quic_result asserts
+    // done && !failed; only this mode fills it).
+    [[nodiscard]] TlsQuicHandshakeResult take_quic_result() noexcept { return std::move(quic_result_); }
+
 private:
     enum class St : std::uint8_t {
         WaitClientHello2, // an HRR is out; CH2 owed (exactly one HRR per handshake)
@@ -112,6 +117,7 @@ private:
     bool ccs_sent_ = false; // the one compat CCS went out (after HRR or SH; RFC 8446 D.4)
     TlsCertificateChain peer_chain_; // the mTLS client chain (empty otherwise)
     TlsConnectedState state_{};
+    TlsQuicHandshakeResult quic_result_{}; // filled instead of state_ in QUIC mode (10 §8)
 
     // ---- helpers ----
 
@@ -168,6 +174,22 @@ private:
         tls_secure_wipe(keys.iv.data(), keys.iv.size());
         slot = std::move(fresh);
         return true;
+    }
+
+    // QUIC secret export (10 §4): the callback twin of swap_cipher at each
+    // derivation point — no record cipher is ever built.
+    [[nodiscard]] bool quic_secret(TlsQuicLevel level, bool write_secret, const TlsSecret &secret) noexcept {
+        return cfg_.quic->set_secret(cfg_.quic->ctx, level, write_secret, suite_, secret.bytes());
+    }
+
+    // Negotiated ALPN lands in whichever result the mode hands over (the
+    // flight builder is the single fill point).
+    void record_alpn(std::string_view alpn) noexcept {
+        std::array<std::uint8_t, 256> &bytes = cfg_.quic != nullptr ? quic_result_.alpn : state_.alpn;
+        std::uint16_t &len = cfg_.quic != nullptr ? quic_result_.alpn_len : state_.alpn_len;
+        FIBER_ASSERT(alpn.size() <= bytes.size());
+        std::memcpy(bytes.data(), alpn.data(), alpn.size());
+        len = static_cast<std::uint16_t>(alpn.size());
     }
 
     // ---- flight builders / handlers ----

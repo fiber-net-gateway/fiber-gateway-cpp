@@ -14,6 +14,7 @@
 #include "TlsServerHandshakeShared.h"
 
 #include <fiber/tls/TlsVersion.h>
+#include <fiber/tls/handshake/TlsExtensionCodec.h>
 #include <fiber/tls/handshake/TlsHandshakeCodec.h>
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
 #include <fiber/tls/record/TlsRecord.h>
@@ -168,6 +169,15 @@ TlsServerHandshakeEngine::TlsServerHandshakeEngine(const TlsServerConfig &config
     // client's 0x0301 first-flight convention is client-only, 06 §2.3).
     impl.ctx.set_legacy_version(kTlsRecordVersionTls12);
 
+    if (impl.cfg.quic != nullptr) {
+        // QUIC (10 §3): records never frame; the HRR (if any) rides Initial
+        // CRYPTO, the SH flight Handshake. The context binds the template's
+        // callbacks here — a per-ClientHello selector may not change them
+        // (asserted at the fork).
+        FIBER_ASSERT(impl.cfg.min_version == kTlsVersionTls13 && impl.cfg.max_version == kTlsVersionTls13);
+        impl.ctx.enable_quic(*impl.cfg.quic);
+    }
+
     // Configuration invariants at the boundary (no PSK-only mode exists).
     // With a per-ClientHello selector the ctor config is a TEMPLATE:
     // chain/key arrive with the selection (checked at the fork); only the
@@ -201,6 +211,15 @@ common::IoResult<TlsServerHandshakeEngine::Event> TlsServerHandshakeEngine::feed
     return impl_->pump();
 }
 
+common::IoResult<TlsServerHandshakeEngine::Event>
+TlsServerHandshakeEngine::feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept {
+    FIBER_ASSERT(impl_ != nullptr && !impl_->out.done);
+    if (!impl_->ctx.provide_quic(level, bytes)) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    return impl_->pump();
+}
+
 mem::IoBufChain TlsServerHandshakeEngine::take_early_data() noexcept {
     if (impl_ == nullptr) {
         return mem::IoBufChain{};
@@ -226,6 +245,7 @@ TlsAlertDesc TlsServerHandshakeEngine::failure_alert() const noexcept {
 
 TlsConnectedState TlsServerHandshakeEngine::take_state() noexcept {
     FIBER_ASSERT(impl_ != nullptr && impl_->out.done && !impl_->out.failed);
+    FIBER_ASSERT(impl_->cfg.quic == nullptr); // QUIC hands over via take_quic_result (10 定谳 2)
     return std::visit(
             [](auto &sub) -> TlsConnectedState {
                 using Sub = std::decay_t<decltype(sub)>;
@@ -234,6 +254,22 @@ TlsConnectedState TlsServerHandshakeEngine::take_state() noexcept {
                     return TlsConnectedState{};
                 } else {
                     return sub.take_state();
+                }
+            },
+            impl_->flow);
+}
+
+TlsQuicHandshakeResult TlsServerHandshakeEngine::take_quic_result() noexcept {
+    FIBER_ASSERT(impl_ != nullptr && impl_->out.done && !impl_->out.failed);
+    FIBER_ASSERT(impl_->cfg.quic != nullptr); // the QUIC-mode twin of take_state
+    return std::visit(
+            [](auto &sub) -> TlsQuicHandshakeResult {
+                using Sub = std::decay_t<decltype(sub)>;
+                if constexpr (std::is_same_v<Sub, Tls13ServerHandshake>) {
+                    return sub.take_quic_result();
+                } else {
+                    FIBER_ASSERT(false); // QUIC never mounts monostate-done or the 1.2 sub-flow
+                    return TlsQuicHandshakeResult{};
                 }
             },
             impl_->flow);
@@ -280,7 +316,27 @@ void TlsServerHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
             fail_local(TlsAlertDesc::HandshakeFailure);
             return;
         }
+        FIBER_ASSERT(selected->quic == cfg.quic); // the context is QUIC-bound to the template's callbacks
         cfg = *selected;
+    }
+
+    if (cfg.quic != nullptr) {
+        // Middlebox compatibility mode is prohibited in QUIC (RFC 9001 §8.4):
+        // a non-empty legacy_session_id can only be a compat-mode client.
+        // BoringSSL answers illegal_parameter (reason
+        // UNEXPECTED_COMPATIBILITY_MODE).
+        if (!ch.session_id.empty()) {
+            fail_local(TlsAlertDesc::IllegalParameter);
+            return;
+        }
+        // 0x39 extraction (10 §5): the CH's transport parameters, handed to
+        // the QUIC layer the moment they decode (the span borrows the
+        // retained copy — the callback copies). Absence is the QUIC layer's
+        // completeness check to raise.
+        std::span<const std::uint8_t> params{};
+        if (tls_find_extension_payload(ch.extensions_block, TlsExtensionType::QuicTransportParameters, params)) {
+            cfg.quic->on_peer_transport_params(cfg.quic->ctx, params);
+        }
     }
 
     // Null compression only (RFC 8446 §4.1.2 / RFC 5246 §7.4.1.4); the alert
@@ -298,7 +354,8 @@ void TlsServerHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
     const bool offers12 = ch.has_supported_versions ? tls_server_list_contains(ch.supported_versions, kTlsVersionTls12)
                                                     : ch.legacy_version >= kTlsVersionTls12;
     const bool allow13 = offers13 && cfg.max_version >= kTlsVersionTls13;
-    const bool allow12 = offers12 && cfg.min_version <= kTlsVersionTls12 && cfg.max_version >= kTlsVersionTls12;
+    const bool allow12 = offers12 && cfg.min_version <= kTlsVersionTls12 && cfg.max_version >= kTlsVersionTls12 &&
+                         cfg.quic == nullptr; // QUIC is 1.3-only (10 §3.4) — a 1.2 fork cannot mount
 
     if (allow13) {
         if (!null_compression) {
@@ -315,6 +372,7 @@ void TlsServerHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
             fail_local(TlsAlertDesc::HandshakeFailure); // RFC 5246 §7.4.1.4
             return;
         }
+        FIBER_ASSERT(cfg.quic == nullptr); // the allow12 gate above is QUIC-blind by construction
         auto &sub = flow.emplace<Tls12ServerHandshake>(Tls12ServerHandshake::Mount{
                 ctx, cfg, resumption, minter, hello, out, {scratch.data(), scratch.size()}});
         sub.start(ch, {hello.ch.data(), hello.ch_len});

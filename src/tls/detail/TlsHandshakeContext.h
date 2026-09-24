@@ -34,6 +34,7 @@
 #include <fiber/common/NonMovable.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/common/mem/IoBufChain.h>
+#include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/TlsTypes.h>
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
 #include <fiber/tls/record/TlsRecord.h>
@@ -84,14 +85,37 @@ public:
     [[nodiscard]] bool feed(mem::IoBuf &&bytes) noexcept;
     [[nodiscard]] bool feed(mem::IoBufChain &&bytes) noexcept;
 
+    // QUIC mode (10 §3.3): appends CRYPTO-stream bytes — raw handshake
+    // messages, NO record framing — at `level`. Ordering is the QUIC layer's
+    // gate contract (it feeds Initial then Handshake then Application, fully
+    // consuming each level's stream in between); the context only tracks
+    // monotonicity as a contract check. False only on allocation failure.
+    // Mutually exclusive with feed().
+    [[nodiscard]] bool provide_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept;
+
     void set_inbound_mode(TlsInboundMode mode) noexcept { mode_ = mode; }
     [[nodiscard]] TlsInboundMode inbound_mode() const noexcept { return mode_; }
 
     // Pulls the next protocol event: a complete handshake message (possibly
     // reassembled across records), a validated 0x01 CCS, a decoded peer
     // alert, NeedMore, or Fatal (record-level violation; alert not yet
-    // encoded — call fail()).
+    // encoded — call fail()). In QUIC mode: complete messages off the CRYPTO
+    // stream only (no alerts/CCS — those do not exist without records).
     [[nodiscard]] TlsInboundStep step() noexcept;
+
+    // ---- QUIC mode (10 §3): enable before first use; all four callbacks
+    // must be present. Thereafter feed() is invalid, records never frame,
+    // emit() sinks to add_handshake_data, send_ccs() is suppressed, and
+    // fail() reports via send_alert instead of encoding bytes. ----
+
+    void enable_quic(const TlsQuicCallbacks &callbacks) noexcept;
+    [[nodiscard]] bool quic() const noexcept { return quic_ != nullptr; }
+
+    // Advances the outbound CRYPTO level (the engine sets it at the flight
+    // boundaries: client CH→Initial then Handshake at the hs secrets;
+    // server HRR→Initial then Handshake, Application at the app secrets).
+    // Monotonic by construction — asserted.
+    void set_quic_level(TlsQuicLevel level) noexcept;
 
     // ---- outbound ----
 
@@ -104,11 +128,16 @@ public:
     // write cipher is active (via the Writer: zero framing copies); sealed
     // per-record chunk otherwise, or with `cipher` when given (the 0-RTT
     // early-write instance). Sealed records are written as outer
-    // application_data with legacy_version 0x0303.
+    // application_data with legacy_version 0x0303. QUIC mode: the payload
+    // (one fully-encoded handshake message) goes to add_handshake_data at
+    // the current outbound level — type and cipher are ignored, nothing
+    // lands in out_.
     [[nodiscard]] common::IoResult<void> emit(TlsContentType type, std::span<const std::uint8_t> payload,
                                               TlsRecordCipher *cipher = nullptr) noexcept;
 
     // 1-byte 0x01 ChangeCipherSpec — always plaintext (by definition).
+    // QUIC mode: suppressed (RFC 9001 §5.3 forbids the compat CCS) — a
+    // successful no-op.
     [[nodiscard]] common::IoResult<void> send_ccs() noexcept;
 
     // ---- record-protection swap points (engine-driven) ----
@@ -169,7 +198,11 @@ public:
     // Inbound bytes fed past the terminal event but never consumed (app
     // data piggybacked behind the final flight): handed to the connection
     // object the glue builds here. A second take yields an empty chain.
-    [[nodiscard]] mem::IoBufChain take_inbound_leftover() noexcept { return reader_.take_pending(); }
+    // QUIC mode: the unconsumed CRYPTO-stream tail (e.g. an NST that
+    // arrived in the same provide) — the post-handshake consumer's input.
+    [[nodiscard]] mem::IoBufChain take_inbound_leftover() noexcept {
+        return quic_ != nullptr ? std::move(reassembly_) : reader_.take_pending();
+    }
 
     // Sink-window content bytes handed over so far (tests/diagnostics).
     [[nodiscard]] std::size_t early_data_received() const noexcept { return early_sink_armed_ ? early_used_ : 0; }
@@ -179,6 +212,7 @@ public:
     // Encodes a fatal alert into out_ (sealed when the write cipher is
     // active) and marks the context failed. Idempotent; NoMem while encoding
     // leaves failed_ set without bytes (connection dies either way).
+    // QUIC mode: reports via send_alert — no bytes are ever encoded.
     void fail(TlsAlertDesc desc) noexcept;
     [[nodiscard]] bool failed() const noexcept { return failed_; }
     [[nodiscard]] TlsAlertDesc failure_alert() const noexcept { return failure_alert_; }
@@ -199,6 +233,7 @@ private:
     [[nodiscard]] TlsInboundStep open_current(TlsRecord &record) noexcept;
     [[nodiscard]] bool append_fragment(std::span<const std::uint8_t> bytes) noexcept;
     [[nodiscard]] TlsInboundStep extract_message() noexcept;
+    [[nodiscard]] TlsInboundStep quic_step() noexcept;
 
     mem::IoBufChain out_{};
     mem::IoBufChain reassembly_{};
@@ -222,6 +257,10 @@ private:
     std::size_t early_used_ = 0;
     bool early_sink_armed_ = false;
     bool early_skip_armed_ = false;
+    // ---- QUIC mode (see enable_quic) ----
+    const TlsQuicCallbacks *quic_ = nullptr; // null = TCP record mode
+    TlsQuicLevel quic_level_ = TlsQuicLevel::Initial; // outbound CRYPTO level
+    TlsQuicLevel quic_provided_level_ = TlsQuicLevel::Initial; // inbound gate contract check
     // In-place-open / materialization scratch; also the straddle destination
     // for tls_record_open_in_place.
     std::array<std::uint8_t, kOpenScratchSize> open_scratch_{};

@@ -39,6 +39,7 @@ enum class TlsExtensionType : std::uint16_t {
     KeyShare = 51,
     ConnectionId = 54,
     TranscriptPadding = 56,
+    QuicTransportParameters = 57, // RFC 9001 §7.4 — opaque to the TLS engine
     RenegotiationInfo = 0xFF01,
 };
 
@@ -112,6 +113,13 @@ inline constexpr std::uint8_t kTlsPskModePskKe = 0;
 inline constexpr std::uint8_t kTlsPskModePskDheKe = 1;
 
 [[nodiscard]] bool tls_psk_modes_contains(std::span<const std::uint8_t> modes, std::uint8_t mode) noexcept;
+
+// Finds `type`'s payload in a VALIDATED extension block (the CH/EE decoders
+// already guarantee an exact walk, so duplicates cannot occur and truncation
+// is unreachable). False = not present. Used for opaque engine-internal
+// lookups (10 §5: quic_transport_parameters extraction).
+[[nodiscard]] bool tls_find_extension_payload(std::span<const std::uint8_t> block, TlsExtensionType type,
+                                              std::span<const std::uint8_t> &payload) noexcept;
 
 } // namespace fiber::tls
 

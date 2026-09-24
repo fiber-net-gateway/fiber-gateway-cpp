@@ -139,6 +139,20 @@ TlsClientHandshakeEngine::TlsClientHandshakeEngine(const TlsClientConfig &config
     Impl &impl = *impl_;
     impl.ctx.set_legacy_version(kTlsRecordVersionTls10); // first flight (06 §2.3)
 
+    if (impl.cfg.quic != nullptr) {
+        // QUIC (10 §3): records never frame; the CH rides Initial-level
+        // CRYPTO. The glue pins the version window to 1.3 (QUIC is 1.3-only)
+        // — asserted here, enforced at the fork by the 09 version gates.
+        FIBER_ASSERT(impl.cfg.min_version == kTlsVersionTls13 && impl.cfg.max_version == kTlsVersionTls13);
+        impl.ctx.enable_quic(*impl.cfg.quic);
+        // ALPN is mandatory in QUIC (RFC 9001 §8.1) — BoringSSL refuses the
+        // CH build with an empty offer list; answer the config bug up front.
+        if (impl.cfg.alpn.empty()) {
+            impl.fail_local(TlsAlertDesc::InternalError);
+            return;
+        }
+    }
+
     impl.psk_offered = session != nullptr;
     impl.early.offered_ext = impl.psk_offered && session->max_early_data > 0;
 
@@ -174,10 +188,25 @@ TlsClientHandshakeEngine::TlsClientHandshakeEngine(const TlsClientConfig &config
     if (!tls_client_hello_build(impl.hello, impl.cfg, session, impl.psk_offered, impl.early.offered_ext, false,
                                 static_cast<std::uint16_t>(TlsNamedGroup::X25519), {}) ||
         (impl.psk_offered && !tls_client_backfill_psk_binder(*impl.sched, impl.hello)) ||
-        (impl.early.offered_ext && !tls_client_init_early_write(*impl.sched, *session, impl.hello, impl.early.write)) ||
         !impl.ctx.emit(TlsContentType::Handshake, {impl.hello.ch.data(), impl.hello.len}).has_value()) {
         impl.fail_local(TlsAlertDesc::InternalError);
         return;
+    }
+    if (impl.early.offered_ext) {
+        // 0-RTT write side (10 定谳 5): TCP builds the early record cipher;
+        // QUIC only exports the secret — early data is STREAM frames there
+        // and the QUIC layer seals them itself.
+        if (impl.cfg.quic != nullptr) {
+            auto early_secret = tls_client_early_secret(*impl.sched, impl.hello);
+            if (!early_secret.has_value() || !impl.cfg.quic->set_secret(impl.cfg.quic->ctx, TlsQuicLevel::EarlyData,
+                                                                        true, session->suite, early_secret->bytes())) {
+                impl.fail_local(TlsAlertDesc::InternalError);
+                return;
+            }
+        } else if (!tls_client_init_early_write(*impl.sched, *session, impl.hello, impl.early.write)) {
+            impl.fail_local(TlsAlertDesc::InternalError);
+            return;
+        }
     }
     if (impl.early.offered_ext) {
         // RFC 8446 D.4 / BoringSSL do_enter_early_data: when early data is
@@ -211,6 +240,15 @@ common::IoResult<TlsClientHandshakeEngine::Event> TlsClientHandshakeEngine::feed
 common::IoResult<TlsClientHandshakeEngine::Event> TlsClientHandshakeEngine::feed(mem::IoBufChain &&bytes) noexcept {
     FIBER_ASSERT(impl_ != nullptr && !impl_->out.done);
     if (!impl_->ctx.feed(std::move(bytes))) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    return impl_->pump();
+}
+
+common::IoResult<TlsClientHandshakeEngine::Event>
+TlsClientHandshakeEngine::feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept {
+    FIBER_ASSERT(impl_ != nullptr && !impl_->out.done);
+    if (!impl_->ctx.provide_quic(level, bytes)) {
         return std::unexpected(common::IoErr::NoMem);
     }
     return impl_->pump();
@@ -250,6 +288,7 @@ TlsAlertDesc TlsClientHandshakeEngine::failure_alert() const noexcept {
 
 TlsConnectedState TlsClientHandshakeEngine::take_state() noexcept {
     FIBER_ASSERT(impl_ != nullptr && impl_->out.done && !impl_->out.failed);
+    FIBER_ASSERT(impl_->cfg.quic == nullptr); // QUIC hands over via take_quic_result (10 定谳 2)
     return std::visit(
             [](auto &sub) -> TlsConnectedState {
                 using Sub = std::decay_t<decltype(sub)>;
@@ -258,6 +297,22 @@ TlsConnectedState TlsClientHandshakeEngine::take_state() noexcept {
                     return TlsConnectedState{};
                 } else {
                     return sub.take_state();
+                }
+            },
+            impl_->flow);
+}
+
+TlsQuicHandshakeResult TlsClientHandshakeEngine::take_quic_result() noexcept {
+    FIBER_ASSERT(impl_ != nullptr && impl_->out.done && !impl_->out.failed);
+    FIBER_ASSERT(impl_->cfg.quic != nullptr); // the QUIC-mode twin of take_state
+    return std::visit(
+            [](auto &sub) -> TlsQuicHandshakeResult {
+                using Sub = std::decay_t<decltype(sub)>;
+                if constexpr (std::is_same_v<Sub, Tls13ClientHandshake>) {
+                    return sub.take_quic_result();
+                } else {
+                    FIBER_ASSERT(false); // QUIC never mounts monostate-done or the 1.2 sub-flow
+                    return TlsQuicHandshakeResult{};
                 }
             },
             impl_->flow);
@@ -311,6 +366,7 @@ void TlsClientHandshakeEngine::Impl::handle_first_message(TlsHandshakeType type,
         // above it. (With the default window the CH offered both, so a
         // conforming peer lands here by choice; the gate only bites when the
         // operator narrowed the floor.)
+        FIBER_ASSERT(cfg.quic == nullptr); // QUIC pins 1.3 — the gate below fired
         if (cfg.min_version > kTlsVersionTls12) {
             fail_local(TlsAlertDesc::ProtocolVersion);
             return;
