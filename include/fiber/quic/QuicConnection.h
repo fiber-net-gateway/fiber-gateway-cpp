@@ -30,8 +30,9 @@
 #include "QuicStreamTable.h"
 #include "QuicTlsSession.h"
 
-struct ssl_session_st;
-typedef struct ssl_session_st SSL_SESSION;
+namespace fiber::tls {
+struct TlsSessionState;
+}
 
 namespace fiber::quic {
 
@@ -176,14 +177,17 @@ struct QuicConnectError {
     std::uint32_t offered_version = 0;
 };
 
-// Consumed synchronously by QuicConnection::connect(). Every pointer and view
-// is borrowed only until connect() returns: BoringSSL copies what it needs out
-// of tls while the SSL is created, SSL_set_session retains its own reference,
-// and the token and remembered transport are copied into connection state.
+// Consumed synchronously by QuicConnection::connect(). The TLS material
+// borrows like TlsClientParam documents: the param, its views' storage, and
+// the pointees of security stay valid until the handshake settles — until
+// wait_established()/wait_confirmed() resolves or the connection closes (the
+// resumption identity/psk are staged inside QuicTlsSession; the token and
+// remembered transport are copied into connection state).
 struct QuicClientConnectParams {
     net::TlsClientParam tls{};
     bool allow_insecure = false;
-    SSL_SESSION *resumption_session = nullptr;
+    // Borrowed session receipt (10 §9); null or empty runs a full handshake.
+    const tls::TlsSessionState *resumption_session = nullptr;
     const std::uint8_t *token = nullptr;
     std::size_t token_len = 0;
     // Offer 0-RTT. Early data is actually attempted only when
@@ -488,10 +492,12 @@ public:
         // mutate the connection or its streams. In particular, defer closing
         // until the current packet has finished processing.
         void (*on_capacity_change)(void *owner, QuicConnection &connection) noexcept = nullptr;
-        // Client role. A NewSessionTicket arrived; returning true transfers the
-        // SSL_SESSION reference to the owner. Runs from inside the TLS stack:
-        // store it and return, do not touch the connection.
-        bool (*on_new_tls_session)(void *owner, QuicConnection &connection, SSL_SESSION *session) noexcept = nullptr;
+        // Client role. A NewSessionTicket arrived; returning true moves the
+        // session receipt into the owner's cache. Runs from inside the TLS
+        // post-handshake consumer: store it and return, do not touch the
+        // connection.
+        bool (*on_new_tls_session)(void *owner, QuicConnection &connection,
+                                   tls::TlsSessionState &&session) noexcept = nullptr;
         // Client role. A NEW_TOKEN frame arrived; the bytes are borrowed for
         // the call.
         void (*on_new_token)(void *owner, QuicConnection &connection, const std::uint8_t *token,
@@ -872,7 +878,7 @@ public:
     [[nodiscard]] const mem::IoBuf &initial_token() const noexcept { return initial_token_; }
     [[nodiscard]] common::IoResult<void> set_initial_token(const std::uint8_t *token, std::size_t token_len) noexcept;
     [[nodiscard]] common::IoResult<void> recv_new_token_frame(const QuicInputFrame &frame) noexcept;
-    [[nodiscard]] bool on_new_tls_session(SSL_SESSION *session) noexcept;
+    [[nodiscard]] bool on_new_tls_session(tls::TlsSessionState &&session) noexcept;
     void fail_client_connect(common::IoErr error) noexcept;
     // Lazily create the server SSL object the first time an Initial packet
     // is authenticated. Idempotent; no-op when no TLS parameters are configured

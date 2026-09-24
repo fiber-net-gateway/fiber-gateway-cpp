@@ -14,6 +14,10 @@ namespace fiber::tls {
 struct TlsServerConfig;
 }
 
+namespace fiber::quic {
+class QuicTlsSession;
+}
+
 namespace fiber::net {
 
 class TlsCredential;
@@ -56,6 +60,7 @@ private:
     friend class detail::TlsRuntime;
     friend class detail::TlsSslFactory;
     friend class detail::TlsStreamFd;
+    friend class fiber::quic::QuicTlsSession;
 
     TlsServerHandshakeConfig(SSL *ssl) noexcept : ssl_(ssl) {}
     // Engine mode: the callback stages into `engine` (caller-owned, borrowed

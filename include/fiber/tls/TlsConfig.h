@@ -6,14 +6,17 @@
 // TlsCertificateChain / TlsPrivateKey / TlsTrustStore types ARE the
 // SSL-free credential layer and this config consumes them directly (06 §5.4).
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include "TlsTypes.h"
 #include "TlsVersion.h"
 #include "crypto/TlsCertificate.h"
+#include "crypto/TlsSecret.h"
 #include "crypto/TlsSignature.h"
 #include "handshake/TlsCipherSuites.h"
 #include "handshake/TlsHandshakeMessage.h"
@@ -100,6 +103,32 @@ struct TlsSessionOffer {
     TlsCipherSuiteId suite = TlsCipherSuiteId::TlsAes128GcmSha256; // binds the binder + transcript hash
     std::span<const std::uint8_t> psk; // resumption PSK bytes (08 derives them from the NST)
     std::size_t max_early_data = 0; // 0 = no early_data extension
+};
+
+// An owning session receipt assembled from a received NewSessionTicket
+// (10 §6.2): everything a later connection needs to offer resumption. The
+// QUIC layer's session cache stores these (the engine never caches). The
+// vector/array owning shape is deliberate — this is a cold-path cache value,
+// not a per-request allocation (IoBuf is wrong for long-lived storage).
+struct TlsSessionState {
+    std::vector<std::uint8_t> identity; // the opaque ticket blob
+    TlsSecret psk; // tls13_resumption_psk(master, nonce) at receipt time
+    TlsCipherSuiteId suite = TlsCipherSuiteId::TlsAes128GcmSha256; // the handshake's suite
+    std::uint32_t ticket_age_add = 0; // the NST's obfuscation key
+    std::uint32_t ticket_lifetime_s = 0; // expiry policy input for the cache owner
+    std::uint32_t max_early_data = 0; // the NST's value (0xffffffff sentinel in QUIC)
+    std::array<std::uint8_t, 256> alpn{}; // the negotiated protocol the ticket is bound to
+    std::uint16_t alpn_len = 0;
+    std::int64_t issued_ms = 0; // wall-clock receipt time (age arithmetic base)
+
+    [[nodiscard]] bool empty() const noexcept { return identity.empty() || psk.empty(); }
+
+    // RFC 8446 §4.6.1 ticket age: (now - issued) + ticket_age_add, mod 2^32.
+    // A clock reading before issue time counts as zero elapsed age.
+    [[nodiscard]] std::uint32_t obfuscated_ticket_age(std::int64_t now_unix_ms) const noexcept {
+        const std::int64_t elapsed = now_unix_ms > issued_ms ? now_unix_ms - issued_ms : 0;
+        return static_cast<std::uint32_t>(elapsed) + ticket_age_add;
+    }
 };
 
 // ---- server handshake inputs (07 §3.2) ----

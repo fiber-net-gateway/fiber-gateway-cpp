@@ -406,3 +406,64 @@ fixture SAN 域须匹配;测试 sink 须留累计日志(drained 队列被 pump �
 
 **待续**:slice 2(QuicTlsSession 重写 + 装配 + post-handshake 消费器 + §9)、
 slice 3(0-RTT/恢复矩阵)、slice 4(链接收窄)。待拍板 A/B 未决。
+
+### slice 2(2026-09-24,QuicTlsSession 重写 + 装配 + 消费器 + §9)— 完成
+
+**落地形态**(src/quic/QuicTlsSession.{h,cpp} 全量重写,公共契约面不变):
+
+- init/init_client/init_server/provide_crypto_data/drive_handshake/
+  process_post_handshake/alpn/alert stash 签名与语义保持 pre-10 形状;
+  内部一角色一引擎(`TlsClientHandshakeEngine`/`TlsServerHandshakeEngine`
+  raw new,RAII delete,须在连接 loop 上生死——IoBufChain 节点池亲和)。
+- 配置staging 全为地址稳定成员(quic_cb_/client_cfg_/server_cfg_/selector_/
+  minter_/lookup_);`TlsQuicCallbacks` 四静态 thunk 转发到 on_quic_*。
+- server 装配(§8):net::TlsServerParam → 模板 TlsServerConfig(ALPN
+  强制非空、mTLS trust 检查、1.3 pin、now);凭据经 09 §4.1 selector shim
+  (`select_server_config`,TlsServerHandshakeConfig 引擎模式构造 + alpn_list
+  前两字节 wire-form 技巧)按 CH 重建,callback 错误 latch 后由
+  fail_terminal 优先上报(不 close)。
+- client 装配(§8):mirror TlsStreamFd::start_client(system_default trust、
+  verify_name IP/host 二分、sni 非 IP 才发);恢复会话整体拷贝进
+  session_state_(identity vector + psk from_bytes),offer_ span 指向该副本
+  (param 借用契约:连接握手存续期)。
+- done-transition(`finish_handshake`,一次性):take_quic_result →
+  resumption_master/alpn/suite stash → take_inbound_leftover →0x39 完整性
+  (缺失 TransportParameterError close)→ client 0-RTT 裁决(accepted →
+  on_early_data_accepted[失败亦 TPE close];rejected → 定谳 5:无回滚无
+  re-drive,仅 on_early_data_rejected 丢弃早状态)。时序安全:全部先于
+  mark_established。
+- 秘钥导出:on_quic_set_secret 映射级/套件后
+  quic_set_encryption_secret;negotiated_suite_ 首次导出即存(NST 回执需);
+  EarlyData 丢弃条件 = Application+Client+双 app 钥就绪。
+- post-handshake 消费器(§7):done 后 app CRYPTO 入 post_buf_(64KiB 上限,
+  超限 MessageTooLarge+close);pump 解 4 字节握手头:NST(client-only,
+  decode→tls13_resumption_psk→TlsSessionState→on_new_tls_session;decode
+  失败 DecodeError close,psk 分配失败静默跳过)、KeyUpdate/其余 → fatal
+  unexpected_message(RFC 9001 §6,定谳 4)。
+- 证书校验失败映射(§8 无 long 码):cert 族 alert{42,43,44,45,46,48,49} →
+  verify_failed_+Permission;peer_verify_result() 回 alert 值(非零语义保持)。
+- 票据零配置平权:`ticket_service == nullptr` 时进程级惰性单钥
+  TlsTicketService(random_key,10 年 mint 窗,永不析构——对齐 pre-10
+  TlsRuntime::server_context() 共享 CTX 默认票据钥的跨连接恢复形状;
+  08 注入旋转仍是部署路径)。熵失败 = 安全降级(无 NST)。
+
+**§9 去 SSL_SESSION 化**:QuicClientCachedState.session →
+tls::TlsSessionState(持有值);store_session 签名改 move 交接;QuicConnection
+Ops.on_new_tls_session 改 (void*, QuicConnection&, TlsSessionState&&);
+Http3ClientConnection 缓存接线随之更新;tests/QuicClientTest 的
+TestClientCache 去 SSL_SESSIONFree/early_data_capable(→
+`!empty() && max_early_data != 0`)。
+
+**两处 fixture 修正**(引擎 SAN-only 语义对齐,matches_host 恒
+NEVER_CHECK_SUBJECT):tests/QuicTestTlsCertificate.h 与 lite_nginx
+kSelfSignedCertPem 重发为 SAN=DNS:localhost,IP:127.0.0.1(同钥换证,
+CA:TRUE 保持;openssl req -x509 默认已带 BC,勿 -addext 重复)。pre-10
+BoringSSL 走 CN 回退故旧证可过;QUIC 全量测试经此修复 2428 绿。
+
+**验收**:2428/2428 ctest 绿;curl(ngtcp2/nghttp3)对 lite_nginx H3
+(19543→nginx echo 9001)GET/POST/CA 验证通,TLS1.3 x25519
+TLS_AES_128_GCM_SHA256;Retry/0-RTT 矩阵由测试覆盖(绿)。
+snap curl --cacert 须 $HOME(仓库路径读不了)。
+
+**待续**:slice 3(0-RTT/恢复矩阵扩展)、slice 4(链接收窄 + TlsSslFactory/
+TlsRuntime 清退)。待拍板 A/B 未决。

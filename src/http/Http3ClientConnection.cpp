@@ -130,13 +130,14 @@ quic::QuicClientCacheKey Http3ClientConnection::cache_key() const noexcept {
     };
 }
 
-bool Http3ClientConnection::on_new_tls_session(void *owner, quic::QuicConnection &quic, SSL_SESSION *session) noexcept {
+bool Http3ClientConnection::on_new_tls_session(void *owner, quic::QuicConnection &quic,
+                                               tls::TlsSessionState &&session) noexcept {
     auto &self = *static_cast<Http3ClientConnection *>(owner);
     const quic::QuicClientCacheOps &cache = self.client_.options().cache;
     if (cache.store_session == nullptr) {
         return false;
     }
-    return cache.store_session(cache.owner, self.cache_key(), session, quic.peer_transport().params);
+    return cache.store_session(cache.owner, self.cache_key(), std::move(session), quic.peer_transport().params);
 }
 
 void Http3ClientConnection::on_new_token(void *owner, quic::QuicConnection &, const std::uint8_t *token,
@@ -245,7 +246,7 @@ async::Task<Http3ClientConnectResult> Http3ClientConnection::connect() noexcept 
     params.tls.server_name = server_name_;
     params.tls.verify_name = verify_name_;
     params.allow_insecure = allow_insecure_;
-    params.resumption_session = cached.session;
+    params.resumption_session = &cached.session;
     params.token = cached.token;
     params.token_len = cached.token_len;
     auto connected = quic_.connect(params);

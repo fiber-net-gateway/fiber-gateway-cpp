@@ -9,7 +9,6 @@
 #include <vector>
 
 #include <openssl/hmac.h>
-#include <openssl/ssl.h>
 
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
@@ -211,7 +210,8 @@ fiber::async::DetachedTask start_client_attempt(fiber::quic::QuicUdpEndpoint *en
         co_return;
     }
     fiber::quic::QuicConnection connection(*endpoint, *options);
-    auto connected = connection.connect(make_connect_params(*security, "localhost", {}, true));
+    const auto params = make_connect_params(*security, "localhost", {}, true);
+    auto connected = connection.connect(params);
     if (!connected) {
         summary.error = connected.error();
         co_await connection.wait_closed();
@@ -262,7 +262,8 @@ fiber::async::DetachedTask timeout_client_attempt(fiber::quic::QuicUdpEndpoint *
         co_return;
     }
     fiber::quic::QuicConnection connection(*endpoint, *options);
-    auto connected = connection.connect(make_connect_params(*security, "localhost", {}, true));
+    const auto params = make_connect_params(*security, "localhost", {}, true);
+    auto connected = connection.connect(params);
     if (!connected) {
         summary.error = connected.error();
         summary.phase = connection.connect_error(connected.error()).phase;
@@ -311,20 +312,14 @@ struct QuicMtlsCase {
 class QuicClientMtlsTest : public ::testing::TestWithParam<QuicMtlsCase> {};
 
 struct TestClientCache {
-    ~TestClientCache() {
-        if (session != nullptr) {
-            SSL_SESSION_free(session);
-        }
-    }
-
     static bool load(void *owner, const fiber::quic::QuicClientCacheKey &,
                      fiber::quic::QuicClientCachedState &out) noexcept {
         auto &cache = *static_cast<TestClientCache *>(owner);
         ++cache.load_count;
-        if (cache.session == nullptr) {
+        if (cache.session.empty()) {
             return false;
         }
-        out.session = cache.session;
+        out.session = std::move(cache.session);
         out.token = cache.token.empty() ? nullptr : cache.token.data();
         out.token_len = cache.token.size();
         out.remembered_transport = cache.remembered_transport;
@@ -332,13 +327,11 @@ struct TestClientCache {
         return true;
     }
 
-    static bool store_session(void *owner, const fiber::quic::QuicClientCacheKey &, SSL_SESSION *session,
+    static bool store_session(void *owner, const fiber::quic::QuicClientCacheKey &,
+                              fiber::tls::TlsSessionState &&session,
                               const fiber::quic::QuicTransportSettings &remembered) noexcept {
         auto &cache = *static_cast<TestClientCache *>(owner);
-        if (cache.session != nullptr) {
-            SSL_SESSION_free(cache.session);
-        }
-        cache.session = session;
+        cache.session = std::move(session);
         cache.remembered_transport = remembered;
         ++cache.session_store_count;
         return true;
@@ -351,7 +344,7 @@ struct TestClientCache {
         ++cache.token_store_count;
     }
 
-    SSL_SESSION *session = nullptr;
+    fiber::tls::TlsSessionState session{};
     std::vector<std::uint8_t> token{};
     fiber::quic::QuicTransportSettings remembered_transport{};
     std::size_t load_count = 0;
@@ -359,8 +352,9 @@ struct TestClientCache {
     std::size_t token_store_count = 0;
 };
 
-bool cache_store_session(void *owner, fiber::quic::QuicConnection &connection, SSL_SESSION *session) noexcept {
-    return TestClientCache::store_session(owner, {}, session, connection.peer_transport().params);
+bool cache_store_session(void *owner, fiber::quic::QuicConnection &connection,
+                         fiber::tls::TlsSessionState &&session) noexcept {
+    return TestClientCache::store_session(owner, {}, std::move(session), connection.peer_transport().params);
 }
 
 void cache_store_token(void *owner, fiber::quic::QuicConnection &, const std::uint8_t *token,
@@ -430,7 +424,8 @@ fiber::async::DetachedTask receive_unknown_dcid_stateless_reset(
         co_return;
     }
     fiber::quic::QuicConnection connection(*client_endpoint, *options);
-    auto connected = connection.connect(make_connect_params(*security, "localhost"));
+    const auto params = make_connect_params(*security, "localhost");
+    auto connected = connection.connect(params);
     if (!connected) {
         summary.error = connected.error();
     } else if (auto established = co_await connection.wait_established(2s); !established) {
@@ -505,7 +500,8 @@ fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint
             co_return;
         }
         fiber::quic::QuicConnection first(*client_endpoint, *options);
-        auto connected = first.connect(make_connect_params(*security, "localhost"));
+        const auto first_params = make_connect_params(*security, "localhost");
+        auto connected = first.connect(first_params);
         if (!connected) {
             summary.error = connected.error();
         } else if (auto established = co_await first.wait_established(2s); !established) {
@@ -513,7 +509,7 @@ fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint
         } else {
             (void) co_await first.wait_confirmed(2s);
             co_await fiber::async::sleep(20ms);
-            summary.session_cached = cache->session != nullptr;
+            summary.session_cached = !cache->session.empty();
             summary.token_cached = !cache->token.empty();
         }
         co_await close_and_wait(first);
@@ -525,15 +521,14 @@ fiber::async::DetachedTask connect_twice_with_cache(fiber::quic::QuicUdpEndpoint
         if (!TestClientCache::load(cache, {}, cached)) {
             cached = {};
         }
-        summary.cached_session_early_capable =
-                cached.session != nullptr && SSL_SESSION_early_data_capable(cached.session) == 1;
+        summary.cached_session_early_capable = !cached.session.empty() && cached.session.max_early_data != 0;
         auto options = make_options();
         if (!options) {
             summary.error = options.error();
         } else {
             fiber::quic::QuicConnection second(*client_endpoint, *options);
             auto params = make_connect_params(*security, "localhost");
-            params.resumption_session = cached.session;
+            params.resumption_session = &cached.session;
             params.token = cached.token;
             params.token_len = cached.token_len;
             params.enable_early_data = true;
@@ -617,7 +612,8 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
         summary.error = options.error();
     } else {
         fiber::quic::QuicConnection connection(*client_endpoint, *options);
-        auto connected = connection.connect(make_connect_params(*security, server_name, verify_name));
+        const auto params = make_connect_params(*security, server_name, verify_name);
+        auto connected = connection.connect(params);
         if (!connected) {
             fill_connect_error(summary, connection.connect_error(connected.error()));
         } else {

@@ -15,6 +15,10 @@
 struct ssl_credential_st;
 typedef struct ssl_credential_st SSL_CREDENTIAL;
 
+namespace fiber::quic {
+class QuicTlsSession;
+}
+
 namespace fiber::net {
 
 class TlsServerHandshakeConfig;
@@ -47,6 +51,7 @@ private:
     friend class TlsServerHandshakeConfig;
     friend class detail::TlsSslFactory;
     friend class detail::TlsStreamFd;
+    friend class quic::QuicTlsSession;
 
     TlsCredential() noexcept = default;
 

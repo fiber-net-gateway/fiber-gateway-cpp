@@ -1,19 +1,23 @@
 #include <fiber/quic/QuicTlsSession.h>
 
-#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
+#include <span>
+#include <utility>
 
-#include <openssl/ssl.h>
-#include <openssl/tls1.h>
-#include <openssl/x509.h>
-
+#include <fiber/common/Assert.h>
 #include <fiber/net/IpAddress.h>
+#include <fiber/net/TlsCredential.h>
+#include <fiber/net/TlsServerHandshakeConfig.h>
+#include <fiber/net/TrustStore.h>
 #include <fiber/quic/QuicConnection.h>
 #include <fiber/quic/QuicCursor.h>
-#include "net/detail/TlsRuntime.h"
-#include "net/detail/TlsSslFactory.h"
+#include <fiber/quic/QuicFrame.h>
+#include <fiber/tls/TlsTicketService.h>
+#include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include "quic/QuicCrypto.h"
 #include "quic/QuicTransportParamsCodec.h"
 
@@ -21,160 +25,127 @@ namespace fiber::quic {
 
 namespace {
 
-bool store_new_client_session(void *ctx, SSL_SESSION *session) noexcept {
-    auto *connection = static_cast<QuicConnection *>(ctx);
-    return connection != nullptr && session != nullptr && connection->on_new_tls_session(session);
+// Certificate-validity snapshot: wall clock (the engines' now_unix_ms is a
+// real-time input; EventLoop::now() is a steady monotonic source). Also the
+// ticket-age base for session receipts and offers.
+std::int64_t system_now_unix_ms() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
 }
 
-[[nodiscard]] common::IoResult<QuicEncryptionLevel> quic_level_from_ssl(enum ssl_encryption_level_t level) noexcept {
-    switch (level) {
-        case ssl_encryption_initial:
-            return QuicEncryptionLevel::Initial;
-        case ssl_encryption_early_data:
-            return QuicEncryptionLevel::EarlyData;
-        case ssl_encryption_handshake:
-            return QuicEncryptionLevel::Handshake;
-        case ssl_encryption_application:
-            return QuicEncryptionLevel::Application;
-    }
-    return std::unexpected(common::IoErr::Invalid);
-}
+// Post-handshake CRYPTO is a raw handshake-message stream (10 §7). One bound
+// covers the buffered tail and each message: NSTs are the only legal content
+// and real tickets are a few hundred bytes.
+constexpr std::size_t kMaxPostHandshakeBytes = 64 * 1024;
+constexpr std::size_t kTlsHandshakeHeaderSize = 4;
 
-[[nodiscard]] enum ssl_encryption_level_t ssl_level_from_quic(QuicEncryptionLevel level) noexcept {
+[[nodiscard]] tls::TlsQuicLevel tls_level_from_encryption(QuicEncryptionLevel level) noexcept {
     switch (level) {
         case QuicEncryptionLevel::Initial:
-            return ssl_encryption_initial;
+            return tls::TlsQuicLevel::Initial;
         case QuicEncryptionLevel::EarlyData:
-            return ssl_encryption_early_data;
+            return tls::TlsQuicLevel::EarlyData;
         case QuicEncryptionLevel::Handshake:
-            return ssl_encryption_handshake;
+            return tls::TlsQuicLevel::Handshake;
         case QuicEncryptionLevel::Application:
-            return ssl_encryption_application;
+            return tls::TlsQuicLevel::Application;
     }
-    return ssl_encryption_application;
+    return tls::TlsQuicLevel::Application;
 }
 
-[[nodiscard]] common::IoResult<QuicCryptoSuite> crypto_suite_from_cipher(const SSL_CIPHER *cipher) noexcept {
-    if (cipher == nullptr) {
-        return std::unexpected(common::IoErr::Invalid);
+[[nodiscard]] QuicEncryptionLevel encryption_level_from_tls(tls::TlsQuicLevel level) noexcept {
+    switch (level) {
+        case tls::TlsQuicLevel::Initial:
+            return QuicEncryptionLevel::Initial;
+        case tls::TlsQuicLevel::EarlyData:
+            return QuicEncryptionLevel::EarlyData;
+        case tls::TlsQuicLevel::Handshake:
+            return QuicEncryptionLevel::Handshake;
+        case tls::TlsQuicLevel::Application:
+            return QuicEncryptionLevel::Application;
     }
+    return QuicEncryptionLevel::Application;
+}
 
-    switch (SSL_CIPHER_get_protocol_id(cipher)) {
-        case TLS1_3_CK_AES_128_GCM_SHA256 & 0xffffU:
+[[nodiscard]] std::optional<QuicCryptoSuite> quic_suite_from_tls(tls::TlsCipherSuiteId suite) noexcept {
+    switch (suite) {
+        case tls::TlsCipherSuiteId::TlsAes128GcmSha256:
             return QuicCryptoSuite::Aes128GcmSha256;
-        case TLS1_3_CK_AES_256_GCM_SHA384 & 0xffffU:
+        case tls::TlsCipherSuiteId::TlsAes256GcmSha384:
             return QuicCryptoSuite::Aes256GcmSha384;
-        case TLS1_3_CK_CHACHA20_POLY1305_SHA256 & 0xffffU:
+        case tls::TlsCipherSuiteId::TlsChacha20Poly1305Sha256:
             return QuicCryptoSuite::ChaCha20Poly1305Sha256;
         default:
-            return std::unexpected(common::IoErr::NotSupported);
+            // 1.2-only suites can't be negotiated with the engines pinned to
+            // 1.3 in QUIC mode.
+            return std::nullopt;
     }
 }
 
-[[nodiscard]] QuicConnection *connection_from_ssl(SSL *ssl) noexcept {
-    return ssl == nullptr ? nullptr : static_cast<QuicConnection *>(SSL_get_app_data(ssl));
-}
-
-int set_secret(SSL *ssl, enum ssl_encryption_level_t level, const SSL_CIPHER *cipher, const std::uint8_t *secret,
-               std::size_t secret_len, bool write_secret) noexcept {
-    QuicConnection *connection = connection_from_ssl(ssl);
-    if (connection == nullptr || secret == nullptr || secret_len == 0) {
-        return 0;
-    }
-
-    auto quic_level = quic_level_from_ssl(level);
-    if (!quic_level || *quic_level == QuicEncryptionLevel::Initial) {
-        return 0;
-    }
-    auto suite = crypto_suite_from_cipher(cipher);
-    if (!suite) {
-        return 0;
-    }
-
-    auto installed =
-            quic_set_encryption_secret(connection->crypto(), *quic_level, write_secret, *suite, secret, secret_len);
-    if (installed && *quic_level == QuicEncryptionLevel::Application &&
-        connection->role() == QuicConnectionRole::Client && connection->crypto().application_read().ready() &&
-        connection->crypto().application_write().ready()) {
-        connection->crypto().discard_level(QuicEncryptionLevel::EarlyData);
-    }
-    return installed ? 1 : 0;
-}
-
-int set_read_secret(SSL *ssl, enum ssl_encryption_level_t level, const SSL_CIPHER *cipher, const std::uint8_t *secret,
-                    std::size_t secret_len) noexcept {
-    return set_secret(ssl, level, cipher, secret, secret_len, false);
-}
-
-int set_write_secret(SSL *ssl, enum ssl_encryption_level_t level, const SSL_CIPHER *cipher, const std::uint8_t *secret,
-                     std::size_t secret_len) noexcept {
-    return set_secret(ssl, level, cipher, secret, secret_len, true);
-}
-
-int add_handshake_data(SSL *ssl, enum ssl_encryption_level_t level, const std::uint8_t *data,
-                       std::size_t len) noexcept {
-    QuicConnection *connection = connection_from_ssl(ssl);
-    if (connection == nullptr || (data == nullptr && len != 0)) {
-        return 0;
-    }
-
-    if (len == 0) {
-        return 1;
-    }
-
-    auto quic_level = quic_level_from_ssl(level);
-    if (!quic_level) {
-        return 0;
-    }
-
-    QuicPacketNumberSpace &space = connection->packet_number_space(*quic_level);
-    QuicOutputFrame *frame = space.alloc_frame();
-    if (frame == nullptr) {
-        connection->close(QuicErrorCode::InternalError);
-        return 0;
-    }
-
-    frame->type = QuicFrameType::Crypto;
-    frame->u.crypto.offset = space.crypto_sent;
-    auto copied = quic_output_frame_set_owned_data(*frame, data, len);
-    if (!copied) {
-        space.release_frame(*frame);
-        connection->close(QuicErrorCode::InternalError);
-        return 0;
-    }
-
-    space.crypto_sent += len;
-    space.pending_frames.push_back(*frame);
-    return 1;
-}
-
-int flush_flight(SSL *ssl) noexcept { return connection_from_ssl(ssl) == nullptr ? 0 : 1; }
-
-int send_alert(SSL *ssl, enum ssl_encryption_level_t level, std::uint8_t alert) noexcept {
-    (void) level;
-    QuicConnection *connection = connection_from_ssl(ssl);
-    if (connection == nullptr) {
-        return 0;
-    }
-    // Stash the alert; drive_handshake() converts it into a CRYPTO_ERROR close
-    // once SSL_do_handshake returns. Mirrors nginx stashing qc->error in the
-    // alert callback and emitting the close from the main loop, so connection
-    // close state is never mutated re-entrantly from inside the TLS stack.
-    connection->tls().record_alert(alert);
-    return 1;
-}
-
-const SSL_QUIC_METHOD kQuicTlsMethod{
-        .set_read_secret = set_read_secret,
-        .set_write_secret = set_write_secret,
-        .add_handshake_data = add_handshake_data,
-        .flush_flight = flush_flight,
-        .send_alert = send_alert,
+// RFC 8446 §4.6.1 NewSessionTicket body: u32 lifetime + u32 ticket_age_add +
+// opaque nonce<0..255> + opaque ticket<1..65535> + extensions. Only the
+// early_data extension (42, u32) is defined; anything unknown is skipped per
+// §4.1.1 extension tolerance (the receipt path stores no unknown state).
+struct NstDecoded {
+    std::uint32_t lifetime_s = 0;
+    std::uint32_t ticket_age_add = 0;
+    std::span<const std::uint8_t> nonce{};
+    std::span<const std::uint8_t> ticket{};
+    std::uint32_t max_early_data = 0;
 };
+
+[[nodiscard]] bool decode_new_session_ticket(std::span<const std::uint8_t> body, NstDecoded &out) noexcept {
+    if (body.size() < 11) { // 4 + 4 + 1 + 2 + 0 (empty extension block)
+        return false;
+    }
+    std::size_t off = 0;
+    const auto be16 = [&body](std::size_t at) noexcept {
+        return static_cast<std::uint16_t>((static_cast<std::uint16_t>(body[at]) << 8) | body[at + 1]);
+    };
+    const auto be32 = [&body](std::size_t at) noexcept {
+        return (static_cast<std::uint32_t>(body[at]) << 24) | (static_cast<std::uint32_t>(body[at + 1]) << 16) |
+               (static_cast<std::uint32_t>(body[at + 2]) << 8) | static_cast<std::uint32_t>(body[at + 3]);
+    };
+    out.lifetime_s = be32(off);
+    off += 4;
+    out.ticket_age_add = be32(off);
+    off += 4;
+    const std::size_t nonce_len = body[off++];
+    if (off + nonce_len + 2 > body.size()) {
+        return false;
+    }
+    out.nonce = body.subspan(off, nonce_len);
+    off += nonce_len;
+    const std::size_t ticket_len = be16(off);
+    off += 2;
+    if (off + ticket_len + 2 > body.size() || ticket_len == 0) {
+        return false;
+    }
+    out.ticket = body.subspan(off, ticket_len);
+    off += ticket_len;
+    const std::size_t ext_block = be16(off);
+    off += 2;
+    if (off + ext_block != body.size()) {
+        return false;
+    }
+    const std::size_t ext_end = off + ext_block;
+    while (off + 4 <= ext_end) {
+        const std::uint16_t type = be16(off);
+        const std::uint16_t len = be16(off + 2);
+        off += 4;
+        if (off + len > ext_end) {
+            return false;
+        }
+        if (type == 42 && len == 4) { // early_data
+            out.max_early_data = be32(off);
+        }
+        off += len;
+    }
+    return off == ext_end;
+}
 
 struct QuicServerTransportParamsWire {
     std::size_t len = 0;
-    std::size_t zero_rtt_len = 0;
 };
 
 [[nodiscard]] common::IoResult<std::size_t>
@@ -198,40 +169,6 @@ create_client_transport_params(QuicConnection &connection, std::uint8_t *out, st
 
     QuicWriteCursor writer(out, out_cap);
     return quic_create_transport_params(QuicTransportParamOwner::Client, &writer, params);
-}
-
-[[nodiscard]] common::IoResult<void> maybe_apply_peer_transport_params(SSL *ssl) noexcept {
-    QuicConnection *connection = connection_from_ssl(ssl);
-    if (connection == nullptr) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    if (connection->peer_transport_params_received()) {
-        return {};
-    }
-
-    const std::uint8_t *peer_params = nullptr;
-    std::size_t peer_params_len = 0;
-    SSL_get_peer_quic_transport_params(ssl, &peer_params, &peer_params_len);
-    if (peer_params == nullptr || peer_params_len == 0) {
-        return std::unexpected(common::IoErr::WouldBlock);
-    }
-
-    const QuicTransportParamOwner owner = connection->role() == QuicConnectionRole::Client
-                                                  ? QuicTransportParamOwner::Server
-                                                  : QuicTransportParamOwner::Client;
-    QuicTransportParams params{};
-    QuicReadCursor reader(peer_params, peer_params_len);
-    auto parsed = quic_parse_transport_params(owner, reader, params);
-    if (!parsed) {
-        connection->close(QuicErrorCode::TransportParameterError);
-        return std::unexpected(parsed.error());
-    }
-    auto applied = connection->apply_peer_transport_params(params);
-    if (!applied) {
-        connection->close(QuicErrorCode::TransportParameterError);
-        return std::unexpected(applied.error());
-    }
-    return {};
 }
 
 [[nodiscard]] common::IoResult<QuicServerTransportParamsWire>
@@ -264,77 +201,189 @@ create_server_transport_params(QuicConnection &connection, std::uint8_t *out, st
         params.retry_source_connection_id = connection.retry_source_connection_id();
     }
 
-    std::size_t zero_rtt_len = 0;
     QuicWriteCursor writer(out, out_cap);
-    auto len = quic_create_transport_params(QuicTransportParamOwner::Server, &writer, params, &zero_rtt_len);
+    auto len = quic_create_transport_params(QuicTransportParamOwner::Server, &writer, params, nullptr);
     if (!len) {
         return std::unexpected(len.error());
     }
-    return QuicServerTransportParamsWire{.len = *len, .zero_rtt_len = zero_rtt_len};
+    return QuicServerTransportParamsWire{.len = *len};
+}
+
+// Zero-config ticket parity (10 §8): the pre-10 BoringSSL path minted NSTs
+// from the shared TlsRuntime::server_context()'s default ticket keys, so every
+// server connection in the process could open each other's tickets. A param
+// without ticket_service keeps that shape: one process-wide random key, born
+// at first use, minting for the process lifetime (like the system trust
+// store, intentionally never destroyed; 08's injected-rotation contract
+// remains the deployment path). An entropy failure leaves null — minter and
+// lookup stay unwired, the documented safe degradation (no NST, no
+// resumption).
+const tls::TlsTicketService *default_ticket_service() noexcept {
+    const auto build = []() noexcept -> tls::TlsTicketService * {
+        std::array<tls::TlsTicketKeyMaterial, 1> keys{};
+        if (!tls::TlsTicketService::random_key(1, system_now_unix_ms(), keys[0])) {
+            return nullptr;
+        }
+        constexpr std::uint32_t kTenYears = 10u * 365u * 86400u;
+        const tls::TlsTicketKeyPolicy policy{.key_lifetime_s = kTenYears, .key_retention_s = kTenYears};
+        return new (std::nothrow) tls::TlsTicketService(keys, policy);
+    };
+    static tls::TlsTicketService *const held = build();
+    return held != nullptr && held->valid() ? held : nullptr;
 }
 
 } // namespace
 
 QuicTlsSession::~QuicTlsSession() {
-    if (ssl_ != nullptr) {
-        SSL_free(ssl_);
-        ssl_ = nullptr;
-    }
+    // The engines' chains resolve the current loop's node pool — this runs on
+    // the connection's loop, where the connection (and its session member)
+    // die.
+    delete client_;
+    delete server_;
+    client_ = nullptr;
+    server_ = nullptr;
 }
+
+// =====================================================================
+// callback trampolines
+// =====================================================================
+
+bool QuicTlsSession::quic_set_secret_thunk(void *ctx, tls::TlsQuicLevel level, bool write_secret,
+                                           tls::TlsCipherSuiteId suite, std::span<const std::uint8_t> secret) noexcept {
+    return static_cast<QuicTlsSession *>(ctx)->on_quic_set_secret(level, write_secret, suite, secret);
+}
+
+bool QuicTlsSession::quic_add_data_thunk(void *ctx, tls::TlsQuicLevel level,
+                                         std::span<const std::uint8_t> data) noexcept {
+    return static_cast<QuicTlsSession *>(ctx)->on_quic_add_data(level, data);
+}
+
+void QuicTlsSession::quic_peer_params_thunk(void *ctx, std::span<const std::uint8_t> params) noexcept {
+    static_cast<QuicTlsSession *>(ctx)->on_quic_peer_params(params);
+}
+
+void QuicTlsSession::quic_send_alert_thunk(void *ctx, tls::TlsAlertDesc alert) noexcept {
+    static_cast<QuicTlsSession *>(ctx)->on_quic_alert(alert);
+}
+
+// =====================================================================
+// init — config staging + engine construction (10 §8)
+// =====================================================================
 
 common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerParam &options,
                                                    QuicConnection &connection) noexcept {
-    if (ssl_ != nullptr) {
+    if (initialized()) {
         return std::unexpected(common::IoErr::Already);
     }
-
-    // The handshake borrows server_param_ through server_handshake_state_;
-    // both are session members, so the borrow holds across every
-    // drive_handshake() call.
-    server_param_ = options;
-    server_handshake_state_ = net::detail::TlsServerHandshakeState{.param = &server_param_};
-    auto created_ssl = net::detail::TlsSslFactory::create_server(server_param_);
-    if (!created_ssl) {
-        return std::unexpected(created_ssl.error());
-    }
-    SSL *ssl = *created_ssl;
-    net::detail::TlsRuntime::set_server_handshake_state(ssl, &server_handshake_state_);
-
-    if (SSL_set_quic_method(ssl, &kQuicTlsMethod) != 1) {
-        SSL_free(ssl);
+    if (!options.enabled()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    SSL_set_app_data(ssl, &connection);
-    std::array<std::uint8_t, 512> transport_params{};
+    // ALPN is mandatory in QUIC (RFC 9001 §8.1) — the engine would answer
+    // no_application_protocol to every client; fail the configuration instead.
+    if (options.alpn.empty()) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (options.client_certificate_mode != net::TlsClientCertificateMode::None && options.trust_store == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+
+    connection_ = &connection;
     auto transport_params_wire =
-            create_server_transport_params(connection, transport_params.data(), transport_params.size());
+            create_server_transport_params(connection, local_transport_params_.data(), local_transport_params_.size());
     if (!transport_params_wire) {
-        SSL_free(ssl);
+        connection_ = nullptr;
         return std::unexpected(transport_params_wire.error());
     }
-    if (SSL_set_quic_transport_params(ssl, transport_params.data(), transport_params_wire->len) != 1) {
-        SSL_free(ssl);
+    local_transport_params_len_ = transport_params_wire->len;
+
+    server_cfg_ = tls::TlsServerConfig{};
+    if (options.trust_store != nullptr) {
+        server_cfg_.client_trust = &options.trust_store->tls_store();
+    }
+    server_cfg_.require_client_cert = options.client_certificate_mode == net::TlsClientCertificateMode::Required;
+    server_cfg_.alpn = options.alpn;
+    server_cfg_.min_version = tls::kTlsVersionTls13; // QUIC is TLS 1.3 only (10 §3.4)
+    server_cfg_.max_version = tls::kTlsVersionTls13;
+    server_cfg_.enable_early_data = options.enable_early_data;
+    server_cfg_.now_unix_ms = system_now_unix_ms();
+    server_cfg_.quic = &quic_cb_;
+    server_cfg_.quic_transport_params = {local_transport_params_.data(), local_transport_params_len_};
+
+    quic_cb_ = tls::TlsQuicCallbacks{.set_secret = &QuicTlsSession::quic_set_secret_thunk,
+                                     .add_handshake_data = &QuicTlsSession::quic_add_data_thunk,
+                                     .on_peer_transport_params = &QuicTlsSession::quic_peer_params_thunk,
+                                     .send_alert = &QuicTlsSession::quic_send_alert_thunk,
+                                     .ctx = this};
+
+    server_param_ = &options;
+    selector_.select = [](void *ctx, const tls::TlsClientHello &client_hello) noexcept -> const tls::TlsServerConfig * {
+        return static_cast<QuicTlsSession *>(ctx)->select_server_config(client_hello);
+    };
+    selector_.ctx = this;
+    // Session tickets (09 §6 / 10 §8): the service's adapters are staged here
+    // so the engine borrows them for the handshake. Unconfigured falls back to
+    // the process-wide default service (pre-10 parity); only an entropy
+    // failure leaves null — no NST, no resumption, which the engine treats
+    // natively.
+    const tls::TlsTicketService *tickets =
+            options.ticket_service != nullptr ? options.ticket_service : default_ticket_service();
+    if (tickets != nullptr) {
+        minter_ = tickets->minter();
+        lookup_ = tickets->lookup();
+    }
+    // Credentials arrive per ClientHello through the selector, so the
+    // template config passes only the selector-mode invariant checks.
+    server_ = new (std::nothrow) tls::TlsServerHandshakeEngine(server_cfg_, tickets != nullptr ? &lookup_ : nullptr,
+                                                               tickets != nullptr ? &minter_ : nullptr, &selector_);
+    if (server_ == nullptr) {
+        connection_ = nullptr;
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (server_->failed()) { // construction-terminal (config invariant)
+        record_alert(static_cast<std::uint8_t>(server_->failure_alert()));
+        delete server_;
+        server_ = nullptr;
+        connection_ = nullptr;
         return std::unexpected(common::IoErr::Invalid);
     }
-    SSL_set_early_data_enabled(ssl, connection.early_data_enabled() ? 1 : 0);
-    if (connection.early_data_enabled()) {
-        if (transport_params_wire->zero_rtt_len == 0) {
-            SSL_free(ssl);
-            return std::unexpected(common::IoErr::Invalid);
-        }
-        if (SSL_set_quic_early_data_context(ssl, transport_params.data(), transport_params_wire->zero_rtt_len) != 1) {
-            SSL_free(ssl);
-            return std::unexpected(common::IoErr::Invalid);
-        }
-    }
-
-    ssl_ = ssl;
     return {};
 }
 
+const tls::TlsServerConfig *QuicTlsSession::select_server_config(const tls::TlsClientHello &client_hello) noexcept {
+    // The 09 §4.1 shim (TlsStreamFd::select_server_config's QUIC twin): the
+    // net configure callback stages credentials into the template config
+    // under the documented param borrow; its error latches for
+    // drive_handshake to report after the engine's handshake_failure.
+    callback_error_ = common::IoErr::None;
+    server_cfg_.chain = nullptr;
+    server_cfg_.key = nullptr;
+    std::size_t credential_count = 0;
+    net::TlsServerHandshakeConfig config(server_cfg_, credential_count);
+    // The decoded alpn_list is the ProtocolNameList BODY (1-byte length
+    // entries); TlsAlpnProtocolsView wants the wire form with the 2-byte
+    // list-length prefix, which sits immediately before the body in the
+    // engine's retained ClientHello copy.
+    net::TlsClientHelloView view{
+            .server_name = client_hello.has_server_name ? client_hello.server_name : std::string_view{},
+            .offered_alpn = client_hello.has_alpn && !client_hello.alpn_list.empty()
+                                    ? net::TlsAlpnProtocolsView(client_hello.alpn_list.data() - 2,
+                                                                client_hello.alpn_list.size() + 2)
+                                    : net::TlsAlpnProtocolsView{},
+    };
+    common::IoErr error = server_param_->configure_callback(server_param_->configure_ctx, config, view);
+    if (error == common::IoErr::None && credential_count == 0) {
+        error = common::IoErr::Invalid;
+    }
+    if (error != common::IoErr::None) {
+        callback_error_ = error;
+        return nullptr; // the engine answers handshake_failure
+    }
+    return &server_cfg_;
+}
+
 common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientParam &param, QuicConnection &connection,
-                                                   bool allow_insecure, SSL_SESSION *session) noexcept {
-    if (ssl_ != nullptr || param.alpn.empty()) {
+                                                   bool allow_insecure, const tls::TlsSessionState *session) noexcept {
+    if (initialized() || param.alpn.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
     const bool verify_peer = param.security.verify_peer;
@@ -345,153 +394,463 @@ common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientParam &pa
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    new_session_ops_ = {.ctx = &connection, .store = &store_new_client_session};
-    auto created_ssl =
-            net::detail::TlsSslFactory::create_client(param, connection.early_data_enabled(), &new_session_ops_);
-    if (!created_ssl) {
-        return std::unexpected(created_ssl.error());
-    }
-    SSL *ssl = *created_ssl;
-    if (SSL_set_quic_method(ssl, &kQuicTlsMethod) != 1) {
-        SSL_free(ssl);
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    SSL_set_app_data(ssl, &connection);
-    if (session != nullptr && SSL_set_session(ssl, session) != 1) {
-        SSL_free(ssl);
-        return std::unexpected(common::IoErr::Invalid);
-    }
-
-    std::array<std::uint8_t, 512> transport_params{};
+    connection_ = &connection;
     auto transport_params_len =
-            create_client_transport_params(connection, transport_params.data(), transport_params.size());
-    if (!transport_params_len ||
-        SSL_set_quic_transport_params(ssl, transport_params.data(), *transport_params_len) != 1) {
-        SSL_free(ssl);
-        return std::unexpected(transport_params_len ? common::IoErr::Invalid : transport_params_len.error());
+            create_client_transport_params(connection, local_transport_params_.data(), local_transport_params_.size());
+    if (!transport_params_len) {
+        connection_ = nullptr;
+        return std::unexpected(transport_params_len.error());
+    }
+    local_transport_params_len_ = *transport_params_len;
+
+    client_cfg_ = tls::TlsClientConfig{};
+    const bool server_name_is_ip = !param.server_name.empty() && [&] {
+        net::IpAddress parsed{};
+        return net::IpAddress::parse(param.server_name, parsed);
+    }();
+    if (!param.server_name.empty() && !server_name_is_ip) {
+        client_cfg_.sni_host = param.server_name;
+    }
+    if (verify_peer) {
+        // A null trust store means the process-wide system roots.
+        const net::TrustStore *trust_store = param.security.trust_store;
+        if (trust_store == nullptr) {
+            auto system_store = net::TrustStore::system_default();
+            if (!system_store) {
+                connection_ = nullptr;
+                return std::unexpected(system_store.error());
+            }
+            trust_store = *system_store;
+        }
+        client_cfg_.trust = &trust_store->tls_store();
+        const std::string_view verify_name = param.verify_name.empty() ? param.server_name : param.verify_name;
+        net::IpAddress verify_ip{};
+        if (!verify_name.empty() && net::IpAddress::parse(verify_name, verify_ip)) {
+            std::memcpy(ip_bytes_.data(), verify_ip.data(), verify_ip.byte_size());
+            client_cfg_.verify_ip = {ip_bytes_.data(), verify_ip.byte_size()};
+        } else if (!verify_name.empty()) {
+            client_cfg_.check_host = verify_name;
+        } else {
+            connection_ = nullptr;
+            return std::unexpected(common::IoErr::Invalid);
+        }
+    } else {
+        client_cfg_.verify_peer = false;
+    }
+    if (param.security.credential != nullptr) {
+        client_cfg_.client_chain = &param.security.credential->tls_chain();
+        client_cfg_.client_key = &param.security.credential->tls_key();
+    }
+    client_cfg_.alpn = param.alpn;
+    client_cfg_.min_version = tls::kTlsVersionTls13; // QUIC is TLS 1.3 only (10 §3.4)
+    client_cfg_.max_version = tls::kTlsVersionTls13;
+    client_cfg_.now_unix_ms = system_now_unix_ms();
+    client_cfg_.quic = &quic_cb_;
+    client_cfg_.quic_transport_params = {local_transport_params_.data(), local_transport_params_len_};
+
+    quic_cb_ = tls::TlsQuicCallbacks{.set_secret = &QuicTlsSession::quic_set_secret_thunk,
+                                     .add_handshake_data = &QuicTlsSession::quic_add_data_thunk,
+                                     .on_peer_transport_params = &QuicTlsSession::quic_peer_params_thunk,
+                                     .send_alert = &QuicTlsSession::quic_send_alert_thunk,
+                                     .ctx = this};
+
+    // Resumption staging (10 §6.2): the borrowed receipt is copied into the
+    // session (identity vector + TlsSecret are owning), and the offer spans
+    // point at that copy — the param's session only lives until connect()
+    // returns, the handshake continues long after.
+    if (session != nullptr && !session->empty()) {
+        session_state_.identity = session->identity;
+        session_state_.psk = tls::TlsSecret::from_bytes(session->psk.bytes());
+        session_state_.suite = session->suite;
+        session_state_.ticket_age_add = session->ticket_age_add;
+        session_state_.ticket_lifetime_s = session->ticket_lifetime_s;
+        session_state_.max_early_data = session->max_early_data;
+        session_state_.alpn = session->alpn;
+        session_state_.alpn_len = session->alpn_len;
+        session_state_.issued_ms = session->issued_ms;
+        offer_.identity = session_state_.identity;
+        offer_.obfuscated_ticket_age = session_state_.obfuscated_ticket_age(client_cfg_.now_unix_ms);
+        offer_.suite = session_state_.suite;
+        offer_.psk = session_state_.psk.bytes();
+        offer_.max_early_data = session_state_.max_early_data;
     }
 
-    ssl_ = ssl;
     client_mode_ = true;
     verify_peer_ = verify_peer;
+    // Construction emits the ClientHello through the callbacks (and, with an
+    // offer, exports the early write secret for 0-RTT packets) — the Initial
+    // keys and packet spaces must already exist, which connect() guarantees.
+    client_ = new (std::nothrow) tls::TlsClientHandshakeEngine(client_cfg_, session_state_.empty() ? nullptr : &offer_);
+    if (client_ == nullptr) {
+        connection_ = nullptr;
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    if (client_->failed()) { // construction-terminal (entropy / allocation)
+        record_alert(static_cast<std::uint8_t>(client_->failure_alert()));
+        delete client_;
+        client_ = nullptr;
+        connection_ = nullptr;
+        return std::unexpected(common::IoErr::Invalid);
+    }
     return {};
 }
 
+// =====================================================================
+// callbacks → QUIC layer
+// =====================================================================
+
+bool QuicTlsSession::on_quic_set_secret(tls::TlsQuicLevel level, bool write_secret, tls::TlsCipherSuiteId suite,
+                                        std::span<const std::uint8_t> secret) noexcept {
+    if (connection_ == nullptr || secret.empty() || level == tls::TlsQuicLevel::Initial) {
+        return false;
+    }
+    const auto quic_suite = quic_suite_from_tls(suite);
+    if (!quic_suite) {
+        return false;
+    }
+    negotiated_suite_ = suite; // the hs/app exports carry the negotiated suite
+    const QuicEncryptionLevel quic_level = encryption_level_from_tls(level);
+    auto installed = quic_set_encryption_secret(connection_->crypto(), quic_level, write_secret, *quic_suite,
+                                                secret.data(), secret.size());
+    if (installed && quic_level == QuicEncryptionLevel::Application &&
+        connection_->role() == QuicConnectionRole::Client && connection_->crypto().application_read().ready() &&
+        connection_->crypto().application_write().ready()) {
+        connection_->crypto().discard_level(QuicEncryptionLevel::EarlyData);
+    }
+    return installed.has_value();
+}
+
+bool QuicTlsSession::on_quic_add_data(tls::TlsQuicLevel level, std::span<const std::uint8_t> data) noexcept {
+    if (connection_ == nullptr || (data.data() == nullptr && !data.empty())) {
+        return false;
+    }
+    if (data.empty()) {
+        return true;
+    }
+    const QuicEncryptionLevel quic_level = encryption_level_from_tls(level);
+    QuicPacketNumberSpace &space = connection_->packet_number_space(quic_level);
+    QuicOutputFrame *frame = space.alloc_frame();
+    if (frame == nullptr) {
+        connection_->close(QuicErrorCode::InternalError);
+        return false;
+    }
+    frame->type = QuicFrameType::Crypto;
+    frame->u.crypto.offset = space.crypto_sent;
+    auto copied = quic_output_frame_set_owned_data(*frame, data.data(), data.size());
+    if (!copied) {
+        space.release_frame(*frame);
+        connection_->close(QuicErrorCode::InternalError);
+        return false;
+    }
+    space.crypto_sent += data.size();
+    space.pending_frames.push_back(*frame);
+    return true;
+}
+
+void QuicTlsSession::on_quic_peer_params(std::span<const std::uint8_t> params) noexcept {
+    if (params.size() > peer_transport_params_.size()) {
+        // Oversized (or absent-but-hostile) parameters fail the handshake's
+        // completeness check as TransportParameterError rather than here —
+        // this callback cannot close the connection re-entrantly.
+        peer_transport_params_overflow_ = true;
+        return;
+    }
+    std::memcpy(peer_transport_params_.data(), params.data(), params.size());
+    peer_transport_params_len_ = params.size();
+}
+
+void QuicTlsSession::on_quic_alert(tls::TlsAlertDesc alert) noexcept { record_alert(static_cast<std::uint8_t>(alert)); }
+
+// =====================================================================
+// handshake drive
+// =====================================================================
+
 common::IoResult<void> QuicTlsSession::provide_crypto_data(QuicEncryptionLevel level, const std::uint8_t *data,
                                                            std::size_t len) noexcept {
-    if (ssl_ == nullptr || (data == nullptr && len != 0)) {
+    if (!initialized() || (data == nullptr && len != 0)) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (SSL_provide_quic_data(ssl_, ssl_level_from_quic(level), data, len) != 1) {
-        return std::unexpected(common::IoErr::Invalid);
+    const tls::TlsQuicLevel tls_level = tls_level_from_encryption(level);
+    const bool done = client_mode_ ? client().done() : server().done();
+    if (done) {
+        // Post-handshake tail: the engine is terminal, app-level CRYPTO
+        // belongs to the consumer (10 §7). The gate always runs
+        // drive_handshake between provides, so the done-transition (which
+        // appends the engine's own leftover first) has already run.
+        if (len != 0) {
+            if (post_buf_.size() + len > kMaxPostHandshakeBytes) {
+                record_alert(static_cast<std::uint8_t>(tls::TlsAlertDesc::DecodeError));
+                if (auto alert = take_pending_alert()) {
+                    connection_->close_crypto_error(*alert);
+                }
+                return std::unexpected(common::IoErr::MessageTooLarge);
+            }
+            post_buf_.insert(post_buf_.end(), data, data + len);
+        }
+        return {};
+    }
+    if (client_mode_) {
+        auto fed = client().feed_quic(tls_level, {data, len});
+        if (!fed) {
+            return std::unexpected(fed.error());
+        }
+    } else {
+        auto fed = server().feed_quic(tls_level, {data, len});
+        if (!fed) {
+            return std::unexpected(fed.error());
+        }
     }
     return {};
 }
 
 common::IoResult<void> QuicTlsSession::drive_handshake() noexcept {
-    if (ssl_ == nullptr) {
+    if (!initialized()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-
-    if (SSL_is_init_finished(ssl_) == 1) {
+    const bool failed = client_mode_ ? client().failed() : server().failed();
+    if (failed) {
+        return fail_terminal();
+    }
+    const bool done = client_mode_ ? client().done() : server().done();
+    if (done) {
+        if (!result_taken_) {
+            auto finished = finish_handshake();
+            if (!finished) {
+                return finished;
+            }
+        }
         return process_post_handshake();
     }
-
-    const int rc = SSL_do_handshake(ssl_);
-    auto transport_params = maybe_apply_peer_transport_params(ssl_);
-    if (!transport_params && transport_params.error() != common::IoErr::WouldBlock) {
-        return std::unexpected(transport_params.error());
+    auto applied = apply_peer_transport_params();
+    if (!applied && applied.error() != common::IoErr::WouldBlock) {
+        return std::unexpected(applied.error());
     }
-    if (rc == 1) {
-        if (client_mode_ && SSL_in_early_data(ssl_) == 1 && SSL_is_init_finished(ssl_) != 1) {
-            return {};
-        }
-        QuicConnection *connection = connection_from_ssl(ssl_);
-        if (!transport_params || connection == nullptr || !connection->peer_transport_params_received()) {
-            if (connection != nullptr) {
-                connection->close(QuicErrorCode::TransportParameterError);
-            }
-            return std::unexpected(common::IoErr::Invalid);
-        }
-        if (client_mode_) {
-            if (verify_peer_ && SSL_get_verify_result(ssl_) != X509_V_OK) {
-                return std::unexpected(common::IoErr::Permission);
-            }
-            const std::string_view selected = selected_alpn();
-            const unsigned char *selected_data = nullptr;
-            unsigned int selected_len = 0;
-            SSL_get0_alpn_selected(ssl_, &selected_data, &selected_len);
-            const bool supported = selected_data != nullptr && selected_len != 0;
-            if (!supported || selected.empty()) {
-                return std::unexpected(common::IoErr::NotSupported);
-            }
-            if (connection->early_data_attempted() && SSL_early_data_accepted(ssl_) == 1) {
-                auto accepted = connection->on_early_data_accepted();
-                if (!accepted) {
-                    connection->close(QuicErrorCode::TransportParameterError);
-                    return std::unexpected(accepted.error());
-                }
-            }
-        }
-        return {};
-    }
-
-    const int err = SSL_get_error(ssl_, rc);
-    if (err == SSL_ERROR_EARLY_DATA_REJECTED && client_mode_) {
-        QuicConnection *connection = connection_from_ssl(ssl_);
-        SSL_reset_early_data_reject(ssl_);
-        if (connection != nullptr) {
-            connection->on_early_data_rejected();
-        }
-        return drive_handshake();
-    }
-    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-        return std::unexpected(common::IoErr::WouldBlock);
-    }
-    if (!client_mode_ && server_handshake_state_.callback_error != common::IoErr::None) {
-        return std::unexpected(server_handshake_state_.callback_error);
-    }
-
-    // A TLS alert was raised during the handshake (captured by the send_alert
-    // callback). RFC 9000 §20.1: communicate it to the peer as a
-    // CONNECTION_CLOSE carrying CRYPTO_ERROR = 0x0100 | alert, instead of
-    // collapsing every handshake failure to a generic error. The general
-    // 0x0100 | alert mapping already encodes the special alerts nginx
-    // special-cases (no_application_protocol=120, missing_extension=109).
-    if (auto alert = take_pending_alert()) {
-        if (QuicConnection *connection = connection_from_ssl(ssl_)) {
-            connection->close_crypto_error(*alert);
-        }
-    }
-    return std::unexpected(common::IoErr::Invalid);
+    return std::unexpected(common::IoErr::WouldBlock);
 }
 
-common::IoResult<void> QuicTlsSession::process_post_handshake() noexcept {
-    if (ssl_ == nullptr || SSL_is_init_finished(ssl_) != 1) {
+common::IoResult<void> QuicTlsSession::finish_handshake() noexcept {
+    // The single handoff point (10 §8): terminal result, engine tail, peer
+    // transport parameters, then the client's early-data verdict — all before
+    // the caller marks the connection Established.
+    result_taken_ = true;
+    tls::TlsQuicHandshakeResult result = client_mode_ ? client().take_quic_result() : server().take_quic_result();
+    resumption_master_ = std::move(result.resumption_master);
+    alpn_ = result.alpn;
+    alpn_len_ = result.alpn_len;
+    session_resumed_ = result.session_resumed;
+    early_data_accepted_ = result.early_data_accepted;
+    take_engine_leftover();
+
+    auto applied = apply_peer_transport_params();
+    if (!applied && applied.error() != common::IoErr::WouldBlock) {
+        return std::unexpected(applied.error());
+    }
+    if (connection_ == nullptr || !connection_->peer_transport_params_received()) {
+        // RFC 9001 §8.2: the handshake cannot complete without the peer's
+        // transport parameters.
+        if (connection_ != nullptr) {
+            connection_->close(QuicErrorCode::TransportParameterError);
+        }
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (SSL_process_quic_post_handshake(ssl_) != 1) {
-        return std::unexpected(common::IoErr::Invalid);
+    if (client_mode_ && connection_->early_data_attempted()) {
+        if (early_data_accepted_) {
+            auto accepted = connection_->on_early_data_accepted();
+            if (!accepted) {
+                connection_->close(QuicErrorCode::TransportParameterError);
+                return std::unexpected(accepted.error());
+            }
+        } else {
+            // 0-RTT was refused (PSK rejected, or accepted without early
+            // data). The engine already continued down the 1-RTT path (10
+            // 定谳 5: no rollback, no re-drive); the QUIC layer just drops
+            // the early state before anything 1-RTT observes it.
+            connection_->on_early_data_rejected();
+        }
     }
     return {};
 }
 
-bool QuicTlsSession::handshake_done() const noexcept { return ssl_ != nullptr && SSL_is_init_finished(ssl_) == 1; }
+common::IoResult<void> QuicTlsSession::fail_terminal() noexcept {
+    const tls::TlsAlertDesc alert = client_mode_ && client_ != nullptr ? client().failure_alert()
+                                    : server_ != nullptr               ? server().failure_alert()
+                                                                       : tls::TlsAlertDesc::InternalError;
+    record_alert(static_cast<std::uint8_t>(alert));
+    common::IoErr error = common::IoErr::Invalid;
+    switch (alert) { // certificate family = verification failure (10 §8: no X509 long codes)
+        case tls::TlsAlertDesc::BadCertificate:
+        case tls::TlsAlertDesc::UnsupportedCertificate:
+        case tls::TlsAlertDesc::CertificateRevoked:
+        case tls::TlsAlertDesc::CertificateExpired:
+        case tls::TlsAlertDesc::CertificateUnknown:
+        case tls::TlsAlertDesc::UnknownCa:
+        case tls::TlsAlertDesc::AccessDenied:
+            verify_failed_ = true;
+            error = common::IoErr::Permission;
+            break;
+        default:
+            break;
+    }
+    // The server's configure callback latches its own error — report that in
+    // place of the generic failure, without a crypto close (the callback
+    // already decided how the connection dies).
+    if (!client_mode_ && callback_error_ != common::IoErr::None) {
+        return std::unexpected(callback_error_);
+    }
+    // RFC 9000 §20.1: communicate the alert as a CONNECTION_CLOSE carrying
+    // CRYPTO_ERROR = 0x0100 | alert (the mapping already specializes
+    // no_application_protocol=120 and missing_extension=109).
+    if (auto pending = take_pending_alert(); pending.has_value() && connection_ != nullptr) {
+        connection_->close_crypto_error(*pending);
+    }
+    return std::unexpected(error);
+}
 
-bool QuicTlsSession::session_reused() const noexcept { return ssl_ != nullptr && SSL_session_reused(ssl_) == 1; }
-
-std::string_view QuicTlsSession::selected_alpn() const noexcept {
-    if (ssl_ == nullptr) {
+common::IoResult<void> QuicTlsSession::apply_peer_transport_params() noexcept {
+    if (connection_ == nullptr) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (connection_->peer_transport_params_received()) {
         return {};
     }
-    const unsigned char *selected = nullptr;
-    unsigned int selected_len = 0;
-    SSL_get0_alpn_selected(ssl_, &selected, &selected_len);
-    return {reinterpret_cast<const char *>(selected), selected_len};
+    if (peer_transport_params_overflow_ || peer_transport_params_len_ == 0) {
+        if (peer_transport_params_overflow_) {
+            connection_->close(QuicErrorCode::TransportParameterError);
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        return std::unexpected(common::IoErr::WouldBlock);
+    }
+    const QuicTransportParamOwner owner = connection_->role() == QuicConnectionRole::Client
+                                                  ? QuicTransportParamOwner::Server
+                                                  : QuicTransportParamOwner::Client;
+    QuicTransportParams params{};
+    QuicReadCursor reader(peer_transport_params_.data(), peer_transport_params_len_);
+    auto parsed = quic_parse_transport_params(owner, reader, params);
+    if (!parsed) {
+        connection_->close(QuicErrorCode::TransportParameterError);
+        return std::unexpected(parsed.error());
+    }
+    auto applied = connection_->apply_peer_transport_params(params);
+    if (!applied) {
+        connection_->close(QuicErrorCode::TransportParameterError);
+        return std::unexpected(applied.error());
+    }
+    return {};
+}
+
+void QuicTlsSession::take_engine_leftover() noexcept {
+    mem::IoBufChain leftover = client_mode_ ? client().take_inbound_leftover() : server().take_inbound_leftover();
+    while (mem::IoBuf *node = leftover.first_readable()) {
+        const std::span<const std::uint8_t> bytes{node->readable_data(), node->readable()};
+        if (post_buf_.size() + bytes.size() <= kMaxPostHandshakeBytes) {
+            post_buf_.insert(post_buf_.end(), bytes.begin(), bytes.end());
+        }
+        leftover.consume(bytes.size());
+    }
+}
+
+// =====================================================================
+// post-handshake consumer (10 §7)
+// =====================================================================
+
+common::IoResult<void> QuicTlsSession::process_post_handshake() noexcept {
+    if (!result_taken_) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return pump_post_handshake();
+}
+
+common::IoResult<void> QuicTlsSession::pump_post_handshake() noexcept {
+    const auto fatal = [this](std::uint8_t alert) noexcept {
+        record_alert(alert);
+        if (auto pending = take_pending_alert(); pending.has_value() && connection_ != nullptr) {
+            connection_->close_crypto_error(*pending);
+        }
+        return std::unexpected(common::IoErr::Invalid);
+    };
+    std::size_t off = 0;
+    while (post_buf_.size() - off >= kTlsHandshakeHeaderSize) {
+        const std::uint8_t type = post_buf_[off];
+        const std::size_t body_len = (static_cast<std::size_t>(post_buf_[off + 1]) << 16) |
+                                     (static_cast<std::size_t>(post_buf_[off + 2]) << 8) |
+                                     static_cast<std::size_t>(post_buf_[off + 3]);
+        if (body_len > kMaxPostHandshakeBytes) {
+            return fatal(static_cast<std::uint8_t>(tls::TlsAlertDesc::DecodeError));
+        }
+        if (post_buf_.size() - off - kTlsHandshakeHeaderSize < body_len) {
+            break; // partial message — wait for the rest
+        }
+        const std::span<const std::uint8_t> body{post_buf_.data() + off + kTlsHandshakeHeaderSize, body_len};
+        switch (static_cast<tls::TlsHandshakeType>(type)) {
+            case tls::TlsHandshakeType::NewSessionTicket:
+                if (!client_mode_) {
+                    return fatal(static_cast<std::uint8_t>(tls::TlsAlertDesc::UnexpectedMessage));
+                }
+                handle_new_session_ticket(body);
+                break;
+            case tls::TlsHandshakeType::KeyUpdate:
+                // RFC 9001 §6: key update is packet-layer only (the key_phase
+                // bit); the TLS message is prohibited on QUIC connections —
+                // fatal, exactly like BoringSSL's dispatcher (10 定谳 4).
+                return fatal(static_cast<std::uint8_t>(tls::TlsAlertDesc::UnexpectedMessage));
+            default:
+                return fatal(static_cast<std::uint8_t>(tls::TlsAlertDesc::UnexpectedMessage));
+        }
+        off += kTlsHandshakeHeaderSize + body_len;
+    }
+    if (off != 0) {
+        post_buf_.erase(post_buf_.begin(), post_buf_.begin() + static_cast<std::ptrdiff_t>(off));
+    }
+    return {};
+}
+
+void QuicTlsSession::handle_new_session_ticket(std::span<const std::uint8_t> body) noexcept {
+    NstDecoded nst{};
+    if (!decode_new_session_ticket(body, nst)) {
+        record_alert(static_cast<std::uint8_t>(tls::TlsAlertDesc::DecodeError));
+        if (auto pending = take_pending_alert(); pending.has_value() && connection_ != nullptr) {
+            connection_->close_crypto_error(*pending);
+        }
+        return;
+    }
+    // The receipt (10 §6.2): PSK = resumption_master + ticket_nonce
+    // (tls13_resumption_psk), everything else straight off the wire plus the
+    // connection's own handshake facts.
+    auto psk = tls13_resumption_psk(resumption_master_, nst.nonce);
+    if (!psk) {
+        return; // allocation failure: no receipt this ticket, connection unaffected
+    }
+    tls::TlsSessionState state{};
+    state.identity.assign(nst.ticket.begin(), nst.ticket.end());
+    state.psk = std::move(psk).value();
+    state.suite = negotiated_suite_;
+    state.ticket_age_add = nst.ticket_age_add;
+    state.ticket_lifetime_s = nst.lifetime_s;
+    state.max_early_data = nst.max_early_data;
+    state.alpn = alpn_;
+    state.alpn_len = alpn_len_;
+    state.issued_ms = system_now_unix_ms();
+    (void) connection_->on_new_tls_session(std::move(state)); // store-and-return contract
+}
+
+// =====================================================================
+// accessors
+// =====================================================================
+
+bool QuicTlsSession::initialized() const noexcept { return client_ != nullptr || server_ != nullptr; }
+
+bool QuicTlsSession::handshake_done() const noexcept { return result_taken_; }
+
+bool QuicTlsSession::session_reused() const noexcept { return result_taken_ && session_resumed_; }
+
+std::string_view QuicTlsSession::selected_alpn() const noexcept {
+    return {reinterpret_cast<const char *>(alpn_.data()), alpn_len_};
 }
 
 long QuicTlsSession::peer_verify_result() const noexcept {
-    return ssl_ == nullptr || !verify_peer_ ? 0 : SSL_get_verify_result(ssl_);
+    // No X509 long codes survive the engine swap (10 §8) — a nonzero value
+    // still marks certificate verification as the failure reason.
+    return verify_failed_ && last_alert_.has_value() ? static_cast<long>(*last_alert_) : 0;
 }
 
 void QuicTlsSession::record_alert(std::uint8_t alert) noexcept {
@@ -503,6 +862,26 @@ std::optional<std::uint8_t> QuicTlsSession::take_pending_alert() noexcept {
     std::optional<std::uint8_t> alert = pending_alert_;
     pending_alert_.reset();
     return alert;
+}
+
+tls::TlsClientHandshakeEngine &QuicTlsSession::client() noexcept {
+    FIBER_ASSERT(client_ != nullptr);
+    return *client_;
+}
+
+tls::TlsServerHandshakeEngine &QuicTlsSession::server() noexcept {
+    FIBER_ASSERT(server_ != nullptr);
+    return *server_;
+}
+
+const tls::TlsClientHandshakeEngine &QuicTlsSession::client() const noexcept {
+    FIBER_ASSERT(client_ != nullptr);
+    return *client_;
+}
+
+const tls::TlsServerHandshakeEngine &QuicTlsSession::server() const noexcept {
+    FIBER_ASSERT(server_ != nullptr);
+    return *server_;
 }
 
 } // namespace fiber::quic

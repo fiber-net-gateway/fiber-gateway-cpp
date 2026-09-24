@@ -14,6 +14,10 @@
 struct x509_store_st;
 typedef struct x509_store_st X509_STORE;
 
+namespace fiber::quic {
+class QuicTlsSession;
+}
+
 namespace fiber::net {
 
 class TlsServerHandshakeConfig;
@@ -68,6 +72,7 @@ private:
     friend class TlsServerHandshakeConfig;
     friend class detail::TlsSslFactory;
     friend class detail::TlsStreamFd;
+    friend class quic::QuicTlsSession;
 
     TrustStore() noexcept = default;
 
