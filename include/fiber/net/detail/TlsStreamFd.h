@@ -92,29 +92,34 @@ private:
         Server,
     };
 
-    // Handshake staging + engines, heap-allocated per connection (defined in
-    // the .cpp): staged configs borrow the caller's param material under the
-    // documented param contract (valid until the handshake co_returns).
+    // Handshake staging + engines (defined in the .cpp): a coroutine-frame
+    // local of handshake_impl, dying with the frame at co_return or unwind.
+    // Staged configs borrow the caller's param material under the documented
+    // param contract (valid until the handshake co_returns). The engines'
+    // chains resolve the current loop's node pool, so the frame — the Task —
+    // must be destroyed on the connection's loop.
     struct Handshake;
 
-    common::IoResult<void> start_client(const TlsClientParam &param) noexcept;
-    common::IoResult<void> start_server(const TlsServerParam &param) noexcept;
+    common::IoResult<void> start_client(Handshake &staging, const TlsClientParam &param) noexcept;
+    common::IoResult<void> start_server(Handshake &staging, const TlsServerParam &param) noexcept;
     // TlsServerConfigSource::select — re-stages the server config per
     // ClientHello through the param's configure callback.
     static const tls::TlsServerConfig *select_server_config(void *ctx,
                                                             const tls::TlsClientHello &client_hello) noexcept;
-    [[nodiscard]] HandshakeTask handshake_impl(common::IoResult<void> start_result, std::chrono::milliseconds timeout);
-    fiber::common::IoErr handshake_once(fiber::event::IoEvent &event) noexcept;
+    [[nodiscard]] HandshakeTask handshake_impl(Role role, const TlsClientParam *client_param,
+                                               const TlsServerParam *server_param, std::chrono::milliseconds timeout);
+    fiber::common::IoErr handshake_once(Handshake &staging, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr write_once(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
-    // Moves engine/connection output into out_pending_ and writes it out.
-    fiber::common::IoErr flush_output(fiber::event::IoEvent &event) noexcept;
+    // Moves connection output — or the live handshake engines' output when
+    // staging is passed — into out_pending_ and writes it out. The connected
+    // phase passes nullptr (a live staging outranks nothing there).
+    fiber::common::IoErr flush_output(Handshake *staging, fiber::event::IoEvent &event) noexcept;
     // Reads the fd to drain and feeds the live engine (handshake phase).
-    fiber::common::IoErr feed_engine(fiber::event::IoEvent &event) noexcept;
+    fiber::common::IoErr feed_engine(Handshake &staging, fiber::event::IoEvent &event) noexcept;
 
     StreamFd stream_fd_;
-    Handshake *hs_ = nullptr; // live until the handshake completes/fails
     tls::TlsConnection *conn_ = nullptr; // the connected phase
     mem::IoBufChain out_pending_{}; // sealed records not yet on the wire
     mem::IoBufChain early_data_{}; // server: decrypted 0-RTT, delivered first
