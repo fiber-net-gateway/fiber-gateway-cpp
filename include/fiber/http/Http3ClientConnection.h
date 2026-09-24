@@ -138,7 +138,7 @@ private:
     static void on_peer_stream_attached(void *, quic::QuicStream &) noexcept;
     static void on_quic_state_change(void *, quic::QuicConnection &) noexcept;
     static void on_quic_capacity_change(void *, quic::QuicConnection &) noexcept;
-    static bool on_new_tls_session(void *, quic::QuicConnection &, SSL_SESSION *) noexcept;
+    static bool on_new_tls_session(void *, quic::QuicConnection &, tls::TlsSessionState &&) noexcept;
     static void on_new_token(void *, quic::QuicConnection &, const std::uint8_t *, std::size_t) noexcept;
     [[nodiscard]] static const Http3ControlStreams::Ops &control_ops() noexcept;
     [[nodiscard]] quic::QuicClientCacheKey cache_key() const noexcept;

@@ -6,10 +6,8 @@
 #include <string_view>
 
 #include "../net/SocketAddress.h"
+#include "../tls/TlsConfig.h"
 #include "QuicConnection.h"
-
-struct ssl_session_st;
-typedef struct ssl_session_st SSL_SESSION;
 
 namespace fiber::net {
 class TlsCredential;
@@ -34,7 +32,9 @@ struct QuicClientCacheKey {
 };
 
 struct QuicClientCachedState {
-    SSL_SESSION *session = nullptr;
+    // Owning session receipt (10 §9): filled by load(), moved out by the
+    // connect path. An empty state (identity/psk empty) runs a full handshake.
+    tls::TlsSessionState session{};
     const std::uint8_t *token = nullptr;
     std::size_t token_len = 0;
     QuicTransportSettings remembered_transport{};
@@ -44,8 +44,9 @@ struct QuicClientCachedState {
 struct QuicClientCacheOps {
     void *owner = nullptr;
     bool (*load)(void *owner, const QuicClientCacheKey &key, QuicClientCachedState &out) noexcept = nullptr;
-    // Returning true transfers the callback's SSL_SESSION reference to the cache.
-    bool (*store_session)(void *owner, const QuicClientCacheKey &key, SSL_SESSION *session,
+    // Returning true moves the session receipt into the cache (10 §9: the
+    // move transfers ownership; the callback keeps nothing on false).
+    bool (*store_session)(void *owner, const QuicClientCacheKey &key, tls::TlsSessionState &&session,
                           const QuicTransportSettings &remembered_transport) noexcept = nullptr;
     void (*store_token)(void *owner, const QuicClientCacheKey &key, const std::uint8_t *token,
                         std::size_t token_len) noexcept = nullptr;

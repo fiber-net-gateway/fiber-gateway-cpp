@@ -2317,9 +2317,9 @@ common::IoResult<void> QuicConnection::recv_new_token_frame(const QuicInputFrame
     return {};
 }
 
-bool QuicConnection::on_new_tls_session(SSL_SESSION *session) noexcept {
-    return role() == QuicConnectionRole::Client && session != nullptr && options_.ops.on_new_tls_session != nullptr &&
-           options_.ops.on_new_tls_session(options_.owner, *this, session);
+bool QuicConnection::on_new_tls_session(tls::TlsSessionState &&session) noexcept {
+    return role() == QuicConnectionRole::Client && !session.empty() && options_.ops.on_new_tls_session != nullptr &&
+           options_.ops.on_new_tls_session(options_.owner, *this, std::move(session));
 }
 
 void QuicConnection::reset_after_retry() noexcept {
