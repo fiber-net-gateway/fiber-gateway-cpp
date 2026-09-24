@@ -250,3 +250,20 @@ secret 取向(cipher 本身已按端点取向——engine 的 move 语义保证 
     几乎一致而对照零变化 → 回退主因假设 = 05 适配层 seal_scatter 跨 IoBufChain
     节点退化转录,吃掉了 a58cf18 的跨节点零拷贝增益。§3 原计划"连接侧 v1 简路径,
     benchmark 后再优化"如约到期:**恢复跨节点零拷贝 seal 是换芯后的首个优化项**。
+
+- **2026-09-23 record 层微基准(归因修正)**:`temp/bench/tls_record_bench.cpp`,纯内存
+  (BoringSSL 走内存 BIO pair、我方走 IoBuf,零 fd/零 syscall),16KiB 明文/op,
+  7×3000 取中位、复跑两轮确认稳定。双套件矩阵 = AES-128-GCM@TLS1.2(双侧 strict
+  cipher list 强制——此 BoringSSL 的 cipher list 只管 1.2 套件名)+ ChaCha20-
+  Poly1305@TLS1.3(bssl 默认序;本机 Core 2 无 AES-NI,默认协商 ChaCha)。
+  **记录层与 BoringSSL 打平或略优**:AES 我方 emit 16K×1(含每 record IoBuf 分配
+  +header+append)≈69.7µs(1.01x floor)vs bssl SSL_write 72.1µs(1.04x);open 连续
+  70.3µs(1.01x)vs bssl SSL_read 73.5µs(1.06x);ChaCha 同构(emit 61.5 vs 63.4µs;
+  open 65.3 ≈ 65.2µs)。4K×4 小 record:bssl +10~15%,ours +0~8%——我方每 record
+  边际开销更低。本机原语差:AES 69.2µs vs ChaCha 60.6µs = **AES 慢 14%**。
+  **归因修正**:proxy bulk -54~60% 无法由记录层解释——套件选择(~14%)+ 跨节点
+  转录(straddling open 仅 +2~4%)+ 小 record 粒度(≤8%)合计远不足额;上段
+  “seal_scatter 跨节点退化转录”主因假设被证伪(chain seal_in_place 1.00x floor),
+  “恢复跨节点零拷贝 seal”实测上限 ~4%,优先级下调。**下一步 = proxy 级 profile**
+  (lite worker 线程 perf 采样 / 每响应 TLS record 数与 syscall 计数)定位连接/glue
+  层真实热点。
