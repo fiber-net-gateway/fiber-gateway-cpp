@@ -43,21 +43,15 @@ public:
     };
 
     TlsRecordReader() noexcept = default;
-    explicit TlsRecordReader(mem::IoBufNodePool &node_pool) noexcept : pending_(node_pool) {}
 
-    // Only for the default constructor; must precede the first feed.
-    void bind_node_pool(mem::IoBufNodePool &node_pool) noexcept { pending_.bind_node_pool(node_pool); }
-
-    // Appends inbound bytes. Returns false only on allocation failure (feed a
-    // chain bound to a different node pool). Feeding never disturbs records
-    // already taken.
+    // Appends inbound bytes. Returns false only on allocation failure. Feeding
+    // never disturbs records already taken.
     bool feed(mem::IoBuf &&buf) noexcept { return pending_.append(std::move(buf)); }
     bool feed(mem::IoBufChain &&chain) noexcept { return pending_.append_chain(std::move(chain)); }
 
     // Splits the next record off the buffered input by taking its bytes out of
     // the pending chain. An Ok record owns its payload and stays valid for as
-    // long as the caller keeps it — but its chain nodes belong to the reader's
-    // IoBufNodePool, so destroy it on the loop that owns that pool.
+    // long as the caller keeps it.
     [[nodiscard]] Result next() noexcept;
 
     [[nodiscard]] std::size_t pending_bytes() const noexcept { return pending_.readable_bytes(); }
@@ -66,15 +60,8 @@ public:
     // handoff (09 §3): bytes fed past the terminal event (app data
     // piggybacked behind the final flight) move into the TlsConnection the
     // glue builds from the engine's state. A second take yields an empty
-    // chain; the reader stays bound to its node pool and keeps framing.
-    [[nodiscard]] mem::IoBufChain take_pending() noexcept {
-        mem::IoBufNodePool *pool = pending_.bound() ? &pending_.node_pool() : nullptr;
-        mem::IoBufChain out = std::move(pending_);
-        if (pool != nullptr) {
-            pending_ = mem::IoBufChain(*pool);
-        }
-        return out;
-    }
+    // chain; the reader keeps framing.
+    [[nodiscard]] mem::IoBufChain take_pending() noexcept { return std::move(pending_); }
 
     void reset() noexcept;
 

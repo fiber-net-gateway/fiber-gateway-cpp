@@ -56,6 +56,7 @@
 #include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 #include <fiber/tls/record/TlsRecord.h>
 #include <fiber/tls/record/TlsRecordCipher.h>
+#include "LoopTestSupport.h"
 
 namespace {
 
@@ -265,7 +266,6 @@ bool drive(BoringClient &client, TlsServerHandshakeEngine &engine) {
 }
 
 struct ServerMaterial {
-    IoBufNodePool pool;
     std::string chain_pem;
     std::optional<TlsCertificateChain> chain;
     std::optional<TlsPrivateKey> key;
@@ -354,8 +354,8 @@ PairStates complete_pair(ServerMaterial &material) {
     client_cfg.trust = &*trust;
     client_cfg.now_unix_ms = certfix::kRefNowMs;
 
-    TlsServerHandshakeEngine server(material.config(), nullptr, nullptr, material.pool);
-    TlsClientHandshakeEngine client(client_cfg, nullptr, material.pool);
+    TlsServerHandshakeEngine server(material.config(), nullptr, nullptr);
+    TlsClientHandshakeEngine client(client_cfg, nullptr);
     EXPECT_TRUE(drive_pair(client, server));
 
     PairStates states;
@@ -521,283 +521,305 @@ Synthetic12Pair make_synthetic_12_pair() {
 // =====================================================================
 
 TEST(TlsConnectionTest, AppRoundTripAndAlpn13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
-    ASSERT_EQ(TlsProtocolVersion::Tls13, states.server.version);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+        ASSERT_EQ(TlsProtocolVersion::Tls13, states.server.version);
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
-    ASSERT_FALSE(client.failed());
-    ASSERT_FALSE(server.failed());
-    EXPECT_EQ("h2", std::string_view(reinterpret_cast<const char *>(client.alpn().data()), client.alpn().size()));
-    EXPECT_EQ("h2", std::string_view(reinterpret_cast<const char *>(server.alpn().data()), server.alpn().size()));
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        ASSERT_FALSE(client.failed());
+        ASSERT_FALSE(server.failed());
+        EXPECT_EQ("h2", std::string_view(reinterpret_cast<const char *>(client.alpn().data()), client.alpn().size()));
+        EXPECT_EQ("h2", std::string_view(reinterpret_cast<const char *>(server.alpn().data()), server.alpn().size()));
 
-    // client → server (span write)
-    const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
-    ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
-    EXPECT_EQ(ping, read_all(server));
+        // client → server (span write)
+        const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
+        ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
+        EXPECT_EQ(ping, read_all(server));
 
-    // server → client (IoBufChain write)
-    const std::vector<std::uint8_t> pong{'p', 'o', 'n', 'g'};
-    IoBuf payload = IoBuf::allocate(pong.size());
-    ASSERT_TRUE(payload.valid());
-    std::memcpy(payload.writable_data(), pong.data(), pong.size());
-    payload.commit(pong.size());
-    IoBufChain chain(material.pool);
-    ASSERT_TRUE(chain.append(std::move(payload)));
-    ASSERT_TRUE(server.write(std::move(chain)).has_value());
-    ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
-    EXPECT_EQ(pong, read_all(client));
+        // server → client (IoBufChain write)
+        const std::vector<std::uint8_t> pong{'p', 'o', 'n', 'g'};
+        IoBuf payload = IoBuf::allocate(pong.size());
+        ASSERT_TRUE(payload.valid());
+        std::memcpy(payload.writable_data(), pong.data(), pong.size());
+        payload.commit(pong.size());
+        IoBufChain chain;
+        ASSERT_TRUE(chain.append(std::move(payload)));
+        ASSERT_TRUE(server.write(std::move(chain)).has_value());
+        ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
+        EXPECT_EQ(pong, read_all(client));
+    });
 }
 
 TEST(TlsConnectionTest, LargePayloadSplitsIntoRecords13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
 
-    std::vector<std::uint8_t> big(40000);
-    for (std::size_t i = 0; i < big.size(); ++i) {
-        big[i] = static_cast<std::uint8_t>(i * 7 + 3);
-    }
-    const std::vector<std::uint8_t> wire = connection_wire(client, big);
-    EXPECT_LE(3u, count_records(wire)); // 40000 > 2 × 16384
-    ASSERT_TRUE(feed_wire(server, wire));
-    EXPECT_EQ(big, read_all(server));
-    EXPECT_FALSE(server.failed());
+        std::vector<std::uint8_t> big(40000);
+        for (std::size_t i = 0; i < big.size(); ++i) {
+            big[i] = static_cast<std::uint8_t>(i * 7 + 3);
+        }
+        const std::vector<std::uint8_t> wire = connection_wire(client, big);
+        EXPECT_LE(3u, count_records(wire)); // 40000 > 2 × 16384
+        ASSERT_TRUE(feed_wire(server, wire));
+        EXPECT_EQ(big, read_all(server));
+        EXPECT_FALSE(server.failed());
+    });
 }
 
 TEST(TlsConnectionTest, CloseNotifyBothDirections13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
 
-    // Plaintext delivered in the SAME feed as the close_notify still reads
-    // first; only then does PeerClosed surface.
-    const std::vector<std::uint8_t> bye{'b', 'y', 'e'};
-    ASSERT_TRUE(client.write(bye).has_value());
-    ASSERT_TRUE(client.close_notify().has_value());
-    const std::vector<std::uint8_t> wire = chain_bytes(client.take_output());
-    EXPECT_EQ(2u, count_records(wire)); // app data + close_notify
-    ASSERT_TRUE(feed_wire(server, wire));
-    EXPECT_FALSE(server.failed());
-    EXPECT_EQ(bye, read_all(server));
-    std::size_t n = 0;
-    std::array<std::uint8_t, 8> scratch{};
-    EXPECT_EQ(ReadStatus::PeerClosed, server.read(scratch.data(), scratch.size(), n));
-    EXPECT_EQ(0u, n);
-    EXPECT_TRUE(server.peer_closed());
-    // Writing after the PEER closed stays legal (half-close semantics are
-    // the glue's call); our own close_notify is idempotent success.
-    EXPECT_TRUE(server.close_notify().has_value());
+        // Plaintext delivered in the SAME feed as the close_notify still reads
+        // first; only then does PeerClosed surface.
+        const std::vector<std::uint8_t> bye{'b', 'y', 'e'};
+        ASSERT_TRUE(client.write(bye).has_value());
+        ASSERT_TRUE(client.close_notify().has_value());
+        const std::vector<std::uint8_t> wire = chain_bytes(client.take_output());
+        EXPECT_EQ(2u, count_records(wire)); // app data + close_notify
+        ASSERT_TRUE(feed_wire(server, wire));
+        EXPECT_FALSE(server.failed());
+        EXPECT_EQ(bye, read_all(server));
+        std::size_t n = 0;
+        std::array<std::uint8_t, 8> scratch{};
+        EXPECT_EQ(ReadStatus::PeerClosed, server.read(scratch.data(), scratch.size(), n));
+        EXPECT_EQ(0u, n);
+        EXPECT_TRUE(server.peer_closed());
+        // Writing after the PEER closed stays legal (half-close semantics are
+        // the glue's call); our own close_notify is idempotent success.
+        EXPECT_TRUE(server.close_notify().has_value());
 
-    // The answering close_notify crosses back.
-    ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
-    EXPECT_TRUE(client.peer_closed());
-    EXPECT_EQ(ReadStatus::PeerClosed, client.read(scratch.data(), scratch.size(), n));
+        // The answering close_notify crosses back.
+        ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
+        EXPECT_TRUE(client.peer_closed());
+        EXPECT_EQ(ReadStatus::PeerClosed, client.read(scratch.data(), scratch.size(), n));
+    });
 }
 
 TEST(TlsConnectionTest, EmptyWriteEmitsOneZeroLengthRecord13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
 
-    const std::vector<std::uint8_t> wire = connection_wire(client, std::span<const std::uint8_t>{});
-    EXPECT_EQ(1u, count_records(wire));
-    const std::size_t len = (static_cast<std::size_t>(wire[3]) << 8) | wire[4];
-    EXPECT_EQ(17u, len); // tag(16) + inner type(1)
-    ASSERT_TRUE(feed_wire(server, wire));
-    EXPECT_TRUE(read_all(server).empty()); // nothing delivered, nothing failed
-    EXPECT_FALSE(server.failed());
-    std::size_t n = 0;
-    std::array<std::uint8_t, 8> scratch{};
-    EXPECT_EQ(ReadStatus::NeedMore, server.read(scratch.data(), scratch.size(), n));
+        const std::vector<std::uint8_t> wire = connection_wire(client, std::span<const std::uint8_t>{});
+        EXPECT_EQ(1u, count_records(wire));
+        const std::size_t len = (static_cast<std::size_t>(wire[3]) << 8) | wire[4];
+        EXPECT_EQ(17u, len); // tag(16) + inner type(1)
+        ASSERT_TRUE(feed_wire(server, wire));
+        EXPECT_TRUE(read_all(server).empty()); // nothing delivered, nothing failed
+        EXPECT_FALSE(server.failed());
+        std::size_t n = 0;
+        std::array<std::uint8_t, 8> scratch{};
+        EXPECT_EQ(ReadStatus::NeedMore, server.read(scratch.data(), scratch.size(), n));
+    });
 }
 
 TEST(TlsConnectionTest, KeyUpdateRequestedRoundTrip13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    // The client sends KeyUpdate(update_requested) and rotates its write
-    // side; the server connection must rekey its READ side on receipt.
-    const std::vector<std::uint8_t> ku = craft_key_update(states.client, true);
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
-    ASSERT_TRUE(feed_wire(server, ku));
-    EXPECT_FALSE(server.failed());
-    EXPECT_TRUE(read_all(server).empty()); // a KeyUpdate carries no app data
+        // The client sends KeyUpdate(update_requested) and rotates its write
+        // side; the server connection must rekey its READ side on receipt.
+        const std::vector<std::uint8_t> ku = craft_key_update(states.client, true);
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        ASSERT_TRUE(feed_wire(server, ku));
+        EXPECT_FALSE(server.failed());
+        EXPECT_TRUE(read_all(server).empty()); // a KeyUpdate carries no app data
 
-    // The passive response: the write emits [KeyUpdate under the OLD server
-    // write keys][app data under the ROTATED ones].
-    const std::vector<std::uint8_t> resp{'r', 'e', 's', 'p'};
-    ASSERT_TRUE(server.write(resp).has_value());
-    const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
-    EXPECT_EQ(2u, count_records(flight));
-    ASSERT_TRUE(feed_wire(client, flight));
-    EXPECT_FALSE(client.failed());
-    EXPECT_EQ(resp, read_all(client)); // proves the client's read side rotated in step
+        // The passive response: the write emits [KeyUpdate under the OLD server
+        // write keys][app data under the ROTATED ones].
+        const std::vector<std::uint8_t> resp{'r', 'e', 's', 'p'};
+        ASSERT_TRUE(server.write(resp).has_value());
+        const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
+        EXPECT_EQ(2u, count_records(flight));
+        ASSERT_TRUE(feed_wire(client, flight));
+        EXPECT_FALSE(client.failed());
+        EXPECT_EQ(resp, read_all(client)); // proves the client's read side rotated in step
 
-    // The client's post-rotation write opens with the server's rotated READ
-    // keys.
-    const std::vector<std::uint8_t> tail{'f', 'i', 'n', 'a', 'l'};
-    ASSERT_TRUE(client.write(tail).has_value());
-    ASSERT_TRUE(feed_wire(server, chain_bytes(client.take_output())));
-    EXPECT_EQ(tail, read_all(server));
-    EXPECT_FALSE(server.failed());
+        // The client's post-rotation write opens with the server's rotated READ
+        // keys.
+        const std::vector<std::uint8_t> tail{'f', 'i', 'n', 'a', 'l'};
+        ASSERT_TRUE(client.write(tail).has_value());
+        ASSERT_TRUE(feed_wire(server, chain_bytes(client.take_output())));
+        EXPECT_EQ(tail, read_all(server));
+        EXPECT_FALSE(server.failed());
+    });
 }
 
 TEST(TlsConnectionTest, KeyUpdateNotRequestedKeepsPeerWriteKeys13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    const std::vector<std::uint8_t> ku = craft_key_update(states.client, false);
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
-    ASSERT_TRUE(feed_wire(server, ku));
-    EXPECT_FALSE(server.failed());
+        const std::vector<std::uint8_t> ku = craft_key_update(states.client, false);
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        ASSERT_TRUE(feed_wire(server, ku));
+        EXPECT_FALSE(server.failed());
 
-    // No response owed: exactly ONE record on the wire, sealed under the
-    // server's ORIGINAL write keys (the client's read side never rotated).
-    const std::vector<std::uint8_t> msg{'o', 'k'};
-    ASSERT_TRUE(server.write(msg).has_value());
-    const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
-    EXPECT_EQ(1u, count_records(flight));
-    ASSERT_TRUE(feed_wire(client, flight));
-    EXPECT_EQ(msg, read_all(client));
+        // No response owed: exactly ONE record on the wire, sealed under the
+        // server's ORIGINAL write keys (the client's read side never rotated).
+        const std::vector<std::uint8_t> msg{'o', 'k'};
+        ASSERT_TRUE(server.write(msg).has_value());
+        const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
+        EXPECT_EQ(1u, count_records(flight));
+        ASSERT_TRUE(feed_wire(client, flight));
+        EXPECT_EQ(msg, read_all(client));
+    });
 }
 
 TEST(TlsConnectionTest, NewSessionTicketIsSwallowed13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    // An NST (type 4) the peer keeps sending after the handshake: body is
-    // opaque here — the connection swallows without parsing (09 §1: no
-    // client session cache).
-    std::vector<std::uint8_t> message{4, 0, 0, 40};
-    message.resize(4 + 40, 0xAB);
-    const std::vector<std::uint8_t> nst = craft_hs_record(states.client, message);
+        // An NST (type 4) the peer keeps sending after the handshake: body is
+        // opaque here — the connection swallows without parsing (09 §1: no
+        // client session cache).
+        std::vector<std::uint8_t> message{4, 0, 0, 40};
+        message.resize(4 + 40, 0xAB);
+        const std::vector<std::uint8_t> nst = craft_hs_record(states.client, message);
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
-    ASSERT_TRUE(feed_wire(server, nst));
-    EXPECT_FALSE(server.failed());
-    EXPECT_TRUE(read_all(server).empty());
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        ASSERT_TRUE(feed_wire(server, nst));
+        EXPECT_FALSE(server.failed());
+        EXPECT_TRUE(read_all(server).empty());
 
-    // The stream stays alive after the swallow.
-    const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
-    ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
-    EXPECT_EQ(ping, read_all(server));
+        // The stream stays alive after the swallow.
+        const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
+        ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
+        EXPECT_EQ(ping, read_all(server));
+    });
 }
 
 TEST(TlsConnectionTest, PeerFatalAlertLatches13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    // A fatal alert from the peer (sealed, inner type alert): terminal, no
-    // response owed.
-    const std::uint8_t alert[2] = {2, static_cast<std::uint8_t>(TlsAlertDesc::DecodeError)};
-    TlsRecordCipher wc = std::move(states.client.write_cipher);
-    const std::vector<std::uint8_t> wire = seal_record(wc, TlsContentType::Alert, alert, kTypeApplicationData);
-    states.client.write_cipher = std::move(wc);
+        // A fatal alert from the peer (sealed, inner type alert): terminal, no
+        // response owed.
+        const std::uint8_t alert[2] = {2, static_cast<std::uint8_t>(TlsAlertDesc::DecodeError)};
+        TlsRecordCipher wc = std::move(states.client.write_cipher);
+        const std::vector<std::uint8_t> wire = seal_record(wc, TlsContentType::Alert, alert, kTypeApplicationData);
+        states.client.write_cipher = std::move(wc);
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
-    ASSERT_TRUE(feed_wire(server, wire));
-    EXPECT_TRUE(server.failed());
-    EXPECT_EQ(TlsAlertDesc::DecodeError, server.failure_alert());
-    EXPECT_TRUE(chain_bytes(server.take_output()).empty()); // nothing sent back
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        ASSERT_TRUE(feed_wire(server, wire));
+        EXPECT_TRUE(server.failed());
+        EXPECT_EQ(TlsAlertDesc::DecodeError, server.failure_alert());
+        EXPECT_TRUE(chain_bytes(server.take_output()).empty()); // nothing sent back
 
-    std::size_t n = 0;
-    std::array<std::uint8_t, 8> scratch{};
-    EXPECT_EQ(ReadStatus::Fatal, server.read(scratch.data(), scratch.size(), n));
-    const std::uint8_t dead_byte = 0;
-    EXPECT_FALSE(server.write({&dead_byte, 1}).has_value());
-    // The client side is untouched — half-close semantics live in the glue.
-    EXPECT_FALSE(client.failed());
+        std::size_t n = 0;
+        std::array<std::uint8_t, 8> scratch{};
+        EXPECT_EQ(ReadStatus::Fatal, server.read(scratch.data(), scratch.size(), n));
+        const std::uint8_t dead_byte = 0;
+        EXPECT_FALSE(server.write({&dead_byte, 1}).has_value());
+        // The client side is untouched — half-close semantics live in the glue.
+        EXPECT_FALSE(client.failed());
+    });
 }
 
 TEST(TlsConnectionTest, CorruptedRecordLatchesBadRecordMac13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
-    TlsRecordCipher wc = std::move(states.client.write_cipher);
-    std::vector<std::uint8_t> wire = seal_record(wc, TlsContentType::ApplicationData, ping, kTypeApplicationData);
-    states.client.write_cipher = std::move(wc);
-    wire[wire.size() / 2] ^= 0x40; // flip one ciphertext byte
+        const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
+        TlsRecordCipher wc = std::move(states.client.write_cipher);
+        std::vector<std::uint8_t> wire = seal_record(wc, TlsContentType::ApplicationData, ping, kTypeApplicationData);
+        states.client.write_cipher = std::move(wc);
+        wire[wire.size() / 2] ^= 0x40; // flip one ciphertext byte
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
-    ASSERT_TRUE(feed_wire(server, wire));
-    EXPECT_TRUE(server.failed());
-    EXPECT_EQ(TlsAlertDesc::BadRecordMac, server.failure_alert());
-    // Our own fatal alert IS encoded — the glue flushes it best-effort.
-    EXPECT_FALSE(chain_bytes(server.take_output()).empty());
-    // The connection is terminal: pump/write refuse further work.
-    server.pump();
-    EXPECT_FALSE(server.write(ping).has_value());
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        ASSERT_TRUE(feed_wire(server, wire));
+        EXPECT_TRUE(server.failed());
+        EXPECT_EQ(TlsAlertDesc::BadRecordMac, server.failure_alert());
+        // Our own fatal alert IS encoded — the glue flushes it best-effort.
+        EXPECT_FALSE(chain_bytes(server.take_output()).empty());
+        // The connection is terminal: pump/write refuse further work.
+        server.pump();
+        EXPECT_FALSE(server.write(ping).has_value());
+    });
 }
 
 TEST(TlsConnectionTest, CcsAfterHandshakeIsFatal13) {
-    ServerMaterial material;
-    PairStates states = complete_pair(material);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(states.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(states.server), material.pool);
-    const std::uint8_t ccs[] = {kTypeChangeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01};
-    ASSERT_TRUE(feed_wire(server, ccs));
-    EXPECT_TRUE(server.failed());
-    EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, server.failure_alert());
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        const std::uint8_t ccs[] = {kTypeChangeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01};
+        ASSERT_TRUE(feed_wire(server, ccs));
+        EXPECT_TRUE(server.failed());
+        EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, server.failure_alert());
+    });
 }
 
 TEST(TlsConnectionTest, EngineLeftoverFeedsConnection) {
-    ServerMaterial material;
-    auto trust = TlsTrustStore::from_pem_bundle({certfix::kRootRsaPem, std::strlen(certfix::kRootRsaPem)});
-    ASSERT_TRUE(trust.has_value());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        auto trust = TlsTrustStore::from_pem_bundle({certfix::kRootRsaPem, std::strlen(certfix::kRootRsaPem)});
+        ASSERT_TRUE(trust.has_value());
 
-    TlsClientConfig client_cfg;
-    client_cfg.sni_host = "example.com";
-    client_cfg.alpn = material.alpn;
-    client_cfg.trust = &*trust;
-    client_cfg.now_unix_ms = certfix::kRefNowMs;
+        TlsClientConfig client_cfg;
+        client_cfg.sni_host = "example.com";
+        client_cfg.alpn = material.alpn;
+        client_cfg.trust = &*trust;
+        client_cfg.now_unix_ms = certfix::kRefNowMs;
 
-    TlsServerHandshakeEngine server(material.config(), nullptr, nullptr, material.pool);
-    TlsClientHandshakeEngine client(client_cfg, nullptr, material.pool);
+        TlsServerHandshakeEngine server(material.config(), nullptr, nullptr);
+        TlsClientHandshakeEngine client(client_cfg, nullptr);
 
-    // Trailing partial-record header riding the client's final flight: the
-    // server engine consumes the Finished, reaches done, and these bytes
-    // stay unconsumed.
-    const std::vector<std::uint8_t> tail{kTypeApplicationData, 0x03, 0x03};
-    ASSERT_TRUE(drive_pair(client, server, &tail));
+        // Trailing partial-record header riding the client's final flight: the
+        // server engine consumes the Finished, reaches done, and these bytes
+        // stay unconsumed.
+        const std::vector<std::uint8_t> tail{kTypeApplicationData, 0x03, 0x03};
+        ASSERT_TRUE(drive_pair(client, server, &tail));
 
-    IoBufChain leftover = server.take_inbound_leftover();
-    ASSERT_EQ(3u, leftover.readable_bytes());
-    const std::vector<std::uint8_t> leftover_bytes = chain_bytes(leftover);
-    EXPECT_EQ(tail, leftover_bytes);
-    EXPECT_EQ(0u, server.take_inbound_leftover().readable_bytes()); // second take is empty
+        IoBufChain leftover = server.take_inbound_leftover();
+        ASSERT_EQ(3u, leftover.readable_bytes());
+        const std::vector<std::uint8_t> leftover_bytes = chain_bytes(leftover);
+        EXPECT_EQ(tail, leftover_bytes);
+        EXPECT_EQ(0u, server.take_inbound_leftover().readable_bytes()); // second take is empty
 
-    TlsConnectedState client_state = client.take_state();
-    TlsConnectedState server_state = server.take_state();
+        TlsConnectedState client_state = client.take_state();
+        TlsConnectedState server_state = server.take_state();
 
-    // The rest of that record (header tail + sealed body) arrives through
-    // the CONNECTION — the leftover bytes and the follow-up feed reassemble
-    // into one record.
-    TlsRecordCipher wc = std::move(client_state.write_cipher);
-    const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
-    const std::vector<std::uint8_t> record =
-            seal_record(wc, TlsContentType::ApplicationData, ping, kTypeApplicationData);
-    client_state.write_cipher = std::move(wc);
+        // The rest of that record (header tail + sealed body) arrives through
+        // the CONNECTION — the leftover bytes and the follow-up feed reassemble
+        // into one record.
+        TlsRecordCipher wc = std::move(client_state.write_cipher);
+        const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
+        const std::vector<std::uint8_t> record =
+                seal_record(wc, TlsContentType::ApplicationData, ping, kTypeApplicationData);
+        client_state.write_cipher = std::move(wc);
 
-    TlsConnection server_conn(TlsConnectionRole::Server, std::move(server_state), material.pool);
-    ASSERT_TRUE(server_conn.feed(std::move(leftover)));
-    ASSERT_TRUE(feed_wire(server_conn, {record.data() + 3, record.size() - 3}));
-    EXPECT_EQ(ping, read_all(server_conn));
-    EXPECT_FALSE(server_conn.failed());
+        TlsConnection server_conn(TlsConnectionRole::Server, std::move(server_state));
+        ASSERT_TRUE(server_conn.feed(std::move(leftover)));
+        ASSERT_TRUE(feed_wire(server_conn, {record.data() + 3, record.size() - 3}));
+        EXPECT_EQ(ping, read_all(server_conn));
+        EXPECT_FALSE(server_conn.failed());
+    });
 }
 
 // =====================================================================
@@ -805,51 +827,55 @@ TEST(TlsConnectionTest, EngineLeftoverFeedsConnection) {
 // =====================================================================
 
 TEST(TlsConnectionTest, HandshakeRecordAfter12HandshakeIsFatal) {
-    ServerMaterial material; // pool only
-    Synthetic12Pair pair = make_synthetic_12_pair();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material; // pool only
+        Synthetic12Pair pair = make_synthetic_12_pair();
 
-    // HelloRequest (type 0, empty body) — renegotiation is refused outright
-    // (09 §1 decision 3). Sealed with the client's write keys, outer type
-    // preserved (1.2 binds it into the AAD).
-    const std::uint8_t hello_request[4] = {0, 0, 0, 0};
-    const std::vector<std::uint8_t> wire =
-            craft_12_record(pair.client.write_cipher, TlsContentType::Handshake, hello_request);
+        // HelloRequest (type 0, empty body) — renegotiation is refused outright
+        // (09 §1 decision 3). Sealed with the client's write keys, outer type
+        // preserved (1.2 binds it into the AAD).
+        const std::uint8_t hello_request[4] = {0, 0, 0, 0};
+        const std::vector<std::uint8_t> wire =
+                craft_12_record(pair.client.write_cipher, TlsContentType::Handshake, hello_request);
 
-    TlsConnection server_conn(TlsConnectionRole::Server, std::move(pair.server), material.pool);
-    ASSERT_TRUE(feed_wire(server_conn, wire));
-    EXPECT_TRUE(server_conn.failed());
-    EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, server_conn.failure_alert());
-    EXPECT_FALSE(chain_bytes(server_conn.take_output()).empty()); // our fatal alert flies
+        TlsConnection server_conn(TlsConnectionRole::Server, std::move(pair.server));
+        ASSERT_TRUE(feed_wire(server_conn, wire));
+        EXPECT_TRUE(server_conn.failed());
+        EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, server_conn.failure_alert());
+        EXPECT_FALSE(chain_bytes(server_conn.take_output()).empty()); // our fatal alert flies
+    });
 }
 
 TEST(TlsConnectionTest, Synthetic12AppAndCloseNotifyBothWays) {
-    ServerMaterial material; // pool only
-    Synthetic12Pair pair = make_synthetic_12_pair();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material; // pool only
+        Synthetic12Pair pair = make_synthetic_12_pair();
 
-    TlsConnection client(TlsConnectionRole::Client, std::move(pair.client), material.pool);
-    TlsConnection server(TlsConnectionRole::Server, std::move(pair.server), material.pool);
+        TlsConnection client(TlsConnectionRole::Client, std::move(pair.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(pair.server));
 
-    const std::vector<std::uint8_t> ping{'1', '2', 'p', 'i', 'n', 'g'};
-    ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
-    EXPECT_EQ(ping, read_all(server));
+        const std::vector<std::uint8_t> ping{'1', '2', 'p', 'i', 'n', 'g'};
+        ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
+        EXPECT_EQ(ping, read_all(server));
 
-    const std::vector<std::uint8_t> pong{'1', '2', 'p', 'o', 'n', 'g'};
-    ASSERT_TRUE(feed_wire(client, connection_wire(server, pong)));
-    EXPECT_EQ(pong, read_all(client));
+        const std::vector<std::uint8_t> pong{'1', '2', 'p', 'o', 'n', 'g'};
+        ASSERT_TRUE(feed_wire(client, connection_wire(server, pong)));
+        EXPECT_EQ(pong, read_all(client));
 
-    // close_notify in 1.2 flies as a SEALED alert record (outer type 21
-    // preserved) — this exercises the sealed-1.2-alert decode on receive.
-    ASSERT_TRUE(client.close_notify().has_value());
-    const std::vector<std::uint8_t> close_wire = chain_bytes(client.take_output());
-    ASSERT_EQ(1u, count_records(close_wire));
-    EXPECT_EQ(kTypeAlert, close_wire[0]); // 1.2 preserves the record type
-    ASSERT_TRUE(feed_wire(server, close_wire));
-    EXPECT_TRUE(server.peer_closed());
-    EXPECT_FALSE(server.failed());
+        // close_notify in 1.2 flies as a SEALED alert record (outer type 21
+        // preserved) — this exercises the sealed-1.2-alert decode on receive.
+        ASSERT_TRUE(client.close_notify().has_value());
+        const std::vector<std::uint8_t> close_wire = chain_bytes(client.take_output());
+        ASSERT_EQ(1u, count_records(close_wire));
+        EXPECT_EQ(kTypeAlert, close_wire[0]); // 1.2 preserves the record type
+        ASSERT_TRUE(feed_wire(server, close_wire));
+        EXPECT_TRUE(server.peer_closed());
+        EXPECT_FALSE(server.failed());
 
-    ASSERT_TRUE(server.close_notify().has_value());
-    ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
-    EXPECT_TRUE(client.peer_closed());
+        ASSERT_TRUE(server.close_notify().has_value());
+        ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
+        EXPECT_TRUE(client.peer_closed());
+    });
 }
 
 // =====================================================================
@@ -857,92 +883,96 @@ TEST(TlsConnectionTest, Synthetic12AppAndCloseNotifyBothWays) {
 // =====================================================================
 
 TEST(TlsConnectionTest, BoringSsl13AppCloseNotifyAndKeyUpdate) {
-    auto client = BoringClient::make();
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine));
-    TlsConnectedState state = engine.take_state();
-    ASSERT_EQ(TlsProtocolVersion::Tls13, state.version);
-    TlsConnection conn(TlsConnectionRole::Server, std::move(state), material.pool);
-    ASSERT_FALSE(conn.failed());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make();
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine));
+        TlsConnectedState state = engine.take_state();
+        ASSERT_EQ(TlsProtocolVersion::Tls13, state.version);
+        TlsConnection conn(TlsConnectionRole::Server, std::move(state));
+        ASSERT_FALSE(conn.failed());
 
-    // BoringSSL → connection
-    const char kMessage[] = "hello from boringssl";
-    ASSERT_EQ(sizeof(kMessage) - 1,
-              static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
-    ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
-    const std::vector<std::uint8_t> got = read_all(conn);
-    ASSERT_EQ(sizeof(kMessage) - 1, got.size());
-    EXPECT_EQ(0, std::memcmp(kMessage, got.data(), got.size()));
+        // BoringSSL → connection
+        const char kMessage[] = "hello from boringssl";
+        ASSERT_EQ(sizeof(kMessage) - 1,
+                  static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
+        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        const std::vector<std::uint8_t> got = read_all(conn);
+        ASSERT_EQ(sizeof(kMessage) - 1, got.size());
+        EXPECT_EQ(0, std::memcmp(kMessage, got.data(), got.size()));
 
-    // connection → BoringSSL
-    const char kReply[] = "reply from fiber";
-    ASSERT_TRUE(conn.write({reinterpret_cast<const std::uint8_t *>(kReply), sizeof(kReply) - 1}).has_value());
-    ASSERT_TRUE(client->ship(chain_bytes(conn.take_output())));
-    std::array<char, 128> buf{};
-    const int read = SSL_read(client->ssl(), buf.data(), static_cast<int>(buf.size()));
-    ASSERT_GT(read, 0);
-    EXPECT_EQ(0, std::memcmp(kReply, buf.data(), sizeof(kReply) - 1));
+        // connection → BoringSSL
+        const char kReply[] = "reply from fiber";
+        ASSERT_TRUE(conn.write({reinterpret_cast<const std::uint8_t *>(kReply), sizeof(kReply) - 1}).has_value());
+        ASSERT_TRUE(client->ship(chain_bytes(conn.take_output())));
+        std::array<char, 128> buf{};
+        const int read = SSL_read(client->ssl(), buf.data(), static_cast<int>(buf.size()));
+        ASSERT_GT(read, 0);
+        EXPECT_EQ(0, std::memcmp(kReply, buf.data(), sizeof(kReply) - 1));
 
-    // KeyUpdate(update_requested) from the real peer: our read side rekeys,
-    // and the passive response (under the OLD write keys, rotation after)
-    // must satisfy BoringSSL's expectations — its next SSL_read consumes our
-    // response record and the app data behind it.
-    ASSERT_EQ(1, SSL_key_update(client->ssl(), SSL_KEY_UPDATE_REQUESTED));
-    (void) client->handshake_step(); // flush the queued KeyUpdate
-    ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
-    EXPECT_FALSE(conn.failed());
-    const char kAfterKu[] = "after key update";
-    ASSERT_TRUE(conn.write({reinterpret_cast<const std::uint8_t *>(kAfterKu), sizeof(kAfterKu) - 1}).has_value());
-    ASSERT_TRUE(client->ship(chain_bytes(conn.take_output())));
-    const int read2 = SSL_read(client->ssl(), buf.data(), static_cast<int>(buf.size()));
-    ASSERT_GT(read2, 0);
-    EXPECT_EQ(0, std::memcmp(kAfterKu, buf.data(), sizeof(kAfterKu) - 1));
+        // KeyUpdate(update_requested) from the real peer: our read side rekeys,
+        // and the passive response (under the OLD write keys, rotation after)
+        // must satisfy BoringSSL's expectations — its next SSL_read consumes our
+        // response record and the app data behind it.
+        ASSERT_EQ(1, SSL_key_update(client->ssl(), SSL_KEY_UPDATE_REQUESTED));
+        (void) client->handshake_step(); // flush the queued KeyUpdate
+        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        EXPECT_FALSE(conn.failed());
+        const char kAfterKu[] = "after key update";
+        ASSERT_TRUE(conn.write({reinterpret_cast<const std::uint8_t *>(kAfterKu), sizeof(kAfterKu) - 1}).has_value());
+        ASSERT_TRUE(client->ship(chain_bytes(conn.take_output())));
+        const int read2 = SSL_read(client->ssl(), buf.data(), static_cast<int>(buf.size()));
+        ASSERT_GT(read2, 0);
+        EXPECT_EQ(0, std::memcmp(kAfterKu, buf.data(), sizeof(kAfterKu) - 1));
 
-    // BoringSSL's close_notify (sealed inner alert): peer_closed latches.
-    ASSERT_EQ(0, SSL_shutdown(client->ssl()));
-    ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
-    EXPECT_TRUE(conn.peer_closed());
-    EXPECT_FALSE(conn.failed());
+        // BoringSSL's close_notify (sealed inner alert): peer_closed latches.
+        ASSERT_EQ(0, SSL_shutdown(client->ssl()));
+        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        EXPECT_TRUE(conn.peer_closed());
+        EXPECT_FALSE(conn.failed());
+    });
 }
 
 TEST(TlsConnectionTest, BoringSsl12AppAndSealedCloseNotify) {
-    auto client = BoringClient::make(BoringClientOptions{.tls12_only = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine));
-    TlsConnectedState state = engine.take_state();
-    ASSERT_EQ(TlsProtocolVersion::Tls12, state.version);
-    TlsConnection conn(TlsConnectionRole::Server, std::move(state), material.pool);
-    ASSERT_FALSE(conn.failed());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(BoringClientOptions{.tls12_only = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine));
+        TlsConnectedState state = engine.take_state();
+        ASSERT_EQ(TlsProtocolVersion::Tls12, state.version);
+        TlsConnection conn(TlsConnectionRole::Server, std::move(state));
+        ASSERT_FALSE(conn.failed());
 
-    // App data both ways under the 1.2 key block.
-    const char kMessage[] = "12 hello";
-    ASSERT_EQ(sizeof(kMessage) - 1,
-              static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
-    ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
-    const std::vector<std::uint8_t> got = read_all(conn);
-    ASSERT_EQ(sizeof(kMessage) - 1, got.size());
-    EXPECT_EQ(0, std::memcmp(kMessage, got.data(), got.size()));
+        // App data both ways under the 1.2 key block.
+        const char kMessage[] = "12 hello";
+        ASSERT_EQ(sizeof(kMessage) - 1,
+                  static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
+        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        const std::vector<std::uint8_t> got = read_all(conn);
+        ASSERT_EQ(sizeof(kMessage) - 1, got.size());
+        EXPECT_EQ(0, std::memcmp(kMessage, got.data(), got.size()));
 
-    const char kReply[] = "12 reply";
-    ASSERT_TRUE(conn.write({reinterpret_cast<const std::uint8_t *>(kReply), sizeof(kReply) - 1}).has_value());
-    ASSERT_TRUE(client->ship(chain_bytes(conn.take_output())));
-    std::array<char, 64> buf{};
-    ASSERT_GT(SSL_read(client->ssl(), buf.data(), static_cast<int>(buf.size())), 0);
-    EXPECT_EQ(0, std::memcmp(kReply, buf.data(), sizeof(kReply) - 1));
+        const char kReply[] = "12 reply";
+        ASSERT_TRUE(conn.write({reinterpret_cast<const std::uint8_t *>(kReply), sizeof(kReply) - 1}).has_value());
+        ASSERT_TRUE(client->ship(chain_bytes(conn.take_output())));
+        std::array<char, 64> buf{};
+        ASSERT_GT(SSL_read(client->ssl(), buf.data(), static_cast<int>(buf.size())), 0);
+        EXPECT_EQ(0, std::memcmp(kReply, buf.data(), sizeof(kReply) - 1));
 
-    // BoringSSL's close_notify arrives as a SEALED 1.2 alert record.
-    ASSERT_EQ(0, SSL_shutdown(client->ssl()));
-    ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
-    EXPECT_TRUE(conn.peer_closed());
-    EXPECT_FALSE(conn.failed());
+        // BoringSSL's close_notify arrives as a SEALED 1.2 alert record.
+        ASSERT_EQ(0, SSL_shutdown(client->ssl()));
+        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        EXPECT_TRUE(conn.peer_closed());
+        EXPECT_FALSE(conn.failed());
 
-    // Our close_notify back: BoringSSL reads it as clean EOF.
-    ASSERT_TRUE(conn.close_notify().has_value());
-    ASSERT_TRUE(client->ship(chain_bytes(conn.take_output())));
-    EXPECT_EQ(0, SSL_read(client->ssl(), buf.data(), static_cast<int>(buf.size())));
-    EXPECT_EQ(SSL_ERROR_ZERO_RETURN, SSL_get_error(client->ssl(), 0));
+        // Our close_notify back: BoringSSL reads it as clean EOF.
+        ASSERT_TRUE(conn.close_notify().has_value());
+        ASSERT_TRUE(client->ship(chain_bytes(conn.take_output())));
+        EXPECT_EQ(0, SSL_read(client->ssl(), buf.data(), static_cast<int>(buf.size())));
+        EXPECT_EQ(SSL_ERROR_ZERO_RETURN, SSL_get_error(client->ssl(), 0));
+    });
 }

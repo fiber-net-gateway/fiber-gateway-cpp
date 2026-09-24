@@ -189,7 +189,7 @@ void discard_packet_number_space(QuicConnection &conn, QuicEncryptionLevel level
         return std::unexpected(inserted.error());
     }
 
-    mem::IoBufChain contiguous(conn.recv_extent_pool());
+    mem::IoBufChain contiguous;
     auto taken = space.crypto_recv.take_contiguous(contiguous);
     if (!taken) {
         return std::unexpected(taken.error());

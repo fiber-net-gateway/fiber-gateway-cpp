@@ -20,6 +20,7 @@
 #undef private
 
 #include "HttpTransportStub.h"
+#include "LoopTestSupport.h"
 
 namespace {
 
@@ -196,8 +197,7 @@ fiber::common::IoErr EncodeOperation::on_encode(fiber::http::Http2Stream &,
 }
 
 std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
-    fiber::mem::IoBufNodePool node_pool;
-    fiber::http::Http2OutboundEncodeTarget target(node_pool);
+    fiber::http::Http2OutboundEncodeTarget target;
     EncodeOperation operation(test_case);
     fiber::http::Http2Stream stream(&operation, kStreamOps);
     fiber::http::Http2OutboundEncodeRequest request{.max_frame_size = test_case.options.max_frame_size};
@@ -224,123 +224,135 @@ std::vector<std::uint8_t> encode_headers_bytes(EncodeCase test_case) {
 }
 
 TEST(Http2HeadersFrameEncoderTest, EncodesSingleHeadersFrame) {
-    EXPECT_EQ(encode_headers_bytes({
-                      .status_code = 200,
-                      .options =
-                              {
-                                      .stream_id = 1,
-                                      .max_frame_size = 16384,
-                                      .first_frame_payload_cap = 1024,
-                              },
-              }),
-              (std::vector<std::uint8_t>{0x00, 0x00, 0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01, 0x20, 0x88}));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        EXPECT_EQ(encode_headers_bytes({
+                          .status_code = 200,
+                          .options =
+                                  {
+                                          .stream_id = 1,
+                                          .max_frame_size = 16384,
+                                          .first_frame_payload_cap = 1024,
+                                  },
+                  }),
+                  (std::vector<std::uint8_t>{0x00, 0x00, 0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01, 0x20, 0x88}));
+    });
 }
 
 TEST(Http2HeadersFrameEncoderTest, SplitsHeaderBlockIntoContinuationFrames) {
-    EXPECT_EQ(encode_headers_bytes({
-                      .status_code = 418,
-                      .options =
-                              {
-                                      .stream_id = 3,
-                                      .max_frame_size = 4,
-                                      .first_frame_payload_cap = 4,
-                              },
-              }),
-              (std::vector<std::uint8_t>{
-                      0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x20, 0x08, 0x03,
-                      '4',  0x00, 0x00, 0x02, 0x09, 0x04, 0x00, 0x00, 0x00, 0x03, '1',  '8',
-              }));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        EXPECT_EQ(encode_headers_bytes({
+                          .status_code = 418,
+                          .options =
+                                  {
+                                          .stream_id = 3,
+                                          .max_frame_size = 4,
+                                          .first_frame_payload_cap = 4,
+                                  },
+                  }),
+                  (std::vector<std::uint8_t>{
+                          0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0x20, 0x08, 0x03,
+                          '4',  0x00, 0x00, 0x02, 0x09, 0x04, 0x00, 0x00, 0x00, 0x03, '1',  '8',
+                  }));
+    });
 }
 
 TEST(Http2HeadersFrameEncoderTest, KeepsSingleFrameAcrossMultipleIoBufs) {
-    std::vector<std::uint8_t> out = encode_headers_bytes({
-            .status_code = 418,
-            .options =
-                    {
-                            .stream_id = 7,
-                            .max_frame_size = 16,
-                            .first_frame_payload_cap = 4,
-                    },
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        std::vector<std::uint8_t> out = encode_headers_bytes({
+                .status_code = 418,
+                .options =
+                        {
+                                .stream_id = 7,
+                                .max_frame_size = 16,
+                                .first_frame_payload_cap = 4,
+                        },
+        });
+        EXPECT_EQ(out.size(), 15U);
+        EXPECT_EQ(out, (std::vector<std::uint8_t>{
+                               0x00,
+                               0x00,
+                               0x06,
+                               0x01,
+                               0x04,
+                               0x00,
+                               0x00,
+                               0x00,
+                               0x07,
+                               0x20,
+                               0x08,
+                               0x03,
+                               '4',
+                               '1',
+                               '8',
+                       }));
     });
-    EXPECT_EQ(out.size(), 15U);
-    EXPECT_EQ(out, (std::vector<std::uint8_t>{
-                           0x00,
-                           0x00,
-                           0x06,
-                           0x01,
-                           0x04,
-                           0x00,
-                           0x00,
-                           0x00,
-                           0x07,
-                           0x20,
-                           0x08,
-                           0x03,
-                           '4',
-                           '1',
-                           '8',
-                   }));
 }
 
 TEST(Http2HeadersFrameEncoderTest, EncodesHeadersFrameWithPaddingAndPriority) {
-    EXPECT_EQ(encode_headers_bytes({
-                      .status_code = 200,
-                      .options =
-                              {
-                                      .stream_id = 5,
-                                      .max_frame_size = 32,
-                                      .first_frame_payload_cap = 32,
-                                      .end_stream = true,
-                                      .pad_length = 2,
-                                      .has_priority = true,
-                                      .exclusive = true,
-                                      .stream_dependency = 3,
-                                      .weight = 10,
-                              },
-              }),
-              (std::vector<std::uint8_t>{
-                      0x00, 0x00, 0x0a, 0x01, 0x2d, 0x00, 0x00, 0x00, 0x05, 0x02,
-                      0x80, 0x00, 0x00, 0x03, 0x0a, 0x20, 0x88, 0x00, 0x00,
-              }));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        EXPECT_EQ(encode_headers_bytes({
+                          .status_code = 200,
+                          .options =
+                                  {
+                                          .stream_id = 5,
+                                          .max_frame_size = 32,
+                                          .first_frame_payload_cap = 32,
+                                          .end_stream = true,
+                                          .pad_length = 2,
+                                          .has_priority = true,
+                                          .exclusive = true,
+                                          .stream_dependency = 3,
+                                          .weight = 10,
+                                  },
+                  }),
+                  (std::vector<std::uint8_t>{
+                          0x00, 0x00, 0x0a, 0x01, 0x2d, 0x00, 0x00, 0x00, 0x05, 0x02,
+                          0x80, 0x00, 0x00, 0x03, 0x0a, 0x20, 0x88, 0x00, 0x00,
+                  }));
+    });
 }
 
 TEST(Http2HeadersFrameEncoderTest, EncodesSmallHeaderBlockIntoOwnedBuffer) {
-    EncodeCase test_case{
-            .status_code = 200,
-            .options =
-                    {
-                            .stream_id = 9,
-                            .max_frame_size = 16384,
-                    },
-    };
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        EncodeCase test_case{
+                .status_code = 200,
+                .options =
+                        {
+                                .stream_id = 9,
+                                .max_frame_size = 16384,
+                        },
+        };
 
-    EXPECT_EQ(encode_headers_bytes_in_place(test_case),
-              (std::vector<std::uint8_t>{0x00, 0x00, 0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x09, 0x20, 0x88}));
-    EXPECT_EQ(test_case.total_bytes, 11U);
-    EXPECT_EQ(test_case.first_buffer_capacity, 1033U);
+        EXPECT_EQ(encode_headers_bytes_in_place(test_case),
+                  (std::vector<std::uint8_t>{0x00, 0x00, 0x02, 0x01, 0x04, 0x00, 0x00, 0x00, 0x09, 0x20, 0x88}));
+        EXPECT_EQ(test_case.total_bytes, 11U);
+        EXPECT_EQ(test_case.first_buffer_capacity, 1033U);
+    });
 }
 
 TEST(Http2HeadersFrameEncoderTest, GrowsOutputBufferForLargeHuffmanValueWithinFrame) {
-    std::string value(16 * 1024, 'x');
-    EncodeCase test_case{
-            .status_code = 200,
-            .options =
-                    {
-                            .stream_id = 11,
-                            .max_frame_size = 16384,
-                    },
-            .headers = {{"grpc-message", value}},
-    };
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        std::string value(16 * 1024, 'x');
+        EncodeCase test_case{
+                .status_code = 200,
+                .options =
+                        {
+                                .stream_id = 11,
+                                .max_frame_size = 16384,
+                        },
+                .headers = {{"grpc-message", value}},
+        };
 
-    const std::vector<std::uint8_t> out = encode_headers_bytes_in_place(test_case);
-    ASSERT_GE(out.size(), 9U);
-    const std::size_t payload_size = (static_cast<std::size_t>(out[0]) << 16U) |
-                                     (static_cast<std::size_t>(out[1]) << 8U) | static_cast<std::size_t>(out[2]);
-    EXPECT_EQ(out.size(), payload_size + 9U);
-    EXPECT_EQ(out[3], 0x01U);
-    EXPECT_EQ(out[4] & 0x04U, 0x04U);
-    EXPECT_LT(payload_size, 16384U);
-    EXPECT_EQ(test_case.first_buffer_capacity, 1033U);
+        const std::vector<std::uint8_t> out = encode_headers_bytes_in_place(test_case);
+        ASSERT_GE(out.size(), 9U);
+        const std::size_t payload_size = (static_cast<std::size_t>(out[0]) << 16U) |
+                                         (static_cast<std::size_t>(out[1]) << 8U) | static_cast<std::size_t>(out[2]);
+        EXPECT_EQ(out.size(), payload_size + 9U);
+        EXPECT_EQ(out[3], 0x01U);
+        EXPECT_EQ(out[4] & 0x04U, 0x04U);
+        EXPECT_LT(payload_size, 16384U);
+        EXPECT_EQ(test_case.first_buffer_capacity, 1033U);
+    });
 }
 
 } // namespace

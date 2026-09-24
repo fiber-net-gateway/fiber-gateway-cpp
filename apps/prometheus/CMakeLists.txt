@@ -31,7 +31,8 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/MultiLoopSnapshotTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/TextEncoderTest.cpp")
     target_link_libraries(fiber_prometheus_tests PRIVATE fiber::prometheus GTest::gtest_main)
-    target_include_directories(fiber_prometheus_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_include_directories(fiber_prometheus_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src"
+                                                             "${CMAKE_SOURCE_DIR}/tests")
     set_target_properties(fiber_prometheus_tests PROPERTIES FOLDER "components/prometheus")
     fiber_link_runtime_allocator(fiber_prometheus_tests)
 

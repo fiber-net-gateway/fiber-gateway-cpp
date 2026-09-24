@@ -30,10 +30,6 @@
 #include <fiber/tls/TlsConnectedState.h>
 #include <fiber/tls/TlsTypes.h>
 
-namespace fiber::mem {
-class IoBufNodePool;
-}
-
 namespace fiber::tls {
 
 class TlsClientHandshakeEngine final : public common::NonCopyable, public common::NonMovable {
@@ -46,11 +42,10 @@ public:
 
     // `config` and `session` are BORROWED views that must outlive the engine
     // (the net glue holds them). `session` == nullptr runs a full handshake.
-    // The pool backs the engine's record chains; destroy the engine (and any
-    // output it produced) on the loop owning that pool. Construction failure
+    // Chains resolve the current loop's node pool per operation — run and
+    // destroy the engine on the connection's loop. Construction failure
     // (entropy / allocation) lands directly in the Failed terminal state.
-    TlsClientHandshakeEngine(const TlsClientConfig &config, const TlsSessionOffer *session,
-                             mem::IoBufNodePool &pool) noexcept;
+    TlsClientHandshakeEngine(const TlsClientConfig &config, const TlsSessionOffer *session) noexcept;
     ~TlsClientHandshakeEngine();
 
     // Peer bytes in arbitrary chunking; the engine digests everything it can.

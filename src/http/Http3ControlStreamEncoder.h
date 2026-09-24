@@ -8,10 +8,9 @@
 namespace fiber::http {
 
 [[nodiscard]] common::IoResult<mem::IoBufChain>
-encode_http3_control_stream_preface(const Http3Settings &settings, mem::IoBufNodePool &node_pool) noexcept;
+encode_http3_control_stream_preface(const Http3Settings &settings) noexcept;
 
-[[nodiscard]] common::IoResult<mem::IoBufChain> encode_http3_goaway_frame(std::uint64_t id,
-                                                                          mem::IoBufNodePool &node_pool) noexcept;
+[[nodiscard]] common::IoResult<mem::IoBufChain> encode_http3_goaway_frame(std::uint64_t id) noexcept;
 
 } // namespace fiber::http
 

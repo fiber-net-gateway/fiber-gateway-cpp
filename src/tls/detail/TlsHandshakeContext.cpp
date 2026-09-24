@@ -47,25 +47,11 @@ TlsHandshakeContext::TlsHandshakeContext() noexcept = default;
 
 TlsHandshakeContext::~TlsHandshakeContext() noexcept = default;
 
-void TlsHandshakeContext::bind(mem::IoBufNodePool &pool) noexcept {
-    reader_.bind_node_pool(pool);
-    writer_.bind_node_pool(pool);
-    out_ = mem::IoBufChain(pool);
-    reassembly_ = mem::IoBufChain(pool);
-}
-
 bool TlsHandshakeContext::feed(mem::IoBuf &&bytes) noexcept { return reader_.feed(std::move(bytes)); }
 
 bool TlsHandshakeContext::feed(mem::IoBufChain &&bytes) noexcept { return reader_.feed(std::move(bytes)); }
 
-mem::IoBufChain TlsHandshakeContext::take_output() noexcept {
-    mem::IoBufNodePool *pool = out_.bound() ? &out_.node_pool() : nullptr;
-    mem::IoBufChain out = std::move(out_);
-    if (pool != nullptr) {
-        out_ = mem::IoBufChain(*pool);
-    }
-    return out;
-}
+mem::IoBufChain TlsHandshakeContext::take_output() noexcept { return std::move(out_); }
 
 std::size_t TlsHandshakeContext::pending_bytes() const noexcept {
     return reader_.pending_bytes() + reassembly_.readable_bytes() + (has_current_ ? plain_len_ - current_off_ : 0);

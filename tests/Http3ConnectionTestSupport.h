@@ -36,6 +36,7 @@
 #include "quic/QuicTransportCodec.h"
 #include "quic/QuicTransportParamsCodec.h"
 
+#include "LoopTestSupport.h"
 #include "QuicTestLoop.h"
 
 namespace fiber::http {
@@ -474,15 +475,15 @@ std::vector<std::uint8_t> chain_to_bytes(fiber::mem::IoBufChain chain) {
 }
 
 std::vector<std::uint8_t> qpack_header_block(const HeaderList &headers) {
-    fiber::mem::IoBufNodePool pool;
+    auto &pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
     fiber::http::Http3QpackEncoderIoBufWriter writer(
-            pool, fiber::http::Http3QpackEncoder::Options{.huffman_threshold = 1024});
+            fiber::http::Http3QpackEncoder::Options{.huffman_threshold = 1024});
     for (const auto &[name, value]: headers) {
         EXPECT_EQ(writer.encode_field(name, fiber::http::http_header_name_hash(name), value),
                   fiber::common::IoErr::None);
     }
 
-    fiber::mem::IoBufChain block(pool);
+    fiber::mem::IoBufChain block;
     EXPECT_EQ(writer.finish(block), fiber::common::IoErr::None);
     return chain_to_bytes(std::move(block));
 }

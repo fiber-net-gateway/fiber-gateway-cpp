@@ -15,11 +15,10 @@ namespace fiber::http {
 
 class Http3QpackEncoderIoBufWriter : public common::NonCopyable, public common::NonMovable {
 public:
-    explicit Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool, std::size_t chunk_size = 512) noexcept;
-    Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool, Http3QpackEncoder::Options options,
-                                 std::size_t chunk_size = 512) noexcept;
-    Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool, Http3QpackEncoder::Options options,
-                                 std::size_t chunk_size, std::size_t prefix_reserve) noexcept;
+    explicit Http3QpackEncoderIoBufWriter(std::size_t chunk_size = 512) noexcept;
+    Http3QpackEncoderIoBufWriter(Http3QpackEncoder::Options options, std::size_t chunk_size = 512) noexcept;
+    Http3QpackEncoderIoBufWriter(Http3QpackEncoder::Options options, std::size_t chunk_size,
+                                 std::size_t prefix_reserve) noexcept;
 
     [[nodiscard]] common::IoErr encode_status(int status_code) noexcept;
     [[nodiscard]] common::IoErr encode_method(HttpMethod method) noexcept;

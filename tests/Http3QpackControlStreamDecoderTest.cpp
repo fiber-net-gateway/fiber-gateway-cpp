@@ -6,6 +6,7 @@
 
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/common/mem/IoBufChain.h>
+#include "LoopTestSupport.h"
 #include "http/Http3QpackControlStreamDecoder.h"
 
 namespace {
@@ -40,68 +41,75 @@ void append_prefixed_integer(std::vector<std::uint8_t> &out, std::uint8_t prefix
 } // namespace
 
 TEST(Http3QpackControlStreamDecoderTest, EncoderAcceptsCapacityZero) {
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, {0x20});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, {0x20});
 
-    fiber::http::Http3QpackEncoderStreamDecoder decoder;
-    EXPECT_EQ(decoder.parse(chain), fiber::http::Http3ParseStatus::NeedMore);
-    EXPECT_EQ(chain.readable_bytes(), 0U);
+        fiber::http::Http3QpackEncoderStreamDecoder decoder;
+        EXPECT_EQ(decoder.parse(chain), fiber::http::Http3ParseStatus::NeedMore);
+        EXPECT_EQ(chain.readable_bytes(), 0U);
+    });
 }
 
 TEST(Http3QpackControlStreamDecoderTest, EncoderRejectsCapacityNonZero) {
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, {0x21});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, {0x21});
 
-    fiber::http::Http3QpackEncoderStreamDecoder decoder;
-    ASSERT_EQ(decoder.parse(chain), fiber::http::Http3ParseStatus::Error);
-    EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::QpackEncoderStreamError);
+        fiber::http::Http3QpackEncoderStreamDecoder decoder;
+        ASSERT_EQ(decoder.parse(chain), fiber::http::Http3ParseStatus::Error);
+        EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::QpackEncoderStreamError);
+    });
 }
 
 TEST(Http3QpackControlStreamDecoderTest, EncoderRejectsInsertInstruction) {
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, {0x80});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, {0x80});
 
-    fiber::http::Http3QpackEncoderStreamDecoder decoder;
-    ASSERT_EQ(decoder.parse(chain), fiber::http::Http3ParseStatus::Error);
-    EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::QpackEncoderStreamError);
+        fiber::http::Http3QpackEncoderStreamDecoder decoder;
+        ASSERT_EQ(decoder.parse(chain), fiber::http::Http3ParseStatus::Error);
+        EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::QpackEncoderStreamError);
+    });
 }
 
 TEST(Http3QpackControlStreamDecoderTest, DecoderAcceptsStreamCancellation) {
-    std::vector<std::uint8_t> bytes;
-    append_prefixed_integer(bytes, 0x40, 6, 67);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        std::vector<std::uint8_t> bytes;
+        append_prefixed_integer(bytes, 0x40, 6, 67);
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, bytes);
 
-    fiber::http::Http3QpackDecoderStreamDecoder decoder;
-    fiber::http::Http3QpackDecoderStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
-    EXPECT_EQ(event.type, fiber::http::Http3QpackDecoderStreamEventType::StreamCancellation);
-    EXPECT_EQ(event.stream_id, 67U);
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, bytes);
+
+        fiber::http::Http3QpackDecoderStreamDecoder decoder;
+        fiber::http::Http3QpackDecoderStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+        EXPECT_EQ(event.type, fiber::http::Http3QpackDecoderStreamEventType::StreamCancellation);
+        EXPECT_EQ(event.stream_id, 67U);
+    });
 }
 
 TEST(Http3QpackControlStreamDecoderTest, DecoderRejectsSectionAcknowledgement) {
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, {0x80});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, {0x80});
 
-    fiber::http::Http3QpackDecoderStreamDecoder decoder;
-    fiber::http::Http3QpackDecoderStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
-    EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::QpackDecoderStreamError);
+        fiber::http::Http3QpackDecoderStreamDecoder decoder;
+        fiber::http::Http3QpackDecoderStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
+        EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::QpackDecoderStreamError);
+    });
 }
 
 TEST(Http3QpackControlStreamDecoderTest, DecoderRejectsInsertCountIncrement) {
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, {0x00});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, {0x00});
 
-    fiber::http::Http3QpackDecoderStreamDecoder decoder;
-    fiber::http::Http3QpackDecoderStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
-    EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::QpackDecoderStreamError);
+        fiber::http::Http3QpackDecoderStreamDecoder decoder;
+        fiber::http::Http3QpackDecoderStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
+        EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::QpackDecoderStreamError);
+    });
 }

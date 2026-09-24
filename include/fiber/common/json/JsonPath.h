@@ -185,7 +185,7 @@ struct JsonPathRewriteError {
 };
 
 [[nodiscard]] std::expected<mem::IoBufChain, JsonPathRewriteError>
-rewrite_json_paths(const JsonPathProgram &program, mem::IoBuf input, mem::BufPool &pool, mem::IoBufNodePool &node_pool,
+rewrite_json_paths(const JsonPathProgram &program, mem::IoBuf input, mem::BufPool &pool,
                    JsonPathRewriter rewriter) noexcept;
 
 } // namespace fiber::json

@@ -66,7 +66,6 @@ public:
     [[nodiscard]] std::size_t buffer_limit() const noexcept { return reassembler_.buffer_limit(); }
     [[nodiscard]] std::size_t low_water() const noexcept { return low_water_; }
     [[nodiscard]] std::size_t active_extent_count() const noexcept { return reassembler_.active_extent_count(); }
-    [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept { return reassembler_.node_pool(); }
     [[nodiscard]] bool has_read_waiter() const noexcept { return read_waiter_ != nullptr; }
     [[nodiscard]] bool initialized() const noexcept { return reassembler_.initialized(); }
 

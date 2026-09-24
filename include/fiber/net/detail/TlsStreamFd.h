@@ -114,10 +114,6 @@ private:
     fiber::common::IoErr feed_engine(fiber::event::IoEvent &event) noexcept;
 
     StreamFd stream_fd_;
-    // Private per-connection node allocator (pure freelist, loop-independent)
-    // shared by the handshake engines and TlsConnection; destroyed after the
-    // chains that borrow it.
-    mem::IoBufNodePool *pool_ = nullptr;
     Handshake *hs_ = nullptr; // live until the handshake completes/fails
     tls::TlsConnection *conn_ = nullptr; // the connected phase
     mem::IoBufChain out_pending_{}; // sealed records not yet on the wire

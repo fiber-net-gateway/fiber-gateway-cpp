@@ -48,15 +48,14 @@ HttpBodyPipeResult pipe_error(common::IoErr code, HttpBodyPipePhase phase) noexc
 } // namespace
 
 async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBodyPipeWriter sink,
-                                               mem::IoBufNodePool &node_pool,
                                                const HttpBodyPipeOptions &options) noexcept {
     if (!source.valid() || !sink.valid() || !valid_options(options)) {
         co_return pipe_error(common::IoErr::Invalid, HttpBodyPipePhase::Validate);
     }
 
     HttpBodyPipeAbortGuard abort_guard(source, sink);
-    mem::IoBufChain buffer(node_pool);
-    mem::IoBufChain refill(node_pool);
+    mem::IoBufChain buffer;
+    mem::IoBufChain refill;
     HttpBodyPipeStats stats;
     std::optional<HttpBodyPipeError> pending_read_error;
     bool input_complete = false;

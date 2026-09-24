@@ -13,8 +13,8 @@
 // Config/resumption/minter are all borrowed and must outlive the engine (the
 // net glue holds them). resumption/minter == nullptr: no resumption lookup,
 // no NST minting (a client PSK offer then degrades safely to a full
-// handshake). Pool semantics as in 06: every chain binds to the caller's
-// IoBufNodePool and is destroyed on the owning loop.
+// handshake). Chains resolve the current loop's node pool per operation —
+// run and destroy the engine on the connection's loop.
 //
 // source (09 §4.1): optional per-ClientHello config selection. When set, the
 // fork calls select() right after decoding the ClientHello; null return =
@@ -42,8 +42,7 @@ public:
     enum class Event : std::uint8_t { None, HandshakeDone, Failed }; // as in 06
 
     TlsServerHandshakeEngine(const TlsServerConfig &config, const TlsResumptionLookup *resumption,
-                             const TlsTicketMinter *minter, mem::IoBufNodePool &pool,
-                             const TlsServerConfigSource *source = nullptr) noexcept;
+                             const TlsTicketMinter *minter, const TlsServerConfigSource *source = nullptr) noexcept;
     ~TlsServerHandshakeEngine();
 
     // Client bytes in (any chunking). NoMem = connection-level failure;

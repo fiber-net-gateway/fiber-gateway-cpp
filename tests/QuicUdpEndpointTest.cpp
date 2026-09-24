@@ -1713,7 +1713,7 @@ recv_http3_control_preface_frame(fiber::event::EventLoop *loop, fiber::quic::Qui
         done_promise->set_value(std::unexpected(attached.error()));
         co_return;
     }
-    auto preface = fiber::http::encode_http3_control_stream_preface({}, server.recv_extent_pool());
+    auto preface = fiber::http::encode_http3_control_stream_preface({});
     if (!preface) {
         done_promise->set_value(std::unexpected(preface.error()));
         co_return;

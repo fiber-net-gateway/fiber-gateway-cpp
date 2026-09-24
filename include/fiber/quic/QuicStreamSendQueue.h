@@ -50,8 +50,6 @@ public:
 
     [[nodiscard]] common::IoResult<std::uint64_t> reset(std::uint64_t error_code = 0) noexcept;
 
-    [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept { return *pool_; }
-    [[nodiscard]] const mem::IoBufNodePool &node_pool() const noexcept { return *pool_; }
     [[nodiscard]] bool initialized() const noexcept { return pool_ != nullptr; }
     [[nodiscard]] std::size_t buffer_limit() const noexcept { return buffer_limit_; }
     [[nodiscard]] std::size_t buffer_available() const noexcept;

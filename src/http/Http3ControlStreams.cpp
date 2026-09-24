@@ -50,7 +50,7 @@ async::Task<common::IoResult<void>> Http3ControlStreams::start() noexcept {
         co_return std::unexpected(common::IoErr::Canceled);
     }
     FIBER_ASSERT(!local_control_stream_);
-    auto preface = encode_http3_control_stream_preface(local_settings_, quic_.recv_extent_pool());
+    auto preface = encode_http3_control_stream_preface(local_settings_);
     if (!preface) {
         co_return std::unexpected(preface.error());
     }
@@ -336,7 +336,7 @@ async::Task<common::IoResult<void>> Http3ControlStreams::send_goaway(std::uint64
         co_return std::unexpected(common::IoErr::Canceled);
     }
     FIBER_ASSERT(local_control_stream_);
-    auto frame = encode_http3_goaway_frame(id, quic_.recv_extent_pool());
+    auto frame = encode_http3_goaway_frame(id);
     if (!frame) {
         fail(Http3ErrorCode::InternalError);
         co_return std::unexpected(frame.error());

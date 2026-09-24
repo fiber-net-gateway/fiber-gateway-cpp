@@ -47,8 +47,7 @@ DetachedTask update_metrics(CounterRef counter, GaugeRef gauge, HistogramRef his
 
 DetachedTask collect_to_string(MetricsRegistry *registry, std::promise<IoResult<std::string>> *done,
                                fiber::event::EventLoopGroup *stop_group = nullptr) {
-    auto &pool = fiber::event::EventLoop::current().io_buf_node_pool();
-    auto result = co_await registry->collect_text(pool);
+    auto result = co_await registry->collect_text();
     if (!result) {
         done->set_value(std::unexpected(result.error()));
     } else {
@@ -146,8 +145,7 @@ private:
 };
 
 CancelableTask cancelable_collect(MetricsRegistry *registry, bool *completed) {
-    auto &pool = fiber::event::EventLoop::current().io_buf_node_pool();
-    (void) co_await registry->collect_text(pool);
+    (void) co_await registry->collect_text();
     *completed = true;
 }
 

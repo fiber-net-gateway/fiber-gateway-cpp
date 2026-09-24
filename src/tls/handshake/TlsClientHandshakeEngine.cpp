@@ -130,14 +130,13 @@ struct TlsClientHandshakeEngine::Impl {
 // ClientHello first flight
 // =====================================================================
 
-TlsClientHandshakeEngine::TlsClientHandshakeEngine(const TlsClientConfig &config, const TlsSessionOffer *session,
-                                                   mem::IoBufNodePool &pool) noexcept {
+TlsClientHandshakeEngine::TlsClientHandshakeEngine(const TlsClientConfig &config,
+                                                   const TlsSessionOffer *session) noexcept {
     impl_ = new (std::nothrow) Impl(config, session);
     if (impl_ == nullptr) {
         return; // done()/failed() report the terminal state; no alert bytes
     }
     Impl &impl = *impl_;
-    impl.ctx.bind(pool);
     impl.ctx.set_legacy_version(kTlsRecordVersionTls10); // first flight (06 §2.3)
 
     impl.psk_offered = session != nullptr;

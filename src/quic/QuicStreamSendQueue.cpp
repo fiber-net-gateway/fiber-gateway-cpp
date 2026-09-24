@@ -96,9 +96,6 @@ common::IoResult<std::size_t> QuicStreamSendQueue::try_append(const mem::IoBuf &
 }
 
 common::IoResult<std::size_t> QuicStreamSendQueue::try_append_chain(mem::IoBufChain &chain) noexcept {
-    if (!chain.bound() || &chain.node_pool() != pool_) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
 
     const bool chain_complete = chain.complete();
     const std::size_t bytes = chain.readable_bytes();

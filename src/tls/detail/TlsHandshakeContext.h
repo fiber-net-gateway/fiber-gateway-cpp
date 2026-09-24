@@ -18,9 +18,10 @@
 // protocol state, and keeping the feed points next to their snapshot points
 // in the FSM makes the ordering auditable (06 §4.2 tables).
 //
-// Pool contract: reader/writer/out_ share the caller's IoBufNodePool; the
-// context and the chains it produced are destroyed on the owning loop.
-// No OpenSSL include here — record protection goes through TlsRecordCipher.
+// Node pool contract: chains resolve the current loop's node pool per
+// operation (see IoBufChain) — the context and its callers live on the
+// connection's loop. No OpenSSL include here — record protection goes
+// through TlsRecordCipher.
 
 #include <array>
 #include <cstddef>
@@ -75,9 +76,6 @@ public:
 
     TlsHandshakeContext() noexcept;
     ~TlsHandshakeContext();
-
-    // Binds every chain to `pool`; must precede the first feed/emit.
-    void bind(mem::IoBufNodePool &pool) noexcept;
 
     // ---- inbound ----
 

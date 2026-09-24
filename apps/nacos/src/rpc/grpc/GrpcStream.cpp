@@ -187,7 +187,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::write(const google::proto
         co_return std::unexpected(common::IoErr::Already);
     }
 
-    auto payload = encode(conn_->loop().io_buf_node_pool(), request);
+    auto payload = encode(request);
     if (!payload) {
         fail(payload.error());
         co_return std::unexpected(payload.error());
@@ -223,7 +223,7 @@ fiber::async::Task<common::IoResult<void>> GrpcStream::writes_done() noexcept {
     }
 
     // Empty chain marked complete -> an empty DATA frame with END_STREAM.
-    mem::IoBufChain empty(conn_->loop().io_buf_node_pool());
+    mem::IoBufChain empty;
     empty.mark_complete();
     auto write_result = co_await exchange_.write_all(std::move(empty), remaining_timeout());
     if (!write_result) {

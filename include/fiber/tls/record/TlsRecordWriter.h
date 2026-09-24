@@ -31,19 +31,11 @@ namespace fiber::tls {
 // writer emits plaintext records only. Pure memory: no fds, no coroutines,
 // no openssl.
 //
-// Node pool contract (single pool per connection, mirroring the reader): the
-// writer's pool backs the internal wrap chain; `out` and every payload chain
-// must be bound to the SAME pool (any non-empty chain is bound by
-// construction — only default-constructed empties are not). Pool mismatches
-// surface as IoErr::NoMem via append_chain. Nodes handed to `out` belong to
-// that pool: drain/destroy `out` on the loop that owns it.
+// Node pool contract: chains resolve the current loop's node pool per
+// operation (see IoBufChain) — every write runs on the connection's loop.
 class TlsRecordWriter : public common::NonCopyable, public common::NonMovable {
 public:
     TlsRecordWriter() noexcept = default;
-    explicit TlsRecordWriter(mem::IoBufNodePool &node_pool) noexcept : node_pool_(&node_pool) {}
-
-    // Only for the default constructor; must precede the first write.
-    void bind_node_pool(mem::IoBufNodePool &node_pool) noexcept { node_pool_ = &node_pool; }
 
     void set_legacy_version(std::uint16_t version) noexcept { legacy_version_ = version; }
     [[nodiscard]] std::uint16_t legacy_version() const noexcept { return legacy_version_; }
@@ -60,7 +52,6 @@ private:
     [[nodiscard]] common::IoResult<void> write_header(TlsContentType type, std::size_t length,
                                                       mem::IoBufChain &out) noexcept;
 
-    mem::IoBufNodePool *node_pool_ = nullptr;
     std::uint16_t legacy_version_ = kTlsRecordVersionTls12;
 };
 

@@ -1123,7 +1123,7 @@ private:
         }
 
         if (has_request_body) {
-            fiber::mem::IoBufChain body(fiber::event::EventLoop::current().io_buf_node_pool());
+            fiber::mem::IoBufChain body;
             body.mark_complete();
             if (request_body_) {
                 fiber::mem::IoBuf slice = request_body_.retain_slice(0, request_body_.readable());

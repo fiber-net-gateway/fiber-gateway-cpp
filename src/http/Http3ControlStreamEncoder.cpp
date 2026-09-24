@@ -50,8 +50,7 @@ namespace {
 
 } // namespace
 
-common::IoResult<mem::IoBufChain> encode_http3_control_stream_preface(const Http3Settings &settings,
-                                                                      mem::IoBufNodePool &node_pool) noexcept {
+common::IoResult<mem::IoBufChain> encode_http3_control_stream_preface(const Http3Settings &settings) noexcept {
     const std::size_t payload_len = settings_payload_len(settings);
     const std::size_t encoded_len = quic::quic_varint_len(static_cast<std::uint64_t>(Http3StreamType::Control)) +
                                     quic::quic_varint_len(static_cast<std::uint64_t>(Http3FrameType::Settings)) +
@@ -102,14 +101,14 @@ common::IoResult<mem::IoBufChain> encode_http3_control_stream_preface(const Http
     }
 
     buf.commit(out.offset());
-    mem::IoBufChain chain(node_pool);
+    mem::IoBufChain chain;
     if (!chain.append(std::move(buf))) {
         return std::unexpected(common::IoErr::NoMem);
     }
     return std::move(chain);
 }
 
-common::IoResult<mem::IoBufChain> encode_http3_goaway_frame(std::uint64_t id, mem::IoBufNodePool &node_pool) noexcept {
+common::IoResult<mem::IoBufChain> encode_http3_goaway_frame(std::uint64_t id) noexcept {
     const std::size_t payload_len = quic::quic_varint_len(id);
     const std::size_t encoded_len = quic::quic_varint_len(static_cast<std::uint64_t>(Http3FrameType::Goaway)) +
                                     quic::quic_varint_len(payload_len) + payload_len;
@@ -133,7 +132,7 @@ common::IoResult<mem::IoBufChain> encode_http3_goaway_frame(std::uint64_t id, me
     }
 
     buf.commit(out.offset());
-    mem::IoBufChain chain(node_pool);
+    mem::IoBufChain chain;
     if (!chain.append(std::move(buf))) {
         return std::unexpected(common::IoErr::NoMem);
     }

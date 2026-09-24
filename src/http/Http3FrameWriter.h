@@ -20,8 +20,7 @@ inline constexpr std::uint64_t kMaxHttp3FramePayloadLength = (1ULL << 62U) - 1U;
 
 [[nodiscard]] common::IoResult<mem::IoBuf> http3_build_data_frame_header(std::size_t payload_len) noexcept;
 
-[[nodiscard]] common::IoResult<void> http3_prepare_data_frame(mem::IoBufChain &chunk,
-                                                              mem::IoBufNodePool &target_pool) noexcept;
+[[nodiscard]] common::IoResult<void> http3_prepare_data_frame(mem::IoBufChain &chunk) noexcept;
 
 } // namespace fiber::http
 

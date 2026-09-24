@@ -437,8 +437,7 @@ proxy_over_connection(fiber::http::HttpExchange &exchange, fiber::http::HttpResp
     };
     auto pipe_result =
             co_await fiber::http::pipe_http_body(fiber::http::make_http_body_pipe_reader(upstream_exchange),
-                                                 fiber::http::make_http_body_pipe_writer(response),
-                                                 fiber::event::EventLoop::current().io_buf_node_pool(), pipe_options);
+                                                 fiber::http::make_http_body_pipe_writer(response), pipe_options);
     if (!pipe_result) {
         if (pipe_result.error().phase == fiber::http::HttpBodyPipePhase::Read) {
             record_upstream_error(log_context, pipe_result.error().code, "read_body");

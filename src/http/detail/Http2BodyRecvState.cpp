@@ -161,8 +161,6 @@ private:
     friend class Http2BodyRecvState;
 };
 
-Http2BodyRecvState::Http2BodyRecvState(mem::IoBufNodePool &node_pool) noexcept : queue_(node_pool) {}
-
 common::IoErr Http2BodyRecvState::push_body(mem::IoBuf &&buf, bool end_stream) noexcept {
     const bool queued_data = buf.readable() != 0;
     if (queued_data && !queue_.append(std::move(buf))) {
@@ -193,7 +191,7 @@ void Http2BodyRecvState::abort(common::IoErr reason) noexcept {
 
 fiber::async::Task<common::IoResult<mem::IoBufChain>>
 Http2BodyRecvState::read_body(Http2Stream &stream, std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept {
-    mem::IoBufChain out(queue_.node_pool());
+    mem::IoBufChain out;
     if (max_bytes == 0) {
         if (queue_.readable_bytes() == 0 && input_closed_) {
             out.mark_complete();

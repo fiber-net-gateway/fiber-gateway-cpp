@@ -1570,7 +1570,7 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
     saw_connection_keep_alive_ = false;
     response_eof_delimited_ = false;
 
-    auto *header_node = new (pool_) ResponseHeaderNode(pool_, event::EventLoop::current().io_buf_node_pool());
+    auto *header_node = new (pool_) ResponseHeaderNode(pool_);
     if (!header_node) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
@@ -1803,7 +1803,7 @@ ClientHttp1Exchange::read_body(std::size_t max_bytes, std::chrono::milliseconds 
     if (!conn_.transport_ || !conn_.valid()) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    mem::IoBufChain out(event::EventLoop::current().io_buf_node_pool());
+    mem::IoBufChain out;
     if (!final_response_received_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }

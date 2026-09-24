@@ -7,7 +7,7 @@ namespace fiber::tls {
 
 common::IoResult<void> TlsRecordWriter::write(TlsContentType type, mem::IoBuf &&payload,
                                               mem::IoBufChain &out) noexcept {
-    mem::IoBufChain chain(*node_pool_);
+    mem::IoBufChain chain;
     if (!chain.append(std::move(payload))) {
         return std::unexpected(common::IoErr::NoMem);
     }
@@ -16,8 +16,6 @@ common::IoResult<void> TlsRecordWriter::write(TlsContentType type, mem::IoBuf &&
 
 common::IoResult<void> TlsRecordWriter::write(TlsContentType type, mem::IoBufChain &&payload,
                                               mem::IoBufChain &out) noexcept {
-    FIBER_ASSERT(node_pool_ != nullptr);
-    FIBER_ASSERT(out.bound());
     const bool empty = payload.readable_bytes() == 0;
     while (payload.readable_bytes() > 0) {
         const std::size_t chunk = std::min(payload.readable_bytes(), kTlsMaxPlaintextSize);

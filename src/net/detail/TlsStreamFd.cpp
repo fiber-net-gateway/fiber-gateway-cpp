@@ -114,7 +114,7 @@ struct TlsStreamFd::Handshake {
 TlsStreamFd::TlsStreamFd(fiber::event::EventLoop &loop, int fd) : stream_fd_(loop, fd) {}
 
 TlsStreamFd::~TlsStreamFd() {
-    if (!stream_fd_.valid() && hs_ == nullptr && conn_ == nullptr && pool_ == nullptr) {
+    if (!stream_fd_.valid() && hs_ == nullptr && conn_ == nullptr) {
         return;
     }
     if (loop().in_loop()) {
@@ -167,11 +167,6 @@ void TlsStreamFd::close() {
     }
     delete hs_;
     hs_ = nullptr;
-    // Return chain nodes to the pool before the pool itself dies.
-    out_pending_ = mem::IoBufChain{};
-    early_data_ = mem::IoBufChain{};
-    delete pool_;
-    pool_ = nullptr;
     if (stream_fd_.valid()) {
         stream_fd_.close();
     }
@@ -227,11 +222,8 @@ common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) no
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    auto *pool = new (std::nothrow) mem::IoBufNodePool();
     auto *staging = new (std::nothrow) Handshake();
-    if (pool == nullptr || staging == nullptr) {
-        delete staging;
-        delete pool;
+    if (staging == nullptr) {
         return std::unexpected(common::IoErr::NoMem);
     }
 
@@ -250,7 +242,6 @@ common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) no
             auto system_store = TrustStore::system_default();
             if (!system_store) {
                 delete staging;
-                delete pool;
                 return std::unexpected(system_store.error());
             }
             trust_store = *system_store;
@@ -265,7 +256,6 @@ common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) no
             cfg.check_host = verify_name;
         } else {
             delete staging;
-            delete pool;
             return std::unexpected(common::IoErr::Invalid);
         }
     } else {
@@ -280,16 +270,14 @@ common::IoResult<void> TlsStreamFd::start_client(const TlsClientParam &param) no
     cfg.max_version = static_cast<std::uint16_t>(param.max_version);
     cfg.now_unix_ms = system_now_unix_ms();
 
-    staging->client = new (std::nothrow) tls::TlsClientHandshakeEngine(cfg, nullptr, *pool);
+    staging->client = new (std::nothrow) tls::TlsClientHandshakeEngine(cfg, nullptr);
     if (staging->client == nullptr) {
         delete staging;
-        delete pool;
         return std::unexpected(common::IoErr::NoMem);
     }
     // A construction failure (entropy/allocation) is already terminal with
     // any alert encoded — the handshake loop flushes it, then reports.
 
-    pool_ = pool;
     hs_ = staging;
     role_ = Role::Client;
     handshake_done_ = false;
@@ -311,11 +299,8 @@ common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param) no
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    auto *pool = new (std::nothrow) mem::IoBufNodePool();
     auto *staging = new (std::nothrow) Handshake();
-    if (pool == nullptr || staging == nullptr) {
-        delete staging;
-        delete pool;
+    if (staging == nullptr) {
         return std::unexpected(common::IoErr::NoMem);
     }
 
@@ -344,14 +329,12 @@ common::IoResult<void> TlsStreamFd::start_server(const TlsServerParam &param) no
     // template config passes only the selector-mode invariant checks.
     staging->server = new (std::nothrow) tls::TlsServerHandshakeEngine(
             cfg, param.ticket_service != nullptr ? &staging->lookup : nullptr,
-            param.ticket_service != nullptr ? &staging->minter : nullptr, *pool, &staging->selector);
+            param.ticket_service != nullptr ? &staging->minter : nullptr, &staging->selector);
     if (staging->server == nullptr) {
         delete staging;
-        delete pool;
         return std::unexpected(common::IoErr::NoMem);
     }
 
-    pool_ = pool;
     hs_ = staging;
     role_ = Role::Server;
     handshake_done_ = false;
@@ -661,7 +644,7 @@ fiber::common::IoErr TlsStreamFd::handshake_once(fiber::event::IoEvent &event) n
         }
         conn_ = new (std::nothrow) tls::TlsConnection(role_ == Role::Client ? tls::TlsConnectionRole::Client
                                                                             : tls::TlsConnectionRole::Server,
-                                                      std::move(state), *pool_);
+                                                      std::move(state));
         delete hs_;
         hs_ = nullptr;
         if (conn_ == nullptr) {

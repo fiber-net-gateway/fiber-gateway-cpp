@@ -61,7 +61,7 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write_all(const 
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    mem::IoBufChain chunk(req->node_pool());
+    mem::IoBufChain chunk;
     if (end_stream) {
         chunk.mark_complete();
     }

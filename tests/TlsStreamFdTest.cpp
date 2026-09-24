@@ -35,6 +35,7 @@
 #include <openssl/ssl.h>
 
 #include <poll.h>
+#include "LoopTestSupport.h"
 
 namespace {
 
@@ -286,120 +287,126 @@ DetachedTask write_tls_after_server_reset(fiber::net::detail::TlsStreamFd *clien
 }
 
 TEST(TlsStreamFdTest, CrossLoopHandshakeAndReadWriteUseOwnerPoller) {
-    SigpipeGuard sigpipe_guard;
-    TempFile cert("cert", kSelfSignedCertPem);
-    TempFile key("key", kSelfSignedKeyPem);
-    ASSERT_TRUE(cert.ok);
-    ASSERT_TRUE(key.ok);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert", kSelfSignedCertPem);
+        TempFile key("key", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
 
-    auto tls_pair = create_tls_pair(cert.path, key.path);
-    ASSERT_TRUE(tls_pair);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
 
-    int fds[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
 
-    fiber::event::EventLoopGroup group(2);
-    group.start();
+        fiber::event::EventLoopGroup group(2);
+        group.start();
 
-    auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
-    auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
+        auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
+        auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
 
-    std::promise<fiber::common::IoResult<std::string>> server_promise;
-    std::promise<fiber::common::IoResult<std::string>> client_promise;
-    auto server_future = server_promise.get_future();
-    auto client_future = client_promise.get_future();
+        std::promise<fiber::common::IoResult<std::string>> server_promise;
+        std::promise<fiber::common::IoResult<std::string>> client_promise;
+        auto server_future = server_promise.get_future();
+        auto client_future = client_promise.get_future();
 
-    fiber::async::spawn(group.at(0),
-                        [&]() { return run_tls_server(server_stream, tls_pair->server_options, &server_promise); });
-    fiber::async::spawn(group.at(1),
-                        [&]() { return run_tls_client(client_stream, tls_pair->client_options, &client_promise); });
+        fiber::async::spawn(group.at(0),
+                            [&]() { return run_tls_server(server_stream, tls_pair->server_options, &server_promise); });
+        fiber::async::spawn(group.at(1),
+                            [&]() { return run_tls_client(client_stream, tls_pair->client_options, &client_promise); });
 
-    ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
-    ASSERT_EQ(client_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(client_future.wait_for(2s), std::future_status::ready);
 
-    auto server_result = server_future.get();
-    auto client_result = client_future.get();
-    ASSERT_TRUE(server_result);
-    ASSERT_TRUE(client_result);
-    EXPECT_EQ(*server_result, "ping");
-    EXPECT_EQ(*client_result, "pong");
+        auto server_result = server_future.get();
+        auto client_result = client_future.get();
+        ASSERT_TRUE(server_result);
+        ASSERT_TRUE(client_result);
+        EXPECT_EQ(*server_result, "ping");
+        EXPECT_EQ(*client_result, "pong");
 
-    // Return the client stream to loop 0 before both streams die there.
-    std::promise<fiber::common::IoErr> handback_promise;
-    auto handback_future = handback_promise.get_future();
-    fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
-        handback_promise.set_value(client_stream->detach_for_handover());
-        co_return;
+        // Return the client stream to loop 0 before both streams die there.
+        std::promise<fiber::common::IoErr> handback_promise;
+        auto handback_future = handback_promise.get_future();
+        fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
+            handback_promise.set_value(client_stream->detach_for_handover());
+            co_return;
+        });
+        ASSERT_EQ(handback_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(handback_future.get(), fiber::common::IoErr::None);
+
+        std::promise<void> close_promise;
+        auto close_future = close_promise.get_future();
+        fiber::async::spawn(group.at(0),
+                            [&]() { return close_tls_streams(server_stream, client_stream, &close_promise); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
     });
-    ASSERT_EQ(handback_future.wait_for(2s), std::future_status::ready);
-    ASSERT_EQ(handback_future.get(), fiber::common::IoErr::None);
-
-    std::promise<void> close_promise;
-    auto close_future = close_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return close_tls_streams(server_stream, client_stream, &close_promise); });
-    ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
-
-    group.stop();
-    group.join();
 }
 
 TEST(TlsStreamFdTest, CrossLoopWriteFailureDoesNotTouchOwnerPoller) {
-    SigpipeGuard sigpipe_guard;
-    TempFile cert("cert_reset", kSelfSignedCertPem);
-    TempFile key("key_reset", kSelfSignedKeyPem);
-    ASSERT_TRUE(cert.ok);
-    ASSERT_TRUE(key.ok);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_reset", kSelfSignedCertPem);
+        TempFile key("key_reset", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
 
-    auto tls_pair = create_tls_pair(cert.path, key.path);
-    ASSERT_TRUE(tls_pair);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
 
-    int fds[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
 
-    fiber::event::EventLoopGroup group(2);
-    group.start();
+        fiber::event::EventLoopGroup group(2);
+        group.start();
 
-    auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
-    auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
+        auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
+        auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[1]);
 
-    std::atomic_bool client_handshake_done = false;
-    std::atomic_bool server_closed = false;
-    std::promise<fiber::common::IoErr> server_promise;
-    std::promise<fiber::common::IoErr> client_promise;
-    auto server_future = server_promise.get_future();
-    auto client_future = client_promise.get_future();
+        std::atomic_bool client_handshake_done = false;
+        std::atomic_bool server_closed = false;
+        std::promise<fiber::common::IoErr> server_promise;
+        std::promise<fiber::common::IoErr> client_promise;
+        auto server_future = server_promise.get_future();
+        auto client_future = client_promise.get_future();
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return reset_tls_server_after_client_handshake(server_stream, tls_pair->server_options, &client_handshake_done,
-                                                       &server_closed, &server_promise);
+        fiber::async::spawn(group.at(0), [&]() {
+            return reset_tls_server_after_client_handshake(server_stream, tls_pair->server_options,
+                                                           &client_handshake_done, &server_closed, &server_promise);
+        });
+        fiber::async::spawn(group.at(1), [&]() {
+            return write_tls_after_server_reset(client_stream, tls_pair->client_options, &client_handshake_done,
+                                                &server_closed, &client_promise);
+        });
+
+        ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(client_future.wait_for(2s), std::future_status::ready);
+        EXPECT_EQ(server_future.get(), fiber::common::IoErr::None);
+        EXPECT_NE(client_future.get(), fiber::common::IoErr::None);
+
+        // Return the client stream to loop 0 before both streams die there.
+        std::promise<fiber::common::IoErr> handback_promise;
+        auto handback_future = handback_promise.get_future();
+        fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
+            handback_promise.set_value(client_stream->detach_for_handover());
+            co_return;
+        });
+        ASSERT_EQ(handback_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(handback_future.get(), fiber::common::IoErr::None);
+
+        std::promise<void> close_promise;
+        auto close_future = close_promise.get_future();
+        fiber::async::spawn(group.at(0),
+                            [&]() { return close_tls_streams(server_stream, client_stream, &close_promise); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
     });
-    fiber::async::spawn(group.at(1), [&]() {
-        return write_tls_after_server_reset(client_stream, tls_pair->client_options, &client_handshake_done,
-                                            &server_closed, &client_promise);
-    });
-
-    ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
-    ASSERT_EQ(client_future.wait_for(2s), std::future_status::ready);
-    EXPECT_EQ(server_future.get(), fiber::common::IoErr::None);
-    EXPECT_NE(client_future.get(), fiber::common::IoErr::None);
-
-    // Return the client stream to loop 0 before both streams die there.
-    std::promise<fiber::common::IoErr> handback_promise;
-    auto handback_future = handback_promise.get_future();
-    fiber::async::spawn(group.at(1), [&]() -> fiber::async::DetachedTask {
-        handback_promise.set_value(client_stream->detach_for_handover());
-        co_return;
-    });
-    ASSERT_EQ(handback_future.wait_for(2s), std::future_status::ready);
-    ASSERT_EQ(handback_future.get(), fiber::common::IoErr::None);
-
-    std::promise<void> close_promise;
-    auto close_future = close_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return close_tls_streams(server_stream, client_stream, &close_promise); });
-    ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
-
-    group.stop();
-    group.join();
 }
 
 // Build an IoBufChain of segments with the given sizes. Each segment i is filled
@@ -457,8 +464,8 @@ DetachedTask abandon_blocked_tls_write(fiber::http::TlsTransport *transport, con
         fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
         fiber::common::IoErr err = transport->poll_writev(chain, out, wait_event);
         if (err == fiber::common::IoErr::WouldBlock) {
-            fiber::mem::IoBufNodePool empty_pool;
-            fiber::mem::IoBufChain empty_chain(empty_pool);
+            auto &empty_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+            fiber::mem::IoBufChain empty_chain;
             AbandonPendingWriteStats stats;
             stats.different_chain_busy_before =
                     transport->poll_writev(empty_chain, out, wait_event) == fiber::common::IoErr::Busy;
@@ -693,138 +700,142 @@ DetachedTask write_tls_pending_payload(fiber::http::TlsTransport *transport, con
 }
 
 TEST(TlsStreamFdTest, TlsTransportWaitReadableSeesPendingDecryptedData) {
-    SigpipeGuard sigpipe_guard;
-    TempFile cert("cert", kSelfSignedCertPem);
-    TempFile key("key", kSelfSignedKeyPem);
-    ASSERT_TRUE(cert.ok);
-    ASSERT_TRUE(key.ok);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert", kSelfSignedCertPem);
+        TempFile key("key", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
 
-    auto tls_pair = create_tls_pair(cert.path, key.path);
-    ASSERT_TRUE(tls_pair);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
 
-    int fds[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
 
-    fiber::event::EventLoopGroup group(2);
-    group.start();
+        fiber::event::EventLoopGroup group(2);
+        group.start();
 
-    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
-    ASSERT_TRUE(server_transport_result);
-    ASSERT_TRUE(client_transport_result);
-    auto *server_transport = server_transport_result->release();
-    auto *client_transport = client_transport_result->release();
+        fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+        auto server_transport_result =
+                fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+        auto client_transport_result =
+                fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
+        ASSERT_TRUE(server_transport_result);
+        ASSERT_TRUE(client_transport_result);
+        auto *server_transport = server_transport_result->release();
+        auto *client_transport = client_transport_result->release();
 
-    std::string payload(4096, 'p');
-    std::promise<fiber::common::IoResult<std::string>> server_promise;
-    std::promise<fiber::common::IoResult<std::size_t>> client_promise;
-    auto server_future = server_promise.get_future();
-    auto client_future = client_promise.get_future();
+        std::string payload(4096, 'p');
+        std::promise<fiber::common::IoResult<std::string>> server_promise;
+        std::promise<fiber::common::IoResult<std::size_t>> client_promise;
+        auto server_future = server_promise.get_future();
+        auto client_future = client_promise.get_future();
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return read_tls_pending_payload(server_transport, tls_pair->server_options, &server_promise);
+        fiber::async::spawn(group.at(0), [&]() {
+            return read_tls_pending_payload(server_transport, tls_pair->server_options, &server_promise);
+        });
+        fiber::async::spawn(group.at(1), [&]() {
+            return write_tls_pending_payload(client_transport, tls_pair->client_options, payload, &client_promise);
+        });
+
+        ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+        ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+        auto client_result = client_future.get();
+        auto server_result = server_future.get();
+
+        std::promise<void> server_close_promise;
+        std::promise<void> client_close_promise;
+        auto server_close_future = server_close_promise.get_future();
+        auto client_close_future = client_close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
+        fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
+        ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
+
+        ASSERT_TRUE(client_result);
+        ASSERT_TRUE(server_result);
+        EXPECT_EQ(*client_result, payload.size());
+        EXPECT_EQ(*server_result, payload);
     });
-    fiber::async::spawn(group.at(1), [&]() {
-        return write_tls_pending_payload(client_transport, tls_pair->client_options, payload, &client_promise);
-    });
-
-    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
-    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
-    auto client_result = client_future.get();
-    auto server_result = server_future.get();
-
-    std::promise<void> server_close_promise;
-    std::promise<void> client_close_promise;
-    auto server_close_future = server_close_promise.get_future();
-    auto client_close_future = client_close_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
-    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
-    ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
-    ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
-
-    group.stop();
-    group.join();
-
-    ASSERT_TRUE(client_result);
-    ASSERT_TRUE(server_result);
-    EXPECT_EQ(*client_result, payload.size());
-    EXPECT_EQ(*server_result, payload);
 }
 
 // Exercises TlsTransport::writev coalescing over a real TLS pair. The chain mixes
 // small nodes (coalesced into <=8k groups), a >8k node (solo, zero-copy), and
 // enough nodes to exceed the 16-iovec snapshot cap (forces a re-snapshot).
 TEST(TlsStreamFdTest, TlsTransportWritevCoalescesMultiNodeChain) {
-    SigpipeGuard sigpipe_guard;
-    TempFile cert("cert", kSelfSignedCertPem);
-    TempFile key("key", kSelfSignedKeyPem);
-    ASSERT_TRUE(cert.ok);
-    ASSERT_TRUE(key.ok);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert", kSelfSignedCertPem);
+        TempFile key("key", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
 
-    auto tls_pair = create_tls_pair(cert.path, key.path);
-    ASSERT_TRUE(tls_pair);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
 
-    int fds[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
 
-    fiber::event::EventLoopGroup group(2);
-    group.start();
+        fiber::event::EventLoopGroup group(2);
+        group.start();
 
-    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
-    ASSERT_TRUE(server_transport_result);
-    ASSERT_TRUE(client_transport_result);
-    auto *server_transport = server_transport_result->release();
-    auto *client_transport = client_transport_result->release();
+        fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+        auto server_transport_result =
+                fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+        auto client_transport_result =
+                fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
+        ASSERT_TRUE(server_transport_result);
+        ASSERT_TRUE(client_transport_result);
+        auto *server_transport = server_transport_result->release();
+        auto *client_transport = client_transport_result->release();
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    // [1k][2k][3k][7k][4k][2k] + oversized [20k] + 20x[100B] (27 nodes, >16 iov cap).
-    std::vector<std::size_t> sizes = {1024, 2048, 3072, 7168, 4096, 2048, 20480};
-    for (int i = 0; i < 20; ++i) {
-        sizes.push_back(100);
-    }
-    std::string expected = build_distinct_chain(pool, chain, sizes);
 
-    std::promise<fiber::common::IoResult<std::string>> server_promise;
-    std::promise<fiber::common::IoResult<std::size_t>> client_promise;
-    auto server_future = server_promise.get_future();
-    auto client_future = client_promise.get_future();
+        fiber::mem::IoBufChain chain;
+        // [1k][2k][3k][7k][4k][2k] + oversized [20k] + 20x[100B] (27 nodes, >16 iov cap).
+        std::vector<std::size_t> sizes = {1024, 2048, 3072, 7168, 4096, 2048, 20480};
+        for (int i = 0; i < 20; ++i) {
+            sizes.push_back(100);
+        }
+        std::string expected = build_distinct_chain(pool, chain, sizes);
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_transport_server(server_transport, tls_pair->server_options, &server_promise);
+        std::promise<fiber::common::IoResult<std::string>> server_promise;
+        std::promise<fiber::common::IoResult<std::size_t>> client_promise;
+        auto server_future = server_promise.get_future();
+        auto client_future = client_promise.get_future();
+
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_transport_server(server_transport, tls_pair->server_options, &server_promise);
+        });
+        fiber::async::spawn(group.at(1), [&]() {
+            return run_transport_client(client_transport, tls_pair->client_options, std::move(chain), &client_promise);
+        });
+
+        ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+        ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+
+        auto client_result = client_future.get();
+        auto server_result = server_future.get();
+        ASSERT_TRUE(client_result);
+        ASSERT_TRUE(server_result);
+        EXPECT_EQ(*client_result, expected.size());
+        EXPECT_EQ(*server_result, expected);
+
+        std::promise<void> close_promise;
+        auto close_future = close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &close_promise); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+        std::promise<void> close_promise2;
+        auto close_future2 = close_promise2.get_future();
+        fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &close_promise2); });
+        ASSERT_EQ(close_future2.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
     });
-    fiber::async::spawn(group.at(1), [&]() {
-        return run_transport_client(client_transport, tls_pair->client_options, std::move(chain), &client_promise);
-    });
-
-    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
-    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
-
-    auto client_result = client_future.get();
-    auto server_result = server_future.get();
-    ASSERT_TRUE(client_result);
-    ASSERT_TRUE(server_result);
-    EXPECT_EQ(*client_result, expected.size());
-    EXPECT_EQ(*server_result, expected);
-
-    std::promise<void> close_promise;
-    auto close_future = close_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &close_promise); });
-    ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
-    std::promise<void> close_promise2;
-    auto close_future2 = close_promise2.get_future();
-    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &close_promise2); });
-    ASSERT_EQ(close_future2.wait_for(2s), std::future_status::ready);
-
-    group.stop();
-    group.join();
 }
 
 DetachedTask write_chain_recording_records(fiber::http::TlsTransport *transport,
@@ -864,213 +875,222 @@ DetachedTask write_chain_recording_records(fiber::http::TlsTransport *transport,
 }
 
 TEST(TlsStreamFdTest, TlsTransportWritevFillsRecordsAcrossSmallAndLargeNodes) {
-    SigpipeGuard sigpipe_guard;
-    TempFile cert("cert", kSelfSignedCertPem);
-    TempFile key("key", kSelfSignedKeyPem);
-    ASSERT_TRUE(cert.ok);
-    ASSERT_TRUE(key.ok);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert", kSelfSignedCertPem);
+        TempFile key("key", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
 
-    auto tls_pair = create_tls_pair(cert.path, key.path);
-    ASSERT_TRUE(tls_pair);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
 
-    int fds[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
 
-    fiber::event::EventLoopGroup group(2);
-    group.start();
+        fiber::event::EventLoopGroup group(2);
+        group.start();
 
-    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
-    ASSERT_TRUE(server_transport_result);
-    ASSERT_TRUE(client_transport_result);
-    auto *server_transport = server_transport_result->release();
-    auto *client_transport = client_transport_result->release();
+        fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+        auto server_transport_result =
+                fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+        auto client_transport_result =
+                fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
+        ASSERT_TRUE(server_transport_result);
+        ASSERT_TRUE(client_transport_result);
+        auto *server_transport = server_transport_result->release();
+        auto *client_transport = client_transport_result->release();
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    // HTTP/2 DATA frame shape: 9-byte header node + 16 KiB payload node, three
-    // times, then an oversized node followed by small nodes.
-    std::vector<std::size_t> sizes = {9, 16384, 9, 16384, 9, 16384, 20000, 9, 300};
-    std::string expected = build_distinct_chain(pool, chain, sizes);
 
-    std::promise<fiber::common::IoResult<std::string>> server_promise;
-    std::promise<fiber::common::IoResult<std::vector<std::size_t>>> client_promise;
-    auto server_future = server_promise.get_future();
-    auto client_future = client_promise.get_future();
+        fiber::mem::IoBufChain chain;
+        // HTTP/2 DATA frame shape: 9-byte header node + 16 KiB payload node, three
+        // times, then an oversized node followed by small nodes.
+        std::vector<std::size_t> sizes = {9, 16384, 9, 16384, 9, 16384, 20000, 9, 300};
+        std::string expected = build_distinct_chain(pool, chain, sizes);
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_transport_server(server_transport, tls_pair->server_options, &server_promise);
+        std::promise<fiber::common::IoResult<std::string>> server_promise;
+        std::promise<fiber::common::IoResult<std::vector<std::size_t>>> client_promise;
+        auto server_future = server_promise.get_future();
+        auto client_future = client_promise.get_future();
+
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_transport_server(server_transport, tls_pair->server_options, &server_promise);
+        });
+        fiber::async::spawn(group.at(1), [&]() {
+            return write_chain_recording_records(client_transport, tls_pair->client_options, std::move(chain),
+                                                 &client_promise);
+        });
+
+        ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+        ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+
+        auto client_result = client_future.get();
+        auto server_result = server_future.get();
+        ASSERT_TRUE(client_result);
+        ASSERT_TRUE(server_result);
+        EXPECT_EQ(*server_result, expected);
+        // 3 x (9 + 16384) = 49179 -> three full records + 27 bytes carried into
+        // the fourth, which is filled from the 20000 node; its 3643-byte tail is
+        // coalesced with the trailing [9][300] instead of becoming its own record.
+        const std::vector<std::size_t> expected_records = {16384, 16384, 16384, 16384, 3643 + 9 + 300};
+        EXPECT_EQ(*client_result, expected_records);
+
+        std::promise<void> close_promise;
+        auto close_future = close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &close_promise); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+        std::promise<void> close_promise2;
+        auto close_future2 = close_promise2.get_future();
+        fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &close_promise2); });
+        ASSERT_EQ(close_future2.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
     });
-    fiber::async::spawn(group.at(1), [&]() {
-        return write_chain_recording_records(client_transport, tls_pair->client_options, std::move(chain),
-                                             &client_promise);
-    });
-
-    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
-    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
-
-    auto client_result = client_future.get();
-    auto server_result = server_future.get();
-    ASSERT_TRUE(client_result);
-    ASSERT_TRUE(server_result);
-    EXPECT_EQ(*server_result, expected);
-    // 3 x (9 + 16384) = 49179 -> three full records + 27 bytes carried into
-    // the fourth, which is filled from the 20000 node; its 3643-byte tail is
-    // coalesced with the trailing [9][300] instead of becoming its own record.
-    const std::vector<std::size_t> expected_records = {16384, 16384, 16384, 16384, 3643 + 9 + 300};
-    EXPECT_EQ(*client_result, expected_records);
-
-    std::promise<void> close_promise;
-    auto close_future = close_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &close_promise); });
-    ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
-    std::promise<void> close_promise2;
-    auto close_future2 = close_promise2.get_future();
-    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &close_promise2); });
-    ASSERT_EQ(close_future2.wait_for(2s), std::future_status::ready);
-
-    group.stop();
-    group.join();
 }
 
 TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBlock) {
-    SigpipeGuard sigpipe_guard;
-    TempFile cert("cert", kSelfSignedCertPem);
-    TempFile key("key", kSelfSignedKeyPem);
-    ASSERT_TRUE(cert.ok);
-    ASSERT_TRUE(key.ok);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert", kSelfSignedCertPem);
+        TempFile key("key", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
 
-    auto tls_pair = create_tls_pair(cert.path, key.path);
-    ASSERT_TRUE(tls_pair);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
 
-    int fds[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
-    int send_buffer_size = 4096;
-    ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)), 0);
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+        int send_buffer_size = 4096;
+        ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)), 0);
 
-    fiber::event::EventLoopGroup group(2);
-    group.start();
+        fiber::event::EventLoopGroup group(2);
+        group.start();
 
-    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
-    ASSERT_TRUE(server_transport_result);
-    ASSERT_TRUE(client_transport_result);
-    auto *server_transport = server_transport_result->release();
-    auto *client_transport = client_transport_result->release();
+        fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+        auto server_transport_result =
+                fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+        auto client_transport_result =
+                fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
+        ASSERT_TRUE(server_transport_result);
+        ASSERT_TRUE(client_transport_result);
+        auto *server_transport = server_transport_result->release();
+        auto *client_transport = client_transport_result->release();
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    std::vector<std::size_t> sizes(64, 4096);
-    std::string expected = build_distinct_chain(pool, chain, sizes);
 
-    std::promise<fiber::common::IoResult<std::string>> server_promise;
-    std::promise<fiber::common::IoResult<PollWriteStats>> client_promise;
-    auto server_future = server_promise.get_future();
-    auto client_future = client_promise.get_future();
+        fiber::mem::IoBufChain chain;
+        std::vector<std::size_t> sizes(64, 4096);
+        std::string expected = build_distinct_chain(pool, chain, sizes);
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return run_poll_transport_server(server_transport, tls_pair->server_options, expected.size(), &server_promise);
+        std::promise<fiber::common::IoResult<std::string>> server_promise;
+        std::promise<fiber::common::IoResult<PollWriteStats>> client_promise;
+        auto server_future = server_promise.get_future();
+        auto client_future = client_promise.get_future();
+
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_poll_transport_server(server_transport, tls_pair->server_options, expected.size(),
+                                             &server_promise);
+        });
+        fiber::async::spawn(group.at(1), [&]() {
+            return run_poll_transport_client(client_transport, tls_pair->client_options, std::move(chain),
+                                             &client_promise);
+        });
+
+        ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+        ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+        auto client_result = client_future.get();
+        auto server_result = server_future.get();
+
+        std::promise<void> server_close_promise;
+        std::promise<void> client_close_promise;
+        auto server_close_future = server_close_promise.get_future();
+        auto client_close_future = client_close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
+        fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
+        ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
+
+        ASSERT_TRUE(client_result);
+        ASSERT_TRUE(server_result);
+        EXPECT_EQ(client_result->written, expected.size());
+        EXPECT_GT(client_result->would_block_count, 0U);
+        EXPECT_EQ(*server_result, expected);
     });
-    fiber::async::spawn(group.at(1), [&]() {
-        return run_poll_transport_client(client_transport, tls_pair->client_options, std::move(chain), &client_promise);
-    });
-
-    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
-    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
-    auto client_result = client_future.get();
-    auto server_result = server_future.get();
-
-    std::promise<void> server_close_promise;
-    std::promise<void> client_close_promise;
-    auto server_close_future = server_close_promise.get_future();
-    auto client_close_future = client_close_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
-    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
-    ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
-    ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
-
-    group.stop();
-    group.join();
-
-    ASSERT_TRUE(client_result);
-    ASSERT_TRUE(server_result);
-    EXPECT_EQ(client_result->written, expected.size());
-    EXPECT_GT(client_result->would_block_count, 0U);
-    EXPECT_EQ(*server_result, expected);
 }
 
 TEST(TlsStreamFdTest, TlsTransportAbandonPendingWriteDropsChainReference) {
-    SigpipeGuard sigpipe_guard;
-    TempFile cert("cert", kSelfSignedCertPem);
-    TempFile key("key", kSelfSignedKeyPem);
-    ASSERT_TRUE(cert.ok);
-    ASSERT_TRUE(key.ok);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert", kSelfSignedCertPem);
+        TempFile key("key", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
 
-    auto tls_pair = create_tls_pair(cert.path, key.path);
-    ASSERT_TRUE(tls_pair);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
 
-    int fds[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
-    int send_buffer_size = 4096;
-    ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)), 0);
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+        int send_buffer_size = 4096;
+        ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)), 0);
 
-    fiber::event::EventLoopGroup group(2);
-    group.start();
+        fiber::event::EventLoopGroup group(2);
+        group.start();
 
-    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-    auto server_transport_result =
-            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
-    auto client_transport_result =
-            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
-    ASSERT_TRUE(server_transport_result);
-    ASSERT_TRUE(client_transport_result);
-    auto *server_transport = server_transport_result->release();
-    auto *client_transport = client_transport_result->release();
+        fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+        auto server_transport_result =
+                fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+        auto client_transport_result =
+                fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
+        ASSERT_TRUE(server_transport_result);
+        ASSERT_TRUE(client_transport_result);
+        auto *server_transport = server_transport_result->release();
+        auto *client_transport = client_transport_result->release();
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    std::vector<std::size_t> sizes(64, 4096);
-    (void) build_distinct_chain(pool, chain, sizes);
 
-    std::promise<fiber::common::IoResult<void>> server_promise;
-    std::promise<fiber::common::IoResult<AbandonPendingWriteStats>> client_promise;
-    auto server_future = server_promise.get_future();
-    auto client_future = client_promise.get_future();
+        fiber::mem::IoBufChain chain;
+        std::vector<std::size_t> sizes(64, 4096);
+        (void) build_distinct_chain(pool, chain, sizes);
 
-    fiber::async::spawn(group.at(0), [&]() {
-        return hold_tls_transport_after_handshake(server_transport, tls_pair->server_options, &server_promise);
+        std::promise<fiber::common::IoResult<void>> server_promise;
+        std::promise<fiber::common::IoResult<AbandonPendingWriteStats>> client_promise;
+        auto server_future = server_promise.get_future();
+        auto client_future = client_promise.get_future();
+
+        fiber::async::spawn(group.at(0), [&]() {
+            return hold_tls_transport_after_handshake(server_transport, tls_pair->server_options, &server_promise);
+        });
+        fiber::async::spawn(group.at(1), [&]() {
+            return abandon_blocked_tls_write(client_transport, tls_pair->client_options, std::move(chain),
+                                             &client_promise);
+        });
+
+        ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+        ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+        auto client_result = client_future.get();
+        auto server_result = server_future.get();
+
+        std::promise<void> server_close_promise;
+        std::promise<void> client_close_promise;
+        auto server_close_future = server_close_promise.get_future();
+        auto client_close_future = client_close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
+        fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
+        ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
+
+        ASSERT_TRUE(server_result);
+        ASSERT_TRUE(client_result);
+        EXPECT_TRUE(client_result->different_chain_busy_before);
+        EXPECT_TRUE(client_result->empty_chain_ready_after);
     });
-    fiber::async::spawn(group.at(1), [&]() {
-        return abandon_blocked_tls_write(client_transport, tls_pair->client_options, std::move(chain), &client_promise);
-    });
-
-    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
-    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
-    auto client_result = client_future.get();
-    auto server_result = server_future.get();
-
-    std::promise<void> server_close_promise;
-    std::promise<void> client_close_promise;
-    auto server_close_future = server_close_promise.get_future();
-    auto client_close_future = client_close_promise.get_future();
-    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
-    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
-    ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
-    ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
-
-    group.stop();
-    group.join();
-
-    ASSERT_TRUE(server_result);
-    ASSERT_TRUE(client_result);
-    EXPECT_TRUE(client_result->different_chain_busy_before);
-    EXPECT_TRUE(client_result->empty_chain_ready_after);
 }
 
 // ---- stateless ticket assembly (09 slice 3): a BoringSSL socket oracle ----
@@ -1234,35 +1254,37 @@ std::string run_server_against_bssl_client(fiber::event::EventLoopGroup &group, 
 // a NewSessionTicket. BoringSSL's stash staying empty is the proof; the
 // handshake and app data still flow.
 TEST(TlsStreamFdTest, UnconfiguredTicketServiceMintsNoSessionTicket) {
-    SigpipeGuard sigpipe_guard;
-    StashedSessionsGuard stash_guard;
-    TempFile cert("cert", kSelfSignedCertPem);
-    TempFile key("key", kSelfSignedKeyPem);
-    ASSERT_TRUE(cert.ok);
-    ASSERT_TRUE(key.ok);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        StashedSessionsGuard stash_guard;
+        TempFile cert("cert", kSelfSignedCertPem);
+        TempFile key("key", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
 
-    auto tls_pair = create_tls_pair(cert.path, key.path);
-    ASSERT_TRUE(tls_pair);
-    EXPECT_EQ(tls_pair->server_options.ticket_service, nullptr); // the default under test
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+        EXPECT_EQ(tls_pair->server_options.ticket_service, nullptr); // the default under test
 
-    int fds[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
-    arm_receive_timeout(fds[1]);
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        arm_receive_timeout(fds[1]);
 
-    fiber::event::EventLoopGroup group(1);
-    group.start();
+        fiber::event::EventLoopGroup group(1);
+        group.start();
 
-    std::unique_ptr<BsslSocketClient> client;
-    ASSERT_TRUE(BsslSocketClient::make(false, true, client));
-    client->attach_fd(fds[1]);
+        std::unique_ptr<BsslSocketClient> client;
+        ASSERT_TRUE(BsslSocketClient::make(false, true, client));
+        client->attach_fd(fds[1]);
 
-    const std::string observed =
-            run_server_against_bssl_client(group, fds[0], tls_pair->server_options, *client, fds[1], "ping", false);
-    EXPECT_EQ(observed, "ping");
-    EXPECT_TRUE(stashed_sessions().empty());
+        const std::string observed =
+                run_server_against_bssl_client(group, fds[0], tls_pair->server_options, *client, fds[1], "ping", false);
+        EXPECT_EQ(observed, "ping");
+        EXPECT_TRUE(stashed_sessions().empty());
 
-    group.stop();
-    group.join();
+        group.stop();
+        group.join();
+    });
 }
 
 // The stateless contract end to end: a ticket minted under one service stays

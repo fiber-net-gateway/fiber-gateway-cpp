@@ -39,10 +39,18 @@ private:
     std::size_t cached_count_ = 0;
 };
 
+// Node pool contract: a chain holds no pool reference of its own. Every node
+// allocation (append/prepend/take_prefix) and release (consume_and_compact/
+// trim_end/clear/destruction) resolves the CURRENT thread's running loop:
+// EventLoop::current().io_buf_node_pool(). Nodes are individually heap-backed
+// — the pool is a per-loop free-list cache, never an ownership domain — so a
+// node allocated on one loop may be released into another's cache. Chains may
+// cross loops time-sliced (stolen connections, body pipes between transports)
+// but must never be mutated concurrently: only an empty chain is pool-free,
+// so a non-empty chain may only be destroyed where a loop is current.
 class IoBufChain {
 public:
     IoBufChain() noexcept = default;
-    explicit IoBufChain(IoBufNodePool &node_pool) noexcept;
     ~IoBufChain();
 
     IoBufChain(const IoBufChain &) = delete;
@@ -56,11 +64,6 @@ public:
     [[nodiscard]] std::size_t readable_bytes() const noexcept;
     [[nodiscard]] std::size_t writable_bytes() const noexcept;
     [[nodiscard]] bool complete() const noexcept;
-    [[nodiscard]] IoBufNodePool &node_pool() noexcept;
-    [[nodiscard]] const IoBufNodePool &node_pool() const noexcept;
-    [[nodiscard]] bool bound() const noexcept;
-    [[nodiscard]] bool same_pool(const IoBufChain &other) const noexcept;
-    void bind_node_pool(IoBufNodePool &node_pool) noexcept;
 
     bool append(IoBuf &&buf) noexcept;
     bool append_chain(IoBufChain &&other) noexcept;
@@ -109,7 +112,6 @@ public:
     [[nodiscard]] const IoBuf *first_writable() const noexcept;
 
 private:
-    void bind_unbound_destination(IoBufChain &dst) const noexcept;
     void release_nodes(IoBufNode *node) noexcept;
     static void reset_node_for_chain(IoBufNode &node) noexcept;
 
@@ -118,7 +120,6 @@ private:
     std::size_t size_ = 0;
     std::size_t readable_bytes_ = 0;
     std::size_t writable_bytes_ = 0;
-    IoBufNodePool *node_pool_ = nullptr;
     bool complete_ = false;
 };
 

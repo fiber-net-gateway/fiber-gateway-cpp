@@ -107,7 +107,7 @@ ClientHttp2Exchange::write_all(const std::uint8_t *buf, std::size_t len, bool en
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    mem::IoBufChain chunk(req->node_pool());
+    mem::IoBufChain chunk;
     if (end_stream) {
         chunk.mark_complete();
     }

@@ -10,6 +10,7 @@
 #include <fiber/http/Http2HpackDecoder.h>
 #include <fiber/http/Http2HpackEncoder.h>
 #include <fiber/http/HttpHeaderHash.h>
+#include "LoopTestSupport.h"
 #include "http/Http2HpackEncoderIoBufWriter.h"
 #include "http/Huffman.h"
 
@@ -151,15 +152,16 @@ struct DecodeRecorder {
 };
 
 TEST(Http2HpackEncoderTest, EncodesStaticExactAsIndexedField) {
-    IoBufNodePool pool;
-    Http2HpackEncoder encoder({});
-    Http2HpackEncoderIoBufWriter writer(encoder, pool);
-    ASSERT_EQ(writer.begin(), IoErr::None);
-    ASSERT_EQ(writer.encode_status(200), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http2HpackEncoder encoder({});
+        Http2HpackEncoderIoBufWriter writer(encoder);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        ASSERT_EQ(writer.encode_status(200), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x20, 0x88}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x20, 0x88}));
+    });
 }
 
 TEST(Http2HpackEncoderTest, EncodesCommonPseudoHeadersAsFixedStaticIndexes) {
@@ -204,191 +206,201 @@ TEST(Http2HpackEncoderTest, EncodesCommonPseudoHeadersAsFixedStaticIndexes) {
 }
 
 TEST(Http2HpackEncoderTest, EncodesNonStaticStatusUsingIndexedName) {
-    IoBufNodePool pool;
-    Http2HpackEncoder encoder({.huffman_threshold = 1024});
-    Http2HpackEncoderIoBufWriter writer(encoder, pool);
-    ASSERT_EQ(writer.begin(), IoErr::None);
-    ASSERT_EQ(writer.encode_status(418), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http2HpackEncoder encoder({.huffman_threshold = 1024});
+        Http2HpackEncoderIoBufWriter writer(encoder);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        ASSERT_EQ(writer.encode_status(418), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x20, 0x08, 0x03, '4', '1', '8'}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x20, 0x08, 0x03, '4', '1', '8'}));
 
-    Http2HpackDecoder decoder;
-    ASSERT_TRUE(decoder.init());
-    DecodeRecorder recorder;
-    decoder.begin_block(&recorder, &DecodeRecorder::ops());
-    ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], ":status=418");
+        Http2HpackDecoder decoder;
+        ASSERT_TRUE(decoder.init());
+        DecodeRecorder recorder;
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], ":status=418");
+    });
 }
 
 TEST(Http2HpackEncoderTest, EncodesStaticNameMatchWithoutIndexingAndDecodesBack) {
-    IoBufNodePool pool;
-    Http2HpackEncoder encoder({.huffman_threshold = 1024});
-    Http2HpackEncoderIoBufWriter writer(encoder, pool);
-    ASSERT_EQ(writer.begin(), IoErr::None);
-    ASSERT_EQ(writer.encode_field("content-type", fiber::http::http_header_name_hash("content-type"), "text/plain"),
-              IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http2HpackEncoder encoder({.huffman_threshold = 1024});
+        Http2HpackEncoderIoBufWriter writer(encoder);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        ASSERT_EQ(writer.encode_field("content-type", fiber::http::http_header_name_hash("content-type"), "text/plain"),
+                  IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    ASSERT_FALSE(bytes.empty());
-    ASSERT_GE(bytes.size(), 2U);
-    EXPECT_EQ(bytes[0], 0x20);
-    EXPECT_EQ(bytes[1], 0x0f);
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        ASSERT_FALSE(bytes.empty());
+        ASSERT_GE(bytes.size(), 2U);
+        EXPECT_EQ(bytes[0], 0x20);
+        EXPECT_EQ(bytes[1], 0x0f);
 
-    Http2HpackDecoder decoder;
-    ASSERT_TRUE(decoder.init());
-    DecodeRecorder recorder;
-    decoder.begin_block(&recorder, &DecodeRecorder::ops());
-    ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], "content-type=text/plain");
+        Http2HpackDecoder decoder;
+        ASSERT_TRUE(decoder.init());
+        DecodeRecorder recorder;
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "content-type=text/plain");
+    });
 }
 
 TEST(Http2HpackEncoderTest, RepeatedFieldsNeverUseDynamicIndexes) {
-    IoBufNodePool pool;
-    Http2HpackEncoder encoder({.huffman_threshold = 1024});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http2HpackEncoder encoder({.huffman_threshold = 1024});
 
-    Http2HpackEncoderIoBufWriter first_writer(encoder, pool);
-    ASSERT_EQ(first_writer.begin(), IoErr::None);
-    ASSERT_EQ(first_writer.encode_field("server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"),
-              IoErr::None);
-    IoBufChain first_block(pool);
-    ASSERT_EQ(first_writer.finish(first_block), IoErr::None);
-    EXPECT_EQ(chain_to_bytes(std::move(first_block)),
-              (std::vector<std::uint8_t>{0x20, 0x0f, 0x27, 0x0c, 'n', 'g', 'i', 'n', 'x', '-', '1', '.', '2', '5', '.',
-                                         '1'}));
+        Http2HpackEncoderIoBufWriter first_writer(encoder);
+        ASSERT_EQ(first_writer.begin(), IoErr::None);
+        ASSERT_EQ(first_writer.encode_field("server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"),
+                  IoErr::None);
+        IoBufChain first_block;
+        ASSERT_EQ(first_writer.finish(first_block), IoErr::None);
+        EXPECT_EQ(chain_to_bytes(std::move(first_block)),
+                  (std::vector<std::uint8_t>{0x20, 0x0f, 0x27, 0x0c, 'n', 'g', 'i', 'n', 'x', '-', '1', '.', '2', '5',
+                                             '.', '1'}));
 
-    Http2HpackEncoderIoBufWriter second_writer(encoder, pool);
-    ASSERT_EQ(second_writer.begin(), IoErr::None);
-    ASSERT_EQ(second_writer.encode_field("server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"),
-              IoErr::None);
-    IoBufChain second_block(pool);
-    ASSERT_EQ(second_writer.finish(second_block), IoErr::None);
-    EXPECT_EQ(chain_to_bytes(std::move(second_block)),
-              (std::vector<std::uint8_t>{0x20, 0x0f, 0x27, 0x0c, 'n', 'g', 'i', 'n', 'x', '-', '1', '.', '2', '5', '.',
-                                         '1'}));
+        Http2HpackEncoderIoBufWriter second_writer(encoder);
+        ASSERT_EQ(second_writer.begin(), IoErr::None);
+        ASSERT_EQ(second_writer.encode_field("server", fiber::http::http_header_name_hash("server"), "nginx-1.25.1"),
+                  IoErr::None);
+        IoBufChain second_block;
+        ASSERT_EQ(second_writer.finish(second_block), IoErr::None);
+        EXPECT_EQ(chain_to_bytes(std::move(second_block)),
+                  (std::vector<std::uint8_t>{0x20, 0x0f, 0x27, 0x0c, 'n', 'g', 'i', 'n', 'x', '-', '1', '.', '2', '5',
+                                             '.', '1'}));
+    });
 }
 
 TEST(Http2HpackEncoderTest, UsesRawOrHuffmanStringEncodingBasedOnThreshold) {
-    IoBufNodePool pool;
-    Http2HpackEncoder raw_encoder({.huffman_threshold = 1024});
-    Http2HpackEncoderIoBufWriter raw_writer(raw_encoder, pool);
-    ASSERT_EQ(raw_writer.begin(), IoErr::None);
-    ASSERT_EQ(raw_writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
-    IoBufChain raw_block(pool);
-    ASSERT_EQ(raw_writer.finish(raw_block), IoErr::None);
-    const std::vector<std::uint8_t> raw_bytes = chain_to_bytes(std::move(raw_block));
-    ASSERT_GE(raw_bytes.size(), 3U);
-    EXPECT_EQ(raw_bytes[0], 0x20);
-    EXPECT_EQ(raw_bytes[1], 0x00);
-    EXPECT_EQ(raw_bytes[2] & 0x80U, 0x00U);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http2HpackEncoder raw_encoder({.huffman_threshold = 1024});
+        Http2HpackEncoderIoBufWriter raw_writer(raw_encoder);
+        ASSERT_EQ(raw_writer.begin(), IoErr::None);
+        ASSERT_EQ(raw_writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
+        IoBufChain raw_block;
+        ASSERT_EQ(raw_writer.finish(raw_block), IoErr::None);
+        const std::vector<std::uint8_t> raw_bytes = chain_to_bytes(std::move(raw_block));
+        ASSERT_GE(raw_bytes.size(), 3U);
+        EXPECT_EQ(raw_bytes[0], 0x20);
+        EXPECT_EQ(raw_bytes[1], 0x00);
+        EXPECT_EQ(raw_bytes[2] & 0x80U, 0x00U);
 
-    Http2HpackEncoder huffman_encoder({.huffman_threshold = 1});
-    Http2HpackEncoderIoBufWriter huffman_writer(huffman_encoder, pool);
-    ASSERT_EQ(huffman_writer.begin(), IoErr::None);
-    ASSERT_EQ(huffman_writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
-    IoBufChain huffman_block(pool);
-    ASSERT_EQ(huffman_writer.finish(huffman_block), IoErr::None);
-    const std::vector<std::uint8_t> huffman_bytes = chain_to_bytes(std::move(huffman_block));
-    ASSERT_GE(huffman_bytes.size(), 3U);
-    EXPECT_EQ(huffman_bytes[0], 0x20);
-    EXPECT_EQ(huffman_bytes[1], 0x00);
-    EXPECT_EQ(huffman_bytes[2] & 0x80U, 0x80U);
+        Http2HpackEncoder huffman_encoder({.huffman_threshold = 1});
+        Http2HpackEncoderIoBufWriter huffman_writer(huffman_encoder);
+        ASSERT_EQ(huffman_writer.begin(), IoErr::None);
+        ASSERT_EQ(huffman_writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"),
+                  IoErr::None);
+        IoBufChain huffman_block;
+        ASSERT_EQ(huffman_writer.finish(huffman_block), IoErr::None);
+        const std::vector<std::uint8_t> huffman_bytes = chain_to_bytes(std::move(huffman_block));
+        ASSERT_GE(huffman_bytes.size(), 3U);
+        EXPECT_EQ(huffman_bytes[0], 0x20);
+        EXPECT_EQ(huffman_bytes[1], 0x00);
+        EXPECT_EQ(huffman_bytes[2] & 0x80U, 0x80U);
+    });
 }
 
 TEST(Http2HpackEncoderTest, DoesNotHuffmanEncodeValueThatWouldExpand) {
-    // RFC 7541 §6.2: Huffman must only be used when it shortens the string.
-    // "!!!" expands under Huffman (3 -> 4 bytes), so it must be sent raw even
-    // though the threshold gate (here 1) would otherwise permit Huffman.
-    IoBufNodePool pool;
-    Http2HpackEncoder encoder({.huffman_threshold = 1});
-    Http2HpackEncoderIoBufWriter writer(encoder, pool);
-    ASSERT_EQ(writer.begin(), IoErr::None);
-    ASSERT_EQ(writer.encode_field("content-type", fiber::http::http_header_name_hash("content-type"), "!!!"),
-              IoErr::None);
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        // RFC 7541 §6.2: Huffman must only be used when it shortens the string.
+        // "!!!" expands under Huffman (3 -> 4 bytes), so it must be sent raw even
+        // though the threshold gate (here 1) would otherwise permit Huffman.
 
-    Http2HpackDecoder decoder;
-    ASSERT_TRUE(decoder.init());
-    DecodeRecorder recorder;
-    decoder.begin_block(&recorder, &DecodeRecorder::ops());
-    ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], "content-type=!!!");
-    EXPECT_EQ(recorder.huff_value_count, 0U);
-    EXPECT_EQ(recorder.raw_value_count, 1U);
+        Http2HpackEncoder encoder({.huffman_threshold = 1});
+        Http2HpackEncoderIoBufWriter writer(encoder);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        ASSERT_EQ(writer.encode_field("content-type", fiber::http::http_header_name_hash("content-type"), "!!!"),
+                  IoErr::None);
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+
+        Http2HpackDecoder decoder;
+        ASSERT_TRUE(decoder.init());
+        DecodeRecorder recorder;
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "content-type=!!!");
+        EXPECT_EQ(recorder.huff_value_count, 0U);
+        EXPECT_EQ(recorder.raw_value_count, 1U);
+    });
 }
 
 TEST(Http2HpackEncoderTest, UsesNewTailWhenContiguousHuffmanOutputDoesNotFit) {
-    IoBufNodePool pool;
-    Http2HpackEncoder encoder({.huffman_threshold = 1});
-    Http2HpackEncoderIoBufWriter writer(encoder, pool, 4);
-    ASSERT_EQ(writer.begin(), IoErr::None);
-    ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http2HpackEncoder encoder({.huffman_threshold = 1});
+        Http2HpackEncoderIoBufWriter writer(encoder, 4);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    ASSERT_GT(block.size(), 1U);
-    ASSERT_NE(block.front(), nullptr);
-    EXPECT_GT(block.front()->writable(), 0U);
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        ASSERT_GT(block.size(), 1U);
+        ASSERT_NE(block.front(), nullptr);
+        EXPECT_GT(block.front()->writable(), 0U);
 
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    Http2HpackDecoder decoder;
-    ASSERT_TRUE(decoder.init());
-    DecodeRecorder recorder;
-    decoder.begin_block(&recorder, &DecodeRecorder::ops());
-    ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], "x-test=abc");
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        Http2HpackDecoder decoder;
+        ASSERT_TRUE(decoder.init());
+        DecodeRecorder recorder;
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(bytes.data(), bytes.size(), true), IoErr::None);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "x-test=abc");
+    });
 }
 
 TEST(Http2HpackEncoderTest, EmitsTableSizeZeroOnEveryBlock) {
-    IoBufNodePool pool;
-    Http2HpackEncoder encoder({});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http2HpackEncoder encoder({});
 
-    Http2HpackEncoderIoBufWriter first_writer(encoder, pool);
-    ASSERT_EQ(first_writer.begin(), IoErr::None);
-    IoBufChain first_block(pool);
-    ASSERT_EQ(first_writer.finish(first_block), IoErr::None);
-    const std::vector<std::uint8_t> first_bytes = chain_to_bytes(std::move(first_block));
-    EXPECT_EQ(first_bytes, (std::vector<std::uint8_t>{0x20}));
+        Http2HpackEncoderIoBufWriter first_writer(encoder);
+        ASSERT_EQ(first_writer.begin(), IoErr::None);
+        IoBufChain first_block;
+        ASSERT_EQ(first_writer.finish(first_block), IoErr::None);
+        const std::vector<std::uint8_t> first_bytes = chain_to_bytes(std::move(first_block));
+        EXPECT_EQ(first_bytes, (std::vector<std::uint8_t>{0x20}));
 
-    Http2HpackEncoderIoBufWriter second_writer(encoder, pool);
-    ASSERT_EQ(second_writer.begin(), IoErr::None);
-    IoBufChain second_block(pool);
-    ASSERT_EQ(second_writer.finish(second_block), IoErr::None);
-    const std::vector<std::uint8_t> second_bytes = chain_to_bytes(std::move(second_block));
-    EXPECT_EQ(second_bytes, (std::vector<std::uint8_t>{0x20}));
+        Http2HpackEncoderIoBufWriter second_writer(encoder);
+        ASSERT_EQ(second_writer.begin(), IoErr::None);
+        IoBufChain second_block;
+        ASSERT_EQ(second_writer.finish(second_block), IoErr::None);
+        const std::vector<std::uint8_t> second_bytes = chain_to_bytes(std::move(second_block));
+        EXPECT_EQ(second_bytes, (std::vector<std::uint8_t>{0x20}));
 
-    Http2HpackDecoder decoder;
-    ASSERT_TRUE(decoder.init());
-    DecodeRecorder recorder;
-    decoder.begin_block(&recorder, &DecodeRecorder::ops());
-    ASSERT_EQ(decoder.decode(first_bytes.data(), first_bytes.size(), true), IoErr::None);
-    decoder.begin_block(&recorder, &DecodeRecorder::ops());
-    ASSERT_EQ(decoder.decode(second_bytes.data(), second_bytes.size(), true), IoErr::None);
+        Http2HpackDecoder decoder;
+        ASSERT_TRUE(decoder.init());
+        DecodeRecorder recorder;
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(first_bytes.data(), first_bytes.size(), true), IoErr::None);
+        decoder.begin_block(&recorder, &DecodeRecorder::ops());
+        ASSERT_EQ(decoder.decode(second_bytes.data(), second_bytes.size(), true), IoErr::None);
+    });
 }
 
 TEST(Http2HpackEncoderTest, CanceledBlockDoesNotAffectNextBlock) {
-    IoBufNodePool pool;
-    Http2HpackEncoder encoder({});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http2HpackEncoder encoder({});
 
-    Http2HpackEncoderIoBufWriter canceled_writer(encoder, pool);
-    ASSERT_EQ(canceled_writer.begin(), IoErr::None);
-    canceled_writer.abort();
+        Http2HpackEncoderIoBufWriter canceled_writer(encoder);
+        ASSERT_EQ(canceled_writer.begin(), IoErr::None);
+        canceled_writer.abort();
 
-    Http2HpackEncoderIoBufWriter writer(encoder, pool);
-    ASSERT_EQ(writer.begin(), IoErr::None);
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x20}));
+        Http2HpackEncoderIoBufWriter writer(encoder);
+        ASSERT_EQ(writer.begin(), IoErr::None);
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x20}));
+    });
 }
 
 } // namespace

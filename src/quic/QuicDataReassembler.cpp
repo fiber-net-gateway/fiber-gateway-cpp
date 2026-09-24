@@ -231,11 +231,6 @@ common::IoResult<std::size_t> QuicDataReassembler::insert(std::uint64_t offset, 
 
 common::IoResult<std::size_t> QuicDataReassembler::take_contiguous(mem::IoBufChain &out,
                                                                    std::size_t max_bytes) noexcept {
-    FIBER_ASSERT(pool_ != nullptr);
-    if (!out.bound()) {
-        out.bind_node_pool(*pool_);
-    }
-    FIBER_ASSERT(&out.node_pool() == pool_);
 
     std::size_t taken = 0;
     while (max_bytes != 0 && head_ != nullptr && head_->offset == next_offset_) {
