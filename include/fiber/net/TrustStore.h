@@ -11,9 +11,6 @@
 #include "../common/NonMovable.h"
 #include "../tls/crypto/TlsCertificate.h"
 
-struct x509_store_st;
-typedef struct x509_store_st X509_STORE;
-
 namespace fiber::quic {
 class QuicTlsSession;
 }
@@ -22,7 +19,6 @@ namespace fiber::net {
 
 class TlsServerHandshakeConfig;
 namespace detail {
-class TlsSslFactory;
 class TlsStreamFd;
 } // namespace detail
 
@@ -70,7 +66,6 @@ public:
 
 private:
     friend class TlsServerHandshakeConfig;
-    friend class detail::TlsSslFactory;
     friend class detail::TlsStreamFd;
     friend class quic::QuicTlsSession;
 
@@ -80,9 +75,6 @@ private:
     [[nodiscard]] const tls::TlsTrustStore &tls_store() const noexcept {
         return shared_ != nullptr ? *shared_ : owned_;
     }
-    // Borrowed X509_STORE* for the QUIC-side BoringSSL glue. Null when the
-    // store is empty (never on an object create() returned successfully).
-    [[nodiscard]] X509_STORE *x509_store() const noexcept;
 
     tls::TlsTrustStore owned_{};
     const tls::TlsTrustStore *shared_ = nullptr;

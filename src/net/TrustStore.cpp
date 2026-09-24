@@ -38,10 +38,6 @@ common::IoErr read_file_bundle(const std::string &path, std::string &out) noexce
 
 TrustStore::~TrustStore() = default;
 
-X509_STORE *TrustStore::x509_store() const noexcept {
-    return static_cast<X509_STORE *>(tls_store().x509_store_handle());
-}
-
 common::IoResult<std::unique_ptr<TrustStore>> TrustStore::create(const TrustStoreOptions &options) noexcept {
     if ((options.kind == TrustStoreSourceKind::System && !options.value.empty()) ||
         (options.kind != TrustStoreSourceKind::System && options.value.empty())) {

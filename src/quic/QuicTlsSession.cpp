@@ -212,7 +212,7 @@ create_server_transport_params(QuicConnection &connection, std::uint8_t *out, st
 }
 
 // Zero-config ticket parity (10 §8): the pre-10 BoringSSL path minted NSTs
-// from the shared TlsRuntime::server_context()'s default ticket keys, so every
+// from the process-shared SSL_CTX's default ticket keys, so every
 // server connection in the process could open each other's tickets. A param
 // without ticket_service keeps that shape: one process-wide random key, born
 // at first use, minting for the process lifetime (like the system trust

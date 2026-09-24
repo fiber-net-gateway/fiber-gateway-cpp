@@ -522,3 +522,52 @@ TestSessionStore.Entry 记面(mint 捕获/lookup 回填,否则面门把 QUIC 票
 
 **待续**:slice 4(链接收窄 boringssl::crypto only+删 TlsSslFactory/
 TlsRuntime+ASan 独立 deps)。待拍板 A/B 未决。
+
+### slice 4(2026-09-24):链接收窄 crypto-only
+
+**范围**:fiber_lib `PUBLIC boringssl::ssl boringssl::crypto` → 仅
+`boringssl::crypto`(Deps.cmake 不动,boringssl 整体照 fetch、ssl 目标照
+build——测试 peer 仍链);`fiber_tests` 显式增链 `boringssl::ssl`(待拍板 A
+推荐形态,test-only 保留对驱)。src/ 中实际 libssl 面 = 且仅 =
+TlsSslFactory.*/TlsRuntime.*/TlsCredential 的 SSL_CREDENTIAL 桥/
+TlsServerHandshakeConfig 的 SSL 分支/TrustStore::x509_store() 五处,09 换芯
+后消费者已死,全数拆除。
+
+**删除**:`src/net/detail/TlsSslFactory.{h,cpp}`、`TlsRuntime.{h,cpp}`;
+`include/fiber/net/detail/TlsHandshakeState.h`(ex_data 桥孤儿化,设计稿
+未列,随工厂一并消亡——定谳)。
+
+**瘦身偏离**:①TlsCredential 的 SSL_CREDENTIAL 桥(ssl_credential()/
+ssl_bridge_/session_identity_ SHA-256)整体删除而非"降 include 为 x509.h"
+——消费者已随工厂消亡,余零 X509 使用,文件 openssl include 全清(设计稿
+预期余 x509.h 是按桥仍在写的;实际删得更彻底);②TrustStore::x509_store()
+与 X509_STORE 前置声明同删(tls 层 x509_store_handle() 保留,测试仍用);
+③TlsServerHandshakeConfig 双模式收敛为纯引擎模式(ssl_ 分支/成员/
+session_id_context_set_ 全删,SSL_MAX_SID_CTX_LENGTH 以字面 32 保留
+portability 校验)。
+
+**防回归**:`scripts/check_ssl_free.sh`(src/|include/ 出现
+`#include <openssl/ssl.h>` 即 fail)+ CMake `add_test(fiber_ssl_free_check)`
+入 ctest。**nm 验证**:`libfiber_lib.a` 零未定义 SSL_*/bssl:: 符号。
+
+**顺带修(阻塞 ASan 验收的既有缺陷)**:GzipEncoderTest 的全局
+operator new/delete 替换只覆盖 6 形态,漏 nothrow/aligned 族——单一
+fiber_tests 可执行文件内 nothrow-new[] 走 ASan 运行时而 delete[] 落到自定义
+free 版,alloc-dealloc-mismatch 风暴 1197/2432(stash 复现于 63f89a96,
+非本 slice 引入)。补齐全 20 形态(new/new[]/nothrow/aligned ×
+throw/nothrow + 对应 delete 全族,aligned 走 posix_memalign,计数语义不变)
+→ ASan 全量从 1197 失败降至 64。
+
+**ASan 验收**(独立 `temp/_deps_asan`,共享 libc++ 配方在册):2368/2432
+过;64 失败经 stash(干净树+仅 harness 修)逐类复现归因为**既有**:
+~60 个 TLS 引擎测试 fixture 退出泄露(load_cert/BsslSocketClient 的
+X509/SSL 生命周期,06-09 对驱 fixtures 晚于 2026-09-11 全量扫描且此前被
+mismatch 风暴掩蔽,未清单化前不修)+ Http3ServerConnectionTest 已知
+H3/QUIC 析构顺序 UAF(2026-09-11 扫描缺陷 2,复核仍复现)+
+StealableHttp1ConnectionPoolSetTest 计时 flake。本 slice 触面
+(TlsCredentialTest/QuicClientTest 0-RTT 对/引擎 staging 路径)ASan 全绿
+零泄露。TLS fixture 泄露清理另案跟进。
+
+**验收**:常规 2432/2432 绿(2435−5 删工厂用例+1 键配对拒收+1
+ssl_free_check);nm 零 ssl 符号;grep 防回归入 ctest。待拍板 A/B 未决
+(A 若通过:去 fiber_tests 的 ssl 链接+删对驱用例,改外部矩阵)。
