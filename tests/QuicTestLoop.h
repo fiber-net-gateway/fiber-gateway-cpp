@@ -1,6 +1,8 @@
 #ifndef FIBER_TEST_QUIC_TEST_LOOP_H
 #define FIBER_TEST_QUIC_TEST_LOOP_H
 
+#include <fiber/async/Spawn.h>
+#include <fiber/async/Task.h>
 #include <fiber/common/Assert.h>
 #include <fiber/event/EventLoop.h>
 #include <fiber/net/IpAddress.h>
@@ -28,6 +30,39 @@ namespace fiber::test {
 inline fiber::event::EventLoop &quic_loop() noexcept {
     static fiber::event::EventLoop loop;
     return loop;
+}
+
+// Runs a synchronous test body on quic_loop() ITSELF, so chains resolve that
+// loop's node pool and QuicConnection::assert_loop_affinity sees current() ==
+// the loop the connections bind to (null current no longer holds once the
+// body allocates chains). The static loop survives across tests; run()
+// re-arms stop_requested each call.
+template<typename F>
+void run_in_quic_loop(F &&body) {
+    fiber::event::EventLoop &loop = quic_loop();
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        body(loop.io_buf_node_pool());
+        loop.stop();
+        co_return;
+    });
+    loop.run();
+}
+
+// Coroutine variant of run_in_quic_loop() for tests that must let the loop turn
+// between setup and assertions: transitions the connection defers to a later
+// tick (e.g. the GracefulClosing -> Closing close-timer handoff, audit #3) only
+// fire once run_due_timers() drains again, which a co_await inside the body
+// makes happen. The body is a factory returning Task<void> that receives the
+// loop.
+template<typename F>
+void run_in_quic_loop_task(F &&body) {
+    fiber::event::EventLoop &loop = quic_loop();
+    fiber::async::spawn(loop, [&]() -> fiber::async::DetachedTask {
+        co_await body(loop);
+        loop.stop();
+        co_return;
+    });
+    loop.run();
 }
 
 // Initialized, never started QuicUdpEndpoint hosting standalone QuicConnection

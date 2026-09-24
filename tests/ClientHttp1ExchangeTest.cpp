@@ -17,6 +17,7 @@
 #include <fiber/http/Http1ClientConnection.h>
 #include <fiber/net/TcpListener.h>
 #include <fiber/net/TcpStream.h>
+#include "LoopTestSupport.h"
 
 namespace {
 
@@ -46,8 +47,6 @@ struct ReadBodyOutcome {
     std::string second_body;
     bool first_last = false;
     bool second_last = false;
-    bool first_pool_is_current = false;
-    bool second_pool_is_current = false;
     std::string trailer_value;
     bool response_complete = false;
     bool reusable_after_scope = false;
@@ -624,8 +623,7 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
                         redundant_pointer ? fiber::common::IoErr::None : redundant_pointer.error();
                 outcome.redundant_pointer_written = redundant_pointer ? *redundant_pointer : 0;
 
-                fiber::mem::IoBufNodePool node_pool;
-                fiber::mem::IoBufChain redundant_chain(node_pool);
+                fiber::mem::IoBufChain redundant_chain;
                 redundant_chain.mark_complete();
                 auto redundant_chain_result = co_await exchange.write_all(std::move(redundant_chain));
                 outcome.redundant_chain_error =
@@ -637,7 +635,7 @@ DetachedTask run_content_length_client(fiber::event::EventLoop *loop, std::uint1
                         repeated_completion ? fiber::common::IoErr::None : repeated_completion.error();
                 outcome.repeated_completion_written = repeated_completion ? *repeated_completion : 0;
 
-                fiber::mem::IoBufChain incomplete_empty(node_pool);
+                fiber::mem::IoBufChain incomplete_empty;
                 auto incomplete_empty_result = co_await exchange.write_all(std::move(incomplete_empty));
                 outcome.incomplete_empty_error =
                         incomplete_empty_result ? fiber::common::IoErr::None : incomplete_empty_result.error();
@@ -742,8 +740,7 @@ DetachedTask run_chunked_client_iobufchain(fiber::event::EventLoop *loop, std::u
         if (!header_result) {
             result = header_result.error();
         } else {
-            fiber::mem::IoBufNodePool node_pool;
-            fiber::mem::IoBufChain body_chain(node_pool);
+            fiber::mem::IoBufChain body_chain;
             fiber::mem::IoBuf body_buf = fiber::mem::IoBuf::allocate(5);
             std::memcpy(body_buf.writable_data(), "hello", 5);
             body_buf.commit(5);
@@ -799,8 +796,7 @@ DetachedTask run_partial_chunked_client(fiber::event::EventLoop *loop, std::uint
             outcome.error = header_result.error();
         } else {
             constexpr std::string_view kBody = "abcdefghijklmnopqrst";
-            fiber::mem::IoBufNodePool node_pool;
-            fiber::mem::IoBufChain chunk(node_pool);
+            fiber::mem::IoBufChain chunk;
             for (char ch: kBody) {
                 fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(1);
                 if (!node) {
@@ -1141,8 +1137,6 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
             result_promise->set_value(std::move(outcome));
             co_return;
         }
-        outcome.first_pool_is_current =
-                &first_body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
         outcome.first_body = flatten_body_chunk(*first_body_result);
         outcome.first_last = first_body_result->complete();
 
@@ -1152,8 +1146,6 @@ DetachedTask run_read_content_length_body_client(fiber::event::EventLoop *loop, 
             result_promise->set_value(std::move(outcome));
             co_return;
         }
-        outcome.second_pool_is_current =
-                &second_body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
         outcome.second_body = flatten_body_chunk(*second_body_result);
         outcome.second_last = second_body_result->complete();
         outcome.response_complete = exchange.response_complete();
@@ -1209,8 +1201,6 @@ DetachedTask run_read_content_length_body_on_borrowed_connection_client(fiber::h
             result_promise->set_value(std::move(outcome));
             co_return;
         }
-        outcome.first_pool_is_current =
-                &first_body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
         outcome.first_body = flatten_body_chunk(*first_body_result);
         outcome.first_last = first_body_result->complete();
 
@@ -1220,8 +1210,6 @@ DetachedTask run_read_content_length_body_on_borrowed_connection_client(fiber::h
             result_promise->set_value(std::move(outcome));
             co_return;
         }
-        outcome.second_pool_is_current =
-                &second_body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
         outcome.second_body = flatten_body_chunk(*second_body_result);
         outcome.second_last = second_body_result->complete();
         outcome.response_complete = exchange.response_complete();
@@ -1276,8 +1264,6 @@ DetachedTask run_read_chunked_body_with_trailer_client(fiber::event::EventLoop *
             result_promise->set_value(std::move(outcome));
             co_return;
         }
-        outcome.first_pool_is_current =
-                &body_result->node_pool() == &fiber::event::EventLoop::current().io_buf_node_pool();
         outcome.first_body = flatten_body_chunk(*body_result);
         outcome.first_last = body_result->complete();
         outcome.trailer_value = std::string(exchange.response_trailers().get("x-checksum"));
@@ -1898,10 +1884,8 @@ TEST(ClientHttp1ExchangeTest, ReadContentLengthBodyReturnsLastOnFinalChunk) {
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_body, "hel");
     EXPECT_FALSE(outcome.first_last);
-    EXPECT_TRUE(outcome.first_pool_is_current);
     EXPECT_EQ(outcome.second_body, "lo");
     EXPECT_TRUE(outcome.second_last);
-    EXPECT_TRUE(outcome.second_pool_is_current);
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);
 
@@ -1962,10 +1946,8 @@ TEST(ClientHttp1ExchangeTest, ReadBodyUsesCurrentLoopNodePoolForBorrowedConnecti
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_body, "hel");
     EXPECT_FALSE(outcome.first_last);
-    EXPECT_TRUE(outcome.first_pool_is_current);
     EXPECT_EQ(outcome.second_body, "lo");
     EXPECT_TRUE(outcome.second_last);
-    EXPECT_TRUE(outcome.second_pool_is_current);
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);
 
@@ -2020,7 +2002,6 @@ TEST(ClientHttp1ExchangeTest, ReadChunkedBodyWaitsForTrailersBeforeLastChunk) {
     EXPECT_EQ(outcome.err, fiber::common::IoErr::None);
     EXPECT_EQ(outcome.first_body, "hello");
     EXPECT_TRUE(outcome.first_last);
-    EXPECT_TRUE(outcome.first_pool_is_current);
     EXPECT_EQ(outcome.trailer_value, "123|456");
     EXPECT_TRUE(outcome.response_complete);
     EXPECT_TRUE(outcome.reusable_after_scope);

@@ -21,11 +21,10 @@
 // flushes it best-effort before tearing down). The peer's close_notify
 // latches PeerClosed — plaintext delivered before it stays readable.
 //
-// Pool semantics as the engines: every chain binds to the caller's
-// IoBufNodePool (the per-connection private pool in the net glue); destroy
-// the connection (and any chain it produced) on the loop owning the pool.
-// Internal state lives behind a pimpl in src/tls — this header pulls no
-// OpenSSL.
+// Node pool semantics as everywhere else: chains resolve the current
+// loop's node pool per operation — run/destroy the connection on the
+// connection's loop. Internal state lives behind a pimpl in src/tls —
+// this header pulls no OpenSSL.
 
 #include <cstddef>
 #include <cstdint>
@@ -40,10 +39,6 @@
 #include "TlsConnectedState.h"
 #include "TlsTypes.h"
 
-namespace fiber::mem {
-class IoBufNodePool;
-}
-
 namespace fiber::tls {
 
 enum class TlsConnectionRole : std::uint8_t { Client, Server };
@@ -57,10 +52,8 @@ public:
 
     // Moves the ciphers and KeyUpdate secrets out of `state` (which is left
     // emptied). The version picks the dispatch table; the role picks which
-    // app secret is ours (write-side rekey base) vs the peer's. The pool
-    // must be the engine's pool — record-protection continuity is
-    // structural and leftover bytes chain onto the same nodes.
-    TlsConnection(TlsConnectionRole role, TlsConnectedState &&state, mem::IoBufNodePool &pool) noexcept;
+    // app secret is ours (write-side rekey base) vs the peer's.
+    TlsConnection(TlsConnectionRole role, TlsConnectedState &&state) noexcept;
     ~TlsConnection();
 
     // ---- inbound ----

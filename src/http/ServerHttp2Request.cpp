@@ -176,8 +176,7 @@ const HeaderMap<ServerHttp2Request::PseudoHeaderHandler> &ServerHttp2Request::ps
 ServerHttp2Request::ServerHttp2Request(std::uint32_t stream_id, Http2Connection &conn, const HttpHandler &handler,
                                        std::shared_ptr<const HttpHandler> handler_owner) noexcept :
     conn_(&conn), handler_(&handler), handler_owner_(std::move(handler_owner)), stream_(this, stream_ops()),
-    exchange_(conn.transport().loop().io_buf_node_pool(), conn.transport().remote_addr()),
-    request_body_recv_(conn.transport().loop().io_buf_node_pool()) {
+    exchange_(conn.transport().remote_addr()), request_body_recv_() {
     (void) stream_id;
     FIBER_ASSERT(handler_ != nullptr);
     exchange_.request_body_spec_ = HttpBodySpec::Stream();
@@ -451,7 +450,7 @@ common::IoErr ServerHttp2Request::SendResponseBodySomeOp::on_encode(ServerHttp2R
 
     if (total_bytes_ == 0) {
         FIBER_ASSERT(end_);
-        mem::IoBufChain empty(request.conn_->transport().loop().io_buf_node_pool());
+        mem::IoBufChain empty;
         Http2DataFrameEncoder frame_encoder({
                 .stream_id = stream.stream_id(),
                 .max_frame_size = req.max_frame_size,
@@ -477,10 +476,8 @@ common::IoErr ServerHttp2Request::SendResponseBodySomeOp::on_encode(ServerHttp2R
     const std::size_t payload_bytes = std::min(total_bytes_, static_cast<std::size_t>(req.payload_budget));
     mem::IoBufChain staged;
     mem::IoBufChain *payload = chunk_;
-    bool consume_borrowed_chain = false;
 
     if (chunk_ == nullptr) {
-        staged.bind_node_pool(request.conn_->transport().loop().io_buf_node_pool());
         mem::IoBuf owned = mem::IoBuf::allocate(payload_bytes);
         if (!owned) {
             return common::IoErr::NoMem;
@@ -494,13 +491,6 @@ common::IoErr ServerHttp2Request::SendResponseBodySomeOp::on_encode(ServerHttp2R
             staged.mark_complete();
         }
         payload = &staged;
-    } else if (&chunk_->node_pool() != &request.conn_->transport().loop().io_buf_node_pool()) {
-        staged.bind_node_pool(request.conn_->transport().loop().io_buf_node_pool());
-        if (!chunk_->retain_prefix(payload_bytes, staged)) {
-            return common::IoErr::NoMem;
-        }
-        payload = &staged;
-        consume_borrowed_chain = true;
     }
 
     Http2DataFrameEncoder frame_encoder({
@@ -512,12 +502,7 @@ common::IoErr ServerHttp2Request::SendResponseBodySomeOp::on_encode(ServerHttp2R
     if (err != common::IoErr::None) {
         return err;
     }
-    if (consume_borrowed_chain) {
-        chunk_->consume_and_compact(payload_bytes);
-        if (payload_bytes == total_bytes_ && end_) {
-            chunk_->clear_complete();
-        }
-    } else if (chunk_ != nullptr && payload_bytes == total_bytes_ && end_) {
+    if (chunk_ != nullptr && payload_bytes == total_bytes_ && end_) {
         chunk_->clear_complete();
     }
 
@@ -669,7 +654,7 @@ fiber::async::Task<common::IoResult<size_t>> ServerHttp2Request::write_all(HttpE
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    mem::IoBufChain chunk(conn_->transport().loop().io_buf_node_pool());
+    mem::IoBufChain chunk;
     if (end) {
         chunk.mark_complete();
     }

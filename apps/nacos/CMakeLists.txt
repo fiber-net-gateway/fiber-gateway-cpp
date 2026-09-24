@@ -56,7 +56,8 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
         "${CMAKE_CURRENT_LIST_DIR}/tests/rpc/GrpcProtoCodecTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/rpc/GrpcStatusTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/rpc/GrpcStreamTest.cpp")
-    target_include_directories(fiber_nacos_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_include_directories(fiber_nacos_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src"
+                                                           "${CMAKE_SOURCE_DIR}/tests")
     target_link_libraries(fiber_nacos_tests PRIVATE
         fiber::nacos
         fiber_proto_nacos_payload

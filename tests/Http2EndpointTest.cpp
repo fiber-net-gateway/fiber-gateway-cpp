@@ -36,6 +36,7 @@
 #include <fiber/tls/TlsTicketService.h>
 
 #include <openssl/ssl.h>
+#include "LoopTestSupport.h"
 
 namespace {
 
@@ -890,7 +891,7 @@ public:
 
     fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
     read_body(std::size_t /*max_bytes*/, std::chrono::milliseconds /*timeout*/) noexcept {
-        fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+        fiber::mem::IoBufChain chunk;
         if (!served_body_) {
             served_body_ = true;
             fiber::mem::IoBuf data = fiber::mem::IoBuf::allocate(body_.size());
@@ -1021,7 +1022,6 @@ TEST(Http2EndpointTest, StreamedAutoBodyThroughPipeCompletes) {
                                auto piped = co_await fiber::http::pipe_http_body(
                                        fiber::http::make_http_body_pipe_reader(source),
                                        fiber::http::make_http_body_pipe_writer(writer),
-                                       fiber::event::EventLoop::current().io_buf_node_pool(),
                                        {.low_water = fiber::http::kUnbufferedBodyPipeLowWater});
                                pipe_promise.set_value(std::move(piped));
                                co_return;

@@ -50,7 +50,6 @@ public:
 
     [[nodiscard]] quic::QuicStream &stream() noexcept { return stream_; }
     [[nodiscard]] const quic::QuicStream &stream() const noexcept { return stream_; }
-    [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept;
     [[nodiscard]] Http3ExtendedConnectSupport extended_connect_support() const noexcept;
     [[nodiscard]] Http3RequestOutcome outcome() const noexcept { return outcome_; }
     [[nodiscard]] common::IoErr terminal_error() const noexcept { return terminal_error_; }

@@ -84,7 +84,7 @@ Http1HeaderParseBufferOptions header_parse_buffer_options(const Http1ServerOptio
 Http1Connection::Http1Connection(std::unique_ptr<HttpTransport> transport, const HttpHandler &handler,
                                  Http1ServerOptions options, std::shared_ptr<const HttpHandler> handler_owner) :
     loop_(event::EventLoop::current()), transport_(std::move(transport)), handler_(&handler),
-    handler_owner_(std::move(handler_owner)), options_(std::move(options)), inbound_bufs_(loop_.io_buf_node_pool()) {}
+    handler_owner_(std::move(handler_owner)), options_(std::move(options)) {}
 
 Http1Connection::~Http1Connection() {
     if (transport_ && transport_->valid() && loop_.in_loop()) {
@@ -376,7 +376,7 @@ fiber::async::Task<void> Http1Connection::run() {
             }
         }
 
-        HttpExchange exchange(loop_.io_buf_node_pool(), transport_->remote_addr());
+        HttpExchange exchange(transport_->remote_addr());
         auto parse_result = co_await parse_request(exchange, idle_deadline);
         if (!parse_result) {
             break;

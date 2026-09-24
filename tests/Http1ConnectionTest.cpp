@@ -313,7 +313,7 @@ TEST(Http1ConnectionTest, ChunkedWriteReturnsAfterPayloadProgressAndPreservesCal
                 co_return;
             }
 
-            fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+            fiber::mem::IoBufChain chunk;
             fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(5);
             if (!body) {
                 metrics.responses_ok = false;
@@ -391,7 +391,7 @@ TEST(Http1ConnectionTest, ChunkedWriteTimeoutAbortsResponseAndRejectsRetry) {
             writes_after_header = metrics.write_calls;
             transport_ptr->fail_writev_after(1, fiber::common::IoErr::TimedOut);
 
-            fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+            fiber::mem::IoBufChain chunk;
             fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(5);
             if (!body) {
                 co_return;

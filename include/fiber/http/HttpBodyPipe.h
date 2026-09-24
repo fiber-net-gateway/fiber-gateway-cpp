@@ -137,7 +137,6 @@ HttpBodyPipeWriter make_http_body_pipe_writer(T &sink) noexcept {
 }
 
 async::Task<HttpBodyPipeResult> pipe_http_body(HttpBodyPipeReader source, HttpBodyPipeWriter sink,
-                                               mem::IoBufNodePool &node_pool,
                                                const HttpBodyPipeOptions &options) noexcept;
 
 } // namespace fiber::http

@@ -504,7 +504,7 @@ Http1ExchangeIo::read_body(HttpExchange &exchange, size_t max_bytes, std::chrono
     if (!connection_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
-    mem::IoBufChain out(connection_->loop().io_buf_node_pool());
+    mem::IoBufChain out;
     if (raw_stream_active()) {
         if (max_bytes == 0) {
             co_return out;

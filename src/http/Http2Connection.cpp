@@ -182,8 +182,6 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) n
     }
 
     transport_ = std::move(transport);
-    bind_outbound_chain(control_hook_.encoded_);
-    bind_outbound_chain(inflight_outbound_chain_);
     inbound_io_.phase = options_.role == ConnectionRole::Server ? ParsePhase::Preface : ParsePhase::FrameHeader;
     inbound_io_.last_inbound_at = transport_->loop().now();
     prefer_write_ = options_.role == ConnectionRole::Client;
@@ -2053,16 +2051,6 @@ void Http2Connection::enter_closing(common::IoErr reason, bool report_error) noe
     finish_connection();
 }
 
-void Http2Connection::bind_outbound_chain(mem::IoBufChain &chain) noexcept {
-    event::EventLoop *owner_loop = transport_ ? &transport_->loop() : event::EventLoop::current_or_null();
-    FIBER_ASSERT(owner_loop != nullptr);
-    if (!chain.bound()) {
-        chain.bind_node_pool(owner_loop->io_buf_node_pool());
-    } else {
-        FIBER_ASSERT(&chain.node_pool() == &owner_loop->io_buf_node_pool());
-    }
-}
-
 void Http2Connection::enqueue_outbound_hook(Http2OutboundHook &hook, bool priority) noexcept {
     FIBER_ASSERT(hook.state_ == Http2OutboundHook::State::Idle);
     FIBER_ASSERT(hook.encoded_.readable_bytes() != 0);
@@ -2116,7 +2104,7 @@ common::IoErr Http2Connection::try_encode_stream_outbound(Http2Stream &stream) n
     Http2OutboundEncodeRequest request;
     request.max_frame_size = peer_max_outbound_frame_size_;
     request.payload_budget = payload_budget;
-    Http2OutboundEncodeTarget target(transport_->loop().io_buf_node_pool());
+    Http2OutboundEncodeTarget target;
     Http2OutboundEncodeResult result;
     common::IoErr err = stream.encode_outbound_batch(request, target, result);
     if (err != common::IoErr::None) {

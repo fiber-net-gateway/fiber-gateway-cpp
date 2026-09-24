@@ -62,10 +62,10 @@ inline void tls_encode_record_header(std::uint8_t *dst, TlsContentType type, std
 // (whole-node moves plus zero-copy boundary slices; the payload itself is
 // never copied), so the record owns its bytes independently of the reader.
 //
-// Lifetime contract: the payload's chain nodes come from the reader's
-// IoBufNodePool — destroy the record on the loop that owns that pool. Bytes
-// leaving the connection (pass-up to other threads) must be re-minted as
-// plain IoBuf slices, whose storage lifetime is refcounted.
+// Lifetime contract: chain nodes resolve the current loop's node pool —
+// destroy the record on the connection's loop. Bytes leaving the connection
+// (pass-up to other threads) must be re-minted as plain IoBuf slices, whose
+// storage lifetime is refcounted.
 struct TlsRecord {
     TlsContentType type = TlsContentType::ApplicationData;
     std::uint16_t legacy_version = 0;

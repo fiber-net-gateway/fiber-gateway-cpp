@@ -6,6 +6,7 @@
 #include <string>
 #include <sys/uio.h>
 
+#include "LoopTestSupport.h"
 #include "PrometheusInternal.h"
 #include "TextEncoder.h"
 
@@ -79,29 +80,31 @@ TEST(TextEncoderTest, EncodesMetadataEscapesLabelsAndGaugeReductionsInOrder) {
 }
 
 TEST(TextEncoderTest, EncodesCumulativeHistogramAndExactDurationSeconds) {
-    RegistryData data({});
-    auto histogram = family(MetricType::Histogram, "request_duration_seconds", "Request duration.", 0);
-    histogram.histogram_unit = HistogramUnit::Microseconds;
-    histogram.upper_bounds = {1, 5};
-    histogram.label_names = {"method"};
-    histogram.series[0].label_values = {"GET"};
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        RegistryData data({});
+        auto histogram = family(MetricType::Histogram, "request_duration_seconds", "Request duration.", 0);
+        histogram.histogram_unit = HistogramUnit::Microseconds;
+        histogram.upper_bounds = {1, 5};
+        histogram.label_names = {"method"};
+        histogram.series[0].label_values = {"GET"};
 
-    data.families = {histogram};
-    data.word_count = 4;
-    data.snapshots = {{2, 1, 4, 12}, {1, 2, 5, 20}};
+        data.families = {histogram};
+        data.word_count = 4;
+        data.snapshots = {{2, 1, 4, 12}, {1, 2, 5, 20}};
 
-    fiber::mem::IoBufNodePool pool;
-    auto encoded = fiber::prometheus::detail::encode_text_chain(data, pool, CollectOptions{.chunk_size = 7});
-    ASSERT_TRUE(encoded);
-    EXPECT_FALSE(encoded->complete());
-    EXPECT_GT(encoded->size(), 1);
-    EXPECT_EQ(chain_string(*encoded), "# HELP request_duration_seconds Request duration.\n"
-                                      "# TYPE request_duration_seconds histogram\n"
-                                      "request_duration_seconds_bucket{method=\"GET\",le=\"0.000001\"} 3\n"
-                                      "request_duration_seconds_bucket{method=\"GET\",le=\"0.000005\"} 6\n"
-                                      "request_duration_seconds_bucket{method=\"GET\",le=\"+Inf\"} 9\n"
-                                      "request_duration_seconds_sum{method=\"GET\"} 0.000032\n"
-                                      "request_duration_seconds_count{method=\"GET\"} 9\n");
+
+        auto encoded = fiber::prometheus::detail::encode_text_chain(data, CollectOptions{.chunk_size = 7});
+        ASSERT_TRUE(encoded);
+        EXPECT_FALSE(encoded->complete());
+        EXPECT_GT(encoded->size(), 1);
+        EXPECT_EQ(chain_string(*encoded), "# HELP request_duration_seconds Request duration.\n"
+                                          "# TYPE request_duration_seconds histogram\n"
+                                          "request_duration_seconds_bucket{method=\"GET\",le=\"0.000001\"} 3\n"
+                                          "request_duration_seconds_bucket{method=\"GET\",le=\"0.000005\"} 6\n"
+                                          "request_duration_seconds_bucket{method=\"GET\",le=\"+Inf\"} 9\n"
+                                          "request_duration_seconds_sum{method=\"GET\"} 0.000032\n"
+                                          "request_duration_seconds_count{method=\"GET\"} 9\n");
+    });
 }
 
 TEST(TextEncoderTest, FixedBufferFailureDoesNotCommitPartialOutput) {
@@ -123,29 +126,32 @@ TEST(TextEncoderTest, FixedBufferFailureDoesNotCommitPartialOutput) {
 }
 
 TEST(TextEncoderTest, ChainHonorsOutputLimitAndRejectsZeroChunk) {
-    RegistryData data({});
-    data.families.push_back(family(MetricType::Counter, "requests_total", "Requests", 0));
-    data.word_count = 1;
-    data.snapshots = {{1}};
-    fiber::mem::IoBufNodePool pool;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        RegistryData data({});
+        data.families.push_back(family(MetricType::Counter, "requests_total", "Requests", 0));
+        data.word_count = 1;
+        data.snapshots = {{1}};
 
-    auto too_large = fiber::prometheus::detail::encode_text_chain(
-            data, pool, CollectOptions{.chunk_size = 16, .max_output_bytes = 8});
-    ASSERT_FALSE(too_large);
-    EXPECT_EQ(too_large.error(), IoErr::MessageTooLarge);
 
-    auto invalid = fiber::prometheus::detail::encode_text_chain(data, pool, CollectOptions{.chunk_size = 0});
-    ASSERT_FALSE(invalid);
-    EXPECT_EQ(invalid.error(), IoErr::Invalid);
+        auto too_large = fiber::prometheus::detail::encode_text_chain(
+                data, CollectOptions{.chunk_size = 16, .max_output_bytes = 8});
+        ASSERT_FALSE(too_large);
+        EXPECT_EQ(too_large.error(), IoErr::MessageTooLarge);
+
+        auto invalid = fiber::prometheus::detail::encode_text_chain(data, CollectOptions{.chunk_size = 0});
+        ASSERT_FALSE(invalid);
+        EXPECT_EQ(invalid.error(), IoErr::Invalid);
+    });
 }
 
 TEST(TextEncoderTest, EmptyRegistryProducesReadableEmptyChain) {
-    RegistryData data({});
-    fiber::mem::IoBufNodePool pool;
-    auto encoded = fiber::prometheus::detail::encode_text_chain(data, pool, {});
-    ASSERT_TRUE(encoded);
-    EXPECT_TRUE(encoded->empty());
-    EXPECT_TRUE(encoded->bound());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        RegistryData data({});
+
+        auto encoded = fiber::prometheus::detail::encode_text_chain(data, {});
+        ASSERT_TRUE(encoded);
+        EXPECT_TRUE(encoded->empty());
+    });
 }
 
 } // namespace

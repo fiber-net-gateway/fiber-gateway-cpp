@@ -659,7 +659,6 @@ std::expected<void, JsonPathVisitError> visit_json_paths(const JsonPathProgram &
 
 std::expected<mem::IoBufChain, JsonPathRewriteError> rewrite_json_paths(const JsonPathProgram &program,
                                                                         mem::IoBuf input, mem::BufPool &pool,
-                                                                        mem::IoBufNodePool &node_pool,
                                                                         JsonPathRewriter rewriter) noexcept {
     if (!rewriter.on_match) {
         return std::unexpected(JsonPathRewriteError{
@@ -672,7 +671,7 @@ std::expected<mem::IoBufChain, JsonPathRewriteError> rewrite_json_paths(const Js
         });
     }
 
-    mem::IoBufChain output(node_pool);
+    mem::IoBufChain output;
     RewriteContext context{
             .input = &input,
             .output = &output,

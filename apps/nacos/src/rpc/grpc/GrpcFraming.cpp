@@ -14,9 +14,6 @@ constexpr std::size_t kFrameHeaderSize = 5;
 } // namespace
 
 common::IoResult<mem::IoBufChain> frame(mem::IoBufChain payload) noexcept {
-    if (!payload.bound()) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
     const std::size_t n = payload.readable_bytes();
     if (n > 0xffffffffull) {
         return std::unexpected(common::IoErr::MessageTooLarge);
@@ -42,17 +39,9 @@ common::IoResult<mem::IoBufChain> frame(mem::IoBufChain payload) noexcept {
 }
 
 common::IoResult<void> GrpcFrameReader::append(mem::IoBufChain chunk) noexcept {
-    if (!buffer_.bound()) {
-        // First chunk: adopt its node-pool binding and nodes wholesale (zero-copy).
-        buffer_ = std::move(chunk);
-        return {};
-    }
-    // Subsequent chunks (must share the reader's pool): move each node across.
-    while (auto *node = chunk.pop_front_node()) {
-        if (!buffer_.append_node(node)) {
-            buffer_.node_pool().release(node);
-            return std::unexpected(common::IoErr::NoMem);
-        }
+    // Zero-copy: splices chunk's nodes onto the buffer's tail.
+    if (!buffer_.append_chain(std::move(chunk))) {
+        return std::unexpected(common::IoErr::NoMem);
     }
     return {};
 }

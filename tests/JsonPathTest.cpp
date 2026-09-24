@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "LoopTestSupport.h"
 
 namespace {
 
@@ -212,48 +213,53 @@ TEST(JsonPathTest, DuplicateObjectFieldsEachProduceAMatch) {
 }
 
 TEST(JsonPathTest, RewritesArbitraryMatchedValuesAndPreservesOtherBytes) {
-    const JsonPathRule rules[] = {
-            {.expression = "$.model", .action = 1},
-            {.expression = "$.items[*].enabled", .action = 2},
-    };
-    auto compiled = JsonPathProgram::compile(rules);
-    ASSERT_TRUE(compiled) << compiled.error().message;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &nodes) {
+        const JsonPathRule rules[] = {
+                {.expression = "$.model", .action = 1},
+                {.expression = "$.items[*].enabled", .action = 2},
+        };
+        auto compiled = JsonPathProgram::compile(rules);
+        ASSERT_TRUE(compiled) << compiled.error().message;
 
-    constexpr std::string_view input =
-            R"({ "unknown":[1e+09,"\u0041"], "model":"public", "items":[{"enabled":true},{"enabled":null}] })";
-    BufPool pool;
-    fiber::mem::IoBufNodePool nodes;
-    RewriteValues values;
-    auto rewritten = fiber::json::rewrite_json_paths(*compiled, make_body(input), pool, nodes,
-                                                     JsonPathRewriter{
-                                                             .context = &values,
-                                                             .on_match = &RewriteValues::on_match,
-                                                     });
+        constexpr std::string_view input =
+                R"({ "unknown":[1e+09,"\u0041"], "model":"public", "items":[{"enabled":true},{"enabled":null}] })";
+        BufPool pool;
 
-    ASSERT_TRUE(rewritten);
-    EXPECT_EQ(flatten(*rewritten),
-              R"({ "unknown":[1e+09,"\u0041"], "model":"upstream", "items":[{"enabled":false},{"enabled":false}] })");
+        RewriteValues values;
+        auto rewritten = fiber::json::rewrite_json_paths(*compiled, make_body(input), pool,
+                                                         JsonPathRewriter{
+                                                                 .context = &values,
+                                                                 .on_match = &RewriteValues::on_match,
+                                                         });
+
+        ASSERT_TRUE(rewritten);
+        EXPECT_EQ(
+                flatten(*rewritten),
+                R"({ "unknown":[1e+09,"\u0041"], "model":"upstream", "items":[{"enabled":false},{"enabled":false}] })");
+    });
 }
 
 TEST(JsonPathTest, RejectsInvalidEncodedReplacement) {
-    const JsonPathRule rules[] = {
-            {.expression = "$.model", .action = 1},
-    };
-    auto compiled = JsonPathProgram::compile(rules);
-    ASSERT_TRUE(compiled) << compiled.error().message;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &nodes) {
+        const JsonPathRule rules[] = {
+                {.expression = "$.model", .action = 1},
+        };
+        auto compiled = JsonPathProgram::compile(rules);
+        ASSERT_TRUE(compiled) << compiled.error().message;
 
-    BufPool pool;
-    fiber::mem::IoBufNodePool nodes;
-    RewriteValues values{.invalid = true};
-    auto rewritten = fiber::json::rewrite_json_paths(*compiled, make_body(R"({"model":"public"})"), pool, nodes,
-                                                     JsonPathRewriter{
-                                                             .context = &values,
-                                                             .on_match = &RewriteValues::on_match,
-                                                     });
+        BufPool pool;
 
-    ASSERT_FALSE(rewritten);
-    EXPECT_EQ(rewritten.error().code, JsonPathRewriteErrorCode::InvalidReplacement);
-    EXPECT_EQ(rewritten.error().action, 1u);
+        RewriteValues values{.invalid = true};
+        auto rewritten = fiber::json::rewrite_json_paths(*compiled, make_body(R"({"model":"public"})"), pool,
+                                                         JsonPathRewriter{
+                                                                 .context = &values,
+                                                                 .on_match = &RewriteValues::on_match,
+                                                         });
+
+        ASSERT_FALSE(rewritten);
+        EXPECT_EQ(rewritten.error().code, JsonPathRewriteErrorCode::InvalidReplacement);
+        EXPECT_EQ(rewritten.error().action, 1u);
+    });
 }
 
 TEST(JsonPathTest, RejectsConflictingAndMalformedPrograms) {

@@ -21,6 +21,7 @@
 #include <fiber/http/HttpResponseWriter.h>
 #include <fiber/net/SocketAddress.h>
 
+#include "LoopTestSupport.h"
 #include "support/ZlibReference.h"
 
 namespace {
@@ -340,707 +341,760 @@ const std::uint8_t *bytes_of(const std::string &s) noexcept { return reinterpret
 // ---- active compression path ----
 
 TEST(GzipResponseWriterTest, CompressesBodyAndRewritesHeaders) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(1000);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(1000);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Content-Length", std::to_string(body.size()));
-        headers.add("ETag", "\"abc123\"");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        EXPECT_EQ(*written, body.size());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Content-Length", std::to_string(body.size()));
+            headers.add("ETag", "\"abc123\"");
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            EXPECT_EQ(*written, body.size());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(h.kind, OutgoingHeaderKind::Final);
+        EXPECT_EQ(h.status_code, 200);
+        EXPECT_FALSE(h.end_stream);
+        EXPECT_TRUE(h.body.is_auto()) << "content-length framing must not survive compression";
+        EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
+        EXPECT_EQ(field_value(h, "Vary"), std::optional<std::string>("Accept-Encoding"));
+        EXPECT_EQ(field_value(h, "Content-Length"), std::nullopt);
+        EXPECT_EQ(field_value(h, "ETag"), std::optional<std::string>("W/\"abc123\""));
+        EXPECT_EQ(field_value(h, "Content-Type"), std::optional<std::string>("text/html"));
+
+        EXPECT_EQ(sink.body, reference_gzip(body, 1));
+        EXPECT_TRUE(sink.ended());
+        EXPECT_EQ(sink.abort_count, 0);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
+        EXPECT_EQ(stats.input_bytes, body.size());
+        EXPECT_EQ(stats.output_bytes, sink.body.size());
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    const CapturedHeader &h = sink.headers[0];
-    EXPECT_EQ(h.kind, OutgoingHeaderKind::Final);
-    EXPECT_EQ(h.status_code, 200);
-    EXPECT_FALSE(h.end_stream);
-    EXPECT_TRUE(h.body.is_auto()) << "content-length framing must not survive compression";
-    EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
-    EXPECT_EQ(field_value(h, "Vary"), std::optional<std::string>("Accept-Encoding"));
-    EXPECT_EQ(field_value(h, "Content-Length"), std::nullopt);
-    EXPECT_EQ(field_value(h, "ETag"), std::optional<std::string>("W/\"abc123\""));
-    EXPECT_EQ(field_value(h, "Content-Type"), std::optional<std::string>("text/html"));
-
-    EXPECT_EQ(sink.body, reference_gzip(body, 1));
-    EXPECT_TRUE(sink.ended());
-    EXPECT_EQ(sink.abort_count, 0);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
-    EXPECT_EQ(stats.input_bytes, body.size());
-    EXPECT_EQ(stats.output_bytes, sink.body.size());
 }
 
 TEST(GzipResponseWriterTest, EmptyChunkedBodyProducesEmptyMember) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(nullptr, 0, true);
-        EXPECT_TRUE(written.has_value());
-        EXPECT_EQ(*written, 0u);
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(nullptr, 0, true);
+            EXPECT_TRUE(written.has_value());
+            EXPECT_EQ(*written, 0u);
+            stats = gzip.stats();
+        });
+
+        EXPECT_EQ(sink.body, reference_gzip("", 1));
+        EXPECT_EQ(sink.body.size(), 20u);
+        EXPECT_TRUE(sink.ended());
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
+        EXPECT_EQ(stats.input_bytes, 0u);
     });
-
-    EXPECT_EQ(sink.body, reference_gzip("", 1));
-    EXPECT_EQ(sink.body.size(), 20u);
-    EXPECT_TRUE(sink.ended());
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
-    EXPECT_EQ(stats.input_bytes, 0u);
 }
 
 TEST(GzipResponseWriterTest, SyncFlushIsDecodableBeforeEnd) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string first = "part-one-";
-    const std::string second = "part-two";
-    std::string flushed_prefix;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string first = "part-one-";
+        const std::string second = "part-two";
+        std::string flushed_prefix;
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(first), first.size(), false);
-        EXPECT_TRUE(written.has_value());
-        const auto flushed = co_await w.flush();
-        EXPECT_TRUE(flushed.has_value());
-        flushed_prefix = sink.body;
-        EXPECT_GT(flushed_prefix.size(), 0u) << "flush must publish the compressed prefix";
-        const auto done = co_await w.write_all(bytes_of(second), second.size(), true);
-        EXPECT_TRUE(done.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(first), first.size(), false);
+            EXPECT_TRUE(written.has_value());
+            const auto flushed = co_await w.flush();
+            EXPECT_TRUE(flushed.has_value());
+            flushed_prefix = sink.body;
+            EXPECT_GT(flushed_prefix.size(), 0u) << "flush must publish the compressed prefix";
+            const auto done = co_await w.write_all(bytes_of(second), second.size(), true);
+            EXPECT_TRUE(done.has_value());
+            stats = gzip.stats();
+        });
+
+        // The flushed prefix must be recoverable without the trailer.
+        fiber::test::ZlibReferenceInflate inflate(15 + 16);
+        EXPECT_EQ(inflate_available(inflate, flushed_prefix), first);
+        EXPECT_FALSE(inflate.stream_end());
+
+        // The completed member matches the reference for the identical operation
+        // sequence (write, flush, write, finish) and decodes to the full body.
+        EXPECT_EQ(sink.body, reference_gzip_sequence(1, {{first, true}, {second, false}}));
+        fiber::test::ZlibReferenceInflate whole(15 + 16);
+        EXPECT_EQ(inflate_available(whole, sink.body), first + second);
+        EXPECT_TRUE(whole.stream_end());
+
+        EXPECT_EQ(sink.flush_count, 1);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
+        EXPECT_EQ(stats.input_bytes, first.size() + second.size());
     });
-
-    // The flushed prefix must be recoverable without the trailer.
-    fiber::test::ZlibReferenceInflate inflate(15 + 16);
-    EXPECT_EQ(inflate_available(inflate, flushed_prefix), first);
-    EXPECT_FALSE(inflate.stream_end());
-
-    // The completed member matches the reference for the identical operation
-    // sequence (write, flush, write, finish) and decodes to the full body.
-    EXPECT_EQ(sink.body, reference_gzip_sequence(1, {{first, true}, {second, false}}));
-    fiber::test::ZlibReferenceInflate whole(15 + 16);
-    EXPECT_EQ(inflate_available(whole, sink.body), first + second);
-    EXPECT_TRUE(whole.stream_end());
-
-    EXPECT_EQ(sink.flush_count, 1);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
-    EXPECT_EQ(stats.input_bytes, first.size() + second.size());
 }
 
 TEST(GzipResponseWriterTest, FlushBeforeAnyInputEmitsNothing) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
-        EXPECT_TRUE(head.has_value());
-        const auto flushed = co_await w.flush();
-        EXPECT_TRUE(flushed.has_value());
-        EXPECT_TRUE(sink.body.empty()) << "virgin flush must not start the member";
-        const std::string data = "data";
-        const auto written = co_await w.write_all(bytes_of(data), data.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            EXPECT_TRUE(head.has_value());
+            const auto flushed = co_await w.flush();
+            EXPECT_TRUE(flushed.has_value());
+            EXPECT_TRUE(sink.body.empty()) << "virgin flush must not start the member";
+            const std::string data = "data";
+            const auto written = co_await w.write_all(bytes_of(data), data.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        EXPECT_EQ(sink.body, reference_gzip("data", 1));
+        EXPECT_EQ(sink.flush_count, 1);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
     });
-
-    EXPECT_EQ(sink.body, reference_gzip("data", 1));
-    EXPECT_EQ(sink.flush_count, 1);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
 }
 
 TEST(GzipResponseWriterTest, LargeSingleWriteCompressesCorrectly) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body =
-            repeat_pattern(600 * 1024, R"({"id":%d,"name":"fiber-gateway","tags":["http","quic"],"ok":true},)");
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body =
+                repeat_pattern(600 * 1024, R"({"id":%d,"name":"fiber-gateway","tags":["http","quic"],"ok":true},)");
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        EXPECT_EQ(*written, body.size());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            EXPECT_EQ(*written, body.size());
+            stats = gzip.stats();
+        });
+
+        EXPECT_EQ(sink.body, reference_gzip(body, 1));
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
+        EXPECT_EQ(stats.input_bytes, body.size());
+        EXPECT_EQ(stats.output_bytes, sink.body.size());
     });
-
-    EXPECT_EQ(sink.body, reference_gzip(body, 1));
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
-    EXPECT_EQ(stats.input_bytes, body.size());
-    EXPECT_EQ(stats.output_bytes, sink.body.size());
 }
 
 TEST(GzipResponseWriterTest, ChainWriteCompletesBody) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string part_a = html_payload(3000);
-    const std::string part_b = html_payload(700);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string part_a = html_payload(3000);
+        const std::string part_b = html_payload(700);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
-        EXPECT_TRUE(head.has_value());
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            EXPECT_TRUE(head.has_value());
 
-        IoBufChain chain(node_pool);
-        IoBuf a = IoBuf::allocate(4096);
-        std::memcpy(a.writable_data(), part_a.data(), part_a.size());
-        a.commit(part_a.size());
-        EXPECT_TRUE(chain.append(std::move(a)));
-        IoBuf b = IoBuf::allocate(4096);
-        std::memcpy(b.writable_data(), part_b.data(), part_b.size());
-        b.commit(part_b.size());
-        EXPECT_TRUE(chain.append(std::move(b)));
-        chain.mark_complete();
+            IoBufChain chain;
+            IoBuf a = IoBuf::allocate(4096);
+            std::memcpy(a.writable_data(), part_a.data(), part_a.size());
+            a.commit(part_a.size());
+            EXPECT_TRUE(chain.append(std::move(a)));
+            IoBuf b = IoBuf::allocate(4096);
+            std::memcpy(b.writable_data(), part_b.data(), part_b.size());
+            b.commit(part_b.size());
+            EXPECT_TRUE(chain.append(std::move(b)));
+            chain.mark_complete();
 
-        const auto written = co_await w.write(chain);
-        EXPECT_TRUE(written.has_value());
-        EXPECT_EQ(*written, part_a.size() + part_b.size());
-        EXPECT_EQ(chain.readable_bytes(), 0u);
-        stats = gzip.stats();
+            const auto written = co_await w.write(chain);
+            EXPECT_TRUE(written.has_value());
+            EXPECT_EQ(*written, part_a.size() + part_b.size());
+            EXPECT_EQ(chain.readable_bytes(), 0u);
+            stats = gzip.stats();
+        });
+
+        EXPECT_EQ(sink.body, reference_gzip(part_a + part_b, 1));
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
+        EXPECT_EQ(stats.input_bytes, part_a.size() + part_b.size());
     });
-
-    EXPECT_EQ(sink.body, reference_gzip(part_a + part_b, 1));
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
-    EXPECT_EQ(stats.input_bytes, part_a.size() + part_b.size());
 }
 
 TEST(GzipResponseWriterTest, CompressesConfiguredContentTypeAndKeepsWeakEtag) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    const std::vector<std::string> json_types{"application/json"};
-    options.types = json_types;
-    GzipResponseWriterStats stats;
-    const std::string body = repeat_pattern(2000, R"({"ok":true,"n":42})");
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        const std::vector<std::string> json_types{"application/json"};
+        options.types = json_types;
+        GzipResponseWriterStats stats;
+        const std::string body = repeat_pattern(2000, R"({"ok":true,"n":42})");
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "application/json");
-        headers.add("Content-Length", std::to_string(body.size()));
-        headers.add("ETag", "W/\"v1\"");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "application/json");
+            headers.add("Content-Length", std::to_string(body.size()));
+            headers.add("ETag", "W/\"v1\"");
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
+        EXPECT_EQ(field_value(h, "ETag"), std::optional<std::string>("W/\"v1\"")) << "weak ETag must stay untouched";
+        EXPECT_EQ(sink.body, reference_gzip(body, 1));
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    const CapturedHeader &h = sink.headers[0];
-    EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
-    EXPECT_EQ(field_value(h, "ETag"), std::optional<std::string>("W/\"v1\"")) << "weak ETag must stay untouched";
-    EXPECT_EQ(sink.body, reference_gzip(body, 1));
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
 }
 
 TEST(GzipResponseWriterTest, ExistingVaryIsNotDuplicated) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(300);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(300);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Vary", "Accept-Encoding");
-        headers.add("Content-Length", std::to_string(body.size()));
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Vary", "Accept-Encoding");
+            headers.add("Content-Length", std::to_string(body.size()));
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(field_count(h, "Vary"), 1u);
+        EXPECT_EQ(field_value(h, "Vary"), std::optional<std::string>("Accept-Encoding"));
+        EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
+        EXPECT_EQ(sink.body, reference_gzip(body, 1));
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    const CapturedHeader &h = sink.headers[0];
-    EXPECT_EQ(field_count(h, "Vary"), 1u);
-    EXPECT_EQ(field_value(h, "Vary"), std::optional<std::string>("Accept-Encoding"));
-    EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip"));
-    EXPECT_EQ(sink.body, reference_gzip(body, 1));
 }
 
 TEST(GzipResponseWriterTest, InformationalHeaderPassesThroughBeforeFinal) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(200);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(200);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
 
-        OutgoingHeaderBlockView informational;
-        informational.kind = OutgoingHeaderKind::Informational;
-        informational.status_code = 100;
-        const auto early = co_await w.send_header(informational);
-        EXPECT_TRUE(early.has_value());
+            OutgoingHeaderBlockView informational;
+            informational.kind = OutgoingHeaderKind::Informational;
+            informational.status_code = 100;
+            const auto early = co_await w.send_header(informational);
+            EXPECT_TRUE(early.has_value());
 
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Content-Length", std::to_string(body.size()));
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value()) << "final header after informational must still be accepted";
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Content-Length", std::to_string(body.size()));
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value()) << "final header after informational must still be accepted";
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 2u);
+        EXPECT_EQ(sink.headers[0].kind, OutgoingHeaderKind::Informational);
+        EXPECT_EQ(sink.headers[0].status_code, 100);
+        EXPECT_EQ(sink.headers[1].kind, OutgoingHeaderKind::Final);
+        EXPECT_EQ(sink.body, reference_gzip(body, 1));
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
     });
-
-    ASSERT_EQ(sink.headers.size(), 2u);
-    EXPECT_EQ(sink.headers[0].kind, OutgoingHeaderKind::Informational);
-    EXPECT_EQ(sink.headers[0].status_code, 100);
-    EXPECT_EQ(sink.headers[1].kind, OutgoingHeaderKind::Final);
-    EXPECT_EQ(sink.body, reference_gzip(body, 1));
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
 }
 
 TEST(GzipResponseWriterTest, TrailerHeaderFinishesActiveBody) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(4000);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(4000);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), false);
-        EXPECT_TRUE(written.has_value());
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), false);
+            EXPECT_TRUE(written.has_value());
 
-        HttpHeaders trailers(exchange.pool());
-        trailers.add("X-Checksum", "deadbeef");
-        OutgoingHeaderBlockView trailer;
-        trailer.kind = OutgoingHeaderKind::Trailer;
-        trailer.headers = &trailers;
-        const auto sent = co_await w.send_header(trailer);
-        EXPECT_TRUE(sent.has_value());
-        stats = gzip.stats();
+            HttpHeaders trailers(exchange.pool());
+            trailers.add("X-Checksum", "deadbeef");
+            OutgoingHeaderBlockView trailer;
+            trailer.kind = OutgoingHeaderKind::Trailer;
+            trailer.headers = &trailers;
+            const auto sent = co_await w.send_header(trailer);
+            EXPECT_TRUE(sent.has_value());
+            stats = gzip.stats();
 
-        const auto late = co_await w.write_all(bytes_of(body), 1, true);
-        EXPECT_FALSE(late.has_value());
-        EXPECT_EQ(late.error(), IoErr::Already);
+            const auto late = co_await w.write_all(bytes_of(body), 1, true);
+            EXPECT_FALSE(late.has_value());
+            EXPECT_EQ(late.error(), IoErr::Already);
+        });
+
+        ASSERT_EQ(sink.headers.size(), 2u);
+        EXPECT_EQ(sink.headers[1].kind, OutgoingHeaderKind::Trailer);
+        EXPECT_EQ(field_value(sink.headers[1], "X-Checksum"), std::optional<std::string>("deadbeef"));
+        EXPECT_EQ(sink.body, reference_gzip(body, 1));
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
+        EXPECT_EQ(stats.input_bytes, body.size());
     });
-
-    ASSERT_EQ(sink.headers.size(), 2u);
-    EXPECT_EQ(sink.headers[1].kind, OutgoingHeaderKind::Trailer);
-    EXPECT_EQ(field_value(sink.headers[1], "X-Checksum"), std::optional<std::string>("deadbeef"));
-    EXPECT_EQ(sink.body, reference_gzip(body, 1));
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
-    EXPECT_EQ(stats.input_bytes, body.size());
 }
 
 // ---- bypass paths ----
 
 TEST(GzipResponseWriterTest, BypassWithoutAcceptAddsVaryOnly) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    options.request_accepts_gzip = false;
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(1000);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        options.request_accepts_gzip = false;
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(1000);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Content-Length", std::to_string(body.size()));
-        headers.add("ETag", "\"abc123\"");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Content-Length", std::to_string(body.size()));
+            headers.add("ETag", "\"abc123\"");
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(field_value(h, "Vary"), std::optional<std::string>("Accept-Encoding")) << "still a compressible body";
+        EXPECT_EQ(field_value(h, "Content-Encoding"), std::nullopt);
+        EXPECT_EQ(field_value(h, "Content-Length"), std::optional<std::string>("1000"));
+        EXPECT_EQ(field_value(h, "ETag"), std::optional<std::string>("\"abc123\"")) << "no transform, no weakening";
+        EXPECT_TRUE(h.body.is_content_length());
+        EXPECT_EQ(h.body.content_length(), body.size());
+
+        EXPECT_EQ(sink.body, body) << "bypass must pass the body through verbatim";
+        EXPECT_TRUE(sink.ended());
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
+        EXPECT_EQ(stats.input_bytes, 0u);
+        EXPECT_EQ(stats.output_bytes, 0u);
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    const CapturedHeader &h = sink.headers[0];
-    EXPECT_EQ(field_value(h, "Vary"), std::optional<std::string>("Accept-Encoding")) << "still a compressible body";
-    EXPECT_EQ(field_value(h, "Content-Encoding"), std::nullopt);
-    EXPECT_EQ(field_value(h, "Content-Length"), std::optional<std::string>("1000"));
-    EXPECT_EQ(field_value(h, "ETag"), std::optional<std::string>("\"abc123\"")) << "no transform, no weakening";
-    EXPECT_TRUE(h.body.is_content_length());
-    EXPECT_EQ(h.body.content_length(), body.size());
-
-    EXPECT_EQ(sink.body, body) << "bypass must pass the body through verbatim";
-    EXPECT_TRUE(sink.ended());
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
-    EXPECT_EQ(stats.input_bytes, 0u);
-    EXPECT_EQ(stats.output_bytes, 0u);
 }
 
 TEST(GzipResponseWriterTest, BypassesBodylessStatusWithoutVary) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 204, HttpBodySpec::None(), true));
-        EXPECT_TRUE(head.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 204, HttpBodySpec::None(), true));
+            EXPECT_TRUE(head.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(h.status_code, 204);
+        EXPECT_TRUE(h.end_stream);
+        EXPECT_TRUE(h.body.is_none());
+        EXPECT_EQ(field_value(h, "Vary"), std::nullopt) << "204 is never an intrinsic candidate";
+        EXPECT_EQ(field_value(h, "Content-Type"), std::optional<std::string>("text/html"));
+        EXPECT_TRUE(sink.body.empty());
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    const CapturedHeader &h = sink.headers[0];
-    EXPECT_EQ(h.status_code, 204);
-    EXPECT_TRUE(h.end_stream);
-    EXPECT_TRUE(h.body.is_none());
-    EXPECT_EQ(field_value(h, "Vary"), std::nullopt) << "204 is never an intrinsic candidate";
-    EXPECT_EQ(field_value(h, "Content-Type"), std::optional<std::string>("text/html"));
-    EXPECT_TRUE(sink.body.empty());
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
 }
 
 TEST(GzipResponseWriterTest, BypassesAlreadyEncodedResponse) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = reference_gzip(html_payload(500), 6);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = reference_gzip(html_payload(500), 6);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Content-Encoding", "gzip");
-        headers.add("Content-Length", std::to_string(body.size()));
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Content-Encoding", "gzip");
+            headers.add("Content-Length", std::to_string(body.size()));
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip")) << "left untouched";
+        EXPECT_EQ(field_value(h, "Vary"), std::nullopt);
+        EXPECT_EQ(field_value(h, "Content-Length"), std::optional<std::string>(std::to_string(body.size())));
+        EXPECT_EQ(sink.body, body);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    const CapturedHeader &h = sink.headers[0];
-    EXPECT_EQ(field_value(h, "Content-Encoding"), std::optional<std::string>("gzip")) << "left untouched";
-    EXPECT_EQ(field_value(h, "Vary"), std::nullopt);
-    EXPECT_EQ(field_value(h, "Content-Length"), std::optional<std::string>(std::to_string(body.size())));
-    EXPECT_EQ(sink.body, body);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
 }
 
 TEST(GzipResponseWriterTest, BypassesNoTransformResponse) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(600);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(600);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Cache-Control", "no-transform");
-        headers.add("Content-Length", std::to_string(body.size()));
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Cache-Control", "no-transform");
+            headers.add("Content-Length", std::to_string(body.size()));
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(field_value(h, "Vary"), std::nullopt) << "no-transform is not an intrinsic candidate";
+        EXPECT_EQ(field_value(h, "Cache-Control"), std::optional<std::string>("no-transform"));
+        EXPECT_EQ(sink.body, body);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    const CapturedHeader &h = sink.headers[0];
-    EXPECT_EQ(field_value(h, "Vary"), std::nullopt) << "no-transform is not an intrinsic candidate";
-    EXPECT_EQ(field_value(h, "Cache-Control"), std::optional<std::string>("no-transform"));
-    EXPECT_EQ(sink.body, body);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
 }
 
 TEST(GzipResponseWriterTest, BypassesBelowMinLengthBody) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = "tiny body"; // below the default min_length of 20
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = "tiny body"; // below the default min_length of 20
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Content-Length", std::to_string(body.size()));
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Content-Length", std::to_string(body.size()));
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        const CapturedHeader &h = sink.headers[0];
+        EXPECT_EQ(field_value(h, "Vary"), std::nullopt);
+        EXPECT_EQ(field_value(h, "Content-Length"), std::optional<std::string>("9"));
+        EXPECT_EQ(sink.body, body);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    const CapturedHeader &h = sink.headers[0];
-    EXPECT_EQ(field_value(h, "Vary"), std::nullopt);
-    EXPECT_EQ(field_value(h, "Content-Length"), std::optional<std::string>("9"));
-    EXPECT_EQ(sink.body, body);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
 }
 
 TEST(GzipResponseWriterTest, BypassesUnconfiguredContentType) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = repeat_pattern(2000, R"({"ok":true,"n":42})");
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = repeat_pattern(2000, R"({"ok":true,"n":42})");
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "application/json");
-        headers.add("Content-Length", std::to_string(body.size()));
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "application/json");
+            headers.add("Content-Length", std::to_string(body.size()));
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
+            stats = gzip.stats();
+        });
+
+        ASSERT_EQ(sink.headers.size(), 1u);
+        EXPECT_EQ(field_value(sink.headers[0], "Vary"), std::nullopt) << "type mismatch is not an intrinsic candidate";
+        EXPECT_EQ(sink.body, body);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
     });
-
-    ASSERT_EQ(sink.headers.size(), 1u);
-    EXPECT_EQ(field_value(sink.headers[0], "Vary"), std::nullopt) << "type mismatch is not an intrinsic candidate";
-    EXPECT_EQ(sink.body, body);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Bypassed);
 }
 
 // ---- failure paths ----
 
 TEST(GzipResponseWriterTest, KnownLengthOverflowFailsImmediately) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(500);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(500);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Content-Length", "100"); // >= min_length, so compression activates
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(100)));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_FALSE(written.has_value());
-        EXPECT_EQ(written.error(), IoErr::Invalid);
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Content-Length", "100"); // >= min_length, so compression activates
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(100)));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_FALSE(written.has_value());
+            EXPECT_EQ(written.error(), IoErr::Invalid);
+            stats = gzip.stats();
+        });
+
+        EXPECT_TRUE(sink.body.empty());
+        EXPECT_EQ(sink.abort_count, 1);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Failed);
     });
-
-    EXPECT_TRUE(sink.body.empty());
-    EXPECT_EQ(sink.abort_count, 1);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Failed);
 }
 
 TEST(GzipResponseWriterTest, KnownLengthUnderflowFailsAtFinish) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(50);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(50);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Content-Length", "100");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(100)));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_FALSE(written.has_value());
-        EXPECT_EQ(written.error(), IoErr::Invalid);
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Content-Length", "100");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(100)));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_FALSE(written.has_value());
+            EXPECT_EQ(written.error(), IoErr::Invalid);
+            stats = gzip.stats();
+        });
+
+        EXPECT_TRUE(sink.body.empty()) << "the short body must not be emitted as a finished member";
+        EXPECT_EQ(sink.abort_count, 1);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Failed);
     });
-
-    EXPECT_TRUE(sink.body.empty()) << "the short body must not be emitted as a finished member";
-    EXPECT_EQ(sink.abort_count, 1);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Failed);
 }
 
 TEST(GzipResponseWriterTest, DownstreamWriteFailureFailsTheStream) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    sink.fail_writes_with = IoErr::BrokenPipe;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = random_bytes(100000, 9); // fills the 16 KiB output buffer mid-write
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        sink.fail_writes_with = IoErr::BrokenPipe;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = random_bytes(100000, 9); // fills the 16 KiB output buffer mid-write
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_FALSE(written.has_value());
-        EXPECT_EQ(written.error(), IoErr::BrokenPipe);
-        stats = gzip.stats();
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_FALSE(written.has_value());
+            EXPECT_EQ(written.error(), IoErr::BrokenPipe);
+            stats = gzip.stats();
+        });
+
+        EXPECT_EQ(sink.abort_count, 1);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Failed);
     });
-
-    EXPECT_EQ(sink.abort_count, 1);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Failed);
 }
 
 TEST(GzipResponseWriterTest, AbortPropagatesAndPoisonsLaterOps) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
-        EXPECT_TRUE(head.has_value());
-        const std::string partial = "partial";
-        const auto written = co_await w.write_all(bytes_of(partial), partial.size(), false);
-        EXPECT_TRUE(written.has_value());
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::Chunked()));
+            EXPECT_TRUE(head.has_value());
+            const std::string partial = "partial";
+            const auto written = co_await w.write_all(bytes_of(partial), partial.size(), false);
+            EXPECT_TRUE(written.has_value());
 
-        EXPECT_TRUE(w.abort(IoErr::Canceled).has_value());
-        const auto late_write = co_await w.write_all(bytes_of(partial), 1, true);
-        EXPECT_FALSE(late_write.has_value());
-        EXPECT_EQ(late_write.error(), IoErr::Invalid);
-        const auto late_flush = co_await w.flush();
-        EXPECT_FALSE(late_flush.has_value());
-        EXPECT_EQ(late_flush.error(), IoErr::Invalid);
-        stats = gzip.stats();
+            EXPECT_TRUE(w.abort(IoErr::Canceled).has_value());
+            const auto late_write = co_await w.write_all(bytes_of(partial), 1, true);
+            EXPECT_FALSE(late_write.has_value());
+            EXPECT_EQ(late_write.error(), IoErr::Invalid);
+            const auto late_flush = co_await w.flush();
+            EXPECT_FALSE(late_flush.has_value());
+            EXPECT_EQ(late_flush.error(), IoErr::Invalid);
+            stats = gzip.stats();
+        });
+
+        EXPECT_EQ(sink.abort_count, 1);
+        EXPECT_EQ(sink.abort_reason, IoErr::Canceled);
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Failed);
     });
-
-    EXPECT_EQ(sink.abort_count, 1);
-    EXPECT_EQ(sink.abort_reason, IoErr::Canceled);
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Failed);
 }
 
 TEST(GzipResponseWriterTest, OperationsAfterFinishAreRejected) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
-    const std::string body = html_payload(300);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
+        const std::string body = html_payload(300);
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        HttpHeaders headers(exchange.pool());
-        headers.add("Content-Type", "text/html");
-        headers.add("Content-Length", std::to_string(body.size()));
-        const auto head = co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
-        EXPECT_TRUE(head.has_value());
-        const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
-        EXPECT_TRUE(written.has_value());
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            HttpHeaders headers(exchange.pool());
+            headers.add("Content-Type", "text/html");
+            headers.add("Content-Length", std::to_string(body.size()));
+            const auto head =
+                    co_await w.send_header(final_header(&headers, 200, HttpBodySpec::ContentLength(body.size())));
+            EXPECT_TRUE(head.has_value());
+            const auto written = co_await w.write_all(bytes_of(body), body.size(), true);
+            EXPECT_TRUE(written.has_value());
 
-        const auto again = co_await w.write_all(bytes_of(body), 1, true);
-        EXPECT_FALSE(again.has_value());
-        EXPECT_EQ(again.error(), IoErr::Already);
-        HttpHeaders repeat(exchange.pool());
-        repeat.add("Content-Type", "text/html");
-        const auto second_head = co_await w.send_header(final_header(&repeat, 200, HttpBodySpec::Chunked()));
-        EXPECT_FALSE(second_head.has_value());
-        EXPECT_EQ(second_head.error(), IoErr::Already);
-        stats = gzip.stats();
+            const auto again = co_await w.write_all(bytes_of(body), 1, true);
+            EXPECT_FALSE(again.has_value());
+            EXPECT_EQ(again.error(), IoErr::Already);
+            HttpHeaders repeat(exchange.pool());
+            repeat.add("Content-Type", "text/html");
+            const auto second_head = co_await w.send_header(final_header(&repeat, 200, HttpBodySpec::Chunked()));
+            EXPECT_FALSE(second_head.has_value());
+            EXPECT_EQ(second_head.error(), IoErr::Already);
+            stats = gzip.stats();
+        });
+
+        EXPECT_EQ(sink.body, reference_gzip(body, 1));
+        EXPECT_EQ(sink.abort_count, 0) << "redundant ops after finish must not abort the sink";
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
     });
-
-    EXPECT_EQ(sink.body, reference_gzip(body, 1));
-    EXPECT_EQ(sink.abort_count, 0) << "redundant ops after finish must not abort the sink";
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Completed);
 }
 
 TEST(GzipResponseWriterTest, NeverActivatedWriterDestroysCleanly) {
-    IoBufNodePool node_pool;
-    HttpExchange exchange(node_pool, SocketAddress{});
-    CaptureSink sink;
-    GzipResponseWriterOptions options = active_options();
-    GzipResponseWriterStats stats;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &node_pool) {
+        HttpExchange exchange(SocketAddress{});
+        CaptureSink sink;
+        GzipResponseWriterOptions options = active_options();
+        GzipResponseWriterStats stats;
 
-    run_scenario([&]() -> Task<void> {
-        GzipResponseWriter gzip(exchange, sink.writer(), options);
-        HttpResponseWriter w = gzip.writer();
-        EXPECT_TRUE(w.valid());
-        // No header, no writes: the destructor must cope with no encoder.
-        stats = gzip.stats();
-        co_return;
+        run_scenario([&]() -> Task<void> {
+            GzipResponseWriter gzip(exchange, sink.writer(), options);
+            HttpResponseWriter w = gzip.writer();
+            EXPECT_TRUE(w.valid());
+            // No header, no writes: the destructor must cope with no encoder.
+            stats = gzip.stats();
+            co_return;
+        });
+
+        EXPECT_TRUE(sink.headers.empty());
+        EXPECT_TRUE(sink.body.empty());
+        EXPECT_EQ(stats.decision, GzipResponseDecision::Undecided);
     });
-
-    EXPECT_TRUE(sink.headers.empty());
-    EXPECT_TRUE(sink.body.empty());
-    EXPECT_EQ(stats.decision, GzipResponseDecision::Undecided);
 }

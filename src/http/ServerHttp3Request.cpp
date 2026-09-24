@@ -166,8 +166,7 @@ ServerHttp3Request::ServerHttp3Request(Http3ServerConnection &conn, const Http3S
                                        const HttpHandler &handler,
                                        std::shared_ptr<const HttpHandler> handler_owner) noexcept :
     quic_lease_(conn.quic().lease()), stream_(this, &ServerHttp3Request::destroy_owner),
-    inbound_buf_(conn.quic().recv_extent_pool()), exchange_(conn.quic().recv_extent_pool(), conn.quic().remote_addr()),
-    handler_(&handler), handler_owner_(std::move(handler_owner)),
+    exchange_(conn.quic().remote_addr()), handler_(&handler), handler_owner_(std::move(handler_owner)),
     max_qpack_string_size_(static_cast<std::uint32_t>(
             std::min<std::size_t>(http_options.header_large_size, std::numeric_limits<std::uint32_t>::max()))),
     body_timeout_(http_options.body_timeout), body_recv_state_(BodyRecvState::FrameHeader),
@@ -1032,7 +1031,7 @@ common::IoErr ServerHttp3Request::begin_body_frame(const Http3FrameHeader &heade
 async::Task<common::IoResult<mem::IoBufChain>>
 ServerHttp3Request::read_body(HttpExchange &exchange, std::size_t max_bytes,
                               std::chrono::milliseconds timeout) noexcept {
-    mem::IoBufChain out(inbound_buf_.node_pool());
+    mem::IoBufChain out;
     if (&exchange != &exchange_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }
@@ -1262,8 +1261,7 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
             break;
     }
 
-    Http3QpackEncoderIoBufWriter writer(inbound_buf_.node_pool(),
-                                        Http3QpackEncoder::Options{.max_string_size = max_qpack_string_size_}, 512,
+    Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.max_string_size = max_qpack_string_size_}, 512,
                                         kHttp3FrameHeaderReserve);
 
     if (header.kind != OutgoingHeaderKind::Trailer) {
@@ -1292,7 +1290,7 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
         }
     }
 
-    mem::IoBufChain frame(inbound_buf_.node_pool());
+    mem::IoBufChain frame;
     auto finished_frame = http3_finish_headers_frame(writer, frame, header.end_stream);
     if (!finished_frame) {
         co_return std::unexpected(finished_frame.error());
@@ -1377,7 +1375,7 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_all(HttpExc
         co_return body_len;
     }
 
-    auto prepared_frame = http3_prepare_data_frame(chunk, inbound_buf_.node_pool());
+    auto prepared_frame = http3_prepare_data_frame(chunk);
     if (!prepared_frame) {
         co_return std::unexpected(prepared_frame.error());
     }
@@ -1407,7 +1405,7 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write_all(HttpExc
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    mem::IoBufChain chunk(inbound_buf_.node_pool());
+    mem::IoBufChain chunk;
     if (end) {
         chunk.mark_complete();
     }
@@ -1436,7 +1434,7 @@ ServerHttp3Request::write_data_frame_header(std::size_t payload_len, std::chrono
         co_return common::IoResult<void>{};
     }
 
-    mem::IoBufChain chain(inbound_buf_.node_pool());
+    mem::IoBufChain chain;
     if (!chain.append(std::move(*header))) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
@@ -1509,26 +1507,12 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write(HttpExchang
     }
 
     std::size_t accepted = 0;
-    if (chunk.bound() && &chunk.node_pool() == &inbound_buf_.node_pool()) {
+    {
         auto written = co_await stream_.write(chunk, timeout);
         if (!written) {
             co_return std::unexpected(written.error());
         }
         accepted = *written;
-    } else {
-        mem::IoBufChain staged(inbound_buf_.node_pool());
-        if (!chunk.retain_prefix(body_len, staged)) {
-            co_return std::unexpected(common::IoErr::NoMem);
-        }
-        auto written = co_await stream_.write(staged, timeout);
-        if (!written) {
-            co_return std::unexpected(written.error());
-        }
-        accepted = *written;
-        chunk.consume_and_compact(accepted);
-        if (accepted == body_len && end_stream) {
-            chunk.clear_complete();
-        }
     }
     if (accepted == 0) {
         co_return std::unexpected(common::IoErr::WouldBlock);

@@ -13,6 +13,7 @@
 #include <fiber/http/Http3QpackEncoder.h>
 #include <fiber/http/HttpHeaderHash.h>
 #include <fiber/quic/QuicCursor.h>
+#include "LoopTestSupport.h"
 #include "http/Http3QpackEncoderIoBufWriter.h"
 #include "http/Huffman.h"
 #include "quic/QuicTransportCodec.h"
@@ -136,224 +137,240 @@ void decode_all(const std::vector<std::uint8_t> &bytes, DecodeRecorder &recorder
 } // namespace
 
 TEST(Http3QpackEncoderTest, EmitsEmptyBlockPrefix) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer;
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00}));
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesStaticExactMethodAsIndexedField) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_method(HttpMethod::Get), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_method(HttpMethod::Get), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0xd1}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0xd1}));
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], ":method=GET");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], ":method=GET");
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesStaticExactStatusAsIndexedField) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_status(200), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_status(200), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd9}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd9}));
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesNonStaticStatusUsingStaticNameReference) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_status(418), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_status(418), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x09, 0x03, '4', '1', '8'}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x09, 0x03, '4', '1', '8'}));
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], ":status=418");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], ":status=418");
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesPathUsingStaticNameReference) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_path("/index.html"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_path("/index.html"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x51, 0x0b, '/', 'i', 'n', 'd', 'e', 'x', '.', 'h', 't',
-                                                'm', 'l'}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x51, 0x0b, '/', 'i', 'n', 'd', 'e', 'x', '.', 'h', 't',
+                                                    'm', 'l'}));
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesAuthorityUsingStaticNameIndexZero) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_authority("example.com"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_authority("example.com"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    ASSERT_GE(bytes.size(), 4U);
-    EXPECT_EQ(bytes[0], 0x00);
-    EXPECT_EQ(bytes[1], 0x00);
-    EXPECT_EQ(bytes[2], 0x50);
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        ASSERT_GE(bytes.size(), 4U);
+        EXPECT_EQ(bytes[0], 0x00);
+        EXPECT_EQ(bytes[1], 0x00);
+        EXPECT_EQ(bytes[2], 0x50);
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], ":authority=example.com");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], ":authority=example.com");
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesLiteralNameAndDecodesBack) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "ok"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "ok"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x26, 'x', '-', 't', 'e', 's', 't', 0x02, 'o', 'k'}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x26, 'x', '-', 't', 'e', 's', 't', 0x02, 'o', 'k'}));
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], "x-test=ok");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "x-test=ok");
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesHuffmanNameAndValue) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1});
-    ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "ok"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1});
+        ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "ok"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    ASSERT_GE(bytes.size(), 3U);
-    EXPECT_EQ(bytes[0], 0x00);
-    EXPECT_EQ(bytes[1], 0x00);
-    EXPECT_EQ(bytes[2] & 0xf8U, 0x28U);
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        ASSERT_GE(bytes.size(), 3U);
+        EXPECT_EQ(bytes[0], 0x00);
+        EXPECT_EQ(bytes[1], 0x00);
+        EXPECT_EQ(bytes[2] & 0xf8U, 0x28U);
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], "x-test=ok");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "x-test=ok");
+    });
 }
 
 TEST(Http3QpackEncoderTest, DoesNotHuffmanEncodeValueThatWouldExpand) {
-    // RFC 9204 §4.5: Huffman must only be used when it shortens the string.
-    // "!!!" expands under Huffman (3 -> 4 bytes), so it must be sent raw even
-    // though the threshold gate (here 1) would otherwise permit Huffman.
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1});
-    ASSERT_EQ(writer.encode_field("content-type", fiber::http::http_header_name_hash("content-type"), "!!!"),
-              IoErr::None);
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        // RFC 9204 §4.5: Huffman must only be used when it shortens the string.
+        // "!!!" expands under Huffman (3 -> 4 bytes), so it must be sent raw even
+        // though the threshold gate (here 1) would otherwise permit Huffman.
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], "content-type=!!!");
-    EXPECT_EQ(recorder.huff_value_count, 0U);
-    EXPECT_EQ(recorder.raw_value_count, 1U);
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1});
+        ASSERT_EQ(writer.encode_field("content-type", fiber::http::http_header_name_hash("content-type"), "!!!"),
+                  IoErr::None);
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "content-type=!!!");
+        EXPECT_EQ(recorder.huff_value_count, 0U);
+        EXPECT_EQ(recorder.raw_value_count, 1U);
+    });
 }
 
 TEST(Http3QpackEncoderTest, SupportsSmallWriterChunks) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024}, 1);
-    ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "chunked"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024}, 1);
+        ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "chunked"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], "x-test=chunked");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "x-test=chunked");
+    });
 }
 
 TEST(Http3QpackEncoderTest, UsesNewTailWhenContiguousHuffmanOutputDoesNotFit) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1}, 4);
-    ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1}, 4);
+        ASSERT_EQ(writer.encode_field("x-test", fiber::http::http_header_name_hash("x-test"), "abc"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    ASSERT_GT(block.size(), 1U);
-    ASSERT_NE(block.front(), nullptr);
-    EXPECT_GT(block.front()->writable(), 0U);
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        ASSERT_GT(block.size(), 1U);
+        ASSERT_NE(block.front(), nullptr);
+        EXPECT_GT(block.front()->writable(), 0U);
 
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], "x-test=abc");
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], "x-test=abc");
+    });
 }
 
 TEST(Http3QpackEncoderTest, SupportsReservedPrefixForHttp3HeadersFrame) {
-    constexpr std::size_t kReserve = 16;
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024}, 4, kReserve);
-    ASSERT_EQ(writer.encode_status(204), IoErr::None);
-    ASSERT_EQ(writer.encode_field("server", fiber::http::http_header_name_hash("server"), "fiber"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        constexpr std::size_t kReserve = 16;
 
-    IoBufChain frame(pool);
-    ASSERT_EQ(writer.finish(frame), IoErr::None);
-    ASSERT_NE(writer.prefix_reserved_data(), nullptr);
-    ASSERT_EQ(writer.prefix_reserved_size(), kReserve);
-    ASSERT_GE(frame.readable_bytes(), kReserve);
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024}, 4, kReserve);
+        ASSERT_EQ(writer.encode_status(204), IoErr::None);
+        ASSERT_EQ(writer.encode_field("server", fiber::http::http_header_name_hash("server"), "fiber"), IoErr::None);
 
-    const std::size_t payload_len = frame.readable_bytes() - kReserve;
-    const std::size_t header_len =
-            fiber::quic::quic_varint_len(static_cast<std::uint64_t>(fiber::http::Http3FrameType::Headers)) +
-            fiber::quic::quic_varint_len(payload_len);
-    ASSERT_LE(header_len, kReserve);
+        IoBufChain frame;
+        ASSERT_EQ(writer.finish(frame), IoErr::None);
+        ASSERT_NE(writer.prefix_reserved_data(), nullptr);
+        ASSERT_EQ(writer.prefix_reserved_size(), kReserve);
+        ASSERT_GE(frame.readable_bytes(), kReserve);
 
-    const std::size_t gap = kReserve - header_len;
-    fiber::quic::QuicWriteCursor cursor(writer.prefix_reserved_data() + gap, header_len);
-    ASSERT_TRUE(fiber::quic::quic_write_varint(cursor, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Headers))
+        const std::size_t payload_len = frame.readable_bytes() - kReserve;
+        const std::size_t header_len =
+                fiber::quic::quic_varint_len(static_cast<std::uint64_t>(fiber::http::Http3FrameType::Headers)) +
+                fiber::quic::quic_varint_len(payload_len);
+        ASSERT_LE(header_len, kReserve);
+
+        const std::size_t gap = kReserve - header_len;
+        fiber::quic::QuicWriteCursor cursor(writer.prefix_reserved_data() + gap, header_len);
+        ASSERT_TRUE(
+                fiber::quic::quic_write_varint(cursor, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Headers))
                         .has_value());
-    ASSERT_TRUE(fiber::quic::quic_write_varint(cursor, payload_len).has_value());
-    ASSERT_EQ(cursor.offset(), header_len);
-    frame.consume_and_compact(gap);
+        ASSERT_TRUE(fiber::quic::quic_write_varint(cursor, payload_len).has_value());
+        ASSERT_EQ(cursor.offset(), header_len);
+        frame.consume_and_compact(gap);
 
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(frame));
-    ASSERT_EQ(bytes.size(), header_len + payload_len);
-    ASSERT_EQ(bytes[0], static_cast<std::uint8_t>(fiber::http::Http3FrameType::Headers));
-    ASSERT_EQ(bytes[1], payload_len);
-    ASSERT_GE(bytes.size(), header_len + 2U);
-    EXPECT_EQ(bytes[header_len], 0x00);
-    EXPECT_EQ(bytes[header_len + 1], 0x00);
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(frame));
+        ASSERT_EQ(bytes.size(), header_len + payload_len);
+        ASSERT_EQ(bytes[0], static_cast<std::uint8_t>(fiber::http::Http3FrameType::Headers));
+        ASSERT_EQ(bytes[1], payload_len);
+        ASSERT_GE(bytes.size(), header_len + 2U);
+        EXPECT_EQ(bytes[header_len], 0x00);
+        EXPECT_EQ(bytes[header_len + 1], 0x00);
 
-    std::vector<std::uint8_t> payload(bytes.begin() + static_cast<std::ptrdiff_t>(header_len), bytes.end());
-    DecodeRecorder recorder;
-    decode_all(payload, recorder);
-    ASSERT_EQ(recorder.fields.size(), 2U);
-    EXPECT_EQ(recorder.fields[0], ":status=204");
-    EXPECT_EQ(recorder.fields[1], "server=fiber");
+        std::vector<std::uint8_t> payload(bytes.begin() + static_cast<std::ptrdiff_t>(header_len), bytes.end());
+        DecodeRecorder recorder;
+        decode_all(payload, recorder);
+        ASSERT_EQ(recorder.fields.size(), 2U);
+        EXPECT_EQ(recorder.fields[0], ":status=204");
+        EXPECT_EQ(recorder.fields[1], "server=fiber");
+    });
 }
 
 TEST(Http3QpackEncoderTest, RejectsStringsAboveLimit) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool,
-                                        Http3QpackEncoder::Options{.max_string_size = 2, .huffman_threshold = 1024});
-    EXPECT_EQ(writer.encode_field("x", fiber::http::http_header_name_hash("x"), "abc"), IoErr::Invalid);
-    writer.abort();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(
+                Http3QpackEncoder::Options{.max_string_size = 2, .huffman_threshold = 1024});
+        EXPECT_EQ(writer.encode_field("x", fiber::http::http_header_name_hash("x"), "abc"), IoErr::Invalid);
+        writer.abort();
+    });
 }
 
 // The following cases exercise the O(1) pseudo-header fast path (scheme a): an
@@ -362,103 +379,110 @@ TEST(Http3QpackEncoderTest, RejectsStringsAboveLimit) {
 // same-name index. Both paths must stay byte-identical to the general find() route.
 
 TEST(Http3QpackEncoderTest, EncodesStatus500AsIndexedField) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_status(500), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_status(500), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    // 500 -> QPACK static index 71; 71 >= 6-bit prefix max (63) -> 0xff, 71-63=8 -> 0x08.
-    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xff, 0x08}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // 500 -> QPACK static index 71; 71 >= 6-bit prefix max (63) -> 0xff, 71-63=8 -> 0x08.
+        EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xff, 0x08}));
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesStatus502UsingStaticNameReference) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_status(502), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_status(502), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    // 502 not in static table -> name ref @24 (first :status), literal "502".
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x09, 0x03, '5', '0', '2'}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // 502 not in static table -> name ref @24 (first :status), literal "502".
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x09, 0x03, '5', '0', '2'}));
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], ":status=502");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], ":status=502");
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesPostAsIndexedField) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_method(HttpMethod::Post), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_method(HttpMethod::Post), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    // POST -> QPACK static index 20; 0xc0 | 20 = 0xd4.
-    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd4}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // POST -> QPACK static index 20; 0xc0 | 20 = 0xd4.
+        EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd4}));
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesNonStaticMethodUsingStaticNameReference) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_method(HttpMethod::MKCOL), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_method(HttpMethod::MKCOL), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    // MKCOL not in static table -> name ref @15 (first :method); 15 == 4-bit prefix
-    // max -> 0x5f, 15-15=0 -> 0x00, then literal "MKCOL".
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x00, 0x05, 'M', 'K', 'C', 'O', 'L'}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // MKCOL not in static table -> name ref @15 (first :method); 15 == 4-bit prefix
+        // max -> 0x5f, 15-15=0 -> 0x00, then literal "MKCOL".
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x00, 0x05, 'M', 'K', 'C', 'O', 'L'}));
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], ":method=MKCOL");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], ":method=MKCOL");
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesSchemeHttpsAndHttpAsIndexedField) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter w_https(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(w_https.encode_scheme("https"), IoErr::None);
-    IoBufChain b_https(pool);
-    ASSERT_EQ(w_https.finish(b_https), IoErr::None);
-    // https -> index 23; 0xc0 | 23 = 0xd7.
-    EXPECT_EQ(chain_to_bytes(std::move(b_https)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd7}));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter w_https(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(w_https.encode_scheme("https"), IoErr::None);
+        IoBufChain b_https;
+        ASSERT_EQ(w_https.finish(b_https), IoErr::None);
+        // https -> index 23; 0xc0 | 23 = 0xd7.
+        EXPECT_EQ(chain_to_bytes(std::move(b_https)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd7}));
 
-    Http3QpackEncoderIoBufWriter w_http(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(w_http.encode_scheme("http"), IoErr::None);
-    IoBufChain b_http(pool);
-    ASSERT_EQ(w_http.finish(b_http), IoErr::None);
-    // http -> index 22; 0xc0 | 22 = 0xd6.
-    EXPECT_EQ(chain_to_bytes(std::move(b_http)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd6}));
+        Http3QpackEncoderIoBufWriter w_http(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(w_http.encode_scheme("http"), IoErr::None);
+        IoBufChain b_http;
+        ASSERT_EQ(w_http.finish(b_http), IoErr::None);
+        // http -> index 22; 0xc0 | 22 = 0xd6.
+        EXPECT_EQ(chain_to_bytes(std::move(b_http)), (std::vector<std::uint8_t>{0x00, 0x00, 0xd6}));
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesNonStaticSchemeUsingStaticNameReference) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_scheme("ftp"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_scheme("ftp"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    // ftp not in static table -> name ref @22; 22 >= 15 -> 0x5f, 22-15=7 -> 0x07, "ftp".
-    const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
-    EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x07, 0x03, 'f', 't', 'p'}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // ftp not in static table -> name ref @22; 22 >= 15 -> 0x5f, 22-15=7 -> 0x07, "ftp".
+        const std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(block));
+        EXPECT_EQ(bytes, (std::vector<std::uint8_t>{0x00, 0x00, 0x5f, 0x07, 0x03, 'f', 't', 'p'}));
 
-    DecodeRecorder recorder;
-    decode_all(bytes, recorder);
-    ASSERT_EQ(recorder.fields.size(), 1U);
-    EXPECT_EQ(recorder.fields[0], ":scheme=ftp");
+        DecodeRecorder recorder;
+        decode_all(bytes, recorder);
+        ASSERT_EQ(recorder.fields.size(), 1U);
+        EXPECT_EQ(recorder.fields[0], ":scheme=ftp");
+    });
 }
 
 TEST(Http3QpackEncoderTest, EncodesRootPathAsIndexedField) {
-    IoBufNodePool pool;
-    Http3QpackEncoderIoBufWriter writer(pool, Http3QpackEncoder::Options{.huffman_threshold = 1024});
-    ASSERT_EQ(writer.encode_path("/"), IoErr::None);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.huffman_threshold = 1024});
+        ASSERT_EQ(writer.encode_path("/"), IoErr::None);
 
-    IoBufChain block(pool);
-    ASSERT_EQ(writer.finish(block), IoErr::None);
-    // "/" -> QPACK static index 1; 0xc0 | 1 = 0xc1.
-    EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xc1}));
+        IoBufChain block;
+        ASSERT_EQ(writer.finish(block), IoErr::None);
+        // "/" -> QPACK static index 1; 0xc0 | 1 = 0xc1.
+        EXPECT_EQ(chain_to_bytes(std::move(block)), (std::vector<std::uint8_t>{0x00, 0x00, 0xc1}));
+    });
 }

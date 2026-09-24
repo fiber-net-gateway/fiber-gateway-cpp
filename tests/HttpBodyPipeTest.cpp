@@ -53,7 +53,7 @@ public:
             co_return std::unexpected(action.error);
         }
 
-        IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+        IoBufChain chunk;
         if (action.bytes > 0) {
             IoBuf data = IoBuf::allocate(action.bytes);
             if (!data) {
@@ -167,8 +167,7 @@ private:
 DetachedTask run_pipe(FakeBodyReader *reader, FakeBodyWriter *writer, HttpBodyPipeOptions options,
                       std::promise<HttpBodyPipeResult> *promise) {
     auto result = co_await fiber::http::pipe_http_body(fiber::http::make_http_body_pipe_reader(*reader),
-                                                       fiber::http::make_http_body_pipe_writer(*writer),
-                                                       fiber::event::EventLoop::current().io_buf_node_pool(), options);
+                                                       fiber::http::make_http_body_pipe_writer(*writer), options);
     promise->set_value(std::move(result));
     fiber::event::EventLoop::current().stop();
     co_return;

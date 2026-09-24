@@ -53,27 +53,31 @@ public:
         const HttpHeaders::HeaderField *expect = nullptr;
     };
 
-    HttpExchange(mem::IoBufNodePool &node_pool, net::SocketAddress remote_addr);
+    explicit HttpExchange(net::SocketAddress remote_addr);
     ~HttpExchange();
 
     [[nodiscard]] HttpMethod method() const noexcept { return method_; }
     [[nodiscard]] HttpVersion version() const noexcept { return version_; }
     [[nodiscard]] const HttpUri &uri() const noexcept { return uri_; }
-    std::string_view version_view() const noexcept { return version_view_; }
-    std::string_view method_view() const noexcept { return method_view_; }
-    std::string_view scheme() const noexcept { return scheme_view_; }
-    std::string_view protocol() const noexcept { return protocol_view_; }
-    std::string_view header(std::string_view name) const noexcept;
-    const RequestHeaderRefs &request_header_refs() const noexcept { return request_header_refs_; }
-    const HttpHeaders::HeaderField *host_header() const noexcept { return request_header_refs_.host; }
-    const HttpHeaders::HeaderField *content_type_header() const noexcept { return request_header_refs_.content_type; }
-    const HttpHeaders::HeaderField *range_header() const noexcept { return request_header_refs_.range; }
-    const HttpHeaders::HeaderField *if_range_header() const noexcept { return request_header_refs_.if_range; }
-    const HttpHeaders::HeaderField *expect_header() const noexcept { return request_header_refs_.expect; }
-    const HttpHeaders &request_headers() const noexcept { return request_headers_; };
-    const HttpHeaders &request_trailers() const noexcept { return request_trailers_; };
+    [[nodiscard]] std::string_view version_view() const noexcept { return version_view_; }
+    [[nodiscard]] std::string_view method_view() const noexcept { return method_view_; }
+    [[nodiscard]] std::string_view scheme() const noexcept { return scheme_view_; }
+    [[nodiscard]] std::string_view protocol() const noexcept { return protocol_view_; }
+    [[nodiscard]] std::string_view header(std::string_view name) const noexcept;
+    [[nodiscard]] const RequestHeaderRefs &request_header_refs() const noexcept { return request_header_refs_; }
+    [[nodiscard]] const HttpHeaders::HeaderField *host_header() const noexcept { return request_header_refs_.host; }
+    [[nodiscard]] const HttpHeaders::HeaderField *content_type_header() const noexcept {
+        return request_header_refs_.content_type;
+    }
+    [[nodiscard]] const HttpHeaders::HeaderField *range_header() const noexcept { return request_header_refs_.range; }
+    [[nodiscard]] const HttpHeaders::HeaderField *if_range_header() const noexcept {
+        return request_header_refs_.if_range;
+    }
+    [[nodiscard]] const HttpHeaders::HeaderField *expect_header() const noexcept { return request_header_refs_.expect; }
+    [[nodiscard]] const HttpHeaders &request_headers() const noexcept { return request_headers_; };
+    [[nodiscard]] const HttpHeaders &request_trailers() const noexcept { return request_trailers_; };
     [[nodiscard]] HttpBodySpec request_body_spec() const noexcept { return request_body_spec_; }
-    bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
+    [[nodiscard]] bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
     mem::BufPool &pool() noexcept { return pool_; }
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept { return remote_addr_; }
     [[nodiscard]] const HttpResponseStats &response_stats() const noexcept { return response_stats_; }

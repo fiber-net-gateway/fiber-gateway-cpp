@@ -20,7 +20,7 @@ namespace detail {
 
 class Http2BodyRecvState : public common::NonCopyable, public common::NonMovable {
 public:
-    Http2BodyRecvState(mem::IoBufNodePool &node_pool) noexcept;
+    Http2BodyRecvState() noexcept = default;
     ~Http2BodyRecvState() = default;
 
     [[nodiscard]] common::IoErr push_body(mem::IoBuf &&buf, bool end_stream) noexcept;

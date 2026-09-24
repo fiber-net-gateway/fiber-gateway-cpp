@@ -14,7 +14,7 @@ constexpr std::uint8_t kAlertLevelWarning = 1;
 } // namespace
 
 struct TlsConnection::Impl {
-    Impl(TlsConnectionRole role, TlsConnectedState &&state, mem::IoBufNodePool &pool) noexcept;
+    Impl(TlsConnectionRole role, TlsConnectedState &&state) noexcept;
 
     // Post-handshake handshake-message dispatch (1.3 NST/KeyUpdate; 1.2 all
     // fatal). False = terminal latched, pump returns.
@@ -49,7 +49,7 @@ struct TlsConnection::Impl {
     bool failed_ = false; // terminal latched (ours or the peer's)
 };
 
-TlsConnection::Impl::Impl(TlsConnectionRole role, TlsConnectedState &&state, mem::IoBufNodePool &pool) noexcept :
+TlsConnection::Impl::Impl(TlsConnectionRole role, TlsConnectedState &&state) noexcept :
     version_(state.version), suite_(state.suite) {
     alpn_len_ = state.alpn_len;
     std::memcpy(alpn_.data(), state.alpn.data(), state.alpn_len);
@@ -57,8 +57,6 @@ TlsConnection::Impl::Impl(TlsConnectionRole role, TlsConnectedState &&state, mem
     // ciphers themselves are already endpoint-oriented by the engines' move.
     own_secret_ = std::move(role == TlsConnectionRole::Client ? state.client_app_secret : state.server_app_secret);
     peer_secret_ = std::move(role == TlsConnectionRole::Client ? state.server_app_secret : state.client_app_secret);
-    ctx_.bind(pool);
-    plaintext_ = mem::IoBufChain(pool);
     ctx_.read_cipher() = std::move(state.read_cipher);
     ctx_.write_cipher() = std::move(state.write_cipher);
     ctx_.set_inbound_mode(version_ == TlsProtocolVersion::Tls13 ? TlsInboundMode::Sealed13 : TlsInboundMode::Sealed12);
@@ -178,8 +176,8 @@ common::IoResult<void> TlsConnection::Impl::write_guard() noexcept {
 // public shell
 // =====================================================================
 
-TlsConnection::TlsConnection(TlsConnectionRole role, TlsConnectedState &&state, mem::IoBufNodePool &pool) noexcept :
-    impl_(new (std::nothrow) Impl(role, std::move(state), pool)) {}
+TlsConnection::TlsConnection(TlsConnectionRole role, TlsConnectedState &&state) noexcept :
+    impl_(new (std::nothrow) Impl(role, std::move(state))) {}
 
 TlsConnection::~TlsConnection() { delete impl_; }
 

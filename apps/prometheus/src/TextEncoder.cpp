@@ -18,8 +18,8 @@ using fiber::common::IoErr;
 
 class ChainWriter {
 public:
-    ChainWriter(fiber::mem::IoBufNodePool &node_pool, CollectOptions options) noexcept :
-        chain_(node_pool), chunk_size_(options.chunk_size), max_bytes_(options.max_output_bytes) {}
+    explicit ChainWriter(CollectOptions options) noexcept :
+        chunk_size_(options.chunk_size), max_bytes_(options.max_output_bytes) {}
 
     [[nodiscard]] IoErr write(std::string_view value) noexcept {
         if (value.size() > max_bytes_ - written_) {
@@ -498,12 +498,12 @@ IoErr encode(Writer &writer, const RegistryData &data) noexcept {
 
 } // namespace
 
-fiber::common::IoResult<fiber::mem::IoBufChain>
-encode_text_chain(const RegistryData &data, fiber::mem::IoBufNodePool &node_pool, CollectOptions options) noexcept {
+fiber::common::IoResult<fiber::mem::IoBufChain> encode_text_chain(const RegistryData &data,
+                                                                  CollectOptions options) noexcept {
     if (options.chunk_size == 0) {
         return std::unexpected(IoErr::Invalid);
     }
-    ChainWriter writer(node_pool, options);
+    ChainWriter writer(options);
     const IoErr error = encode(writer, data);
     if (error != IoErr::None) {
         return std::unexpected(error);

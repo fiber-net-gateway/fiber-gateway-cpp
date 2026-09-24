@@ -34,6 +34,7 @@
 #include <fiber/net/TrustStore.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
 
+#include "LoopTestSupport.h"
 #include "QuicTestTlsCertificate.h"
 
 namespace {
@@ -800,7 +801,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyViaChainWriteCompletes) {
                     co_return;
                 }
 
-                fiber::mem::IoBufChain chain(fiber::event::EventLoop::current().io_buf_node_pool());
+                fiber::mem::IoBufChain chain;
                 fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(136);
                 body.commit(136);
                 chain.append(std::move(body));
@@ -905,8 +906,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyWithTinyRequestStreamWindow) {
                         return {};
                     }
                 };
-                FixedSource source{fiber::mem::IoBufChain(fiber::event::EventLoop::current().io_buf_node_pool()),
-                                   fiber::mem::IoBufChain(fiber::event::EventLoop::current().io_buf_node_pool())};
+                FixedSource source{fiber::mem::IoBufChain{}, fiber::mem::IoBufChain{}};
                 fiber::mem::IoBuf body = fiber::mem::IoBuf::allocate(136);
                 body.commit(136);
                 source.reads[0].append(std::move(body));
@@ -921,7 +921,6 @@ TEST(Http3EndpointTest, StreamedAutoBodyWithTinyRequestStreamWindow) {
                 };
                 auto piped = co_await fiber::http::pipe_http_body(fiber::http::make_http_body_pipe_reader(source),
                                                                   fiber::http::make_http_body_pipe_writer(writer),
-                                                                  fiber::event::EventLoop::current().io_buf_node_pool(),
                                                                   pipe_options);
                 pipe_ok.store(piped.has_value());
                 pipe_error.store(piped ? fiber::common::IoErr::None : piped.error().code);
@@ -1007,12 +1006,11 @@ TEST(Http3EndpointTest, DestroyedSuspendedBodyWriterKeepsLoopIntact) {
                 auto write_body = [](fiber::http::HttpExchange &exchange,
                                      std::atomic<bool> *finished) -> fiber::async::Task<void> {
                     struct EndlessSource {
-                        fiber::mem::IoBufNodePool *pool = nullptr;
                         std::size_t remaining = 600 * 1024;
                         fiber::common::IoResult<void> abort(fiber::common::IoErr) noexcept { return {}; }
                         fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
                         read_body(std::size_t max_bytes, std::chrono::milliseconds) noexcept {
-                            fiber::mem::IoBufChain chunk(*pool);
+                            fiber::mem::IoBufChain chunk;
                             if (remaining == 0) {
                                 chunk.mark_complete();
                                 co_return chunk;
@@ -1029,7 +1027,7 @@ TEST(Http3EndpointTest, DestroyedSuspendedBodyWriterKeepsLoopIntact) {
                     // (consumed + 64 KiB stream recv buffer), so the
                     // writer genuinely suspends inside QuicStream::write
                     // before the client aborts.
-                    EndlessSource source{&fiber::event::EventLoop::current().io_buf_node_pool(), 600 * 1024};
+                    EndlessSource source{600 * 1024};
 
                     fiber::http::HttpResponseWriter writer = fiber::http::make_http_response_writer(exchange);
                     const fiber::http::HttpBodyPipeOptions pipe_options{
@@ -1038,10 +1036,9 @@ TEST(Http3EndpointTest, DestroyedSuspendedBodyWriterKeepsLoopIntact) {
                             .read_timeout = std::chrono::milliseconds::max(),
                             .write_timeout = 5s,
                     };
-                    auto piped = co_await fiber::http::pipe_http_body(
-                            fiber::http::make_http_body_pipe_reader(source),
-                            fiber::http::make_http_body_pipe_writer(writer),
-                            fiber::event::EventLoop::current().io_buf_node_pool(), pipe_options);
+                    auto piped = co_await fiber::http::pipe_http_body(fiber::http::make_http_body_pipe_reader(source),
+                                                                      fiber::http::make_http_body_pipe_writer(writer),
+                                                                      pipe_options);
                     (void) piped;
                     finished->store(true);
                 };
@@ -1348,7 +1345,7 @@ public:
 
     fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
     read_body(std::size_t /*max_bytes*/, std::chrono::milliseconds /*timeout*/) noexcept {
-        fiber::mem::IoBufChain chunk(fiber::event::EventLoop::current().io_buf_node_pool());
+        fiber::mem::IoBufChain chunk;
         if (!served_body_) {
             served_body_ = true;
             fiber::mem::IoBuf data = fiber::mem::IoBuf::allocate(body_.size());
@@ -1416,7 +1413,6 @@ TEST(Http3EndpointTest, StreamedAutoBodyThroughPipeCompletes) {
                 auto piped =
                         co_await fiber::http::pipe_http_body(fiber::http::make_http_body_pipe_reader(source),
                                                              fiber::http::make_http_body_pipe_writer(writer),
-                                                             fiber::event::EventLoop::current().io_buf_node_pool(),
                                                              {.low_water = fiber::http::kUnbufferedBodyPipeLowWater,
                                                               .read_timeout = 5s,
                                                               .write_timeout = 5s});

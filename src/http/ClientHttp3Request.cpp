@@ -215,7 +215,6 @@ private:
 
 ClientHttp3Request::ClientHttp3Request(Http3ClientConnection &conn, mem::BufPool &pool) noexcept :
     quic_lease_(conn.quic().lease()), conn_(&conn), stream_(this, &ClientHttp3Request::destroy_owner), pool_(&pool),
-    inbound_buf_(conn.quic().recv_extent_pool()),
     request_entry_{.owner = this,
                    .on_rejected = &ClientHttp3Request::on_rejected,
                    .on_connection_close = &ClientHttp3Request::on_connection_close} {
@@ -260,11 +259,6 @@ common::IoResult<void> ClientHttp3Request::register_attached() noexcept {
     return conn_->register_client_request(request_entry_);
 }
 
-mem::IoBufNodePool &ClientHttp3Request::node_pool() noexcept {
-    FIBER_ASSERT(conn_ != nullptr);
-    return conn_->quic().recv_extent_pool();
-}
-
 Http3ExtendedConnectSupport ClientHttp3Request::extended_connect_support() const noexcept {
     if (conn_ == nullptr || !conn_->peer_settings_received()) {
         return Http3ExtendedConnectSupport::Unknown;
@@ -300,7 +294,7 @@ ClientHttp3Request::write_data_frame_header(std::size_t payload_len, std::chrono
         co_return common::IoResult<void>{};
     }
 
-    mem::IoBufChain frame(node_pool());
+    mem::IoBufChain frame;
     if (!frame.append(std::move(*header))) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
@@ -383,8 +377,7 @@ ClientHttp3Request::send_request_header(const Http3RequestHead &head, bool end_s
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    Http3QpackEncoderIoBufWriter writer(node_pool(),
-                                        Http3QpackEncoder::Options{.max_string_size = conn_->max_qpack_string_size()},
+    Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.max_string_size = conn_->max_qpack_string_size()},
                                         512, kHttp3FrameHeaderReserve);
     common::IoErr err = writer.encode_method(head.method);
     if (err == common::IoErr::None && !head.scheme.empty()) {
@@ -418,7 +411,7 @@ ClientHttp3Request::send_request_header(const Http3RequestHead &head, bool end_s
         }
     }
 
-    mem::IoBufChain frame(node_pool());
+    mem::IoBufChain frame;
     auto finished = http3_finish_headers_frame(writer, frame, end_stream);
     if (!finished) {
         co_return std::unexpected(finished.error());
@@ -498,7 +491,7 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write_all(mem::Io
         co_return 0;
     }
 
-    auto prepared = http3_prepare_data_frame(chunk, node_pool());
+    auto prepared = http3_prepare_data_frame(chunk);
     if (!prepared) {
         co_return std::unexpected(prepared.error());
     }
@@ -571,32 +564,14 @@ async::Task<common::IoResult<std::size_t>> ClientHttp3Request::write(mem::IoBufC
         request_data_frame_end_ = end_stream;
     }
 
-    mem::IoBufChain staged;
-    mem::IoBufChain *payload = &chunk;
-    bool consume_borrowed_chain = false;
-    if (!chunk.bound() || &chunk.node_pool() != &node_pool()) {
-        staged.bind_node_pool(node_pool());
-        if (!chunk.retain_prefix(body_len, staged)) {
-            (void) abort(common::IoErr::NoMem);
-            co_return std::unexpected(common::IoErr::NoMem);
-        }
-        payload = &staged;
-        consume_borrowed_chain = true;
-    }
-
-    auto written = co_await stream_.write(*payload, remaining_timeout(deadline));
+    auto written = co_await stream_.write(chunk, remaining_timeout(deadline));
     if (!written || *written == 0) {
         const common::IoErr error = written ? common::IoErr::WouldBlock : written.error();
         (void) abort(error);
         co_return std::unexpected(error);
     }
     const std::size_t accepted = *written;
-    if (consume_borrowed_chain) {
-        chunk.consume_and_compact(accepted);
-        if (accepted == body_len && end_stream) {
-            chunk.clear_complete();
-        }
-    } else if (accepted == body_len && end_stream) {
+    if (accepted == body_len && end_stream) {
         chunk.clear_complete();
     }
 
@@ -711,8 +686,7 @@ async::Task<common::IoResult<void>> ClientHttp3Request::write_trailer(const Http
         co_return std::unexpected(common::IoErr::Invalid);
     }
 
-    Http3QpackEncoderIoBufWriter writer(node_pool(),
-                                        Http3QpackEncoder::Options{.max_string_size = conn_->max_qpack_string_size()},
+    Http3QpackEncoderIoBufWriter writer(Http3QpackEncoder::Options{.max_string_size = conn_->max_qpack_string_size()},
                                         512, kHttp3FrameHeaderReserve);
     const std::uint64_t peer_field_limit =
             conn_->peer_settings_received() ? conn_->peer_settings().max_field_section_size : 0;
@@ -739,7 +713,7 @@ async::Task<common::IoResult<void>> ClientHttp3Request::write_trailer(const Http
         }
     }
 
-    mem::IoBufChain frame(node_pool());
+    mem::IoBufChain frame;
     auto finished = http3_finish_headers_frame(writer, frame, true);
     if (!finished) {
         co_return std::unexpected(finished.error());
@@ -1205,7 +1179,7 @@ ClientHttp3Request::read_header(std::chrono::milliseconds timeout) noexcept {
 
 async::Task<common::IoResult<mem::IoBufChain>>
 ClientHttp3Request::read_body(std::size_t max_bytes, std::chrono::milliseconds timeout) noexcept {
-    mem::IoBufChain out(node_pool());
+    mem::IoBufChain out;
     if (conn_ == nullptr || !final_head_received_) {
         co_return std::unexpected(common::IoErr::Invalid);
     }

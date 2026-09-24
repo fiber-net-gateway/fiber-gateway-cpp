@@ -94,9 +94,8 @@ private:
 
 } // namespace
 
-common::IoResult<mem::IoBufChain> encode(mem::IoBufNodePool &node_pool,
-                                         const google::protobuf::MessageLite &msg) noexcept {
-    mem::IoBufChain chain(node_pool);
+common::IoResult<mem::IoBufChain> encode(const google::protobuf::MessageLite &msg) noexcept {
+    mem::IoBufChain chain;
     const std::size_t n = msg.ByteSizeLong();
     if (n == 0) {
         return chain; // empty payload

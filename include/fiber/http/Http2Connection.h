@@ -352,7 +352,6 @@ private:
             return err;
         }
         buf.commit(bytes);
-        bind_outbound_chain(control_hook_.encoded_);
         if (!control_hook_.encoded_.append(std::move(buf))) {
             return common::IoErr::NoMem;
         }
@@ -371,7 +370,6 @@ private:
     void enqueue_connection_window_wait(Http2Stream &stream) noexcept;
     void remove_connection_window_wait(Http2Stream &stream) noexcept;
     void wake_connection_window_waiters() noexcept;
-    void bind_outbound_chain(mem::IoBufChain &chain) noexcept;
     void enqueue_outbound_hook(Http2OutboundHook &hook, bool priority) noexcept;
     void abandon_queued_stream_hook(Http2Stream &stream, bool restore_stream_window) noexcept;
     void build_outbound_batch(std::size_t operation_budget, std::size_t byte_budget) noexcept;

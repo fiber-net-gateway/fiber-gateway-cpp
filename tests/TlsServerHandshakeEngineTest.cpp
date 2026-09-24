@@ -46,6 +46,7 @@
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
 #include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 #include <fiber/tls/record/TlsRecord.h>
+#include "LoopTestSupport.h"
 
 namespace {
 
@@ -369,7 +370,6 @@ std::vector<std::uint8_t> frame_record(std::uint8_t type, std::span<const std::u
 // ---- shared server material ----
 
 struct ServerMaterial {
-    IoBufNodePool pool;
     std::string chain_pem;
     std::optional<TlsCertificateChain> chain;
     std::optional<TlsPrivateKey> key;
@@ -408,101 +408,108 @@ struct ServerMaterial {
 // =====================================================================
 
 TEST(TlsServerHandshake13Full, HandshakeAndAppRoundTrip) {
-    auto client = BoringClient::make(ClientOptions{});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    EXPECT_FALSE(engine.done());
-    EXPECT_TRUE(chain_bytes(engine.take_output()).empty()); // no first flight
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        EXPECT_FALSE(engine.done());
+        EXPECT_TRUE(chain_bytes(engine.take_output()).empty()); // no first flight
 
-    ASSERT_TRUE(drive(*client, engine, false));
-    ASSERT_TRUE(engine.done());
-    EXPECT_FALSE(engine.failed());
+        ASSERT_TRUE(drive(*client, engine, false));
+        ASSERT_TRUE(engine.done());
+        EXPECT_FALSE(engine.failed());
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
-    const SSL_CIPHER *negotiated = SSL_get_current_cipher(client->ssl());
-    ASSERT_NE(nullptr, negotiated);
-    EXPECT_EQ(SSL_CIPHER_get_protocol_id(negotiated), static_cast<std::uint16_t>(state.suite));
-    ASSERT_EQ(2, state.alpn_len);
-    EXPECT_EQ(0, std::memcmp("h2", state.alpn.data(), 2));
-    EXPECT_FALSE(state.session_resumed);
-    EXPECT_FALSE(state.early_data_accepted);
-    EXPECT_TRUE(state.peer_chain.empty()); // no client certificate requested
-    EXPECT_TRUE(chain_bytes(engine.take_early_data()).empty());
-    // The 0-RTT read surface yields nothing when early data was never offered.
-    EXPECT_TRUE(chain_bytes(engine.take_early_data()).empty());
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
+        const SSL_CIPHER *negotiated = SSL_get_current_cipher(client->ssl());
+        ASSERT_NE(nullptr, negotiated);
+        EXPECT_EQ(SSL_CIPHER_get_protocol_id(negotiated), static_cast<std::uint16_t>(state.suite));
+        ASSERT_EQ(2, state.alpn_len);
+        EXPECT_EQ(0, std::memcmp("h2", state.alpn.data(), 2));
+        EXPECT_FALSE(state.session_resumed);
+        EXPECT_FALSE(state.early_data_accepted);
+        EXPECT_TRUE(state.peer_chain.empty()); // no client certificate requested
+        EXPECT_TRUE(chain_bytes(engine.take_early_data()).empty());
+        // The 0-RTT read surface yields nothing when early data was never offered.
+        EXPECT_TRUE(chain_bytes(engine.take_early_data()).empty());
 
-    // ---- client → server app data through the moved read cipher ----
-    const char kMessage[] = "ping from boringssl client";
-    EXPECT_EQ(sizeof(kMessage) - 1,
-              static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
-    const std::vector<std::uint8_t> flight = client->drain_wbio();
-    std::vector<std::uint8_t> plaintext;
-    std::size_t off = 0;
-    while (off + fiber::tls::kTlsRecordHeaderSize <= flight.size()) {
-        const std::size_t len = (static_cast<std::size_t>(flight[off + 3]) << 8) | flight[off + 4];
-        if (flight[off] != 23) {
+        // ---- client → server app data through the moved read cipher ----
+        const char kMessage[] = "ping from boringssl client";
+        EXPECT_EQ(sizeof(kMessage) - 1,
+                  static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
+        const std::vector<std::uint8_t> flight = client->drain_wbio();
+        std::vector<std::uint8_t> plaintext;
+        std::size_t off = 0;
+        while (off + fiber::tls::kTlsRecordHeaderSize <= flight.size()) {
+            const std::size_t len = (static_cast<std::size_t>(flight[off + 3]) << 8) | flight[off + 4];
+            if (flight[off] != 23) {
+                off += fiber::tls::kTlsRecordHeaderSize + len;
+                continue;
+            }
+            std::array<std::uint8_t, fiber::tls::kTlsMaxPlaintextSize> dst{};
+            const auto opened =
+                    state.read_cipher.open(fiber::tls::TlsContentType::ApplicationData,
+                                           (static_cast<std::uint16_t>(flight[off + 1]) << 8) | flight[off + 2],
+                                           static_cast<std::uint16_t>(len),
+                                           {flight.data() + off + fiber::tls::kTlsRecordHeaderSize, len}, dst);
+            ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
+            plaintext.insert(plaintext.end(), dst.data(), dst.data() + opened.plain_len);
             off += fiber::tls::kTlsRecordHeaderSize + len;
-            continue;
         }
-        std::array<std::uint8_t, fiber::tls::kTlsMaxPlaintextSize> dst{};
-        const auto opened = state.read_cipher.open(fiber::tls::TlsContentType::ApplicationData,
-                                                   (static_cast<std::uint16_t>(flight[off + 1]) << 8) | flight[off + 2],
-                                                   static_cast<std::uint16_t>(len),
-                                                   {flight.data() + off + fiber::tls::kTlsRecordHeaderSize, len}, dst);
-        ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
-        plaintext.insert(plaintext.end(), dst.data(), dst.data() + opened.plain_len);
-        off += fiber::tls::kTlsRecordHeaderSize + len;
-    }
-    EXPECT_EQ(0, std::memcmp(kMessage, plaintext.data(), sizeof(kMessage) - 1));
+        EXPECT_EQ(0, std::memcmp(kMessage, plaintext.data(), sizeof(kMessage) - 1));
 
-    // ---- server → client app data through the moved write cipher ----
-    const char kReply[] = "pong from fiber server";
-    std::vector<std::uint8_t> sealed(state.write_cipher.seal_output_size(sizeof(kReply) - 1));
-    const auto sealed_res =
-            state.write_cipher.seal(fiber::tls::TlsContentType::ApplicationData,
-                                    {reinterpret_cast<const std::uint8_t *>(kReply), sizeof(kReply) - 1}, sealed);
-    ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, sealed_res.status);
-    ASSERT_TRUE(client->ship(frame_record(23, {sealed.data(), sealed_res.out_len})));
-    std::array<char, 128> got{};
-    const int read = SSL_read(client->ssl(), got.data(), static_cast<int>(got.size()));
-    ASSERT_GT(read, 0);
-    EXPECT_EQ(0, std::memcmp(kReply, got.data(), sizeof(kReply) - 1));
+        // ---- server → client app data through the moved write cipher ----
+        const char kReply[] = "pong from fiber server";
+        std::vector<std::uint8_t> sealed(state.write_cipher.seal_output_size(sizeof(kReply) - 1));
+        const auto sealed_res =
+                state.write_cipher.seal(fiber::tls::TlsContentType::ApplicationData,
+                                        {reinterpret_cast<const std::uint8_t *>(kReply), sizeof(kReply) - 1}, sealed);
+        ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, sealed_res.status);
+        ASSERT_TRUE(client->ship(frame_record(23, {sealed.data(), sealed_res.out_len})));
+        std::array<char, 128> got{};
+        const int read = SSL_read(client->ssl(), got.data(), static_cast<int>(got.size()));
+        ASSERT_GT(read, 0);
+        EXPECT_EQ(0, std::memcmp(kReply, got.data(), sizeof(kReply) - 1));
+    });
 }
 
 // The same handshake fed one byte at a time — the reassembler must be
 // indifferent to record/message chunking.
 TEST(TlsServerHandshake13Full, HandshakeSlicedFeed) {
-    auto client = BoringClient::make(ClientOptions{});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine, true));
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine, true));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
-    ASSERT_EQ(2, state.alpn_len);
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
+        ASSERT_EQ(2, state.alpn_len);
+    });
 }
 
 // An ECDSA-P256 server credential — the CV scheme selection picks
 // ecdsa_secp256r1_sha256 over the same RSA-signed chain shape.
 TEST(TlsServerHandshake13Full, EcCredentialHandshake) {
-    auto client = BoringClient::make(ClientOptions{});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    material.load(certfix::kLeafEcP256Pem, certfix::kP256KeyPem);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        material.load(certfix::kLeafEcP256Pem, certfix::kP256KeyPem);
 
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine, false));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
-              static_cast<std::uint16_t>(state.suite));
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
+                  static_cast<std::uint16_t>(state.suite));
+    });
 }
 
 // =====================================================================
@@ -510,63 +517,65 @@ TEST(TlsServerHandshake13Full, EcCredentialHandshake) {
 // =====================================================================
 
 TEST(TlsServerHandshake13Full, OurClientDrivesOurServer) {
-    ServerMaterial server_material;
-    auto trust = TlsTrustStore::from_pem_bundle({certfix::kRootRsaPem, std::strlen(certfix::kRootRsaPem)});
-    ASSERT_TRUE(trust.has_value());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial server_material;
+        auto trust = TlsTrustStore::from_pem_bundle({certfix::kRootRsaPem, std::strlen(certfix::kRootRsaPem)});
+        ASSERT_TRUE(trust.has_value());
 
-    TlsClientConfig client_cfg;
-    client_cfg.sni_host = "example.com";
-    client_cfg.alpn = server_material.alpn;
-    client_cfg.trust = &*trust;
-    client_cfg.now_unix_ms = certfix::kRefNowMs;
+        TlsClientConfig client_cfg;
+        client_cfg.sni_host = "example.com";
+        client_cfg.alpn = server_material.alpn;
+        client_cfg.trust = &*trust;
+        client_cfg.now_unix_ms = certfix::kRefNowMs;
 
-    TlsServerHandshakeEngine server(server_material.config(), nullptr, nullptr, server_material.pool);
-    TlsClientHandshakeEngine client(client_cfg, nullptr, server_material.pool);
-    ASSERT_FALSE(server.done());
-    ASSERT_FALSE(client.done());
+        TlsServerHandshakeEngine server(server_material.config(), nullptr, nullptr);
+        TlsClientHandshakeEngine client(client_cfg, nullptr);
+        ASSERT_FALSE(server.done());
+        ASSERT_FALSE(client.done());
 
-    // Pure in-memory pump: each side's output becomes the other's feed.
-    for (int spin = 0; spin < 64 && !(server.done() && client.done()); ++spin) {
-        const std::vector<std::uint8_t> to_server = chain_bytes(client.take_output());
-        if (!to_server.empty()) {
-            IoBuf buf = IoBuf::allocate(to_server.size());
-            ASSERT_TRUE(buf.valid());
-            std::memcpy(buf.writable_data(), to_server.data(), to_server.size());
-            buf.commit(to_server.size());
-            ASSERT_TRUE(server.feed(std::move(buf)).has_value());
+        // Pure in-memory pump: each side's output becomes the other's feed.
+        for (int spin = 0; spin < 64 && !(server.done() && client.done()); ++spin) {
+            const std::vector<std::uint8_t> to_server = chain_bytes(client.take_output());
+            if (!to_server.empty()) {
+                IoBuf buf = IoBuf::allocate(to_server.size());
+                ASSERT_TRUE(buf.valid());
+                std::memcpy(buf.writable_data(), to_server.data(), to_server.size());
+                buf.commit(to_server.size());
+                ASSERT_TRUE(server.feed(std::move(buf)).has_value());
+            }
+            const std::vector<std::uint8_t> to_client = chain_bytes(server.take_output());
+            if (!to_client.empty()) {
+                IoBuf buf = IoBuf::allocate(to_client.size());
+                ASSERT_TRUE(buf.valid());
+                std::memcpy(buf.writable_data(), to_client.data(), to_client.size());
+                buf.commit(to_client.size());
+                ASSERT_TRUE(client.feed(std::move(buf)).has_value());
+            }
+            if (server.done() && client.done()) {
+                break;
+            }
+            ASSERT_FALSE(server.failed());
+            ASSERT_FALSE(client.failed());
         }
-        const std::vector<std::uint8_t> to_client = chain_bytes(server.take_output());
-        if (!to_client.empty()) {
-            IoBuf buf = IoBuf::allocate(to_client.size());
-            ASSERT_TRUE(buf.valid());
-            std::memcpy(buf.writable_data(), to_client.data(), to_client.size());
-            buf.commit(to_client.size());
-            ASSERT_TRUE(client.feed(std::move(buf)).has_value());
-        }
-        if (server.done() && client.done()) {
-            break;
-        }
-        ASSERT_FALSE(server.failed());
-        ASSERT_FALSE(client.failed());
-    }
-    ASSERT_TRUE(server.done());
-    ASSERT_TRUE(client.done());
-    EXPECT_FALSE(server.failed());
-    EXPECT_FALSE(client.failed());
+        ASSERT_TRUE(server.done());
+        ASSERT_TRUE(client.done());
+        EXPECT_FALSE(server.failed());
+        EXPECT_FALSE(client.failed());
 
-    TlsConnectedState server_state = server.take_state();
-    TlsConnectedState client_state = client.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, server_state.version);
-    EXPECT_EQ(client_state.suite, server_state.suite);
-    ASSERT_EQ(2, server_state.alpn_len);
-    EXPECT_EQ(0, std::memcmp(server_state.alpn.data(), client_state.alpn.data(), client_state.alpn_len));
-    // The two engines derived the same application secrets (the handshake
-    // itself already proved the traffic keys agree — this pins the DTO).
-    EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
-    EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
-    // The server saw the full server chain; the client saw none.
-    EXPECT_EQ(2u, client_state.peer_chain.size());
-    EXPECT_TRUE(server_state.peer_chain.empty());
+        TlsConnectedState server_state = server.take_state();
+        TlsConnectedState client_state = client.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, server_state.version);
+        EXPECT_EQ(client_state.suite, server_state.suite);
+        ASSERT_EQ(2, server_state.alpn_len);
+        EXPECT_EQ(0, std::memcmp(server_state.alpn.data(), client_state.alpn.data(), client_state.alpn_len));
+        // The two engines derived the same application secrets (the handshake
+        // itself already proved the traffic keys agree — this pins the DTO).
+        EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
+        EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
+        // The server saw the full server chain; the client saw none.
+        EXPECT_EQ(2u, client_state.peer_chain.size());
+        EXPECT_TRUE(server_state.peer_chain.empty());
+    });
 }
 
 // =====================================================================
@@ -577,26 +586,28 @@ TEST(TlsServerHandshake13Full, OurClientDrivesOurServer) {
 // (group order "P-256:X25519"): the server prefers X25519 → one HRR → the
 // client's CH2 carries the X25619 share → the handshake completes.
 TEST(TlsServerHandshake13Hrr, RetryThenComplete) {
-    auto client = BoringClient::make(ClientOptions{.groups = "P-256:X25519"});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.groups = "P-256:X25519"});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    DriveLog log;
-    ASSERT_TRUE(drive(*client, engine, false, &log));
-    ASSERT_TRUE(engine.done());
-    EXPECT_FALSE(engine.failed());
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        DriveLog log;
+        ASSERT_TRUE(drive(*client, engine, false, &log));
+        ASSERT_TRUE(engine.done());
+        EXPECT_FALSE(engine.failed());
 
-    // The HRR actually flew: the sentinel random is in the server's first
-    // plaintext record flight.
-    const auto &sentinel = fiber::tls::kTlsHelloRetryRandom;
-    EXPECT_TRUE(wire_contains(log.server_to_client, {sentinel.data(), sentinel.size()}));
+        // The HRR actually flew: the sentinel random is in the server's first
+        // plaintext record flight.
+        const auto &sentinel = fiber::tls::kTlsHelloRetryRandom;
+        EXPECT_TRUE(wire_contains(log.server_to_client, {sentinel.data(), sentinel.size()}));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
-    EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
-              static_cast<std::uint16_t>(state.suite));
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
+        EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
+                  static_cast<std::uint16_t>(state.suite));
+    });
 }
 
 // Hand-built CH pair over the raw codec: everything the drive harness cannot
@@ -669,53 +680,57 @@ bool feed_raw(TlsServerHandshakeEngine &engine, const std::vector<std::uint8_t> 
 } // namespace
 
 TEST(TlsServerHandshake13Hrr, SecondShareMissAborts) {
-    // A real P-256 point from our own KX (encap requires a valid one later;
-    // here only the share's PRESENCE matters).
-    auto kx = fiber::tls::TlsKeyExchange::create(fiber::tls::TlsNamedGroup::Secp256r1);
-    ASSERT_TRUE(kx.has_value());
-    ASSERT_TRUE(kx.value()->generate().has_value());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        // A real P-256 point from our own KX (encap requires a valid one later;
+        // here only the share's PRESENCE matters).
+        auto kx = fiber::tls::TlsKeyExchange::create(fiber::tls::TlsNamedGroup::Secp256r1);
+        ASSERT_TRUE(kx.has_value());
+        ASSERT_TRUE(kx.value()->generate().has_value());
 
-    ServerMaterial material;
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
 
-    const std::array<std::uint8_t, 32> kRandom = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
-                                                  17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
-    const std::span<const std::uint8_t> point = kx.value()->public_value().bytes();
+        const std::array<std::uint8_t, 32> kRandom = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
+                                                      17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
+        const std::span<const std::uint8_t> point = kx.value()->public_value().bytes();
 
-    Event event = Event::None;
-    ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0, point), event));
-    EXPECT_EQ(Event::None, event); // the engine now awaits CH2
-    EXPECT_FALSE(engine.done());
-    const std::vector<std::uint8_t> hrr_flight = chain_bytes(engine.take_output());
-    const auto &sentinel = fiber::tls::kTlsHelloRetryRandom;
-    EXPECT_TRUE(wire_contains(hrr_flight, {sentinel.data(), sentinel.size()}));
+        Event event = Event::None;
+        ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0, point), event));
+        EXPECT_EQ(Event::None, event); // the engine now awaits CH2
+        EXPECT_FALSE(engine.done());
+        const std::vector<std::uint8_t> hrr_flight = chain_bytes(engine.take_output());
+        const auto &sentinel = fiber::tls::kTlsHelloRetryRandom;
+        EXPECT_TRUE(wire_contains(hrr_flight, {sentinel.data(), sentinel.size()}));
 
-    // CH2: identical echo fields, still no X25519 share → unexpected_message.
-    ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0, point), event));
-    EXPECT_EQ(Event::Failed, event);
-    EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, engine.failure_alert());
+        // CH2: identical echo fields, still no X25519 share → unexpected_message.
+        ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0, point), event));
+        EXPECT_EQ(Event::Failed, event);
+        EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, engine.failure_alert());
+    });
 }
 
 TEST(TlsServerHandshake13Hrr, EchoMismatchAborts) {
-    auto kx = fiber::tls::TlsKeyExchange::create(fiber::tls::TlsNamedGroup::Secp256r1);
-    ASSERT_TRUE(kx.has_value());
-    ASSERT_TRUE(kx.value()->generate().has_value());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto kx = fiber::tls::TlsKeyExchange::create(fiber::tls::TlsNamedGroup::Secp256r1);
+        ASSERT_TRUE(kx.has_value());
+        ASSERT_TRUE(kx.value()->generate().has_value());
 
-    ServerMaterial material;
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
 
-    const std::array<std::uint8_t, 32> kRandom = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
-                                                  17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
-    const std::span<const std::uint8_t> point = kx.value()->public_value().bytes();
+        const std::array<std::uint8_t, 32> kRandom = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
+                                                      17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
+        const std::span<const std::uint8_t> point = kx.value()->public_value().bytes();
 
-    Event event = Event::None;
-    ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0, point), event));
-    EXPECT_FALSE(engine.done());
+        Event event = Event::None;
+        ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0, point), event));
+        EXPECT_FALSE(engine.done());
 
-    // CH2 with a DIFFERENT random (first byte flipped) → illegal_parameter.
-    ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0x5A, point), event));
-    EXPECT_EQ(Event::Failed, event);
-    EXPECT_EQ(TlsAlertDesc::IllegalParameter, engine.failure_alert());
+        // CH2 with a DIFFERENT random (first byte flipped) → illegal_parameter.
+        ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0x5A, point), event));
+        EXPECT_EQ(Event::Failed, event);
+        EXPECT_EQ(TlsAlertDesc::IllegalParameter, engine.failure_alert());
+    });
 }
 
 // =====================================================================
@@ -724,19 +739,21 @@ TEST(TlsServerHandshake13Hrr, EchoMismatchAborts) {
 
 // A first handshake message that is not a ClientHello → unexpected_message.
 TEST(TlsServerHandshake13Refuse, NonHelloFirstMessageRefused) {
-    ServerMaterial material;
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
 
-    // One plaintext handshake record carrying a bare Finished header.
-    const std::array<std::uint8_t, 9> wire{22, 0x03, 0x03, 0, 4, 20, 0, 0, 0};
-    IoBuf buf = IoBuf::allocate(wire.size());
-    ASSERT_TRUE(buf.valid());
-    std::memcpy(buf.writable_data(), wire.data(), wire.size());
-    buf.commit(wire.size());
-    const IoResult<Event> event = engine.feed(std::move(buf));
-    ASSERT_TRUE(event.has_value());
-    EXPECT_EQ(Event::Failed, *event);
-    EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, engine.failure_alert());
+        // One plaintext handshake record carrying a bare Finished header.
+        const std::array<std::uint8_t, 9> wire{22, 0x03, 0x03, 0, 4, 20, 0, 0, 0};
+        IoBuf buf = IoBuf::allocate(wire.size());
+        ASSERT_TRUE(buf.valid());
+        std::memcpy(buf.writable_data(), wire.data(), wire.size());
+        buf.commit(wire.size());
+        const IoResult<Event> event = engine.feed(std::move(buf));
+        ASSERT_TRUE(event.has_value());
+        EXPECT_EQ(Event::Failed, *event);
+        EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, engine.failure_alert());
+    });
 }
 
 // =====================================================================
@@ -768,73 +785,81 @@ struct ClientTrustMaterial {
 
 // Required client certificate, presented and verified end to end.
 TEST(TlsServerHandshake13Mtls, ClientCertificateVerified) {
-    auto client = BoringClient::make(ClientOptions{.client_cert = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    ClientTrustMaterial trust;
-    TlsServerConfig cfg = material.config();
-    cfg.client_trust = &*trust.related;
-    cfg.require_client_cert = true;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.client_cert = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        ClientTrustMaterial trust;
+        TlsServerConfig cfg = material.config();
+        cfg.client_trust = &*trust.related;
+        cfg.require_client_cert = true;
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine, false));
 
-    TlsConnectedState state = engine.take_state();
-    ASSERT_EQ(2u, state.peer_chain.size()); // kClientRsaPem leaf + RSA intermediate
-    EXPECT_FALSE(state.session_resumed);
+        TlsConnectedState state = engine.take_state();
+        ASSERT_EQ(2u, state.peer_chain.size()); // kClientRsaPem leaf + RSA intermediate
+        EXPECT_FALSE(state.session_resumed);
+    });
 }
 
 // require_client_cert with an empty client chain → certificate_required.
 TEST(TlsServerHandshake13Mtls, MissingCertificateRequired) {
-    auto client = BoringClient::make(ClientOptions{}); // no client credential
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    ClientTrustMaterial trust;
-    TlsServerConfig cfg = material.config();
-    cfg.client_trust = &*trust.related;
-    cfg.require_client_cert = true;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{}); // no client credential
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        ClientTrustMaterial trust;
+        TlsServerConfig cfg = material.config();
+        cfg.client_trust = &*trust.related;
+        cfg.require_client_cert = true;
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    EXPECT_FALSE(drive(*client, engine, false));
-    ASSERT_TRUE(engine.done());
-    EXPECT_TRUE(engine.failed());
-    EXPECT_EQ(TlsAlertDesc::CertificateRequired, engine.failure_alert());
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        EXPECT_FALSE(drive(*client, engine, false));
+        ASSERT_TRUE(engine.done());
+        EXPECT_TRUE(engine.failed());
+        EXPECT_EQ(TlsAlertDesc::CertificateRequired, engine.failure_alert());
+    });
 }
 
 // Optional client certificate (require=false): no chain presented still
 // completes, with an empty peer chain in the state.
 TEST(TlsServerHandshake13Mtls, OptionalCertificateAbsent) {
-    auto client = BoringClient::make(ClientOptions{});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    ClientTrustMaterial trust;
-    TlsServerConfig cfg = material.config();
-    cfg.client_trust = &*trust.related; // request, but do not require
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        ClientTrustMaterial trust;
+        TlsServerConfig cfg = material.config();
+        cfg.client_trust = &*trust.related; // request, but do not require
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    TlsConnectedState state = engine.take_state();
-    EXPECT_TRUE(state.peer_chain.empty());
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine, false));
+        TlsConnectedState state = engine.take_state();
+        EXPECT_TRUE(state.peer_chain.empty());
+    });
 }
 
 // A presented chain that does not root in the configured anchors fails with
 // the verifier's alert.
 TEST(TlsServerHandshake13Mtls, UntrustedChainRefused) {
-    auto client = BoringClient::make(ClientOptions{.client_cert = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    ClientTrustMaterial trust;
-    TlsServerConfig cfg = material.config();
-    cfg.client_trust = &*trust.unrelated;
-    cfg.require_client_cert = true;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.client_cert = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        ClientTrustMaterial trust;
+        TlsServerConfig cfg = material.config();
+        cfg.client_trust = &*trust.unrelated;
+        cfg.require_client_cert = true;
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    EXPECT_FALSE(drive(*client, engine, false));
-    ASSERT_TRUE(engine.done());
-    EXPECT_TRUE(engine.failed());
-    // 02b's mapping: an unrooted chain is unknown_ca (SSL_alert_from_verify_
-    // result parity), not the generic bad_certificate.
-    EXPECT_EQ(TlsAlertDesc::UnknownCa, engine.failure_alert());
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        EXPECT_FALSE(drive(*client, engine, false));
+        ASSERT_TRUE(engine.done());
+        EXPECT_TRUE(engine.failed());
+        // 02b's mapping: an unrooted chain is unknown_ca (SSL_alert_from_verify_
+        // result parity), not the generic bad_certificate.
+        EXPECT_EQ(TlsAlertDesc::UnknownCa, engine.failure_alert());
+    });
 }
 
 // =====================================================================
@@ -845,139 +870,150 @@ TEST(TlsServerHandshake13Mtls, UntrustedChainRefused) {
 // =====================================================================
 
 TEST(TlsServerHandshake12Full, HandshakeAndAppRoundTrip) {
-    auto client = BoringClient::make(ClientOptions{.tls12_only = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
 
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
-    DriveLog log;
-    ASSERT_TRUE(drive(*client, engine, false, &log));
-    ASSERT_TRUE(engine.done());
-    EXPECT_FALSE(engine.failed());
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        DriveLog log;
+        ASSERT_TRUE(drive(*client, engine, false, &log));
+        ASSERT_TRUE(engine.done());
+        EXPECT_FALSE(engine.failed());
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
-    const SSL_CIPHER *negotiated = SSL_get_current_cipher(client->ssl());
-    ASSERT_NE(nullptr, negotiated);
-    EXPECT_EQ(SSL_CIPHER_get_protocol_id(negotiated), static_cast<std::uint16_t>(state.suite));
-    // The client offered EMS and the SH echoed it.
-    EXPECT_EQ(1, SSL_get_extms_support(client->ssl()));
-    ASSERT_EQ(2, state.alpn_len);
-    EXPECT_EQ(0, std::memcmp("h2", state.alpn.data(), 2));
-    EXPECT_FALSE(state.session_resumed);
-    EXPECT_FALSE(state.early_data_accepted);
-    EXPECT_TRUE(state.peer_chain.empty());
-    // The RFC 8446 §4.1.3 downgrade sentinel rides the 1.2 SH random.
-    const std::array<std::uint8_t, 8> kDowngrade{0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01};
-    EXPECT_TRUE(wire_contains(log.server_to_client, kDowngrade));
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+        const SSL_CIPHER *negotiated = SSL_get_current_cipher(client->ssl());
+        ASSERT_NE(nullptr, negotiated);
+        EXPECT_EQ(SSL_CIPHER_get_protocol_id(negotiated), static_cast<std::uint16_t>(state.suite));
+        // The client offered EMS and the SH echoed it.
+        EXPECT_EQ(1, SSL_get_extms_support(client->ssl()));
+        ASSERT_EQ(2, state.alpn_len);
+        EXPECT_EQ(0, std::memcmp("h2", state.alpn.data(), 2));
+        EXPECT_FALSE(state.session_resumed);
+        EXPECT_FALSE(state.early_data_accepted);
+        EXPECT_TRUE(state.peer_chain.empty());
+        // The RFC 8446 §4.1.3 downgrade sentinel rides the 1.2 SH random.
+        const std::array<std::uint8_t, 8> kDowngrade{0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x01};
+        EXPECT_TRUE(wire_contains(log.server_to_client, kDowngrade));
 
-    // ---- client → server app data through the moved read cipher ----
-    const char kMessage[] = "ping from boringssl tls12 client";
-    EXPECT_EQ(sizeof(kMessage) - 1,
-              static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
-    const std::vector<std::uint8_t> flight = client->drain_wbio();
-    std::vector<std::uint8_t> plaintext;
-    std::size_t off = 0;
-    while (off + fiber::tls::kTlsRecordHeaderSize <= flight.size()) {
-        const std::size_t len = (static_cast<std::size_t>(flight[off + 3]) << 8) | flight[off + 4];
-        if (flight[off] != 23) {
+        // ---- client → server app data through the moved read cipher ----
+        const char kMessage[] = "ping from boringssl tls12 client";
+        EXPECT_EQ(sizeof(kMessage) - 1,
+                  static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
+        const std::vector<std::uint8_t> flight = client->drain_wbio();
+        std::vector<std::uint8_t> plaintext;
+        std::size_t off = 0;
+        while (off + fiber::tls::kTlsRecordHeaderSize <= flight.size()) {
+            const std::size_t len = (static_cast<std::size_t>(flight[off + 3]) << 8) | flight[off + 4];
+            if (flight[off] != 23) {
+                off += fiber::tls::kTlsRecordHeaderSize + len;
+                continue;
+            }
+            std::array<std::uint8_t, fiber::tls::kTlsMaxPlaintextSize> dst{};
+            const auto opened =
+                    state.read_cipher.open(fiber::tls::TlsContentType::ApplicationData,
+                                           (static_cast<std::uint16_t>(flight[off + 1]) << 8) | flight[off + 2],
+                                           static_cast<std::uint16_t>(len),
+                                           {flight.data() + off + fiber::tls::kTlsRecordHeaderSize, len}, dst);
+            ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
+            plaintext.insert(plaintext.end(), dst.data(), dst.data() + opened.plain_len);
             off += fiber::tls::kTlsRecordHeaderSize + len;
-            continue;
         }
-        std::array<std::uint8_t, fiber::tls::kTlsMaxPlaintextSize> dst{};
-        const auto opened = state.read_cipher.open(fiber::tls::TlsContentType::ApplicationData,
-                                                   (static_cast<std::uint16_t>(flight[off + 1]) << 8) | flight[off + 2],
-                                                   static_cast<std::uint16_t>(len),
-                                                   {flight.data() + off + fiber::tls::kTlsRecordHeaderSize, len}, dst);
-        ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, opened.status);
-        plaintext.insert(plaintext.end(), dst.data(), dst.data() + opened.plain_len);
-        off += fiber::tls::kTlsRecordHeaderSize + len;
-    }
-    EXPECT_EQ(0, std::memcmp(kMessage, plaintext.data(), sizeof(kMessage) - 1));
+        EXPECT_EQ(0, std::memcmp(kMessage, plaintext.data(), sizeof(kMessage) - 1));
 
-    // ---- server → client app data through the moved write cipher ----
-    const char kReply[] = "pong from fiber tls12 server";
-    std::vector<std::uint8_t> sealed(state.write_cipher.seal_output_size(sizeof(kReply) - 1));
-    const auto sealed_res =
-            state.write_cipher.seal(fiber::tls::TlsContentType::ApplicationData,
-                                    {reinterpret_cast<const std::uint8_t *>(kReply), sizeof(kReply) - 1}, sealed);
-    ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, sealed_res.status);
-    ASSERT_TRUE(client->ship(frame_record(23, {sealed.data(), sealed_res.out_len})));
-    std::array<char, 128> got{};
-    const int read = SSL_read(client->ssl(), got.data(), static_cast<int>(got.size()));
-    ASSERT_GT(read, 0);
-    EXPECT_EQ(0, std::memcmp(kReply, got.data(), sizeof(kReply) - 1));
+        // ---- server → client app data through the moved write cipher ----
+        const char kReply[] = "pong from fiber tls12 server";
+        std::vector<std::uint8_t> sealed(state.write_cipher.seal_output_size(sizeof(kReply) - 1));
+        const auto sealed_res =
+                state.write_cipher.seal(fiber::tls::TlsContentType::ApplicationData,
+                                        {reinterpret_cast<const std::uint8_t *>(kReply), sizeof(kReply) - 1}, sealed);
+        ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, sealed_res.status);
+        ASSERT_TRUE(client->ship(frame_record(23, {sealed.data(), sealed_res.out_len})));
+        std::array<char, 128> got{};
+        const int read = SSL_read(client->ssl(), got.data(), static_cast<int>(got.size()));
+        ASSERT_GT(read, 0);
+        EXPECT_EQ(0, std::memcmp(kReply, got.data(), sizeof(kReply) - 1));
+    });
 }
 
 // One byte at a time — the 1.2 reassembler path is the shared one, but the
 // client flight spans two records (handshake, then CCS+sealed Fin).
 TEST(TlsServerHandshake12Full, HandshakeSlicedFeed) {
-    auto client = BoringClient::make(ClientOptions{.tls12_only = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
 
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine, true));
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine, true));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
-    ASSERT_EQ(2, state.alpn_len);
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+        ASSERT_EQ(2, state.alpn_len);
+    });
 }
 
 // An ECDSA-P256 server credential: the suite filter keeps only the
 // ECDHE-ECDSA half of the registry.
 TEST(TlsServerHandshake12Full, EcCredentialHandshake) {
-    auto client = BoringClient::make(ClientOptions{.tls12_only = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    material.load(certfix::kLeafEcP256Pem, certfix::kP256KeyPem);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        material.load(certfix::kLeafEcP256Pem, certfix::kP256KeyPem);
 
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine, false));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
-              static_cast<std::uint16_t>(state.suite));
-    EXPECT_EQ(0xC02B, static_cast<std::uint16_t>(state.suite)); // ECDHE-ECDSA-AES128-GCM-SHA256
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
+                  static_cast<std::uint16_t>(state.suite));
+        EXPECT_EQ(0xC02B, static_cast<std::uint16_t>(state.suite)); // ECDHE-ECDSA-AES128-GCM-SHA256
+    });
 }
 
 // Pinned single-suite clients: the server takes its preference entry that
 // survives the pin (0xC030 and 0xCCA8 are both RSA suites at different
 // registry depths).
 TEST(TlsServerHandshake12Full, PinnedSuiteSelection) {
-    const std::pair<const char *, std::uint16_t> kPins[] = {{"ECDHE-RSA-AES256-GCM-SHA384", 0xC030},
-                                                            {"ECDHE-RSA-CHACHA20-POLY1305", 0xCCA8}};
-    for (const auto &[cipher_list, want]: kPins) {
-        auto client = BoringClient::make(ClientOptions{.tls12_only = true, .tls12_ciphers = cipher_list});
-        ASSERT_NE(nullptr, client);
-        ServerMaterial material;
-        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool);
-        ASSERT_TRUE(drive(*client, engine, false))
-                << cipher_list << " alert=" << static_cast<int>(engine.failure_alert());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        const std::pair<const char *, std::uint16_t> kPins[] = {{"ECDHE-RSA-AES256-GCM-SHA384", 0xC030},
+                                                                {"ECDHE-RSA-CHACHA20-POLY1305", 0xCCA8}};
+        for (const auto &[cipher_list, want]: kPins) {
+            auto client = BoringClient::make(ClientOptions{.tls12_only = true, .tls12_ciphers = cipher_list});
+            ASSERT_NE(nullptr, client);
+            ServerMaterial material;
+            TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+            ASSERT_TRUE(drive(*client, engine, false))
+                    << cipher_list << " alert=" << static_cast<int>(engine.failure_alert());
 
-        TlsConnectedState state = engine.take_state();
-        EXPECT_EQ(want, static_cast<std::uint16_t>(state.suite)) << cipher_list;
-        EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())), want) << cipher_list;
-    }
+            TlsConnectedState state = engine.take_state();
+            EXPECT_EQ(want, static_cast<std::uint16_t>(state.suite)) << cipher_list;
+            EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())), want) << cipher_list;
+        }
+    });
 }
 
 // mTLS at 1.2: the CR is the three-vector form, the client CV signs the raw
 // transcript through its own CKE.
 TEST(TlsServerHandshake12Full, ClientCertificateVerified) {
-    auto client = BoringClient::make(ClientOptions{.tls12_only = true, .client_cert = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    ClientTrustMaterial trust;
-    TlsServerConfig cfg = material.config();
-    cfg.client_trust = &*trust.related;
-    cfg.require_client_cert = true;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true, .client_cert = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        ClientTrustMaterial trust;
+        TlsServerConfig cfg = material.config();
+        cfg.client_trust = &*trust.related;
+        cfg.require_client_cert = true;
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine, false));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
-    ASSERT_EQ(2u, state.peer_chain.size()); // kClientRsaPem leaf + RSA intermediate
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+        ASSERT_EQ(2u, state.peer_chain.size()); // kClientRsaPem leaf + RSA intermediate
+    });
 }
 
 namespace {
@@ -1014,26 +1050,28 @@ struct CapturingMinter {
 // echoes the empty extension in the SH and mints one NST after the client
 // Finished, in cleartext before its CCS.
 TEST(TlsServerHandshake12Full, TicketMintedAfterClientFinished) {
-    auto client = BoringClient::make(ClientOptions{.tls12_only = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    CapturingMinter minter;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        CapturingMinter minter;
 
-    TlsTicketMinter hook = minter.hook();
-    TlsServerHandshakeEngine engine(material.config(), nullptr, &hook, material.pool);
-    DriveLog log;
-    ASSERT_TRUE(drive(*client, engine, false, &log));
+        TlsTicketMinter hook = minter.hook();
+        TlsServerHandshakeEngine engine(material.config(), nullptr, &hook);
+        DriveLog log;
+        ASSERT_TRUE(drive(*client, engine, false, &log));
 
-    TlsConnectedState state = engine.take_state();
-    ASSERT_TRUE(minter.called);
-    EXPECT_EQ(state.suite, minter.suite);
-    EXPECT_EQ(7200u, minter.timeout_s);
-    ASSERT_EQ(2u, minter.alpn.size());
-    EXPECT_EQ(0, std::memcmp("h2", minter.alpn.data(), 2));
-    ASSERT_EQ(48u, minter.resumption_master.size());
-    EXPECT_EQ(0, std::memcmp(state.tls12_master.bytes().data(), minter.resumption_master.data(), 48));
-    // The NST is plaintext on the wire — the ticket blob is verbatim.
-    EXPECT_TRUE(wire_contains(log.server_to_client, CapturingMinter::kTicket));
+        TlsConnectedState state = engine.take_state();
+        ASSERT_TRUE(minter.called);
+        EXPECT_EQ(state.suite, minter.suite);
+        EXPECT_EQ(7200u, minter.timeout_s);
+        ASSERT_EQ(2u, minter.alpn.size());
+        EXPECT_EQ(0, std::memcmp("h2", minter.alpn.data(), 2));
+        ASSERT_EQ(48u, minter.resumption_master.size());
+        EXPECT_EQ(0, std::memcmp(state.tls12_master.bytes().data(), minter.resumption_master.data(), 48));
+        // The NST is plaintext on the wire — the ticket blob is verbatim.
+        EXPECT_TRUE(wire_contains(log.server_to_client, CapturingMinter::kTicket));
+    });
 }
 
 
@@ -1144,10 +1182,10 @@ private:
 
 // Hop-1 helper: a full handshake with the minter installed leaves exactly
 // one ticket in the store and one session in the client's stash.
-void run_ticketed_hop1(const TlsServerConfig &cfg, const TlsTicketMinter &minter, IoBufNodePool &pool) {
+void run_ticketed_hop1(const TlsServerConfig &cfg, const TlsTicketMinter &minter) {
     auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
     ASSERT_NE(nullptr, client);
-    TlsServerHandshakeEngine engine(cfg, nullptr, &minter, pool);
+    TlsServerHandshakeEngine engine(cfg, nullptr, &minter);
     ASSERT_TRUE(drive(*client, engine, false));
     EXPECT_FALSE(engine.failed());
     EXPECT_FALSE(engine.take_state().session_resumed);
@@ -1312,53 +1350,55 @@ struct DualMaterial {
 // handshake resumes over the PSK (no certificate flight), then the resumed
 // connection mints — and the client parses — a second ticket.
 TEST(TlsServerHandshake13Psk, BoringClientResumesWithTicket) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    run_ticketed_hop1(cfg, minter, material.pool);
-    ASSERT_EQ(1u, store.size());
+        run_ticketed_hop1(cfg, minter);
+        ASSERT_EQ(1u, store.size());
 
-    auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    EXPECT_FALSE(engine.failed());
+        auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
+        ASSERT_NE(nullptr, client);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
+        ASSERT_TRUE(drive(*client, engine, false));
+        EXPECT_FALSE(engine.failed());
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_TRUE(state.session_resumed);
-    EXPECT_FALSE(state.early_data_accepted);
-    EXPECT_TRUE(state.peer_chain.empty()); // PSK resume: no certificate flight either
-    EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
-              static_cast<std::uint16_t>(state.suite));
-    EXPECT_EQ(1, SSL_session_reused(client->ssl()));
-    EXPECT_EQ(2u, store.size()); // the resumed connection minted its own NST
+        TlsConnectedState state = engine.take_state();
+        EXPECT_TRUE(state.session_resumed);
+        EXPECT_FALSE(state.early_data_accepted);
+        EXPECT_TRUE(state.peer_chain.empty()); // PSK resume: no certificate flight either
+        EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
+                  static_cast<std::uint16_t>(state.suite));
+        EXPECT_EQ(1, SSL_session_reused(client->ssl()));
+        EXPECT_EQ(2u, store.size()); // the resumed connection minted its own NST
 
-    // The NST flew after Done; drive's final spin already shipped it into
-    // the client's read BIO. The read path digests it and the stash grows.
-    std::array<char, 64> sink{};
-    (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    EXPECT_EQ(2u, g_new_sessions.size());
+        // The NST flew after Done; drive's final spin already shipped it into
+        // the client's read BIO. The read path digests it and the stash grows.
+        std::array<char, 64> sink{};
+        (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        EXPECT_EQ(2u, g_new_sessions.size());
 
-    // App-data round trip on the resumed connection.
-    const char kPing[] = "ping over psk";
-    ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
-    const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
-    ASSERT_EQ(sizeof(kPing) - 1, ping.size());
-    EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
+        // App-data round trip on the resumed connection.
+        const char kPing[] = "ping over psk";
+        ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
+        const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
+        ASSERT_EQ(sizeof(kPing) - 1, ping.size());
+        EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
 
-    const char kPong[] = "pong over psk";
-    const std::vector<std::uint8_t> pong =
-            seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
-    ASSERT_FALSE(pong.empty());
-    ASSERT_TRUE(client->ship(pong));
-    const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    ASSERT_GT(got, 0);
-    EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+        const char kPong[] = "pong over psk";
+        const std::vector<std::uint8_t> pong =
+                seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+        ASSERT_FALSE(pong.empty());
+        ASSERT_TRUE(client->ship(pong));
+        const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        ASSERT_GT(got, 0);
+        EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+    });
 }
 
 // Hand-driven 0-RTT: the early write must fly before the ServerHello lands,
@@ -1367,76 +1407,78 @@ TEST(TlsServerHandshake13Psk, BoringClientResumesWithTicket) {
 // the plaintext back through take_early_data, and finishes at the client's
 // EOED + Fin.
 TEST(TlsServerHandshake13Psk, BoringClientEarlyDataAccepted) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    TlsServerConfig cfg = material.config();
-    cfg.enable_early_data = true;
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        TlsServerConfig cfg = material.config();
+        cfg.enable_early_data = true;
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    run_ticketed_hop1(cfg, minter, material.pool);
-    const TestSessionStore::Entry *entry = store.first_entry();
-    ASSERT_NE(nullptr, entry);
-    EXPECT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
+        run_ticketed_hop1(cfg, minter);
+        const TestSessionStore::Entry *entry = store.first_entry();
+        ASSERT_NE(nullptr, entry);
+        EXPECT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
 
-    auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    SSL_set_early_data_enabled(client->ssl(), 1); // returns void
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
+        auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
+        ASSERT_NE(nullptr, client);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        SSL_set_early_data_enabled(client->ssl(), 1); // returns void
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
 
-    // ClientHello first. A 0-RTT BoringSSL client early-returns 1 here (the
-    // mirror of the accepting server's early return) so the app may write
-    // early data before any server flight lands.
-    EXPECT_EQ(1, client->handshake_step());
-    std::vector<std::uint8_t> first = client->drain_wbio();
-    // The early request rides out before any server flight arrives.
-    const char kEarly[] = "GET /early HTTP/1.1\r\nhost: example.com\r\n\r\n";
-    ASSERT_EQ(sizeof(kEarly) - 1, SSL_write(client->ssl(), kEarly, static_cast<int>(sizeof(kEarly) - 1)));
-    const std::vector<std::uint8_t> early_wire = client->drain_wbio();
-    first.insert(first.end(), early_wire.begin(), early_wire.end());
-    Event event = Event::None;
-    ASSERT_TRUE(feed_bytes(engine, first, false, event));
+        // ClientHello first. A 0-RTT BoringSSL client early-returns 1 here (the
+        // mirror of the accepting server's early return) so the app may write
+        // early data before any server flight lands.
+        EXPECT_EQ(1, client->handshake_step());
+        std::vector<std::uint8_t> first = client->drain_wbio();
+        // The early request rides out before any server flight arrives.
+        const char kEarly[] = "GET /early HTTP/1.1\r\nhost: example.com\r\n\r\n";
+        ASSERT_EQ(sizeof(kEarly) - 1, SSL_write(client->ssl(), kEarly, static_cast<int>(sizeof(kEarly) - 1)));
+        const std::vector<std::uint8_t> early_wire = client->drain_wbio();
+        first.insert(first.end(), early_wire.begin(), early_wire.end());
+        Event event = Event::None;
+        ASSERT_TRUE(feed_bytes(engine, first, false, event));
 
-    // The engine's flight closes the window; the client completes and sends
-    // EOED (under the EARLY keys, sequence continuing) + Fin (fresh client_hs).
-    ASSERT_TRUE(client->ship(chain_bytes(engine.take_output())));
-    EXPECT_EQ(1, client->handshake_step());
-    ASSERT_TRUE(feed_bytes(engine, client->drain_wbio(), false, event));
-    EXPECT_EQ(Event::HandshakeDone, event);
-    EXPECT_TRUE(engine.done());
-    EXPECT_FALSE(engine.failed());
-    EXPECT_EQ(1, SSL_early_data_accepted(client->ssl()));
+        // The engine's flight closes the window; the client completes and sends
+        // EOED (under the EARLY keys, sequence continuing) + Fin (fresh client_hs).
+        ASSERT_TRUE(client->ship(chain_bytes(engine.take_output())));
+        EXPECT_EQ(1, client->handshake_step());
+        ASSERT_TRUE(feed_bytes(engine, client->drain_wbio(), false, event));
+        EXPECT_EQ(Event::HandshakeDone, event);
+        EXPECT_TRUE(engine.done());
+        EXPECT_FALSE(engine.failed());
+        EXPECT_EQ(1, SSL_early_data_accepted(client->ssl()));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_TRUE(state.session_resumed);
-    EXPECT_TRUE(state.early_data_accepted);
-    const std::vector<std::uint8_t> early = chain_bytes(engine.take_early_data());
-    ASSERT_EQ(sizeof(kEarly) - 1, early.size());
-    EXPECT_EQ(0, std::memcmp(kEarly, early.data(), early.size()));
-    EXPECT_EQ(2u, store.size()); // NST minted on the 0-RTT connection too
+        TlsConnectedState state = engine.take_state();
+        EXPECT_TRUE(state.session_resumed);
+        EXPECT_TRUE(state.early_data_accepted);
+        const std::vector<std::uint8_t> early = chain_bytes(engine.take_early_data());
+        ASSERT_EQ(sizeof(kEarly) - 1, early.size());
+        EXPECT_EQ(0, std::memcmp(kEarly, early.data(), early.size()));
+        EXPECT_EQ(2u, store.size()); // NST minted on the 0-RTT connection too
 
-    // The NST flies after Done; deliver it, then round-trip app data.
-    ASSERT_TRUE(client->ship(chain_bytes(engine.take_output())));
-    std::array<char, 64> sink{};
-    (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    EXPECT_EQ(2u, g_new_sessions.size());
+        // The NST flies after Done; deliver it, then round-trip app data.
+        ASSERT_TRUE(client->ship(chain_bytes(engine.take_output())));
+        std::array<char, 64> sink{};
+        (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        EXPECT_EQ(2u, g_new_sessions.size());
 
-    const char kPing[] = "ping after 0rtt";
-    ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
-    const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
-    ASSERT_EQ(sizeof(kPing) - 1, ping.size());
-    EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
+        const char kPing[] = "ping after 0rtt";
+        ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
+        const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
+        ASSERT_EQ(sizeof(kPing) - 1, ping.size());
+        EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
 
-    const char kPong[] = "pong after 0rtt";
-    const std::vector<std::uint8_t> pong =
-            seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
-    ASSERT_FALSE(pong.empty());
-    ASSERT_TRUE(client->ship(pong));
-    const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    ASSERT_GT(got, 0);
-    EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+        const char kPong[] = "pong after 0rtt";
+        const std::vector<std::uint8_t> pong =
+                seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+        ASSERT_FALSE(pong.empty());
+        ASSERT_TRUE(client->ship(pong));
+        const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        ASSERT_GT(got, 0);
+        EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+    });
 }
 
 // PSK offer + HRR: the client's first share is P-256 (server prefers
@@ -1445,213 +1487,219 @@ TEST(TlsServerHandshake13Psk, BoringClientEarlyDataAccepted) {
 // (§4.2.10); CH2 carries the SECOND binder over message_hash‖HRR‖CH2 and the
 // PSK survives the retry.
 TEST(TlsServerHandshake13Psk, BoringClientHrrAfterPskResume) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    TlsServerConfig cfg = material.config();
-    cfg.enable_early_data = true;
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        TlsServerConfig cfg = material.config();
+        cfg.enable_early_data = true;
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    run_ticketed_hop1(cfg, minter, material.pool);
+        run_ticketed_hop1(cfg, minter);
 
-    auto client = BoringClient::make(ClientOptions{.groups = "P-256:X25519", .collect_tickets = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    SSL_set_early_data_enabled(client->ssl(), 1); // returns void
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
+        auto client = BoringClient::make(ClientOptions{.groups = "P-256:X25519", .collect_tickets = true});
+        ASSERT_NE(nullptr, client);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        SSL_set_early_data_enabled(client->ssl(), 1); // returns void
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
 
-    // CH (P-256 share) + early data, all before any server flight. The
-    // 0-RTT client early-returns 1 after emitting the ClientHello.
-    EXPECT_EQ(1, client->handshake_step());
-    std::vector<std::uint8_t> first = client->drain_wbio();
-    const char kEarly[] = "early-then-hrr";
-    ASSERT_EQ(sizeof(kEarly) - 1, SSL_write(client->ssl(), kEarly, static_cast<int>(sizeof(kEarly) - 1)));
-    const std::vector<std::uint8_t> early_wire = client->drain_wbio();
-    first.insert(first.end(), early_wire.begin(), early_wire.end());
-    Event event = Event::None;
-    ASSERT_TRUE(feed_bytes(engine, first, false, event));
+        // CH (P-256 share) + early data, all before any server flight. The
+        // 0-RTT client early-returns 1 after emitting the ClientHello.
+        EXPECT_EQ(1, client->handshake_step());
+        std::vector<std::uint8_t> first = client->drain_wbio();
+        const char kEarly[] = "early-then-hrr";
+        ASSERT_EQ(sizeof(kEarly) - 1, SSL_write(client->ssl(), kEarly, static_cast<int>(sizeof(kEarly) - 1)));
+        const std::vector<std::uint8_t> early_wire = client->drain_wbio();
+        first.insert(first.end(), early_wire.begin(), early_wire.end());
+        Event event = Event::None;
+        ASSERT_TRUE(feed_bytes(engine, first, false, event));
 
-    // HelloRetryRequest came back; the early records were skipped, not fatal.
-    const std::vector<std::uint8_t> hrr_flight = chain_bytes(engine.take_output());
-    const auto &sentinel = fiber::tls::kTlsHelloRetryRandom;
-    EXPECT_TRUE(wire_contains(hrr_flight, {sentinel.data(), sentinel.size()}));
-    EXPECT_FALSE(engine.done());
+        // HelloRetryRequest came back; the early records were skipped, not fatal.
+        const std::vector<std::uint8_t> hrr_flight = chain_bytes(engine.take_output());
+        const auto &sentinel = fiber::tls::kTlsHelloRetryRandom;
+        EXPECT_TRUE(wire_contains(hrr_flight, {sentinel.data(), sentinel.size()}));
+        EXPECT_FALSE(engine.done());
 
-    // CH2 (X25519 share, second binder) → SH flight → client Fin.
-    ASSERT_TRUE(client->ship(hrr_flight));
-    // The HRR rejected the client's early data: BoringSSL surfaces
-    // SSL_ERROR_EARLY_DATA_REJECTED once so the app can rewind its early
-    // writes; the retried step emits CH2 and waits for the SH flight.
-    const int rejected = SSL_do_handshake(client->ssl());
-    ASSERT_EQ(SSL_ERROR_EARLY_DATA_REJECTED, SSL_get_error(client->ssl(), rejected));
-    // The rejection is sticky: the reset lets the client act on the HRR and
-    // emit CH2 (the app re-sends its early writes afterwards).
-    SSL_reset_early_data_reject(client->ssl());
-    EXPECT_EQ(0, client->handshake_step());
-    ASSERT_TRUE(feed_bytes(engine, client->drain_wbio(), false, event));
-    ASSERT_TRUE(client->ship(chain_bytes(engine.take_output())));
-    EXPECT_EQ(1, client->handshake_step());
-    ASSERT_TRUE(feed_bytes(engine, client->drain_wbio(), false, event));
-    EXPECT_EQ(Event::HandshakeDone, event);
-    EXPECT_FALSE(engine.failed());
+        // CH2 (X25519 share, second binder) → SH flight → client Fin.
+        ASSERT_TRUE(client->ship(hrr_flight));
+        // The HRR rejected the client's early data: BoringSSL surfaces
+        // SSL_ERROR_EARLY_DATA_REJECTED once so the app can rewind its early
+        // writes; the retried step emits CH2 and waits for the SH flight.
+        const int rejected = SSL_do_handshake(client->ssl());
+        ASSERT_EQ(SSL_ERROR_EARLY_DATA_REJECTED, SSL_get_error(client->ssl(), rejected));
+        // The rejection is sticky: the reset lets the client act on the HRR and
+        // emit CH2 (the app re-sends its early writes afterwards).
+        SSL_reset_early_data_reject(client->ssl());
+        EXPECT_EQ(0, client->handshake_step());
+        ASSERT_TRUE(feed_bytes(engine, client->drain_wbio(), false, event));
+        ASSERT_TRUE(client->ship(chain_bytes(engine.take_output())));
+        EXPECT_EQ(1, client->handshake_step());
+        ASSERT_TRUE(feed_bytes(engine, client->drain_wbio(), false, event));
+        EXPECT_EQ(Event::HandshakeDone, event);
+        EXPECT_FALSE(engine.failed());
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_TRUE(state.session_resumed); // the PSK survived the retry
-    EXPECT_FALSE(state.early_data_accepted); // 0-RTT never survives an HRR
-    EXPECT_TRUE(chain_bytes(engine.take_early_data()).empty());
-    EXPECT_EQ(0, SSL_early_data_accepted(client->ssl()));
-    EXPECT_EQ(2u, store.size());
+        TlsConnectedState state = engine.take_state();
+        EXPECT_TRUE(state.session_resumed); // the PSK survived the retry
+        EXPECT_FALSE(state.early_data_accepted); // 0-RTT never survives an HRR
+        EXPECT_TRUE(chain_bytes(engine.take_early_data()).empty());
+        EXPECT_EQ(0, SSL_early_data_accepted(client->ssl()));
+        EXPECT_EQ(2u, store.size());
 
-    // App data still round-trips.
-    const char kPing[] = "ping after hrr-psk";
-    ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
-    const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
-    ASSERT_EQ(sizeof(kPing) - 1, ping.size());
-    EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
+        // App data still round-trips.
+        const char kPing[] = "ping after hrr-psk";
+        ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
+        const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
+        ASSERT_EQ(sizeof(kPing) - 1, ping.size());
+        EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
+    });
 }
 
 // Both FSMs ours, no BoringSSL in the loop: our client resumes our server
 // off a ticket our minter issued, then the pair does it again with 0-RTT
 // (the strongest regression pair for the EOED write-cipher fix).
 TEST(TlsServerHandshake13Psk, OurClientResumesOurServer) {
-    DualMaterial material;
-    TlsServerConfig cfg = material.server_material.config();
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        DualMaterial material;
+        TlsServerConfig cfg = material.server_material.config();
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    // hop 1: our pair, minter installed.
-    {
-        TlsServerHandshakeEngine server(cfg, nullptr, &minter, material.server_material.pool);
-        TlsClientHandshakeEngine client(material.client_cfg, nullptr, material.server_material.pool);
-        ASSERT_TRUE(pump(client, server));
+        // hop 1: our pair, minter installed.
+        {
+            TlsServerHandshakeEngine server(cfg, nullptr, &minter);
+            TlsClientHandshakeEngine client(material.client_cfg, nullptr);
+            ASSERT_TRUE(pump(client, server));
+            EXPECT_FALSE(server.failed());
+            EXPECT_FALSE(client.failed());
+            EXPECT_FALSE(server.take_state().session_resumed);
+        }
+        ASSERT_EQ(1u, store.size());
+        const TestSessionStore::Entry *entry = store.first_entry();
+        ASSERT_NE(nullptr, entry);
+
+        // hop 2: the offer mirrors the store entry exactly (elapsed 0 → the
+        // obfuscated age is the age_add).
+        TlsSessionOffer offer;
+        const std::vector<std::uint8_t> ticket = store.first_ticket();
+        offer.identity = ticket;
+        offer.obfuscated_ticket_age = entry->age_add;
+        offer.suite = entry->suite;
+        offer.psk = entry->psk;
+
+        TlsServerHandshakeEngine server(cfg, &lookup, &minter);
+        TlsClientHandshakeEngine client(material.client_cfg, &offer);
+        std::vector<std::uint8_t> tail; // the post-done NST
+        ASSERT_TRUE(pump(client, server, &tail));
         EXPECT_FALSE(server.failed());
         EXPECT_FALSE(client.failed());
-        EXPECT_FALSE(server.take_state().session_resumed);
-    }
-    ASSERT_EQ(1u, store.size());
-    const TestSessionStore::Entry *entry = store.first_entry();
-    ASSERT_NE(nullptr, entry);
 
-    // hop 2: the offer mirrors the store entry exactly (elapsed 0 → the
-    // obfuscated age is the age_add).
-    TlsSessionOffer offer;
-    const std::vector<std::uint8_t> ticket = store.first_ticket();
-    offer.identity = ticket;
-    offer.obfuscated_ticket_age = entry->age_add;
-    offer.suite = entry->suite;
-    offer.psk = entry->psk;
+        TlsConnectedState server_state = server.take_state();
+        TlsConnectedState client_state = client.take_state();
+        EXPECT_TRUE(server_state.session_resumed);
+        EXPECT_TRUE(client_state.session_resumed);
+        EXPECT_FALSE(server_state.early_data_accepted);
+        EXPECT_TRUE(chain_bytes(server.take_early_data()).empty());
+        EXPECT_EQ(2u, store.size()); // the resumed connection minted its own NST
+        EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
+        EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
 
-    TlsServerHandshakeEngine server(cfg, &lookup, &minter, material.server_material.pool);
-    TlsClientHandshakeEngine client(material.client_cfg, &offer, material.server_material.pool);
-    std::vector<std::uint8_t> tail; // the post-done NST
-    ASSERT_TRUE(pump(client, server, &tail));
-    EXPECT_FALSE(server.failed());
-    EXPECT_FALSE(client.failed());
+        // Post-handshake app data through the moved ciphers, both directions.
+        const char kPing[] = "ping ours-psk";
+        const std::vector<std::uint8_t> ping = seal_app_record(
+                client_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPing), sizeof(kPing) - 1});
+        ASSERT_FALSE(ping.empty());
+        const std::vector<std::uint8_t> opened = open_app_records(server_state.read_cipher, ping);
+        ASSERT_EQ(sizeof(kPing) - 1, opened.size());
+        EXPECT_EQ(0, std::memcmp(kPing, opened.data(), opened.size()));
 
-    TlsConnectedState server_state = server.take_state();
-    TlsConnectedState client_state = client.take_state();
-    EXPECT_TRUE(server_state.session_resumed);
-    EXPECT_TRUE(client_state.session_resumed);
-    EXPECT_FALSE(server_state.early_data_accepted);
-    EXPECT_TRUE(chain_bytes(server.take_early_data()).empty());
-    EXPECT_EQ(2u, store.size()); // the resumed connection minted its own NST
-    EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
-    EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
-
-    // Post-handshake app data through the moved ciphers, both directions.
-    const char kPing[] = "ping ours-psk";
-    const std::vector<std::uint8_t> ping = seal_app_record(
-            client_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPing), sizeof(kPing) - 1});
-    ASSERT_FALSE(ping.empty());
-    const std::vector<std::uint8_t> opened = open_app_records(server_state.read_cipher, ping);
-    ASSERT_EQ(sizeof(kPing) - 1, opened.size());
-    EXPECT_EQ(0, std::memcmp(kPing, opened.data(), opened.size()));
-
-    // The NST (sealed under server_app0, write seq 0) must be opened through
-    // the client's read cipher first — the pong follows at seq 1.
-    ASSERT_TRUE(open_and_discard(client_state.read_cipher, tail));
-    const char kPong[] = "pong ours-psk";
-    const std::vector<std::uint8_t> pong = seal_app_record(
-            server_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
-    ASSERT_FALSE(pong.empty());
-    const std::vector<std::uint8_t> opened_back = open_app_records(client_state.read_cipher, pong);
-    ASSERT_EQ(sizeof(kPong) - 1, opened_back.size());
-    EXPECT_EQ(0, std::memcmp(kPong, opened_back.data(), opened_back.size()));
+        // The NST (sealed under server_app0, write seq 0) must be opened through
+        // the client's read cipher first — the pong follows at seq 1.
+        ASSERT_TRUE(open_and_discard(client_state.read_cipher, tail));
+        const char kPong[] = "pong ours-psk";
+        const std::vector<std::uint8_t> pong = seal_app_record(
+                server_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+        ASSERT_FALSE(pong.empty());
+        const std::vector<std::uint8_t> opened_back = open_app_records(client_state.read_cipher, pong);
+        ASSERT_EQ(sizeof(kPong) - 1, opened_back.size());
+        EXPECT_EQ(0, std::memcmp(kPong, opened_back.data(), opened_back.size()));
+    });
 }
 
 // Both FSMs ours with 0-RTT: the client seals early data under the early
 // keys, the server accepts (ALPN and ticket agree), sinks the plaintext,
 // and the client's EndOfEarlyData closes the window before its Finished.
 TEST(TlsServerHandshake13Psk, OurClientEarlyDataAccepted) {
-    DualMaterial material;
-    TlsServerConfig cfg = material.server_material.config();
-    cfg.enable_early_data = true;
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        DualMaterial material;
+        TlsServerConfig cfg = material.server_material.config();
+        cfg.enable_early_data = true;
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    // hop 1 mints a 0-RTT-capable ticket.
-    {
-        TlsServerHandshakeEngine server(cfg, nullptr, &minter, material.server_material.pool);
-        TlsClientHandshakeEngine client(material.client_cfg, nullptr, material.server_material.pool);
-        ASSERT_TRUE(pump(client, server));
+        // hop 1 mints a 0-RTT-capable ticket.
+        {
+            TlsServerHandshakeEngine server(cfg, nullptr, &minter);
+            TlsClientHandshakeEngine client(material.client_cfg, nullptr);
+            ASSERT_TRUE(pump(client, server));
+            EXPECT_FALSE(server.failed());
+        }
+        const TestSessionStore::Entry *entry = store.first_entry();
+        ASSERT_NE(nullptr, entry);
+        EXPECT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
+
+        TlsSessionOffer offer;
+        const std::vector<std::uint8_t> ticket = store.first_ticket();
+        offer.identity = ticket;
+        offer.obfuscated_ticket_age = entry->age_add;
+        offer.suite = entry->suite;
+        offer.psk = entry->psk;
+        offer.max_early_data = entry->max_early_data;
+
+        TlsServerHandshakeEngine server(cfg, &lookup, &minter);
+        TlsClientHandshakeEngine client(material.client_cfg, &offer);
+        const std::string_view early_request = "GET /early HTTP/1.1\r\nhost: example.com\r\n\r\n";
+        ASSERT_TRUE(client.write_early_data(
+                                  {reinterpret_cast<const std::uint8_t *>(early_request.data()), early_request.size()})
+                            .has_value());
+        std::vector<std::uint8_t> tail; // the post-done NST
+        ASSERT_TRUE(pump(client, server, &tail));
         EXPECT_FALSE(server.failed());
-    }
-    const TestSessionStore::Entry *entry = store.first_entry();
-    ASSERT_NE(nullptr, entry);
-    EXPECT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
+        EXPECT_FALSE(client.failed());
 
-    TlsSessionOffer offer;
-    const std::vector<std::uint8_t> ticket = store.first_ticket();
-    offer.identity = ticket;
-    offer.obfuscated_ticket_age = entry->age_add;
-    offer.suite = entry->suite;
-    offer.psk = entry->psk;
-    offer.max_early_data = entry->max_early_data;
+        TlsConnectedState server_state = server.take_state();
+        TlsConnectedState client_state = client.take_state();
+        EXPECT_TRUE(server_state.session_resumed);
+        EXPECT_TRUE(client_state.session_resumed);
+        EXPECT_TRUE(server_state.early_data_accepted);
+        EXPECT_TRUE(client_state.early_data_accepted);
+        const std::vector<std::uint8_t> early = chain_bytes(server.take_early_data());
+        ASSERT_EQ(early_request.size(), early.size());
+        EXPECT_EQ(0, std::memcmp(early_request.data(), early.data(), early.size()));
+        EXPECT_EQ(2u, store.size());
+        EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
+        EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
 
-    TlsServerHandshakeEngine server(cfg, &lookup, &minter, material.server_material.pool);
-    TlsClientHandshakeEngine client(material.client_cfg, &offer, material.server_material.pool);
-    const std::string_view early_request = "GET /early HTTP/1.1\r\nhost: example.com\r\n\r\n";
-    ASSERT_TRUE(client.write_early_data(
-                              {reinterpret_cast<const std::uint8_t *>(early_request.data()), early_request.size()})
-                        .has_value());
-    std::vector<std::uint8_t> tail; // the post-done NST
-    ASSERT_TRUE(pump(client, server, &tail));
-    EXPECT_FALSE(server.failed());
-    EXPECT_FALSE(client.failed());
+        // Post-handshake app data through the moved ciphers, both directions.
+        const char kPing[] = "ping ours-0rtt";
+        const std::vector<std::uint8_t> ping = seal_app_record(
+                client_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPing), sizeof(kPing) - 1});
+        ASSERT_FALSE(ping.empty());
+        const std::vector<std::uint8_t> opened = open_app_records(server_state.read_cipher, ping);
+        ASSERT_EQ(sizeof(kPing) - 1, opened.size());
+        EXPECT_EQ(0, std::memcmp(kPing, opened.data(), opened.size()));
 
-    TlsConnectedState server_state = server.take_state();
-    TlsConnectedState client_state = client.take_state();
-    EXPECT_TRUE(server_state.session_resumed);
-    EXPECT_TRUE(client_state.session_resumed);
-    EXPECT_TRUE(server_state.early_data_accepted);
-    EXPECT_TRUE(client_state.early_data_accepted);
-    const std::vector<std::uint8_t> early = chain_bytes(server.take_early_data());
-    ASSERT_EQ(early_request.size(), early.size());
-    EXPECT_EQ(0, std::memcmp(early_request.data(), early.data(), early.size()));
-    EXPECT_EQ(2u, store.size());
-    EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
-    EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
-
-    // Post-handshake app data through the moved ciphers, both directions.
-    const char kPing[] = "ping ours-0rtt";
-    const std::vector<std::uint8_t> ping = seal_app_record(
-            client_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPing), sizeof(kPing) - 1});
-    ASSERT_FALSE(ping.empty());
-    const std::vector<std::uint8_t> opened = open_app_records(server_state.read_cipher, ping);
-    ASSERT_EQ(sizeof(kPing) - 1, opened.size());
-    EXPECT_EQ(0, std::memcmp(kPing, opened.data(), opened.size()));
-
-    ASSERT_TRUE(open_and_discard(client_state.read_cipher, tail)); // NST at seq 0
-    const char kPong[] = "pong ours-0rtt";
-    const std::vector<std::uint8_t> pong = seal_app_record(
-            server_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
-    ASSERT_FALSE(pong.empty());
-    const std::vector<std::uint8_t> opened_back = open_app_records(client_state.read_cipher, pong);
-    ASSERT_EQ(sizeof(kPong) - 1, opened_back.size());
-    EXPECT_EQ(0, std::memcmp(kPong, opened_back.data(), opened_back.size()));
+        ASSERT_TRUE(open_and_discard(client_state.read_cipher, tail)); // NST at seq 0
+        const char kPong[] = "pong ours-0rtt";
+        const std::vector<std::uint8_t> pong = seal_app_record(
+                server_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+        ASSERT_FALSE(pong.empty());
+        const std::vector<std::uint8_t> opened_back = open_app_records(client_state.read_cipher, pong);
+        ASSERT_EQ(sizeof(kPong) - 1, opened_back.size());
+        EXPECT_EQ(0, std::memcmp(kPong, opened_back.data(), opened_back.size()));
+    });
 }
 
 // The ticket is 0-RTT-capable but the connection has early data disabled:
@@ -1659,195 +1707,206 @@ TEST(TlsServerHandshake13Psk, OurClientEarlyDataAccepted) {
 // under the handshake keys and dropped (§4.2.10 skip), and the handshake —
 // resumption included — completes unaffected.
 TEST(TlsServerHandshake13Psk, EarlyDataRejectedWhenDisabled) {
-    DualMaterial material;
-    TlsServerConfig hop1_cfg = material.server_material.config();
-    hop1_cfg.enable_early_data = true;
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        DualMaterial material;
+        TlsServerConfig hop1_cfg = material.server_material.config();
+        hop1_cfg.enable_early_data = true;
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    {
-        TlsServerHandshakeEngine server(hop1_cfg, nullptr, &minter, material.server_material.pool);
-        TlsClientHandshakeEngine client(material.client_cfg, nullptr, material.server_material.pool);
-        ASSERT_TRUE(pump(client, server));
+        {
+            TlsServerHandshakeEngine server(hop1_cfg, nullptr, &minter);
+            TlsClientHandshakeEngine client(material.client_cfg, nullptr);
+            ASSERT_TRUE(pump(client, server));
+            EXPECT_FALSE(server.failed());
+        }
+        const TestSessionStore::Entry *entry = store.first_entry();
+        ASSERT_NE(nullptr, entry);
+        ASSERT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
+
+        TlsServerConfig cfg = material.server_material.config(); // early data OFF
+        TlsSessionOffer offer;
+        const std::vector<std::uint8_t> ticket = store.first_ticket();
+        offer.identity = ticket;
+        offer.obfuscated_ticket_age = entry->age_add;
+        offer.suite = entry->suite;
+        offer.psk = entry->psk;
+        offer.max_early_data = entry->max_early_data; // the ticket still advertises it
+
+        TlsServerHandshakeEngine server(cfg, &lookup, &minter);
+        TlsClientHandshakeEngine client(material.client_cfg, &offer);
+        const std::string_view early_request = "GET /early HTTP/1.1\r\nhost: example.com\r\n\r\n";
+        ASSERT_TRUE(client.write_early_data(
+                                  {reinterpret_cast<const std::uint8_t *>(early_request.data()), early_request.size()})
+                            .has_value());
+        std::vector<std::uint8_t> tail; // the post-done NST
+        ASSERT_TRUE(pump(client, server, &tail));
         EXPECT_FALSE(server.failed());
-    }
-    const TestSessionStore::Entry *entry = store.first_entry();
-    ASSERT_NE(nullptr, entry);
-    ASSERT_EQ(14336u, entry->max_early_data); // kMaxEarlyDataAccepted (BoringSSL parity)
+        EXPECT_FALSE(client.failed());
 
-    TlsServerConfig cfg = material.server_material.config(); // early data OFF
-    TlsSessionOffer offer;
-    const std::vector<std::uint8_t> ticket = store.first_ticket();
-    offer.identity = ticket;
-    offer.obfuscated_ticket_age = entry->age_add;
-    offer.suite = entry->suite;
-    offer.psk = entry->psk;
-    offer.max_early_data = entry->max_early_data; // the ticket still advertises it
-
-    TlsServerHandshakeEngine server(cfg, &lookup, &minter, material.server_material.pool);
-    TlsClientHandshakeEngine client(material.client_cfg, &offer, material.server_material.pool);
-    const std::string_view early_request = "GET /early HTTP/1.1\r\nhost: example.com\r\n\r\n";
-    ASSERT_TRUE(client.write_early_data(
-                              {reinterpret_cast<const std::uint8_t *>(early_request.data()), early_request.size()})
-                        .has_value());
-    std::vector<std::uint8_t> tail; // the post-done NST
-    ASSERT_TRUE(pump(client, server, &tail));
-    EXPECT_FALSE(server.failed());
-    EXPECT_FALSE(client.failed());
-
-    TlsConnectedState server_state = server.take_state();
-    TlsConnectedState client_state = client.take_state();
-    EXPECT_TRUE(server_state.session_resumed);
-    EXPECT_TRUE(client_state.session_resumed);
-    EXPECT_FALSE(server_state.early_data_accepted);
-    EXPECT_FALSE(client_state.early_data_accepted);
-    EXPECT_TRUE(chain_bytes(server.take_early_data()).empty());
+        TlsConnectedState server_state = server.take_state();
+        TlsConnectedState client_state = client.take_state();
+        EXPECT_TRUE(server_state.session_resumed);
+        EXPECT_TRUE(client_state.session_resumed);
+        EXPECT_FALSE(server_state.early_data_accepted);
+        EXPECT_FALSE(client_state.early_data_accepted);
+        EXPECT_TRUE(chain_bytes(server.take_early_data()).empty());
+    });
 }
 
 // 15000 early bytes against the 14336 budget: the record crossing the
 // budget is fatal unexpected_message (§4.6.1). The client plays the
 // adversarial role — its offer claims a budget the ticket never had.
 TEST(TlsServerHandshake13Psk, EarlyDataOverBudgetFatal) {
-    DualMaterial material;
-    TlsServerConfig cfg = material.server_material.config();
-    cfg.enable_early_data = true;
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        DualMaterial material;
+        TlsServerConfig cfg = material.server_material.config();
+        cfg.enable_early_data = true;
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    {
-        TlsServerHandshakeEngine server(cfg, nullptr, &minter, material.server_material.pool);
-        TlsClientHandshakeEngine client(material.client_cfg, nullptr, material.server_material.pool);
-        ASSERT_TRUE(pump(client, server));
-        EXPECT_FALSE(server.failed());
-    }
-    const TestSessionStore::Entry *entry = store.first_entry();
-    ASSERT_NE(nullptr, entry);
+        {
+            TlsServerHandshakeEngine server(cfg, nullptr, &minter);
+            TlsClientHandshakeEngine client(material.client_cfg, nullptr);
+            ASSERT_TRUE(pump(client, server));
+            EXPECT_FALSE(server.failed());
+        }
+        const TestSessionStore::Entry *entry = store.first_entry();
+        ASSERT_NE(nullptr, entry);
 
-    TlsSessionOffer offer;
-    const std::vector<std::uint8_t> ticket = store.first_ticket();
-    offer.identity = ticket;
-    offer.obfuscated_ticket_age = entry->age_add;
-    offer.suite = entry->suite;
-    offer.psk = entry->psk;
-    offer.max_early_data = 16384 + 1024; // a lying client budget
+        TlsSessionOffer offer;
+        const std::vector<std::uint8_t> ticket = store.first_ticket();
+        offer.identity = ticket;
+        offer.obfuscated_ticket_age = entry->age_add;
+        offer.suite = entry->suite;
+        offer.psk = entry->psk;
+        offer.max_early_data = 16384 + 1024; // a lying client budget
 
-    TlsServerHandshakeEngine server(cfg, &lookup, &minter, material.server_material.pool);
-    TlsClientHandshakeEngine client(material.client_cfg, &offer, material.server_material.pool);
-    std::vector<std::uint8_t> big(15000, 'x');
-    ASSERT_TRUE(client.write_early_data(big).has_value());
-    std::vector<std::uint8_t> tail; // the fatal alert, post client-finish
-    ASSERT_TRUE(pump(client, server, &tail));
+        TlsServerHandshakeEngine server(cfg, &lookup, &minter);
+        TlsClientHandshakeEngine client(material.client_cfg, &offer);
+        std::vector<std::uint8_t> big(15000, 'x');
+        ASSERT_TRUE(client.write_early_data(big).has_value());
+        std::vector<std::uint8_t> tail; // the fatal alert, post client-finish
+        ASSERT_TRUE(pump(client, server, &tail));
 
-    EXPECT_TRUE(server.failed());
-    EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, server.failure_alert());
+        EXPECT_TRUE(server.failed());
+        EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, server.failure_alert());
 
-    // The client finished before the alert flew (the engine cannot be fed
-    // post-done); open the tail record through its read cipher: a two-byte
-    // fatal alert carrying unexpected_message.
-    TlsConnectedState client_state = client.take_state();
-    ASSERT_GE(tail.size(), fiber::tls::kTlsRecordHeaderSize);
-    const std::size_t alert_len = (static_cast<std::size_t>(tail[3]) << 8) | tail[4];
-    std::array<std::uint8_t, 64> alert_dst{};
-    const auto alert = client_state.read_cipher.open(
-            fiber::tls::TlsContentType::ApplicationData, (static_cast<std::uint16_t>(tail[1]) << 8) | tail[2],
-            static_cast<std::uint16_t>(alert_len), {tail.data() + fiber::tls::kTlsRecordHeaderSize, alert_len},
-            alert_dst);
-    ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, alert.status);
-    ASSERT_EQ(2u, alert.plain_len);
-    EXPECT_EQ(static_cast<std::uint8_t>(TlsAlertDesc::UnexpectedMessage), alert_dst[1]);
+        // The client finished before the alert flew (the engine cannot be fed
+        // post-done); open the tail record through its read cipher: a two-byte
+        // fatal alert carrying unexpected_message.
+        TlsConnectedState client_state = client.take_state();
+        ASSERT_GE(tail.size(), fiber::tls::kTlsRecordHeaderSize);
+        const std::size_t alert_len = (static_cast<std::size_t>(tail[3]) << 8) | tail[4];
+        std::array<std::uint8_t, 64> alert_dst{};
+        const auto alert = client_state.read_cipher.open(
+                fiber::tls::TlsContentType::ApplicationData, (static_cast<std::uint16_t>(tail[1]) << 8) | tail[2],
+                static_cast<std::uint16_t>(alert_len), {tail.data() + fiber::tls::kTlsRecordHeaderSize, alert_len},
+                alert_dst);
+        ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, alert.status);
+        ASSERT_EQ(2u, alert.plain_len);
+        EXPECT_EQ(static_cast<std::uint8_t>(TlsAlertDesc::UnexpectedMessage), alert_dst[1]);
 
-    // What sank before the budget broke stays readable — and bounded.
-    const std::vector<std::uint8_t> early = chain_bytes(server.take_early_data());
-    EXPECT_LE(early.size(), 14336u); // kMaxEarlyDataAccepted
+        // What sank before the budget broke stays readable — and bounded.
+        const std::vector<std::uint8_t> early = chain_bytes(server.take_early_data());
+        EXPECT_LE(early.size(), 14336u); // kMaxEarlyDataAccepted
+    });
 }
 
 // The store misses (unknown ticket): the offer degrades to a full handshake
 // — no fatal, no resume, and the NST still mints.
 TEST(TlsServerHandshake13Psk, UnknownTicketFallsBackToFull) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    run_ticketed_hop1(cfg, minter, material.pool);
-    store.miss_everything = true;
+        run_ticketed_hop1(cfg, minter);
+        store.miss_everything = true;
 
-    auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    EXPECT_FALSE(engine.failed());
+        auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
+        ASSERT_NE(nullptr, client);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
+        ASSERT_TRUE(drive(*client, engine, false));
+        EXPECT_FALSE(engine.failed());
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_FALSE(state.session_resumed);
-    EXPECT_EQ(0, SSL_session_reused(client->ssl()));
-    EXPECT_EQ(2u, store.size()); // the full handshake minted a fresh ticket
+        TlsConnectedState state = engine.take_state();
+        EXPECT_FALSE(state.session_resumed);
+        EXPECT_EQ(0, SSL_session_reused(client->ssl()));
+        EXPECT_EQ(2u, store.size()); // the full handshake minted a fresh ticket
+    });
 }
 
 // The store's PSK no longer matches the binder the client computed over the
 // original: fatal decrypt_error (a binder mismatch is never a fallback).
 TEST(TlsServerHandshake13Psk, BinderMismatchFatal) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    run_ticketed_hop1(cfg, minter, material.pool);
-    store.corrupt_first_psk(); // the client's binder still rides the original PSK
+        run_ticketed_hop1(cfg, minter);
+        store.corrupt_first_psk(); // the client's binder still rides the original PSK
 
-    auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
-    DriveLog log;
-    // drive reports the engine's failure as false — that IS the expectation.
-    ASSERT_FALSE(drive(*client, engine, false, &log));
+        auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
+        ASSERT_NE(nullptr, client);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
+        DriveLog log;
+        // drive reports the engine's failure as false — that IS the expectation.
+        ASSERT_FALSE(drive(*client, engine, false, &log));
 
-    EXPECT_TRUE(engine.failed());
-    EXPECT_EQ(TlsAlertDesc::DecryptError, engine.failure_alert());
+        EXPECT_TRUE(engine.failed());
+        EXPECT_EQ(TlsAlertDesc::DecryptError, engine.failure_alert());
+    });
 }
 
 // The ticket is 5 minutes old against the 60 s skew window: rejected (not
 // fatal) — the handshake falls back to a full one.
 TEST(TlsServerHandshake13Psk, StaleTicketFallsBackToFull) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
-    TestSessionStore store;
-    const TlsTicketMinter minter = store.minter_hook();
-    const TlsResumptionLookup lookup = store.lookup_hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
 
-    run_ticketed_hop1(cfg, minter, material.pool);
-    store.age_skew_first(5 * 60 * 1000); // issued 5 min "earlier": server_age = 5 min
+        run_ticketed_hop1(cfg, minter);
+        store.age_skew_first(5 * 60 * 1000); // issued 5 min "earlier": server_age = 5 min
 
-    auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    EXPECT_FALSE(engine.failed());
+        auto client = BoringClient::make(ClientOptions{.collect_tickets = true});
+        ASSERT_NE(nullptr, client);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
+        ASSERT_TRUE(drive(*client, engine, false));
+        EXPECT_FALSE(engine.failed());
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_FALSE(state.session_resumed);
-    EXPECT_EQ(0, SSL_session_reused(client->ssl()));
+        TlsConnectedState state = engine.take_state();
+        EXPECT_FALSE(state.session_resumed);
+        EXPECT_EQ(0, SSL_session_reused(client->ssl()));
+    });
 }
 
 // ---- engine surface ----
 
 TEST(TlsServerHandshakeSurface, NullCredentialFailsConstruction) {
-    IoBufNodePool pool;
-    TlsServerConfig cfg; // chain/key null
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, pool);
-    EXPECT_TRUE(engine.done());
-    EXPECT_TRUE(engine.failed());
-    EXPECT_EQ(TlsAlertDesc::InternalError, engine.failure_alert());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        TlsServerConfig cfg; // chain/key null
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        EXPECT_TRUE(engine.done());
+        EXPECT_TRUE(engine.failed());
+        EXPECT_EQ(TlsAlertDesc::InternalError, engine.failure_alert());
+    });
 }
 
 // ---- stateless ticket minting through the real engines (08 slice 1) ----
@@ -1875,78 +1934,84 @@ struct CapturingServiceMinter {
 // The full 1.3 handshake mints a stateless ticket carrying the DERIVED psk
 // and the CH's SNI in the AAD — the future lookup consumes exactly this.
 TEST(TlsServerTicketService, Mint13ThroughEngineBindsSniAndCarriesPsk) {
-    DualMaterial dual;
-    const std::array<TlsTicketKeyMaterial, 1> ticket_keys{{
-            {.id = 1,
-             .bytes = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
-             .created_ms = certfix::kRefNowMs},
-    }};
-    TlsTicketService service(ticket_keys, TlsTicketKeyPolicy{});
-    ASSERT_TRUE(service.valid());
-    CapturingServiceMinter capture{.service = service};
-    const TlsTicketMinter minter = capture.hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        DualMaterial dual;
+        const std::array<TlsTicketKeyMaterial, 1> ticket_keys{{
+                {.id = 1,
+                 .bytes = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+                           0x10},
+                 .created_ms = certfix::kRefNowMs},
+        }};
+        TlsTicketService service(ticket_keys, TlsTicketKeyPolicy{});
+        ASSERT_TRUE(service.valid());
+        CapturingServiceMinter capture{.service = service};
+        const TlsTicketMinter minter = capture.hook();
 
-    TlsServerHandshakeEngine server(dual.server_material.config(), nullptr, &minter, dual.server_material.pool);
-    TlsClientHandshakeEngine client(dual.client_cfg, nullptr, dual.server_material.pool);
-    std::vector<std::uint8_t> tail;
-    ASSERT_TRUE(pump(client, server, &tail));
-    EXPECT_TRUE(capture.called); // 1.3 always mints one ticket after client Fin
-    ASSERT_FALSE(capture.ticket.empty());
+        TlsServerHandshakeEngine server(dual.server_material.config(), nullptr, &minter);
+        TlsClientHandshakeEngine client(dual.client_cfg, nullptr);
+        std::vector<std::uint8_t> tail;
+        ASSERT_TRUE(pump(client, server, &tail));
+        EXPECT_TRUE(capture.called); // 1.3 always mints one ticket after client Fin
+        ASSERT_FALSE(capture.ticket.empty());
 
-    const TlsConnectedState state = server.take_state();
-    TlsTicketContents contents;
-    ASSERT_EQ(TlsTicketService::OpenStatus::Ok,
-              service.open(capture.ticket, "example.com", certfix::kRefNowMs + 1000, contents));
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, contents.version);
-    EXPECT_EQ(state.suite, contents.suite);
-    EXPECT_EQ("h2", contents.alpn_view());
-    EXPECT_EQ(certfix::kRefNowMs, contents.issued_ms);
-    EXPECT_EQ(7200u, contents.timeout_s);
-    // PSK symmetry with the client's own NST-side derivation.
-    const std::array<std::uint8_t, 1> nonce{0};
-    const auto psk = fiber::tls::tls13_resumption_psk(state.resumption_master, nonce);
-    ASSERT_TRUE(psk.has_value());
-    EXPECT_TRUE(secrets_equal(*psk, contents.secret));
-    // Another vhost cannot use the ticket.
-    TlsTicketContents wrong;
-    EXPECT_EQ(TlsTicketService::OpenStatus::Rejected,
-              service.open(capture.ticket, "other.example", certfix::kRefNowMs, wrong));
+        const TlsConnectedState state = server.take_state();
+        TlsTicketContents contents;
+        ASSERT_EQ(TlsTicketService::OpenStatus::Ok,
+                  service.open(capture.ticket, "example.com", certfix::kRefNowMs + 1000, contents));
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, contents.version);
+        EXPECT_EQ(state.suite, contents.suite);
+        EXPECT_EQ("h2", contents.alpn_view());
+        EXPECT_EQ(certfix::kRefNowMs, contents.issued_ms);
+        EXPECT_EQ(7200u, contents.timeout_s);
+        // PSK symmetry with the client's own NST-side derivation.
+        const std::array<std::uint8_t, 1> nonce{0};
+        const auto psk = fiber::tls::tls13_resumption_psk(state.resumption_master, nonce);
+        ASSERT_TRUE(psk.has_value());
+        EXPECT_TRUE(secrets_equal(*psk, contents.secret));
+        // Another vhost cannot use the ticket.
+        TlsTicketContents wrong;
+        EXPECT_EQ(TlsTicketService::OpenStatus::Rejected,
+                  service.open(capture.ticket, "other.example", certfix::kRefNowMs, wrong));
+    });
 }
 
 // A TLS 1.2 BoringSSL client that offers session tickets (SNI on the wire)
 // gets a stateless ticket carrying the 48-byte master secret.
 TEST(TlsServerTicketService, Mint12ThroughEngineCarriesMaster) {
-    auto client = BoringClient::make(ClientOptions{.tls12_only = true, .send_sni = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    const std::array<TlsTicketKeyMaterial, 1> ticket_keys{{
-            {.id = 1,
-             .bytes = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
-             .created_ms = certfix::kRefNowMs},
-    }};
-    TlsTicketService service(ticket_keys, TlsTicketKeyPolicy{});
-    CapturingServiceMinter capture{.service = service};
-    const TlsTicketMinter minter = capture.hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true, .send_sni = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        const std::array<TlsTicketKeyMaterial, 1> ticket_keys{{
+                {.id = 1,
+                 .bytes = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+                           0x10},
+                 .created_ms = certfix::kRefNowMs},
+        }};
+        TlsTicketService service(ticket_keys, TlsTicketKeyPolicy{});
+        CapturingServiceMinter capture{.service = service};
+        const TlsTicketMinter minter = capture.hook();
 
-    TlsServerHandshakeEngine engine(material.config(), nullptr, &minter, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    EXPECT_TRUE(capture.called);
-    ASSERT_FALSE(capture.ticket.empty());
+        TlsServerHandshakeEngine engine(material.config(), nullptr, &minter);
+        ASSERT_TRUE(drive(*client, engine, false));
+        EXPECT_TRUE(capture.called);
+        ASSERT_FALSE(capture.ticket.empty());
 
-    const TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+        const TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
 
-    TlsTicketContents contents;
-    ASSERT_EQ(TlsTicketService::OpenStatus::Ok,
-              service.open(capture.ticket, "example.com", certfix::kRefNowMs + 1000, contents));
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, contents.version);
-    EXPECT_EQ(state.suite, contents.suite);
-    EXPECT_EQ("h2", contents.alpn_view());
-    ASSERT_EQ(48u, contents.secret.len());
-    EXPECT_TRUE(secrets_equal(state.tls12_master, contents.secret));
-    // SNI was sent, so the empty name is not this ticket's name.
-    TlsTicketContents wrong;
-    EXPECT_EQ(TlsTicketService::OpenStatus::Rejected, service.open(capture.ticket, "", certfix::kRefNowMs, wrong));
+        TlsTicketContents contents;
+        ASSERT_EQ(TlsTicketService::OpenStatus::Ok,
+                  service.open(capture.ticket, "example.com", certfix::kRefNowMs + 1000, contents));
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, contents.version);
+        EXPECT_EQ(state.suite, contents.suite);
+        EXPECT_EQ("h2", contents.alpn_view());
+        ASSERT_EQ(48u, contents.secret.len());
+        EXPECT_TRUE(secrets_equal(state.tls12_master, contents.secret));
+        // SNI was sent, so the empty name is not this ticket's name.
+        TlsTicketContents wrong;
+        EXPECT_EQ(TlsTicketService::OpenStatus::Rejected, service.open(capture.ticket, "", certfix::kRefNowMs, wrong));
+    });
 }
 
 // ---- stateless resumption through the real service (08 lookup half) ----
@@ -1990,65 +2055,67 @@ struct RecordingServiceLookup {
 // offers the ticket back, the lookup opens it against hop 2's CH SNI, and
 // the handshake resumes over the sealed PSK — binder verification included.
 TEST(TlsServerTicketService, StatelessResume13WithBoringClient) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
-    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
-    RecordingServiceLookup recorder{.service = service};
-    const TlsTicketMinter minter = service.minter();
-    const TlsResumptionLookup lookup = recorder.hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
+        TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+        RecordingServiceLookup recorder{.service = service};
+        const TlsTicketMinter minter = service.minter();
+        const TlsResumptionLookup lookup = recorder.hook();
 
-    // hop 1: full handshake; the NST lands in the client's session stash.
-    {
+        // hop 1: full handshake; the NST lands in the client's session stash.
+        {
+            auto client = BoringClient::make(ClientOptions{.collect_tickets = true, .send_sni = true});
+            ASSERT_NE(nullptr, client);
+            TlsServerHandshakeEngine engine(cfg, nullptr, &minter);
+            ASSERT_TRUE(drive(*client, engine, false));
+            std::array<char, 64> sink{};
+            (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+            ASSERT_EQ(1u, g_new_sessions.size());
+        }
+
+        // hop 2: same SNI, the stashed session set — the PSK offer rides the ticket.
         auto client = BoringClient::make(ClientOptions{.collect_tickets = true, .send_sni = true});
         ASSERT_NE(nullptr, client);
-        TlsServerHandshakeEngine engine(cfg, nullptr, &minter, material.pool);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
         ASSERT_TRUE(drive(*client, engine, false));
+        EXPECT_FALSE(engine.failed());
+
+        TlsConnectedState state = engine.take_state();
+        EXPECT_TRUE(state.session_resumed);
+        EXPECT_EQ(1, SSL_session_reused(client->ssl()));
+        EXPECT_TRUE(state.peer_chain.empty()); // PSK resume: no certificate flight
+        EXPECT_FALSE(state.early_data_accepted);
+        // The engine handed the lookup the CH's SNI and its clock snapshot (the
+        // same one the age gate uses).
+        EXPECT_TRUE(recorder.called);
+        EXPECT_EQ("example.com", recorder.seen_name);
+        EXPECT_EQ(certfix::kRefNowMs, recorder.seen_now_ms);
+
+        // The resumed connection minted — and the client digested — a fresh
+        // stateless ticket of its own.
         std::array<char, 64> sink{};
         (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-        ASSERT_EQ(1u, g_new_sessions.size());
-    }
+        EXPECT_EQ(2u, g_new_sessions.size());
 
-    // hop 2: same SNI, the stashed session set — the PSK offer rides the ticket.
-    auto client = BoringClient::make(ClientOptions{.collect_tickets = true, .send_sni = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    EXPECT_FALSE(engine.failed());
+        // App data over the resumed connection, both directions.
+        const char kPing[] = "ping stateless";
+        ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
+        const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
+        ASSERT_EQ(sizeof(kPing) - 1, ping.size());
+        EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_TRUE(state.session_resumed);
-    EXPECT_EQ(1, SSL_session_reused(client->ssl()));
-    EXPECT_TRUE(state.peer_chain.empty()); // PSK resume: no certificate flight
-    EXPECT_FALSE(state.early_data_accepted);
-    // The engine handed the lookup the CH's SNI and its clock snapshot (the
-    // same one the age gate uses).
-    EXPECT_TRUE(recorder.called);
-    EXPECT_EQ("example.com", recorder.seen_name);
-    EXPECT_EQ(certfix::kRefNowMs, recorder.seen_now_ms);
-
-    // The resumed connection minted — and the client digested — a fresh
-    // stateless ticket of its own.
-    std::array<char, 64> sink{};
-    (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    EXPECT_EQ(2u, g_new_sessions.size());
-
-    // App data over the resumed connection, both directions.
-    const char kPing[] = "ping stateless";
-    ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
-    const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
-    ASSERT_EQ(sizeof(kPing) - 1, ping.size());
-    EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
-
-    const char kPong[] = "pong stateless";
-    const std::vector<std::uint8_t> pong =
-            seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
-    ASSERT_FALSE(pong.empty());
-    ASSERT_TRUE(client->ship(pong));
-    const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    ASSERT_GT(got, 0);
-    EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+        const char kPong[] = "pong stateless";
+        const std::vector<std::uint8_t> pong =
+                seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+        ASSERT_FALSE(pong.empty());
+        ASSERT_TRUE(client->ship(pong));
+        const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        ASSERT_GT(got, 0);
+        EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+    });
 }
 
 // The wrong-vhost fallback: BoringSSL offers the ticket regardless of the new
@@ -2057,41 +2124,43 @@ TEST(TlsServerTicketService, StatelessResume13WithBoringClient) {
 // full one, never a failure. Verification is off: the credential is
 // example.com's; the test is the ticket, not the chain.
 TEST(TlsServerTicketService, CrossVhostTicketFallsBackToFull) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
-    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
-    RecordingServiceLookup recorder{.service = service};
-    const TlsTicketMinter minter = service.minter();
-    const TlsResumptionLookup lookup = recorder.hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
+        TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+        RecordingServiceLookup recorder{.service = service};
+        const TlsTicketMinter minter = service.minter();
+        const TlsResumptionLookup lookup = recorder.hook();
 
-    // hop 1 mints under "example.com".
-    {
-        auto client = BoringClient::make(ClientOptions{.collect_tickets = true, .send_sni = true});
+        // hop 1 mints under "example.com".
+        {
+            auto client = BoringClient::make(ClientOptions{.collect_tickets = true, .send_sni = true});
+            ASSERT_NE(nullptr, client);
+            TlsServerHandshakeEngine engine(cfg, nullptr, &minter);
+            ASSERT_TRUE(drive(*client, engine, false));
+            std::array<char, 64> sink{};
+            (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+            ASSERT_EQ(1u, g_new_sessions.size());
+        }
+
+        // hop 2: a different vhost presents the ticket.
+        auto client = BoringClient::make(ClientOptions{
+                .trust_pem = nullptr, .host = "other.example", .collect_tickets = true, .send_sni = true});
         ASSERT_NE(nullptr, client);
-        TlsServerHandshakeEngine engine(cfg, nullptr, &minter, material.pool);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
         ASSERT_TRUE(drive(*client, engine, false));
-        std::array<char, 64> sink{};
-        (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-        ASSERT_EQ(1u, g_new_sessions.size());
-    }
+        EXPECT_FALSE(engine.failed());
 
-    // hop 2: a different vhost presents the ticket.
-    auto client = BoringClient::make(
-            ClientOptions{.trust_pem = nullptr, .host = "other.example", .collect_tickets = true, .send_sni = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    EXPECT_FALSE(engine.failed());
-
-    TlsConnectedState state = engine.take_state();
-    EXPECT_FALSE(state.session_resumed);
-    EXPECT_EQ(0, SSL_session_reused(client->ssl()));
-    // The lookup ran and saw the new vhost's SNI — the miss is the AAD
-    // binding, not a skipped offer.
-    EXPECT_TRUE(recorder.called);
-    EXPECT_EQ("other.example", recorder.seen_name);
+        TlsConnectedState state = engine.take_state();
+        EXPECT_FALSE(state.session_resumed);
+        EXPECT_EQ(0, SSL_session_reused(client->ssl()));
+        // The lookup ran and saw the new vhost's SNI — the miss is the AAD
+        // binding, not a skipped offer.
+        EXPECT_TRUE(recorder.called);
+        EXPECT_EQ("other.example", recorder.seen_name);
+    });
 }
 
 // Both FSMs ours with the real service: hop 1's captured ticket opens back
@@ -2099,74 +2168,76 @@ TEST(TlsServerTicketService, CrossVhostTicketFallsBackToFull) {
 // NST side, hop 2 resumes through lookup(), and the pair re-derives one set
 // of application secrets.
 TEST(TlsServerTicketService, StatelessResumeOurPair) {
-    DualMaterial dual;
-    const TlsServerConfig cfg = dual.server_material.config();
-    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
-    CapturingServiceMinter capture{.service = service};
-    const TlsTicketMinter minter = capture.hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        DualMaterial dual;
+        const TlsServerConfig cfg = dual.server_material.config();
+        TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+        CapturingServiceMinter capture{.service = service};
+        const TlsTicketMinter minter = capture.hook();
 
-    // hop 1: mint exactly one stateless ticket.
-    {
-        TlsServerHandshakeEngine server(cfg, nullptr, &minter, dual.server_material.pool);
-        TlsClientHandshakeEngine client(dual.client_cfg, nullptr, dual.server_material.pool);
-        ASSERT_TRUE(pump(client, server));
+        // hop 1: mint exactly one stateless ticket.
+        {
+            TlsServerHandshakeEngine server(cfg, nullptr, &minter);
+            TlsClientHandshakeEngine client(dual.client_cfg, nullptr);
+            ASSERT_TRUE(pump(client, server));
+            EXPECT_FALSE(server.failed());
+        }
+        ASSERT_TRUE(capture.called);
+        const std::vector<std::uint8_t> ticket = capture.ticket; // copy: hop 2 re-mints into the capture
+
+        // The offer mirrors the opened ticket (elapsed 0 → the obfuscated age is
+        // the age_add) — psk included, straight out of the sealed payload.
+        TlsTicketContents contents;
+        ASSERT_EQ(TlsTicketService::OpenStatus::Ok, service.open(ticket, "example.com", certfix::kRefNowMs, contents));
+        TlsSessionOffer offer;
+        offer.identity = ticket;
+        offer.obfuscated_ticket_age = contents.ticket_age_add;
+        offer.suite = contents.suite;
+        offer.psk = contents.secret.bytes();
+        offer.max_early_data = contents.max_early_data;
+
+        const TlsResumptionLookup lookup = service.lookup();
+        TlsServerHandshakeEngine server(cfg, &lookup, &minter);
+        TlsClientHandshakeEngine client(dual.client_cfg, &offer);
+        std::vector<std::uint8_t> tail; // the post-done NST
+        ASSERT_TRUE(pump(client, server, &tail));
         EXPECT_FALSE(server.failed());
-    }
-    ASSERT_TRUE(capture.called);
-    const std::vector<std::uint8_t> ticket = capture.ticket; // copy: hop 2 re-mints into the capture
+        EXPECT_FALSE(client.failed());
 
-    // The offer mirrors the opened ticket (elapsed 0 → the obfuscated age is
-    // the age_add) — psk included, straight out of the sealed payload.
-    TlsTicketContents contents;
-    ASSERT_EQ(TlsTicketService::OpenStatus::Ok, service.open(ticket, "example.com", certfix::kRefNowMs, contents));
-    TlsSessionOffer offer;
-    offer.identity = ticket;
-    offer.obfuscated_ticket_age = contents.ticket_age_add;
-    offer.suite = contents.suite;
-    offer.psk = contents.secret.bytes();
-    offer.max_early_data = contents.max_early_data;
+        TlsConnectedState server_state = server.take_state();
+        TlsConnectedState client_state = client.take_state();
+        EXPECT_TRUE(server_state.session_resumed);
+        EXPECT_TRUE(client_state.session_resumed);
+        EXPECT_FALSE(server_state.early_data_accepted);
+        EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
+        EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
 
-    const TlsResumptionLookup lookup = service.lookup();
-    TlsServerHandshakeEngine server(cfg, &lookup, &minter, dual.server_material.pool);
-    TlsClientHandshakeEngine client(dual.client_cfg, &offer, dual.server_material.pool);
-    std::vector<std::uint8_t> tail; // the post-done NST
-    ASSERT_TRUE(pump(client, server, &tail));
-    EXPECT_FALSE(server.failed());
-    EXPECT_FALSE(client.failed());
+        // The resumed connection minted another (distinct-nonce) ticket.
+        EXPECT_TRUE(capture.called);
+        ASSERT_FALSE(capture.ticket.empty());
+        EXPECT_NE(ticket, capture.ticket);
+        TlsTicketContents reissued;
+        EXPECT_EQ(TlsTicketService::OpenStatus::Ok,
+                  service.open(capture.ticket, "example.com", certfix::kRefNowMs, reissued));
 
-    TlsConnectedState server_state = server.take_state();
-    TlsConnectedState client_state = client.take_state();
-    EXPECT_TRUE(server_state.session_resumed);
-    EXPECT_TRUE(client_state.session_resumed);
-    EXPECT_FALSE(server_state.early_data_accepted);
-    EXPECT_TRUE(secrets_equal(client_state.client_app_secret, server_state.client_app_secret));
-    EXPECT_TRUE(secrets_equal(client_state.server_app_secret, server_state.server_app_secret));
+        // App data through the moved ciphers, both directions.
+        const char kPing[] = "ping ours-stateless";
+        const std::vector<std::uint8_t> ping = seal_app_record(
+                client_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPing), sizeof(kPing) - 1});
+        ASSERT_FALSE(ping.empty());
+        const std::vector<std::uint8_t> opened = open_app_records(server_state.read_cipher, ping);
+        ASSERT_EQ(sizeof(kPing) - 1, opened.size());
+        EXPECT_EQ(0, std::memcmp(kPing, opened.data(), opened.size()));
 
-    // The resumed connection minted another (distinct-nonce) ticket.
-    EXPECT_TRUE(capture.called);
-    ASSERT_FALSE(capture.ticket.empty());
-    EXPECT_NE(ticket, capture.ticket);
-    TlsTicketContents reissued;
-    EXPECT_EQ(TlsTicketService::OpenStatus::Ok,
-              service.open(capture.ticket, "example.com", certfix::kRefNowMs, reissued));
-
-    // App data through the moved ciphers, both directions.
-    const char kPing[] = "ping ours-stateless";
-    const std::vector<std::uint8_t> ping = seal_app_record(
-            client_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPing), sizeof(kPing) - 1});
-    ASSERT_FALSE(ping.empty());
-    const std::vector<std::uint8_t> opened = open_app_records(server_state.read_cipher, ping);
-    ASSERT_EQ(sizeof(kPing) - 1, opened.size());
-    EXPECT_EQ(0, std::memcmp(kPing, opened.data(), opened.size()));
-
-    ASSERT_TRUE(open_and_discard(client_state.read_cipher, tail)); // the NST at seq 0
-    const char kPong[] = "pong ours-stateless";
-    const std::vector<std::uint8_t> pong = seal_app_record(
-            server_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
-    ASSERT_FALSE(pong.empty());
-    const std::vector<std::uint8_t> opened_back = open_app_records(client_state.read_cipher, pong);
-    ASSERT_EQ(sizeof(kPong) - 1, opened_back.size());
-    EXPECT_EQ(0, std::memcmp(kPong, opened_back.data(), opened_back.size()));
+        ASSERT_TRUE(open_and_discard(client_state.read_cipher, tail)); // the NST at seq 0
+        const char kPong[] = "pong ours-stateless";
+        const std::vector<std::uint8_t> pong = seal_app_record(
+                server_state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+        ASSERT_FALSE(pong.empty());
+        const std::vector<std::uint8_t> opened_back = open_app_records(client_state.read_cipher, pong);
+        ASSERT_EQ(sizeof(kPong) - 1, opened_back.size());
+        EXPECT_EQ(0, std::memcmp(kPong, opened_back.data(), opened_back.size()));
+    });
 }
 
 // The 1.2 mirror: hop 1 mints a master-bearing stateless ticket (EMS
@@ -2176,102 +2247,108 @@ TEST(TlsServerTicketService, StatelessResumeOurPair) {
 // exchange flies, and the server Finished goes FIRST — the client's MACs it
 // in. App data both ways proves the re-derived key block matches.
 TEST(TlsServerTicketService, StatelessResume12WithBoringClient) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
-    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
-    RecordingServiceLookup recorder{.service = service};
-    const TlsTicketMinter minter = service.minter();
-    const TlsResumptionLookup lookup = recorder.hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
+        TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+        RecordingServiceLookup recorder{.service = service};
+        const TlsTicketMinter minter = service.minter();
+        const TlsResumptionLookup lookup = recorder.hook();
 
-    // hop 1 (1.2): full handshake; the cleartext NST lands in the stash.
-    {
+        // hop 1 (1.2): full handshake; the cleartext NST lands in the stash.
+        {
+            auto client =
+                    BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
+            ASSERT_NE(nullptr, client);
+            TlsServerHandshakeEngine engine(cfg, nullptr, &minter);
+            ASSERT_TRUE(drive(*client, engine, false));
+            std::array<char, 64> sink{};
+            (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+            ASSERT_EQ(1u, g_new_sessions.size());
+        }
+
         auto client = BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
         ASSERT_NE(nullptr, client);
-        TlsServerHandshakeEngine engine(cfg, nullptr, &minter, material.pool);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
         ASSERT_TRUE(drive(*client, engine, false));
+        EXPECT_FALSE(engine.failed());
+
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+        EXPECT_TRUE(state.session_resumed);
+        EXPECT_EQ(1, SSL_session_reused(client->ssl()));
+        EXPECT_TRUE(state.peer_chain.empty()); // abbreviated: no certificate flight
+        EXPECT_TRUE(recorder.called);
+        EXPECT_EQ("example.com", recorder.seen_name);
+        EXPECT_EQ(certfix::kRefNowMs, recorder.seen_now_ms);
+
+        // The abbreviated flight rotated the ticket (fresh nonce over the same
+        // master) — the NST rides before the CCS, so drive() already digested it.
         std::array<char, 64> sink{};
         (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-        ASSERT_EQ(1u, g_new_sessions.size());
-    }
+        EXPECT_EQ(2u, g_new_sessions.size());
 
-    auto client = BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    EXPECT_FALSE(engine.failed());
+        // App data over the resumed connection, both directions.
+        const char kPing[] = "ping stateless12";
+        ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
+        const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
+        ASSERT_EQ(sizeof(kPing) - 1, ping.size());
+        EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
-    EXPECT_TRUE(state.session_resumed);
-    EXPECT_EQ(1, SSL_session_reused(client->ssl()));
-    EXPECT_TRUE(state.peer_chain.empty()); // abbreviated: no certificate flight
-    EXPECT_TRUE(recorder.called);
-    EXPECT_EQ("example.com", recorder.seen_name);
-    EXPECT_EQ(certfix::kRefNowMs, recorder.seen_now_ms);
-
-    // The abbreviated flight rotated the ticket (fresh nonce over the same
-    // master) — the NST rides before the CCS, so drive() already digested it.
-    std::array<char, 64> sink{};
-    (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    EXPECT_EQ(2u, g_new_sessions.size());
-
-    // App data over the resumed connection, both directions.
-    const char kPing[] = "ping stateless12";
-    ASSERT_EQ(sizeof(kPing) - 1, SSL_write(client->ssl(), kPing, static_cast<int>(sizeof(kPing) - 1)));
-    const std::vector<std::uint8_t> ping = open_app_records(state.read_cipher, client->drain_wbio());
-    ASSERT_EQ(sizeof(kPing) - 1, ping.size());
-    EXPECT_EQ(0, std::memcmp(kPing, ping.data(), ping.size()));
-
-    const char kPong[] = "pong stateless12";
-    const std::vector<std::uint8_t> pong =
-            seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
-    ASSERT_FALSE(pong.empty());
-    ASSERT_TRUE(client->ship(pong));
-    const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-    ASSERT_GT(got, 0);
-    EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+        const char kPong[] = "pong stateless12";
+        const std::vector<std::uint8_t> pong =
+                seal_app_record(state.write_cipher, {reinterpret_cast<const std::uint8_t *>(kPong), sizeof(kPong) - 1});
+        ASSERT_FALSE(pong.empty());
+        ASSERT_TRUE(client->ship(pong));
+        const int got = SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+        ASSERT_GT(got, 0);
+        EXPECT_EQ(0, std::memcmp(kPong, sink.data(), sizeof(kPong) - 1));
+    });
 }
 
 // The 1.2 wrong-vhost fallback: the AAD name binding misses inside the
 // lookup, the handshake degrades to a full 1.2 one (the client re-keys from
 // scratch), and the miss is attributed to the binding, not a skipped offer.
 TEST(TlsServerTicketService, CrossVhostTicket12FallsBackToFull) {
-    CollectedSessionsGuard guard;
-    ServerMaterial material;
-    const TlsServerConfig cfg = material.config();
-    TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
-    RecordingServiceLookup recorder{.service = service};
-    const TlsTicketMinter minter = service.minter();
-    const TlsResumptionLookup lookup = recorder.hook();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        CollectedSessionsGuard guard;
+        ServerMaterial material;
+        const TlsServerConfig cfg = material.config();
+        TlsTicketService service(stateless_keys(), TlsTicketKeyPolicy{});
+        RecordingServiceLookup recorder{.service = service};
+        const TlsTicketMinter minter = service.minter();
+        const TlsResumptionLookup lookup = recorder.hook();
 
-    // hop 1 mints under "example.com".
-    {
-        auto client = BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
+        // hop 1 mints under "example.com".
+        {
+            auto client =
+                    BoringClient::make(ClientOptions{.tls12_only = true, .collect_tickets = true, .send_sni = true});
+            ASSERT_NE(nullptr, client);
+            TlsServerHandshakeEngine engine(cfg, nullptr, &minter);
+            ASSERT_TRUE(drive(*client, engine, false));
+            std::array<char, 64> sink{};
+            (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
+            ASSERT_EQ(1u, g_new_sessions.size());
+        }
+
+        // hop 2: a different vhost presents the ticket.
+        auto client = BoringClient::make(
+                ClientOptions{.trust_pem = nullptr, .host = "other.example", .tls12_only = true, .send_sni = true});
         ASSERT_NE(nullptr, client);
-        TlsServerHandshakeEngine engine(cfg, nullptr, &minter, material.pool);
+        ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
+        TlsServerHandshakeEngine engine(cfg, &lookup, &minter);
         ASSERT_TRUE(drive(*client, engine, false));
-        std::array<char, 64> sink{};
-        (void) SSL_read(client->ssl(), sink.data(), static_cast<int>(sink.size()));
-        ASSERT_EQ(1u, g_new_sessions.size());
-    }
+        EXPECT_FALSE(engine.failed());
 
-    // hop 2: a different vhost presents the ticket.
-    auto client = BoringClient::make(
-            ClientOptions{.trust_pem = nullptr, .host = "other.example", .tls12_only = true, .send_sni = true});
-    ASSERT_NE(nullptr, client);
-    ASSERT_EQ(1, SSL_set_session(client->ssl(), g_new_sessions.front()));
-    TlsServerHandshakeEngine engine(cfg, &lookup, &minter, material.pool);
-    ASSERT_TRUE(drive(*client, engine, false));
-    EXPECT_FALSE(engine.failed());
-
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
-    EXPECT_FALSE(state.session_resumed);
-    EXPECT_EQ(0, SSL_session_reused(client->ssl()));
-    EXPECT_TRUE(recorder.called);
-    EXPECT_EQ("other.example", recorder.seen_name);
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+        EXPECT_FALSE(state.session_resumed);
+        EXPECT_EQ(0, SSL_session_reused(client->ssl()));
+        EXPECT_TRUE(recorder.called);
+        EXPECT_EQ("other.example", recorder.seen_name);
+    });
 }
 
 // =====================================================================
@@ -2320,57 +2397,63 @@ struct SelectorState {
 // off the ClientHello and hands back a staged config; the handshake that
 // follows is an ordinary full 1.3 one against the BoringSSL client.
 TEST(TlsServerHandshakeSelector, SelectsConfigFromClientHello) {
-    auto client = BoringClient::make(ClientOptions{.send_sni = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    const TlsServerConfig staged = material.config();
-    SelectorState selector{.answer = &staged};
-    const TlsServerConfigSource source = selector.source();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.send_sni = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        const TlsServerConfig staged = material.config();
+        SelectorState selector{.answer = &staged};
+        const TlsServerConfigSource source = selector.source();
 
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool, &source);
-    ASSERT_TRUE(drive(*client, engine, false));
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, &source);
+        ASSERT_TRUE(drive(*client, engine, false));
 
-    EXPECT_TRUE(selector.called);
-    EXPECT_TRUE(selector.seen_has_name);
-    EXPECT_EQ("example.com", selector.seen_name);
-    ASSERT_EQ(2u, selector.seen_alpn.size());
-    EXPECT_EQ("h2", selector.seen_alpn[0]);
-    EXPECT_EQ("http/1.1", selector.seen_alpn[1]);
+        EXPECT_TRUE(selector.called);
+        EXPECT_TRUE(selector.seen_has_name);
+        EXPECT_EQ("example.com", selector.seen_name);
+        ASSERT_EQ(2u, selector.seen_alpn.size());
+        EXPECT_EQ("h2", selector.seen_alpn[0]);
+        EXPECT_EQ("http/1.1", selector.seen_alpn[1]);
 
-    TlsConnectedState state = engine.take_state();
-    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, state.version);
+    });
 }
 
 // A null answer is the "no vhost for this SNI" case: handshake_failure,
 // nothing else runs.
 TEST(TlsServerHandshakeSelector, NullAnswerRefusesWithHandshakeFailure) {
-    auto client = BoringClient::make(ClientOptions{.send_sni = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    SelectorState selector{.answer = nullptr}; // the hello selects none
-    const TlsServerConfigSource source = selector.source();
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.send_sni = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        SelectorState selector{.answer = nullptr}; // the hello selects none
+        const TlsServerConfigSource source = selector.source();
 
-    TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, material.pool, &source);
-    (void) drive(*client, engine, false); // the refusal is the expected path
-    ASSERT_TRUE(engine.done());
-    EXPECT_TRUE(engine.failed());
-    EXPECT_EQ(TlsAlertDesc::HandshakeFailure, engine.failure_alert());
-    EXPECT_TRUE(selector.called);
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr, &source);
+        (void) drive(*client, engine, false); // the refusal is the expected path
+        ASSERT_TRUE(engine.done());
+        EXPECT_TRUE(engine.failed());
+        EXPECT_EQ(TlsAlertDesc::HandshakeFailure, engine.failure_alert());
+        EXPECT_TRUE(selector.called);
+    });
 }
 
 // The 1.2 fork gate: a tls12_only client against a config whose floor is
 // 1.3 answers protocol_version (the 07 behavior only when the window lets
 // 1.2 through).
 TEST(TlsServerHandshakeBounds, Tls12ClientBelowFloorRefused) {
-    auto client = BoringClient::make(ClientOptions{.tls12_only = true});
-    ASSERT_NE(nullptr, client);
-    ServerMaterial material;
-    TlsServerConfig cfg = material.config();
-    cfg.min_version = fiber::tls::kTlsVersionTls13;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{.tls12_only = true});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        TlsServerConfig cfg = material.config();
+        cfg.min_version = fiber::tls::kTlsVersionTls13;
 
-    TlsServerHandshakeEngine engine(cfg, nullptr, nullptr, material.pool);
-    (void) drive(*client, engine, false); // the refusal is the expected path
-    ASSERT_TRUE(engine.done());
-    EXPECT_TRUE(engine.failed());
-    EXPECT_EQ(TlsAlertDesc::ProtocolVersion, engine.failure_alert());
+        TlsServerHandshakeEngine engine(cfg, nullptr, nullptr);
+        (void) drive(*client, engine, false); // the refusal is the expected path
+        ASSERT_TRUE(engine.done());
+        EXPECT_TRUE(engine.failed());
+        EXPECT_EQ(TlsAlertDesc::ProtocolVersion, engine.failure_alert());
+    });
 }

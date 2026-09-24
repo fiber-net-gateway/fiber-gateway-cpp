@@ -10,34 +10,6 @@
 
 namespace fiber::http {
 
-namespace {
-
-common::IoResult<void> bind_or_migrate_nodes(mem::IoBufChain &chain, mem::IoBufNodePool &target_pool) noexcept {
-    if (!chain.bound()) {
-        if (!chain.empty()) {
-            return std::unexpected(common::IoErr::Invalid);
-        }
-        chain.bind_node_pool(target_pool);
-        return {};
-    }
-    if (&chain.node_pool() == &target_pool) {
-        return {};
-    }
-
-    mem::IoBufChain migrated(target_pool);
-    if (chain.complete()) {
-        migrated.mark_complete();
-    }
-    while (mem::IoBufNode *node = chain.pop_front_node()) {
-        const bool appended = migrated.append_node(node);
-        FIBER_ASSERT(appended);
-    }
-    chain = std::move(migrated);
-    return {};
-}
-
-} // namespace
-
 common::IoResult<void> http3_finish_headers_frame(Http3QpackEncoderIoBufWriter &writer, mem::IoBufChain &frame,
                                                   bool end_stream) noexcept {
     common::IoErr err = writer.finish(frame);
@@ -117,12 +89,8 @@ common::IoResult<mem::IoBuf> http3_build_data_frame_header(std::size_t payload_l
     return frame_header;
 }
 
-common::IoResult<void> http3_prepare_data_frame(mem::IoBufChain &chunk, mem::IoBufNodePool &target_pool) noexcept {
+common::IoResult<void> http3_prepare_data_frame(mem::IoBufChain &chunk) noexcept {
     const std::size_t payload_len = chunk.readable_bytes();
-    auto bound = bind_or_migrate_nodes(chunk, target_pool);
-    if (!bound) {
-        return bound;
-    }
     auto frame_header = http3_build_data_frame_header(payload_len);
     if (!frame_header) {
         return std::unexpected(frame_header.error());

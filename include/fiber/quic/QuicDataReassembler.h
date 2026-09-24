@@ -57,7 +57,6 @@ public:
     [[nodiscard]] bool has_contiguous_data() const noexcept {
         return head_ != nullptr && head_->offset == next_offset_ && head_->buf.readable() != 0;
     }
-    [[nodiscard]] mem::IoBufNodePool &node_pool() noexcept { return *pool_; }
     [[nodiscard]] bool initialized() const noexcept { return pool_ != nullptr; }
 
 private:

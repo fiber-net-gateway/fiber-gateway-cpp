@@ -102,7 +102,7 @@ DetachedTask abort_pending_header_read(std::promise<IoErr> *result) {
 
 DetachedTask abort_pending_body_read(std::promise<IoErr> *result) {
     EventLoop &loop = EventLoop::current();
-    Http2BodyRecvState state(loop.io_buf_node_pool());
+    Http2BodyRecvState state;
     int owner = 0;
     Http2Stream stream(&owner, kStreamOps);
     DeferredBodyAbort abort{.state = &state};
@@ -137,7 +137,7 @@ DetachedTask destroy_notified_header_read(std::promise<int> *result) {
 
 DetachedTask destroy_notified_body_read(std::promise<int> *result) {
     EventLoop &loop = EventLoop::current();
-    Http2BodyRecvState state(loop.io_buf_node_pool());
+    Http2BodyRecvState state;
     int owner = 0;
     Http2Stream stream(&owner, kStreamOps);
     std::atomic<int> resumed{0};

@@ -36,7 +36,7 @@ struct Http2OutboundSendResult {
 
 class Http2OutboundEncodeTarget {
 public:
-    explicit Http2OutboundEncodeTarget(mem::IoBufNodePool &node_pool) noexcept : chain_(node_pool) {}
+    Http2OutboundEncodeTarget() noexcept = default;
 
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] std::size_t total_bytes() const noexcept;

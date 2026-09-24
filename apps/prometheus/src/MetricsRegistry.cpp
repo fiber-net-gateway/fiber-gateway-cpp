@@ -494,12 +494,12 @@ void MetricsRegistry::release_collect() noexcept {
 }
 
 fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
-MetricsRegistry::collect_text(fiber::mem::IoBufNodePool &node_pool, CollectOptions options) noexcept {
+MetricsRegistry::collect_text(CollectOptions options) noexcept {
     auto prepared = co_await prepare_collect();
     if (!prepared) {
         co_return std::unexpected(prepared.error());
     }
-    co_return detail::encode_text_chain(*data_, node_pool, options);
+    co_return detail::encode_text_chain(*data_, options);
 }
 
 fiber::async::Task<fiber::common::IoResult<std::size_t>>

@@ -305,9 +305,6 @@ common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noex
     if (!attached_to_connection_ || !send_queue_.initialized()) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (!chain.bound() || &chain.node_pool() != &send_queue_.node_pool()) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
 
     const std::size_t bytes = chain.readable_bytes();
     const common::IoErr terminal = terminal_write_error();
@@ -316,7 +313,7 @@ common::IoResult<std::size_t> QuicStream::try_write(mem::IoBufChain &chain) noex
     }
 
     mem::IoBufChain *append_chain = &chain;
-    mem::IoBufChain prefix(chain.node_pool());
+    mem::IoBufChain prefix;
     bool report_flow_blocked = false;
     if (bytes > 0) {
         const std::size_t available = write_available();

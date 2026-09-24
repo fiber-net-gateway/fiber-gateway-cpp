@@ -157,15 +157,13 @@ bool config_invariants_hold(const TlsServerConfig &cfg) noexcept {
 } // namespace
 
 TlsServerHandshakeEngine::TlsServerHandshakeEngine(const TlsServerConfig &config, const TlsResumptionLookup *resumption,
-                                                   const TlsTicketMinter *minter, mem::IoBufNodePool &pool,
+                                                   const TlsTicketMinter *minter,
                                                    const TlsServerConfigSource *source) noexcept {
     impl_ = new (std::nothrow) Impl(config, resumption, minter, source);
     if (impl_ == nullptr) {
         return; // done()/failed() report the terminal state; no alert bytes
     }
     Impl &impl = *impl_;
-    impl.ctx.bind(pool);
-    impl.early = mem::IoBufChain(pool); // 0-RTT sink target (pool-bound; take_early_data drains)
     // Server plaintext records are 0x0303 from the very first one (the
     // client's 0x0301 first-flight convention is client-only, 06 §2.3).
     impl.ctx.set_legacy_version(kTlsRecordVersionTls12);

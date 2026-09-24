@@ -10,6 +10,7 @@
 #include <fiber/http/Http3ControlStreamDecoder.h>
 #include <fiber/http/Http3Protocol.h>
 #include <fiber/quic/QuicCursor.h>
+#include "LoopTestSupport.h"
 #include "quic/QuicTransportCodec.h"
 
 namespace {
@@ -47,103 +48,115 @@ std::vector<std::uint8_t> settings_payload(std::uint64_t blocked_streams) {
 } // namespace
 
 TEST(Http3ControlStreamDecoderTest, ParsesInitialSettings) {
-    std::vector<std::uint8_t> bytes;
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings), settings_payload(8));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        std::vector<std::uint8_t> bytes;
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings), settings_payload(8));
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, bytes);
 
-    fiber::http::Http3ControlStreamDecoder decoder;
-    fiber::http::Http3ControlStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
-    EXPECT_EQ(event.type, fiber::http::Http3ControlStreamEventType::Settings);
-    EXPECT_EQ(event.settings.qpack_blocked_streams, 8U);
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, bytes);
+
+        fiber::http::Http3ControlStreamDecoder decoder;
+        fiber::http::Http3ControlStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+        EXPECT_EQ(event.type, fiber::http::Http3ControlStreamEventType::Settings);
+        EXPECT_EQ(event.settings.qpack_blocked_streams, 8U);
+    });
 }
 
 TEST(Http3ControlStreamDecoderTest, RejectsMissingInitialSettings) {
-    std::vector<std::uint8_t> bytes;
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Data));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        std::vector<std::uint8_t> bytes;
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Data));
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, bytes);
 
-    fiber::http::Http3ControlStreamDecoder decoder;
-    fiber::http::Http3ControlStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
-    EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::MissingSettings);
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, bytes);
+
+        fiber::http::Http3ControlStreamDecoder decoder;
+        fiber::http::Http3ControlStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
+        EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::MissingSettings);
+    });
 }
 
 TEST(Http3ControlStreamDecoderTest, RejectsDuplicateSettingsFrame) {
-    std::vector<std::uint8_t> bytes;
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        std::vector<std::uint8_t> bytes;
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, bytes);
 
-    fiber::http::Http3ControlStreamDecoder decoder;
-    fiber::http::Http3ControlStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
-    EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::FrameUnexpected);
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, bytes);
+
+        fiber::http::Http3ControlStreamDecoder decoder;
+        fiber::http::Http3ControlStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
+        EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::FrameUnexpected);
+    });
 }
 
 TEST(Http3ControlStreamDecoderTest, DrainsUnknownFrameAfterSettings) {
-    std::vector<std::uint8_t> bytes;
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
-    append_frame(bytes, 0x21, {1, 2, 3});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        std::vector<std::uint8_t> bytes;
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
+        append_frame(bytes, 0x21, {1, 2, 3});
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, bytes);
 
-    fiber::http::Http3ControlStreamDecoder decoder;
-    fiber::http::Http3ControlStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
-    EXPECT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::NeedMore);
-    EXPECT_EQ(chain.readable_bytes(), 0U);
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, bytes);
+
+        fiber::http::Http3ControlStreamDecoder decoder;
+        fiber::http::Http3ControlStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+        EXPECT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::NeedMore);
+        EXPECT_EQ(chain.readable_bytes(), 0U);
+    });
 }
 
 TEST(Http3ControlStreamDecoderTest, ParsesGoawayAndMaxPushId) {
-    std::vector<std::uint8_t> bytes;
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
-    std::vector<std::uint8_t> goaway_payload;
-    append_varint(goaway_payload, 12);
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Goaway), goaway_payload);
-    std::vector<std::uint8_t> max_push_id_payload;
-    append_varint(max_push_id_payload, 7);
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::MaxPushId), max_push_id_payload);
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        std::vector<std::uint8_t> bytes;
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
+        std::vector<std::uint8_t> goaway_payload;
+        append_varint(goaway_payload, 12);
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Goaway), goaway_payload);
+        std::vector<std::uint8_t> max_push_id_payload;
+        append_varint(max_push_id_payload, 7);
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::MaxPushId), max_push_id_payload);
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, bytes);
 
-    fiber::http::Http3ControlStreamDecoder decoder;
-    fiber::http::Http3ControlStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
-    EXPECT_EQ(event.type, fiber::http::Http3ControlStreamEventType::Goaway);
-    EXPECT_EQ(event.id, 12U);
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
-    EXPECT_EQ(event.type, fiber::http::Http3ControlStreamEventType::MaxPushId);
-    EXPECT_EQ(event.id, 7U);
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, bytes);
+
+        fiber::http::Http3ControlStreamDecoder decoder;
+        fiber::http::Http3ControlStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+        EXPECT_EQ(event.type, fiber::http::Http3ControlStreamEventType::Goaway);
+        EXPECT_EQ(event.id, 12U);
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+        EXPECT_EQ(event.type, fiber::http::Http3ControlStreamEventType::MaxPushId);
+        EXPECT_EQ(event.id, 7U);
+    });
 }
 
 TEST(Http3ControlStreamDecoderTest, RejectsMalformedGoawayPayload) {
-    std::vector<std::uint8_t> bytes;
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
-    append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Goaway), {0x00, 0x00});
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        std::vector<std::uint8_t> bytes;
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Settings));
+        append_frame(bytes, static_cast<std::uint64_t>(fiber::http::Http3FrameType::Goaway), {0x00, 0x00});
 
-    fiber::mem::IoBufNodePool pool;
-    fiber::mem::IoBufChain chain(pool);
-    append_chain(chain, bytes);
 
-    fiber::http::Http3ControlStreamDecoder decoder;
-    fiber::http::Http3ControlStreamEvent event;
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
-    ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
-    EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::FrameError);
+        fiber::mem::IoBufChain chain;
+        append_chain(chain, bytes);
+
+        fiber::http::Http3ControlStreamDecoder decoder;
+        fiber::http::Http3ControlStreamEvent event;
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Done);
+        ASSERT_EQ(decoder.parse(chain, event), fiber::http::Http3ParseStatus::Error);
+        EXPECT_EQ(decoder.error().h3_error, fiber::http::Http3ErrorCode::FrameError);
+    });
 }

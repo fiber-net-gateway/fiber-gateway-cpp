@@ -13,19 +13,16 @@ const Http3QpackEncoder::OutputOps Http3QpackEncoderIoBufWriter::kOutputOps{
         &Http3QpackEncoderIoBufWriter::commit_output,
 };
 
-Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool,
-                                                           std::size_t chunk_size) noexcept :
-    Http3QpackEncoderIoBufWriter(node_pool, Http3QpackEncoder::Options{}, chunk_size) {}
+Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(std::size_t chunk_size) noexcept :
+    Http3QpackEncoderIoBufWriter(Http3QpackEncoder::Options{}, chunk_size) {}
 
-Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool,
-                                                           Http3QpackEncoder::Options options,
+Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(Http3QpackEncoder::Options options,
                                                            std::size_t chunk_size) noexcept :
-    Http3QpackEncoderIoBufWriter(node_pool, options, chunk_size, 0) {}
+    Http3QpackEncoderIoBufWriter(options, chunk_size, 0) {}
 
-Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(mem::IoBufNodePool &node_pool,
-                                                           Http3QpackEncoder::Options options, std::size_t chunk_size,
+Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(Http3QpackEncoder::Options options, std::size_t chunk_size,
                                                            std::size_t prefix_reserve) noexcept :
-    block_(node_pool), encoder_(this, kOutputOps, options), chunk_size_(chunk_size), prefix_reserve_(prefix_reserve) {
+    encoder_(this, kOutputOps, options), chunk_size_(chunk_size), prefix_reserve_(prefix_reserve) {
     FIBER_ASSERT(chunk_size_ != 0);
 }
 

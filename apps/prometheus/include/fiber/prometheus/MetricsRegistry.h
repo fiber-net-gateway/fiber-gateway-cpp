@@ -63,7 +63,7 @@ public:
 
     // Overlapping collections share one stable shard snapshot generation and encode into caller-owned output.
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<fiber::mem::IoBufChain>>
-    collect_text(fiber::mem::IoBufNodePool &node_pool, CollectOptions options = {}) noexcept;
+    collect_text(CollectOptions options = {}) noexcept;
 
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::size_t>>
     collect_text_into(fiber::mem::IoBuf &out, CollectOptions options = {}) noexcept;
