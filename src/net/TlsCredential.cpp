@@ -4,21 +4,9 @@
 #include <new>
 #include <string>
 
-#include <openssl/err.h>
-#include <openssl/evp.h>
-#include <openssl/pool.h>
-#include <openssl/sha.h>
-#include <openssl/ssl.h>
-
 namespace fiber::net {
 
 namespace {
-
-class OpenSslErrorQueueScope {
-public:
-    OpenSslErrorQueueScope() noexcept { ERR_clear_error(); }
-    ~OpenSslErrorQueueScope() noexcept { ERR_clear_error(); }
-};
 
 // PEM material for one source as contiguous text. Content sources copy the
 // string; File sources read the whole file (bounded sanity check included).
@@ -58,15 +46,7 @@ common::IoErr read_pem_text(const TlsPemSource &source, std::string &out) noexce
 
 } // namespace
 
-TlsCredential::~TlsCredential() {
-    if (ssl_bridge_ != nullptr) {
-        SSL_CREDENTIAL_free(ssl_bridge_);
-        ssl_bridge_ = nullptr;
-    }
-}
-
 common::IoResult<std::unique_ptr<TlsCredential>> TlsCredential::create(const TlsCredentialOptions &options) noexcept {
-    OpenSslErrorQueueScope error_queue_scope;
     if (options.certificate_chain.empty() || options.private_key.empty()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -90,65 +70,17 @@ common::IoResult<std::unique_ptr<TlsCredential>> TlsCredential::create(const Tls
     if (!key) {
         return std::unexpected(key.error());
     }
-    // Pair check the SSL path got from SSL_CREDENTIAL_set1_private_key
-    // (BoringSSL rejects a key that does not match the chain); the tls
-    // setters do not check, so validate here — same create-time rejection.
+    // The tls setters do not check key/chain pairing, so validate here —
+    // BoringSSL's SSL_CREDENTIAL_set1_private_key rejects a key that does not
+    // match the chain; same create-time rejection.
     auto paired = chain->leaf().matches_private_key(*key);
     if (!paired || !*paired) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    SHA256(chain->leaf().der().data(), chain->leaf().der().size(), result->session_identity_.data());
     result->chain_ = std::move(*chain);
     result->key_ = std::move(*key);
     return result;
-}
-
-SSL_CREDENTIAL *TlsCredential::ssl_credential() const noexcept {
-    if (ssl_bridge_ != nullptr) {
-        return ssl_bridge_;
-    }
-    SSL_CREDENTIAL *bridge = SSL_CREDENTIAL_new_x509();
-    if (bridge == nullptr) {
-        return nullptr;
-    }
-    // CRYPTO_BUFFER copies each certificate's exact DER — the same wire bytes
-    // the tls chain kept — and set1_cert_chain takes its own buffer refs, so
-    // the projection is independent of this object afterwards.
-    CRYPTO_BUFFER *buffers[tls::TlsCertificateChain::kMaxCerts]{};
-    std::size_t loaded = 0;
-    bool ok = true;
-    const auto append_buffer = [&buffers, &loaded, &ok](const tls::TlsCertificate &certificate) {
-        if (!ok) {
-            return;
-        }
-        const auto der = certificate.der();
-        buffers[loaded] = CRYPTO_BUFFER_new(der.data(), der.size(), nullptr);
-        if (buffers[loaded] == nullptr) {
-            ok = false;
-            return;
-        }
-        loaded++;
-    };
-    append_buffer(chain_.leaf());
-    for (const auto &certificate: chain_.intermediates()) {
-        append_buffer(certificate);
-    }
-    if (ok) {
-        ok = SSL_CREDENTIAL_set1_cert_chain(bridge, buffers, chain_.size()) == 1;
-    }
-    for (std::size_t i = 0; i < loaded; ++i) {
-        CRYPTO_BUFFER_free(buffers[i]);
-    }
-    if (ok) {
-        ok = SSL_CREDENTIAL_set1_private_key(bridge, static_cast<EVP_PKEY *>(key_.evp_pkey_handle())) == 1;
-    }
-    if (!ok) {
-        SSL_CREDENTIAL_free(bridge);
-        return nullptr;
-    }
-    ssl_bridge_ = bridge;
-    return bridge;
 }
 
 } // namespace fiber::net

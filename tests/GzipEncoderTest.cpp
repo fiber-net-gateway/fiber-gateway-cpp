@@ -266,6 +266,12 @@ std::string gunzip_incremental(std::string_view member, std::size_t chunk) {
 // them here would collide at link time. Without the replacement the counter
 // stays zero and the steady-state check passes vacuously under TSan; every
 // other build runs the real assertion.
+//
+// The FULL standard family must be replaced together: these are process-wide
+// replacements inside the single fiber_tests executable, and any form left
+// out (e.g. nothrow new[]) allocates through the sanitizer runtime while its
+// matching delete resolves here — an alloc-dealloc-mismatch storm under ASan
+// for every test in the binary.
 
 #if !defined(__SANITIZE_THREAD__) && !(defined(__has_feature) && __has_feature(thread_sanitizer))
 
@@ -278,11 +284,51 @@ void *operator new(std::size_t size) {
     return ptr;
 }
 
+void *operator new[](std::size_t size) { return operator new(size); }
+
+void *operator new(std::size_t size, const std::nothrow_t &) noexcept {
+    ++g_thread_allocations;
+    return std::malloc(size ? size : 1);
+}
+
+void *operator new[](std::size_t size, const std::nothrow_t &) noexcept { return operator new(size, std::nothrow); }
+
+void *operator new(std::size_t size, std::align_val_t alignment) {
+    ++g_thread_allocations;
+    void *ptr = nullptr;
+    if (::posix_memalign(&ptr, static_cast<std::size_t>(alignment), size ? size : 1) != 0) {
+        throw std::bad_alloc();
+    }
+    return ptr;
+}
+
+void *operator new[](std::size_t size, std::align_val_t alignment) { return operator new(size, alignment); }
+
+void *operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept {
+    ++g_thread_allocations;
+    void *ptr = nullptr;
+    if (::posix_memalign(&ptr, static_cast<std::size_t>(alignment), size ? size : 1) != 0) {
+        return nullptr;
+    }
+    return ptr;
+}
+
+void *operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t &) noexcept {
+    return operator new(size, alignment, std::nothrow);
+}
+
 void operator delete(void *ptr) noexcept { std::free(ptr); }
 void operator delete(void *ptr, std::size_t) noexcept { std::free(ptr); }
-void *operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void *ptr, const std::nothrow_t &) noexcept { std::free(ptr); }
+void operator delete(void *ptr, std::align_val_t) noexcept { std::free(ptr); }
+void operator delete(void *ptr, std::size_t, std::align_val_t) noexcept { std::free(ptr); }
+void operator delete(void *ptr, std::align_val_t, const std::nothrow_t &) noexcept { std::free(ptr); }
 void operator delete[](void *ptr) noexcept { std::free(ptr); }
 void operator delete[](void *ptr, std::size_t) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, const std::nothrow_t &) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, std::align_val_t) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, std::size_t, std::align_val_t) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, std::align_val_t, const std::nothrow_t &) noexcept { std::free(ptr); }
 
 #endif
 

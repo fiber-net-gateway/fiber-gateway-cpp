@@ -51,7 +51,9 @@ target_include_directories(fiber_lib
     PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src
         ${FIBER_GENERATED_INCLUDE_DIR})
-target_link_libraries(fiber_lib PUBLIC boringssl::ssl boringssl::crypto)
+# 10 §10: fiber_lib links crypto only; the ssl library is test-side (the
+# BoringSSL differential peers in tests/ link it below).
+target_link_libraries(fiber_lib PUBLIC boringssl::crypto)
 target_compile_definitions(fiber_lib
     PUBLIC FIBER_ENABLE_BENCHMARK_TRACE=$<BOOL:${FIBER_ENABLE_BENCHMARK_TRACE}>
     PRIVATE
@@ -206,7 +208,9 @@ if(FIBER_BUILD_TESTS)
         if (FIBER_TEST_SOURCES)
             add_executable(fiber_tests ${FIBER_TEST_SOURCES})
             target_include_directories(fiber_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src)
-            target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main)
+            # boringssl::ssl is deliberately NOT in fiber_lib (10 §10): the
+            # differential peers driven from these tests are its only consumer.
+            target_link_libraries(fiber_tests PRIVATE fiber_lib GTest::gtest_main boringssl::ssl)
             if (FIBER_BUILD_HTTP_COMPRESSION)
                 target_link_libraries(fiber_tests PRIVATE fiber_http_compression)
             endif()
@@ -221,6 +225,10 @@ if(FIBER_BUILD_TESTS)
             endif()
             include(GoogleTest)
             gtest_discover_tests(fiber_tests)
+            # Anti-regression (10 §10): no <openssl/ssl.h> under src/ or
+            # include/ — keeps fiber_lib's link surface crypto-only.
+            add_test(NAME fiber_ssl_free_check COMMAND bash
+                    "${CMAKE_CURRENT_LIST_DIR}/scripts/check_ssl_free.sh")
         else()
             message(STATUS "No tests found under tests/*. Tests may be archived under temp/.")
         endif()

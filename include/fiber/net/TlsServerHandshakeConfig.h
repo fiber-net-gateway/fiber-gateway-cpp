@@ -7,9 +7,6 @@
 #include "../common/IoError.h"
 #include "TlsParams.h"
 
-struct ssl_st;
-typedef struct ssl_st SSL;
-
 namespace fiber::tls {
 struct TlsServerConfig;
 }
@@ -23,29 +20,25 @@ namespace fiber::net {
 class TlsCredential;
 class TrustStore;
 namespace detail {
-class TlsRuntime;
-class TlsSslFactory;
 class TlsStreamFd;
 } // namespace detail
 
 // A synchronous, callback-duration view for configuring the current server
-// handshake. Two modes (09 §5): the SSL mode drives a live BoringSSL SSL
-// (the QUIC-side glue) and retains its own references; the engine mode
-// stages into a caller-held tls::TlsServerConfig whose spans borrow the
-// caller's material for the handshake's duration (the TCP path). It owns
-// and exposes neither object.
+// handshake (09 §5): it stages into a caller-held tls::TlsServerConfig whose
+// spans borrow the caller's material for the handshake's duration. It owns
+// and exposes neither the config nor the material.
 class TlsServerHandshakeConfig {
 public:
     [[nodiscard]] common::IoErr clear_credentials() noexcept;
-    // SSL mode: the current SSL retains its own BoringSSL reference. Engine
-    // mode: the staged config borrows the credential's tls material.
+    // The staged config borrows the credential's tls material; the credential
+    // must outlive the handshake (the documented param contract).
     [[nodiscard]] common::IoErr add_credential(const TlsCredential &credential) noexcept;
-    // SSL mode: the current SSL retains its own X509_STORE reference. Engine
-    // mode: the staged config borrows the store's anchors.
+    // The staged config borrows the store's anchors; the store must outlive
+    // the handshake.
     [[nodiscard]] common::IoErr set_trust_store(const TrustStore &trust_store) noexcept;
-    // SSL mode: the session-id context scopes session-cache entries. Engine
-    // mode: accepted and validated for portability, then ignored (the TCP
-    // path has no session-id cache; resumption is stateless tickets only).
+    // Nothing to scope — the TCP path has no session-id cache (resumption is
+    // stateless tickets only); accepted and validated for callback
+    // portability, then ignored.
     [[nodiscard]] common::IoErr set_session_id_context(std::span<const std::uint8_t> context) noexcept;
     // Sets both bounds; a value of 0 leaves that bound unchanged. The engine
     // domain is {TLS 1.2, TLS 1.3}.
@@ -57,25 +50,20 @@ public:
     [[nodiscard]] common::IoErr set_early_data_enabled(bool enabled) noexcept;
 
 private:
-    friend class detail::TlsRuntime;
-    friend class detail::TlsSslFactory;
     friend class detail::TlsStreamFd;
     friend class fiber::quic::QuicTlsSession;
 
-    TlsServerHandshakeConfig(SSL *ssl) noexcept : ssl_(ssl) {}
-    // Engine mode: the callback stages into `engine` (caller-owned, borrowed
-    // for the callback's duration and the handshake it feeds); the caller
-    // watches `credential_count` for the must-add-one rule.
+    // The caller owns `engine` (borrowed for the callback's duration and the
+    // handshake it feeds) and watches `credential_count` for the
+    // must-add-one rule.
     TlsServerHandshakeConfig(fiber::tls::TlsServerConfig &engine, std::size_t &credential_count) noexcept :
         engine_(&engine), credential_count_(&credential_count) {}
 
     [[nodiscard]] std::size_t credential_count() const noexcept { return *credential_count_; }
 
-    SSL *ssl_ = nullptr;
     fiber::tls::TlsServerConfig *engine_ = nullptr;
     std::size_t count_storage_ = 0;
     std::size_t *credential_count_ = &count_storage_;
-    bool session_id_context_set_ = false;
 };
 
 // Convenience callback for static single-certificate servers. Dynamic servers
