@@ -409,6 +409,92 @@ TEST(TlsStreamFdTest, CrossLoopWriteFailureDoesNotTouchOwnerPoller) {
     });
 }
 
+// Regression for the frame-local staging redesign: a close() that interrupts a
+// suspended handshake must unwind the handshake coroutine — its staging and
+// engines die with the coroutine frame — and report Canceled, with nothing
+// left for a later close()/destructor to clean up.
+template<typename Param>
+DetachedTask await_handshake_result(fiber::net::detail::TlsStreamFd *stream, const Param &param,
+                                    std::promise<fiber::common::IoErr> *done) {
+    auto handshake_result = co_await stream->handshake(param);
+    done->set_value(handshake_result ? fiber::common::IoErr::None : handshake_result.error());
+}
+
+DetachedTask close_parked_handshake(fiber::net::detail::TlsStreamFd *stream, std::promise<void> *done) {
+    // Let the parked-handshake task run into its socket wait first: it was
+    // spawned before this task, so its whole first slice (start + park) runs
+    // before this timer can fire — the margin only has to survive loop-thread
+    // starvation, not task ordering.
+    co_await fiber::async::sleep(50ms);
+    // close() resumes the suspended handshake inline (Canceled wake): by the
+    // time it returns, the coroutine has unwound and its frame is gone, so
+    // the stream can be deleted here.
+    stream->close();
+    delete stream;
+    done->set_value();
+    co_return;
+}
+
+TEST(TlsStreamFdTest, CloseDuringSuspendedHandshakeUnwindsCleanly) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_close_susp", kSelfSignedCertPem);
+        TempFile key("key_close_susp", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+
+        int server_fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, server_fds), 0);
+        int client_fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, client_fds), 0);
+
+        fiber::event::EventLoopGroup group(1);
+        group.start();
+
+        // Server side: no ClientHello ever arrives (the peer stays silent), so
+        // the handshake parks in wait_readable with live engines.
+        auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), server_fds[0]);
+        std::promise<fiber::common::IoErr> server_handshake_promise;
+        auto server_handshake_future = server_handshake_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return await_handshake_result(server_stream, tls_pair->server_options, &server_handshake_promise);
+        });
+        std::promise<void> server_close_promise;
+        auto server_close_future = server_close_promise.get_future();
+        fiber::async::spawn(group.at(0),
+                            [&]() { return close_parked_handshake(server_stream, &server_close_promise); });
+
+        // Client side: the ClientHello is flushed, then the handshake parks
+        // waiting for a ServerHello that never comes.
+        auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(0), client_fds[0]);
+        std::promise<fiber::common::IoErr> client_handshake_promise;
+        auto client_handshake_future = client_handshake_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return await_handshake_result(client_stream, tls_pair->client_options, &client_handshake_promise);
+        });
+        std::promise<void> client_close_promise;
+        auto client_close_future = client_close_promise.get_future();
+        fiber::async::spawn(group.at(0),
+                            [&]() { return close_parked_handshake(client_stream, &client_close_promise); });
+
+        ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(server_handshake_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(client_handshake_future.wait_for(2s), std::future_status::ready);
+        EXPECT_EQ(server_handshake_future.get(), fiber::common::IoErr::Canceled);
+        EXPECT_EQ(client_handshake_future.get(), fiber::common::IoErr::Canceled);
+
+        ::close(server_fds[1]); // the silent peers
+        ::close(client_fds[1]);
+
+        group.stop();
+        group.join();
+    });
+}
+
 // Build an IoBufChain of segments with the given sizes. Each segment i is filled
 // with a distinct byte (0x40 + i) so that reordering, drops, or duplication in the
 // coalesce path show up as a mismatched byte. Returns the expected concatenation.
