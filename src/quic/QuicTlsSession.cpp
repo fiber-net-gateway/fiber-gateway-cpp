@@ -146,6 +146,7 @@ struct NstDecoded {
 
 struct QuicServerTransportParamsWire {
     std::size_t len = 0;
+    std::size_t zero_rtt_len = 0; // the leading slice governing early data — the 0-RTT gate's binding
 };
 
 [[nodiscard]] common::IoResult<std::size_t>
@@ -202,11 +203,12 @@ create_server_transport_params(QuicConnection &connection, std::uint8_t *out, st
     }
 
     QuicWriteCursor writer(out, out_cap);
-    auto len = quic_create_transport_params(QuicTransportParamOwner::Server, &writer, params, nullptr);
+    std::size_t zero_rtt_len = 0;
+    auto len = quic_create_transport_params(QuicTransportParamOwner::Server, &writer, params, &zero_rtt_len);
     if (!len) {
         return std::unexpected(len.error());
     }
-    return QuicServerTransportParamsWire{.len = *len};
+    return QuicServerTransportParamsWire{.len = *len, .zero_rtt_len = zero_rtt_len};
 }
 
 // Zero-config ticket parity (10 §8): the pre-10 BoringSSL path minted NSTs
@@ -308,6 +310,10 @@ common::IoResult<void> QuicTlsSession::init_server(const net::TlsServerParam &op
     server_cfg_.now_unix_ms = system_now_unix_ms();
     server_cfg_.quic = &quic_cb_;
     server_cfg_.quic_transport_params = {local_transport_params_.data(), local_transport_params_len_};
+    // The 0-RTT consistency gate's binding (10 §6.1): the codec guarantees the
+    // early-data-relevant params sit in the leading slice, so the context is a
+    // prefix view of the same stable buffer the EE extension borrows.
+    server_cfg_.quic_early_data_context = {local_transport_params_.data(), transport_params_wire->zero_rtt_len};
 
     quic_cb_ = tls::TlsQuicCallbacks{.set_secret = &QuicTlsSession::quic_set_secret_thunk,
                                      .add_handshake_data = &QuicTlsSession::quic_add_data_thunk,

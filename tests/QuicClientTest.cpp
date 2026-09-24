@@ -19,6 +19,7 @@
 #include <fiber/net/UdpSocket.h>
 #include <fiber/quic/QuicClientConnect.h>
 #include <fiber/quic/QuicUdpEndpoint.h>
+#include <fiber/tls/TlsTicketService.h>
 #include "QuicTestTlsCertificate.h"
 #include "TlsClientIdentityTestData.h"
 
@@ -1022,6 +1023,288 @@ TEST(QuicClientTest, ReusesSessionAndNewTokenWithEarlyData) {
     EXPECT_TRUE(summary.early_write_ready);
     EXPECT_TRUE(summary.early_stream_queued) << static_cast<int>(summary.early_attach_error);
     EXPECT_TRUE(summary.early_data_accepted);
+
+    group.stop();
+    group.join();
+}
+
+// =====================================================================
+// The 0-RTT rejection legs (10 §6.1's matrix): the ticket survives, the
+// early data does not.
+// =====================================================================
+
+// Connect to server A (filling the cache), then offer the session with early
+// data to server B — the same ticket service shared across both servers, so
+// B can open A's tickets.
+fiber::async::DetachedTask connect_twice_across_servers(fiber::quic::QuicUdpEndpoint *server_a,
+                                                        fiber::quic::QuicUdpEndpoint *server_b,
+                                                        fiber::quic::QuicUdpEndpoint *client_endpoint,
+                                                        const fiber::net::TlsClientSecurity *security,
+                                                        TestClientCache *cache,
+                                                        std::promise<ResumptionSummary> *promise) {
+    ResumptionSummary summary{};
+    auto a_started = server_a->start();
+    auto b_started = server_b->start();
+    auto client_started = client_endpoint->start();
+    if (!a_started || !b_started || !client_started) {
+        summary.error = !a_started        ? a_started.error()
+                        : !b_started      ? b_started.error()
+                        : !client_started ? client_started.error()
+                                          : fiber::common::IoErr::None;
+        promise->set_value(summary);
+        co_return;
+    }
+    const auto make_options = [&]() {
+        auto options = make_client_options(*client_endpoint,
+                                           {fiber::net::IpAddress::loopback_v4(), server_a->local_addr().port()});
+        if (options) {
+            options->owner = cache;
+            options->ops.on_new_tls_session = cache_store_session;
+            options->ops.on_new_token = cache_store_token;
+        }
+        return options;
+    };
+
+    {
+        auto options = make_options();
+        if (!options) {
+            summary.error = options.error();
+            promise->set_value(summary);
+            co_return;
+        }
+        fiber::quic::QuicConnection first(*client_endpoint, *options);
+        const auto first_params = make_connect_params(*security, "localhost");
+        auto connected = first.connect(first_params);
+        if (!connected) {
+            summary.error = connected.error();
+        } else if (auto established = co_await first.wait_established(2s); !established) {
+            summary.error = established.error();
+        } else {
+            (void) co_await first.wait_confirmed(2s);
+            co_await fiber::async::sleep(20ms);
+            summary.session_cached = !cache->session.empty();
+            summary.token_cached = !cache->token.empty();
+        }
+        co_await close_and_wait(first);
+        co_await fiber::async::sleep(5ms);
+    }
+
+    if (summary.error == fiber::common::IoErr::None) {
+        fiber::quic::QuicClientCachedState cached{};
+        if (!TestClientCache::load(cache, {}, cached)) {
+            cached = {};
+        }
+        summary.cached_session_early_capable = !cached.session.empty() && cached.session.max_early_data != 0;
+        auto options = make_options();
+        if (!options) {
+            summary.error = options.error();
+        } else {
+            options->remote_addr = {fiber::net::IpAddress::loopback_v4(), server_b->local_addr().port()};
+            fiber::quic::QuicConnection second(*client_endpoint, *options);
+            auto params = make_connect_params(*security, "localhost");
+            params.resumption_session = &cached.session;
+            params.token = cached.token;
+            params.token_len = cached.token_len;
+            params.enable_early_data = true;
+            params.remembered_peer_transport = cached.has_remembered_transport ? &cached.remembered_transport : nullptr;
+            auto connected = second.connect(params);
+            if (!connected) {
+                summary.error = connected.error();
+            } else {
+                summary.early_write_ready = second.crypto().early_write().ready();
+                auto attached = second.try_attach_local_stream(
+                        fiber::quic::QuicStream::Lease::adopt(new (std::nothrow)
+                                                                      fiber::quic::QuicStream(nullptr, destroy_stream)),
+                        fiber::quic::QuicStreamType::Bidirectional, fiber::quic::QuicStreamEarlyDataMode::ReplaySafe);
+                if (attached) {
+                    fiber::mem::IoBuf data = fiber::mem::IoBuf::allocate(4);
+                    if (data) {
+                        std::memcpy(data.writable_data(), "ping", 4);
+                        data.commit(4);
+                        summary.early_stream_queued = (*attached)->try_write(data, true).has_value();
+                    }
+                } else {
+                    summary.early_attach_error = attached.error();
+                }
+                auto established = co_await second.wait_established(2s);
+                if (!established) {
+                    summary.error = established.error();
+                } else {
+                    summary.session_reused = second.tls().session_reused();
+                    summary.early_data_attempted = second.early_data_attempted();
+                    summary.early_data_accepted = second.early_data_accepted();
+                }
+            }
+            co_await close_and_wait(second);
+        }
+    }
+
+    co_await client_endpoint->shutdown();
+    co_await server_a->shutdown();
+    co_await server_b->shutdown();
+    promise->set_value(summary);
+}
+
+namespace {
+
+// One shared fixed-key service: the mint server and the resume server both
+// open the same tickets (the deployment shape the gate protects). The key is
+// born at the process clock with a ten-year window — the same shape the
+// QUIC glue's zero-config default uses.
+[[nodiscard]] std::unique_ptr<fiber::tls::TlsTicketService> make_shared_ticket_service() {
+    const std::int64_t now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+    fiber::tls::TlsTicketKeyMaterial material{};
+    material.id = 1;
+    material.created_ms = now_ms;
+    for (std::size_t i = 0; i < material.bytes.size(); ++i) {
+        material.bytes[i] = static_cast<std::uint8_t>(i * 7 + 1);
+    }
+    constexpr std::uint32_t kTenYears = 10u * 365u * 86400u;
+    const fiber::tls::TlsTicketKeyPolicy policy{.key_lifetime_s = kTenYears, .key_retention_s = kTenYears};
+    const std::array<fiber::tls::TlsTicketKeyMaterial, 1> keys{{material}};
+    auto service = std::make_unique<fiber::tls::TlsTicketService>(keys, policy);
+    return service->valid() ? std::move(service) : nullptr;
+}
+
+} // namespace
+
+// The mismatch leg: server B's 0-RTT-relevant transport params differ from
+// the ones bound into the mint-time context, so the lookup vetoes early
+// data — the handshake still resumes, at 1-RTT.
+TEST(QuicClientTest, EarlyDataRejectedOnTransportParamsChange) {
+    fiber::test::QuicTestTlsFile cert("cert", fiber::test::kQuicTestCertificatePem);
+    fiber::test::QuicTestTlsFile key("key", fiber::test::kQuicTestPrivateKeyPem);
+    ASSERT_TRUE(cert.valid());
+    ASSERT_TRUE(key.valid());
+
+    auto server_material = create_quic_tls(cert.path(), key.path());
+    ASSERT_TRUE(server_material);
+    auto client_material = create_quic_tls({}, {}, cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
+
+    auto service = make_shared_ticket_service();
+    ASSERT_NE(nullptr, service);
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint server_a(group.at(0));
+    fiber::quic::QuicUdpEndpoint server_b(group.at(0));
+    auto tls_a = make_quic_server_tls(*server_material);
+    auto tls_b = make_quic_server_tls(*server_material);
+    tls_a.ticket_service = service.get();
+    tls_b.ticket_service = service.get();
+    tls_a.enable_early_data = true;
+    tls_b.enable_early_data = true;
+
+    fiber::quic::QuicUdpEndpoint::Options options_a{};
+    options_a.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    options_a.tls = &tls_a;
+    options_a.create_connection = create_server_connection;
+    options_a.issue_new_token = true;
+    // The advertised window is the endpoint's real receive buffer (the
+    // connection overwrites initial_max_data from recv_flow), so this is the
+    // knob that reaches the sealed early-data context.
+    options_a.recv_flow.conn_recv_limit = 1u << 20;
+    ASSERT_TRUE(server_a.init(options_a));
+
+    // The changed 0-RTT-relevant params: a different receive budget alters
+    // the sealed context, and the gate must veto the early data.
+    fiber::quic::QuicUdpEndpoint::Options options_b = options_a;
+    options_b.tls = &tls_b;
+    options_b.recv_flow.conn_recv_limit = 2u << 20;
+    ASSERT_TRUE(server_b.init(options_b));
+
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
+    fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
+    client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    ASSERT_TRUE(client_endpoint.init(client_options));
+
+    TestClientCache cache{};
+
+    std::promise<ResumptionSummary> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return connect_twice_across_servers(&server_a, &server_b, &client_endpoint, &client_tls, &cache, &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    const ResumptionSummary summary = future.get();
+    EXPECT_EQ(summary.error, fiber::common::IoErr::None);
+    EXPECT_TRUE(summary.session_cached);
+    EXPECT_TRUE(summary.cached_session_early_capable);
+    EXPECT_TRUE(summary.session_reused); // the ticket still resumes
+    EXPECT_TRUE(summary.early_data_attempted);
+    EXPECT_FALSE(summary.early_data_accepted); // but only at 1-RTT
+
+    group.stop();
+    group.join();
+}
+
+// The declined leg: same params, but server B has early data off — the
+// accept chain's master switch rejects, again resuming at 1-RTT.
+TEST(QuicClientTest, EarlyDataRejectedWhenServerDeclinesEarlyData) {
+    fiber::test::QuicTestTlsFile cert("cert", fiber::test::kQuicTestCertificatePem);
+    fiber::test::QuicTestTlsFile key("key", fiber::test::kQuicTestPrivateKeyPem);
+    ASSERT_TRUE(cert.valid());
+    ASSERT_TRUE(key.valid());
+
+    auto server_material = create_quic_tls(cert.path(), key.path());
+    ASSERT_TRUE(server_material);
+    auto client_material = create_quic_tls({}, {}, cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
+
+    auto service = make_shared_ticket_service();
+    ASSERT_NE(nullptr, service);
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint server_a(group.at(0));
+    fiber::quic::QuicUdpEndpoint server_b(group.at(0));
+    auto tls_a = make_quic_server_tls(*server_material);
+    auto tls_b = make_quic_server_tls(*server_material);
+    tls_a.ticket_service = service.get();
+    tls_b.ticket_service = service.get();
+    tls_a.enable_early_data = true; // mints 0-RTT-capable tickets
+    tls_b.enable_early_data = false; // but the resume server declines
+
+    fiber::quic::QuicUdpEndpoint::Options options_a{};
+    options_a.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    options_a.tls = &tls_a;
+    options_a.create_connection = create_server_connection;
+    options_a.issue_new_token = true;
+    ASSERT_TRUE(server_a.init(options_a));
+
+    fiber::quic::QuicUdpEndpoint::Options options_b = options_a;
+    options_b.tls = &tls_b;
+    ASSERT_TRUE(server_b.init(options_b));
+
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
+    fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
+    client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    ASSERT_TRUE(client_endpoint.init(client_options));
+
+    TestClientCache cache{};
+
+    std::promise<ResumptionSummary> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return connect_twice_across_servers(&server_a, &server_b, &client_endpoint, &client_tls, &cache, &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    const ResumptionSummary summary = future.get();
+    EXPECT_EQ(summary.error, fiber::common::IoErr::None);
+    EXPECT_TRUE(summary.session_cached);
+    EXPECT_TRUE(summary.cached_session_early_capable);
+    EXPECT_TRUE(summary.session_reused);
+    EXPECT_TRUE(summary.early_data_attempted);
+    EXPECT_FALSE(summary.early_data_accepted);
 
     group.stop();
     group.join();

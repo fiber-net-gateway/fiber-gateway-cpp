@@ -1149,11 +1149,13 @@ public:
     }
 
     static bool lookup(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
-                       std::int64_t now_unix_ms, TlsResumedSession &out) noexcept {
+                       std::int64_t now_unix_ms, std::span<const std::uint8_t> quic_early_data_context,
+                       TlsResumedSession &out) noexcept {
         // The in-memory store is identity-keyed only; the SNI/expiry pair is
         // the stateless open's contract, not this table's.
         (void) name;
         (void) now_unix_ms;
+        (void) quic_early_data_context; // the consistency gate is the stateless service's, not this table's
         const auto &self = *static_cast<TestSessionStore *>(ctx);
         if (self.miss_everything) {
             return false;
@@ -2037,12 +2039,13 @@ struct RecordingServiceLookup {
     std::int64_t seen_now_ms = 0;
 
     static bool lookup(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
-                       std::int64_t now_unix_ms, TlsResumedSession &out) noexcept {
+                       std::int64_t now_unix_ms, std::span<const std::uint8_t> quic_early_data_context,
+                       TlsResumedSession &out) noexcept {
         auto &self = *static_cast<RecordingServiceLookup *>(ctx);
         self.called = true;
         self.seen_name.assign(name);
         self.seen_now_ms = now_unix_ms;
-        return TlsTicketService::lookup_thunk(&self.service, identity, name, now_unix_ms, out);
+        return TlsTicketService::lookup_thunk(&self.service, identity, name, now_unix_ms, quic_early_data_context, out);
     }
     [[nodiscard]] TlsResumptionLookup hook() noexcept { return TlsResumptionLookup{&lookup, this}; }
 };

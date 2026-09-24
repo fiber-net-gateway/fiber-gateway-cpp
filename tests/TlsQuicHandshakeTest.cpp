@@ -38,6 +38,7 @@
 
 #include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/TlsConnectedState.h>
+#include <fiber/tls/TlsTicketService.h>
 #include <fiber/tls/TlsVersion.h>
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/crypto/TlsSecret.h>
@@ -65,8 +66,11 @@ using fiber::tls::TlsSecret;
 using fiber::tls::TlsServerConfig;
 using fiber::tls::TlsServerHandshakeEngine;
 using fiber::tls::TlsSessionOffer;
+using fiber::tls::TlsTicketKeyMaterial;
+using fiber::tls::TlsTicketKeyPolicy;
 using fiber::tls::TlsTicketMinter;
 using fiber::tls::TlsTicketRequest;
+using fiber::tls::TlsTicketService;
 using Event = TlsServerHandshakeEngine::Event;
 
 // TlsQuicLevel mirrors ssl_encryption_level_t value-for-value (the QUIC
@@ -748,10 +752,19 @@ public:
         std::uint32_t age_add = 0;
         std::uint32_t max_early_data = 0;
         std::int64_t issued_ms = 0;
+        bool quic = false; // the mint face — echoed so the engine's face gate passes QUIC tickets
     };
 
     [[nodiscard]] const Entry *first_entry() const noexcept {
         return entries.empty() ? nullptr : &entries.begin()->second;
+    }
+
+    // The face-gate probe: relabel the stored ticket as TCP-minted so the
+    // engine's face gate (10 §6.1) must treat the offer as a miss.
+    void flip_first_face() noexcept {
+        if (!entries.empty()) {
+            entries.begin()->second.quic = false;
+        }
     }
 
     [[nodiscard]] std::vector<std::uint8_t> first_ticket() const {
@@ -772,6 +785,7 @@ public:
         entry.age_add = req.ticket_age_add;
         entry.max_early_data = req.max_early_data;
         entry.issued_ms = req.now_unix_ms;
+        entry.quic = req.quic;
         const std::uint64_t id = self.next_id++;
         std::array<std::uint8_t, 8> blob{};
         for (unsigned i = 0; i < 8; ++i) {
@@ -786,7 +800,7 @@ public:
     }
 
     static bool lookup(void *ctx, std::span<const std::uint8_t> identity, std::string_view, std::int64_t,
-                       fiber::tls::TlsResumedSession &out) noexcept {
+                       std::span<const std::uint8_t>, fiber::tls::TlsResumedSession &out) noexcept {
         const auto &self = *static_cast<TestSessionStore *>(ctx);
         const auto it = self.entries.find(std::vector<std::uint8_t>(identity.begin(), identity.end()));
         if (it == self.entries.end()) {
@@ -798,6 +812,7 @@ public:
         out.alpn = entry.alpn;
         out.ticket_age_add = entry.age_add;
         out.max_early_data = entry.max_early_data;
+        out.quic = entry.quic;
         out.ticket_issued_ms = entry.issued_ms;
         return true;
     }
@@ -1332,5 +1347,183 @@ TEST(TlsQuicHandshake, SelfInteropEarlyDataAccepted) {
 
         expect_engine_export_order(client_sink);
         expect_engine_export_order(server_sink);
+    });
+}
+
+// =====================================================================
+// The 0-RTT consistency gate (10 §6.1): remembered params vs current ones
+// =====================================================================
+
+// Wraps the real stateless service at mint time — the request's scalars and
+// the sealed blob are all a client needs to offer the ticket again (the PSK
+// is re-derived from the hop-1 server's exported resumption master).
+struct CapturingMinter {
+    TlsTicketService *service = nullptr;
+    std::vector<std::uint8_t> ticket;
+    std::uint32_t age_add = 0;
+    TlsCipherSuiteId suite = TlsCipherSuiteId::TlsAes128GcmSha256;
+
+    static std::size_t mint(void *ctx, const TlsTicketRequest &req, std::span<std::uint8_t> out) noexcept {
+        auto &self = *static_cast<CapturingMinter *>(ctx);
+        const std::size_t len = TlsTicketService::mint_thunk(self.service, req, out);
+        if (len != 0) {
+            self.ticket.assign(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(len));
+            self.age_add = req.ticket_age_add;
+            self.suite = req.suite;
+        }
+        return len;
+    }
+    [[nodiscard]] TlsTicketMinter hook() noexcept { return {&mint, this}; }
+};
+
+namespace {
+
+[[nodiscard]] std::unique_ptr<TlsTicketService> fixed_key_service() {
+    TlsTicketKeyMaterial material{};
+    material.id = 1;
+    material.created_ms = certfix::kRefNowMs;
+    for (std::size_t i = 0; i < material.bytes.size(); ++i) {
+        material.bytes[i] = static_cast<std::uint8_t>(i * 7 + 1);
+    }
+    const std::array<TlsTicketKeyMaterial, 1> keys{{material}};
+    auto service = std::make_unique<TlsTicketService>(keys, TlsTicketKeyPolicy{});
+    if (!service->valid()) {
+        return nullptr;
+    }
+    return service;
+}
+
+} // namespace
+
+// The matrix's mismatch leg at engine level: hop 1 mints under context A,
+// hop 2 offers the ticket with early data against context B. The gate
+// demotes to 1-RTT resumption only — the session still resumes, no early
+// secrets are installed, and the client sees early_data_accepted == false.
+TEST(TlsQuicHandshake, EarlyDataContextMismatchResumesAtOneRtt) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        QuicMaterial material;
+        auto service = fixed_key_service();
+        ASSERT_NE(nullptr, service);
+        constexpr std::array<std::uint8_t, 6> kContextA{{1, 2, 3, 4, 5, 6}};
+        constexpr std::array<std::uint8_t, 6> kContextB{{1, 2, 3, 4, 5, 9}};
+
+        // hop 1: mint a 0-RTT-capable ticket bound to context A.
+        TlsSecret master{};
+        CapturingMinter capturing{service.get()};
+        const TlsTicketMinter minter = capturing.hook();
+        {
+            EngineQuicSink client_sink;
+            EngineQuicSink server_sink;
+            TlsServerConfig cfg = material.server_cfg(server_sink);
+            cfg.enable_early_data = true;
+            cfg.quic_early_data_context = kContextA;
+            TlsServerHandshakeEngine server(cfg, nullptr, &minter);
+            TlsClientHandshakeEngine client(material.client_cfg(client_sink), nullptr);
+            ASSERT_TRUE(pump_self(client_sink, client, server_sink, server));
+            ASSERT_TRUE(server.done());
+            master = TlsSecret::from_bytes(server.take_quic_result().resumption_master.bytes());
+        }
+        ASSERT_FALSE(capturing.ticket.empty());
+
+        // The client-side receipt derivation: PSK = f(resumption_master, 0).
+        const std::array<std::uint8_t, 1> nonce{0};
+        const auto psk = fiber::tls::tls13_resumption_psk(master, nonce);
+        ASSERT_TRUE(psk.has_value());
+
+        // hop 2: offer the ticket with early data against context B.
+        EngineQuicSink client_sink;
+        EngineQuicSink server_sink;
+        TlsSessionOffer offer;
+        offer.identity = capturing.ticket;
+        offer.obfuscated_ticket_age = capturing.age_add; // zero elapsed age
+        offer.suite = capturing.suite;
+        offer.psk = psk->bytes();
+        offer.max_early_data = 0xffffffff;
+
+        const TlsResumptionLookup lookup = service->lookup();
+        TlsServerConfig cfg = material.server_cfg(server_sink);
+        cfg.enable_early_data = true;
+        cfg.quic_early_data_context = kContextB; // the server's params changed
+        TlsServerHandshakeEngine server(cfg, &lookup, &minter);
+        TlsClientHandshakeEngine client(material.client_cfg(client_sink), &offer);
+
+        ASSERT_TRUE(pump_self(client_sink, client, server_sink, server));
+        EXPECT_FALSE(client.failed());
+        EXPECT_FALSE(server.failed());
+
+        // 0-RTT vetoed: the server never installs the early read secret.
+        EXPECT_EQ(nullptr, server_sink.find_secret(TlsQuicLevel::EarlyData, false));
+        // ...but the session resumed at 1-RTT (not a full handshake).
+        const TlsQuicHandshakeResult result = client.take_quic_result();
+        EXPECT_TRUE(result.session_resumed);
+        EXPECT_FALSE(result.early_data_accepted);
+
+        // The 1-RTT legs still agree across the engines.
+        for (const TlsQuicLevel level: {TlsQuicLevel::Handshake, TlsQuicLevel::Application}) {
+            const auto *client_write = client_sink.find_secret(level, true);
+            const auto *server_read = server_sink.find_secret(level, false);
+            ASSERT_NE(nullptr, client_write);
+            ASSERT_NE(nullptr, server_read);
+            EXPECT_TRUE(secrets_equal(client_write->bytes, server_read->bytes));
+        }
+    });
+}
+
+// The face gate's miss leg: a ticket relabeled as TCP-minted (the cross-face
+// offer) is a plain miss — the handshake runs FULL (session_resumed false),
+// never a fatal error.
+TEST(TlsQuicHandshake, CrossFaceTicketFallsBackToFullHandshake) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        QuicMaterial material;
+        TestSessionStore store;
+        const TlsTicketMinter minter = store.minter_hook();
+        const TlsResumptionLookup lookup = store.lookup_hook();
+
+        // hop 1: mint a 0-RTT-capable ticket on the QUIC face.
+        {
+            EngineQuicSink client_sink;
+            EngineQuicSink server_sink;
+            TlsServerConfig cfg = material.server_cfg(server_sink);
+            cfg.enable_early_data = true;
+            TlsServerHandshakeEngine server(cfg, nullptr, &minter);
+            TlsClientHandshakeEngine client(material.client_cfg(client_sink), nullptr);
+            ASSERT_TRUE(pump_self(client_sink, client, server_sink, server));
+        }
+        const TestSessionStore::Entry *entry = store.first_entry();
+        ASSERT_NE(nullptr, entry);
+        store.flip_first_face(); // the stored ticket now claims the TCP face
+
+        // hop 2: offer with early data — the face gate must treat it as a miss.
+        EngineQuicSink client_sink;
+        EngineQuicSink server_sink;
+        TlsSessionOffer offer;
+        const std::vector<std::uint8_t> ticket = store.first_ticket();
+        offer.identity = ticket;
+        offer.obfuscated_ticket_age = entry->age_add;
+        offer.suite = entry->suite;
+        offer.psk = entry->psk;
+        offer.max_early_data = entry->max_early_data;
+
+        TlsServerConfig cfg = material.server_cfg(server_sink);
+        cfg.enable_early_data = true;
+        TlsServerHandshakeEngine server(cfg, &lookup, &minter);
+        TlsClientHandshakeEngine client(material.client_cfg(client_sink), &offer);
+
+        ASSERT_TRUE(pump_self(client_sink, client, server_sink, server));
+        EXPECT_FALSE(client.failed());
+        EXPECT_FALSE(server.failed());
+
+        EXPECT_EQ(nullptr, server_sink.find_secret(TlsQuicLevel::EarlyData, false));
+        const TlsQuicHandshakeResult result = client.take_quic_result();
+        EXPECT_FALSE(result.session_resumed); // a full handshake, not a resume
+        EXPECT_FALSE(result.early_data_accepted);
+
+        for (const TlsQuicLevel level: {TlsQuicLevel::Handshake, TlsQuicLevel::Application}) {
+            const auto *client_write = client_sink.find_secret(level, true);
+            const auto *server_read = server_sink.find_secret(level, false);
+            ASSERT_NE(nullptr, client_write);
+            ASSERT_NE(nullptr, server_read);
+            EXPECT_TRUE(secrets_equal(client_write->bytes, server_read->bytes));
+        }
     });
 }
