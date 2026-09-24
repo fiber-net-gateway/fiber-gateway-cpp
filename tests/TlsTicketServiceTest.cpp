@@ -368,7 +368,7 @@ TEST(TlsTicketService, LookupThunkResumes13Ticket) {
     const TlsResumptionLookup lookup = service.lookup();
     ASSERT_NE(nullptr, lookup.lookup);
     TlsResumedSession resumed;
-    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, resumed));
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, {}, resumed));
     EXPECT_EQ(TlsProtocolVersion::Tls13, resumed.version); // the 1.3 engine's gate input
     // The engine consumes the psk view synchronously — it must be the sealed
     // pre-derived PSK, i.e. exactly what the client derives from the NST.
@@ -394,7 +394,7 @@ TEST(TlsTicketService, LookupThunkResumes12TicketWithMaster) {
 
     const TlsResumptionLookup lookup = service.lookup();
     TlsResumedSession resumed;
-    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, resumed));
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, {}, resumed));
     EXPECT_EQ(TlsProtocolVersion::Tls12, resumed.version);
     ASSERT_EQ(fx.master12.size(), resumed.psk.size());
     EXPECT_EQ(0, std::memcmp(fx.master12.data(), resumed.psk.data(), fx.master12.size()));
@@ -413,21 +413,89 @@ TEST(TlsTicketService, LookupThunkMissesOnWrongNameTamperOrExpiry) {
 
     // Wrong vhost name — the AAD binding rejects before any decryption.
     const std::vector<std::uint8_t> other = fx.mint(service, fx.request13("other.example"));
-    EXPECT_FALSE(lookup.lookup(lookup.ctx, other, "example.com", kNow, resumed));
+    EXPECT_FALSE(lookup.lookup(lookup.ctx, other, "example.com", kNow, {}, resumed));
 
     // Tampered ciphertext.
     std::vector<std::uint8_t> bad = fx.mint(service, fx.request13());
     bad[kHeaderLen + 2] ^= 0xA5;
-    EXPECT_FALSE(lookup.lookup(lookup.ctx, bad, "example.com", kNow, resumed));
+    EXPECT_FALSE(lookup.lookup(lookup.ctx, bad, "example.com", kNow, {}, resumed));
 
     // Session timeout: a 5 s ticket offered 6 s later (the key window is the
     // default 24 h, so this isolates the payload's own timeout).
     const std::vector<std::uint8_t> expired = fx.mint(service, fx.request13("example.com", 5, kNow));
-    EXPECT_FALSE(lookup.lookup(lookup.ctx, expired, "example.com", kNow + 6'000, resumed));
+    EXPECT_FALSE(lookup.lookup(lookup.ctx, expired, "example.com", kNow + 6'000, {}, resumed));
 
     // An invalid service (no keys) misses everything — never fatal: this very
     // ticket is unknown key material to it.
     TlsTicketService empty(std::span<const TlsTicketKeyMaterial>{}, TlsTicketKeyPolicy{});
     const TlsResumptionLookup empty_lookup = empty.lookup();
-    EXPECT_FALSE(empty_lookup.lookup(empty_lookup.ctx, fx.mint(service, fx.request13()), "example.com", kNow, resumed));
+    EXPECT_FALSE(
+            empty_lookup.lookup(empty_lookup.ctx, fx.mint(service, fx.request13()), "example.com", kNow, {}, resumed));
+}
+
+// ---- the 0-RTT consistency gate (10 §6.1) ----
+// A QUIC-minted ticket carries the mint-time early-data context; the lookup
+// compares it against the server's current one. A match keeps the ticket's
+// early data; every mismatch (different bytes, different length, or the
+// current context gone empty) demotes to 1-RTT resumption only — the
+// session itself still resumes (lookup stays true).
+TEST(TlsTicketService, LookupGateKeepsEarlyDataOnContextMatch) {
+    Fixture fx;
+    TlsTicketService service(fx.keys(), TlsTicketKeyPolicy{});
+    const std::array<std::uint8_t, 5> context{{0x11, 0x22, 0x33, 0x44, 0x55}};
+    TlsTicketRequest req = fx.request13();
+    req.max_early_data = 0xffffffff; // the QUIC sentinel
+    req.quic = true;
+    req.quic_early_data_context = context;
+    const std::vector<std::uint8_t> ticket = fx.mint(service, req);
+
+    const TlsResumptionLookup lookup = service.lookup();
+    TlsResumedSession resumed;
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, context, resumed));
+    EXPECT_TRUE(resumed.quic); // the engine's face gate input
+    EXPECT_EQ(0xffffffffu, resumed.max_early_data);
+}
+
+TEST(TlsTicketService, LookupGateVetoesEarlyDataOnContextMismatch) {
+    Fixture fx;
+    TlsTicketService service(fx.keys(), TlsTicketKeyPolicy{});
+    const std::array<std::uint8_t, 5> minted{{0x11, 0x22, 0x33, 0x44, 0x55}};
+    const std::array<std::uint8_t, 5> altered{{0x11, 0x22, 0x33, 0x44, 0xAA}};
+    const std::array<std::uint8_t, 4> shorter{{0x11, 0x22, 0x33, 0x44}};
+    TlsTicketRequest req = fx.request13();
+    req.max_early_data = 0xffffffff;
+    req.quic = true;
+    req.quic_early_data_context = minted;
+    const std::vector<std::uint8_t> ticket = fx.mint(service, req);
+
+    const TlsResumptionLookup lookup = service.lookup();
+    TlsResumedSession resumed;
+    // Same length, different bytes.
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, altered, resumed));
+    EXPECT_TRUE(resumed.quic);
+    EXPECT_EQ(0u, resumed.max_early_data); // 0-RTT vetoed, the session resumes
+    // Different length.
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, shorter, resumed));
+    EXPECT_EQ(0u, resumed.max_early_data);
+    // The current context gone empty (early data since disabled).
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, {}, resumed));
+    EXPECT_EQ(0u, resumed.max_early_data);
+}
+
+// A TCP-minted ticket has no gate to run: the context span is ignored and
+// the early data it never had stays absent (the engine's face gate owns the
+// cross-face miss).
+TEST(TlsTicketService, LookupGateSkipsTcpMintedTickets) {
+    Fixture fx;
+    TlsTicketService service(fx.keys(), TlsTicketKeyPolicy{});
+    TlsTicketRequest req = fx.request13();
+    req.max_early_data = 14336; // the TCP budget
+    const std::vector<std::uint8_t> ticket = fx.mint(service, req);
+
+    const TlsResumptionLookup lookup = service.lookup();
+    TlsResumedSession resumed;
+    const std::array<std::uint8_t, 5> context{{0x11, 0x22, 0x33, 0x44, 0x55}};
+    EXPECT_TRUE(lookup.lookup(lookup.ctx, ticket, "example.com", kNow, context, resumed));
+    EXPECT_FALSE(resumed.quic);
+    EXPECT_EQ(14336u, resumed.max_early_data);
 }

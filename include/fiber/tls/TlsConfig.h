@@ -158,6 +158,13 @@ struct TlsServerConfig {
     // quic pointer (the engine asserts it — the context binds at ctor).
     const TlsQuicCallbacks *quic = nullptr;
     std::span<const std::uint8_t> quic_transport_params; // non-empty (in QUIC mode) => EE extension 0x39
+    // The server's 0-RTT-relevant transport params prefix (10 §6.1) — the
+    // leading slice of quic_transport_params the codec marks as governing
+    // early data (BoringSSL SSL_set_quic_early_data_context's context). The
+    // engine seals it into minted tickets and hands the current value to the
+    // resumption lookup; the implementer's comparison is the 0-RTT
+    // consistency gate. Empty on the TCP face (the gate is QUIC-only).
+    std::span<const std::uint8_t> quic_early_data_context;
 };
 
 // Per-ClientHello config selection (09 §4.1): the fork calls `select` right
@@ -186,15 +193,21 @@ struct TlsResumedSession { // all-borrowed views; the lookup caller owns the byt
     std::uint32_t ticket_age_add = 0; // 1.3 only
     std::uint32_t max_early_data = 0; // 0 = this ticket allows no 0-RTT (1.3 only)
     std::int64_t ticket_issued_ms = 0; // 1.3: the age-window check; 1.2: expiry only (in open)
+    bool quic = false; // the ticket's mint face; the engine rejects the other face as a miss
+                       // (BoringSSL ssl_session_is_resumable's is_quic match, 10 §6.1)
 };
 struct TlsResumptionLookup {
     // name = the CH's SNI (the stateless ticket binds it into its AAD),
     // now_unix_ms = the engine's clock for the expiry check — the same
-    // snapshot the age gate uses. The out spans borrow the hook's storage
-    // and must stay valid until the caller has consumed them (the engine
-    // reads them right after the call returns).
+    // snapshot the age gate uses. quic_early_data_context = the server's
+    // current 0-RTT-relevant transport params prefix (10 §6.1); empty on the
+    // TCP face. The stateless implementer compares it against the context
+    // sealed at mint — a mismatch vetoes only the ticket's early data, the
+    // session still resumes. The out spans borrow the hook's storage and
+    // must stay valid until the caller has consumed them (the engine reads
+    // them right after the call returns).
     bool (*lookup)(void *ctx, std::span<const std::uint8_t> identity, std::string_view name, std::int64_t now_unix_ms,
-                   TlsResumedSession &out) noexcept = nullptr;
+                   std::span<const std::uint8_t> quic_early_data_context, TlsResumedSession &out) noexcept = nullptr;
     void *ctx = nullptr;
 };
 
@@ -213,6 +226,8 @@ struct TlsTicketRequest {
     std::uint32_t max_early_data = 0; // enable_early_data ? 14336 : 0
     std::uint32_t timeout_s = 0;
     std::int64_t now_unix_ms = 0;
+    bool quic = false; // the mint face — sealed so the other face's lookup rejects it
+    std::span<const std::uint8_t> quic_early_data_context; // the 0-RTT consistency gate's mint-time binding (10 §6.1)
     TlsProtocolVersion version = TlsProtocolVersion::Tls13; // selects the payload field set
     std::string_view name; // the CH's SNI — bound into the ticket AAD (cross-vhost replay guard)
 };

@@ -87,6 +87,12 @@ struct TlsTicketKeyMaterial {
 // secret is already the resumption PSK (1.3, derived at mint from the
 // resumption master + ticket nonce) or the 1.2 master secret.
 struct TlsTicketContents {
+    // The sealed 0-RTT consistency gate's mint-time binding (10 §6.1): the
+    // codec's zero-RTT-relevant server transport params prefix. Worst case
+    // is ~8 varint params (9 bytes each) + the optional empty migration
+    // param; 128 leaves slack without threatening the container budget.
+    static constexpr std::size_t kMaxQuicContextLen = 128;
+
     TlsProtocolVersion version = TlsProtocolVersion::Tls13;
     TlsSecret secret{}; // move-only; open() fills it
     TlsCipherSuiteId suite = TlsCipherSuiteId::TlsAes128GcmSha256;
@@ -96,6 +102,9 @@ struct TlsTicketContents {
     std::uint32_t max_early_data = 0; // 1.3 only (0 while enable_early_data is off)
     std::int64_t issued_ms = 0;
     std::uint32_t timeout_s = 0;
+    bool quic = false; // 1.3 only: the mint face (lookup on the other face is a miss)
+    std::array<std::uint8_t, kMaxQuicContextLen> quic_context{}; // 1.3 only: empty when minted early-data-less
+    std::uint16_t quic_context_len = 0;
 
     [[nodiscard]] std::string_view alpn_view() const noexcept {
         return {reinterpret_cast<const char *>(alpn.data()), alpn_len};
@@ -142,7 +151,8 @@ public:
     // overwrites the cell).
     [[nodiscard]] TlsResumptionLookup lookup() const noexcept;
     static bool lookup_thunk(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
-                             std::int64_t now_unix_ms, TlsResumedSession &out) noexcept;
+                             std::int64_t now_unix_ms, std::span<const std::uint8_t> quic_early_data_context,
+                             TlsResumedSession &out) noexcept;
 
     // Authenticates + decrypts + freshness-checks a presented ticket.
     // `name` must equal the mint-time SNI (empty == empty). Contents are

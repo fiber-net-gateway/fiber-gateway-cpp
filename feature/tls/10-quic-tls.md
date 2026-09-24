@@ -467,3 +467,58 @@ snap curl --cacert 须 $HOME(仓库路径读不了)。
 
 **待续**:slice 3(0-RTT/恢复矩阵扩展)、slice 4(链接收窄 + TlsSslFactory/
 TlsRuntime 清退)。待拍板 A/B 未决。
+
+### slice 3 — 0-RTT 一致性门与 is_quic 面匹配(2026-09-24)
+
+**范围**:§6.1 的 lookup veto + §11 验收矩阵。slice 2 已提前带走的
+(TlsSessionState/obfuscated_ticket_age/NST 收据/offer 装配/拒绝语义)
+不重做;本片补齐服务端门与矩阵测试。
+
+**lookup 签名**(§6.1 逐字落地):`TlsResumptionLookup::lookup` 增
+`std::span<const std::uint8_t> quic_early_data_context`。命名偏离设计稿
+的 `quic_transport_params`:该名已被 TlsServerConfig 的全量 0x39 blob
+占用,而门比对的是 **zero-RTT 相关前缀**(quic_create_transport_params
+的 zero_rtt_len 标记——initial_max_data/streams/stream-data/idle-timeout/
+udp-payload/migration/cid-limit,BoringSSL SSL_set_quic_early_data_context
+的 context 同源);TlsServerConfig 相应增 `quic_early_data_context` 字段,
+QuicTlsSession.init_server 恕取同一稳定缓冲的前缀视图。设计稿"与 CH 的
+0x39 比对"按 BoringSSL 实义定谳为 **票内存的 mint 时 context vs 当前
+服务端 context**(tls13_server.cc:648 mint 拷入票、:501-506 CRYPTO_memcmp
+比对,不一致 → ssl_early_data_quic_parameter_mismatch):CH 的 0x39 是
+对端参数,不参与此门。
+
+**无状态门实现**:容器版本 1→2(1.3 payload 尾追加 quic 面 bit + context,
+1.2 payload 不动——QUIC 无 1.2;AAD 含版本字节故旧票天然 Rejected→全握手
+安全降级);TlsTicketRequest/TlsTicketContents 增面与 context(≤128B,
+kMaxPayloadLen 有余);**比对在 TlsTicketService::lookup_thunk**(默认
+lookup 实现者,即设计稿"QUIC 层自办"之落点):`tls_constant_time_equal`
+不一致 → 仅钳 `out.max_early_data = 0`——会话照常恢复,引擎 573 行的
+`resumed_max_early_ > 0` 自然降 1-RTT,与上游 demote 语义一致。TCP 面
+票(quic=false)不比对。引擎侧只供货:1.3 lookup 调用传
+cfg_.quic_early_data_context,1.2 恒传空。
+
+**is_quic 面匹配**(ssl_session.cc:512 parity):票内面 bit →
+TlsResumedSession.quic;引擎 version 门后增面门,`resumed.quic !=
+(cfg_.quic != nullptr)` → PskOutcome::Reject(纯 miss,全握手,非 fatal)。
+
+**矩阵验收**(2435/2435 绿,+7 测试):
+- 服务级 ×3(TlsTicketServiceTest):match 保早数据/mismatch(异字节、
+  异长、当前空)钳 0/TCB 票跳过比对。
+- 引擎级 ×2(TlsQuicHandshakeTest):`EarlyDataContextMismatchResumesAtOneRtt`
+  (真 service 两跳:A 铸票 B 换 context → session_resumed=true +
+  early_data_accepted=false + 服务端无 EarlyData 读密钥 + 两级别密钥一致);
+  `CrossFaceTicketFallsBackToFullHandshake`(面改标 → session_resumed=false)。
+- 传输级 ×2(QuicClientTest):`EarlyDataRejectedOnTransportParamsChange`
+  /`EarlyDataRejectedWhenServerDeclinesEarlyData`(双 server 共享固定键
+  service;connect_twice_across_servers 协程)。**坑**:endpoint
+  Options.transport.initial_max_data 被连接构造无条件用
+  recv_flow.conn_recv_limit 覆写(广告窗口=真实接收缓冲,既有设计),
+  改变前缀的正确旋钮是 `recv_flow.conn_recv_limit`。
+- 接受/重连/复用腿由既有 ReusesSessionAndNewTokenWithEarlyData 覆盖。
+
+**测试侧适配**:三处 lookup 表签名 +TlsQuicHandshakeTest
+TestSessionStore.Entry 记面(mint 捕获/lookup 回填,否则面门把 QUIC 票
+误判跨面)。
+
+**待续**:slice 4(链接收窄 boringssl::crypto only+删 TlsSslFactory/
+TlsRuntime+ASan 独立 deps)。待拍板 A/B 未决。

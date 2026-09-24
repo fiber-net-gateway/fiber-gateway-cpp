@@ -127,7 +127,10 @@ bool Tls12ServerHandshake::try_resume_12(const TlsClientHello &ch) noexcept {
         return false;
     }
     TlsResumedSession resumed{};
-    if (!resumption_->lookup(resumption_->ctx, ch.session_ticket, hello_.view.server_name, cfg_.now_unix_ms, resumed)) {
+    // 1.2 never runs on QUIC, so the early-data context span is always empty
+    // here — the gate is 1.3-only (10 §6.1).
+    if (!resumption_->lookup(resumption_->ctx, ch.session_ticket, hello_.view.server_name, cfg_.now_unix_ms, {},
+                             resumed)) {
         return false;
     }
     // The lookup is version-blind — only a 1.2-payload ticket resumes here.

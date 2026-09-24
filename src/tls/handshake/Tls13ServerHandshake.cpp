@@ -208,16 +208,26 @@ Tls13ServerHandshake::PskOutcome Tls13ServerHandshake::try_accept_psk(const TlsC
     // ---- lookup (hook owns the returned bytes; miss = full handshake). The
     // CH's SNI rides along so the stateless open can check the ticket's AAD
     // name binding, and now_unix_ms is the same clock snapshot the age gate
-    // below uses — the lookup's expiry and the gate can never disagree. ----
+    // below uses — the lookup's expiry and the gate can never disagree. The
+    // server's current early-data context rides with them: the implementer's
+    // mint-time comparison is the 0-RTT consistency gate (10 §6.1). ----
     TlsResumedSession resumed{};
     if (resumption_ == nullptr || resumption_->lookup == nullptr ||
-        !resumption_->lookup(resumption_->ctx, id.identity, hello_.view.server_name, cfg_.now_unix_ms, resumed)) {
+        !resumption_->lookup(resumption_->ctx, id.identity, hello_.view.server_name, cfg_.now_unix_ms,
+                             cfg_.quic_early_data_context, resumed)) {
         return PskOutcome::Reject;
     }
 
     // ---- version gate: the lookup is version-blind, so a 1.2 ticket offered
     // in a 1.3 CH (never legitimate, always possible) is a plain miss. ----
     if (resumed.version != TlsProtocolVersion::Tls13) {
+        return PskOutcome::Reject;
+    }
+
+    // ---- face gate (BoringSSL ssl_session_is_resumable parity): a ticket
+    // minted on the other face — QUIC offered to TCP or TCP offered to QUIC —
+    // is a plain miss, not a fatal error. ----
+    if (resumed.quic != (cfg_.quic != nullptr)) {
         return PskOutcome::Reject;
     }
 
@@ -965,6 +975,10 @@ void Tls13ServerHandshake::finish_1_3() noexcept {
         request.timeout_s = cfg_.session_timeout_s;
         request.now_unix_ms = cfg_.now_unix_ms;
         request.version = TlsProtocolVersion::Tls13;
+        // The face + the 0-RTT consistency gate's mint-time binding (10
+        // §6.1): the stateless service seals both into the ticket.
+        request.quic = cfg_.quic != nullptr;
+        request.quic_early_data_context = cfg_.quic_early_data_context;
         // ALPN lands in the QUIC result, not state_, in that mode
         // (record_alpn) — read whichever holds the negotiated protocol.
         request.alpn = cfg_.quic != nullptr

@@ -17,9 +17,9 @@ namespace fiber::tls {
 
 namespace {
 
-// ---- container constants (version 1; see the header for the layout) ----
+// ---- container constants (version 2; see the header for the layout) ----
 
-constexpr std::uint8_t kContainerVersion = 1;
+constexpr std::uint8_t kContainerVersion = 2; // v2: the 1.3 payload gained the QUIC face + early-data context
 constexpr std::size_t kContainerHeaderLen = 1 + 4 + 12; // ver || key_id || nonce
 constexpr std::size_t kTagLen = 16;
 constexpr std::uint8_t kKindTls13 = 0x13;
@@ -27,7 +27,7 @@ constexpr std::uint8_t kKindTls12 = 0x12;
 constexpr std::size_t kAeadKeyLen = 16;
 constexpr std::size_t kNonceLen = 12;
 constexpr std::size_t kMaxAlpnLen = 255;
-constexpr std::size_t kMaxPayloadLen = 512; // 1+1+48+2+1+255+4+4+8+4 = 328, headroom
+constexpr std::size_t kMaxPayloadLen = 512; // 1+1+48+2+1+255+4+4+8+4 = 328; +2+128 context, headroom
 constexpr std::size_t kMaxAadLen = 1 + 4 + 2 + TlsTicketService::kMaxNameLen;
 
 void store_be16(std::uint8_t *dst, std::uint16_t v) noexcept {
@@ -172,7 +172,16 @@ struct Reader {
     if (tls13 && (!w.u32(req.ticket_age_add) || !w.u32(req.max_early_data))) {
         return false;
     }
-    return w.u64(static_cast<std::uint64_t>(req.now_unix_ms)) && w.u32(req.timeout_s);
+    if (!w.u64(static_cast<std::uint64_t>(req.now_unix_ms)) || !w.u32(req.timeout_s)) {
+        return false;
+    }
+    // 1.3 only (v2): the QUIC face + the 0-RTT consistency gate's mint-time
+    // context. 1.2 never runs on QUIC, so its payload keeps the v1 shape.
+    if (tls13 && (!w.u8(req.quic ? 1 : 0) || !w.u8(static_cast<std::uint8_t>(req.quic_early_data_context.size())) ||
+                  !w.bytes(req.quic_early_data_context))) {
+        return false;
+    }
+    return true;
 }
 
 // AAD = ver || key_id || be16(name.len) || name. The name rides OUTSIDE the
@@ -317,7 +326,8 @@ std::size_t TlsTicketService::mint_thunk(void *ctx, const TlsTicketRequest &req,
     }
 
     // ---- input validation (a declined mint is always safe) ----
-    if (req.name.size() > kMaxNameLen || req.alpn.size() > kMaxAlpnLen) {
+    if (req.name.size() > kMaxNameLen || req.alpn.size() > kMaxAlpnLen ||
+        req.quic_early_data_context.size() > TlsTicketContents::kMaxQuicContextLen) {
         return 0;
     }
     // 1.3: the ticket carries the DERIVED PSK, not the resumption master —
@@ -440,7 +450,22 @@ TlsTicketService::OpenStatus TlsTicketService::open(std::span<const std::uint8_t
     if (kind == kKindTls13 && (!r.u32(contents.ticket_age_add) || !r.u32(contents.max_early_data))) {
         return OpenStatus::Rejected;
     }
-    if (!r.u64(issued_ms) || !r.u32(timeout_s) || !r.empty()) {
+    if (!r.u64(issued_ms) || !r.u32(timeout_s)) {
+        return OpenStatus::Rejected;
+    }
+    if (kind == kKindTls13) {
+        // v2 tail: QUIC face + the sealed early-data context. A v1 ticket
+        // (no tail) fails the u8 read — Rejected, a full handshake next time.
+        std::uint8_t quic = 0;
+        std::uint8_t ctx_len = 0;
+        if (!r.u8(quic) || !r.u8(ctx_len) || ctx_len > TlsTicketContents::kMaxQuicContextLen ||
+            !r.bytes(contents.quic_context.data(), ctx_len)) {
+            return OpenStatus::Rejected;
+        }
+        contents.quic = quic != 0;
+        contents.quic_context_len = ctx_len;
+    }
+    if (!r.empty()) {
         return OpenStatus::Rejected; // trailing bytes = not our format
     }
     contents.secret = TlsSecret::from_bytes({secret.data(), secret_len});
@@ -480,7 +505,8 @@ thread_local TlsTicketContents t_staged_resumption;
 // version-blind: both ticket kinds map straight through (`version` says
 // which payload it was; each engine rejects the other version's ticket).
 bool TlsTicketService::lookup_thunk(void *ctx, std::span<const std::uint8_t> identity, std::string_view name,
-                                    std::int64_t now_unix_ms, TlsResumedSession &out) noexcept {
+                                    std::int64_t now_unix_ms, std::span<const std::uint8_t> quic_early_data_context,
+                                    TlsResumedSession &out) noexcept {
     auto &self = *static_cast<TlsTicketService *>(ctx);
     TlsTicketContents &contents = t_staged_resumption;
     if (self.open(identity, name, now_unix_ms, contents) != OpenStatus::Ok) {
@@ -493,6 +519,17 @@ bool TlsTicketService::lookup_thunk(void *ctx, std::span<const std::uint8_t> ide
     out.ticket_age_add = contents.ticket_age_add;
     out.max_early_data = contents.max_early_data;
     out.ticket_issued_ms = contents.issued_ms;
+    out.quic = contents.quic;
+    // The 0-RTT consistency gate (10 §6.1) — BoringSSL quic_ticket_compatible
+    // parity: a QUIC-minted ticket's early data survives only when the
+    // current context equals the mint-time one (an empty stored context
+    // never matches, exactly as upstream). The veto demotes the ticket to
+    // 1-RTT resumption only; the engine's `max_early_data > 0` test does
+    // the downgrade. A TCP-minted ticket carries no context to compare.
+    if (contents.quic &&
+        !tls_constant_time_equal({contents.quic_context.data(), contents.quic_context_len}, quic_early_data_context)) {
+        out.max_early_data = 0;
+    }
     return true;
 }
 
