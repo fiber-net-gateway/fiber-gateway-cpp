@@ -55,6 +55,12 @@ public:
     [[nodiscard]] common::IoResult<Event> feed(mem::IoBuf &&bytes) noexcept;
     [[nodiscard]] common::IoResult<Event> feed(mem::IoBufChain &&bytes) noexcept;
 
+    // QUIC mode (10 §3.3): CRYPTO-stream bytes at `level` — raw handshake
+    // messages, no record framing. The QUIC layer gates level ordering
+    // (fully consuming each level's stream before advancing). Requires a
+    // config with quic callbacks; mutually exclusive with feed().
+    [[nodiscard]] common::IoResult<Event> feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept;
+
     // 0-RTT write path. Available only while early data is offered
     // (session->max_early_data > 0) and not yet accepted or rejected; the
     // cumulative cap is the advertised max_early_data. MessageTooLarge when
@@ -73,8 +79,15 @@ public:
     // (received). Requires done().
     [[nodiscard]] TlsAlertDesc failure_alert() const noexcept;
     // HandshakeDone: the connected-phase state (record ciphers moved in with
-    // their sequence continuity). Requires done() && !failed().
+    // their sequence continuity). Requires done() && !failed(). QUIC mode:
+    // contract violation — take_quic_result() is that mode's handoff.
     [[nodiscard]] TlsConnectedState take_state() noexcept;
+
+    // HandshakeDone in QUIC mode (10 §8): the tail delivery — secrets went
+    // out via set_secret during the handshake; this carries the resumption
+    // master, ALPN, and the resume/0-RTT verdicts. Requires done() &&
+    // !failed() && config.quic != nullptr.
+    [[nodiscard]] TlsQuicHandshakeResult take_quic_result() noexcept;
 
     // HandshakeDone: inbound bytes the handshake never consumed (app data
     // piggybacked behind the final flight, or a post-handshake NST that

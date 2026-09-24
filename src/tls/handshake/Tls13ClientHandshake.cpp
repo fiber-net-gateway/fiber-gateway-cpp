@@ -79,8 +79,16 @@ void Tls13ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
         fail(TlsAlertDesc::IllegalParameter); // transcript-hash stability (06 §2.1)
         return;
     }
-    if (sh.session_id.size() != hello_.session_id.size() ||
-        std::memcmp(sh.session_id.data(), hello_.session_id.data(), hello_.session_id.size()) != 0) {
+    // The session-id echo must equal what the CH carried on the wire. QUIC
+    // clients send an EMPTY legacy_session_id (RFC 9001 §8.4) even though the
+    // entropy draw happens anyway (tls_client_hello_build) — compare against
+    // the wire form, not the drawn bytes, or every QUIC echo check fails.
+    const bool session_id_echo_ok =
+            cfg_.quic != nullptr
+                    ? sh.session_id.empty()
+                    : (sh.session_id.size() == hello_.session_id.size() &&
+                       std::memcmp(sh.session_id.data(), hello_.session_id.data(), hello_.session_id.size()) == 0);
+    if (!session_id_echo_ok) {
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }
@@ -137,7 +145,18 @@ void Tls13ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
         fail(TlsAlertDesc::InternalError);
         return;
     }
-    if (!swap_cipher(ctx_.read_cipher(), server_hs_)) {
+    if (cfg_.quic != nullptr) {
+        // QUIC (10 §4): both handshake secrets export at derivation
+        // (BoringSSL parity — the QUIC layer derives packet keys per
+        // direction); no record cipher exists and the outbound CRYPTO level
+        // becomes Handshake (EoED and the second flight live there).
+        if (!quic_secret(TlsQuicLevel::Handshake, true, client_hs_) ||
+            !quic_secret(TlsQuicLevel::Handshake, false, server_hs_)) {
+            fail(TlsAlertDesc::InternalError);
+            return;
+        }
+        ctx_.set_quic_level(TlsQuicLevel::Handshake);
+    } else if (!swap_cipher(ctx_.read_cipher(), server_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -167,8 +186,16 @@ void Tls13ClientHandshake::start_hello_retry_request(const TlsServerHello &sh,
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }
-    if (sh.session_id.size() != hello_.session_id.size() ||
-        std::memcmp(sh.session_id.data(), hello_.session_id.data(), hello_.session_id.size()) != 0) {
+    // The session-id echo must equal what the CH carried on the wire. QUIC
+    // clients send an EMPTY legacy_session_id (RFC 9001 §8.4) even though the
+    // entropy draw happens anyway (tls_client_hello_build) — compare against
+    // the wire form, not the drawn bytes, or every QUIC echo check fails.
+    const bool session_id_echo_ok =
+            cfg_.quic != nullptr
+                    ? sh.session_id.empty()
+                    : (sh.session_id.size() == hello_.session_id.size() &&
+                       std::memcmp(sh.session_id.data(), hello_.session_id.data(), hello_.session_id.size()) == 0);
+    if (!session_id_echo_ok) {
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }
@@ -345,6 +372,15 @@ void Tls13ClientHandshake::handle_encrypted_extensions(std::span<const std::uint
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }
+    if (cfg_.quic != nullptr) {
+        // 0x39 extraction (10 §5): the QUIC server's transport parameters
+        // ride the EE; the span borrows the inbound stream (the callback
+        // copies). Absence is the QUIC layer's completeness check to raise.
+        std::span<const std::uint8_t> params{};
+        if (tls_find_extension_payload(ee.extensions_block, TlsExtensionType::QuicTransportParameters, params)) {
+            cfg_.quic->on_peer_transport_params(cfg_.quic->ctx, params);
+        }
+    }
     feed13(TlsHandshakeType::EncryptedExtensions, body);
 
     if (ee.has_alpn) {
@@ -355,12 +391,16 @@ void Tls13ClientHandshake::handle_encrypted_extensions(std::span<const std::uint
                 break;
             }
         }
-        if (!offered || ee.alpn.size() > state_.alpn.size()) {
+        if (!offered || ee.alpn.size() > quic_result_.alpn.size()) {
             fail(TlsAlertDesc::IllegalParameter);
             return;
         }
-        std::memcpy(state_.alpn.data(), ee.alpn.data(), ee.alpn.size());
-        state_.alpn_len = static_cast<std::uint16_t>(ee.alpn.size());
+        record_alpn(ee.alpn);
+    } else if (cfg_.quic != nullptr) {
+        // ALPN is mandatory in QUIC (RFC 9001 §8.1) — an EE without it is
+        // fatal, where TCP would simply proceed ALPN-less.
+        fail(TlsAlertDesc::NoApplicationProtocol);
+        return;
     }
     ee_early_data_ = ee.has_early_data;
     st_ = St::ExpectCrCertFin;
@@ -580,16 +620,33 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
     // §4.5: "encrypted under keys derived from the
     // client_early_traffic_secret").
     snapshot13();
-    if (!sched_->application_secrets({hash_buf_.data(), hash_len()}, client_app0_, server_app0_).has_value() ||
-        !swap_cipher(ctx_.read_cipher(), server_app0_)) {
+    if (!sched_->application_secrets({hash_buf_.data(), hash_len()}, client_app0_, server_app0_).has_value()) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
-    if (early_.offered_ext && psk_accepted_ && ee_early_data_) {
+    if (cfg_.quic != nullptr) {
+        // QUIC (10 §4): both application secrets export right after the
+        // server Fin verifies (the QUIC layer gates usage by stream state);
+        // the outbound level STAYS Handshake until the flight is out. Write
+        // before read — the BoringSSL QUIC contract (a stack may ACK
+        // anything it can decrypt implies send keys never lag recv keys).
+        if (!quic_secret(TlsQuicLevel::Application, true, client_app0_) ||
+            !quic_secret(TlsQuicLevel::Application, false, server_app0_)) {
+            fail(TlsAlertDesc::InternalError);
+            return;
+        }
+    } else if (!swap_cipher(ctx_.read_cipher(), server_app0_)) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
+    if (early_.offered_ext && psk_accepted_ && ee_early_data_ && cfg_.quic == nullptr) {
         // EndOfEarlyData closes the accepted 0-RTT window: sealed with the
         // EARLY instance (`early_.write` — ctx_.write_cipher() is not yet
         // live on this path), its record sequence continuing the early-data
-        // records (RFC 8446 §4.5).
+        // records (RFC 8446 §4.5). TCP only — QUIC omits the message
+        // entirely, transcript included (RFC 9001 §8.3: the transport's
+        // shift to the Handshake CRYPTO stream closes the early window; a
+        // peer that receives one treats it as unexpected_message).
         const auto eoed =
                 tls_encode_handshake_message(TlsHandshakeType::EndOfEarlyData, {}, {scratch_.data(), scratch_.size()});
         if (!eoed.has_value() || !t13_.update({scratch_.data(), eoed.value()}) ||
@@ -599,7 +656,7 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
         }
     }
     early_.closed = true;
-    if (!swap_cipher(ctx_.write_cipher(), client_hs_)) {
+    if (cfg_.quic == nullptr && !swap_cipher(ctx_.write_cipher(), client_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -636,27 +693,46 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
     // write side swaps to client_app0; the hs instance dies with the flight.
     snapshot13();
     auto resumption = sched_->resumption_master_secret({hash_buf_.data(), hash_len()});
-    if (!resumption.has_value() || !swap_cipher(ctx_.write_cipher(), client_app0_)) {
+    if (!resumption.has_value()) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
     resumption_master_ = std::move(resumption).value();
+    if (cfg_.quic != nullptr) {
+        // QUIC: the write direction already exported; only the outbound
+        // level advances (nothing follows from the client at 1-RTT today,
+        // but the tail contract stays uniform).
+        ctx_.set_quic_level(TlsQuicLevel::Application);
+    } else if (!swap_cipher(ctx_.write_cipher(), client_app0_)) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
 
     // ---- Done ----
-    state_.version = TlsProtocolVersion::Tls13;
-    state_.suite = suite_;
-    state_.read_cipher = std::move(ctx_.read_cipher());
-    state_.write_cipher = std::move(ctx_.write_cipher());
-    state_.client_app_secret = std::move(client_app0_);
-    state_.server_app_secret = std::move(server_app0_);
-    state_.resumption_master = std::move(resumption_master_);
-    state_.session_resumed = psk_accepted_;
-    state_.early_data_accepted = early_.offered_ext && psk_accepted_ && ee_early_data_;
-    state_.peer_chain = std::move(peer_chain_);
+    if (cfg_.quic != nullptr) {
+        // QUIC tail delivery (10 §8): the single handoff — no record
+        // ciphers, no ConnectedState.
+        quic_result_.resumption_master = std::move(resumption_master_);
+        quic_result_.session_resumed = psk_accepted_;
+        quic_result_.early_data_accepted = early_.offered_ext && psk_accepted_ && ee_early_data_;
+        quic_result_.peer_chain = std::move(peer_chain_);
+    } else {
+        state_.version = TlsProtocolVersion::Tls13;
+        state_.suite = suite_;
+        state_.read_cipher = std::move(ctx_.read_cipher());
+        state_.write_cipher = std::move(ctx_.write_cipher());
+        state_.client_app_secret = std::move(client_app0_);
+        state_.server_app_secret = std::move(server_app0_);
+        state_.resumption_master = std::move(resumption_master_);
+        state_.session_resumed = psk_accepted_;
+        state_.early_data_accepted = early_.offered_ext && psk_accepted_ && ee_early_data_;
+        state_.peer_chain = std::move(peer_chain_);
+    }
     out_.done = true;
     st_ = St::Done;
     // Reader bytes arriving after the server Fin (e.g. an NST in the same
-    // feed) stay buffered — post-handshake messages belong to 08/09.
+    // feed) stay buffered — post-handshake messages belong to 08/09 (QUIC:
+    // the CRYPTO-stream tail drains via take_inbound_leftover).
 }
 
 } // namespace fiber::tls

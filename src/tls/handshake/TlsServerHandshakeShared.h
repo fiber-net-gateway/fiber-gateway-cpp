@@ -67,6 +67,12 @@ inline constexpr std::size_t kServerMaxSigLen = 1024;
 // into NSTs when enable_early_data is on.
 inline constexpr std::uint32_t kMaxEarlyDataAccepted = 14336;
 
+// The QUIC sentinel: RFC 9001 §4.6.1 repurposes max_early_data_size — 0xffffffff
+// means "QUIC 0-RTT accepted, initial_max_data governs volume"; any other value
+// in a QUIC NST is a protocol violation. Omitted entirely when early data is
+// off, as over TCP.
+inline constexpr std::uint32_t kQuicMaxEarlyDataSentinel = 0xffffffff;
+
 // Rejected-early-data discard ceiling: CIPHERTEXT record bytes (the
 // plaintext of records we cannot open is unknowable). BoringSSL's
 // kMaxEarlyDataSkipped.

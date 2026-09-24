@@ -73,6 +73,26 @@ bool tls_psk_modes_contains(std::span<const std::uint8_t> modes, std::uint8_t mo
     return false;
 }
 
+bool tls_find_extension_payload(std::span<const std::uint8_t> block, TlsExtensionType type,
+                                std::span<const std::uint8_t> &payload) noexcept {
+    std::size_t off = 0;
+    while (off + 4 <= block.size()) {
+        const std::uint16_t entry_type =
+                static_cast<std::uint16_t>((static_cast<std::uint16_t>(block[off]) << 8) | block[off + 1]);
+        const std::uint16_t len =
+                static_cast<std::uint16_t>((static_cast<std::uint16_t>(block[off + 2]) << 8) | block[off + 3]);
+        if (off + 4 + len > block.size()) {
+            return false; // unreachable on a decoded block; defensive
+        }
+        if (entry_type == static_cast<std::uint16_t>(type)) {
+            payload = {block.data() + off + 4, len};
+            return true;
+        }
+        off += 4 + len;
+    }
+    return false;
+}
+
 common::IoResult<bool> tls_psk_identity_at(std::span<const std::uint8_t> psk_identities, std::size_t index,
                                            TlsPskIdentityView &out) noexcept {
     TlsReadCursor cursor(psk_identities.data(), psk_identities.size());

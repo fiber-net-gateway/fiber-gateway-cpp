@@ -132,6 +132,12 @@ struct TlsClientHandshakeOutcome {
 // once-per-schedule, so HRR rebuilds the schedule before calling this again.
 [[nodiscard]] bool tls_client_backfill_psk_binder(TlsKeySchedule13 &sched, TlsClientHelloState &hello) noexcept;
 
+// Derives client_early_traffic_secret from Hash(CH) — the derivation half
+// of the 0-RTT write path, split for QUIC (10 定谳 5: early data is STREAM
+// frames there, so only the secret is wanted, never a record cipher).
+[[nodiscard]] common::IoResult<TlsSecret> tls_client_early_secret(TlsKeySchedule13 &sched,
+                                                                  const TlsClientHelloState &hello) noexcept;
+
 // Derives the early-traffic cipher from Hash(CH) — the pre-fork 0-RTT write
 // instance (both CH1-attached early data and the window the fork inherits).
 [[nodiscard]] bool tls_client_init_early_write(TlsKeySchedule13 &sched, const TlsSessionOffer &session,

@@ -50,6 +50,11 @@ public:
     [[nodiscard]] common::IoResult<Event> feed(mem::IoBuf &&bytes) noexcept;
     [[nodiscard]] common::IoResult<Event> feed(mem::IoBufChain &&bytes) noexcept;
 
+    // QUIC mode (10 §3.3): CRYPTO-stream bytes at `level` — raw handshake
+    // messages, no record framing. The QUIC layer gates level ordering.
+    // Requires a config with quic callbacks; mutually exclusive with feed().
+    [[nodiscard]] common::IoResult<Event> feed_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept;
+
     // 0-RTT read path: decrypted early-data plaintext (non-empty only when
     // accepted; bounded by 14336). The glue drains it before and after
     // HandshakeDone alike; a second take yields an empty chain.
@@ -59,8 +64,13 @@ public:
     [[nodiscard]] bool done() const noexcept;
     [[nodiscard]] bool failed() const noexcept;
     [[nodiscard]] TlsAlertDesc failure_alert() const noexcept;
-    // Requires done && !failed.
+    // Requires done && !failed. QUIC mode: contract violation —
+    // take_quic_result() is that mode's handoff.
     [[nodiscard]] TlsConnectedState take_state() noexcept;
+
+    // HandshakeDone in QUIC mode (10 §8): the tail delivery. Requires
+    // done() && !failed() && config.quic != nullptr.
+    [[nodiscard]] TlsQuicHandshakeResult take_quic_result() noexcept;
 
     // Requires done && !failed. Inbound bytes the handshake never consumed
     // (app data piggybacked behind the final flight — the engine stops

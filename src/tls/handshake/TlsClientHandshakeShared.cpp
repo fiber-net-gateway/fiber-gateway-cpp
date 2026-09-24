@@ -41,7 +41,11 @@ bool tls_client_hello_build(TlsClientHelloState &hello, const TlsClientConfig &c
 
     TlsClientHelloInput in{};
     in.random = hello.client_random;
-    in.session_id = hello.session_id;
+    // Middlebox compat mode is TLS-over-TCP only — QUIC clients send an
+    // EMPTY legacy_session_id (RFC 9001 §8.4; BoringSSL servers reject a
+    // non-empty one with illegal_parameter). The drawn bytes stay unused.
+    in.session_id =
+            cfg.quic != nullptr ? std::span<const std::uint8_t>{} : std::span<const std::uint8_t>{hello.session_id};
     in.cipher_suites = kOfferedSuites;
     in.supported_groups = kOfferedGroups;
     in.signature_algorithms = kOfferedSigalgs;
@@ -67,6 +71,11 @@ bool tls_client_hello_build(TlsClientHelloState &hello, const TlsClientConfig &c
         in.sni_host = cfg.sni_host;
     }
     in.alpn = cfg.alpn;
+    // 0x39 rides both CH1 and the HRR rebuild (10 §5): QUIC-only, presence
+    // driven by the config staging.
+    if (cfg.quic != nullptr) {
+        in.quic_transport_params = cfg.quic_transport_params;
+    }
     if (psk_offered) {
         const TlsSuiteInfo *psk_info = tls_suite_info(session->suite);
         if (psk_info == nullptr || !psk_info->is_tls13) {
@@ -112,17 +121,22 @@ bool tls_client_backfill_psk_binder(TlsKeySchedule13 &sched, TlsClientHelloState
             .has_value();
 }
 
-bool tls_client_init_early_write(TlsKeySchedule13 &sched, const TlsSessionOffer &session,
-                                 const TlsClientHelloState &hello, TlsRecordCipher &write) noexcept {
+common::IoResult<TlsSecret> tls_client_early_secret(TlsKeySchedule13 &sched,
+                                                    const TlsClientHelloState &hello) noexcept {
     TlsHash one_shot;
     if (!one_shot.init(sched.hash()) || !one_shot.update({hello.ch.data(), hello.len})) {
-        return false;
+        return std::unexpected(common::IoErr::Invalid);
     }
     std::array<std::uint8_t, 64> digest{};
     if (!one_shot.final(digest)) {
-        return false;
+        return std::unexpected(common::IoErr::Invalid);
     }
-    auto early_secret = sched.client_early_traffic_secret({digest.data(), tls_hash_len(sched.hash())});
+    return sched.client_early_traffic_secret({digest.data(), tls_hash_len(sched.hash())});
+}
+
+bool tls_client_init_early_write(TlsKeySchedule13 &sched, const TlsSessionOffer &session,
+                                 const TlsClientHelloState &hello, TlsRecordCipher &write) noexcept {
+    auto early_secret = tls_client_early_secret(sched, hello);
     if (!early_secret.has_value()) {
         return false;
     }

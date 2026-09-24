@@ -101,6 +101,7 @@ struct TlsClientHelloInput {
     std::uint32_t psk_obfuscated_ticket_age = 0;
     std::uint8_t psk_binder_len = 0; // psk suite hash length (32 | 48)
     bool early_data = false; // early_data extension (psk offers only)
+    std::span<const std::uint8_t> quic_transport_params; // non-empty => 0x39, opaque passthrough (10 §5)
 };
 
 struct TlsClientHelloEncoded {
@@ -190,6 +191,7 @@ struct TlsEncryptedExtensionsInput {
     bool acknowledge_server_name = false;
     std::string_view alpn; // non-empty => selected protocol
     bool early_data = false; // empty extension (0-RTT accepted)
+    std::span<const std::uint8_t> quic_transport_params; // non-empty => 0x39, opaque passthrough (10 §5)
 };
 
 [[nodiscard]] common::IoResult<std::size_t> tls_encode_encrypted_extensions(const TlsEncryptedExtensionsInput &in,

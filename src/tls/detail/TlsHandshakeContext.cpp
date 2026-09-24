@@ -4,6 +4,7 @@
 #include <cstring>
 #include <utility>
 
+#include <fiber/common/Assert.h>
 #include <fiber/tls/record/TlsRecordCipherChain.h>
 
 namespace fiber::tls {
@@ -47,9 +48,36 @@ TlsHandshakeContext::TlsHandshakeContext() noexcept = default;
 
 TlsHandshakeContext::~TlsHandshakeContext() noexcept = default;
 
-bool TlsHandshakeContext::feed(mem::IoBuf &&bytes) noexcept { return reader_.feed(std::move(bytes)); }
+bool TlsHandshakeContext::feed(mem::IoBuf &&bytes) noexcept {
+    FIBER_ASSERT(quic_ == nullptr); // QUIC mode feeds via provide_quic
+    return reader_.feed(std::move(bytes));
+}
 
-bool TlsHandshakeContext::feed(mem::IoBufChain &&bytes) noexcept { return reader_.feed(std::move(bytes)); }
+bool TlsHandshakeContext::feed(mem::IoBufChain &&bytes) noexcept {
+    FIBER_ASSERT(quic_ == nullptr); // QUIC mode feeds via provide_quic
+    return reader_.feed(std::move(bytes));
+}
+
+void TlsHandshakeContext::enable_quic(const TlsQuicCallbacks &callbacks) noexcept {
+    FIBER_ASSERT(quic_ == nullptr && callbacks.set_secret != nullptr && callbacks.add_handshake_data != nullptr &&
+                 callbacks.on_peer_transport_params != nullptr && callbacks.send_alert != nullptr);
+    quic_ = &callbacks;
+}
+
+void TlsHandshakeContext::set_quic_level(TlsQuicLevel level) noexcept {
+    FIBER_ASSERT(static_cast<std::uint8_t>(level) >= static_cast<std::uint8_t>(quic_level_));
+    quic_level_ = level;
+}
+
+bool TlsHandshakeContext::provide_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept {
+    FIBER_ASSERT(quic_ != nullptr && static_cast<std::uint8_t>(level) >=
+                                             static_cast<std::uint8_t>(quic_provided_level_)); // RFC 9001 §4.1.3 gate
+    quic_provided_level_ = level;
+    if (bytes.empty()) {
+        return true; // a level boundary ping needs no bytes
+    }
+    return append_fragment(bytes);
+}
 
 mem::IoBufChain TlsHandshakeContext::take_output() noexcept { return std::move(out_); }
 
@@ -60,6 +88,9 @@ std::size_t TlsHandshakeContext::pending_bytes() const noexcept {
 // ---- inbound ----
 
 TlsInboundStep TlsHandshakeContext::step() noexcept {
+    if (quic_ != nullptr) {
+        return quic_step();
+    }
     for (;;) {
         if (has_current_ && current_off_ < plain_len_) {
             const TlsInboundStep message = extract_message();
@@ -401,10 +432,64 @@ TlsInboundStep TlsHandshakeContext::extract_message() noexcept {
     return step_need_more();
 }
 
+// QUIC inbound (10 §3.3): the CRYPTO stream is raw handshake messages — the
+// same 4-byte-header reassembly contract as the record path, minus records,
+// alerts, CCS, and the 1.3 plaintext-record DOs bound (a CH may arrive in
+// any fragmentation; the 4 MiB per-message bound below is the surviving
+// limit). Each message materializes into message_buf_ (one exact-size copy —
+// the borrowed body span stays valid until the next step()).
+TlsInboundStep TlsHandshakeContext::quic_step() noexcept {
+    const std::size_t total = reassembly_.readable_bytes();
+    if (total < kTlsHandshakeHeaderSize) {
+        return step_need_more();
+    }
+    std::array<std::uint8_t, kTlsHandshakeHeaderSize> header{};
+    if (gather_small(reassembly_, header) == nullptr) {
+        return step_fatal(TlsAlertDesc::InternalError);
+    }
+    const std::size_t body_len = (static_cast<std::size_t>(header[1]) << 16) |
+                                 (static_cast<std::size_t>(header[2]) << 8) | static_cast<std::size_t>(header[3]);
+    if (body_len > kMaxReassembledMessage) {
+        return step_fatal(TlsAlertDesc::DecodeError);
+    }
+    const std::size_t message_len = kTlsHandshakeHeaderSize + body_len;
+    if (total < message_len) {
+        return step_need_more();
+    }
+    message_buf_ = mem::IoBuf::allocate(message_len);
+    if (!message_buf_.valid()) {
+        return step_fatal(TlsAlertDesc::InternalError);
+    }
+    std::size_t done = 0;
+    while (done < message_len) {
+        mem::IoBuf *front = reassembly_.first_readable();
+        if (front == nullptr) {
+            return step_fatal(TlsAlertDesc::InternalError);
+        }
+        const std::size_t take = std::min(front->readable(), message_len - done);
+        std::memcpy(message_buf_.writable_data() + done, front->readable_data(), take);
+        done += take;
+        reassembly_.consume(take);
+    }
+    message_buf_.commit(message_len);
+    TlsInboundStep step;
+    step.kind = TlsInboundStep::Kind::Message;
+    step.type = static_cast<TlsHandshakeType>(header[0]);
+    step.body = {message_buf_.readable_data() + kTlsHandshakeHeaderSize, body_len};
+    return step;
+}
+
 // ---- outbound ----
 
 common::IoResult<void> TlsHandshakeContext::emit(TlsContentType type, std::span<const std::uint8_t> payload,
                                                  TlsRecordCipher *cipher) noexcept {
+    if (quic_ != nullptr) {
+        // QUIC: the payload is one fully-encoded handshake message; the QUIC
+        // layer frames it as CRYPTO at the current outbound level. Records
+        // never exist — type and any cipher argument are TCP concepts.
+        return quic_->add_handshake_data(quic_->ctx, quic_level_, payload) ? common::IoResult<void>{}
+                                                                           : std::unexpected(common::IoErr::NoMem);
+    }
     TlsRecordCipher *seal_with = nullptr;
     if (cipher != nullptr) {
         FIBER_ASSERT(cipher->initialized());
@@ -455,6 +540,11 @@ common::IoResult<void> TlsHandshakeContext::emit(TlsContentType type, std::span<
 }
 
 common::IoResult<void> TlsHandshakeContext::send_ccs() noexcept {
+    // QUIC: the compat CCS is forbidden (RFC 9001 §5.3) — a successful
+    // no-op keeps the sub-flow call sites mode-blind.
+    if (quic_ != nullptr) {
+        return {};
+    }
     // Always plaintext, independent of the write-cipher state (a CCS by
     // definition precedes the cipher it announces).
     mem::IoBuf staged = mem::IoBuf::allocate(1);
@@ -472,6 +562,12 @@ void TlsHandshakeContext::fail(TlsAlertDesc desc) noexcept {
     }
     failed_ = true;
     failure_alert_ = desc;
+    if (quic_ != nullptr) {
+        // QUIC: nothing is encoded — the layer translates the alert into a
+        // CONNECTION_CLOSE 0x0100|desc (10 定谳 2).
+        quic_->send_alert(quic_->ctx, desc);
+        return;
+    }
     const std::uint8_t alert[] = {kAlertLevelFatal, static_cast<std::uint8_t>(desc)};
     (void) emit(TlsContentType::Alert, alert, nullptr);
 }

@@ -1115,6 +1115,12 @@ common::IoResult<std::size_t> tls_client_hello_size(const TlsClientHelloInput &i
     if (in.early_data) {
         size += 4;
     }
+    if (!in.quic_transport_params.empty()) {
+        if (in.quic_transport_params.size() > 0xFFFF - 4) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        size += 4 + in.quic_transport_params.size();
+    }
     if (in.has_psk) {
         size += 4 + (2 + 2 + in.psk_identity.size() + 4) + (2 + 1 + in.psk_binder_len);
     }
@@ -1247,6 +1253,13 @@ common::IoResult<TlsClientHelloEncoded> tls_encode_client_hello(const TlsClientH
         }
     }
     if (in.early_data && !w.ext(TlsExtensionType::EarlyData, 0)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    // quic_transport_parameters (10 §5): opaque passthrough ahead of the
+    // mandatory-last pre_shared_key.
+    if (!in.quic_transport_params.empty() &&
+        (!w.ext(TlsExtensionType::QuicTransportParameters, in.quic_transport_params.size()) ||
+         !w.bytes(in.quic_transport_params))) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (in.has_psk) {
@@ -1517,6 +1530,12 @@ common::IoResult<std::size_t> tls_encode_encrypted_extensions(const TlsEncrypted
     if (in.early_data) {
         ext_len += 4;
     }
+    if (!in.quic_transport_params.empty()) {
+        if (in.quic_transport_params.size() > 0xFFFF - 4) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
+        ext_len += 4 + in.quic_transport_params.size();
+    }
 
     const std::size_t body_len = 2 + ext_len;
     if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
@@ -1540,6 +1559,11 @@ common::IoResult<std::size_t> tls_encode_encrypted_extensions(const TlsEncrypted
         }
     }
     if (in.early_data && !w.ext(TlsExtensionType::EarlyData, 0)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    if (!in.quic_transport_params.empty() &&
+        (!w.ext(TlsExtensionType::QuicTransportParameters, in.quic_transport_params.size()) ||
+         !w.bytes(in.quic_transport_params))) {
         return std::unexpected(common::IoErr::Invalid);
     }
     return w.offset();

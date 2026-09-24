@@ -11,6 +11,7 @@
 #include <span>
 #include <string_view>
 
+#include "TlsTypes.h"
 #include "TlsVersion.h"
 #include "crypto/TlsCertificate.h"
 #include "crypto/TlsSignature.h"
@@ -18,6 +19,48 @@
 #include "handshake/TlsHandshakeMessage.h"
 
 namespace fiber::tls {
+
+// ---- QUIC mode (feature/tls/10 §3): the transport callbacks ----
+
+// Mirrors BoringSSL's ssl_encryption_level_t (RFC 9001 §4.1.1) across the two
+// callbacks that carry a level: add_handshake_data never fires EarlyData
+// (CRYPTO frames exist at Initial/Handshake/Application only) and set_secret
+// never fires Initial (Initial secrets are QUIC-local, derived in
+// src/quic/QuicCrypto — the engine never sees them).
+enum class TlsQuicLevel : std::uint8_t {
+    Initial, // outbound CRYPTO only: CH (client) / HRR (server)
+    EarlyData, // set_secret only: client_early_traffic_secret
+    Handshake, // SH..Fin CRYPTO; hs traffic secrets
+    Application, // NST CRYPTO; app traffic secrets
+};
+
+// The QUIC transport contract (10 §3.1). A non-null `quic` field on the
+// config switches the engine into QUIC mode for the WHOLE handshake: records
+// are never framed (inbound = raw CRYPTO-stream handshake messages, outbound
+// = per-message add_handshake_data), no compat CCS is sent, fatal alerts are
+// reported (not encoded — the QUIC layer translates to a CONNECTION_CLOSE
+// 0x0100|desc), and no record cipher is ever constructed — every secret
+// derivation point calls set_secret instead. All four pointers must be set
+// when the struct is used (enable_quic asserts it). Raw function pointers,
+// no std::function — null quic on the config is the TCP path, unchanged.
+struct TlsQuicCallbacks {
+    // Secret export at each derivation point (10 §4). `secret` is a
+    // short-lived span into engine scratch — copy before returning. false =
+    // installation failure (the engine fails the handshake, internal_error).
+    bool (*set_secret)(void *ctx, TlsQuicLevel level, bool write_secret, TlsCipherSuiteId suite,
+                       std::span<const std::uint8_t> secret) noexcept = nullptr;
+    // Outbound handshake bytes (one fully-encoded TLS message per call) at
+    // the engine's current outbound level — QUIC frames them as CRYPTO.
+    // false = buffer failure (the engine fails the handshake).
+    bool (*add_handshake_data)(void *ctx, TlsQuicLevel level, std::span<const std::uint8_t> data) noexcept = nullptr;
+    // The peer's quic_transport_parameters (extension 0x39), extracted from
+    // the CH (server) / EE (client) as soon as decoded. `params` borrows the
+    // inbound stream — copy before returning. Not re-validated by the engine.
+    void (*on_peer_transport_params)(void *ctx, std::span<const std::uint8_t> params) noexcept = nullptr;
+    // Fatal alert report (nothing is encoded outbound in QUIC mode).
+    void (*send_alert)(void *ctx, TlsAlertDesc desc) noexcept = nullptr;
+    void *ctx = nullptr;
+};
 
 // All-borrowed views that must outlive the engine (the net glue holds the
 // config). Immutable by contract; groups/suites preferences,
@@ -40,6 +83,12 @@ struct TlsClientConfig {
     // ServerHello negotiating outside the window is fatal protocol_version.
     std::uint16_t min_version = kTlsVersionTls12;
     std::uint16_t max_version = kTlsVersionTls13;
+    // QUIC mode (10 §3): non-null switches the engine per TlsQuicCallbacks.
+    // The glue pins min_version = max_version = 1.3 (QUIC is TLS 1.3 only —
+    // the engine asserts the window) and stages the 0x39 payload somewhere
+    // that outlives the engine (borrowed here, injected into the CH).
+    const TlsQuicCallbacks *quic = nullptr;
+    std::span<const std::uint8_t> quic_transport_params; // non-empty (in QUIC mode) => CH extension 0x39
 };
 
 // Resumption attempt: a borrowed projection of 08's future TlsSessionState
@@ -75,6 +124,11 @@ struct TlsServerConfig {
     // protocol_version.
     std::uint16_t min_version = kTlsVersionTls12;
     std::uint16_t max_version = kTlsVersionTls13;
+    // QUIC mode (10 §3): as on TlsClientConfig. The 0x39 payload rides the
+    // EncryptedExtensions. A per-ClientHello selector must not change the
+    // quic pointer (the engine asserts it — the context binds at ctor).
+    const TlsQuicCallbacks *quic = nullptr;
+    std::span<const std::uint8_t> quic_transport_params; // non-empty (in QUIC mode) => EE extension 0x39
 };
 
 // Per-ClientHello config selection (09 §4.1): the fork calls `select` right

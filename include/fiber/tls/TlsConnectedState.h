@@ -39,6 +39,22 @@ struct TlsConnectedState {
     bool early_data_accepted = false;
 };
 
+// QUIC-mode handshake output (feature/tls/10 §8): the single handoff at the
+// handshake tail when the engine runs under TlsQuicCallbacks. No record
+// ciphers and no TlsConnectedState — the QUIC layer owns every post-
+// handshake byte (app data is STREAM frames; post-handshake TLS messages
+// are the QUIC layer's own consumer). The resumption master is delivered
+// here because QUIC tickets are consumed by the QUIC layer's session cache
+// (the engine hands it over and keeps nothing).
+struct TlsQuicHandshakeResult {
+    TlsSecret resumption_master{}; // NST→PSK derivation base (08 schedule); wiped empty after take
+    std::array<std::uint8_t, 256> alpn{}; // selected protocol bytes; empty table when alpn_len == 0
+    std::uint16_t alpn_len = 0;
+    TlsCertificateChain peer_chain; // client side; empty when resumed via PSK
+    bool session_resumed = false;
+    bool early_data_accepted = false;
+};
+
 } // namespace fiber::tls
 
 #endif // FIBER_TLS_TLS_CONNECTED_STATE_H
