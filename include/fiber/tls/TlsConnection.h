@@ -87,7 +87,6 @@ public:
     // connection or after close_notify; NoMem is connection-fatal (the
     // chain may hold a prefix of the records).
     [[nodiscard]] common::IoResult<void> write(std::span<const std::uint8_t> payload) noexcept;
-    [[nodiscard]] common::IoResult<void> write(mem::IoBufChain &&payload) noexcept;
 
     // Graceful close: close_notify into the outbound chain (a pending
     // KeyUpdate response goes out first — RFC 8446 §4.6.1 MUST). The glue
@@ -104,7 +103,6 @@ public:
 
     [[nodiscard]] bool peer_closed() const noexcept; // the peer's close_notify latched
     [[nodiscard]] bool failed() const noexcept; // fatal latched (ours or the peer's)
-    [[nodiscard]] TlsAlertDesc failure_alert() const noexcept;
     [[nodiscard]] std::span<const std::uint8_t> alpn() const noexcept; // the negotiated protocol
 
 private:

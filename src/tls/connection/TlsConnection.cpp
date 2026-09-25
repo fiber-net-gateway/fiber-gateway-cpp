@@ -41,7 +41,6 @@ struct TlsConnection::Impl {
     std::array<std::uint8_t, 256> alpn_{};
     TlsProtocolVersion version_;
     TlsCipherSuiteId suite_;
-    TlsAlertDesc failure_alert_ = TlsAlertDesc::InternalError;
     std::uint16_t alpn_len_ = 0;
     bool rekey_pending_ = false; // peer's KeyUpdate(update_requested): owe a response before the next write
     bool peer_closed_ = false; // the peer's close_notify latched
@@ -158,7 +157,6 @@ common::IoResult<void> TlsConnection::Impl::send_pending_rekey() noexcept {
 
 void TlsConnection::Impl::latch_fatal(TlsAlertDesc alert) noexcept {
     failed_ = true;
-    failure_alert_ = alert;
     ctx_.fail(alert); // idempotent; NoMem leaves failed_ set without bytes
 }
 
@@ -212,7 +210,6 @@ void TlsConnection::pump() noexcept {
                 } else {
                     // The peer's fatal alert: terminal, nothing to send.
                     impl_->failed_ = true;
-                    impl_->failure_alert_ = step.alert;
                 }
                 return;
             case TlsInboundStep::Kind::Ccs:
@@ -280,30 +277,6 @@ common::IoResult<void> TlsConnection::write(std::span<const std::uint8_t> payloa
     return emitted;
 }
 
-common::IoResult<void> TlsConnection::write(mem::IoBufChain &&payload) noexcept {
-    if (impl_ == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    const auto guard = impl_->write_guard();
-    if (!guard.has_value()) {
-        return guard;
-    }
-    // Node-wise emission: emit() splits each contiguous span into
-    // <= 16 KiB records itself.
-    for (const mem::IoBufNode *node = payload.front_node(); node != nullptr; node = node->next) {
-        const std::size_t readable = node->buf.readable();
-        if (readable == 0) {
-            continue;
-        }
-        const auto emitted =
-                impl_->ctx_.emit(TlsContentType::ApplicationData, {node->buf.readable_data(), readable}, nullptr);
-        if (!emitted.has_value()) {
-            return emitted;
-        }
-    }
-    return {};
-}
-
 common::IoResult<void> TlsConnection::close_notify() noexcept {
     if (impl_ == nullptr) {
         return std::unexpected(common::IoErr::NoMem);
@@ -337,10 +310,6 @@ mem::IoBufChain TlsConnection::take_output() noexcept {
 bool TlsConnection::peer_closed() const noexcept { return impl_ != nullptr && impl_->peer_closed_; }
 
 bool TlsConnection::failed() const noexcept { return impl_ == nullptr || impl_->failed_; }
-
-TlsAlertDesc TlsConnection::failure_alert() const noexcept {
-    return impl_ != nullptr ? impl_->failure_alert_ : TlsAlertDesc::InternalError;
-}
 
 std::span<const std::uint8_t> TlsConnection::alpn() const noexcept {
     return impl_ == nullptr ? std::span<const std::uint8_t>{}
