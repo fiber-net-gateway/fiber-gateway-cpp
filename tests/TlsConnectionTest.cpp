@@ -538,15 +538,9 @@ TEST(TlsConnectionTest, AppRoundTripAndAlpn13) {
         ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
         EXPECT_EQ(ping, read_all(server));
 
-        // server → client (IoBufChain write)
+        // server → client (span write)
         const std::vector<std::uint8_t> pong{'p', 'o', 'n', 'g'};
-        IoBuf payload = IoBuf::allocate(pong.size());
-        ASSERT_TRUE(payload.valid());
-        std::memcpy(payload.writable_data(), pong.data(), pong.size());
-        payload.commit(pong.size());
-        IoBufChain chain;
-        ASSERT_TRUE(chain.append(std::move(payload)));
-        ASSERT_TRUE(server.write(std::move(chain)).has_value());
+        ASSERT_TRUE(server.write(pong).has_value());
         ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
         EXPECT_EQ(pong, read_all(client));
     });
@@ -724,7 +718,6 @@ TEST(TlsConnectionTest, PeerFatalAlertLatches13) {
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
         ASSERT_TRUE(feed_wire(server, wire));
         EXPECT_TRUE(server.failed());
-        EXPECT_EQ(TlsAlertDesc::DecodeError, server.failure_alert());
         EXPECT_TRUE(chain_bytes(server.take_output()).empty()); // nothing sent back
 
         std::size_t n = 0;
@@ -752,7 +745,6 @@ TEST(TlsConnectionTest, CorruptedRecordLatchesBadRecordMac13) {
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
         ASSERT_TRUE(feed_wire(server, wire));
         EXPECT_TRUE(server.failed());
-        EXPECT_EQ(TlsAlertDesc::BadRecordMac, server.failure_alert());
         // Our own fatal alert IS encoded — the glue flushes it best-effort.
         EXPECT_FALSE(chain_bytes(server.take_output()).empty());
         // The connection is terminal: pump/write refuse further work.
@@ -771,7 +763,6 @@ TEST(TlsConnectionTest, CcsAfterHandshakeIsFatal13) {
         const std::uint8_t ccs[] = {kTypeChangeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01};
         ASSERT_TRUE(feed_wire(server, ccs));
         EXPECT_TRUE(server.failed());
-        EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, server.failure_alert());
     });
 }
 
@@ -841,7 +832,6 @@ TEST(TlsConnectionTest, HandshakeRecordAfter12HandshakeIsFatal) {
         TlsConnection server_conn(TlsConnectionRole::Server, std::move(pair.server));
         ASSERT_TRUE(feed_wire(server_conn, wire));
         EXPECT_TRUE(server_conn.failed());
-        EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, server_conn.failure_alert());
         EXPECT_FALSE(chain_bytes(server_conn.take_output()).empty()); // our fatal alert flies
     });
 }

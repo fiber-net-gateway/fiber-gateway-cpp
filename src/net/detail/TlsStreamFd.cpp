@@ -586,8 +586,6 @@ fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out, 
             return fiber::common::IoErr::NoMem;
         }
         conn_->pump(); // may deliver plaintext or latch a terminal
-        if (conn_->failed()) {
-        }
     }
 }
 
