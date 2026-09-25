@@ -29,8 +29,6 @@ namespace fiber::net::detail {
 class TlsStreamFd : public common::NonCopyable, public common::NonMovable {
 public:
     using HandshakeTask = fiber::async::Task<fiber::common::IoResult<void>>;
-    using ShutdownTask = fiber::async::Task<fiber::common::IoResult<void>>;
-    using IoTask = fiber::async::Task<fiber::common::IoResult<size_t>>;
     using ReadyCallback = StreamFd::ReadyCallback;
 
     TlsStreamFd(fiber::event::EventLoop &loop, int fd);
@@ -66,17 +64,10 @@ public:
     fiber::common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
 
-    [[nodiscard]] IoTask read(void *buf, size_t len,
-                              std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
-    [[nodiscard]] IoTask write(const void *buf, size_t len,
-                               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
-    [[nodiscard]] fiber::common::IoResult<size_t> try_read(void *buf, size_t len) noexcept;
-    [[nodiscard]] fiber::common::IoResult<size_t> try_write(const void *buf, size_t len) noexcept;
     [[nodiscard]] HandshakeTask handshake(const TlsClientParam &param,
                                           std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
     [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param,
                                           std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
-    [[nodiscard]] ShutdownTask shutdown();
     [[nodiscard]] StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] StreamFd::WaitWritableAwaiter

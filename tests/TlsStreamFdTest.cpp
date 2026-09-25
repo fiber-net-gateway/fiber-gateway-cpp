@@ -180,6 +180,60 @@ DetachedTask close_tls_streams(fiber::net::detail::TlsStreamFd *server_stream,
     co_return;
 }
 
+// The poll + wait loop the transport layer runs; these helpers keep the
+// fd-layer smoke tests on the same production surface.
+fiber::async::Task<fiber::common::IoResult<std::size_t>> tls_poll_read(fiber::net::detail::TlsStreamFd &stream,
+                                                                       void *buf, std::size_t len) {
+    for (;;) {
+        std::size_t out = 0;
+        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
+        fiber::common::IoErr err = stream.poll_read(buf, len, out, wait_event);
+        if (err == fiber::common::IoErr::None) {
+            co_return out;
+        }
+        if (err != fiber::common::IoErr::WouldBlock) {
+            co_return std::unexpected(err);
+        }
+        fiber::common::IoResult<void> wait;
+        if (wait_event == fiber::event::IoEvent::Read) {
+            wait = co_await stream.wait_readable();
+        } else if (wait_event == fiber::event::IoEvent::Write) {
+            wait = co_await stream.wait_writable();
+        } else {
+            co_return std::unexpected(fiber::common::IoErr::Invalid);
+        }
+        if (!wait) {
+            co_return std::unexpected(wait.error());
+        }
+    }
+}
+
+fiber::async::Task<fiber::common::IoResult<std::size_t>> tls_poll_write(fiber::net::detail::TlsStreamFd &stream,
+                                                                        const void *buf, std::size_t len) {
+    for (;;) {
+        std::size_t out = 0;
+        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
+        fiber::common::IoErr err = stream.poll_write(buf, len, out, wait_event);
+        if (err == fiber::common::IoErr::None) {
+            co_return out;
+        }
+        if (err != fiber::common::IoErr::WouldBlock) {
+            co_return std::unexpected(err);
+        }
+        fiber::common::IoResult<void> wait;
+        if (wait_event == fiber::event::IoEvent::Read) {
+            wait = co_await stream.wait_readable();
+        } else if (wait_event == fiber::event::IoEvent::Write) {
+            wait = co_await stream.wait_writable();
+        } else {
+            co_return std::unexpected(fiber::common::IoErr::Invalid);
+        }
+        if (!wait) {
+            co_return std::unexpected(wait.error());
+        }
+    }
+}
+
 DetachedTask run_tls_server(fiber::net::detail::TlsStreamFd *server_stream, const fiber::net::TlsServerParam &param,
                             std::promise<fiber::common::IoResult<std::string>> *done) {
     auto handshake_result = co_await server_stream->handshake(param);
@@ -189,14 +243,14 @@ DetachedTask run_tls_server(fiber::net::detail::TlsStreamFd *server_stream, cons
     }
 
     std::array<char, 32> read_buf{};
-    auto read_result = co_await server_stream->read(read_buf.data(), read_buf.size());
+    auto read_result = co_await tls_poll_read(*server_stream, read_buf.data(), read_buf.size());
     if (!read_result) {
         done->set_value(std::unexpected(read_result.error()));
         co_return;
     }
 
     const char reply[] = "pong";
-    auto write_result = co_await server_stream->write(reply, sizeof(reply) - 1U);
+    auto write_result = co_await tls_poll_write(*server_stream, reply, sizeof(reply) - 1U);
     if (!write_result) {
         done->set_value(std::unexpected(write_result.error()));
         co_return;
@@ -218,14 +272,14 @@ DetachedTask run_tls_client(fiber::net::detail::TlsStreamFd *client_stream, cons
     }
 
     const char request[] = "ping";
-    auto write_result = co_await client_stream->write(request, sizeof(request) - 1U);
+    auto write_result = co_await tls_poll_write(*client_stream, request, sizeof(request) - 1U);
     if (!write_result) {
         done->set_value(std::unexpected(write_result.error()));
         co_return;
     }
 
     std::array<char, 32> read_buf{};
-    auto read_result = co_await client_stream->read(read_buf.data(), read_buf.size());
+    auto read_result = co_await tls_poll_read(*client_stream, read_buf.data(), read_buf.size());
     if (!read_result) {
         done->set_value(std::unexpected(read_result.error()));
         co_return;
@@ -282,7 +336,7 @@ DetachedTask write_tls_after_server_reset(fiber::net::detail::TlsStreamFd *clien
         co_await fiber::async::sleep(1ms);
     }
     const char payload[] = "ping";
-    auto write_result = co_await client_stream->write(payload, sizeof(payload) - 1U);
+    auto write_result = co_await tls_poll_write(*client_stream, payload, sizeof(payload) - 1U);
     done->set_value(write_result ? fiber::common::IoErr::None : write_result.error());
 }
 
