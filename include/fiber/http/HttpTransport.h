@@ -29,9 +29,6 @@ public:
     virtual fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) = 0;
     [[nodiscard]] virtual bool has_pending_read() const noexcept { return false; }
-    // Some stateful transports require a WouldBlock read to be retried with
-    // the same destination buffer and length.
-    [[nodiscard]] virtual bool requires_stable_read_buffer_on_retry() const noexcept { return false; }
 
     // Readiness callbacks are persistent and run on loop(). close() completes
     // registered callbacks with Canceled. Callers may update registration from
@@ -62,27 +59,19 @@ public:
     // connection whose peer went away is detected instead of handed out.
     [[nodiscard]] virtual common::IoErr ensure_state_observation() noexcept { return common::IoErr::None; }
 
-    // poll_* performs one non-suspending transport operation. wait_event is set
-    // only when WouldBlock is returned. For TLS it may be the opposite physical
-    // direction from the logical operation. Buffers passed to a TLS operation
-    // must remain unchanged until that operation succeeds, fails, or the
-    // transport is closed.
-    virtual common::IoErr poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept = 0;
-    virtual common::IoErr poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept = 0;
-    virtual common::IoErr poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept = 0;
-    virtual common::IoErr poll_write(const void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept = 0;
-    virtual common::IoErr poll_write(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept = 0;
-    virtual common::IoErr poll_writev(mem::IoBufChain &buf, size_t &out, event::IoEvent &wait_event) noexcept = 0;
-
-    virtual fiber::async::Task<common::IoResult<size_t>> read(void *buf, size_t len,
-                                                              std::chrono::milliseconds timeout) = 0;
-    virtual fiber::async::Task<common::IoResult<size_t>> read_into(mem::IoBuf &buf,
-                                                                   std::chrono::milliseconds timeout) = 0;
-    virtual fiber::async::Task<common::IoResult<size_t>> readv_into(mem::IoBufChain &bufs,
-                                                                    std::chrono::milliseconds timeout) = 0;
-    virtual fiber::async::Task<common::IoResult<size_t>> write(const void *buf, size_t len,
+    // Reads are append-only: try_readv/readv append freshly allocated nodes
+    // holding at most `size` bytes to `out` (one non-suspending transport
+    // operation; `size` is a cap, not a target). WouldBlock leaves the chain
+    // untouched. Returns 0 on EOF.
+    [[nodiscard]] virtual common::IoResult<size_t> try_readv(size_t size, mem::IoBufChain &out) noexcept = 0;
+    virtual fiber::async::Task<common::IoResult<size_t>> readv(size_t size, mem::IoBufChain &out,
                                                                std::chrono::milliseconds timeout) = 0;
-    virtual fiber::async::Task<common::IoResult<size_t>> write(mem::IoBuf &buf, std::chrono::milliseconds timeout) = 0;
+
+    // Writes consume from the front of `buf` and may complete partially; loop
+    // until readable_bytes() == 0. A TLS transport retains pointers into the
+    // caller's chain after WouldBlock: retry try_writev with the same chain
+    // (Busy otherwise) or close the transport before releasing the chain.
+    [[nodiscard]] virtual common::IoResult<size_t> try_writev(mem::IoBufChain &buf) noexcept = 0;
     virtual fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                                 std::chrono::milliseconds timeout) = 0;
     // Drops transport-owned references to buffers from an abandoned operation.
@@ -120,20 +109,10 @@ public:
     common::IoErr detach_for_handover() noexcept override;
     common::IoErr adopt_loop(event::EventLoop &loop) noexcept override;
     [[nodiscard]] common::IoErr ensure_state_observation() noexcept override;
-    common::IoErr poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_write(const void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_write(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_writev(mem::IoBufChain &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
-    fiber::async::Task<common::IoResult<size_t>> read(void *buf, size_t len,
-                                                      std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> read_into(mem::IoBuf &buf, std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> readv_into(mem::IoBufChain &bufs,
-                                                            std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> write(const void *buf, size_t len,
+    [[nodiscard]] common::IoResult<size_t> try_readv(size_t size, mem::IoBufChain &out) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> readv(size_t size, mem::IoBufChain &out,
                                                        std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> write(mem::IoBuf &buf, std::chrono::milliseconds timeout) override;
+    [[nodiscard]] common::IoResult<size_t> try_writev(mem::IoBufChain &buf) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                         std::chrono::milliseconds timeout) override;
     void close() override;
@@ -166,7 +145,6 @@ public:
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
     [[nodiscard]] bool has_pending_read() const noexcept override;
-    [[nodiscard]] bool requires_stable_read_buffer_on_retry() const noexcept override { return true; }
     common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;
@@ -178,20 +156,10 @@ public:
     common::IoErr detach_for_handover() noexcept override;
     common::IoErr adopt_loop(event::EventLoop &loop) noexcept override;
     [[nodiscard]] common::IoErr ensure_state_observation() noexcept override;
-    common::IoErr poll_read(void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_read_into(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_readv_into(mem::IoBufChain &bufs, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_write(const void *buf, size_t len, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_write(mem::IoBuf &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
-    common::IoErr poll_writev(mem::IoBufChain &buf, size_t &out, event::IoEvent &wait_event) noexcept override;
-    fiber::async::Task<common::IoResult<size_t>> read(void *buf, size_t len,
-                                                      std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> read_into(mem::IoBuf &buf, std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> readv_into(mem::IoBufChain &bufs,
-                                                            std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> write(const void *buf, size_t len,
+    [[nodiscard]] common::IoResult<size_t> try_readv(size_t size, mem::IoBufChain &out) noexcept override;
+    fiber::async::Task<common::IoResult<size_t>> readv(size_t size, mem::IoBufChain &out,
                                                        std::chrono::milliseconds timeout) override;
-    fiber::async::Task<common::IoResult<size_t>> write(mem::IoBuf &buf, std::chrono::milliseconds timeout) override;
+    [[nodiscard]] common::IoResult<size_t> try_writev(mem::IoBufChain &buf) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                         std::chrono::milliseconds timeout) override;
     void abandon_pending_io() noexcept override;
@@ -208,10 +176,14 @@ private:
     TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr);
     [[nodiscard]] bool handshake_done() const noexcept;
     void clear_pending_write() noexcept;
+    // Shared cores: perform one non-suspending operation, reporting the
+    // physical direction to wait on when WouldBlock is returned.
+    common::IoErr poll_read_node(std::size_t size, mem::IoBufChain &out, std::size_t &out_bytes,
+                                 event::IoEvent &wait_event) noexcept;
+    common::IoErr poll_write_chain(mem::IoBufChain &buf, std::size_t &out, event::IoEvent &wait_event) noexcept;
 
     enum class PendingWriteKind {
         None,
-        Contiguous,
         Chain,
     };
 

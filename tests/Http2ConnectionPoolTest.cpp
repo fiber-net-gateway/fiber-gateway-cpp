@@ -135,8 +135,22 @@ struct PoolHarness {
                                                  static_cast<std::uint8_t>(value >> 16),
                                                  static_cast<std::uint8_t>(value >> 8),
                                                  static_cast<std::uint8_t>(value)};
-        auto result = co_await servers.front()->conn.transport().write(frame.data(), frame.size(), 1s);
+        auto &transport = servers.front()->conn.transport();
+        mem::IoBuf node = mem::IoBuf::allocate(frame.size());
+        if (!node) {
+            ADD_FAILURE() << "frame node allocation failed";
+            co_return;
+        }
+        std::memcpy(node.writable_data(), frame.data(), frame.size());
+        node.commit(frame.size());
+        mem::IoBufChain chain;
+        if (!chain.append(std::move(node))) {
+            ADD_FAILURE() << "frame chain append failed";
+            co_return;
+        }
+        auto result = co_await transport.writev(chain, 1s);
         EXPECT_TRUE(result);
+        EXPECT_EQ(*result, frame.size());
         for (int i = 0; i < 1000 && lease.connection().http2().peer_max_concurrent_streams() != value; ++i)
             co_await async::sleep(1ms);
         EXPECT_EQ(lease.connection().http2().peer_max_concurrent_streams(), value);

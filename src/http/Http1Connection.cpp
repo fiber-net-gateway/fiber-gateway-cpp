@@ -203,13 +203,15 @@ Http1Connection::parse_request(HttpExchange &exchange, std::chrono::steady_clock
                 }
                 std::size_t copied = drain_inbound(header_buffer.buf());
                 if (copied == 0) {
-                    auto result = co_await transport_->read_into(header_buffer.buf(), head_timeout(received_any));
+                    auto result = co_await transport_->readv(header_buffer.buf().writable(), inbound_bufs_,
+                                                             head_timeout(received_any));
                     if (!result) {
                         co_return std::unexpected(result.error());
                     }
                     if (*result == 0) {
                         co_return std::unexpected(common::IoErr::ConnReset);
                     }
+                    drain_inbound(header_buffer.buf());
                 }
                 received_any = true;
                 continue;
@@ -267,13 +269,15 @@ Http1Connection::parse_request(HttpExchange &exchange, std::chrono::steady_clock
                 }
                 std::size_t copied = drain_inbound(header_buffer.buf());
                 if (copied == 0) {
-                    auto result = co_await transport_->read_into(header_buffer.buf(), options_.header_timeout);
+                    auto result = co_await transport_->readv(header_buffer.buf().writable(), inbound_bufs_,
+                                                             options_.header_timeout);
                     if (!result) {
                         co_return std::unexpected(result.error());
                     }
                     if (*result == 0) {
                         co_return std::unexpected(common::IoErr::ConnReset);
                     }
+                    drain_inbound(header_buffer.buf());
                 }
                 continue;
             }

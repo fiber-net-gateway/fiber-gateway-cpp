@@ -336,22 +336,33 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
                           "Connection: close\r\n"
                           "\r\n";
     size_t request_len = std::strlen(request);
-    size_t write_offset = 0;
-    while (write_offset < request_len) {
-        auto write_result =
-                co_await transport->write(request + write_offset, request_len - write_offset, std::chrono::seconds(5));
-        if (!write_result || *write_result == 0) {
-            auto err = write_result ? fiber::common::IoErr::BrokenPipe : write_result.error();
-            co_await fail("client write failed", err);
+    {
+        fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(request_len);
+        if (!node) {
+            co_await fail("client write alloc failed", fiber::common::IoErr::NoMem);
             co_return;
         }
-        write_offset += *write_result;
+        std::memcpy(node.writable_data(), request, request_len);
+        node.commit(request_len);
+        fiber::mem::IoBufChain chain;
+        if (!chain.append(std::move(node))) {
+            co_await fail("client write alloc failed", fiber::common::IoErr::NoMem);
+            co_return;
+        }
+        while (chain.readable_bytes() > 0) {
+            auto write_result = co_await transport->writev(chain, std::chrono::seconds(5));
+            if (!write_result || *write_result == 0) {
+                auto err = write_result ? fiber::common::IoErr::BrokenPipe : write_result.error();
+                co_await fail("client write failed", err);
+                co_return;
+            }
+        }
     }
 
     std::string response;
-    std::array<char, 4096> buffer{};
     for (;;) {
-        auto read_result = co_await transport->read(buffer.data(), buffer.size(), std::chrono::seconds(5));
+        fiber::mem::IoBufChain chunk;
+        auto read_result = co_await transport->readv(4096, chunk, std::chrono::seconds(5));
         if (!read_result) {
             co_await fail("client read failed", read_result.error());
             co_return;
@@ -359,7 +370,9 @@ fiber::async::DetachedTask run_demo_client(fiber::event::EventLoop *loop, fiber:
         if (*read_result == 0) {
             break;
         }
-        response.append(buffer.data(), *read_result);
+        for (const fiber::mem::IoBufNode *node = chunk.front_node(); node != nullptr; node = node->next) {
+            response.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+        }
     }
 
     std::cout << "demo response:\n" << response << "\n";

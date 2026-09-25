@@ -46,29 +46,22 @@ public:
 
     [[nodiscard]] bool terminal() const noexcept override { return terminal_; }
 
-    common::IoErr poll_read(void *, std::size_t, std::size_t &out, event::IoEvent &wait_event) noexcept override {
-        return not_supported(out, wait_event);
+    // Fakes are synchronous: one try_* operation per call, never WouldBlock.
+    [[nodiscard]] common::IoResult<size_t> try_readv(size_t, mem::IoBufChain &) noexcept override {
+        return std::unexpected(common::IoErr::NotSupported);
     }
 
-    common::IoErr poll_read_into(mem::IoBuf &, std::size_t &out, event::IoEvent &wait_event) noexcept override {
-        return not_supported(out, wait_event);
+    [[nodiscard]] common::IoResult<size_t> try_writev(mem::IoBufChain &) noexcept override {
+        return std::unexpected(common::IoErr::NotSupported);
     }
 
-    common::IoErr poll_readv_into(mem::IoBufChain &, std::size_t &out, event::IoEvent &wait_event) noexcept override {
-        return not_supported(out, wait_event);
+    fiber::async::Task<common::IoResult<size_t>> readv(size_t size, mem::IoBufChain &out,
+                                                       std::chrono::milliseconds) override {
+        co_return try_readv(size, out);
     }
 
-    common::IoErr poll_write(const void *, std::size_t, std::size_t &out,
-                             event::IoEvent &wait_event) noexcept override {
-        return not_supported(out, wait_event);
-    }
-
-    common::IoErr poll_write(mem::IoBuf &, std::size_t &out, event::IoEvent &wait_event) noexcept override {
-        return not_supported(out, wait_event);
-    }
-
-    common::IoErr poll_writev(mem::IoBufChain &, std::size_t &out, event::IoEvent &wait_event) noexcept override {
-        return not_supported(out, wait_event);
+    fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf, std::chrono::milliseconds) override {
+        co_return try_writev(buf);
     }
 
 protected:
@@ -125,12 +118,6 @@ private:
             slot_ctx = nullptr;
         }
         return common::IoErr::None;
-    }
-
-    static common::IoErr not_supported(std::size_t &out, event::IoEvent &wait_event) noexcept {
-        out = 0;
-        wait_event = event::IoEvent::None;
-        return common::IoErr::NotSupported;
     }
 
     ReadyCallback read_callback_ = nullptr;

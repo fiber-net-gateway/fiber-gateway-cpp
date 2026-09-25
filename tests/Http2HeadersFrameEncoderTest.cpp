@@ -37,79 +37,18 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
-    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out,
-                                    fiber::event::IoEvent &wait_event) noexcept override {
-        out = 0;
-        wait_event = fiber::event::IoEvent::None;
+    [[nodiscard]] fiber::common::IoResult<size_t> try_writev(fiber::mem::IoBufChain &buf) noexcept override {
         if (closed_) {
-            return fiber::common::IoErr::ConnReset;
+            return std::unexpected(fiber::common::IoErr::ConnReset);
         }
-        const auto *ptr = static_cast<const std::uint8_t *>(buf);
-        written_.insert(written_.end(), ptr, ptr + len);
-        out = len;
-        return fiber::common::IoErr::None;
-    }
-
-    fiber::common::IoErr poll_writev(fiber::mem::IoBufChain &buf, size_t &out,
-                                     fiber::event::IoEvent &wait_event) noexcept override {
-        out = 0;
-        wait_event = fiber::event::IoEvent::None;
+        size_t out = 0;
         while (auto *front = buf.first_readable()) {
-            size_t written = 0;
-            fiber::common::IoErr err = poll_write(front->readable_data(), front->readable(), written, wait_event);
-            if (err != fiber::common::IoErr::None) {
-                return err;
-            }
-            buf.consume_and_compact(written);
-            out += written;
+            const auto *ptr = static_cast<const std::uint8_t *>(front->readable_data());
+            written_.insert(written_.end(), ptr, ptr + front->readable());
+            out += front->readable();
+            buf.consume_and_compact(front->readable());
         }
-        return fiber::common::IoErr::None;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> read(void *, size_t, std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> read_into(fiber::mem::IoBuf &,
-                                                                  std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> readv_into(fiber::mem::IoBufChain &,
-                                                                   std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(const void *buf, size_t len,
-                                                              std::chrono::milliseconds) override {
-        if (closed_) {
-            co_return std::unexpected(fiber::common::IoErr::ConnReset);
-        }
-        const auto *ptr = static_cast<const std::uint8_t *>(buf);
-        written_.insert(written_.end(), ptr, ptr + len);
-        co_return len;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(fiber::mem::IoBuf &buf,
-                                                              std::chrono::milliseconds timeout) override {
-        auto result = co_await write(buf.readable_data(), buf.readable(), timeout);
-        if (result) {
-            buf.consume(*result);
-        }
-        co_return result;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> writev(fiber::mem::IoBufChain &buf,
-                                                               std::chrono::milliseconds timeout) override {
-        auto *front = buf.first_readable();
-        if (!front) {
-            co_return static_cast<size_t>(0);
-        }
-        auto result = co_await write(front->readable_data(), front->readable(), timeout);
-        if (result) {
-            buf.consume_and_compact(*result);
-        }
-        co_return result;
+        return out;
     }
 
     void close() override { closed_ = true; }
