@@ -145,12 +145,10 @@ fiber::common::IoResult<void> run_tcp_wait(int transport_fd, std::chrono::millis
 
 struct TcpCallbackResult {
     fiber::common::IoErr initial_poll_err = fiber::common::IoErr::Invalid;
-    fiber::event::IoEvent initial_wait_event = fiber::event::IoEvent::None;
     fiber::common::IoErr set_err = fiber::common::IoErr::Invalid;
     fiber::common::IoErr callback_err = fiber::common::IoErr::Invalid;
     fiber::common::IoErr clear_err = fiber::common::IoErr::Invalid;
     fiber::common::IoErr callback_poll_err = fiber::common::IoErr::Invalid;
-    fiber::event::IoEvent callback_wait_event = fiber::event::IoEvent::None;
     std::array<char, 16> data{};
     std::size_t read = 0;
     bool called = false;
@@ -170,8 +168,13 @@ void on_tcp_transport_readable(void *opaque, fiber::common::IoErr err) noexcept 
     }
 
     ctx->result->clear_err = ctx->transport->clear_read_callback(&on_tcp_transport_readable, ctx);
-    ctx->result->callback_poll_err = ctx->transport->poll_read(ctx->result->data.data(), ctx->result->data.size(),
-                                                               ctx->result->read, ctx->result->callback_wait_event);
+    fiber::mem::IoBufChain chunk;
+    auto read_result = ctx->transport->try_readv(ctx->result->data.size(), chunk);
+    ctx->result->callback_poll_err = read_result ? fiber::common::IoErr::None : read_result.error();
+    if (read_result && *read_result > 0) {
+        ctx->result->read = *read_result;
+        std::memcpy(ctx->result->data.data(), chunk.front()->readable_data(), *read_result);
+    }
 }
 
 fiber::async::DetachedTask exercise_tcp_callback(fiber::event::EventLoop *loop, int fd, int peer_fd,
@@ -186,8 +189,11 @@ fiber::async::DetachedTask exercise_tcp_callback(fiber::event::EventLoop *loop, 
     }
 
     auto transport = std::move(*transport_result);
-    result.initial_poll_err =
-            transport->poll_read(result.data.data(), result.data.size(), result.read, result.initial_wait_event);
+    {
+        fiber::mem::IoBufChain probe;
+        auto read_result = transport->try_readv(result.data.size(), probe);
+        result.initial_poll_err = read_result ? fiber::common::IoErr::None : read_result.error();
+    }
     TcpCallbackContext ctx{transport.get(), &result};
     result.set_err = transport->set_read_callback(&on_tcp_transport_readable, &ctx);
     if (result.set_err == fiber::common::IoErr::None) {
@@ -306,13 +312,11 @@ TEST(HttpTransportTest, TcpPollReadUsesPersistentReadinessCallback) {
     ::close(fds[1]);
 
     EXPECT_EQ(result.initial_poll_err, fiber::common::IoErr::WouldBlock);
-    EXPECT_EQ(result.initial_wait_event, fiber::event::IoEvent::Read);
     EXPECT_EQ(result.set_err, fiber::common::IoErr::None);
     EXPECT_TRUE(result.called);
     EXPECT_EQ(result.callback_err, fiber::common::IoErr::None);
     EXPECT_EQ(result.clear_err, fiber::common::IoErr::None);
     EXPECT_EQ(result.callback_poll_err, fiber::common::IoErr::None);
-    EXPECT_EQ(result.callback_wait_event, fiber::event::IoEvent::None);
     EXPECT_EQ(result.read, 5U);
     EXPECT_EQ(std::string_view(result.data.data(), result.read), "hello");
 }

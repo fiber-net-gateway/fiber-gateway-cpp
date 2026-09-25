@@ -100,26 +100,31 @@ private:
                                                                    std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *transport, mem::IoBufChain &chain,
                                                                    std::chrono::milliseconds timeout) noexcept;
+    // One transport write operation over a contiguous span; may complete
+    // partially, like HttpTransport::writev.
+    fiber::async::Task<common::IoResult<std::size_t>> transport_write(HttpTransport *transport, const void *buf,
+                                                                      std::size_t len,
+                                                                      std::chrono::milliseconds timeout) noexcept;
     fiber::async::Task<common::IoResult<void>> write_chunk_suffix(HttpTransport *transport, bool end_stream,
                                                                   std::chrono::milliseconds timeout) noexcept;
     [[nodiscard]] bool is_idempotent_content_length_completion(std::size_t body_bytes, bool end_stream) const noexcept;
-    common::IoResult<void> ensure_body_read_buf_writable(mem::IoBuf &read_buf, std::size_t min_writable) noexcept;
-    common::IoResult<void> take_prefix(mem::IoBuf &read_buf, mem::IoBufChain &out, std::size_t len) noexcept;
-    common::IoResult<void> stash_pending_buf(mem::IoBuf &read_buf) noexcept;
-    fiber::async::Task<common::IoResult<std::size_t>> read_more(mem::IoBuf &read_buf, std::size_t max_bytes,
+    common::IoResult<void> take_prefix(mem::IoBufChain &read_buf, mem::IoBufChain &out, std::size_t len) noexcept;
+    common::IoResult<void> stash_pending_buf(mem::IoBufChain &read_buf) noexcept;
+    fiber::async::Task<common::IoResult<std::size_t>> read_more(mem::IoBufChain &read_buf, std::size_t max_bytes,
                                                                 bool &read_call_used_io,
                                                                 std::chrono::milliseconds timeout) noexcept;
-    fiber::async::Task<common::IoResult<ParseCode>> advance_chunked_body(mem::IoBuf &read_buf, std::size_t max_bytes,
-                                                                         bool allow_read, bool &read_call_used_io,
+    fiber::async::Task<common::IoResult<ParseCode>> advance_chunked_body(mem::IoBufChain &read_buf,
+                                                                         std::size_t max_bytes, bool allow_read,
+                                                                         bool &read_call_used_io,
                                                                          std::chrono::milliseconds timeout) noexcept;
-    fiber::async::Task<common::IoResult<void>> read_response_trailers(mem::IoBuf &read_buf,
+    fiber::async::Task<common::IoResult<void>> read_response_trailers(mem::IoBufChain &read_buf,
                                                                       std::chrono::milliseconds timeout) noexcept;
 
     Http1ClientConnection &conn_;
     mem::BufPool &pool_;
     Http1ClientExchangeOptions options_{};
     HttpHeaders response_trailers_;
-    mem::IoBuf pending_buf_;
+    mem::IoBufChain pending_bufs_;
     ResponseHeaderNode *response_headers_head_ = nullptr;
     BodyParser response_body_parser_{};
     bool active_ = false;

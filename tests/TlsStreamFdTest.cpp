@@ -546,26 +546,22 @@ DetachedTask abandon_blocked_tls_write(fiber::http::TlsTransport *transport, con
     }
 
     while (chain.readable_bytes() > 0) {
-        std::size_t out = 0;
-        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-        fiber::common::IoErr err = transport->poll_writev(chain, out, wait_event);
-        if (err == fiber::common::IoErr::WouldBlock) {
-            auto &empty_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
-            fiber::mem::IoBufChain empty_chain;
-            AbandonPendingWriteStats stats;
-            stats.different_chain_busy_before =
-                    transport->poll_writev(empty_chain, out, wait_event) == fiber::common::IoErr::Busy;
-            transport->abandon_pending_io();
-            stats.empty_chain_ready_after =
-                    transport->poll_writev(empty_chain, out, wait_event) == fiber::common::IoErr::None;
-            done->set_value(stats);
+        auto result = transport->try_writev(chain);
+        if (!result) {
+            if (result.error() == fiber::common::IoErr::WouldBlock) {
+                fiber::mem::IoBufChain empty_chain;
+                AbandonPendingWriteStats stats;
+                stats.different_chain_busy_before =
+                        transport->try_writev(empty_chain).error() == fiber::common::IoErr::Busy;
+                transport->abandon_pending_io();
+                stats.empty_chain_ready_after = static_cast<bool>(transport->try_writev(empty_chain));
+                done->set_value(stats);
+                co_return;
+            }
+            done->set_value(std::unexpected(result.error()));
             co_return;
         }
-        if (err != fiber::common::IoErr::None) {
-            done->set_value(std::unexpected(err));
-            co_return;
-        }
-        if (out == 0) {
+        if (*result == 0) {
             done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
             co_return;
         }
@@ -590,28 +586,24 @@ DetachedTask run_poll_transport_server(fiber::http::TlsTransport *transport, con
 
     std::string received;
     received.reserve(expected_size);
-    std::array<char, 16384> read_buf{};
     while (received.size() < expected_size) {
-        std::size_t out = 0;
-        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-        fiber::common::IoErr err = transport->poll_read(read_buf.data(), read_buf.size(), out, wait_event);
-        if (err == fiber::common::IoErr::WouldBlock) {
-            if (wait_event != fiber::event::IoEvent::Read && wait_event != fiber::event::IoEvent::Write) {
-                done->set_value(std::unexpected(fiber::common::IoErr::Invalid));
-                co_return;
+        fiber::mem::IoBufChain chunk;
+        auto read_result = transport->try_readv(16384, chunk);
+        if (!read_result) {
+            if (read_result.error() == fiber::common::IoErr::WouldBlock) {
+                co_await fiber::async::sleep(1ms);
+                continue;
             }
-            co_await fiber::async::sleep(1ms);
-            continue;
-        }
-        if (err != fiber::common::IoErr::None) {
-            done->set_value(std::unexpected(err));
+            done->set_value(std::unexpected(read_result.error()));
             co_return;
         }
-        if (out == 0) {
+        if (*read_result == 0) {
             done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
             co_return;
         }
-        received.append(read_buf.data(), out);
+        for (const fiber::mem::IoBufNode *node = chunk.front_node(); node != nullptr; node = node->next) {
+            received.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+        }
     }
 
     done->set_value(std::move(received));
@@ -629,27 +621,21 @@ DetachedTask run_poll_transport_client(fiber::http::TlsTransport *transport, con
 
     PollWriteStats stats;
     while (chain.readable_bytes() > 0) {
-        std::size_t out = 0;
-        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-        fiber::common::IoErr err = transport->poll_writev(chain, out, wait_event);
-        if (err == fiber::common::IoErr::WouldBlock) {
-            if (wait_event != fiber::event::IoEvent::Read && wait_event != fiber::event::IoEvent::Write) {
-                done->set_value(std::unexpected(fiber::common::IoErr::Invalid));
-                co_return;
+        auto result = transport->try_writev(chain);
+        if (!result) {
+            if (result.error() == fiber::common::IoErr::WouldBlock) {
+                ++stats.would_block_count;
+                co_await fiber::async::sleep(1ms);
+                continue;
             }
-            ++stats.would_block_count;
-            co_await fiber::async::sleep(1ms);
-            continue;
-        }
-        if (err != fiber::common::IoErr::None) {
-            done->set_value(std::unexpected(err));
+            done->set_value(std::unexpected(result.error()));
             co_return;
         }
-        if (out == 0) {
+        if (*result == 0) {
             done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
             co_return;
         }
-        stats.written += out;
+        stats.written += *result;
     }
 
     done->set_value(stats);
@@ -665,7 +651,6 @@ DetachedTask run_transport_server(fiber::http::TlsTransport *transport, const fi
     }
 
     std::string received;
-    std::array<char, 8192> read_buf{};
     for (;;) {
         auto ready_result = co_await transport->wait_readable(5s);
         if (!ready_result) {
@@ -673,7 +658,8 @@ DetachedTask run_transport_server(fiber::http::TlsTransport *transport, const fi
             co_return;
         }
 
-        auto read_result = co_await transport->read(read_buf.data(), read_buf.size(), 5s);
+        fiber::mem::IoBufChain chunk;
+        auto read_result = co_await transport->readv(8192, chunk, 5s);
         if (!read_result) {
             done->set_value(std::unexpected(read_result.error()));
             co_return;
@@ -681,7 +667,9 @@ DetachedTask run_transport_server(fiber::http::TlsTransport *transport, const fi
         if (*read_result == 0) {
             break;
         }
-        received.append(read_buf.data(), *read_result);
+        for (const fiber::mem::IoBufNode *node = chunk.front_node(); node != nullptr; node = node->next) {
+            received.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+        }
     }
     done->set_value(std::move(received));
     co_return;
@@ -740,14 +728,29 @@ DetachedTask read_tls_pending_payload(fiber::http::TlsTransport *transport, cons
     }
 
     std::array<char, 1024> first{};
-    auto first_result = co_await transport->read(first.data(), first.size(), 5s);
-    if (!first_result) {
-        done->set_value(std::unexpected(first_result.error()));
-        co_return;
-    }
-    if (*first_result != first.size()) {
-        done->set_value(std::unexpected(fiber::common::IoErr::Invalid));
-        co_return;
+    std::size_t first_len = 0;
+    {
+        fiber::mem::IoBufChain first_chunk;
+        auto first_result = co_await transport->readv(first.size(), first_chunk, 5s);
+        if (!first_result) {
+            done->set_value(std::unexpected(first_result.error()));
+            co_return;
+        }
+        first_len = *first_result;
+        if (first_len > first.size()) {
+            done->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+            co_return;
+        }
+        std::size_t gathered = 0;
+        for (const fiber::mem::IoBufNode *node = first_chunk.front_node(); node != nullptr; node = node->next) {
+            const std::size_t take = std::min(node->buf.readable(), first.size() - gathered);
+            std::memcpy(first.data() + gathered, node->buf.readable_data(), take);
+            gathered += take;
+        }
+        if (gathered != first_len || first_len != first.size()) {
+            done->set_value(std::unexpected(fiber::common::IoErr::Invalid));
+            co_return;
+        }
     }
 
     // The peer sends exactly one application-data record. The first short read
@@ -760,14 +763,23 @@ DetachedTask read_tls_pending_payload(fiber::http::TlsTransport *transport, cons
     }
 
     std::array<char, 4096> rest{};
-    auto rest_result = co_await transport->read(rest.data(), rest.size(), 5s);
-    if (!rest_result) {
-        done->set_value(std::unexpected(rest_result.error()));
-        co_return;
+    std::size_t rest_len = 0;
+    {
+        fiber::mem::IoBufChain rest_chunk;
+        auto rest_result = co_await transport->readv(rest.size(), rest_chunk, 5s);
+        if (!rest_result) {
+            done->set_value(std::unexpected(rest_result.error()));
+            co_return;
+        }
+        for (const fiber::mem::IoBufNode *node = rest_chunk.front_node(); node != nullptr; node = node->next) {
+            const std::size_t take = std::min(node->buf.readable(), rest.size() - rest_len);
+            std::memcpy(rest.data() + rest_len, node->buf.readable_data(), take);
+            rest_len += take;
+        }
     }
 
-    std::string received(first.data(), *first_result);
-    received.append(rest.data(), *rest_result);
+    std::string received(first.data(), first_len);
+    received.append(rest.data(), rest_len);
     done->set_value(std::move(received));
     co_return;
 }
@@ -780,7 +792,19 @@ DetachedTask write_tls_pending_payload(fiber::http::TlsTransport *transport, con
         co_return;
     }
 
-    auto write_result = co_await transport->write(payload.data(), payload.size(), 5s);
+    fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(payload.size());
+    if (!node) {
+        done->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+        co_return;
+    }
+    std::memcpy(node.writable_data(), payload.data(), payload.size());
+    node.commit(payload.size());
+    fiber::mem::IoBufChain write_chain;
+    if (!write_chain.append(std::move(node))) {
+        done->set_value(std::unexpected(fiber::common::IoErr::NoMem));
+        co_return;
+    }
+    auto write_result = co_await transport->writev(write_chain, 5s);
     done->set_value(std::move(write_result));
     co_return;
 }
@@ -937,23 +961,21 @@ DetachedTask write_chain_recording_records(fiber::http::TlsTransport *transport,
     // worth of plaintext.
     std::vector<std::size_t> records;
     while (chain.readable_bytes() != 0) {
-        std::size_t out = 0;
-        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-        fiber::common::IoErr err = transport->poll_writev(chain, out, wait_event);
-        if (err == fiber::common::IoErr::WouldBlock) {
-            // The pending group is retained; the peer drains continuously.
-            co_await fiber::async::sleep(1ms);
-            continue;
-        }
-        if (err != fiber::common::IoErr::None) {
-            done->set_value(std::unexpected(err));
+        auto result = transport->try_writev(chain);
+        if (!result) {
+            if (result.error() == fiber::common::IoErr::WouldBlock) {
+                // The pending group is retained; the peer drains continuously.
+                co_await fiber::async::sleep(1ms);
+                continue;
+            }
+            done->set_value(std::unexpected(result.error()));
             co_return;
         }
-        if (out == 0) {
+        if (*result == 0) {
             done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
             co_return;
         }
-        records.push_back(out);
+        records.push_back(*result);
     }
     (void) co_await transport->shutdown(5s);
     done->set_value(std::move(records));

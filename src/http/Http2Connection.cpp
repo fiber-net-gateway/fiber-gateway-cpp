@@ -107,38 +107,32 @@ std::uint8_t *append_u64(std::uint8_t *out, std::uint64_t value) noexcept {
     return out + 8;
 }
 
-common::IoErr prepare_read_buffer(mem::IoBuf &read_buf, std::size_t capacity) noexcept {
-    if (!read_buf) {
-        read_buf = mem::IoBuf::allocate(capacity);
-        return read_buf ? common::IoErr::None : common::IoErr::NoMem;
+// The inbound parser consumes frame heads (the client preface, a 9-byte frame
+// header, or a padded/priority prefix) from one contiguous span, and payload
+// handlers receive one node per chunk. A read may end anywhere, so when a head
+// crosses a node boundary its bytes are gathered into a fresh front node. The
+// caller has already verified the chain holds at least `want` readable bytes.
+common::IoErr coalesce_chain_head(mem::IoBufChain &chain, std::size_t want) noexcept {
+    mem::IoBuf stage = mem::IoBuf::allocate(want);
+    if (!stage) {
+        return common::IoErr::NoMem;
     }
-
-    std::size_t unread = read_buf.readable();
-    const std::uint8_t *unread_begin = read_buf.readable_data();
-
-    if (!read_buf.unique()) {
-        mem::IoBuf next = mem::IoBuf::allocate(capacity);
-        if (!next) {
-            return common::IoErr::NoMem;
+    std::size_t gathered = 0;
+    for (const mem::IoBufNode *node = chain.front_node(); node != nullptr && gathered < want; node = node->next) {
+        const std::size_t readable = node->buf.readable();
+        if (readable == 0) {
+            continue;
         }
-        if (unread != 0) {
-            std::memcpy(next.writable_data(), unread_begin, unread);
-            next.commit(unread);
-        }
-        read_buf = std::move(next);
-        return common::IoErr::None;
+        const std::size_t take = std::min(readable, want - gathered);
+        std::memcpy(stage.writable_data() + gathered, node->buf.readable_data(), take);
+        gathered += take;
     }
-
-    if (unread == 0) {
-        read_buf.clear();
-        return common::IoErr::None;
+    chain.consume(want);
+    chain.drop_empty_front();
+    stage.commit(gathered);
+    if (!chain.prepend(std::move(stage))) {
+        return common::IoErr::NoMem;
     }
-
-    if (unread_begin != read_buf.data()) {
-        std::memmove(read_buf.data(), unread_begin, unread);
-    }
-    read_buf.clear();
-    read_buf.commit(unread);
     return common::IoErr::None;
 }
 
@@ -236,16 +230,22 @@ Http2Connection::~Http2Connection() {
 }
 
 common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget, std::size_t &byte_budget) noexcept {
-    mem::IoBuf &read_buf = inbound_io_.read_buf;
+    mem::IoBufChain &read_buf = inbound_io_.read_buf;
     while (operation_budget != 0 && byte_budget != 0) {
         if (inbound_io_.phase == ParsePhase::Preface) {
-            if (read_buf.readable() < kClientPreface.size()) {
+            if (read_buf.readable_bytes() < kClientPreface.size()) {
                 return common::IoErr::None;
             }
-            if (std::memcmp(read_buf.readable_data(), kClientPreface.data(), kClientPreface.size()) != 0) {
+            if (read_buf.front()->readable() < kClientPreface.size()) {
+                common::IoErr err = coalesce_chain_head(read_buf, kClientPreface.size());
+                if (err != common::IoErr::None) {
+                    return err;
+                }
+            }
+            if (std::memcmp(read_buf.front()->readable_data(), kClientPreface.data(), kClientPreface.size()) != 0) {
                 return common::IoErr::Invalid;
             }
-            read_buf.consume(kClientPreface.size());
+            read_buf.consume_and_compact(kClientPreface.size());
             --operation_budget;
             byte_budget -= std::min(byte_budget, kClientPreface.size());
             common::IoErr err = send_initial_flight();
@@ -258,11 +258,17 @@ common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget
         }
 
         if (inbound_io_.phase == ParsePhase::FrameHeader) {
-            if (read_buf.readable() < kFrameHeaderSize) {
+            if (read_buf.readable_bytes() < kFrameHeaderSize) {
                 return common::IoErr::None;
             }
+            if (read_buf.front()->readable() < kFrameHeaderSize) {
+                common::IoErr coalesce_err = coalesce_chain_head(read_buf, kFrameHeaderSize);
+                if (coalesce_err != common::IoErr::None) {
+                    return coalesce_err;
+                }
+            }
 
-            const std::uint8_t *header = read_buf.readable_data();
+            const std::uint8_t *header = read_buf.front()->readable_data();
             FrameHeader &current_header = inbound_io_.current_header;
             current_header.length = parse_frame_length(header);
             current_header.type = static_cast<Http2FrameType>(header[3]);
@@ -272,13 +278,17 @@ common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget
                 return common::IoErr::Invalid;
             }
 
-            read_buf.consume(kFrameHeaderSize);
+            read_buf.consume_and_compact(kFrameHeaderSize);
             --operation_budget;
             byte_budget -= std::min(byte_budget, kFrameHeaderSize);
             inbound_io_.payload_remaining = current_header.length;
             inbound_io_.payload_offset = 0;
             if (inbound_io_.payload_remaining == 0) {
-                common::IoErr err = consume_incoming_frame_payload(current_header, read_buf, 0, 0);
+                // Length 0 keeps every handler off the payload buffer; a fresh
+                // empty node stands in when the chain happens to be drained.
+                static const mem::IoBuf kEmptyPayload{};
+                const mem::IoBuf &empty_view = read_buf.front() ? *read_buf.front() : kEmptyPayload;
+                common::IoErr err = consume_incoming_frame_payload(current_header, empty_view, 0, 0);
                 if (err != common::IoErr::None || state_ == State::Closing || state_ == State::Closed) {
                     return err;
                 }
@@ -288,7 +298,7 @@ common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget
             continue;
         }
 
-        if (read_buf.readable() == 0) {
+        if (read_buf.readable_bytes() == 0) {
             return common::IoErr::None;
         }
 
@@ -301,20 +311,29 @@ common::IoErr Http2Connection::consume_read_buffer(std::size_t &operation_budget
                 prefix = 4U + ((frame.flags & kFlagPadded) ? 1U : 0U);
             }
             prefix = std::min(prefix, static_cast<std::size_t>(frame.length));
-            if (read_buf.readable() < prefix)
+            if (read_buf.readable_bytes() < prefix)
                 return common::IoErr::None;
         }
+        // Payload handlers receive one contiguous node per chunk; the prefix
+        // fields (pad length, priority, promised id) must not straddle nodes.
+        if (prefix > 0 && read_buf.front()->readable() < prefix) {
+            common::IoErr coalesce_err = coalesce_chain_head(read_buf, prefix);
+            if (coalesce_err != common::IoErr::None) {
+                return coalesce_err;
+            }
+        }
+        mem::IoBuf *front = read_buf.front();
         const std::size_t chunk_len =
-                std::min({read_buf.readable(), static_cast<std::size_t>(inbound_io_.payload_remaining),
+                std::min({front->readable(), static_cast<std::size_t>(inbound_io_.payload_remaining),
                           std::max(byte_budget, prefix)});
-        common::IoErr err = consume_incoming_frame_payload(inbound_io_.current_header, read_buf,
+        common::IoErr err = consume_incoming_frame_payload(inbound_io_.current_header, *front,
                                                            inbound_io_.payload_offset, chunk_len);
         // Processing GOAWAY or the final stream payload can finish a draining
-        // connection and release read_buf. Do not touch that storage afterwards.
+        // connection and release chain nodes. Do not touch that storage afterwards.
         if (err != common::IoErr::None || state_ == State::Closing || state_ == State::Closed) {
             return err;
         }
-        read_buf.consume(chunk_len);
+        read_buf.consume_and_compact(chunk_len);
         inbound_io_.payload_remaining -= static_cast<std::uint32_t>(chunk_len);
         inbound_io_.payload_offset += chunk_len;
         --operation_budget;
@@ -337,7 +356,7 @@ common::IoResult<Http2Connection::ReadPumpResult> Http2Connection::pump_read(std
     if (inbound_eof_) {
         return result;
     }
-    const std::size_t read_buffer_capacity = std::max(options_.read_buffer_size, kClientPreface.size());
+    const std::size_t read_size = std::max(options_.read_buffer_size, kClientPreface.size());
 
     while (state_ == State::Start || state_ == State::Running || state_ == State::Draining) {
         common::IoErr consume_err = consume_read_buffer(operation_budget, byte_budget);
@@ -357,29 +376,23 @@ common::IoResult<Http2Connection::ReadPumpResult> Http2Connection::pump_read(std
             result.wait_event = inbound_io_.operation_pending ? inbound_io_.wait_event : event::IoEvent::Read;
             return result;
         }
-        common::IoErr prepare_err = prepare_read_buffer(inbound_io_.read_buf, read_buffer_capacity);
-        if (prepare_err != common::IoErr::None) {
-            return std::unexpected(prepare_err);
-        }
 
-        std::size_t bytes_read = 0;
-        event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr read_err = transport_->poll_read_into(inbound_io_.read_buf, bytes_read, wait_event);
+        // try_readv appends a fresh node; WouldBlock leaves the chain
+        // untouched, so a pending retry has no buffer to keep stable.
+        common::IoResult<std::size_t> read_result = transport_->try_readv(read_size, inbound_io_.read_buf);
         inbound_io_.ready_hint = false;
         --operation_budget;
-        if (read_err == common::IoErr::WouldBlock) {
-            if (wait_event != event::IoEvent::Read && wait_event != event::IoEvent::Write) {
-                return std::unexpected(common::IoErr::Invalid);
+        if (!read_result) {
+            if (read_result.error() == common::IoErr::WouldBlock) {
+                inbound_io_.operation_pending = true;
+                inbound_io_.wait_event = event::IoEvent::Read;
+                result.wait_event = event::IoEvent::Read;
+                return result;
             }
-            inbound_io_.operation_pending = true;
-            result.wait_event = wait_event;
-            return result;
+            return std::unexpected(read_result.error());
         }
         inbound_io_.operation_pending = false;
-        if (read_err != common::IoErr::None) {
-            return std::unexpected(read_err);
-        }
-        if (bytes_read == 0) {
+        if (*read_result == 0) {
             handle_read_eof();
             return result;
         }
@@ -389,8 +402,8 @@ common::IoResult<Http2Connection::ReadPumpResult> Http2Connection::pump_read(std
         // that became available from the same socket event without waiting for
         // another physical readiness edge.
         inbound_io_.ready_hint = true;
-        result.bytes_read += bytes_read;
-        byte_budget -= std::min(byte_budget, bytes_read);
+        result.bytes_read += *read_result;
+        byte_budget -= std::min(byte_budget, *read_result);
         inbound_io_.last_inbound_at = transport_->loop().now();
         // Any inbound bytes are proof of life: they settle an outstanding
         // keepalive probe and restart the idle window from this timestamp.
@@ -404,7 +417,7 @@ common::IoResult<Http2Connection::ReadPumpResult> Http2Connection::pump_read(std
 }
 
 void Http2Connection::handle_read_eof() noexcept {
-    if (inbound_io_.phase != ParsePhase::FrameHeader || inbound_io_.read_buf.readable() != 0) {
+    if (inbound_io_.phase != ParsePhase::FrameHeader || inbound_io_.read_buf.readable_bytes() != 0) {
         enter_closing(common::IoErr::ConnReset);
         return;
     }
@@ -572,7 +585,6 @@ void Http2Connection::drive_io() noexcept {
     if (state_ != State::Closed) {
         arm_read_timer();
         arm_write_timer(write_progress);
-        arm_read_buffer_idle_timer();
         if (read_result.needs_reschedule || write_result.needs_reschedule) {
             io_pump_again_ = true;
         }
@@ -686,19 +698,6 @@ void Http2Connection::on_write_timer(Http2Connection *connection) noexcept {
     connection->enter_closing(common::IoErr::TimedOut);
 }
 
-void Http2Connection::on_read_buffer_idle_timer(Http2Connection *connection) noexcept {
-    FIBER_ASSERT(connection != nullptr);
-    const bool retry_buffer_pinned =
-            connection->inbound_io_.operation_pending && connection->transport_->requires_stable_read_buffer_on_retry();
-    if (!retry_buffer_pinned && connection->inbound_io_.read_buf && connection->inbound_io_.read_buf.unique() &&
-        connection->inbound_io_.read_buf.readable() == 0) {
-        connection->inbound_io_.read_buf = {};
-    }
-    if (connection->transport_ && connection->transport_->has_pending_read()) {
-        connection->schedule_io_pump();
-    }
-}
-
 void Http2Connection::arm_read_timer() noexcept {
     if (!transport_) {
         return;
@@ -738,24 +737,6 @@ void Http2Connection::arm_write_timer(bool made_progress) noexcept {
             deadline_after(write_blocked_at_, options_.write_timeout), *this);
 }
 
-void Http2Connection::arm_read_buffer_idle_timer() noexcept {
-    if (!transport_) {
-        return;
-    }
-    event::EventLoop &event_loop = transport_->loop();
-    event_loop.cancel<Http2Connection, &Http2Connection::read_buffer_idle_timer_entry_>(*this);
-    const bool retry_buffer_pinned =
-            inbound_io_.operation_pending && transport_->requires_stable_read_buffer_on_retry();
-    if (options_.read_buffer_idle_release_timeout <= std::chrono::milliseconds::zero() || !inbound_io_.read_buf ||
-        !inbound_io_.read_buf.unique() || inbound_io_.read_buf.readable() != 0 || retry_buffer_pinned ||
-        state_ == State::Closed) {
-        return;
-    }
-    event_loop.post_at<Http2Connection, &Http2Connection::read_buffer_idle_timer_entry_,
-                       &Http2Connection::on_read_buffer_idle_timer>(
-            deadline_after(inbound_io_.last_inbound_at, options_.read_buffer_idle_release_timeout), *this);
-}
-
 void Http2Connection::cancel_io_timers() noexcept {
     if (!transport_) {
         return;
@@ -763,7 +744,6 @@ void Http2Connection::cancel_io_timers() noexcept {
     event::EventLoop &event_loop = transport_->loop();
     event_loop.cancel<Http2Connection, &Http2Connection::read_timer_entry_>(*this);
     event_loop.cancel<Http2Connection, &Http2Connection::write_timer_entry_>(*this);
-    event_loop.cancel<Http2Connection, &Http2Connection::read_buffer_idle_timer_entry_>(*this);
 }
 
 void Http2Connection::finish_connection() noexcept {
@@ -879,6 +859,10 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
 
         std::uint8_t pad_length = 0;
         if ((fhr.flags & kFlagPadded) != 0) {
+            if (fhr.length == 0) {
+                // A zero-length frame has no room for the pad-length byte.
+                return common::IoErr::Invalid;
+            }
             pad_length = buf.readable_data()[0];
             if (fhr.length < static_cast<std::uint32_t>(1 + pad_length)) {
                 return common::IoErr::Invalid;
@@ -944,9 +928,14 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
     bool end_stream = ((fhr.flags & kFlagEndStream) != 0) && (frame_end >= fhr.length);
 
     if (deliver_len != 0 || end_stream) {
-        mem::IoBuf payload = buf.retain_slice(chunk_begin, deliver_len);
-        if (!payload && deliver_len != 0) {
-            return common::IoErr::NoMem;
+        // Zero-length deliveries (end_stream only) must not slice: the empty
+        // stand-in for a drained chain has no control block to retain.
+        mem::IoBuf payload;
+        if (deliver_len != 0) {
+            payload = buf.retain_slice(chunk_begin, deliver_len);
+            if (!payload) {
+                return common::IoErr::NoMem;
+            }
         }
         common::IoErr err = stream->on_data_payload_recv(std::move(payload), data_offset, logical_total, end_stream);
         if (err != common::IoErr::None) {
@@ -1171,9 +1160,14 @@ common::IoErr Http2Connection::handle_headers_payload(const FrameHeader &fhr, co
     bool end_stream = end_headers && inbound_stream_.end_stream_pending;
 
     if (deliver_len != 0 || end_headers || end_stream) {
-        mem::IoBuf payload = buf.retain_slice(chunk_begin, deliver_len);
-        if (!payload && deliver_len != 0) {
-            return common::IoErr::NoMem;
+        // Zero-length deliveries (end flags only) must not slice: the empty
+        // stand-in for a drained chain has no control block to retain.
+        mem::IoBuf payload;
+        if (deliver_len != 0) {
+            payload = buf.retain_slice(chunk_begin, deliver_len);
+            if (!payload) {
+                return common::IoErr::NoMem;
+            }
         }
         common::IoErr err =
                 stream->on_headers_payload_recv(deliver_len != 0 ? payload : buf, offset == 0, end_headers, end_stream);
@@ -1221,9 +1215,14 @@ common::IoErr Http2Connection::handle_continuation_payload(const FrameHeader &fh
     bool end_headers = ((fhr.flags & kFlagEndHeaders) != 0) && (frame_end >= fhr.length);
     bool end_stream = end_headers && inbound_stream_.end_stream_pending;
     if (length != 0 || end_headers || end_stream) {
-        mem::IoBuf payload = buf.retain_slice(0, length);
-        if (!payload && length != 0) {
-            return common::IoErr::NoMem;
+        // Zero-length deliveries (end flags only) must not slice: the empty
+        // stand-in for a drained chain has no control block to retain.
+        mem::IoBuf payload;
+        if (length != 0) {
+            payload = buf.retain_slice(0, length);
+            if (!payload) {
+                return common::IoErr::NoMem;
+            }
         }
         common::IoErr err =
                 stream->on_headers_payload_recv(length != 0 ? payload : buf, false, end_headers, end_stream);
@@ -2325,28 +2324,22 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
             return std::unexpected(common::IoErr::Invalid);
         }
 
-        std::size_t written = 0;
-        event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = transport_->poll_writev(inflight_outbound_chain_, written, wait_event);
-        if (err == common::IoErr::WouldBlock) {
-            if (wait_event != event::IoEvent::Read && wait_event != event::IoEvent::Write) {
-                abort_outbound(common::IoErr::Invalid);
-                return std::unexpected(common::IoErr::Invalid);
+        common::IoResult<std::size_t> written_result = transport_->try_writev(inflight_outbound_chain_);
+        if (!written_result) {
+            if (written_result.error() == common::IoErr::WouldBlock) {
+                result.wait_event = event::IoEvent::Write;
+                return result;
             }
-            result.wait_event = wait_event;
-            return result;
+            abort_outbound(written_result.error());
+            return std::unexpected(written_result.error());
         }
-        if (err != common::IoErr::None) {
-            abort_outbound(err);
-            return std::unexpected(err);
-        }
-        if (written == 0) {
+        if (*written_result == 0) {
             abort_outbound(common::IoErr::ConnReset);
             return std::unexpected(common::IoErr::ConnReset);
         }
 
-        result.bytes_written += written;
-        finish_written_outbound_hooks(written);
+        result.bytes_written += *written_result;
+        finish_written_outbound_hooks(*written_result);
     }
     result.needs_reschedule = !outbound_stopped_ && (!inflight_outbound_chain_.empty() || !outbound_queue_.empty());
     if (outbound_closed_ && outbound_idle()) {

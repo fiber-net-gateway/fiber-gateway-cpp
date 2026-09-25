@@ -73,9 +73,6 @@ public:
         // before the connection is closed. Outside the running state, or when the
         // peer never answers, expiry closes with TimedOut. max() disables.
         std::chrono::milliseconds read_timeout = std::chrono::seconds(75);
-        // Retain an empty unique read buffer for this long after the last
-        // successful inbound read. Zero disables idle buffer release.
-        std::chrono::milliseconds read_buffer_idle_release_timeout = std::chrono::milliseconds::zero();
         std::chrono::milliseconds write_timeout = std::chrono::seconds(30);
         std::uint32_t max_frame_size = 16384;
         std::uint32_t max_hpack_string_size = 64 * 1024;
@@ -194,7 +191,7 @@ private:
     };
 
     struct InboundIoState {
-        mem::IoBuf read_buf{};
+        mem::IoBufChain read_buf{};
         FrameHeader current_header{};
         std::chrono::steady_clock::time_point last_inbound_at{};
         std::chrono::steady_clock::time_point ping_sent_at{};
@@ -394,7 +391,6 @@ private:
     static void on_io_pump(Http2Connection *connection) noexcept;
     static void on_read_timer(Http2Connection *connection) noexcept;
     static void on_write_timer(Http2Connection *connection) noexcept;
-    static void on_read_buffer_idle_timer(Http2Connection *connection) noexcept;
     void handle_transport_ready(event::IoEvent event, common::IoErr err) noexcept;
     void schedule_io_pump(bool next_turn = false) noexcept;
     void drive_io() noexcept;
@@ -402,7 +398,6 @@ private:
     void clear_transport_callbacks() noexcept;
     void arm_read_timer() noexcept;
     void arm_write_timer(bool made_progress) noexcept;
-    void arm_read_buffer_idle_timer() noexcept;
     void cancel_io_timers() noexcept;
     void finish_connection() noexcept;
     common::IoErr start_draining() noexcept;
@@ -464,7 +459,6 @@ private:
     event::EventLoop::DeferEntry io_pump_entry_{};
     event::EventLoop::TimerEntry read_timer_entry_{};
     event::EventLoop::TimerEntry write_timer_entry_{};
-    event::EventLoop::TimerEntry read_buffer_idle_timer_entry_{};
     std::chrono::steady_clock::time_point write_blocked_at_{};
     FramePayloadHook frame_payload_hook_ = nullptr;
     void *frame_payload_hook_ctx_ = nullptr;

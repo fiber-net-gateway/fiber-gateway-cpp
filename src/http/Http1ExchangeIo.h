@@ -83,10 +83,8 @@ private:
     fiber::async::Task<common::IoResult<void>> write_response_header(HttpExchange &exchange, bool body_end,
                                                                      std::size_t first_body_len, bool infer_body_mode,
                                                                      std::chrono::milliseconds timeout) noexcept;
-    common::IoResult<void> ensure_read_buf_writable(std::size_t min_writable) noexcept;
     std::size_t drain_body_input(mem::IoBuf &buffer) noexcept;
     common::IoResult<void> take_prefix(mem::IoBufChain &out, std::size_t len) noexcept;
-    common::IoResult<void> spill_read_buf_to_inbound() noexcept;
     [[nodiscard]] mem::IoBuf *front_body_input() noexcept;
     [[nodiscard]] std::size_t body_input_readable() const noexcept;
 
@@ -94,7 +92,6 @@ private:
     ResponseChannelClosedCallback response_channel_closed_callback_ = nullptr;
     void *response_channel_closed_callback_ctx_ = nullptr;
     BodyParser body_parser_;
-    mem::IoBuf read_buf_;
     bool read_call_used_io_ = false;
 
     ResponsePhase response_phase_ = ResponsePhase::Init;

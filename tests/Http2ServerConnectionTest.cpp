@@ -65,29 +65,32 @@ public:
         block_write = false;
         notify_write_ready();
     }
-    IoErr poll_read_into(mem::IoBuf &buf, std::size_t &out, event::IoEvent &wait) noexcept override {
-        out = std::min(buf.writable(), incoming.size());
-        wait = event::IoEvent::None;
-        if (out != 0) {
-            std::memcpy(buf.writable_data(), incoming.data(), out);
-            buf.commit(out);
-            incoming.erase(0, out);
-            last_read = loop().now();
-            return IoErr::None;
+    common::IoResult<std::size_t> try_readv(std::size_t size, mem::IoBufChain &out) noexcept override {
+        if (incoming.empty() && !eof) {
+            return std::unexpected(IoErr::WouldBlock);
         }
-        if (eof) {
-            return IoErr::None;
+        if (incoming.empty()) {
+            return static_cast<std::size_t>(0);
         }
-        wait = event::IoEvent::Read;
-        return IoErr::WouldBlock;
+        const std::size_t take = std::min(size, incoming.size());
+        mem::IoBuf node = mem::IoBuf::allocate(take);
+        if (!node) {
+            return std::unexpected(IoErr::NoMem);
+        }
+        std::memcpy(node.writable_data(), incoming.data(), take);
+        node.commit(take);
+        if (!out.append(std::move(node))) {
+            return std::unexpected(IoErr::NoMem);
+        }
+        incoming.erase(0, take);
+        last_read = loop().now();
+        return take;
     }
-    IoErr poll_writev(mem::IoBufChain &buf, std::size_t &out, event::IoEvent &wait) noexcept override {
-        out = 0;
-        wait = event::IoEvent::None;
+    common::IoResult<std::size_t> try_writev(mem::IoBufChain &buf) noexcept override {
         if (block_write) {
-            wait = event::IoEvent::Write;
-            return IoErr::WouldBlock;
+            return std::unexpected(IoErr::WouldBlock);
         }
+        std::size_t out = 0;
         while (const auto *front = buf.front()) {
             auto length = front->readable();
             if (length == 0) {
@@ -98,30 +101,12 @@ public:
             out += length;
             buf.consume_and_compact(length);
         }
-        return IoErr::None;
+        return out;
     }
     async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         co_return std::unexpected(IoErr::NotSupported);
     }
     async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds) override {
-        co_return std::unexpected(IoErr::NotSupported);
-    }
-    async::Task<common::IoResult<std::size_t>> read(void *, std::size_t, std::chrono::milliseconds) override {
-        co_return std::unexpected(IoErr::NotSupported);
-    }
-    async::Task<common::IoResult<std::size_t>> read_into(mem::IoBuf &, std::chrono::milliseconds) override {
-        co_return std::unexpected(IoErr::NotSupported);
-    }
-    async::Task<common::IoResult<std::size_t>> readv_into(mem::IoBufChain &, std::chrono::milliseconds) override {
-        co_return std::unexpected(IoErr::NotSupported);
-    }
-    async::Task<common::IoResult<std::size_t>> write(const void *, std::size_t, std::chrono::milliseconds) override {
-        co_return std::unexpected(IoErr::NotSupported);
-    }
-    async::Task<common::IoResult<std::size_t>> write(mem::IoBuf &, std::chrono::milliseconds) override {
-        co_return std::unexpected(IoErr::NotSupported);
-    }
-    async::Task<common::IoResult<std::size_t>> writev(mem::IoBufChain &, std::chrono::milliseconds) override {
         co_return std::unexpected(IoErr::NotSupported);
     }
     void close() override {

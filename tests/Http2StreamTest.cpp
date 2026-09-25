@@ -162,34 +162,6 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
-    fiber::async::Task<fiber::common::IoResult<size_t>> read(void *, size_t, std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> read_into(fiber::mem::IoBuf &,
-                                                                  std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> readv_into(fiber::mem::IoBufChain &,
-                                                                   std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(const void *, size_t,
-                                                              std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(fiber::mem::IoBuf &, std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> writev(fiber::mem::IoBufChain &,
-                                                               std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
     void close() override {}
     [[nodiscard]] bool valid() const noexcept override { return true; }
     [[nodiscard]] int fd() const noexcept override { return -1; }

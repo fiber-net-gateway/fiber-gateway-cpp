@@ -165,20 +165,41 @@ void encode_header_fields(char *&dst, const HttpHeaders *headers) noexcept {
     }
 }
 
+// Wraps a contiguous span into a fresh node so the chain-based write path can
+// drain it; the copy is released with the chain when the write completes.
+fiber::async::Task<common::IoResult<size_t>> transport_write_span(HttpTransport *transport, const void *buf, size_t len,
+                                                                  std::chrono::milliseconds timeout) {
+    size_t total = 0;
+    if (len > 0) {
+        mem::IoBuf node = mem::IoBuf::allocate(len);
+        if (!node) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+        std::memcpy(node.writable_data(), buf, len);
+        node.commit(len);
+        mem::IoBufChain chain;
+        if (!chain.append(std::move(node))) {
+            co_return std::unexpected(common::IoErr::NoMem);
+        }
+        while (chain.readable_bytes() > 0) {
+            auto result = co_await transport->writev(chain, timeout);
+            if (!result) {
+                co_return std::unexpected(result.error());
+            }
+            if (*result == 0) {
+                co_return std::unexpected(common::IoErr::ConnReset);
+            }
+            total += *result;
+        }
+    }
+    co_return total;
+}
+
 fiber::async::Task<common::IoResult<void>> transport_write_all(HttpTransport *transport, const void *buf, size_t len,
                                                                std::chrono::milliseconds timeout) {
-    const auto *ptr = static_cast<const std::uint8_t *>(buf);
-    size_t remaining = len;
-    while (remaining > 0) {
-        auto result = co_await transport->write(ptr, remaining, timeout);
-        if (!result) {
-            co_return std::unexpected(result.error());
-        }
-        if (*result == 0) {
-            co_return std::unexpected(common::IoErr::ConnReset);
-        }
-        ptr += *result;
-        remaining -= *result;
+    auto result = co_await transport_write_span(transport, buf, len, timeout);
+    if (!result) {
+        co_return std::unexpected(result.error());
     }
     co_return common::IoResult<void>{};
 }
@@ -291,77 +312,24 @@ void Http1ExchangeIo::on_transport_terminal(void *ctx, common::IoErr) noexcept {
     callback(callback_ctx);
 }
 
-common::IoResult<void> Http1ExchangeIo::ensure_read_buf_writable(std::size_t min_writable) noexcept {
-    if (min_writable == 0) {
-        return {};
-    }
-
-    if (!read_buf_) {
-        read_buf_ = mem::IoBuf::allocate(min_writable);
-        if (!read_buf_) {
-            return std::unexpected(common::IoErr::NoMem);
-        }
-        return {};
-    }
-
-    if (read_buf_.readable() == 0) {
-        if (read_buf_.unique() && read_buf_.capacity() >= min_writable) {
-            read_buf_.reset();
-            return {};
-        }
-
-        mem::IoBuf next = mem::IoBuf::allocate(min_writable);
-        if (!next) {
-            return std::unexpected(common::IoErr::NoMem);
-        }
-        read_buf_ = std::move(next);
-        return {};
-    }
-
-    if (read_buf_.writable() >= min_writable) {
-        return {};
-    }
-
-    std::size_t unread = read_buf_.readable();
-    mem::IoBuf next = mem::IoBuf::allocate(unread + min_writable);
-    if (!next) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    std::memcpy(next.writable_data(), read_buf_.readable_data(), unread);
-    next.commit(unread);
-    read_buf_ = std::move(next);
-    return {};
-}
-
 std::size_t Http1ExchangeIo::drain_body_input(mem::IoBuf &buffer) noexcept {
     std::size_t copied = 0;
     while (buffer.writable() > 0) {
-        connection_->inbound_bufs().drop_empty_front();
-        mem::IoBuf *front = connection_->inbound_bufs().front();
-        if (front && front->readable() > 0) {
-            std::size_t take = std::min(front->readable(), buffer.writable());
-            std::memcpy(buffer.writable_data(), front->readable_data(), take);
-            buffer.commit(take);
-            connection_->inbound_bufs().consume_and_compact(take);
-            copied += take;
-            continue;
-        }
-
-        if (read_buf_.readable() == 0) {
+        mem::IoBuf *front = front_body_input();
+        if (!front) {
             break;
         }
-
-        std::size_t take = std::min(read_buf_.readable(), buffer.writable());
-        std::memcpy(buffer.writable_data(), read_buf_.readable_data(), take);
+        std::size_t take = std::min(front->readable(), buffer.writable());
+        std::memcpy(buffer.writable_data(), front->readable_data(), take);
         buffer.commit(take);
-        read_buf_.consume(take);
+        connection_->inbound_bufs().consume_and_compact(take);
         copied += take;
     }
     return copied;
 }
 
 std::size_t Http1ExchangeIo::body_input_readable() const noexcept {
-    return connection_->inbound_bufs().readable_bytes() + read_buf_.readable();
+    return connection_->inbound_bufs().readable_bytes();
 }
 
 mem::IoBuf *Http1ExchangeIo::front_body_input() noexcept {
@@ -370,23 +338,7 @@ mem::IoBuf *Http1ExchangeIo::front_body_input() noexcept {
     if (front && front->readable() > 0) {
         return front;
     }
-    if (read_buf_.readable() > 0) {
-        return &read_buf_;
-    }
     return nullptr;
-}
-
-common::IoResult<void> Http1ExchangeIo::spill_read_buf_to_inbound() noexcept {
-    if (read_buf_.readable() == 0) {
-        return {};
-    }
-
-    mem::IoBuf trailing = read_buf_.retain_slice(0, read_buf_.readable());
-    if (!connection_->inbound_bufs().append(std::move(trailing))) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    read_buf_.consume(read_buf_.readable());
-    return {};
 }
 
 fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::read_more(std::size_t max_bytes,
@@ -400,17 +352,11 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::read_more(std::siz
         co_return static_cast<size_t>(0);
     }
 
-    auto ensure_result = ensure_read_buf_writable(read_size);
-    if (!ensure_result) {
-        co_return std::unexpected(ensure_result.error());
-    }
-
-    auto result = co_await connection_->transport().read(read_buf_.writable_data(), read_size, timeout);
+    auto result = co_await connection_->transport().readv(read_size, connection_->inbound_bufs(), timeout);
     if (!result) {
         co_return std::unexpected(result.error());
     }
     read_call_used_io_ = true;
-    read_buf_.commit(*result);
     co_return *result;
 }
 
@@ -438,11 +384,7 @@ Http1ExchangeIo::advance_chunked_body(std::size_t max_bytes, bool allow_read,
         ParseCode code = body_parser_.execute(&cursor);
         std::size_t consumed = front->readable() - cursor.readable();
         if (consumed > 0) {
-            if (front == &read_buf_) {
-                read_buf_.consume(consumed);
-            } else {
-                connection_->inbound_bufs().consume_and_compact(consumed);
-            }
+            connection_->inbound_bufs().consume_and_compact(consumed);
         }
 
         if (code == ParseCode::Again) {
@@ -473,27 +415,14 @@ Http1ExchangeIo::advance_chunked_body(std::size_t max_bytes, bool allow_read,
 
 common::IoResult<void> Http1ExchangeIo::take_prefix(mem::IoBufChain &out, std::size_t len) noexcept {
     while (len > 0) {
-        connection_->inbound_bufs().drop_empty_front();
-        mem::IoBuf *front = connection_->inbound_bufs().front();
-        if (front && front->readable() > 0) {
-            std::size_t take = std::min(len, front->readable());
-            if (!connection_->inbound_bufs().take_prefix(take, out)) {
-                return std::unexpected(common::IoErr::NoMem);
-            }
-            len -= take;
-            continue;
-        }
-
-        if (read_buf_.readable() == 0) {
+        mem::IoBuf *front = front_body_input();
+        if (!front) {
             return std::unexpected(common::IoErr::Invalid);
         }
-
-        std::size_t take = std::min(len, read_buf_.readable());
-        mem::IoBuf piece = read_buf_.retain_slice(0, take);
-        if (!out.append(std::move(piece))) {
+        std::size_t take = std::min(len, front->readable());
+        if (!connection_->inbound_bufs().take_prefix(take, out)) {
             return std::unexpected(common::IoErr::NoMem);
         }
-        read_buf_.consume(take);
         len -= take;
     }
     return {};
@@ -648,13 +577,15 @@ Http1ExchangeIo::read_request_trailers(HttpExchange &exchange, std::chrono::mill
             }
             std::size_t copied = drain_body_input(header_buffer.buf());
             if (copied == 0) {
-                auto more = co_await connection_->transport().read_into(header_buffer.buf(), timeout);
+                auto more = co_await connection_->transport().readv(header_buffer.buf().writable(),
+                                                                    connection_->inbound_bufs(), timeout);
                 if (!more) {
                     co_return std::unexpected(more.error());
                 }
                 if (*more == 0) {
                     co_return std::unexpected(common::IoErr::ConnReset);
                 }
+                drain_body_input(header_buffer.buf());
             }
             continue;
         }
@@ -696,10 +627,6 @@ Http1ExchangeIo::read_request_trailers(HttpExchange &exchange, std::chrono::mill
                 if (!connection_->inbound_bufs().append(std::move(trailing))) {
                     co_return std::unexpected(common::IoErr::NoMem);
                 }
-            }
-            auto spill_result = spill_read_buf_to_inbound();
-            if (!spill_result) {
-                co_return std::unexpected(spill_result.error());
             }
             exchange.request_trailers_complete_ = true;
             body_parser_.finish_chunked_trailers();
@@ -1558,7 +1485,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange
             }
             co_return 0;
         }
-        auto written = co_await connection_->transport().write(buf, len, timeout);
+        auto written = co_await transport_write_span(&connection_->transport(), buf, len, timeout);
         if (!written) {
             co_return std::unexpected(written.error());
         }
@@ -1618,7 +1545,7 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange
         chunk_write_end_ = end;
     }
 
-    auto written = co_await connection_->transport().write(buf, len, timeout);
+    auto written = co_await transport_write_span(&connection_->transport(), buf, len, timeout);
     if (!written) {
         co_return std::unexpected(written.error());
     }

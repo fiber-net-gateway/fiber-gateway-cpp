@@ -70,56 +70,34 @@ public:
         return report_pending_read_ && !reads_blocked_ && (!hold_eof_ || next_chunk_ < chunks_.size());
     }
 
-    fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out,
-                                   fiber::event::IoEvent &wait_event) noexcept override {
-        out = 0;
-        wait_event = fiber::event::IoEvent::None;
+    fiber::common::IoResult<size_t> try_readv(size_t size, fiber::mem::IoBufChain &out) noexcept override {
+        ++read_into_call_count_;
         if (closed_) {
-            return fiber::common::IoErr::ConnReset;
+            return std::unexpected(fiber::common::IoErr::ConnReset);
         }
         if (reads_blocked_ || (hold_eof_ && next_chunk_ >= chunks_.size())) {
-            wait_event = fiber::event::IoEvent::Read;
-            return fiber::common::IoErr::WouldBlock;
+            return std::unexpected(fiber::common::IoErr::WouldBlock);
         }
         if (next_chunk_ >= chunks_.size()) {
-            return fiber::common::IoErr::None;
+            return static_cast<size_t>(0);
         }
         const std::string &chunk = chunks_[next_chunk_++];
-        out = std::min(len, chunk.size());
-        std::memcpy(buf, chunk.data(), out);
-        return fiber::common::IoErr::None;
-    }
-
-    fiber::common::IoErr poll_read_into(fiber::mem::IoBuf &buf, size_t &out,
-                                        fiber::event::IoEvent &wait_event) noexcept override {
-        ++read_into_call_count_;
-        fiber::common::IoErr err = poll_read(buf.writable_data(), buf.writable(), out, wait_event);
-        if (err == fiber::common::IoErr::None) {
-            buf.commit(out);
+        const size_t take = std::min(size, chunk.size());
+        fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(take);
+        if (!node) {
+            return std::unexpected(fiber::common::IoErr::NoMem);
         }
-        return err;
-    }
-
-    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out,
-                                    fiber::event::IoEvent &wait_event) noexcept override {
-        out = 0;
-        wait_event = fiber::event::IoEvent::None;
-        if (closed_) {
-            return fiber::common::IoErr::ConnReset;
+        std::memcpy(node.writable_data(), chunk.data(), take);
+        node.commit(take);
+        if (!out.append(std::move(node))) {
+            return std::unexpected(fiber::common::IoErr::NoMem);
         }
-        out = next_write_size(len);
-        const auto *ptr = static_cast<const char *>(buf);
-        written_.append(ptr, ptr + out);
-        ++write_call_count_;
-        return fiber::common::IoErr::None;
+        return take;
     }
 
-    fiber::common::IoErr poll_writev(fiber::mem::IoBufChain &buf, size_t &out,
-                                     fiber::event::IoEvent &wait_event) noexcept override {
-        out = 0;
-        wait_event = fiber::event::IoEvent::None;
+    fiber::common::IoResult<size_t> try_writev(fiber::mem::IoBufChain &buf) noexcept override {
         if (closed_) {
-            return fiber::common::IoErr::ConnReset;
+            return std::unexpected(fiber::common::IoErr::ConnReset);
         }
         const size_t take = next_write_size(buf.readable_bytes());
         std::array<iovec, 16> iov{};
@@ -133,70 +111,7 @@ public:
         }
         buf.consume_and_compact(take);
         ++write_call_count_;
-        out = take;
-        return fiber::common::IoErr::None;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> read(void *buf, size_t len,
-                                                             std::chrono::milliseconds) override {
-        while (reads_blocked_ && !closed_) {
-            co_await fiber::async::sleep(std::chrono::milliseconds(1));
-        }
-        while (hold_eof_ && next_chunk_ >= chunks_.size() && !closed_) {
-            co_await fiber::async::sleep(std::chrono::milliseconds(1));
-        }
-        if (next_chunk_ >= chunks_.size()) {
-            co_return static_cast<size_t>(0);
-        }
-        const std::string &chunk = chunks_[next_chunk_++];
-        size_t take = std::min(len, chunk.size());
-        std::memcpy(buf, chunk.data(), take);
-        co_return take;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> read_into(fiber::mem::IoBuf &buf,
-                                                                  std::chrono::milliseconds) override {
-        ++read_into_call_count_;
-        while (reads_blocked_ && !closed_) {
-            co_await fiber::async::sleep(std::chrono::milliseconds(1));
-        }
-        while (hold_eof_ && next_chunk_ >= chunks_.size() && !closed_) {
-            co_await fiber::async::sleep(std::chrono::milliseconds(1));
-        }
-        if (next_chunk_ >= chunks_.size()) {
-            co_return static_cast<size_t>(0);
-        }
-        const std::string &chunk = chunks_[next_chunk_++];
-        size_t take = std::min(buf.writable(), chunk.size());
-        std::memcpy(buf.writable_data(), chunk.data(), take);
-        buf.commit(take);
-        co_return take;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> readv_into(fiber::mem::IoBufChain &,
-                                                                   std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(const void *buf, size_t len,
-                                                              std::chrono::milliseconds) override {
-        if (closed_) {
-            co_return std::unexpected(fiber::common::IoErr::ConnReset);
-        }
-        size_t take = next_write_size(len);
-        const auto *ptr = static_cast<const char *>(buf);
-        written_.append(ptr, ptr + take);
-        ++write_call_count_;
-        co_return take;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(fiber::mem::IoBuf &buf,
-                                                              std::chrono::milliseconds timeout) override {
-        auto result = co_await write(buf.readable_data(), buf.readable(), timeout);
-        if (result) {
-            buf.consume(*result);
-        }
-        co_return result;
+        return take;
     }
 
     fiber::async::Task<fiber::common::IoResult<size_t>> writev(fiber::mem::IoBufChain &buf,
@@ -311,130 +226,52 @@ public:
 
     [[nodiscard]] bool has_pending_read() const noexcept override { return next_action_ < actions_.size(); }
 
-    fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out,
-                                   fiber::event::IoEvent &wait_event) noexcept override {
-        out = 0;
-        wait_event = fiber::event::IoEvent::None;
+    fiber::common::IoResult<size_t> try_readv(size_t size, fiber::mem::IoBufChain &out) noexcept override {
+        ++read_into_call_count_;
         if (closed_) {
-            return fiber::common::IoErr::ConnReset;
+            return std::unexpected(fiber::common::IoErr::ConnReset);
         }
         if (next_action_ >= actions_.size()) {
-            return fiber::common::IoErr::None;
+            return static_cast<size_t>(0);
         }
 
         ReadAction &action = actions_[next_action_++];
         switch (action.kind) {
-            case ReadActionKind::Chunk:
-                out = std::min(len, action.data.size());
-                std::memcpy(buf, action.data.data(), out);
-                return fiber::common::IoErr::None;
+            case ReadActionKind::Chunk: {
+                const size_t take = std::min(size, action.data.size());
+                fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(take);
+                if (!node) {
+                    return std::unexpected(fiber::common::IoErr::NoMem);
+                }
+                std::memcpy(node.writable_data(), action.data.data(), take);
+                node.commit(take);
+                if (!out.append(std::move(node))) {
+                    return std::unexpected(fiber::common::IoErr::NoMem);
+                }
+                return take;
+            }
             case ReadActionKind::TimedOut:
-                wait_event = fiber::event::IoEvent::Read;
-                return fiber::common::IoErr::WouldBlock;
+                return std::unexpected(fiber::common::IoErr::WouldBlock);
             case ReadActionKind::Eof:
-                return fiber::common::IoErr::None;
+                return static_cast<size_t>(0);
         }
-        return fiber::common::IoErr::Invalid;
+        return std::unexpected(fiber::common::IoErr::Invalid);
     }
 
-    fiber::common::IoErr poll_read_into(fiber::mem::IoBuf &buf, size_t &out,
-                                        fiber::event::IoEvent &wait_event) noexcept override {
-        ++read_into_call_count_;
-        fiber::common::IoErr err = poll_read(buf.writable_data(), buf.writable(), out, wait_event);
-        if (err == fiber::common::IoErr::None) {
-            buf.commit(out);
-        }
-        return err;
-    }
-
-    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out,
-                                    fiber::event::IoEvent &wait_event) noexcept override {
-        out = 0;
-        wait_event = fiber::event::IoEvent::None;
+    fiber::common::IoResult<size_t> try_writev(fiber::mem::IoBufChain &buf) noexcept override {
         if (closed_) {
-            return fiber::common::IoErr::ConnReset;
-        }
-        const auto *ptr = static_cast<const char *>(buf);
-        written_.append(ptr, ptr + len);
-        out = len;
-        return fiber::common::IoErr::None;
-    }
-
-    fiber::common::IoErr poll_writev(fiber::mem::IoBufChain &buf, size_t &out,
-                                     fiber::event::IoEvent &wait_event) noexcept override {
-        out = 0;
-        wait_event = fiber::event::IoEvent::None;
-        if (closed_) {
-            return fiber::common::IoErr::ConnReset;
+            return std::unexpected(fiber::common::IoErr::ConnReset);
         }
         std::array<iovec, 16> iov{};
         const int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+        size_t out = 0;
         for (int i = 0; i < count; ++i) {
             const char *ptr = static_cast<const char *>(iov[i].iov_base);
             written_.append(ptr, ptr + iov[i].iov_len);
             out += iov[i].iov_len;
         }
         buf.consume_and_compact(out);
-        return fiber::common::IoErr::None;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> read(void *buf, size_t len,
-                                                             std::chrono::milliseconds) override {
-        if (closed_) {
-            co_return std::unexpected(fiber::common::IoErr::ConnReset);
-        }
-        if (next_action_ >= actions_.size()) {
-            co_return static_cast<size_t>(0);
-        }
-
-        ReadAction &action = actions_[next_action_++];
-        switch (action.kind) {
-            case ReadActionKind::Chunk: {
-                const size_t take = std::min(len, action.data.size());
-                std::memcpy(buf, action.data.data(), take);
-                co_return take;
-            }
-            case ReadActionKind::TimedOut:
-                co_return std::unexpected(fiber::common::IoErr::TimedOut);
-            case ReadActionKind::Eof:
-                co_return static_cast<size_t>(0);
-        }
-
-        co_return std::unexpected(fiber::common::IoErr::Invalid);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> read_into(fiber::mem::IoBuf &buf,
-                                                                  std::chrono::milliseconds timeout) override {
-        ++read_into_call_count_;
-        auto result = co_await read(buf.writable_data(), buf.writable(), timeout);
-        if (result) {
-            buf.commit(*result);
-        }
-        co_return result;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> readv_into(fiber::mem::IoBufChain &,
-                                                                   std::chrono::milliseconds) override {
-        co_return std::unexpected(fiber::common::IoErr::NotSupported);
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(const void *buf, size_t len,
-                                                              std::chrono::milliseconds) override {
-        if (closed_) {
-            co_return std::unexpected(fiber::common::IoErr::ConnReset);
-        }
-        const auto *ptr = static_cast<const char *>(buf);
-        written_.append(ptr, ptr + len);
-        co_return len;
-    }
-
-    fiber::async::Task<fiber::common::IoResult<size_t>> write(fiber::mem::IoBuf &buf,
-                                                              std::chrono::milliseconds timeout) override {
-        auto result = co_await write(buf.readable_data(), buf.readable(), timeout);
-        if (result) {
-            buf.consume(*result);
-        }
-        co_return result;
+        return out;
     }
 
     fiber::async::Task<fiber::common::IoResult<size_t>> writev(fiber::mem::IoBufChain &buf,
@@ -2072,7 +1909,7 @@ public:
     [[nodiscard]] const std::string &written() const noexcept { return transport_impl_->written(); }
     [[nodiscard]] std::size_t transport_close_count() const noexcept { return transport_impl_->close_count(); }
     [[nodiscard]] State current_state() const noexcept { return state(); }
-    [[nodiscard]] bool read_buffer_allocated() const noexcept { return static_cast<bool>(inbound_io_.read_buf); }
+    [[nodiscard]] bool read_buffer_allocated() const noexcept { return !inbound_io_.read_buf.empty(); }
 
 private:
     ScriptedReadTransport *transport_impl_ = nullptr;
@@ -3355,50 +3192,6 @@ TEST(Http2ConnectionTest, AnyInboundDataSettlesOutstandingKeepalivePing) {
         EXPECT_EQ(frames[1].payload.back(), '\x02');
         EXPECT_EQ(outcome.wait_readable_call_count, 0U);
         EXPECT_EQ(outcome.read_into_call_count, 3U);
-    });
-}
-
-TEST(Http2ConnectionTest, IdleReadBufferReleaseTimeoutDoesNotCloseConnection) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
-        fiber::http::Http2Connection::Options options;
-        options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-        options.read_timeout = std::chrono::milliseconds(100);
-        options.read_buffer_idle_release_timeout = std::chrono::milliseconds(1);
-
-        std::string frame = make_frame(0, 0xA, 0x0, 1, {});
-        KeepaliveRunOutcome outcome = execute_keepalive_connection(
-                {
-                        {ScriptedReadTransport::ReadActionKind::Chunk, std::move(frame)},
-                        {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
-                },
-                options, true);
-
-        ASSERT_TRUE(outcome.result.has_value());
-        EXPECT_TRUE(outcome.read_buffer_released);
-        EXPECT_EQ(outcome.wait_readable_call_count, 0U);
-        EXPECT_EQ(outcome.read_into_call_count, 2U);
-    });
-}
-
-TEST(Http2ConnectionTest, PartialFrameIsNotReleasedByIdleReadBufferTimeout) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
-        fiber::http::Http2Connection::Options options;
-        options.role = fiber::http::Http2Connection::ConnectionRole::Client;
-        options.read_timeout = std::chrono::milliseconds(100);
-        options.read_buffer_idle_release_timeout = std::chrono::milliseconds(1);
-
-        std::string partial_frame = make_frame(0, 0xA, 0x0, 1, {}).substr(0, 1);
-        KeepaliveRunOutcome outcome = execute_keepalive_connection(
-                {
-                        {ScriptedReadTransport::ReadActionKind::Chunk, std::move(partial_frame)},
-                        {ScriptedReadTransport::ReadActionKind::TimedOut, {}},
-                },
-                options);
-
-        ASSERT_FALSE(outcome.result.has_value());
-        EXPECT_EQ(outcome.result.error(), fiber::common::IoErr::TimedOut);
-        EXPECT_EQ(outcome.wait_readable_call_count, 0U);
-        EXPECT_EQ(outcome.read_into_call_count, 2U);
     });
 }
 

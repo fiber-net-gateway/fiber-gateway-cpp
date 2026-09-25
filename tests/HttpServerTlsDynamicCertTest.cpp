@@ -218,21 +218,34 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
     result.negotiated_alpn = std::string(transport->negotiated_alpn());
 
     const char *request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    size_t request_len = std::strlen(request);
-    size_t offset = 0;
-    while (offset < request_len) {
-        auto write_result = co_await transport->write(request + offset, request_len - offset, 5s);
-        if (!write_result || *write_result == 0) {
-            result.err = write_result ? fiber::common::IoErr::BrokenPipe : write_result.error();
+    {
+        fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(std::strlen(request));
+        if (!node) {
+            result.err = fiber::common::IoErr::NoMem;
             result_promise->set_value(std::move(result));
             co_return;
         }
-        offset += *write_result;
+        std::memcpy(node.writable_data(), request, std::strlen(request));
+        node.commit(std::strlen(request));
+        fiber::mem::IoBufChain chain;
+        if (!chain.append(std::move(node))) {
+            result.err = fiber::common::IoErr::NoMem;
+            result_promise->set_value(std::move(result));
+            co_return;
+        }
+        while (chain.readable_bytes() > 0) {
+            auto write_result = co_await transport->writev(chain, 5s);
+            if (!write_result || *write_result == 0) {
+                result.err = write_result ? fiber::common::IoErr::BrokenPipe : write_result.error();
+                result_promise->set_value(std::move(result));
+                co_return;
+            }
+        }
     }
 
-    std::array<char, 4096> buf{};
     while (result.response.find("\r\n\r\n") == std::string::npos) {
-        auto read_result = co_await transport->read(buf.data(), buf.size(), 5s);
+        fiber::mem::IoBufChain chunk;
+        auto read_result = co_await transport->readv(4096, chunk, 5s);
         if (!read_result) {
             result.err = read_result.error();
             result_promise->set_value(std::move(result));
@@ -241,7 +254,9 @@ DetachedTask run_tls_http1_client(fiber::event::EventLoop *loop, std::uint16_t p
         if (*read_result == 0) {
             break;
         }
-        result.response.append(buf.data(), *read_result);
+        for (const fiber::mem::IoBufNode *node = chunk.front_node(); node != nullptr; node = node->next) {
+            result.response.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+        }
     }
     result_promise->set_value(std::move(result));
     co_return;
@@ -416,20 +431,34 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
     std::string request =
             "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + std::to_string(request_body.size()) +
             "\r\nConnection: close\r\n\r\n" + std::string(request_body);
-    std::size_t offset = 0;
-    while (offset < request.size()) {
-        auto write_result = co_await transport->write(request.data() + offset, request.size() - offset, 5s);
-        if (!write_result || *write_result == 0) {
-            result.err = write_result ? fiber::common::IoErr::BrokenPipe : write_result.error();
+    {
+        fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(request.size());
+        if (!node) {
+            result.err = fiber::common::IoErr::NoMem;
             result_promise->set_value(std::move(result));
             co_return;
         }
-        offset += *write_result;
+        std::memcpy(node.writable_data(), request.data(), request.size());
+        node.commit(request.size());
+        fiber::mem::IoBufChain chain;
+        if (!chain.append(std::move(node))) {
+            result.err = fiber::common::IoErr::NoMem;
+            result_promise->set_value(std::move(result));
+            co_return;
+        }
+        while (chain.readable_bytes() > 0) {
+            auto write_result = co_await transport->writev(chain, 5s);
+            if (!write_result || *write_result == 0) {
+                result.err = write_result ? fiber::common::IoErr::BrokenPipe : write_result.error();
+                result_promise->set_value(std::move(result));
+                co_return;
+            }
+        }
     }
 
-    std::array<char, 4096> buf{};
     for (;;) {
-        auto read_result = co_await transport->read(buf.data(), buf.size(), 5s);
+        fiber::mem::IoBufChain chunk;
+        auto read_result = co_await transport->readv(4096, chunk, 5s);
         if (!read_result) {
             result.err = read_result.error();
             result_promise->set_value(std::move(result));
@@ -438,7 +467,9 @@ DetachedTask run_tls_http1_client_post_and_read_all(fiber::event::EventLoop *loo
         if (*read_result == 0) {
             break;
         }
-        result.response.append(buf.data(), *read_result);
+        for (const fiber::mem::IoBufNode *node = chunk.front_node(); node != nullptr; node = node->next) {
+            result.response.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+        }
     }
     result_promise->set_value(std::move(result));
     co_return;
