@@ -51,6 +51,53 @@ struct TlsHandshakeHeader {
 [[nodiscard]] common::IoResult<TlsHandshakeHeader> tls_decode_handshake_header(const std::uint8_t *src,
                                                                                std::size_t len) noexcept;
 
+// A borrowed view of a ClientHello's offered ALPN protocols: the
+// ProtocolNameList BODY (1-byte length + protocol bytes per entry) exactly as
+// the decoder retains it — no 2-byte list-length prefix. Malformed trailing
+// entries stop the scan (contains treats them as absent).
+class TlsAlpnProtocolsView {
+public:
+    constexpr TlsAlpnProtocolsView() noexcept = default;
+    constexpr TlsAlpnProtocolsView(const std::uint8_t *data, std::size_t size) noexcept : data_(data), size_(size) {}
+    constexpr explicit TlsAlpnProtocolsView(std::span<const std::uint8_t> body) noexcept :
+        TlsAlpnProtocolsView(body.data(), body.size()) {}
+
+    [[nodiscard]] constexpr const std::uint8_t *data() const noexcept { return data_; }
+    [[nodiscard]] constexpr std::size_t size() const noexcept { return size_; }
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    [[nodiscard]] bool contains(std::string_view protocol) const noexcept;
+
+private:
+    const std::uint8_t *data_ = nullptr;
+    std::size_t size_ = 0;
+};
+
+inline bool TlsAlpnProtocolsView::contains(std::string_view protocol) const noexcept {
+    std::size_t remaining = size_;
+    const std::uint8_t *cur = data_;
+    while (remaining > 0) {
+        const std::size_t len = cur[0];
+        if (len + 1 > remaining) {
+            return false;
+        }
+        if (len == protocol.size() &&
+            std::char_traits<char>::compare(reinterpret_cast<const char *>(cur + 1), protocol.data(), len) == 0) {
+            return true;
+        }
+        cur += len + 1;
+        remaining -= len + 1;
+    }
+    return false;
+}
+
+// The config-selection callback projection of a ClientHello (09 §4.1): SNI
+// host name + offered ALPN, both borrowing the engine's retained copy —
+// valid for the callback's duration only.
+struct TlsClientHelloView {
+    std::string_view server_name{};
+    TlsAlpnProtocolsView offered_alpn{};
+};
+
 // Decoded ClientHello. All spans borrow the message body buffer passed to
 // tls_decode_client_hello; the caller owns that buffer for the struct's life.
 struct TlsClientHello {
@@ -117,6 +164,15 @@ struct TlsClientHello {
     std::size_t psk_binder_block_offset = 0;
     std::uint16_t psk_identity_count = 0;
     std::uint16_t psk_binder_count = 0;
+
+    // The callback-facing projection (see TlsClientHelloView above): the SNI
+    // host name and the offered ALPN list, viewing this struct's spans.
+    [[nodiscard]] TlsClientHelloView view() const noexcept {
+        return TlsClientHelloView{
+                .server_name = has_server_name ? server_name : std::string_view{},
+                .offered_alpn = TlsAlpnProtocolsView(alpn_list),
+        };
+    }
 };
 
 // ---- ServerHello (RFC 8446 §4.1.3 / RFC 5246 §7.4.1.2). HelloRetryRequest

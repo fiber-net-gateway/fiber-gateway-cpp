@@ -271,7 +271,7 @@ struct SelectorState {
 };
 
 fiber::common::IoErr configure_alt_identity(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
-                                            const fiber::net::TlsClientHelloView &client_hello) noexcept {
+                                            const fiber::tls::TlsClientHelloView &client_hello) noexcept {
     auto *state = static_cast<SelectorState *>(ctx);
     state->calls.fetch_add(1, std::memory_order_relaxed);
     state->saw_http11.store(client_hello.offered_alpn.contains("http/1.1"), std::memory_order_relaxed);

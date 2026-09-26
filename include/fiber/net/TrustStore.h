@@ -20,6 +20,7 @@ namespace fiber::net {
 class TlsServerHandshakeConfig;
 namespace detail {
 class TlsStreamFd;
+class TlsClientStager;
 } // namespace detail
 
 enum class TrustStoreSourceKind : std::uint8_t {
@@ -67,6 +68,7 @@ public:
 private:
     friend class TlsServerHandshakeConfig;
     friend class detail::TlsStreamFd;
+    friend class detail::TlsClientStager;
     friend class quic::QuicTlsSession;
 
     TrustStore() noexcept = default;

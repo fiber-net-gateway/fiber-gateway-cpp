@@ -1,6 +1,5 @@
 #include <fiber/quic/QuicTlsSession.h>
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -9,10 +8,9 @@
 #include <utility>
 
 #include <fiber/common/Assert.h>
-#include <fiber/net/IpAddress.h>
-#include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
+#include <fiber/net/detail/TlsClientStaging.h>
 #include <fiber/quic/QuicConnection.h>
 #include <fiber/quic/QuicCursor.h>
 #include <fiber/quic/QuicFrame.h>
@@ -25,13 +23,7 @@ namespace fiber::quic {
 
 namespace {
 
-// Certificate-validity snapshot: wall clock (the engines' now_unix_ms is a
-// real-time input; EventLoop::now() is a steady monotonic source). Also the
-// ticket-age base for session receipts and offers.
-std::int64_t system_now_unix_ms() noexcept {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
-            .count();
-}
+using net::detail::system_now_unix_ms;
 
 // Post-handshake CRYPTO is a raw handshake-message stream (10 §7). One bound
 // covers the buffered tail and each message: NSTs are the only legal content
@@ -365,17 +357,7 @@ const tls::TlsServerConfig *QuicTlsSession::select_server_config(const tls::TlsC
     server_cfg_.key = nullptr;
     std::size_t credential_count = 0;
     net::TlsServerHandshakeConfig config(server_cfg_, credential_count);
-    // The decoded alpn_list is the ProtocolNameList BODY (1-byte length
-    // entries); TlsAlpnProtocolsView wants the wire form with the 2-byte
-    // list-length prefix, which sits immediately before the body in the
-    // engine's retained ClientHello copy.
-    net::TlsClientHelloView view{
-            .server_name = client_hello.has_server_name ? client_hello.server_name : std::string_view{},
-            .offered_alpn = client_hello.has_alpn && !client_hello.alpn_list.empty()
-                                    ? net::TlsAlpnProtocolsView(client_hello.alpn_list.data() - 2,
-                                                                client_hello.alpn_list.size() + 2)
-                                    : net::TlsAlpnProtocolsView{},
-    };
+    const tls::TlsClientHelloView view = client_hello.view();
     common::IoErr error = server_param_->configure_callback(server_param_->configure_ctx, config, view);
     if (error == common::IoErr::None && credential_count == 0) {
         error = common::IoErr::Invalid;
@@ -410,47 +392,12 @@ common::IoResult<void> QuicTlsSession::init_client(const net::TlsClientParam &pa
     local_transport_params_len_ = *transport_params_len;
 
     client_cfg_ = tls::TlsClientConfig{};
-    const bool server_name_is_ip = !param.server_name.empty() && [&] {
-        net::IpAddress parsed{};
-        return net::IpAddress::parse(param.server_name, parsed);
-    }();
-    if (!param.server_name.empty() && !server_name_is_ip) {
-        client_cfg_.sni_host = param.server_name;
+    if (auto staged = net::detail::TlsClientStager::stage(param, client_cfg_, ip_bytes_); !staged) {
+        connection_ = nullptr;
+        return std::unexpected(staged.error());
     }
-    if (verify_peer) {
-        // A null trust store means the process-wide system roots.
-        const net::TrustStore *trust_store = param.security.trust_store;
-        if (trust_store == nullptr) {
-            auto system_store = net::TrustStore::system_default();
-            if (!system_store) {
-                connection_ = nullptr;
-                return std::unexpected(system_store.error());
-            }
-            trust_store = *system_store;
-        }
-        client_cfg_.trust = &trust_store->tls_store();
-        const std::string_view verify_name = param.verify_name.empty() ? param.server_name : param.verify_name;
-        net::IpAddress verify_ip{};
-        if (!verify_name.empty() && net::IpAddress::parse(verify_name, verify_ip)) {
-            std::memcpy(ip_bytes_.data(), verify_ip.data(), verify_ip.byte_size());
-            client_cfg_.verify_ip = {ip_bytes_.data(), verify_ip.byte_size()};
-        } else if (!verify_name.empty()) {
-            client_cfg_.check_host = verify_name;
-        } else {
-            connection_ = nullptr;
-            return std::unexpected(common::IoErr::Invalid);
-        }
-    } else {
-        client_cfg_.verify_peer = false;
-    }
-    if (param.security.credential != nullptr) {
-        client_cfg_.client_chain = &param.security.credential->tls_chain();
-        client_cfg_.client_key = &param.security.credential->tls_key();
-    }
-    client_cfg_.alpn = param.alpn;
     client_cfg_.min_version = tls::kTlsVersionTls13; // QUIC is TLS 1.3 only (10 §3.4)
     client_cfg_.max_version = tls::kTlsVersionTls13;
-    client_cfg_.now_unix_ms = system_now_unix_ms();
     client_cfg_.quic = &quic_cb_;
     client_cfg_.quic_transport_params = {local_transport_params_.data(), local_transport_params_len_};
 

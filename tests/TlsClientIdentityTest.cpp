@@ -113,7 +113,7 @@ struct ServerCallbackState {
 };
 
 fiber::common::IoErr capture_client_hello(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
-                                          const fiber::net::TlsClientHelloView &input) noexcept {
+                                          const fiber::tls::TlsClientHelloView &input) noexcept {
     auto *state = static_cast<ServerCallbackState *>(ctx);
     if (!state || !state->credential) {
         return fiber::common::IoErr::Invalid;
@@ -130,7 +130,7 @@ fiber::common::IoErr capture_client_hello(void *ctx, fiber::net::TlsServerHandsh
 }
 
 fiber::common::IoErr reject_server_configuration(void *, fiber::net::TlsServerHandshakeConfig &,
-                                                 const fiber::net::TlsClientHelloView &) noexcept {
+                                                 const fiber::tls::TlsClientHelloView &) noexcept {
     return fiber::common::IoErr::Permission;
 }
 

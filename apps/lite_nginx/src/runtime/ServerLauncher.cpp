@@ -227,7 +227,7 @@ run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter 
 }
 
 fiber::common::IoErr configure_identity_by_server_name(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
-                                                       const fiber::net::TlsClientHelloView &client_hello) noexcept {
+                                                       const fiber::tls::TlsClientHelloView &client_hello) noexcept {
     auto *credentials = static_cast<const ListenerTlsCredentials *>(ctx);
     if (!credentials || !credentials->default_credential) {
         return fiber::common::IoErr::Invalid;
