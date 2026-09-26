@@ -175,24 +175,12 @@ public:
 private:
     TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr);
     [[nodiscard]] bool handshake_done() const noexcept;
-    void clear_pending_write() noexcept;
-    // Shared cores: perform one non-suspending operation, reporting the
-    // physical direction to wait on when WouldBlock is returned.
+    // Shared core: perform one non-suspending read, reporting the physical
+    // direction to wait on when WouldBlock is returned.
     common::IoErr poll_read_node(std::size_t size, mem::IoBufChain &out, std::size_t &out_bytes,
                                  event::IoEvent &wait_event) noexcept;
-    common::IoErr poll_write_chain(mem::IoBufChain &buf, std::size_t &out, event::IoEvent &wait_event) noexcept;
-
-    enum class PendingWriteKind {
-        None,
-        Chain,
-    };
 
     net::TlsTcpStream stream_;
-    std::unique_ptr<std::uint8_t[]> writev_scratch_;
-    PendingWriteKind pending_write_kind_ = PendingWriteKind::None;
-    const void *pending_write_data_ = nullptr;
-    std::size_t pending_write_len_ = 0;
-    mem::IoBufChain *pending_write_chain_ = nullptr;
 };
 
 } // namespace fiber::http

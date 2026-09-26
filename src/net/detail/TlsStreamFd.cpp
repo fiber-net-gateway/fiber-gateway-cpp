@@ -1,5 +1,6 @@
 #include <fiber/net/detail/TlsStreamFd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include <fiber/tls/TlsTicketService.h>
 #include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
 #include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
+#include <fiber/tls/record/TlsRecord.h>
 
 namespace fiber::net::detail {
 
@@ -66,6 +68,8 @@ struct BusyResetGuard {
 // jumbo app record lands in one try_read, one node's worth of memory.
 constexpr std::size_t kReadChunk = 32 * 1024;
 constexpr int kMaxIov = 16;
+// One TLS record's maximum plaintext — the write-side grouping granularity.
+constexpr std::size_t kRecordPlaintextMax = tls::kTlsMaxPlaintextSize;
 
 // Certificate-validity snapshot: wall clock (the engines' now_unix_ms is a
 // real-time input; EventLoop::now() is a steady monotonic source).
@@ -182,12 +186,14 @@ void TlsStreamFd::close() {
     handshake_done_ = false;
     shutdown_started_ = false;
     busy_ = false;
-    pending_write_ptr_ = nullptr;
+    pending_write_chain_ = nullptr;
     pending_write_len_ = 0;
+    write_scratch_.reset();
 }
 
 fiber::common::IoErr TlsStreamFd::detach_for_handover() noexcept {
     FIBER_ASSERT(!busy_);
+    FIBER_ASSERT(pending_write_chain_ == nullptr); // no active write group awaiting retry
     return stream_fd_.detach_for_handover();
 }
 
@@ -438,11 +444,6 @@ fiber::common::IoErr TlsStreamFd::poll_read(void *buf, size_t len, size_t &out, 
     return read_once(buf, len, out, event);
 }
 
-fiber::common::IoErr TlsStreamFd::poll_write(const void *buf, size_t len, size_t &out,
-                                             fiber::event::IoEvent &event) noexcept {
-    return write_once(buf, len, out, event);
-}
-
 fiber::common::IoErr TlsStreamFd::handshake_once(Handshake &staging, fiber::event::IoEvent &event) noexcept {
     if (!stream_fd_.valid()) {
         return fiber::common::IoErr::BadFd;
@@ -598,38 +599,123 @@ fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out, 
     }
 }
 
-fiber::common::IoErr TlsStreamFd::write_once(const void *buf, size_t len, size_t &out,
-                                             fiber::event::IoEvent &event) noexcept {
-    out = 0;
+// TLS writes seal a contiguous input buffer into records. Unlike sendmsg,
+// there is no scatter-gather seal API, so multi-node chains would otherwise
+// produce one record per IoBuf: an HTTP/2 DATA frame is a 9-byte header node
+// followed by its payload node, and writing the header as its own record
+// costs a full send() for 31 bytes on the wire. A node that is itself at
+// least one full record is passed to the seal with the node's own pointer
+// (zero copy). Anything smaller is coalesced into a scratch buffer with the
+// nodes that follow it, splitting the last node when needed, so that each
+// scratch write is a full record whenever the chain holds enough data.
+fiber::common::IoResult<std::size_t> TlsStreamFd::try_write(mem::IoBufChain &buf) noexcept {
     if (!stream_fd_.valid() || conn_ == nullptr) {
-        return fiber::common::IoErr::BadFd;
+        return std::unexpected(fiber::common::IoErr::BadFd);
     }
-    if (len == 0) {
-        return fiber::common::IoErr::None;
+    if (buf.readable_bytes() == 0 && pending_write_chain_ == nullptr) {
+        return std::size_t{0};
     }
-    if (!out_pending_.empty()) {
-        // A sealed payload is still flushing: the retry must present the same
-        // (buf, len) — the BoringSSL WANT_WRITE contract every caller
-        // (HttpTransport's same-pointer poll_write retries included) follows.
-        if (buf != pending_write_ptr_ || len != pending_write_len_) {
-            return fiber::common::IoErr::Busy;
+    if (!out_pending_.empty() && pending_write_chain_ != &buf) {
+        // A sealed group is still flushing: only its own chain may resume it
+        // (the BoringSSL WANT_WRITE same-buffer contract, chain-shaped).
+        return std::unexpected(fiber::common::IoErr::Busy);
+    }
+
+    std::size_t group_len = 0;
+    if (out_pending_.empty()) {
+        std::array<iovec, kMaxIov> iov{};
+        const int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
+        FIBER_ASSERT(count > 0); // readable_bytes() > 0 with no pending group
+
+        const void *write_data = nullptr;
+        std::size_t write_len = 0;
+        if (count == 1) {
+            write_data = iov[0].iov_base;
+            write_len = iov[0].iov_len;
+        } else if (iov[0].iov_len >= kRecordPlaintextMax) {
+            // Whole records straight from the node; its tail joins the next
+            // group so it does not become a short record of its own.
+            write_data = iov[0].iov_base;
+            write_len = iov[0].iov_len - iov[0].iov_len % kRecordPlaintextMax;
+        } else {
+            if (!write_scratch_) {
+                write_scratch_.reset(new (std::nothrow) std::uint8_t[kRecordPlaintextMax]);
+                if (!write_scratch_) {
+                    return std::unexpected(fiber::common::IoErr::NoMem);
+                }
+            }
+            std::uint8_t *dst = write_scratch_.get();
+            std::size_t coalesced = 0;
+            for (int i = 0; i < count && coalesced < kRecordPlaintextMax; ++i) {
+                const std::size_t take = std::min(iov[i].iov_len, kRecordPlaintextMax - coalesced);
+                std::memcpy(dst + coalesced, iov[i].iov_base, take);
+                coalesced += take;
+            }
+            write_data = write_scratch_.get();
+            write_len = coalesced;
+        }
+
+        group_len = write_len;
+        pending_write_chain_ = &buf;
+        pending_write_len_ = group_len;
+        auto sealed = conn_->write({static_cast<const std::uint8_t *>(write_data), group_len});
+        if (!sealed) {
+            // The group never sealed: no retry state to keep.
+            pending_write_chain_ = nullptr;
+            pending_write_len_ = 0;
+            return std::unexpected(sealed.error()); // terminal/closed (Invalid) or NoMem
         }
     } else {
-        auto sealed = conn_->write({static_cast<const std::uint8_t *>(buf), len});
-        if (!sealed) {
-            return sealed.error(); // terminal/closed (Invalid) or NoMem
-        }
-        pending_write_ptr_ = buf;
-        pending_write_len_ = len;
+        group_len = pending_write_len_; // resume: the plaintext is already sealed
     }
+
+    fiber::event::IoEvent event = fiber::event::IoEvent::None;
     const fiber::common::IoErr err = flush_output(nullptr, event);
     if (err != fiber::common::IoErr::None) {
-        return err;
+        if (err != fiber::common::IoErr::WouldBlock) {
+            // The group is dead (no resume after a hard error): drop its
+            // identity; the sealed remainder lingers until close, and a
+            // write on any chain reports Busy meanwhile.
+            abandon_pending_write();
+        }
+        return std::unexpected(err);
     }
-    out = pending_write_len_;
-    pending_write_ptr_ = nullptr;
+    buf.consume_and_compact(group_len);
+    pending_write_chain_ = nullptr;
     pending_write_len_ = 0;
-    return fiber::common::IoErr::None;
+    return group_len;
+}
+
+void TlsStreamFd::abandon_pending_write() noexcept {
+    pending_write_chain_ = nullptr;
+    pending_write_len_ = 0;
+}
+
+fiber::async::Task<fiber::common::IoResult<std::size_t>> TlsStreamFd::writev(mem::IoBufChain &buf,
+                                                                             std::chrono::milliseconds timeout) {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        if (buf.readable_bytes() == 0) {
+            co_return std::size_t{0};
+        }
+        auto written = try_write(buf);
+        if (written) {
+            // One record group per call — the caller drives the loop.
+            co_return written;
+        }
+        if (written.error() != fiber::common::IoErr::WouldBlock) {
+            co_return std::unexpected(written.error());
+        }
+        // A connected-phase write only ever blocks on writability.
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await stream_fd_.wait_writable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
 }
 
 fiber::common::IoErr TlsStreamFd::flush_output(Handshake *staging, fiber::event::IoEvent &event) noexcept {

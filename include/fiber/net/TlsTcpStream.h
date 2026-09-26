@@ -65,7 +65,13 @@ public:
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
-    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
+    // Chain-based write, see detail::TlsStreamFd: WouldBlock retries must
+    // present the same chain; the suspending variant drives that loop.
+    [[nodiscard]] fiber::common::IoResult<size_t> try_write(mem::IoBufChain &buf) noexcept;
+    [[nodiscard]] fiber::async::Task<fiber::common::IoResult<size_t>>
+    writev(mem::IoBufChain &buf, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    // Drops an in-flight write group's chain identity, see detail::TlsStreamFd.
+    void abandon_pending_write() noexcept;
 
 private:
     detail::TlsStreamFd stream_;

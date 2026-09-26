@@ -2306,7 +2306,7 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
                                                                                      std::size_t byte_budget) noexcept {
     OutboundPumpResult result;
     byte_budget = std::max<std::size_t>(byte_budget, 1);
-    // A TLS transport writes one record per poll_writev, so keep writing until
+    // A TLS transport writes one record group per try_writev, so keep writing until
     // the transport blocks, the queue drains or the byte budget is spent
     // instead of handing each record back to the loop.
     while (!outbound_stopped_ && state_ != State::Closed && result.bytes_written < byte_budget) {
