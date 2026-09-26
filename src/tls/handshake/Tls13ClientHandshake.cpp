@@ -65,7 +65,7 @@ void Tls13ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
         fail(TlsAlertDesc::UnsupportedExtension); // 1.2-only echoes never appear in a 1.3 SH
         return;
     }
-    if (tls_client_suite_offer_index(sh.cipher_suite) == kOfferedSuites.size()) {
+    if (tls_client_suite_offer_index(sh.cipher_suite) == kTlsSuitePreference.size()) {
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }
@@ -182,7 +182,8 @@ void Tls13ClientHandshake::start_hello_retry_request(const TlsServerHello &sh,
         return;
     }
     const TlsSuiteInfo *info = tls_suite_info(static_cast<TlsCipherSuiteId>(sh.cipher_suite));
-    if (tls_client_suite_offer_index(sh.cipher_suite) == kOfferedSuites.size() || info == nullptr || !info->is_tls13) {
+    if (tls_client_suite_offer_index(sh.cipher_suite) == kTlsSuitePreference.size() || info == nullptr ||
+        !info->is_tls13) {
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }

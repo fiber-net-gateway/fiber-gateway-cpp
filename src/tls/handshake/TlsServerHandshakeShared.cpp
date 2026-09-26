@@ -1,5 +1,7 @@
 #include "TlsServerHandshakeShared.h"
 
+#include "TlsSuitePreference.h"
+
 #include <fiber/tls/handshake/TlsCipherSuites.h>
 
 namespace fiber::tls {
@@ -19,7 +21,7 @@ bool tls_server_list_contains(std::span<const std::uint8_t> raw_list, std::uint1
 }
 
 bool tls_server_suite_select(const TlsClientHello &ch, bool tls13, TlsCipherSuiteId &out) noexcept {
-    for (const std::uint16_t raw: kServerSuites) {
+    for (const std::uint16_t raw: tls_effective_suite_order()) {
         if (!tls_server_list_contains(ch.cipher_suites, raw)) {
             continue;
         }
@@ -56,7 +58,7 @@ bool tls_server_suite_select_12(const TlsClientHello &ch, const TlsPrivateKey &k
     if (auth == TlsKeyKind::Ed25519) {
         return false; // no 1.2 registry entry signs with Ed25519
     }
-    for (const std::uint16_t raw: kServerSuites) {
+    for (const std::uint16_t raw: tls_effective_suite_order()) {
         if (!tls_server_list_contains(ch.cipher_suites, raw)) {
             continue;
         }

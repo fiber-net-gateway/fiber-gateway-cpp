@@ -12,6 +12,8 @@
 #include <span>
 #include <string_view>
 
+#include "TlsSuitePreference.h"
+
 #include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/crypto/TlsKeyExchange.h>
@@ -24,12 +26,9 @@ namespace fiber::tls {
 // ---- engine-fixed preference tables (§10.2: server preference order,
 // registry constants — not config) ----
 
-// Server suite preference: the 1.3 set first, then the ECDHE+AEAD 1.2 set.
-// Semantics differ from the client's identically-valued offer table: the
-// server walks THIS order and takes the first suite the client offered.
-inline constexpr std::array<std::uint16_t, 9> kServerSuites{
-        0x1301, 0x1302, 0x1303, 0xC02F, 0xC030, 0xCCA8, 0xC02B, 0xC02C, 0xCCA9,
-};
+// Suite preference: kTlsSuitePreference in its hardware-aware effective form
+// (TlsSuitePreference.h) — the server walks tls_effective_suite_order() and
+// takes the first suite the client offered.
 
 // Server group preference: X25519 leads; P-256 is the fallback (and the HRR
 // answer when the client's first share misses).
@@ -115,8 +114,8 @@ struct TlsServerHandshakeOutcome {
 // ---- negotiation helpers (Shared.cpp; all walk server preference × client
 // offer, returning false = no common value) ----
 
-// Suite: first kServerSuites entry (filtered to the negotiated version) that
-// appears in the CH's raw cipher_suites list.
+// Suite: first tls_effective_suite_order() entry (filtered to the negotiated
+// version) that appears in the CH's raw cipher_suites list.
 [[nodiscard]] bool tls_server_suite_select(const TlsClientHello &ch, bool tls13, TlsCipherSuiteId &out) noexcept;
 
 // Suite (1.2): additionally filters by the credential's key kind — an RSA

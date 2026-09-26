@@ -14,6 +14,8 @@
 #include <memory>
 #include <span>
 
+#include "TlsSuitePreference.h"
+
 #include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/crypto/TlsKeyExchange.h>
@@ -24,12 +26,10 @@ namespace fiber::tls {
 
 // ---- engine-fixed offer tables (06 §5.4: registry constants, not config) ----
 
-// 1.3 suites first (preference order), then the ECDHE+AEAD 1.2 set the
-// supported_versions fallback can negotiate (0xC030 = ECDHE-RSA-AES256-GCM
-// — the IANA value; 0x0030 was never a suite).
-inline constexpr std::array<std::uint16_t, 9> kOfferedSuites{
-        0x1301, 0x1302, 0x1303, 0xC02F, 0xC030, 0xCCA8, 0xC02B, 0xC02C, 0xCCA9,
-};
+// Suites: kTlsSuitePreference in its hardware-aware effective form
+// (TlsSuitePreference.h; 0xC030 = ECDHE-RSA-AES256-GCM — the IANA value,
+// 0x0030 was never a suite) — the CH offers tls_effective_suite_order()
+// verbatim; the membership check below scans kTlsSuitePreference.
 
 // Share order: X25519 leads (the CH1 share); P-256 is the HRR alternative.
 inline constexpr std::array<std::uint16_t, 2> kOfferedGroups{0x001D, 0x0017};
@@ -50,12 +50,12 @@ inline constexpr std::size_t kClientMaxCrSigalgs = 16;
 inline constexpr std::size_t kClientMaxSigLen = 1024; // RSA-4096 signature bound
 
 [[nodiscard]] constexpr std::size_t tls_client_suite_offer_index(std::uint16_t raw) noexcept {
-    for (std::size_t i = 0; i < kOfferedSuites.size(); ++i) {
-        if (kOfferedSuites[i] == raw) {
+    for (std::size_t i = 0; i < kTlsSuitePreference.size(); ++i) {
+        if (kTlsSuitePreference[i] == raw) {
             return i;
         }
     }
-    return kOfferedSuites.size();
+    return kTlsSuitePreference.size();
 }
 
 [[nodiscard]] constexpr bool tls_client_group_offered(std::uint16_t raw) noexcept {
