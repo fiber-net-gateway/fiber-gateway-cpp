@@ -210,28 +210,25 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> tls_poll_read(fiber::ne
 
 fiber::async::Task<fiber::common::IoResult<std::size_t>> tls_poll_write(fiber::net::detail::TlsStreamFd &stream,
                                                                         const void *buf, std::size_t len) {
-    for (;;) {
-        std::size_t out = 0;
-        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-        fiber::common::IoErr err = stream.poll_write(buf, len, out, wait_event);
-        if (err == fiber::common::IoErr::None) {
-            co_return out;
-        }
-        if (err != fiber::common::IoErr::WouldBlock) {
-            co_return std::unexpected(err);
-        }
-        fiber::common::IoResult<void> wait;
-        if (wait_event == fiber::event::IoEvent::Read) {
-            wait = co_await stream.wait_readable();
-        } else if (wait_event == fiber::event::IoEvent::Write) {
-            wait = co_await stream.wait_writable();
-        } else {
-            co_return std::unexpected(fiber::common::IoErr::Invalid);
-        }
-        if (!wait) {
-            co_return std::unexpected(wait.error());
-        }
+    fiber::mem::IoBufChain chain;
+    fiber::mem::IoBuf node = fiber::mem::IoBuf::allocate(len);
+    if (!node.valid()) {
+        co_return std::unexpected(fiber::common::IoErr::NoMem);
     }
+    std::memcpy(node.writable_data(), buf, len);
+    node.commit(len);
+    if (!chain.append(std::move(node))) {
+        co_return std::unexpected(fiber::common::IoErr::NoMem);
+    }
+    std::size_t total = 0;
+    while (chain.readable_bytes() > 0) {
+        auto write_result = co_await stream.writev(chain);
+        if (!write_result) {
+            co_return std::unexpected(write_result.error());
+        }
+        total += *write_result;
+    }
+    co_return total;
 }
 
 DetachedTask run_tls_server(fiber::net::detail::TlsStreamFd *server_stream, const fiber::net::TlsServerParam &param,

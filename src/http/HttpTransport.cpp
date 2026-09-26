@@ -17,15 +17,9 @@ namespace {
 
 constexpr int kMaxIov = 16;
 
-// TLS writes go through SSL_write, which encrypts a contiguous input buffer into
-// one record. Unlike sendmsg, BoringSSL has no scatter-gather API, so multi-node
-// chains would otherwise produce one record per IoBuf: an HTTP/2 DATA frame is
-// a 9-byte header node followed by its payload node, and writing the header as
-// its own record costs a full send() for 31 bytes on the wire. A node that is
-// itself at least one full record is passed to SSL_write with the node's own
-// pointer (zero copy). Anything smaller is coalesced into a scratch buffer with
-// the nodes that follow it, splitting the last node when needed, so that each
-// scratch write is a full record whenever the chain holds enough data.
+// One TLS record's maximum plaintext: a read delivers at most a record's
+// worth of fresh plaintext, so a larger node would only hold unwritten
+// capacity. (The write-side record grouping lives in TlsStreamFd.)
 constexpr std::size_t kTlsRecordPlaintextMax = 16384;
 
 std::chrono::steady_clock::time_point make_deadline(std::chrono::milliseconds timeout) noexcept {
@@ -288,10 +282,7 @@ bool TlsTransport::read_ready() const noexcept { return stream_.has_pending_read
 
 bool TlsTransport::write_ready() const noexcept { return stream_.write_ready(); }
 
-common::IoErr TlsTransport::detach_for_handover() noexcept {
-    FIBER_ASSERT(pending_write_kind_ == PendingWriteKind::None);
-    return stream_.detach_for_handover();
-}
+common::IoErr TlsTransport::detach_for_handover() noexcept { return stream_.detach_for_handover(); }
 
 common::IoErr TlsTransport::adopt_loop(event::EventLoop &loop) noexcept { return stream_.adopt_loop(loop); }
 
@@ -338,95 +329,19 @@ common::IoErr TlsTransport::poll_read_node(std::size_t size, mem::IoBufChain &ou
     return common::IoErr::None;
 }
 
-common::IoResult<size_t> TlsTransport::try_writev(mem::IoBufChain &buf) noexcept {
-    std::size_t out = 0;
-    event::IoEvent wait_event = event::IoEvent::None;
-    common::IoErr err = poll_write_chain(buf, out, wait_event);
-    if (err != common::IoErr::None) {
-        return std::unexpected(err);
-    }
-    return out;
-}
-
-common::IoErr TlsTransport::poll_write_chain(mem::IoBufChain &buf, std::size_t &out,
-                                             event::IoEvent &wait_event) noexcept {
-    out = 0;
-    wait_event = event::IoEvent::None;
-    FIBER_ASSERT(handshake_done());
-
-    if (pending_write_kind_ == PendingWriteKind::Chain && pending_write_chain_ != &buf) {
-        return common::IoErr::Busy;
-    }
-
-    const void *write_data = pending_write_data_;
-    std::size_t write_len = pending_write_len_;
-    if (pending_write_kind_ == PendingWriteKind::None) {
-        std::array<iovec, kMaxIov> iov{};
-        int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
-        if (count == 0) {
-            return common::IoErr::None;
-        }
-
-        if (count == 1) {
-            write_data = iov[0].iov_base;
-            write_len = iov[0].iov_len;
-        } else if (iov[0].iov_len >= kTlsRecordPlaintextMax) {
-            // Whole records straight from the node; its tail joins the next
-            // group so it does not become a short record of its own.
-            write_data = iov[0].iov_base;
-            write_len = iov[0].iov_len - iov[0].iov_len % kTlsRecordPlaintextMax;
-        } else {
-            if (!writev_scratch_) {
-                writev_scratch_.reset(new (std::nothrow) std::uint8_t[kTlsRecordPlaintextMax]);
-                if (!writev_scratch_) {
-                    return common::IoErr::NoMem;
-                }
-            }
-            std::uint8_t *dst = writev_scratch_.get();
-            std::size_t group_len = 0;
-            for (int i = 0; i < count && group_len < kTlsRecordPlaintextMax; ++i) {
-                const std::size_t take = std::min(iov[i].iov_len, kTlsRecordPlaintextMax - group_len);
-                std::memcpy(dst + group_len, iov[i].iov_base, take);
-                group_len += take;
-            }
-            write_data = writev_scratch_.get();
-            write_len = group_len;
-        }
-    }
-
-    common::IoErr err = stream_.poll_write(write_data, write_len, out, wait_event);
-    if (err == common::IoErr::WouldBlock) {
-        pending_write_kind_ = PendingWriteKind::Chain;
-        pending_write_data_ = write_data;
-        pending_write_len_ = write_len;
-        pending_write_chain_ = &buf;
-        return err;
-    }
-    clear_pending_write();
-    if (err == common::IoErr::None) {
-        buf.consume_and_compact(out);
-    }
-    return err;
-}
+common::IoResult<size_t> TlsTransport::try_writev(mem::IoBufChain &buf) noexcept { return stream_.try_write(buf); }
 
 bool TlsTransport::handshake_done() const noexcept { return stream_.handshake_done(); }
 
-void TlsTransport::clear_pending_write() noexcept {
-    pending_write_kind_ = PendingWriteKind::None;
-    pending_write_data_ = nullptr;
-    pending_write_len_ = 0;
-    pending_write_chain_ = nullptr;
-}
-
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(const net::TlsClientParam &param,
                                                                    std::chrono::milliseconds timeout) {
-    clear_pending_write();
+    stream_.abandon_pending_write();
     return stream_.handshake(param, timeout);
 }
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(const net::TlsServerParam &param,
                                                                    std::chrono::milliseconds timeout) {
-    clear_pending_write();
+    stream_.abandon_pending_write();
     return stream_.handshake(param, timeout);
 }
 
@@ -472,37 +387,12 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::readv(size_t size, me
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChain &buf,
                                                                   std::chrono::milliseconds timeout) {
     FIBER_ASSERT(handshake_done());
-    auto deadline = make_deadline(timeout);
-
-    for (;;) {
-        if (buf.readable_bytes() == 0) {
-            co_return static_cast<std::size_t>(0);
-        }
-
-        std::size_t out = 0;
-        event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = poll_write_chain(buf, out, wait_event);
-        if (err == common::IoErr::None) {
-            co_return out;
-        }
-        if (err != common::IoErr::WouldBlock) {
-            co_return std::unexpected(err);
-        }
-
-        auto wait_result = co_await wait_tls_event(stream_, wait_event, deadline);
-        if (!wait_result) {
-            co_return std::unexpected(wait_result.error());
-        }
-    }
+    co_return co_await stream_.writev(buf, timeout);
 }
 
-void TlsTransport::abandon_pending_io() noexcept { clear_pending_write(); }
+void TlsTransport::abandon_pending_io() noexcept { stream_.abandon_pending_write(); }
 
-void TlsTransport::close() {
-    clear_pending_write();
-    writev_scratch_.reset();
-    stream_.close();
-}
+void TlsTransport::close() { stream_.close(); }
 
 bool TlsTransport::valid() const noexcept { return stream_.valid(); }
 

@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <memory>
 #include <string_view>
 
 #include "../../async/Task.h"
@@ -75,7 +76,19 @@ public:
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
-    fiber::common::IoErr poll_write(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
+    // Chain-based write: prepares one record group from the chain (a node
+    // holding whole records passes through zero-copy, smaller runs coalesce
+    // into a scratch record), seals and flushes it, then consumes the group
+    // from the chain. WouldBlock: the sealed remainder is retained — retry
+    // with the same chain after wait_writable; any other chain (empty
+    // included) reports Busy until the group completes.
+    [[nodiscard]] fiber::common::IoResult<std::size_t> try_write(mem::IoBufChain &buf) noexcept;
+    [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::size_t>>
+    writev(mem::IoBufChain &buf, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+    // Drops an in-flight write group's chain identity (post-WouldBlock
+    // abandon): the sealed records stay until close, and any write on
+    // another chain reports Busy while they linger.
+    void abandon_pending_write() noexcept;
 
 private:
     enum class Role : std::uint8_t {
@@ -103,7 +116,6 @@ private:
     fiber::common::IoErr handshake_once(Handshake &staging, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
-    fiber::common::IoErr write_once(const void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
     // Moves connection output — or the live handshake engines' output when
     // staging is passed — into out_pending_ and writes it out. The connected
     // phase passes nullptr (a live staging outranks nothing there).
@@ -125,10 +137,12 @@ private:
     tls::TlsRecordReader record_reader_{};
     mem::IoBufChain out_pending_{}; // sealed records not yet on the wire
     mem::IoBufChain early_data_{}; // server: decrypted 0-RTT, delivered first
-    // Retry-contract identity of the payload sealed into out_pending_ (the
-    // caller must retry poll_write with the same buffer until completion).
-    const void *pending_write_ptr_ = nullptr;
+    // Write-side retry state: the chain whose group is sealed in out_pending_
+    // (null once abandoned) and its plaintext length, plus the record
+    // coalescing scratch — a plain allocation so it is loop-independent.
+    mem::IoBufChain *pending_write_chain_ = nullptr;
     size_t pending_write_len_ = 0;
+    std::unique_ptr<std::uint8_t[]> write_scratch_{};
     Role role_ = Role::None;
     bool handshake_done_ = false;
     bool shutdown_started_ = false;
