@@ -12,7 +12,7 @@
 //     swallowed, peer fatal alert latched, corrupted record →
 //     bad_record_mac (our own alert emitted), post-handshake CCS fatal
 //   - engine take_inbound_leftover: bytes fed past the terminal event ride
-//     into the connection and reassemble with the follow-up feed
+//     into the glue-side reader and reassemble with the follow-up feed
 //   - TLS 1.2: a synthetic key-block pair (dispatch coverage without an
 //     engine) — handshake message after the handshake fatal (09 §1
 //     decision 3: HelloRequest/renegotiation refused), app data + SEALED
@@ -56,6 +56,7 @@
 #include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 #include <fiber/tls/record/TlsRecord.h>
 #include <fiber/tls/record/TlsRecordCipher.h>
+#include <fiber/tls/record/TlsRecordReader.h>
 #include "LoopTestSupport.h"
 
 namespace {
@@ -438,19 +439,41 @@ std::size_t count_records(const std::vector<std::uint8_t> &wire) {
     return records;
 }
 
-bool feed_wire(TlsConnection &conn, std::span<const std::uint8_t> wire) {
-    IoBuf buf = IoBuf::allocate(wire.size());
-    if (!buf.valid() || wire.empty()) {
-        return wire.empty();
+// The glue's connected-phase framing (TlsStreamFd's contract): one reader
+// per inbound direction — complete records out, a partial record tail
+// buffered across feeds — each record handed to the connection.
+struct WireFeeder {
+    fiber::tls::TlsRecordReader reader{};
+
+    bool feed(TlsConnection &conn, std::span<const std::uint8_t> wire) {
+        if (wire.empty()) {
+            return true;
+        }
+        IoBuf buf = IoBuf::allocate(wire.size());
+        if (!buf.valid()) {
+            return false;
+        }
+        std::memcpy(buf.writable_data(), wire.data(), wire.size());
+        buf.commit(wire.size());
+        if (!reader.feed(std::move(buf))) {
+            return false;
+        }
+        for (;;) {
+            fiber::tls::TlsRecordReader::Result next = reader.next();
+            if (next.status == fiber::tls::TlsRecordReader::Result::Status::Fatal) {
+                conn.on_framing_fatal(next.alert);
+                return true;
+            }
+            if (next.status == fiber::tls::TlsRecordReader::Result::Status::NeedMore) {
+                return true; // partial tail stays buffered for the next feed
+            }
+            conn.on_record(std::move(next.record));
+            if (conn.failed() || conn.peer_closed()) {
+                return true; // terminal: further records drop
+            }
+        }
     }
-    std::memcpy(buf.writable_data(), wire.data(), wire.size());
-    buf.commit(wire.size());
-    if (!conn.feed(std::move(buf))) {
-        return false;
-    }
-    conn.pump();
-    return true;
-}
+};
 
 std::vector<std::uint8_t> read_all(TlsConnection &conn) {
     std::vector<std::uint8_t> out;
@@ -533,15 +556,18 @@ TEST(TlsConnectionTest, AppRoundTripAndAlpn13) {
         EXPECT_EQ("h2", std::string_view(reinterpret_cast<const char *>(client.alpn().data()), client.alpn().size()));
         EXPECT_EQ("h2", std::string_view(reinterpret_cast<const char *>(server.alpn().data()), server.alpn().size()));
 
+        WireFeeder server_feeds;
+        WireFeeder client_feeds;
+
         // client → server (span write)
         const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
-        ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
+        ASSERT_TRUE(server_feeds.feed(server, connection_wire(client, ping)));
         EXPECT_EQ(ping, read_all(server));
 
         // server → client (span write)
         const std::vector<std::uint8_t> pong{'p', 'o', 'n', 'g'};
         ASSERT_TRUE(server.write(pong).has_value());
-        ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
+        ASSERT_TRUE(client_feeds.feed(client, chain_bytes(server.take_output())));
         EXPECT_EQ(pong, read_all(client));
     });
 }
@@ -558,9 +584,10 @@ TEST(TlsConnectionTest, LargePayloadSplitsIntoRecords13) {
         for (std::size_t i = 0; i < big.size(); ++i) {
             big[i] = static_cast<std::uint8_t>(i * 7 + 3);
         }
+        WireFeeder server_feeds;
         const std::vector<std::uint8_t> wire = connection_wire(client, big);
         EXPECT_LE(3u, count_records(wire)); // 40000 > 2 × 16384
-        ASSERT_TRUE(feed_wire(server, wire));
+        ASSERT_TRUE(server_feeds.feed(server, wire));
         EXPECT_EQ(big, read_all(server));
         EXPECT_FALSE(server.failed());
     });
@@ -579,9 +606,11 @@ TEST(TlsConnectionTest, CloseNotifyBothDirections13) {
         const std::vector<std::uint8_t> bye{'b', 'y', 'e'};
         ASSERT_TRUE(client.write(bye).has_value());
         ASSERT_TRUE(client.close_notify().has_value());
+        WireFeeder server_feeds;
+        WireFeeder client_feeds;
         const std::vector<std::uint8_t> wire = chain_bytes(client.take_output());
         EXPECT_EQ(2u, count_records(wire)); // app data + close_notify
-        ASSERT_TRUE(feed_wire(server, wire));
+        ASSERT_TRUE(server_feeds.feed(server, wire));
         EXPECT_FALSE(server.failed());
         EXPECT_EQ(bye, read_all(server));
         std::size_t n = 0;
@@ -594,7 +623,7 @@ TEST(TlsConnectionTest, CloseNotifyBothDirections13) {
         EXPECT_TRUE(server.close_notify().has_value());
 
         // The answering close_notify crosses back.
-        ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
+        ASSERT_TRUE(client_feeds.feed(client, chain_bytes(server.take_output())));
         EXPECT_TRUE(client.peer_closed());
         EXPECT_EQ(ReadStatus::PeerClosed, client.read(scratch.data(), scratch.size(), n));
     });
@@ -608,11 +637,12 @@ TEST(TlsConnectionTest, EmptyWriteEmitsOneZeroLengthRecord13) {
         TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
 
+        WireFeeder server_feeds;
         const std::vector<std::uint8_t> wire = connection_wire(client, std::span<const std::uint8_t>{});
         EXPECT_EQ(1u, count_records(wire));
         const std::size_t len = (static_cast<std::size_t>(wire[3]) << 8) | wire[4];
         EXPECT_EQ(17u, len); // tag(16) + inner type(1)
-        ASSERT_TRUE(feed_wire(server, wire));
+        ASSERT_TRUE(server_feeds.feed(server, wire));
         EXPECT_TRUE(read_all(server).empty()); // nothing delivered, nothing failed
         EXPECT_FALSE(server.failed());
         std::size_t n = 0;
@@ -631,7 +661,9 @@ TEST(TlsConnectionTest, KeyUpdateRequestedRoundTrip13) {
         const std::vector<std::uint8_t> ku = craft_key_update(states.client, true);
         TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
-        ASSERT_TRUE(feed_wire(server, ku));
+        WireFeeder server_feeds;
+        WireFeeder client_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, ku));
         EXPECT_FALSE(server.failed());
         EXPECT_TRUE(read_all(server).empty()); // a KeyUpdate carries no app data
 
@@ -641,7 +673,7 @@ TEST(TlsConnectionTest, KeyUpdateRequestedRoundTrip13) {
         ASSERT_TRUE(server.write(resp).has_value());
         const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
         EXPECT_EQ(2u, count_records(flight));
-        ASSERT_TRUE(feed_wire(client, flight));
+        ASSERT_TRUE(client_feeds.feed(client, flight));
         EXPECT_FALSE(client.failed());
         EXPECT_EQ(resp, read_all(client)); // proves the client's read side rotated in step
 
@@ -649,7 +681,7 @@ TEST(TlsConnectionTest, KeyUpdateRequestedRoundTrip13) {
         // keys.
         const std::vector<std::uint8_t> tail{'f', 'i', 'n', 'a', 'l'};
         ASSERT_TRUE(client.write(tail).has_value());
-        ASSERT_TRUE(feed_wire(server, chain_bytes(client.take_output())));
+        ASSERT_TRUE(server_feeds.feed(server, chain_bytes(client.take_output())));
         EXPECT_EQ(tail, read_all(server));
         EXPECT_FALSE(server.failed());
     });
@@ -663,7 +695,9 @@ TEST(TlsConnectionTest, KeyUpdateNotRequestedKeepsPeerWriteKeys13) {
         const std::vector<std::uint8_t> ku = craft_key_update(states.client, false);
         TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
-        ASSERT_TRUE(feed_wire(server, ku));
+        WireFeeder server_feeds;
+        WireFeeder client_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, ku));
         EXPECT_FALSE(server.failed());
 
         // No response owed: exactly ONE record on the wire, sealed under the
@@ -672,7 +706,7 @@ TEST(TlsConnectionTest, KeyUpdateNotRequestedKeepsPeerWriteKeys13) {
         ASSERT_TRUE(server.write(msg).has_value());
         const std::vector<std::uint8_t> flight = chain_bytes(server.take_output());
         EXPECT_EQ(1u, count_records(flight));
-        ASSERT_TRUE(feed_wire(client, flight));
+        ASSERT_TRUE(client_feeds.feed(client, flight));
         EXPECT_EQ(msg, read_all(client));
     });
 }
@@ -691,13 +725,14 @@ TEST(TlsConnectionTest, NewSessionTicketIsSwallowed13) {
 
         TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
-        ASSERT_TRUE(feed_wire(server, nst));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, nst));
         EXPECT_FALSE(server.failed());
         EXPECT_TRUE(read_all(server).empty());
 
         // The stream stays alive after the swallow.
         const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
-        ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
+        ASSERT_TRUE(server_feeds.feed(server, connection_wire(client, ping)));
         EXPECT_EQ(ping, read_all(server));
     });
 }
@@ -716,7 +751,8 @@ TEST(TlsConnectionTest, PeerFatalAlertLatches13) {
 
         TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
-        ASSERT_TRUE(feed_wire(server, wire));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire));
         EXPECT_TRUE(server.failed());
         EXPECT_TRUE(chain_bytes(server.take_output()).empty()); // nothing sent back
 
@@ -743,12 +779,15 @@ TEST(TlsConnectionTest, CorruptedRecordLatchesBadRecordMac13) {
 
         TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
-        ASSERT_TRUE(feed_wire(server, wire));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire));
         EXPECT_TRUE(server.failed());
         // Our own fatal alert IS encoded — the glue flushes it best-effort.
         EXPECT_FALSE(chain_bytes(server.take_output()).empty());
-        // The connection is terminal: pump/write refuse further work.
-        server.pump();
+        // The connection is terminal: further records/writes refuse work.
+        const std::vector<std::uint8_t> more = connection_wire(client, ping);
+        ASSERT_TRUE(server_feeds.feed(server, more));
+        EXPECT_TRUE(read_all(server).empty());
         EXPECT_FALSE(server.write(ping).has_value());
     });
 }
@@ -760,9 +799,54 @@ TEST(TlsConnectionTest, CcsAfterHandshakeIsFatal13) {
 
         TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
         TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
         const std::uint8_t ccs[] = {kTypeChangeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01};
-        ASSERT_TRUE(feed_wire(server, ccs));
+        ASSERT_TRUE(server_feeds.feed(server, ccs));
         EXPECT_TRUE(server.failed());
+    });
+}
+
+TEST(TlsConnectionTest, TwoPostHandshakeMessagesInOneRecordDrain) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        // Two complete post-handshake messages coalesced into ONE sealed
+        // record: the KeyUpdate rekeys the read side, the NST swallows, and
+        // the fragment drains fully (nothing strands in the reassembler
+        // waiting for bytes that never come).
+        std::vector<std::uint8_t> messages{static_cast<std::uint8_t>(TlsHandshakeType::KeyUpdate), 0, 0, 1, 0};
+        const std::uint8_t nst[]{4, 0, 0, 4, 0xAA, 0xBB, 0xCC, 0xDD};
+        messages.insert(messages.end(), nst, nst + sizeof(nst));
+
+        // Seal the coalesced payload, then rotate the client's write side one
+        // generation — the sender's obligation after a KeyUpdate (mirrors
+        // craft_key_update's rotation for a multi-message payload).
+        TlsRecordCipher wc = std::move(states.client.write_cipher);
+        std::vector<std::uint8_t> wire = seal_record(wc, TlsContentType::Handshake, messages, kTypeApplicationData);
+        states.client.write_cipher = std::move(wc);
+        auto next = fiber::tls::tls13_key_update(states.client.client_app_secret);
+        ASSERT_TRUE(next.has_value());
+        auto keys = fiber::tls::tls13_traffic_keys(*next, states.client.suite);
+        ASSERT_TRUE(keys.has_value());
+        TlsRecordCipher fresh;
+        ASSERT_TRUE(fresh.init(states.client.suite, TlsRecordProtectionKind::Tls13, {keys->key.data(), keys->key_len},
+                               {keys->iv.data(), keys->iv_len})
+                            .has_value());
+        states.client.client_app_secret = std::move(*next);
+        states.client.write_cipher = std::move(fresh);
+
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire));
+        EXPECT_FALSE(server.failed());
+
+        // The stream stays alive behind the rekeyed read side: the client
+        // (write side rotated past the KeyUpdate by craft) → server opens.
+        const std::vector<std::uint8_t> ping{'p', 'i', 'n', 'g'};
+        ASSERT_TRUE(server_feeds.feed(server, connection_wire(client, ping)));
+        EXPECT_EQ(ping, read_all(server));
     });
 }
 
@@ -806,8 +890,12 @@ TEST(TlsConnectionTest, EngineLeftoverFeedsConnection) {
         client_state.write_cipher = std::move(wc);
 
         TlsConnection server_conn(TlsConnectionRole::Server, std::move(server_state));
-        ASSERT_TRUE(server_conn.feed(std::move(leftover)));
-        ASSERT_TRUE(feed_wire(server_conn, {record.data() + 3, record.size() - 3}));
+        WireFeeder server_feeds;
+        // The leftover partial header and the follow-up feed reassemble into
+        // one record inside the glue's reader — the connection only ever
+        // sees complete records.
+        ASSERT_TRUE(server_feeds.feed(server_conn, leftover_bytes));
+        ASSERT_TRUE(server_feeds.feed(server_conn, {record.data() + 3, record.size() - 3}));
         EXPECT_EQ(ping, read_all(server_conn));
         EXPECT_FALSE(server_conn.failed());
     });
@@ -830,7 +918,28 @@ TEST(TlsConnectionTest, HandshakeRecordAfter12HandshakeIsFatal) {
                 craft_12_record(pair.client.write_cipher, TlsContentType::Handshake, hello_request);
 
         TlsConnection server_conn(TlsConnectionRole::Server, std::move(pair.server));
-        ASSERT_TRUE(feed_wire(server_conn, wire));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server_conn, wire));
+        EXPECT_TRUE(server_conn.failed());
+        EXPECT_FALSE(chain_bytes(server_conn.take_output()).empty()); // our fatal alert flies
+    });
+}
+
+TEST(TlsConnectionTest, DegenerateShortSealedRecordLatchesBadRecordMac12) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material; // pool only
+        Synthetic12Pair pair = make_synthetic_12_pair();
+
+        // A sealed body shorter than nonce+tag can never authenticate: the
+        // length guard rejects it BEFORE any buffer arithmetic (the chain
+        // adapter's body/tag sizing must underflow nothing on degenerate
+        // lengths) and it collapses to bad_record_mac like any other
+        // unauthentic record.
+        const std::uint8_t short_record[] = {kTypeHandshake, 0x03, 0x03, 0x00, 0x01, 0x00};
+
+        TlsConnection server_conn(TlsConnectionRole::Server, std::move(pair.server));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server_conn, short_record));
         EXPECT_TRUE(server_conn.failed());
         EXPECT_FALSE(chain_bytes(server_conn.take_output()).empty()); // our fatal alert flies
     });
@@ -844,12 +953,14 @@ TEST(TlsConnectionTest, Synthetic12AppAndCloseNotifyBothWays) {
         TlsConnection client(TlsConnectionRole::Client, std::move(pair.client));
         TlsConnection server(TlsConnectionRole::Server, std::move(pair.server));
 
+        WireFeeder server_feeds;
+        WireFeeder client_feeds;
         const std::vector<std::uint8_t> ping{'1', '2', 'p', 'i', 'n', 'g'};
-        ASSERT_TRUE(feed_wire(server, connection_wire(client, ping)));
+        ASSERT_TRUE(server_feeds.feed(server, connection_wire(client, ping)));
         EXPECT_EQ(ping, read_all(server));
 
         const std::vector<std::uint8_t> pong{'1', '2', 'p', 'o', 'n', 'g'};
-        ASSERT_TRUE(feed_wire(client, connection_wire(server, pong)));
+        ASSERT_TRUE(client_feeds.feed(client, connection_wire(server, pong)));
         EXPECT_EQ(pong, read_all(client));
 
         // close_notify in 1.2 flies as a SEALED alert record (outer type 21
@@ -858,12 +969,12 @@ TEST(TlsConnectionTest, Synthetic12AppAndCloseNotifyBothWays) {
         const std::vector<std::uint8_t> close_wire = chain_bytes(client.take_output());
         ASSERT_EQ(1u, count_records(close_wire));
         EXPECT_EQ(kTypeAlert, close_wire[0]); // 1.2 preserves the record type
-        ASSERT_TRUE(feed_wire(server, close_wire));
+        ASSERT_TRUE(server_feeds.feed(server, close_wire));
         EXPECT_TRUE(server.peer_closed());
         EXPECT_FALSE(server.failed());
 
         ASSERT_TRUE(server.close_notify().has_value());
-        ASSERT_TRUE(feed_wire(client, chain_bytes(server.take_output())));
+        ASSERT_TRUE(client_feeds.feed(client, chain_bytes(server.take_output())));
         EXPECT_TRUE(client.peer_closed());
     });
 }
@@ -883,12 +994,13 @@ TEST(TlsConnectionTest, BoringSsl13AppCloseNotifyAndKeyUpdate) {
         ASSERT_EQ(TlsProtocolVersion::Tls13, state.version);
         TlsConnection conn(TlsConnectionRole::Server, std::move(state));
         ASSERT_FALSE(conn.failed());
+        WireFeeder conn_feeds;
 
         // BoringSSL → connection
         const char kMessage[] = "hello from boringssl";
         ASSERT_EQ(sizeof(kMessage) - 1,
                   static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
-        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        ASSERT_TRUE(conn_feeds.feed(conn, client->drain_wbio()));
         const std::vector<std::uint8_t> got = read_all(conn);
         ASSERT_EQ(sizeof(kMessage) - 1, got.size());
         EXPECT_EQ(0, std::memcmp(kMessage, got.data(), got.size()));
@@ -908,7 +1020,7 @@ TEST(TlsConnectionTest, BoringSsl13AppCloseNotifyAndKeyUpdate) {
         // response record and the app data behind it.
         ASSERT_EQ(1, SSL_key_update(client->ssl(), SSL_KEY_UPDATE_REQUESTED));
         (void) client->handshake_step(); // flush the queued KeyUpdate
-        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        ASSERT_TRUE(conn_feeds.feed(conn, client->drain_wbio()));
         EXPECT_FALSE(conn.failed());
         const char kAfterKu[] = "after key update";
         ASSERT_TRUE(conn.write({reinterpret_cast<const std::uint8_t *>(kAfterKu), sizeof(kAfterKu) - 1}).has_value());
@@ -919,7 +1031,7 @@ TEST(TlsConnectionTest, BoringSsl13AppCloseNotifyAndKeyUpdate) {
 
         // BoringSSL's close_notify (sealed inner alert): peer_closed latches.
         ASSERT_EQ(0, SSL_shutdown(client->ssl()));
-        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        ASSERT_TRUE(conn_feeds.feed(conn, client->drain_wbio()));
         EXPECT_TRUE(conn.peer_closed());
         EXPECT_FALSE(conn.failed());
     });
@@ -936,12 +1048,13 @@ TEST(TlsConnectionTest, BoringSsl12AppAndSealedCloseNotify) {
         ASSERT_EQ(TlsProtocolVersion::Tls12, state.version);
         TlsConnection conn(TlsConnectionRole::Server, std::move(state));
         ASSERT_FALSE(conn.failed());
+        WireFeeder conn_feeds;
 
         // App data both ways under the 1.2 key block.
         const char kMessage[] = "12 hello";
         ASSERT_EQ(sizeof(kMessage) - 1,
                   static_cast<std::size_t>(SSL_write(client->ssl(), kMessage, static_cast<int>(sizeof(kMessage) - 1))));
-        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        ASSERT_TRUE(conn_feeds.feed(conn, client->drain_wbio()));
         const std::vector<std::uint8_t> got = read_all(conn);
         ASSERT_EQ(sizeof(kMessage) - 1, got.size());
         EXPECT_EQ(0, std::memcmp(kMessage, got.data(), got.size()));
@@ -955,7 +1068,7 @@ TEST(TlsConnectionTest, BoringSsl12AppAndSealedCloseNotify) {
 
         // BoringSSL's close_notify arrives as a SEALED 1.2 alert record.
         ASSERT_EQ(0, SSL_shutdown(client->ssl()));
-        ASSERT_TRUE(feed_wire(conn, client->drain_wbio()));
+        ASSERT_TRUE(conn_feeds.feed(conn, client->drain_wbio()));
         EXPECT_TRUE(conn.peer_closed());
         EXPECT_FALSE(conn.failed());
 

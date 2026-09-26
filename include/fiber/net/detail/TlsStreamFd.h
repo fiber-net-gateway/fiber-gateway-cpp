@@ -12,6 +12,7 @@
 #include "../../common/mem/IoBufChain.h"
 #include "../../event/Poller.h"
 #include "../../tls/TlsConnection.h"
+#include "../../tls/record/TlsRecordReader.h"
 #include "../TlsParams.h"
 #include "StreamFd.h"
 
@@ -109,9 +110,19 @@ private:
     fiber::common::IoErr flush_output(Handshake *staging, fiber::event::IoEvent &event) noexcept;
     // Reads the fd to drain and feeds the live engine (handshake phase).
     fiber::common::IoErr feed_engine(Handshake &staging, fiber::event::IoEvent &event) noexcept;
+    // Splits complete records off the connected-phase reader and hands each
+    // to the connection (open + route happen there; a trailing partial
+    // record stays buffered in record_reader_ across feeds). Reader- and
+    // record-level violations both latch the connection's terminal — the
+    // read path surfaces it.
+    fiber::common::IoErr drain_records() noexcept;
 
     StreamFd stream_fd_;
     tls::TlsConnection *conn_ = nullptr; // the connected phase
+    // Connected-phase framing buffer: fd bytes in, complete records out.
+    // Filled from the socket and from the engine's take_inbound_leftover at
+    // HandshakeDone; the connection itself never sees partial records.
+    tls::TlsRecordReader record_reader_{};
     mem::IoBufChain out_pending_{}; // sealed records not yet on the wire
     mem::IoBufChain early_data_{}; // server: decrypted 0-RTT, delivered first
     // Retry-contract identity of the payload sealed into out_pending_ (the
