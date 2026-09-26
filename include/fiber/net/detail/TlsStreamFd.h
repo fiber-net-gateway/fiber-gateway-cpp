@@ -121,7 +121,6 @@ private:
                                                const TlsServerParam *server_param, std::chrono::milliseconds timeout);
     fiber::common::IoErr handshake_once(Handshake &staging, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
-    fiber::common::IoErr read_once(void *buf, size_t len, size_t &out) noexcept;
     // Moves connection output — or the live handshake engines' output when
     // staging is passed — into out_pending_ and writes it out. The connected
     // phase passes nullptr (a live staging outranks nothing there).

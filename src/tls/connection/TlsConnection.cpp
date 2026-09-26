@@ -573,6 +573,29 @@ TlsConnection::ReadStatus TlsConnection::read(void *buf, std::size_t len, std::s
     return ReadStatus::Ok;
 }
 
+TlsConnection::ReadStatus TlsConnection::take(std::size_t size, mem::IoBufChain &out, std::size_t &out_len) noexcept {
+    out_len = 0;
+    if (impl_ == nullptr) {
+        return ReadStatus::Fatal;
+    }
+    const std::size_t available = impl_->plaintext_.readable_bytes();
+    if (size == 0 || available == 0) {
+        if (impl_->failed_) {
+            return ReadStatus::Fatal;
+        }
+        if (impl_->peer_closed_) {
+            return ReadStatus::PeerClosed;
+        }
+        return ReadStatus::NeedMore;
+    }
+    const std::size_t bytes = size < available ? size : available;
+    if (!impl_->plaintext_.take_prefix(bytes, out)) {
+        return ReadStatus::NoMem; // rolled back — the plaintext is untouched
+    }
+    out_len = bytes;
+    return ReadStatus::Ok;
+}
+
 std::size_t TlsConnection::pending_plaintext() const noexcept {
     return impl_ == nullptr ? 0 : impl_->plaintext_.readable_bytes();
 }

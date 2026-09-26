@@ -58,10 +58,11 @@ enum class TlsConnectionRole : std::uint8_t { Client, Server };
 
 class TlsConnection final : public common::NonCopyable, common::NonMovable {
 public:
-    // read() outcome. Ok always delivered > 0 bytes; NeedMore means no
-    // complete record yet (feed more); PeerClosed/Fatal are latched
-    // terminals (pending plaintext drains first).
-    enum class ReadStatus : std::uint8_t { Ok, NeedMore, PeerClosed, Fatal };
+    // read()/take() outcome. Ok always delivered > 0 bytes; NeedMore means
+    // no complete record yet (feed more); PeerClosed/Fatal are latched
+    // terminals (pending plaintext drains first). NoMem is take()-only: a
+    // node-split allocation failed with the plaintext untouched.
+    enum class ReadStatus : std::uint8_t { Ok, NeedMore, PeerClosed, Fatal, NoMem };
 
     // Moves the ciphers and KeyUpdate secrets out of `state` (which is left
     // emptied). The version picks the dispatch table; the role picks which
@@ -84,10 +85,15 @@ public:
     // record): latches the fatal terminal with the reader's alert.
     void on_framing_fatal(TlsAlertDesc alert) noexcept;
 
-    // Drains delivered plaintext into buf (a memcpy API — what the fd layer
-    // wants). Ok with out_len > 0; once empty, the latched terminal (or
-    // NeedMore) surfaces.
+    // Drains delivered plaintext into buf (a memcpy API). Ok with out_len >
+    // 0; once empty, the latched terminal (or NeedMore) surfaces.
     [[nodiscard]] ReadStatus read(void *buf, std::size_t len, std::size_t &out_len) noexcept;
+
+    // Zero-copy read: moves up to `size` plaintext bytes onto the back of
+    // `out` — whole nodes splice, a straddling node splits into a retained
+    // view. Status order mirrors read(); a split's allocation failure
+    // reports NoMem with the plaintext untouched.
+    [[nodiscard]] ReadStatus take(std::size_t size, mem::IoBufChain &out, std::size_t &out_len) noexcept;
 
     [[nodiscard]] std::size_t pending_plaintext() const noexcept;
 

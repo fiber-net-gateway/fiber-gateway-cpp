@@ -447,26 +447,57 @@ fiber::common::IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem
     if (size == 0) {
         return std::size_t{0};
     }
-    // A read delivers at most a record's worth of fresh plaintext, so a
-    // larger node would only hold unwritten capacity.
+    // A read delivers at most a record's worth of fresh plaintext per call;
+    // the take moves record nodes zero-copy, so nothing is allocated unless
+    // plaintext actually arrives.
     size = std::min(size, kRecordPlaintextMax);
-    mem::IoBuf node = mem::IoBuf::allocate(size);
-    if (!node) {
-        return std::unexpected(fiber::common::IoErr::NoMem);
+    for (;;) {
+        if (!early_data_.empty()) {
+            // Server 0-RTT: decrypted early data delivers before anything
+            // decrypted under the handshake keys.
+            const std::size_t readable = early_data_.readable_bytes();
+            const std::size_t bytes = readable < size ? readable : size;
+            if (!early_data_.take_prefix(bytes, out)) {
+                return std::unexpected(fiber::common::IoErr::NoMem);
+            }
+            return bytes;
+        }
+        std::size_t got = 0;
+        const auto status = conn_->take(size, out, got);
+        switch (status) {
+            case tls::TlsConnection::ReadStatus::Ok:
+                return got;
+            case tls::TlsConnection::ReadStatus::PeerClosed:
+                return std::size_t{0}; // EOF (close_notify), out = 0
+            case tls::TlsConnection::ReadStatus::Fatal:
+                return std::unexpected(fiber::common::IoErr::Invalid);
+            case tls::TlsConnection::ReadStatus::NoMem:
+                return std::unexpected(fiber::common::IoErr::NoMem);
+            case tls::TlsConnection::ReadStatus::NeedMore:
+                break;
+        }
+        // No plaintext buffered: pull a wire chunk and split its records.
+        mem::IoBuf chunk = mem::IoBuf::allocate(kReadChunk);
+        if (!chunk.valid()) {
+            return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+        auto read_result = stream_fd_.try_read(chunk.writable_data(), chunk.writable());
+        if (!read_result) {
+            return std::unexpected(read_result.error()); // WouldBlock included: the socket read is the only stall
+        }
+        if (*read_result == 0) {
+            // EOF without close_notify: truncation.
+            return std::unexpected(fiber::common::IoErr::ConnReset);
+        }
+        chunk.commit(*read_result);
+        if (!record_reader_.feed(std::move(chunk))) {
+            return std::unexpected(fiber::common::IoErr::NoMem);
+        }
+        const fiber::common::IoErr drain_err = drain_records();
+        if (drain_err != fiber::common::IoErr::None) {
+            return std::unexpected(drain_err);
+        }
     }
-    std::size_t got = 0;
-    const fiber::common::IoErr err = read_once(node.writable_data(), node.writable(), got);
-    if (err != fiber::common::IoErr::None) {
-        return std::unexpected(err);
-    }
-    if (got == 0) {
-        return std::size_t{0}; // EOF (close_notify)
-    }
-    node.commit(got);
-    if (!out.append(std::move(node))) {
-        return std::unexpected(fiber::common::IoErr::NoMem);
-    }
-    return got;
 }
 
 fiber::async::Task<fiber::common::IoResult<std::size_t>> TlsStreamFd::readv(std::size_t size, mem::IoBufChain &out,
@@ -586,61 +617,6 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
     // Send our close_notify and be done: waiting for the peer's echo is the
     // reader's business (read_once surfaces PeerClosed), not the closer's.
     return flush_output(nullptr, event);
-}
-
-fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out) noexcept {
-    out = 0;
-    if (!stream_fd_.valid() || conn_ == nullptr) {
-        return fiber::common::IoErr::BadFd;
-    }
-    if (len == 0) {
-        return fiber::common::IoErr::None;
-    }
-    for (;;) {
-        if (!early_data_.empty()) {
-            // Server 0-RTT: decrypted early data delivers before anything
-            // decrypted under the handshake keys.
-            const std::size_t readable = early_data_.readable_bytes();
-            const std::size_t bytes = readable < len ? readable : len;
-            std::memcpy(buf, early_data_.first_readable()->readable_data(), bytes);
-            early_data_.consume_and_compact(bytes);
-            out = bytes;
-            return fiber::common::IoErr::None;
-        }
-        std::size_t got = 0;
-        const auto status = conn_->read(buf, len, got);
-        switch (status) {
-            case tls::TlsConnection::ReadStatus::Ok:
-                out = got;
-                return fiber::common::IoErr::None;
-            case tls::TlsConnection::ReadStatus::PeerClosed:
-                return fiber::common::IoErr::None; // EOF (close_notify), out = 0
-            case tls::TlsConnection::ReadStatus::Fatal:
-                return fiber::common::IoErr::Invalid;
-            case tls::TlsConnection::ReadStatus::NeedMore:
-                break;
-        }
-        mem::IoBuf chunk = mem::IoBuf::allocate(kReadChunk);
-        if (!chunk.valid()) {
-            return fiber::common::IoErr::NoMem;
-        }
-        auto read_result = stream_fd_.try_read(chunk.writable_data(), chunk.writable());
-        if (!read_result) {
-            return read_result.error(); // WouldBlock included: the socket read is the only stall
-        }
-        if (*read_result == 0) {
-            // EOF without close_notify: truncation.
-            return fiber::common::IoErr::ConnReset;
-        }
-        chunk.commit(*read_result);
-        if (!record_reader_.feed(std::move(chunk))) {
-            return fiber::common::IoErr::NoMem;
-        }
-        const fiber::common::IoErr drain_err = drain_records();
-        if (drain_err != fiber::common::IoErr::None) {
-            return drain_err;
-        }
-    }
 }
 
 // TLS writes seal a contiguous input buffer into records. Unlike sendmsg,
