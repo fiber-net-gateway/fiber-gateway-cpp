@@ -593,6 +593,50 @@ TEST(TlsConnectionTest, LargePayloadSplitsIntoRecords13) {
     });
 }
 
+TEST(TlsConnectionTest, TakeMovesPlaintextZeroCopy13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        TlsConnection client(TlsConnectionRole::Client, std::move(states.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+
+        std::vector<std::uint8_t> big(40000);
+        for (std::size_t i = 0; i < big.size(); ++i) {
+            big[i] = static_cast<std::uint8_t>(i * 7 + 3);
+        }
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, connection_wire(client, big)));
+        ASSERT_EQ(big.size(), server.pending_plaintext());
+
+        // A bounded take moves exactly the requested bytes — the straddling
+        // node splits — and the remainder stays pending; a second take
+        // appends onto the same sink chain and drains it.
+        IoBufChain sink;
+        std::size_t n = 0;
+        ASSERT_EQ(ReadStatus::Ok, server.take(123, sink, n));
+        ASSERT_EQ(123u, n);
+        ASSERT_EQ(big.size() - 123, server.pending_plaintext());
+        ASSERT_EQ(ReadStatus::Ok, server.take(big.size(), sink, n));
+        ASSERT_EQ(big.size() - 123, n);
+        EXPECT_EQ(0u, server.pending_plaintext());
+        EXPECT_EQ(big, chain_bytes(sink));
+
+        // Empty and no terminal yet: NeedMore.
+        IoBufChain empty_sink;
+        EXPECT_EQ(ReadStatus::NeedMore, server.take(64, empty_sink, n));
+
+        // Pending plaintext drains before a latched terminal surfaces.
+        const std::vector<std::uint8_t> tail{'t', 'a', 'i', 'l'};
+        ASSERT_TRUE(server_feeds.feed(server, connection_wire(client, tail)));
+        ASSERT_TRUE(client.close_notify().has_value());
+        ASSERT_TRUE(server_feeds.feed(server, chain_bytes(client.take_output())));
+        EXPECT_EQ(ReadStatus::Ok, server.take(64, empty_sink, n));
+        EXPECT_EQ(4u, n);
+        EXPECT_EQ(ReadStatus::PeerClosed, server.take(64, empty_sink, n));
+    });
+}
+
 TEST(TlsConnectionTest, CloseNotifyBothDirections13) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         ServerMaterial material;
