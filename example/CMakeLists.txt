@@ -8,6 +8,7 @@ set(FIBER_SIMPLE_EXAMPLES
     http1_echo
     https_echo
     tcp_echo
+    tls_ab_bench
     udp_echo
 )
 
