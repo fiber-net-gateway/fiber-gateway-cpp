@@ -84,9 +84,13 @@ fiber::common::IoErr TlsTcpStream::poll_shutdown(fiber::event::IoEvent &event) n
     return stream_.poll_shutdown(event);
 }
 
-fiber::common::IoErr TlsTcpStream::poll_read(void *buf, size_t len, size_t &out,
-                                             fiber::event::IoEvent &event) noexcept {
-    return stream_.poll_read(buf, len, out, event);
+fiber::common::IoResult<size_t> TlsTcpStream::try_read(size_t size, mem::IoBufChain &out) noexcept {
+    return stream_.try_read(size, out);
+}
+
+fiber::async::Task<fiber::common::IoResult<size_t>> TlsTcpStream::readv(size_t size, mem::IoBufChain &out,
+                                                                        std::chrono::milliseconds timeout) {
+    return stream_.readv(size, out, timeout);
 }
 
 fiber::common::IoResult<size_t> TlsTcpStream::try_write(mem::IoBufChain &buf) noexcept {

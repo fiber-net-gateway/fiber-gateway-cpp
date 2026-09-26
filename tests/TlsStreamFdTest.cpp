@@ -184,28 +184,18 @@ DetachedTask close_tls_streams(fiber::net::detail::TlsStreamFd *server_stream,
 // fd-layer smoke tests on the same production surface.
 fiber::async::Task<fiber::common::IoResult<std::size_t>> tls_poll_read(fiber::net::detail::TlsStreamFd &stream,
                                                                        void *buf, std::size_t len) {
-    for (;;) {
-        std::size_t out = 0;
-        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-        fiber::common::IoErr err = stream.poll_read(buf, len, out, wait_event);
-        if (err == fiber::common::IoErr::None) {
-            co_return out;
-        }
-        if (err != fiber::common::IoErr::WouldBlock) {
-            co_return std::unexpected(err);
-        }
-        fiber::common::IoResult<void> wait;
-        if (wait_event == fiber::event::IoEvent::Read) {
-            wait = co_await stream.wait_readable();
-        } else if (wait_event == fiber::event::IoEvent::Write) {
-            wait = co_await stream.wait_writable();
-        } else {
-            co_return std::unexpected(fiber::common::IoErr::Invalid);
-        }
-        if (!wait) {
-            co_return std::unexpected(wait.error());
-        }
+    fiber::mem::IoBufChain chain;
+    auto read_result = co_await stream.readv(len, chain);
+    if (!read_result) {
+        co_return std::unexpected(read_result.error());
     }
+    std::size_t copied = 0;
+    for (const fiber::mem::IoBufNode *node = chain.front_node(); node != nullptr && copied < len; node = node->next) {
+        const std::size_t take = std::min(node->buf.readable(), len - copied);
+        std::memcpy(static_cast<std::uint8_t *>(buf) + copied, node->buf.readable_data(), take);
+        copied += take;
+    }
+    co_return copied;
 }
 
 fiber::async::Task<fiber::common::IoResult<std::size_t>> tls_poll_write(fiber::net::detail::TlsStreamFd &stream,

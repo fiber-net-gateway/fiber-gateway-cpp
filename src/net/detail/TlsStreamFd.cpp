@@ -440,8 +440,56 @@ StreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable(std::chrono::millisecon
 
 fiber::common::IoErr TlsStreamFd::poll_shutdown(fiber::event::IoEvent &event) noexcept { return shutdown_once(event); }
 
-fiber::common::IoErr TlsStreamFd::poll_read(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept {
-    return read_once(buf, len, out, event);
+fiber::common::IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem::IoBufChain &out) noexcept {
+    if (!stream_fd_.valid() || conn_ == nullptr) {
+        return std::unexpected(fiber::common::IoErr::BadFd);
+    }
+    if (size == 0) {
+        return std::size_t{0};
+    }
+    // A read delivers at most a record's worth of fresh plaintext, so a
+    // larger node would only hold unwritten capacity.
+    size = std::min(size, kRecordPlaintextMax);
+    mem::IoBuf node = mem::IoBuf::allocate(size);
+    if (!node) {
+        return std::unexpected(fiber::common::IoErr::NoMem);
+    }
+    std::size_t got = 0;
+    const fiber::common::IoErr err = read_once(node.writable_data(), node.writable(), got);
+    if (err != fiber::common::IoErr::None) {
+        return std::unexpected(err);
+    }
+    if (got == 0) {
+        return std::size_t{0}; // EOF (close_notify)
+    }
+    node.commit(got);
+    if (!out.append(std::move(node))) {
+        return std::unexpected(fiber::common::IoErr::NoMem);
+    }
+    return got;
+}
+
+fiber::async::Task<fiber::common::IoResult<std::size_t>> TlsStreamFd::readv(std::size_t size, mem::IoBufChain &out,
+                                                                            std::chrono::milliseconds timeout) {
+    Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        auto read = try_read(size, out);
+        if (read) {
+            // One node of plaintext per call — the caller drives the loop.
+            co_return read;
+        }
+        if (read.error() != fiber::common::IoErr::WouldBlock) {
+            co_return std::unexpected(read.error());
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        auto wait_result = co_await stream_fd_.wait_readable(*remaining);
+        if (!wait_result) {
+            co_return std::unexpected(wait_result.error());
+        }
+    }
 }
 
 fiber::common::IoErr TlsStreamFd::handshake_once(Handshake &staging, fiber::event::IoEvent &event) noexcept {
@@ -540,7 +588,7 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
     return flush_output(nullptr, event);
 }
 
-fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept {
+fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out) noexcept {
     out = 0;
     if (!stream_fd_.valid() || conn_ == nullptr) {
         return fiber::common::IoErr::BadFd;
@@ -578,11 +626,7 @@ fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out, 
         }
         auto read_result = stream_fd_.try_read(chunk.writable_data(), chunk.writable());
         if (!read_result) {
-            if (read_result.error() == fiber::common::IoErr::WouldBlock) {
-                event = fiber::event::IoEvent::Read;
-                return fiber::common::IoErr::WouldBlock;
-            }
-            return read_result.error();
+            return read_result.error(); // WouldBlock included: the socket read is the only stall
         }
         if (*read_result == 0) {
             // EOF without close_notify: truncation.
