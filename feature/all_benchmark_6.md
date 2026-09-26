@@ -166,8 +166,13 @@ bash temp/bench/run_matrix6.sh h1 3   # → temp/bench/results6/s{1,2,3}/
 bash temp/bench/run_matrix6.sh h2 2
 bash temp/bench/run_h3_6.sh 6
 
-# 汇总（中位数 + Δ vs #5 内嵌基线）
-python3 temp/bench/parse_results6.py
+# 修复后验证矩阵（#7，见 §7.6：H3 档位逐样本实测内置）
+bash temp/bench/run_matrix7.sh h1 3   # → temp/bench/results7/
+bash temp/bench/run_matrix7.sh h2 2
+bash temp/bench/run_h3_7.sh 6
+
+# 汇总（中位数 + Δ vs #5/#6 内嵌基线 + H3 每档归一）
+python3 temp/bench/parse_results7.py
 ```
 
 原始数据：`temp/bench/results6/s1..s9/`（H3 含 `.json` 摘要；`s7-s9` 为 nginx 端口竞态补测；`rejected_nginx_port_race/` 为剔除样本）。
@@ -182,7 +187,7 @@ python3 temp/bench/parse_results6.py
 
 | # | 因素 | 性质 | 影响面 | 状态 |
 |---|---|---|---|---|
-| 1 | **引擎套件偏好固定 AES 优先**：`kServerSuites`/`kClientSuites`（`src/tls/handshake/TlsServerHandshakeShared.h:30`、`TlsClientHandshakeShared.h:31`）丢掉了 BoringSSL "无 AES 硬件时 ChaCha20-Poly1305 优先"的运行时偏好（`ssl_cipher.cc` 的 `EVP_has_aes_hardware()` 检查，客户端/服务端皆然） | **代码回归**（硬件相关：仅在无 AES-NI 主机上吃亏） | H2 大体（TLS 记录密封）+ H3 大体（QUIC 包保护），每字节成本 228→600+ MB/s/core，**~2.4×** | **已修复**（2026-09-26）：新增 `TlsSuitePreference` 模块，客户端 offer 与服务端偏好共用 `EVP_has_aes_hardware()` 硬件感知有效序——无 AES 硬件时 ChaCha20-Poly1305 提到各版本组最前（BoringSSL 语义），AES-NI 机器零变化；验证见 §7.5 |
+| 1 | **引擎套件偏好固定 AES 优先**：`kServerSuites`/`kClientSuites`（`src/tls/handshake/TlsServerHandshakeShared.h:30`、`TlsClientHandshakeShared.h:31`）丢掉了 BoringSSL "无 AES 硬件时 ChaCha20-Poly1305 优先"的运行时偏好（`ssl_cipher.cc` 的 `EVP_has_aes_hardware()` 检查，客户端/服务端皆然） | **代码回归**（硬件相关：仅在无 AES-NI 主机上吃亏） | H2 大体（TLS 记录密封）+ H3 大体（QUIC 包保护），每字节成本 228→600+ MB/s/core，**~2.4×** | **已修复**（2026-09-26）：新增 `TlsSuitePreference` 模块，客户端 offer 与服务端偏好共用 `EVP_has_aes_hardware()` 硬件感知有效序——无 AES 硬件时 ChaCha20-Poly1305 提到各版本组最前（BoringSSL 语义），AES-NI 机器零变化；验证见 §7.5（快速）/ §7.6（全矩阵） |
 | 2 | **`temp/_deps` 共享构建目录被 -O0 复写**：`FETCHCONTENT_BASE_DIR` 全局共享，`build-debug`（Debug，2026-09-26 11:00）及更早（09-14~09-23 间）某次无优化配置把 `boringssl-build` 的 C++ 旗标烤成无 -O → poly1305 **C 回退**（本 CPU 无 SSE4.1，组合汇编 `chacha20_poly1305_seal_sse41/avx2` 不可调度）从 ~600+ 掉到 ~257 MB/s/core。AES 走 vpaes/ghash 汇编不受影响 | **环境事故** | 09-23 重跑（覆盖 #5 h1/h2 原始文件的 704 rps）、#6 中所有 chacha 分支（当时即使强制 ChaCha 也只有 781） | **已修复**：`cmake -S . -B build` 重配置后 -O3/-DNDEBUG 恢复 |
 
 另有一桩**数据完整性事故**放大了混乱：`results5/` 的 h1/h2 文件被 09-23 17:07-17:34 的一次重跑覆盖（mtime 证据），h3 文件仍是 09-14 原始——导致"基线"内部自相矛盾：#5 报告的 H2 数字（1771/22.1k/178.6k，真实）与残留文件（704/10.2k/158.8k，污染期）无法互相印证，误导排查方向。**教训：results 目录应只追加、按日期归档，不可被重跑覆盖。**
@@ -229,3 +234,33 @@ python3 temp/bench/parse_results6.py
 全部 0 失败 / 0 丢包。**结论：H2 与 H3 的全部格档对档精确回到 #5 水平（+2~4%）——套件偏好是 #6 大体回归的唯一根因，不存在第二因子。** 4w 档 64K 实测 4 个 worker 各占 96-97% 单核——满载密封瓶颈，与 ChaCha20-Poly1305 ~600 MB/s/core 的天花板自洽（4×6,644×64KiB ≈ 1.68 GB/s ≈ 4×~430 MB/s/worker）。
 
 > **勘误的勘误**：本节初版曾据 13.3-13.9k 的样本簇判定"H3 64K 仅恢复约四成（3.4k/w），存在第二回归因子（H3 发送路径每请求开销，嫌疑 `7de1a596`）"——**系档位误读**：未逐样本实测 worker 命中数，把 2w 档当 4w 档归一。经采样器 per-tid 分布（该簇仅 2 个 worker 烧 CPU）与 /proc jiffies（26.6k 样本 4 worker 各 97%）双法证伪。教训与 #3 以来的 H3 方法论一脉相承：**每样本必须实测档位，快速验证也不例外**；五连 2w 档在 #5/#6 的档位分布（2w 概率 ~2/3）下纯属抽样运气。
+
+### 7.6 修复后全矩阵复测验证（#7，2026-09-26 17:07-17:55，fix `72426dc0` 同构建）
+
+套件偏好修复落地、环境修复（libcrypto -O3）后，完整重跑 #6 矩阵（H1×3 / H2×2 / H3×6，同场景同参数同绑核；新数据 `results7/s1..s9/`，只追加）。**每个 H3 样本档位均为脚本内置实测**（`bench7.sh` 每场景前后快照 `/proc/<pid>/task/*/stat` 的 utime+stime 差值，≥300 jiffies 记为命中；lite 主线程不计——它不在 reuseport 抽奖内），彻底贯彻 §7.5 教训。
+
+**H2 全四格恢复 #5 并反超（中位，2 样本）**：
+
+| 格 | lite RPS | Δ#5 | Δ#6 | vs OR | vs nginx |
+|---|---:|---:|---:|---:|---:|
+| GET 1K | 189,444 | +6% | +19% | 1.48× | 1.95×（健康样本口径 1.68×，见注） |
+| GET 64K | 22,302 | +1% | +115% | 2.55× | 1.92× |
+| GET 1M | 1,828 | +3% | +149% | 3.11× | 2.24× |
+| POST 1M | 915 | +7% | +157% | 3.32× | 2.41× |
+
+注：nginx H2 1K 两样本 81.8k/112.6k 离散异常（其余 11 格对照全部 ±3% 内），中位被低样本拉低；ratio 按健康样本 112.6k 计。两对照大体格对 #5 全部 +1~+3%（环境零漂移成立）。
+
+**H3 档对档恢复 #5（每 worker 中位；lite 6 样本全实测档，nginx 9 样本 6 实测档）**：
+
+| 格 | lite /w | Δw#5 | Δw#6 | nginx /w | Δw#5 | lite/nginx |
+|---|---:|---:|---:|---:|---:|---:|
+| GET 1K | 37,074 | +3% | +16% | 25,819 | +3% | **1.44×**（#5 1.44×，#6 1.19×） |
+| GET 64K | 6,734 | +4% | +149% | 3,035 | +5% | **2.22×**（#5 2.2×，#6 0.90×） |
+| GET 1M | 520 | +3% | +174% | 210 | +3% | **2.48×**（#5 2.5×，#6 0.90×） |
+| POST 1M | 263 | +5% | +103% | 93 | +1% | **2.83×**（#5 2.7×，#6 ~1.4×） |
+
+lite POST 样本恰构成完美等差数列：255(1w)/530(2w)/790(3w)/1,050(4w) ≈ 263/w——档位实测与量化模型互证。H1 全 12 格对 #6 ±2%（对 #5 +1~+14% 为整机同向漂移，两对照同步）——H1 面不受影响，环境等价。全程 0 失败 / 0 非 2xx / 0 UDP 丢包（60 份 H3 json 逐一核查）。
+
+**结论：`72426dc0` 后 H2/H3 全部格档对档回到 #5 水平（+1~+7%，与整机 +2~5% 漂移一致），#5 的全部领先比例（H3 每 worker 1.44×/2.2×/2.5×/2.8×，H2 1.5-3.3×）完整恢复——套件偏好是 #6 回归的唯一根因，全矩阵多样本+实测档位双重口径下最终定谳，无第二因子。**
+
+**#7 过程记录**（方法论沉淀）：① 端口竞态复发一次（s3 h1 nginx 整轮 `EADDRINUSE 38080`，非 LISTEN 态源端口对 `ss -tuln` 不可见），本轮起 nginx START 前加 bind 预探（镜像 nginx 语义：SO_REUSEADDR + 0.0.0.0 TCP/UDP，探到空才启动），此后 10 轮 nginx 零失败；h1 nginx 有效样本 2 个（218.9k/217.3k，±0.4%）。② nginx 无 pid 文件（`nginx_run/logs/` 不存在）且本机 master 不重挂 init（PPid=4346 subreaper）、`pgrep -f` 自匹配——worker 档位发现改为 /proc 扫描（comm=nginx + cmdline 含 nginx_run/nginx_quic.conf 即 master，取最大 pid 防上轮残留；cat-demo 实例前缀不同天然排除），s4 起生效，s1-s3 nginx 档位以 s7-s9 补测。③ cat-demo nginx 本轮确认常驻（719126，与 #5/#6 后台负载一致）。
