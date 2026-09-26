@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "TlsCertFixtures.h"
+#include "tls/handshake/TlsSuitePreference.h" // src-side header (tests may include it)
 
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
@@ -969,7 +970,12 @@ TEST(TlsServerHandshake12Full, EcCredentialHandshake) {
         TlsConnectedState state = engine.take_state();
         EXPECT_EQ(SSL_CIPHER_get_protocol_id(SSL_get_current_cipher(client->ssl())),
                   static_cast<std::uint16_t>(state.suite));
-        EXPECT_EQ(0xC02B, static_cast<std::uint16_t>(state.suite)); // ECDHE-ECDSA-AES128-GCM-SHA256
+        // The default BoringSSL 1.2 client offers the whole ECDHE set; the
+        // engine takes its first preference entry the client offered — the
+        // effective order leads with ChaCha20-Poly1305 when this host lacks
+        // AES acceleration (tls_effective_suite_order).
+        EXPECT_EQ(fiber::tls::tls_has_aes_hardware() ? 0xC02B : 0xCCA9,
+                  static_cast<std::uint16_t>(state.suite)); // ECDHE-ECDSA AES128-GCM | ChaCha20
     });
 }
 
