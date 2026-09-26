@@ -175,10 +175,6 @@ public:
 private:
     TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr);
     [[nodiscard]] bool handshake_done() const noexcept;
-    // Shared core: perform one non-suspending read, reporting the physical
-    // direction to wait on when WouldBlock is returned.
-    common::IoErr poll_read_node(std::size_t size, mem::IoBufChain &out, std::size_t &out_bytes,
-                                 event::IoEvent &wait_event) noexcept;
 
     net::TlsTcpStream stream_;
 };

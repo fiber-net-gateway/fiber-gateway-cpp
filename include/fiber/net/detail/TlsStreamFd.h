@@ -75,7 +75,13 @@ public:
     [[nodiscard]] StreamFd::WaitWritableAwaiter
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
-    fiber::common::IoErr poll_read(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
+    // Chain-based read: appends one node (capped at a record's plaintext) of
+    // freshly decrypted bytes to out and returns them; 0 is EOF (close_notify
+    // latched). WouldBlock: wait_readable, then call again. A connected-phase
+    // read only ever blocks on readability.
+    [[nodiscard]] fiber::common::IoResult<std::size_t> try_read(std::size_t size, mem::IoBufChain &out) noexcept;
+    [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::size_t>>
+    readv(std::size_t size, mem::IoBufChain &out, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
     // Chain-based write: prepares one record group from the chain (a node
     // holding whole records passes through zero-copy, smaller runs coalesce
     // into a scratch record), seals and flushes it, then consumes the group
@@ -115,7 +121,7 @@ private:
                                                const TlsServerParam *server_param, std::chrono::milliseconds timeout);
     fiber::common::IoErr handshake_once(Handshake &staging, fiber::event::IoEvent &event) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
-    fiber::common::IoErr read_once(void *buf, size_t len, size_t &out, fiber::event::IoEvent &event) noexcept;
+    fiber::common::IoErr read_once(void *buf, size_t len, size_t &out) noexcept;
     // Moves connection output — or the live handshake engines' output when
     // staging is passed — into out_pending_ and writes it out. The connected
     // phase passes nullptr (a live staging outranks nothing there).

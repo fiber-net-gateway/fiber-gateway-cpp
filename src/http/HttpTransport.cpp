@@ -17,11 +17,6 @@ namespace {
 
 constexpr int kMaxIov = 16;
 
-// One TLS record's maximum plaintext: a read delivers at most a record's
-// worth of fresh plaintext, so a larger node would only hold unwritten
-// capacity. (The write-side record grouping lives in TlsStreamFd.)
-constexpr std::size_t kTlsRecordPlaintextMax = 16384;
-
 std::chrono::steady_clock::time_point make_deadline(std::chrono::milliseconds timeout) noexcept {
     if (timeout == std::chrono::milliseconds::max()) {
         return std::chrono::steady_clock::time_point::max();
@@ -276,8 +271,8 @@ common::IoErr TlsTransport::clear_terminal_callback(ReadyCallback callback, void
     return stream_.clear_terminal_callback(callback, ctx);
 }
 
-// Pending decrypted plaintext behaves like a ready fd: a poll_read makes
-// progress without waiting, so callers must advance it instead of subscribing.
+// Pending decrypted plaintext behaves like a ready fd: a read makes progress
+// without waiting, so callers must advance it instead of subscribing.
 bool TlsTransport::read_ready() const noexcept { return stream_.has_pending_read() || stream_.read_ready(); }
 
 bool TlsTransport::write_ready() const noexcept { return stream_.write_ready(); }
@@ -289,44 +284,7 @@ common::IoErr TlsTransport::adopt_loop(event::EventLoop &loop) noexcept { return
 common::IoErr TlsTransport::ensure_state_observation() noexcept { return stream_.ensure_state_observation(); }
 
 common::IoResult<size_t> TlsTransport::try_readv(size_t size, mem::IoBufChain &out) noexcept {
-    std::size_t out_bytes = 0;
-    event::IoEvent wait_event = event::IoEvent::None;
-    common::IoErr err = poll_read_node(size, out, out_bytes, wait_event);
-    if (err != common::IoErr::None) {
-        return std::unexpected(err);
-    }
-    return out_bytes;
-}
-
-common::IoErr TlsTransport::poll_read_node(std::size_t size, mem::IoBufChain &out, std::size_t &out_bytes,
-                                           event::IoEvent &wait_event) noexcept {
-    out_bytes = 0;
-    wait_event = event::IoEvent::None;
-    FIBER_ASSERT(handshake_done());
-    if (size == 0) {
-        return common::IoErr::None;
-    }
-    // SSL_read delivers at most one record's plaintext per call, so a larger
-    // node would only hold unwritten capacity.
-    size = std::min(size, kTlsRecordPlaintextMax);
-    mem::IoBuf node = mem::IoBuf::allocate(size);
-    if (!node) {
-        return common::IoErr::NoMem;
-    }
-    std::size_t got = 0;
-    common::IoErr err = stream_.poll_read(node.writable_data(), node.writable(), got, wait_event);
-    if (err != common::IoErr::None) {
-        return err;
-    }
-    if (got == 0) {
-        return common::IoErr::None; // EOF (close_notify)
-    }
-    node.commit(got);
-    if (!out.append(std::move(node))) {
-        return common::IoErr::NoMem;
-    }
-    out_bytes = got;
-    return common::IoErr::None;
+    return stream_.try_read(size, out);
 }
 
 common::IoResult<size_t> TlsTransport::try_writev(mem::IoBufChain &buf) noexcept { return stream_.try_write(buf); }
@@ -366,22 +324,7 @@ fiber::async::Task<common::IoResult<void>> TlsTransport::shutdown(std::chrono::m
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::readv(size_t size, mem::IoBufChain &out,
                                                                  std::chrono::milliseconds timeout) {
     FIBER_ASSERT(handshake_done());
-    auto deadline = make_deadline(timeout);
-    for (;;) {
-        std::size_t out_bytes = 0;
-        event::IoEvent wait_event = event::IoEvent::None;
-        common::IoErr err = poll_read_node(size, out, out_bytes, wait_event);
-        if (err == common::IoErr::None) {
-            co_return out_bytes;
-        }
-        if (err != common::IoErr::WouldBlock) {
-            co_return std::unexpected(err);
-        }
-        auto wait_result = co_await wait_tls_event(stream_, wait_event, deadline);
-        if (!wait_result) {
-            co_return std::unexpected(wait_result.error());
-        }
-    }
+    co_return co_await stream_.readv(size, out, timeout);
 }
 
 fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChain &buf,
