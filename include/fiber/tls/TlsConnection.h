@@ -1,10 +1,11 @@
 #ifndef FIBER_TLS_TLS_CONNECTION_H
 #define FIBER_TLS_TLS_CONNECTION_H
 
-// Connected-phase record engine (feature/tls/09 §3): takes a
-// TlsConnectedState by move from either handshake engine at HandshakeDone
-// and drives everything that flies after the handshake — application data,
-// alerts, and the TLS 1.3 post-handshake messages we handle:
+// Connected-phase record engine (feature/tls/09 §3; framing decoupled from
+// the connection): takes a TlsConnectedState by move from either handshake
+// engine at HandshakeDone and drives everything that flies after the
+// handshake — application data, alerts, and the TLS 1.3 post-handshake
+// messages we handle:
 //   NewSessionTicket  swallowed (09 §1: no client session cache)
 //   KeyUpdate         read side rekeys on receipt; update_requested arms the
 //                     passive RFC 8446 §4.6.1 response (own KeyUpdate under
@@ -14,12 +15,23 @@
 //                     renegotiation is refused outright, 09 §1)
 // We never initiate a KeyUpdate ourselves (09 §1).
 //
+// Record framing lives OUTSIDE (the 09 §3 retrofit of TlsHandshakeContext is
+// gone): the glue (TlsStreamFd) owns the TlsRecordReader that splits the
+// inbound byte stream and hands complete records to on_record(); a trailing
+// partial record stays buffered there across feeds. Per record the
+// connection opens in place — the plaintext rides the record's own nodes
+// into the delivery chain with zero copies when the topology allows, and
+// through the internal open scratch (one gather) when the body straddles
+// chain nodes. Post-handshake handshake messages (NST/KeyUpdate) reassemble
+// across records here (4 MiB per-message cap).
+//
 // Synchronous, memory-only plumbing — the net glue (TlsStreamFd, 09 §5)
-// owns the socket loop: fd bytes → feed(), take_output() → fd. Pure writes
-// (write/close_notify) are fail-fast; inbound violations latch a terminal
-// state and encode the fatal alert into the outbound chain (the glue
-// flushes it best-effort before tearing down). The peer's close_notify
-// latches PeerClosed — plaintext delivered before it stays readable.
+// owns the socket loop: fd bytes → its reader → on_record(), take_output()
+// → fd. Pure writes (write/close_notify) are fail-fast; inbound violations
+// latch a terminal state and encode the fatal alert into the outbound chain
+// (the glue flushes it best-effort before tearing down). The peer's
+// close_notify latches PeerClosed — plaintext delivered before it stays
+// readable.
 //
 // Node pool semantics as everywhere else: chains resolve the current
 // loop's node pool per operation — run/destroy the connection on the
@@ -38,6 +50,7 @@
 
 #include "TlsConnectedState.h"
 #include "TlsTypes.h"
+#include "record/TlsRecord.h"
 
 namespace fiber::tls {
 
@@ -58,18 +71,18 @@ public:
 
     // ---- inbound ----
 
-    // Appends peer bytes (ciphertext, any chunking); false only on
-    // allocation failure (a connection-level failure — the glue tears down).
-    // Feeding a terminal connection is harmless: the bytes buffer, pump()
-    // ignores them.
-    [[nodiscard]] bool feed(mem::IoBuf &&bytes) noexcept;
-    [[nodiscard]] bool feed(mem::IoBufChain &&bytes) noexcept;
+    // One complete record off the glue's TlsRecordReader (any chain
+    // topology — straddling bodies degrade to an internal gather). The
+    // record is processed immediately: opened with the read cipher (auth
+    // failure → fatal bad_record_mac), its inner content routed (app data
+    // delivered, alerts latched, post-handshake messages dispatched).
+    // Records handed to a terminal connection (ours or the peer's
+    // close_notify) drop harmlessly.
+    void on_record(TlsRecord &&record) noexcept;
 
-    // Digests fed bytes to quiescence: splits records, opens them with the
-    // read cipher (auth failure → fatal bad_record_mac), delivers app
-    // plaintext to the internal chain, and handles the post-handshake
-    // dispatch above. Latches terminals; idempotent once latched.
-    void pump() noexcept;
+    // Reader-level framing violation (unknown content type / oversize
+    // record): latches the fatal terminal with the reader's alert.
+    void on_framing_fatal(TlsAlertDesc alert) noexcept;
 
     // Drains delivered plaintext into buf (a memcpy API — what the fd layer
     // wants). Ok with out_len > 0; once empty, the latched terminal (or

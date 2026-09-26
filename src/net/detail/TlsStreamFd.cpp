@@ -177,6 +177,7 @@ void TlsStreamFd::close() {
     if (stream_fd_.valid()) {
         stream_fd_.close();
     }
+    record_reader_.reset();
     role_ = Role::None;
     handshake_done_ = false;
     shutdown_started_ = false;
@@ -505,10 +506,15 @@ fiber::common::IoErr TlsStreamFd::handshake_once(Handshake &staging, fiber::even
         if (conn_ == nullptr) {
             return fiber::common::IoErr::NoMem;
         }
-        if (!leftover.empty() && !conn_->feed(std::move(leftover))) {
+        // The leftover bytes ride the glue's connected-phase reader — records
+        // past the final flight (app data piggybacked behind it) frame here.
+        if (!leftover.empty() && !record_reader_.feed(std::move(leftover))) {
             return fiber::common::IoErr::NoMem;
         }
-        conn_->pump();
+        const fiber::common::IoErr drain_err = drain_records();
+        if (drain_err != fiber::common::IoErr::None) {
+            return drain_err;
+        }
         handshake_done_ = true;
     }
 }
@@ -582,10 +588,13 @@ fiber::common::IoErr TlsStreamFd::read_once(void *buf, size_t len, size_t &out, 
             return fiber::common::IoErr::ConnReset;
         }
         chunk.commit(*read_result);
-        if (!conn_->feed(std::move(chunk))) {
+        if (!record_reader_.feed(std::move(chunk))) {
             return fiber::common::IoErr::NoMem;
         }
-        conn_->pump(); // may deliver plaintext or latch a terminal
+        const fiber::common::IoErr drain_err = drain_records();
+        if (drain_err != fiber::common::IoErr::None) {
+            return drain_err;
+        }
     }
 }
 
@@ -685,6 +694,24 @@ fiber::common::IoErr TlsStreamFd::feed_engine(Handshake &staging, fiber::event::
         }
     }
     return fiber::common::IoErr::None;
+}
+
+fiber::common::IoErr TlsStreamFd::drain_records() noexcept {
+    FIBER_ASSERT(conn_ != nullptr);
+    for (;;) {
+        tls::TlsRecordReader::Result next = record_reader_.next();
+        if (next.status == tls::TlsRecordReader::Result::Status::Fatal) {
+            conn_->on_framing_fatal(next.alert);
+            return fiber::common::IoErr::None; // the read path surfaces the latched terminal
+        }
+        if (next.status == tls::TlsRecordReader::Result::Status::NeedMore) {
+            return fiber::common::IoErr::None; // partial record tail stays buffered here
+        }
+        conn_->on_record(std::move(next.record));
+        if (conn_->failed() || conn_->peer_closed()) {
+            return fiber::common::IoErr::None; // terminal: further records drop
+        }
+    }
 }
 
 } // namespace fiber::net::detail
