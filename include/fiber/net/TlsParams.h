@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../common/IoError.h"
+#include "../tls/handshake/TlsHandshakeMessage.h"
 
 namespace fiber::tls {
 class TlsTicketService;
@@ -21,57 +22,6 @@ class TlsCredential;
 class TrustStore;
 class TlsServerHandshakeConfig;
 
-class TlsAlpnProtocolsView {
-public:
-    constexpr TlsAlpnProtocolsView() noexcept = default;
-    constexpr TlsAlpnProtocolsView(const std::uint8_t *data, std::size_t size) noexcept : data_(data), size_(size) {}
-
-    [[nodiscard]] constexpr const std::uint8_t *data() const noexcept { return data_; }
-    [[nodiscard]] constexpr std::size_t size() const noexcept { return size_; }
-    [[nodiscard]] bool empty() const noexcept { return protocol_list_size() == 0; }
-    [[nodiscard]] bool contains(std::string_view protocol) const noexcept;
-
-private:
-    [[nodiscard]] std::size_t protocol_list_size() const noexcept;
-
-    const std::uint8_t *data_ = nullptr;
-    std::size_t size_ = 0;
-};
-
-inline std::size_t TlsAlpnProtocolsView::protocol_list_size() const noexcept {
-    if (!data_ || size_ < 2) {
-        return 0;
-    }
-    const std::size_t encoded = (static_cast<std::size_t>(data_[0]) << 8U) | static_cast<std::size_t>(data_[1]);
-    return encoded + 2 <= size_ ? encoded : 0;
-}
-
-inline bool TlsAlpnProtocolsView::contains(std::string_view protocol) const noexcept {
-    std::size_t remaining = protocol_list_size();
-    if (remaining == 0) {
-        return false;
-    }
-    const std::uint8_t *cur = data_ + 2;
-    while (remaining > 0) {
-        const std::size_t len = cur[0];
-        if (len + 1 > remaining) {
-            return false;
-        }
-        if (len == protocol.size() &&
-            std::char_traits<char>::compare(reinterpret_cast<const char *>(cur + 1), protocol.data(), len) == 0) {
-            return true;
-        }
-        cur += len + 1;
-        remaining -= len + 1;
-    }
-    return false;
-}
-
-struct TlsClientHelloView {
-    std::string_view server_name{};
-    TlsAlpnProtocolsView offered_alpn{};
-};
-
 enum class TlsClientCertificateMode : std::uint8_t {
     None,
     Optional,
@@ -79,7 +29,7 @@ enum class TlsClientCertificateMode : std::uint8_t {
 };
 
 using ConfigureTlsCallback = common::IoErr (*)(void *ctx, TlsServerHandshakeConfig &config,
-                                               const TlsClientHelloView &client_hello) noexcept;
+                                               const tls::TlsClientHelloView &client_hello) noexcept;
 
 struct TlsClientSecurity {
     // The SSL retains its own references after successful installation.

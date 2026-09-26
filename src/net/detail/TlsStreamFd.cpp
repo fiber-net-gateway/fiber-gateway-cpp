@@ -11,10 +11,9 @@
 #include <sys/uio.h>
 
 #include <fiber/common/Assert.h>
-#include <fiber/net/IpAddress.h>
-#include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
+#include <fiber/net/detail/TlsClientStaging.h>
 #include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/TlsTicketService.h>
 #include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
@@ -70,13 +69,6 @@ constexpr std::size_t kReadChunk = 32 * 1024;
 constexpr int kMaxIov = 16;
 // One TLS record's maximum plaintext — the write-side grouping granularity.
 constexpr std::size_t kRecordPlaintextMax = tls::kTlsMaxPlaintextSize;
-
-// Certificate-validity snapshot: wall clock (the engines' now_unix_ms is a
-// real-time input; EventLoop::now() is a steady monotonic source).
-std::int64_t system_now_unix_ms() noexcept {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
-            .count();
-}
 
 bool version_bounds_ok(int min_version, int max_version) noexcept {
     const auto in_domain = [](int version) noexcept { return version == 0x0303 || version == 0x0304; };
@@ -237,45 +229,11 @@ common::IoResult<void> TlsStreamFd::start_client(Handshake &staging, const TlsCl
     }
 
     auto &cfg = staging.client_cfg;
-    IpAddress server_ip{};
-    const bool server_name_is_ip = !param.server_name.empty() && IpAddress::parse(param.server_name, server_ip);
-    if (!param.server_name.empty() && !server_name_is_ip) {
-        cfg.sni_host = param.server_name;
+    if (auto staged = TlsClientStager::stage(param, cfg, staging.ip_bytes); !staged) {
+        return std::unexpected(staged.error());
     }
-    if (param.security.verify_peer) {
-        // A null trust store means the process-wide system roots. Resolution
-        // happens once per process; NotFound reports that no system CA bundle
-        // exists on this host.
-        const TrustStore *trust_store = param.security.trust_store;
-        if (trust_store == nullptr) {
-            auto system_store = TrustStore::system_default();
-            if (!system_store) {
-                return std::unexpected(system_store.error());
-            }
-            trust_store = *system_store;
-        }
-        cfg.trust = &trust_store->tls_store();
-        const std::string_view verify_name = param.verify_name.empty() ? param.server_name : param.verify_name;
-        IpAddress verify_ip{};
-        if (!verify_name.empty() && IpAddress::parse(verify_name, verify_ip)) {
-            std::memcpy(staging.ip_bytes.data(), verify_ip.data(), verify_ip.byte_size());
-            cfg.verify_ip = {staging.ip_bytes.data(), verify_ip.byte_size()};
-        } else if (!verify_name.empty()) {
-            cfg.check_host = verify_name;
-        } else {
-            return std::unexpected(common::IoErr::Invalid);
-        }
-    } else {
-        cfg.verify_peer = false;
-    }
-    if (param.security.credential != nullptr) {
-        cfg.client_chain = &param.security.credential->tls_chain();
-        cfg.client_key = &param.security.credential->tls_key();
-    }
-    cfg.alpn = param.alpn;
     cfg.min_version = static_cast<std::uint16_t>(param.min_version);
     cfg.max_version = static_cast<std::uint16_t>(param.max_version);
-    cfg.now_unix_ms = system_now_unix_ms();
 
     staging.client = new (std::nothrow) tls::TlsClientHandshakeEngine(cfg, nullptr);
     if (staging.client == nullptr) {
@@ -347,18 +305,7 @@ const tls::TlsServerConfig *TlsStreamFd::select_server_config(void *ctx,
     staging->server_cfg.key = nullptr;
     std::size_t credential_count = 0;
     TlsServerHandshakeConfig config(staging->server_cfg, credential_count);
-    // The decoded alpn_list is the ProtocolNameList BODY (1-byte length
-    // entries); TlsAlpnProtocolsView wants the wire form with the 2-byte
-    // list-length prefix, which sits immediately before the body in the
-    // engine's retained ClientHello copy (the decoder's structure checks
-    // guarantee the prefix is the exact body length).
-    TlsClientHelloView view{
-            .server_name = client_hello.has_server_name ? client_hello.server_name : std::string_view{},
-            .offered_alpn =
-                    client_hello.has_alpn && !client_hello.alpn_list.empty()
-                            ? TlsAlpnProtocolsView(client_hello.alpn_list.data() - 2, client_hello.alpn_list.size() + 2)
-                            : TlsAlpnProtocolsView{},
-    };
+    const tls::TlsClientHelloView view = client_hello.view();
     common::IoErr error = staging->param->configure_callback(staging->param->configure_ctx, config, view);
     if (error == common::IoErr::None && credential_count == 0) {
         error = common::IoErr::Invalid;

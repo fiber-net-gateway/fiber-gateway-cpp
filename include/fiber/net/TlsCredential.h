@@ -20,6 +20,7 @@ namespace fiber::net {
 class TlsServerHandshakeConfig;
 namespace detail {
 class TlsStreamFd;
+class TlsClientStager;
 } // namespace detail
 
 struct TlsCredentialOptions {
@@ -44,6 +45,7 @@ public:
 private:
     friend class TlsServerHandshakeConfig;
     friend class detail::TlsStreamFd;
+    friend class detail::TlsClientStager;
     friend class quic::QuicTlsSession;
 
     TlsCredential() noexcept = default;

@@ -1340,7 +1340,7 @@ public:
 
 private:
     static fiber::common::IoErr configure_tls(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
-                                              const fiber::net::TlsClientHelloView &client_hello) noexcept {
+                                              const fiber::tls::TlsClientHelloView &client_hello) noexcept {
         auto *self = static_cast<TlsSingleRequestUpstream *>(ctx);
         {
             std::lock_guard lock(self->mutex_);
