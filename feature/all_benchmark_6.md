@@ -25,6 +25,11 @@
 
 一句话：**自研 TLS 引擎换芯 + 传输面重构后，`a58cf18` 带来的 H2/H3 大体优势被完整回吐——H2 大体三格回到 #3 水平、H3 大体每 worker 跌破 nginx；H1 面不受影响（POST 2.72× 与 GET 1K 落后 ~36% 的旧格局不变），H2/H3 小请求仍领先但收窄。这确认了 09-slice3 已记录的 proxy bulk -54~-60% 回归，并将其定位扩展到 H3（指向 H2/H3 共享的发送路径，而非仅 TLS 记录层）。**
 
+> **勘误（2026-09-26 排查完成，见 §7）**：上段"指向共享发送路径"的推断**已被证伪**。真实根因有二，均与发送路径重构无关：
+> 1. **密码套件偏好变化**（代码回归，**已修**，见 §7.1/§7.5）：自研引擎固定服务端偏好 AES 优先（`kServerSuites`），丢失 BoringSSL"无 AES 硬件时 ChaCha20 优先"的运行时行为。本机 CPU 无 AES-NI，AES-GCM(vpaes) 228 MB/s/core vs ChaCha20-Poly1305 ~600+ MB/s/core，H2/H3 大体全被压低 ~2.4×。
+> 2. **`temp/_deps` 构建污染**（环境事故，已修复）：`boringssl-build` 被共享 `FETCHCONTENT_BASE_DIR` 上的一次 Debug 配置复写为 -O0，poly1305 C 回退慢 2-3×；`#5` 的 h1/h2 原始数据亦被 09-23 的污染期重跑覆盖。
+> 修复 libcrypto 后强制 ChaCha：1M **1816**（#5 报告 1771 ✓ 复现）、64K **24.7k**（#5 22.1k ✓）、1K **202.6k**（#5 178.6k，±13%）。
+
 ---
 
 ## 2. 环境与构建（与 #5 的差异点）
@@ -135,7 +140,7 @@
 
 1. **作废的结论**：#5 "H2 四场景全面反超（2.0-3.0×）、H3 每 worker 2.2-2.7×"——`tls` 分支上被完整回吐：H2 大体三格回到 #3 水平、H3 大体两格（64K/1M）跌破 nginx。
 2. **保持的结论**：H1 面旧格局不变（POST echo 2.72×、GET 1K 落后 ~36%、1M 带宽打平）；H2/H3 小请求 lite 仍领先（H2 1K 1.24-1.39×、H3 1K 1.19×/w），幅度收窄。
-3. **新增的定位信息**：回归同幅命中 H2 大体与 H3 大体而明文 H1 无恙（对照全程零变化）——结合 09-slice3 在册的"记录层微基准打平"，嫌疑集中于 H2/H3 共享发送路径（帧批量打包/跨节点汇聚），而非 TLS 记录转录本身。具体热点待 proxy 级 profile。
+3. **新增的定位信息**：回归同幅命中 H2 大体与 H3 大体而明文 H1 无恙（对照全程零变化）——~~嫌疑集中于 H2/H3 共享发送路径~~ **已证伪**：根因为套件偏好（AES 优先）+ libcrypto -O0 污染两事叠加，均与发送路径无关，详见 §7。
 4. **稳定性结论不变**：换芯后三协议与 wrk/h2load/http3_benchmark_client 互操作全程零失败零丢包。
 5. **H2/H3 对照数据与 #5 完全可比**（≤±7%），#6 与 #5 的 lite 差值即换芯+重构的净效应。
 
@@ -166,3 +171,62 @@ python3 temp/bench/parse_results6.py
 ```
 
 原始数据：`temp/bench/results6/s1..s9/`（H3 含 `.json` 摘要；`s7-s9` 为 nginx 端口竞态补测；`rejected_nginx_port_race/` 为剔除样本）。
+
+---
+
+## 7. 排查后记：H2/H3 大体"回吐"的真实根因（2026-09-26 深挖，修正 §1/§3/§4 的推断）
+
+### 7.1 结论
+
+§1 中"H2/H3 共享发送路径（帧批量打包/跨节点汇聚）失效"的假设**不成立**——`a58cf18` 的跨节点 coalesce 代码在 `3e71e01a` 上完好且未命中 profile。真实根因是两个独立因素的叠加：
+
+| # | 因素 | 性质 | 影响面 | 状态 |
+|---|---|---|---|---|
+| 1 | **引擎套件偏好固定 AES 优先**：`kServerSuites`/`kClientSuites`（`src/tls/handshake/TlsServerHandshakeShared.h:30`、`TlsClientHandshakeShared.h:31`）丢掉了 BoringSSL "无 AES 硬件时 ChaCha20-Poly1305 优先"的运行时偏好（`ssl_cipher.cc` 的 `EVP_has_aes_hardware()` 检查，客户端/服务端皆然） | **代码回归**（硬件相关：仅在无 AES-NI 主机上吃亏） | H2 大体（TLS 记录密封）+ H3 大体（QUIC 包保护），每字节成本 228→600+ MB/s/core，**~2.4×** | **已修复**（2026-09-26）：新增 `TlsSuitePreference` 模块，客户端 offer 与服务端偏好共用 `EVP_has_aes_hardware()` 硬件感知有效序——无 AES 硬件时 ChaCha20-Poly1305 提到各版本组最前（BoringSSL 语义），AES-NI 机器零变化；验证见 §7.5 |
+| 2 | **`temp/_deps` 共享构建目录被 -O0 复写**：`FETCHCONTENT_BASE_DIR` 全局共享，`build-debug`（Debug，2026-09-26 11:00）及更早（09-14~09-23 间）某次无优化配置把 `boringssl-build` 的 C++ 旗标烤成无 -O → poly1305 **C 回退**（本 CPU 无 SSE4.1，组合汇编 `chacha20_poly1305_seal_sse41/avx2` 不可调度）从 ~600+ 掉到 ~257 MB/s/core。AES 走 vpaes/ghash 汇编不受影响 | **环境事故** | 09-23 重跑（覆盖 #5 h1/h2 原始文件的 704 rps）、#6 中所有 chacha 分支（当时即使强制 ChaCha 也只有 781） | **已修复**：`cmake -S . -B build` 重配置后 -O3/-DNDEBUG 恢复 |
+
+另有一桩**数据完整性事故**放大了混乱：`results5/` 的 h1/h2 文件被 09-23 17:07-17:34 的一次重跑覆盖（mtime 证据），h3 文件仍是 09-14 原始——导致"基线"内部自相矛盾：#5 报告的 H2 数字（1771/22.1k/178.6k，真实）与残留文件（704/10.2k/158.8k，污染期）无法互相印证，误导排查方向。**教训：results 目录应只追加、按日期归档，不可被重跑覆盖。**
+
+### 7.2 证据链
+
+1. **密码学天花板反推**：本机（Core 2 T7700 世系 VM，16 vCPU，无 AES-NI/PCLMULQDQ/SSE4.1）BoringSSL 单核密封速率直接实测：AES-128-GCM（vpaes+ghash 汇编）**228 MiB/s/core**；ChaCha20-Poly1305（chacha 汇编 + **C 版 poly1305**，因无 SSE4.1 组合汇编不可用）污染期 **257** → -O3 修复后大幅上升。4 worker ⇒ AES 绝对上限 ~912 MB/s。#5 报告 1M=1857 MB/s 超限 ⇒ #5 必然协商 ChaCha（BoringSSL 无 AES 硬件时服务端也把 ChaCha 提前，实测 a0263f3+h2load 默认 offer 协商出 `TLS_CHACHA20_POLY1305_SHA256`）；#6 的 741 MB/s ≈ AES 上限的 81%（profile 显示 69% CPU 在密封）⇒ #6 协商 AES。
+2. **修复后复现闭环**：`cmake -S . -B build` 重配置（共享 boringssl-build 恢复 -O3）→ 重建 `3e71e01a` → h2load 强制 `--tls13-ciphers TLS_CHACHA20_POLY1305_SHA256`：**1M 1816 / 64K 24,746 / 1K 202,632**——与 #5 报告（1771/22,149/178,596）全面吻合，证实 #5 数字真实且"回吐"非发送路径所致。同二进制默认（AES）：725/10,972/168,650——即 §3.2 实测值，**当前引擎在这台机器上的代价就是套件选择**。
+3. **H3 与污染无关**：libcrypto 修复后 H3 1M 仍为 381/572/379（与 #6 持平）——引擎 QUIC 协商 AES（汇编路径不受 -O 影响），H3 回归完全归因于套件偏好（#5 ChaCha ~500/w → #6 AES ~190/w，228 MB/s/core × 0.85 ≈ 190 ✓）。
+4. **profile 铁证**（LD_PRELOAD SIGPROF 采样，`timer_create(CLOCK_THREAD_CPUTIME_ID)` 每线程臂装——注意 Linux `setitimer(ITIMER_PROF)` 是 per-thread 的，进程级 CPU 定时器信号只落创建线程，两者都会漏采 worker）：#6 引擎+AES 下 69% CPU 在 `vpaes/gcm_ghash_ssse3`；BoringSSL+ChaCha 下 67% 在 `poly1305_blocks`(C)+`ChaCha20_ctr32_ssse3_4x`。两者速率接近 ⇒ 套件 A/B 仅 ±7-8%（#6 期间）——这曾一度证伪"密码学瓶颈"，实为两个慢实现互为替身；修复后同 A/B 拉开到 2.5×。
+5. **对照数据自洽**：nginx-quic（静态链接项目 BoringSSL，未被污染波及）H2 1M 805→820、H3 616→630 稳定；OpenResty（自带 OpenSSL）577→592 稳定；lite H1（无 crypto）5380→5873 稳定——机器本身速度未变。
+
+### 7.3 修复与建议
+
+- **已修复（环境）**：`cmake -S . -B build` 重配置即可把 -O3 烤回共享 `boringssl-build`。**长期**：`cmake/Deps.cmake` 应对 `crypto` 目标强制注入 Release 级优化旗标（不随父构建类型漂移），或强制非 Release 构建使用独立 `FIBER_DEPS_DIR`（`build-debug`/`build-asan` 目前都打在共享 deps 上，是反复污染的根源；[[quic-awaiter-destruction-safe-fix]] 已有前科记录）。
+- **待修（代码）→ 已修**：套件偏好硬件感知已落地（`src/tls/handshake/TlsSuitePreference.{h,cpp}`）：`kTlsSuitePreference` 单表取代原先两侧值相同的 `kServerSuites`/`kOfferedSuites`，`tls_effective_suite_order()` 一次性按 `EVP_has_aes_hardware()` 返回注册序或 ChaCha 前置序（每个版本组内稳定前置，1.3 组仍在 1.2 组前），客户端 CH offer 与服务端 `tls_server_suite_select`/`_12` 偏好走查均用之；QUIC 经引擎自动覆盖。新增 `TlsSuitePreferenceTest`（纯置换 + 探针一致性 + 偏好走查三形态），`TlsServerHandshakeEngineTest` 的 1.2 ECDSA 断言改为硬件感知期望。2437 测试全绿。
+- **方法论**：results 目录只追加；跨天对比前先跑基准锚（如 cipher A/B + profile）确认环境未漂移。
+
+### 7.4 重跑验证（2026-09-26，libcrypto 修复后的干净环境）
+
+修复 `-O3` 后用同构建、同参数完整重跑 #6 矩阵（新数据 `results6b/`，**不覆盖** `results6/`；脚本 `run_matrix6b.sh`/`run_h3_6b.sh`/`parse_results6b.py` 由 #6 脚本 sed 派生，已快照至 `scripts/benchmark/all/`）：
+
+| 面 | results6b vs #6 中位 |
+|---|---|
+| H1 全部 12 格 | ±2% 以内（lite POST 5,866 vs 5,873） |
+| H2 全部 12 格 | lite 四格 -2~+2%（1M 726 vs 733、64K 10,552 vs 10,366、POST 358 vs 356、1K 156.9k vs 159.8k）；两对照 ±3% |
+| H3（每 worker 归一） | 1M ~190/w、64K ~2.7k/w、POST ~95/w——逐档与 #6 一致（绝对中位受档位抽样扰动 ±12~20%） |
+
+全部 0 失败 / 0 非 2xx / 0 丢包。**结论**：#6 的测量本身有效——污染只拖累 chacha-poly 路径，而默认协商（引擎 AES 优先）从不选中它；H2/H3 大体与 #5 的差距即 §7.1 因素 1（套件偏好）的净效应，修复潜力以强制 ChaCha 的 1816/24.7k/202.6k 为上限（§7.2）。
+
+### 7.5 套件偏好修复后的端到端验证（2026-09-26，同机快速验证）
+
+套件偏好修复（§7.1 因素 1）落地后，同构建同参数快速验证（h2load 默认 offer + `-v` 确认协商 `TLS_CHACHA20_POLY1305_SHA256`；-D15s 无预热，H3 20s+3s，量级判断用非中位矩阵）：
+
+| 格 | 修复后默认协商 | vs #5 | vs #6（AES） |
+|---|---:|---|---|
+| H2 GET 1M | ~1,840 | ≈1,771 ✓ 全恢复 | 733（+151%） |
+| H2 GET 64K | ~24.8k | ≈22.1k ✓（+12%） | 10.4k（+139%） |
+| H2 GET 1K | ~177k | ≈178.6k ✓ | 159.8k（+11%） |
+| H3 GET 1M | 1,544.7（3w ≈ **515/w**） | ~505/w ✓ 全恢复 | ~190/w（+171%） |
+| H3 GET 1K | 71.6k(2w)/107.3k(3w) ≈ **35.8k/w** | ~36k/w ✓ 全恢复 | ~32k/w（+12%） |
+| H3 GET 64K | 13.3-13.9k ×4 样本 ≈ **3.4k/w** | ~6.5k/w ✗ 仅 +26% | ~2.7k/w |
+
+全部 0 失败 / 0 丢包。两点结论：
+
+1. **H2 全部 + H3 1M/1K 精确回到 #5 水平**——套件偏好确为这些格的唯一回归源，与 §7.2 的强制 ChaCha 上限吻合。
+2. **H3 64K 只恢复约四成（3.4k/w vs #5 6.5k/w）**——该格存在**第二个回归因子**。修复后 64K 总带宽 ~870 MB/s 远低于同机 1M 的 ~1.5 GB/s（每字节密码学成本相同），说明瓶颈已不在密封而在每请求开销（64K 的请求密度是 1M 的 16 倍）；§7.1 因素 1 的"影响面"应据此收窄为"H2 全部 + H3 1M/1K"，H3 64K 为复合回归。首要嫌疑回到 §1 原始假设的 H3 发送路径/每请求开销（`7de1a596` 传输面收窄后 H3 自有路径的变化），待 proxy 级 profile 定位。
