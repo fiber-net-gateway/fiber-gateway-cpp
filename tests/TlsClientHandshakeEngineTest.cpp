@@ -1225,6 +1225,42 @@ TEST(TlsClientHandshake12Reject, SuiteNotOfferedAborts) {
     });
 }
 
+TEST(TlsClientHandshake12Reject, LeafKeyNotMatchingSuiteAuthAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        // An ECDSA server relabelled as ECDHE-RSA: its ECDSA-signed SKE would
+        // verify against the EC leaf, so only the Certificate-time auth check
+        // catches the mismatch.
+        expect_reject_after_sh_mutation(
+                ServerOptions{.leaf_pem = certfix::kLeafEcP256Pem,
+                              .key_pem = certfix::kP256KeyPem,
+                              .tls12_cipher = "ECDHE-ECDSA-AES128-GCM-SHA256"},
+                cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0xC0; // ECDHE-RSA-AES128-GCM-SHA256
+                    flight[45 + sid_len] = 0x2F;
+                },
+                TlsAlertDesc::IllegalParameter);
+    });
+}
+
+TEST(TlsClientHandshake12Reject, RsaLeafUnderEcdsaSuiteAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        expect_reject_after_sh_mutation(
+                ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"}, cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0xC0; // ECDHE-ECDSA-AES128-GCM-SHA256
+                    flight[45 + sid_len] = 0x2B;
+                },
+                TlsAlertDesc::IllegalParameter);
+    });
+}
+
 TEST(TlsClientHandshake12Reject, LegacyVersionBelowTls12Aborts) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         ClientMaterial material;
