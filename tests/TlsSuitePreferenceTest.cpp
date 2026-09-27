@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -94,4 +95,40 @@ TEST(TlsServerSuiteSelect, AesOnlyOfferKeepsRegistryOrder) {
     fiber::tls::TlsCipherSuiteId suite{};
     ASSERT_TRUE(fiber::tls::tls_server_suite_select(ch, true, suite));
     EXPECT_EQ(0x1301u, static_cast<std::uint16_t>(suite));
+}
+
+// The client's legacy tail (feature/tls/11): offered after the whole AEAD
+// order and only with 1.2 in the window; every entry is a 1.2 registry suite.
+TEST(TlsSuitePreference, ClientOfferAppendsLegacyTailOnlyWithTls12) {
+    const auto &effective = fiber::tls::tls_effective_suite_order();
+    const auto with12 = fiber::tls::tls_client_offer_suites(true);
+    const auto without12 = fiber::tls::tls_client_offer_suites(false);
+    ASSERT_EQ(effective.size() + fiber::tls::kTlsClientLegacySuites.size(), with12.size());
+    ASSERT_EQ(effective.size(), without12.size());
+    EXPECT_TRUE(std::equal(effective.begin(), effective.end(), with12.begin()));
+    EXPECT_TRUE(std::equal(effective.begin(), effective.end(), without12.begin()));
+    EXPECT_TRUE(std::equal(fiber::tls::kTlsClientLegacySuites.begin(), fiber::tls::kTlsClientLegacySuites.end(),
+                           with12.begin() + static_cast<std::ptrdiff_t>(effective.size())));
+    for (const std::uint16_t raw: fiber::tls::kTlsClientLegacySuites) {
+        const fiber::tls::TlsSuiteInfo *info =
+                fiber::tls::tls_suite_info(static_cast<fiber::tls::TlsCipherSuiteId>(raw));
+        ASSERT_NE(nullptr, info) << raw;
+        EXPECT_FALSE(info->is_tls13);
+        EXPECT_EQ(std::find(fiber::tls::kTlsSuitePreference.begin(), fiber::tls::kTlsSuitePreference.end(), raw),
+                  fiber::tls::kTlsSuitePreference.end());
+    }
+}
+
+// The server never walks the legacy tail: a ClientHello offering only legacy
+// suites selects nothing.
+TEST(TlsServerSuiteSelect, LegacyOnlyOfferSelectsNothing) {
+    std::vector<std::uint8_t> legacy;
+    for (const std::uint16_t raw: fiber::tls::kTlsClientLegacySuites) {
+        legacy.push_back(static_cast<std::uint8_t>(raw >> 8));
+        legacy.push_back(static_cast<std::uint8_t>(raw));
+    }
+    fiber::tls::TlsClientHello ch{};
+    ch.cipher_suites = legacy;
+    fiber::tls::TlsCipherSuiteId suite{};
+    EXPECT_FALSE(fiber::tls::tls_server_suite_select(ch, false, suite));
 }

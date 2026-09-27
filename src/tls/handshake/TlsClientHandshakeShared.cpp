@@ -46,7 +46,8 @@ bool tls_client_hello_build(TlsClientHelloState &hello, const TlsClientConfig &c
     // non-empty one with illegal_parameter). The drawn bytes stay unused.
     in.session_id =
             cfg.quic != nullptr ? std::span<const std::uint8_t>{} : std::span<const std::uint8_t>{hello.session_id};
-    in.cipher_suites = tls_effective_suite_order();
+    in.cipher_suites =
+            tls_client_offer_suites(cfg.min_version <= kTlsVersionTls12 && cfg.max_version >= kTlsVersionTls12);
     in.supported_groups = kOfferedGroups;
     in.signature_algorithms = kOfferedSigalgs;
     // supported_versions narrows to the config bounds (09 §4.2); the domain
