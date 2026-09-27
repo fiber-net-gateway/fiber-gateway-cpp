@@ -70,18 +70,17 @@ Bytes chain_bytes(fiber::mem::IoBufChain chain) {
     return out;
 }
 
-X509 *load_cert(const char *pem) {
-    BIO *bio = BIO_new_mem_buf(pem, -1);
-    X509 *cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    return cert;
+// Owning handles: X509_STORE_add_cert and the *_use_certificate /
+// *_use_PrivateKey setters take their own reference, so the loaded object is
+// ours to free; only the add0_* setters adopt it (pass .release()).
+bssl::UniquePtr<X509> load_cert(const char *pem) {
+    bssl::UniquePtr<BIO> bio(BIO_new_mem_buf(pem, -1));
+    return bssl::UniquePtr<X509>(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
 }
 
-EVP_PKEY *load_key(const char *pem) {
-    BIO *bio = BIO_new_mem_buf(pem, -1);
-    EVP_PKEY *key = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    return key;
+bssl::UniquePtr<EVP_PKEY> load_key(const char *pem) {
+    bssl::UniquePtr<BIO> bio(BIO_new_mem_buf(pem, -1));
+    return bssl::UniquePtr<EVP_PKEY>(PEM_read_bio_PrivateKey(bio.get(), nullptr, nullptr, nullptr));
 }
 
 // ---- a BoringSSL endpoint over memory BIOs ----
@@ -139,11 +138,11 @@ public:
         if (opt.early_data) {
             SSL_CTX_set_early_data_enabled(ctx_, 1);
         }
-        X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx_), load_cert(certfix::kRootRsaPem));
+        X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx_), load_cert(certfix::kRootRsaPem).get());
         if (opt.server) {
-            SSL_CTX_use_certificate(ctx_, load_cert(opt.leaf_pem));
-            SSL_CTX_add0_chain_cert(ctx_, load_cert(certfix::kIntermediateRsaPem));
-            SSL_CTX_use_PrivateKey(ctx_, load_key(opt.key_pem));
+            SSL_CTX_use_certificate(ctx_, load_cert(opt.leaf_pem).get());
+            SSL_CTX_add0_chain_cert(ctx_, load_cert(certfix::kIntermediateRsaPem).release());
+            SSL_CTX_use_PrivateKey(ctx_, load_key(opt.key_pem).get());
             SSL_CTX_set_alpn_select_cb(ctx_, select_first_alpn, nullptr);
             if (opt.client_cert) {
                 SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
@@ -171,9 +170,9 @@ public:
                                                    "http/1.1";
             SSL_set_alpn_protos(ssl_, kProtos, sizeof(kProtos) - 1);
             if (opt.client_cert) {
-                SSL_use_certificate(ssl_, load_cert(certfix::kClientRsaPem));
-                SSL_add0_chain_cert(ssl_, load_cert(certfix::kIntermediateRsaPem));
-                SSL_use_PrivateKey(ssl_, load_key(certfix::kRsa2048KeyPem));
+                SSL_use_certificate(ssl_, load_cert(certfix::kClientRsaPem).get());
+                SSL_add0_chain_cert(ssl_, load_cert(certfix::kIntermediateRsaPem).release());
+                SSL_use_PrivateKey(ssl_, load_key(certfix::kRsa2048KeyPem).get());
             }
             if (opt.resume != nullptr) {
                 SSL_set_session(ssl_, opt.resume);
