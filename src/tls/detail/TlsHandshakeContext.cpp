@@ -257,6 +257,9 @@ TlsInboundStep TlsHandshakeContext::open_current(TlsRecord &record) noexcept {
             }
             return step_need_more();
         }
+        if (result.open.status == TlsRecordCipher::Status::Overflow) {
+            return step_fatal(TlsAlertDesc::RecordOverflow); // authenticated: no oracle
+        }
         // AuthFail and pre-decryption Malformed both collapse to
         // bad_record_mac — no decrypt-oracle distinction is surfaced.
         return step_fatal(TlsAlertDesc::BadRecordMac);

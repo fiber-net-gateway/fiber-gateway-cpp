@@ -314,9 +314,11 @@ void TlsConnection::Impl::open_and_route(TlsRecord &record) noexcept {
             tls_record_open_in_place(read_cipher_, record.type, record.legacy_version, record.length, record.payload,
                                      {open_scratch_.data(), dst_len});
     if (result.open.status != TlsRecordCipher::Status::Ok) {
-        // AuthFail and pre-decryption Malformed both collapse to
+        // Overflow is only reported after authentication, so naming it is no
+        // oracle. AuthFail and pre-decryption Malformed both collapse to
         // bad_record_mac — no decrypt-oracle distinction is surfaced.
-        latch_fatal(TlsAlertDesc::BadRecordMac);
+        latch_fatal(result.open.status == TlsRecordCipher::Status::Overflow ? TlsAlertDesc::RecordOverflow
+                                                                            : TlsAlertDesc::BadRecordMac);
         return;
     }
     const std::uint8_t *plain = nullptr;

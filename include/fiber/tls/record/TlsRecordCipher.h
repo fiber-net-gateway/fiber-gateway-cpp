@@ -71,6 +71,7 @@ public:
         Ok,
         AuthFail, // AEAD authentication failed -> engine sends bad_record_mac
         Malformed, // length out of bounds, wrong outer type, bad inner type, missing content type
+        Overflow, // authenticated plaintext over the limit -> record_overflow (RFC 8446 §5.4, RFC 5246 §6.2.1)
     };
 
     struct SealResult {
