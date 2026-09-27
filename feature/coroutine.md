@@ -54,3 +54,58 @@
 - Coroutines must not outlive their EventLoop thread.
 - No cross-thread destruction; callers must transfer work via `post()` instead.
 
+## Destruction-Cancels Contract
+
+Cancellation in this library is frame destruction, never a generic in-flight
+`cancel()` on a `Task`. A running `Task` is an opaque coroutine tree: the outer
+holder has only a `coroutine_handle`, C++ coroutines offer no reflection to the
+innermost suspended awaiter, and threading cooperative cancellation tokens
+through every protocol layer would duplicate what `IoErr`/abort already
+express. So the cancellation paths are:
+
+- `TaskSelectAwaiter::~TaskSelectAwaiter()` runs `handle_.destroy()` -- destroying
+  the whole frame tree, which runs every in-flight awaiter's destructor;
+- `when_any`'s `destroy_losers()` and `timeout_for`'s temporary destruction are
+  that same mechanism seen from the combinators.
+
+Any `SelectableAwaiter` destroyed while suspended must:
+
+1. de-register everything it registered on its owning loop -- timers, poller
+   subscriptions, waiter queues, kernel state;
+2. never resume the awaiting coroutine from the destructor;
+3. make an already-queued resume retractable before the awaiter storage goes
+   away (`WaitAwaiter`'s cancellable local defer queue is the reference
+   pattern; an MPSC entry cannot be retracted);
+4. be nothrow-destructible (enforced by the `SelectableAwaiter` concept).
+
+Rules 1-3 cannot be checked at compile time; they are pinned by the
+destruction-safety regressions (`AwaiterDestructionTest` for the fd family and
+`timeout_for`-over-`Task::select()`, `WhenAnyTest` for the combinator losers,
+`QuicLocalStreamGateTest` for the retractable-resume family).
+
+### CancellableAwaiter (external active cancellation only)
+
+`CancellableAwaiter` (`Awaitable.h`) is the leaf-only escape hatch: a party
+other than the awaiting coroutine calls `cancel()` while the awaiter is
+suspended. Its contract is deliberately strict: `cancel()` MUST resume the
+awaiting coroutine exactly once, with a terminal error -- "may resume" would
+leave callers unable to write correct code. `ConnectAwaiter` is the production
+example (`DnsClient`'s inflight-cancel path). `timeout_for` / `when_any` must
+never call it before their own resume (for a resuming `cancel()` that is a
+double resume); they cancel through destruction. Note that
+`CancellableAwaiter` does not imply `SelectableAwaiter`: `ConnectAwaiter`
+satisfies the former and lacks `completed()` for the latter, while
+`Watch::NextAwaiter`'s queue retraction is a destructor-only private helper
+that does not resume and therefore must stay out of the concept.
+
+### Task await is rvalue-only
+
+`Task<T>::operator co_await()` is `&&`-qualified (like `Task::select()`): the
+awaiter borrows the handle while the Task owns the frame, so only one await
+chain may consume it. This turns three latent runtime bugs into compile errors
+-- re-awaiting an lvalue (silently reads a moved-from result), awaiting a
+moved-from Task (null-handle dereference), and two concurrent awaits of one
+lvalue (the second `set_continuation` orphans the first parent). Code that
+deliberately keeps ownership and drives the awaiter manually borrows with an
+explicit `std::move(task).operator co_await()`.
+

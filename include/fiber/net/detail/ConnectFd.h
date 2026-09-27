@@ -108,7 +108,10 @@ public:
     ConnectAwaiter(ConnectAwaiter &&) = delete;
     ConnectAwaiter &operator=(ConnectAwaiter &&) = delete;
 
-    ~ConnectAwaiter() {
+    // nothrow per the Destruction-Cancels contract: tearing down a suspended
+    // connect must deregister (timer, poller, fd) without resuming, so it can
+    // never be allowed to throw out of destruction either.
+    ~ConnectAwaiter() noexcept {
         if (!waiting_) {
             FIBER_ASSERT(!timer_entry_.is_in_heap());
             close_fd();

@@ -251,7 +251,7 @@ public:
             NextAwaiter(NextAwaiter &&) = delete;
             NextAwaiter &operator=(NextAwaiter &&) = delete;
 
-            ~NextAwaiter() { cancel(); }
+            ~NextAwaiter() { retract(); }
 
             bool await_ready() noexcept {
                 completed_ = state_->has_newer_version(received_version_);
@@ -280,7 +280,12 @@ public:
 
             [[nodiscard]] bool completed() const noexcept { return completed_; }
 
-            void cancel() noexcept {
+        private:
+            // Destructor-only queue retraction. Deliberately NOT a public
+            // cancel(): it dequeues without resuming, so an external caller
+            // would park the awaiting coroutine forever. It therefore does not
+            // satisfy CancellableAwaiter (must-resume contract) on purpose.
+            void retract() noexcept {
                 if (!waiter_) {
                     return;
                 }
@@ -288,7 +293,6 @@ public:
                 waiter_ = nullptr;
             }
 
-        private:
             std::shared_ptr<SharedState> state_;
             std::uint64_t received_version_ = 0;
             Waiter *waiter_ = nullptr;
