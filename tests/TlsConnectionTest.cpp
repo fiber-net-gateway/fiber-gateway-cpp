@@ -949,6 +949,56 @@ TEST(TlsConnectionTest, EngineLeftoverFeedsConnection) {
 // TLS 1.2 (synthetic key-block pair)
 // =====================================================================
 
+// 1.3 has no warning level except user_canceled, which RFC 8446 §6.1 keeps
+// and JDK 11 sends before close_notify: it is dropped like a 1.2 warning
+// (BoringSSL), sharing the four-in-a-row budget. Sealed 1.3 alerts ride outer
+// application_data, so the budget resets on the DECRYPTED inner type — an app
+// record resets it, the alerts themselves do not.
+TEST(TlsConnectionTest, WarningUserCanceledToleratedUpToConsecutiveLimit13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+        TlsRecordCipher wc = std::move(states.client.write_cipher);
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        const std::uint8_t user_canceled[2] = {1, static_cast<std::uint8_t>(TlsAlertDesc::UserCanceled)};
+        const auto send_warnings = [&](int count) {
+            for (int i = 0; i < count; ++i) {
+                ASSERT_TRUE(server_feeds.feed(
+                        server, seal_record(wc, TlsContentType::Alert, user_canceled, kTypeApplicationData)));
+            }
+        };
+
+        send_warnings(4);
+        EXPECT_FALSE(server.failed());
+        EXPECT_FALSE(server.peer_closed());
+
+        const std::vector<std::uint8_t> hi{'h', 'i'};
+        ASSERT_TRUE(
+                server_feeds.feed(server, seal_record(wc, TlsContentType::ApplicationData, hi, kTypeApplicationData)));
+        EXPECT_EQ(hi, read_all(server)); // dropped, the stream lives
+
+        send_warnings(4); // the app record reset the budget
+        EXPECT_FALSE(server.failed());
+        send_warnings(1);
+        EXPECT_TRUE(server.failed());
+        EXPECT_FALSE(chain_bytes(server.take_output()).empty()); // our unexpected_message flies
+    });
+}
+
+TEST(TlsConnectionTest, OtherWarningAlertIsTerminal13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+        TlsRecordCipher wc = std::move(states.client.write_cipher);
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        const std::uint8_t warning[2] = {1, 112}; // warning, unrecognized_name
+        ASSERT_TRUE(server_feeds.feed(server, seal_record(wc, TlsContentType::Alert, warning, kTypeApplicationData)));
+        EXPECT_TRUE(server.failed());
+    });
+}
+
 TEST(TlsConnectionTest, HandshakeRecordAfter12HandshakeIsFatal) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         ServerMaterial material; // pool only

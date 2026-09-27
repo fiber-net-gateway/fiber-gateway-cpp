@@ -124,13 +124,17 @@ TlsInboundStep TlsHandshakeContext::step() noexcept {
 // Warning-level alerts other than close_notify are dropped until TLS 1.3 is
 // settled — the BoringSSL rule (ssl_process_alert): misconfigured 1.2 servers
 // send unrecognized_name as a warning, OpenSSL even before its ServerHello,
-// while our client cannot yet know the version. More than
-// kMaxWarningAlerts in a row is unexpected_message. Every other alert
-// (fatal, close_notify, any 1.3 warning) is surfaced and terminal.
+// while our client cannot yet know the version. Once 1.3 is settled only a
+// warning user_canceled is still dropped: RFC 8446 §6.1 keeps it without
+// saying how to handle it, and JDK 11 sends it before close_notify
+// (BoringSSL, NSS and OpenSSL all skip it). More than kMaxWarningAlerts in
+// a row is unexpected_message. Every other alert (fatal, close_notify, any
+// other 1.3 warning) is surfaced and terminal.
 TlsInboundStep TlsHandshakeContext::alert_step(const std::uint8_t *bytes) noexcept {
     const bool close_notify = bytes[1] == static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify);
+    const bool tls13 = mode_ == TlsInboundMode::Sealed13 || tls13_settled_;
     if (bytes[0] == static_cast<std::uint8_t>(TlsAlertLevel::Warning) && !close_notify &&
-        mode_ != TlsInboundMode::Sealed13 && !tls13_settled_) {
+        (!tls13 || bytes[1] == static_cast<std::uint8_t>(TlsAlertDesc::UserCanceled))) {
         if (++warning_alerts_ > kMaxWarningAlerts) {
             return step_fatal(TlsAlertDesc::UnexpectedMessage);
         }
@@ -144,8 +148,11 @@ TlsInboundStep TlsHandshakeContext::alert_step(const std::uint8_t *bytes) noexce
 }
 
 TlsInboundStep TlsHandshakeContext::take_record(TlsRecord &&record) noexcept {
-    if (record.type != TlsContentType::Alert) {
-        warning_alerts_ = 0; // the warning budget counts consecutive alerts only
+    if (record.type != TlsContentType::Alert && record.type != TlsContentType::ApplicationData) {
+        // The warning budget counts consecutive alerts only. A sealed record
+        // (outer application_data) may be a 1.3 alert: open_current resets
+        // on its decrypted inner type instead.
+        warning_alerts_ = 0;
     }
     switch (record.type) {
         case TlsContentType::Alert: {
@@ -294,6 +301,9 @@ TlsInboundStep TlsHandshakeContext::open_current(TlsRecord &record) noexcept {
         }
     }
 
+    if (result.open.inner_type != TlsContentType::Alert) {
+        warning_alerts_ = 0; // a non-alert record, by its inner type
+    }
     if (result.open.inner_type == TlsContentType::Alert) {
         if (plain_len_ != 2) {
             return step_fatal(TlsAlertDesc::DecodeError);
