@@ -89,7 +89,8 @@ private:
     bool cr12_received_ = false;
     bool sent_cert12_ = false; // we sent a (non-empty) client Certificate
     std::array<std::uint16_t, kClientMaxCrSigalgs> cr_sigalgs_{};
-    std::size_t cr_sigalgs_n_ = 0;
+    std::size_t cr_sigalgs_n_ = 0; // our schemes the CR lists (tls_client_keep_cr_sigalgs)
+    bool cr_sigalgs_present_ = false; // the CR carried a list at all
     TlsCertificateChain peer_chain_;
     TlsConnectedState state_{};
 

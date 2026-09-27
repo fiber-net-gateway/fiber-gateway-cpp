@@ -45,9 +45,35 @@ inline constexpr auto kOfferedSigalgs = [] {
 }();
 
 // Shared client-flight bounds (both sub-flows stage their flight in the
-// outer-owned scratch).
-inline constexpr std::size_t kClientMaxCrSigalgs = 16;
+// outer-owned scratch). The CR sigalgs store holds only schemes we can sign
+// with (tls_client_keep_cr_sigalgs), so our larger preference table bounds it.
+inline constexpr std::size_t kClientMaxCrSigalgs = kTls12SignaturePreference.size() > kTls13SignaturePreference.size()
+                                                           ? kTls12SignaturePreference.size()
+                                                           : kTls13SignaturePreference.size();
 inline constexpr std::size_t kClientMaxSigLen = 1024; // RSA-4096 signature bound
+
+// A CertificateRequest's signature_algorithms may list far more schemes than
+// we can sign with (OpenSSL sends 20; the vector allows 32767), so the list
+// length is never an error. CertificateVerify selection only tests whether
+// each of OUR schemes is in the list, so keep exactly those, deduplicated
+// and in `ours` order. `raw` is the even-length u16 list; returns the count.
+template<std::size_t N>
+[[nodiscard]] std::size_t tls_client_keep_cr_sigalgs(std::span<const std::uint8_t> raw,
+                                                     const std::array<TlsSignatureScheme, N> &ours,
+                                                     std::array<std::uint16_t, kClientMaxCrSigalgs> &out) noexcept {
+    static_assert(N <= kClientMaxCrSigalgs);
+    std::size_t n = 0;
+    for (const TlsSignatureScheme scheme: ours) {
+        const auto code = static_cast<std::uint16_t>(scheme);
+        for (std::size_t i = 0; i + 1 < raw.size(); i += 2) {
+            if (static_cast<std::uint16_t>((raw[i] << 8) | raw[i + 1]) == code) {
+                out[n++] = code;
+                break;
+            }
+        }
+    }
+    return n;
+}
 
 [[nodiscard]] constexpr std::size_t tls_client_suite_offer_index(std::uint16_t raw) noexcept {
     for (std::size_t i = 0; i < kTlsSuitePreference.size(); ++i) {

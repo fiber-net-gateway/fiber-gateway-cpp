@@ -422,7 +422,7 @@ void Tls13ClientHandshake::handle_certificate_request_13(std::span<const std::ui
         fail(TlsAlertDesc::DecodeError);
         return;
     }
-    if (cr.signature_algorithms.size() % 2 != 0 || cr.signature_algorithms.size() / 2 > cr_sigalgs_.size()) {
+    if (cr.signature_algorithms.size() % 2 != 0) {
         fail(TlsAlertDesc::DecodeError);
         return;
     }
@@ -432,11 +432,7 @@ void Tls13ClientHandshake::handle_certificate_request_13(std::span<const std::ui
     if (cr_ctx_len_ > 0) {
         std::memcpy(cr_context_.data(), cr.certificate_request_context.data(), cr_ctx_len_);
     }
-    cr_sigalgs_n_ = cr.signature_algorithms.size() / 2;
-    for (std::size_t i = 0; i < cr_sigalgs_n_; ++i) {
-        cr_sigalgs_[i] =
-                static_cast<std::uint16_t>((cr.signature_algorithms[2 * i] << 8) | cr.signature_algorithms[2 * i + 1]);
-    }
+    cr_sigalgs_n_ = tls_client_keep_cr_sigalgs(cr.signature_algorithms, kTls13SignaturePreference, cr_sigalgs_);
 }
 
 void Tls13ClientHandshake::handle_certificate_13(std::span<const std::uint8_t> body) noexcept {
