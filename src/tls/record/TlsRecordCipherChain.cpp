@@ -48,10 +48,26 @@ void chain_copy_region(const mem::IoBufChain &chain, std::size_t offset, std::si
     FIBER_ASSERT(len == 0);
 }
 
+// Record length bounds, checked BEFORE any body/tag size arithmetic: a
+// sealed record shorter than its AEAD overhead would underflow
+// `length - 16 - explicit_nonce` into a huge span (the cipher rejects the
+// length too, but only after the spans are formed). Found by the
+// tls_server_engine fuzzer via the handshake context's sealed-record path.
+[[nodiscard]] bool length_in_bounds(const TlsRecordCipher &cipher, std::uint16_t length) noexcept {
+    return length >= cipher.min_ciphertext_size() && length <= cipher.max_ciphertext_size();
+}
+
+[[nodiscard]] TlsRecordCipher::OpenResult malformed() noexcept {
+    return {TlsRecordCipher::Status::Malformed, TlsContentType::ApplicationData, 0};
+}
+
 } // namespace
 
 std::size_t tls_record_open_dst_size(const TlsRecordCipher &cipher, std::uint16_t length) noexcept {
-    return length - (cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0);
+    // Saturating: a length below the explicit nonce is a malformed record
+    // (rejected by the open itself), never a wrapped, enormous size.
+    const std::size_t nonce = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
+    return length > nonce ? length - nonce : 0;
 }
 
 TlsRecordCipher::OpenResult tls_record_open_transcribe(TlsRecordCipher &cipher, TlsContentType outer_type,
@@ -60,6 +76,9 @@ TlsRecordCipher::OpenResult tls_record_open_transcribe(TlsRecordCipher &cipher, 
                                                        std::span<std::uint8_t> dst) noexcept {
     FIBER_ASSERT(payload.readable_bytes() == length);
     FIBER_ASSERT(dst.size() >= tls_record_open_dst_size(cipher, length));
+    if (!length_in_bounds(cipher, length)) {
+        return malformed();
+    }
 
     const std::size_t expl = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
     const std::size_t body_off = expl; // past the 1.2-GCM explicit nonce
@@ -100,6 +119,9 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
                                                   mem::IoBufChain &payload, std::span<std::uint8_t> dst) noexcept {
     FIBER_ASSERT(payload.readable_bytes() == length);
     FIBER_ASSERT(dst.size() >= tls_record_open_dst_size(cipher, length));
+    if (!length_in_bounds(cipher, length)) {
+        return {malformed(), false};
+    }
 
     const std::size_t expl = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
     const std::size_t body_off = expl;

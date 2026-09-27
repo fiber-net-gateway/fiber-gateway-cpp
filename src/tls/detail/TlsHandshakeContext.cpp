@@ -247,6 +247,15 @@ TlsInboundStep TlsHandshakeContext::take_record(TlsRecord &&record) noexcept {
 // forced a transcription). Surfaces non-handshake inner outcomes; NeedMore
 // means "handshake plaintext installed — caller may extract".
 TlsInboundStep TlsHandshakeContext::open_current(TlsRecord &record) noexcept {
+    // Length bounds before any buffer arithmetic (as TlsConnection does): a
+    // sealed 1.2 GCM record shorter than its explicit nonce would otherwise
+    // size the open workspace from a wrapped subtraction and abort on the
+    // scratch-capacity assert — a remote crash for any peer past its CCS.
+    // Out-of-range lengths are framing faults, fatal even in the rejected-
+    // 0-RTT skip window (which only forgives authentication failures).
+    if (record.length < read_cipher_.min_ciphertext_size() || record.length > read_cipher_.max_ciphertext_size()) {
+        return step_fatal(TlsAlertDesc::BadRecordMac);
+    }
     const std::size_t dst_len = tls_record_open_dst_size(read_cipher_, record.length);
     FIBER_ASSERT(dst_len <= open_scratch_.size());
     const TlsRecordOpenChainResult result =

@@ -1025,6 +1025,53 @@ TEST(TlsClientHandshake12ByteFeed, OneByteAtATimeCompletes) {
     });
 }
 
+namespace {
+// Splits a record stream at its first ChangeCipherSpec: {through the CCS, rest}.
+std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> split_after_ccs(const std::vector<std::uint8_t> &wire) {
+    std::size_t off = 0;
+    while (off + fiber::tls::kTlsRecordHeaderSize <= wire.size()) {
+        const std::size_t len = (static_cast<std::size_t>(wire[off + 3]) << 8) | wire[off + 4];
+        const std::size_t end = off + fiber::tls::kTlsRecordHeaderSize + len;
+        if (wire[off] == static_cast<std::uint8_t>(fiber::tls::TlsContentType::ChangeCipherSpec)) {
+            return {std::vector<std::uint8_t>(wire.begin(), wire.begin() + static_cast<std::ptrdiff_t>(end)),
+                    std::vector<std::uint8_t>(wire.begin() + static_cast<std::ptrdiff_t>(end), wire.end())};
+        }
+        off = end;
+    }
+    return {wire, {}};
+}
+
+// A "sealed" 1.2 record shorter than the 8-byte GCM explicit nonce.
+const std::vector<std::uint8_t> kShortSealed12{22, 0x03, 0x03, 0x00, 0x05, 1, 2, 3, 4, 5};
+} // namespace
+
+// The client-side mirror of the remote-crash regression: a sealed 1.2 GCM
+// record shorter than its explicit nonce right after the server's CCS.
+TEST(TlsClientHandshake12Full, ShortSealedRecordAfterCcsIsBadRecordMac) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server = BoringServer::make(ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"});
+        ASSERT_NE(nullptr, server);
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+
+        ASSERT_TRUE(server->ship(chain_bytes(engine.take_output()))); // ClientHello
+        ASSERT_EQ(0, server->handshake_step());
+        Event event = Event::None;
+        ASSERT_TRUE(feed_bytes(engine, server->drain_wbio(), false, event)); // SH..SHD
+        ASSERT_TRUE(server->ship(chain_bytes(engine.take_output()))); // CKE, CCS, Finished
+        (void) server->handshake_step();
+        const auto [through_ccs, rest] = split_after_ccs(server->drain_wbio()); // CCS | Finished
+        ASSERT_FALSE(rest.empty());
+        ASSERT_TRUE(feed_bytes(engine, through_ccs, false, event));
+        ASSERT_FALSE(engine.done());
+
+        ASSERT_TRUE(feed_bytes(engine, kShortSealed12, false, event));
+        EXPECT_EQ(Event::Failed, event);
+        EXPECT_EQ(TlsAlertDesc::BadRecordMac, engine.failure_alert());
+    });
+}
+
 // A CertificateRequest may list far more signature schemes than we can sign
 // with — OpenSSL 3.0 sends 20 (this is its exact 1.2 list), the vector allows
 // 32767. Only our own schemes are kept (in our preference order); the list

@@ -857,6 +857,54 @@ TEST(TlsServerHandshakeWarningAlert, UserCanceledDroppedAfterHelloRetryRequest) 
     });
 }
 
+namespace {
+// Splits a record stream at its first ChangeCipherSpec: {through the CCS, rest}.
+std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> split_after_ccs(const std::vector<std::uint8_t> &wire) {
+    std::size_t off = 0;
+    while (off + fiber::tls::kTlsRecordHeaderSize <= wire.size()) {
+        const std::size_t len = (static_cast<std::size_t>(wire[off + 3]) << 8) | wire[off + 4];
+        const std::size_t end = off + fiber::tls::kTlsRecordHeaderSize + len;
+        if (wire[off] == static_cast<std::uint8_t>(fiber::tls::TlsContentType::ChangeCipherSpec)) {
+            return {std::vector<std::uint8_t>(wire.begin(), wire.begin() + static_cast<std::ptrdiff_t>(end)),
+                    std::vector<std::uint8_t>(wire.begin() + static_cast<std::ptrdiff_t>(end), wire.end())};
+        }
+        off = end;
+    }
+    return {wire, {}};
+}
+
+// A "sealed" 1.2 record shorter than the 8-byte GCM explicit nonce.
+const std::vector<std::uint8_t> kShortSealed12{22, 0x03, 0x03, 0x00, 0x05, 1, 2, 3, 4, 5};
+} // namespace
+
+// Remote-crash regression (found while triaging the tls_server_engine fuzzer):
+// after the client's CCS, a sealed 1.2 GCM record shorter than its explicit
+// nonce once sized the open workspace from a wrapped subtraction and aborted
+// on the scratch-capacity assert. It must be an ordinary bad_record_mac.
+TEST(TlsServerHandshake12Full, ShortSealedRecordAfterCcsIsBadRecordMac) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client =
+                BoringClient::make(ClientOptions{.tls12_only = true, .tls12_ciphers = "ECDHE-RSA-AES128-GCM-SHA256"});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+
+        ASSERT_EQ(0, client->handshake_step());
+        Event event = Event::None;
+        ASSERT_TRUE(feed_bytes(engine, client->drain_wbio(), false, event)); // ClientHello
+        ASSERT_TRUE(client->ship(chain_bytes(engine.take_output()))); // SH..SHD
+        ASSERT_EQ(0, client->handshake_step());
+        const auto [through_ccs, rest] = split_after_ccs(client->drain_wbio()); // CKE, CCS | Finished
+        ASSERT_FALSE(rest.empty());
+        ASSERT_TRUE(feed_bytes(engine, through_ccs, false, event));
+        ASSERT_FALSE(engine.done());
+
+        ASSERT_TRUE(feed_bytes(engine, kShortSealed12, false, event));
+        EXPECT_EQ(Event::Failed, event);
+        EXPECT_EQ(TlsAlertDesc::BadRecordMac, engine.failure_alert());
+    });
+}
+
 // Message-size caps are enforced on the 4-byte handshake header, before any
 // body byte is buffered: an unauthenticated client cannot pin more than the
 // per-type cap of reassembly memory (16 KiB ordinary, 100 KiB Certificate).

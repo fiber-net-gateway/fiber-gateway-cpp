@@ -141,6 +141,42 @@ TEST(TlsRecordChainSizes, OpenDstSizePerKind) {
     });
 }
 
+// Records shorter than their AEAD overhead are Malformed in both open forms,
+// with no size arithmetic on the way (a wrapped `length - 16 - nonce` once
+// formed a huge span — found by the tls_server_engine fuzzer), and the
+// workspace size saturates at 0 instead of wrapping (the 1.2 GCM form once
+// wrapped below the 8-byte explicit nonce and aborted the handshake context's
+// scratch assert: a remote crash).
+TEST(TlsRecordChainOpen, ShorterThanOverheadIsMalformedInBothForms) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        for (const KindVec *v: {&tls13_vec(), &tls12_vec(), &tls12_chacha_vec()}) {
+            TlsRecordCipher cipher;
+            init_cipher(cipher, *v);
+            for (std::size_t length = 0; length < cipher.min_ciphertext_size(); ++length) {
+                const auto wire = ramp(length, 0x40);
+                const auto len16 = static_cast<std::uint16_t>(length);
+                const std::size_t dst_size = fiber::tls::tls_record_open_dst_size(cipher, len16);
+                EXPECT_LE(dst_size, length); // saturates, never wraps
+                std::vector<std::uint8_t> dst(dst_size + 1);
+
+                IoBufChain transcribe_payload =
+                        length == 0 ? IoBufChain{} : make_chain(pool, std::vector<std::vector<std::uint8_t>>{wire});
+                const auto t = fiber::tls::tls_record_open_transcribe(
+                        cipher, outer_for(cipher, TlsContentType::Handshake), 0x0303, len16, transcribe_payload, dst);
+                EXPECT_EQ(TlsRecordCipher::Status::Malformed, t.status) << "transcribe length " << length;
+
+                IoBufChain in_place_payload =
+                        length == 0 ? IoBufChain{} : make_chain(pool, std::vector<std::vector<std::uint8_t>>{wire});
+                const auto r = fiber::tls::tls_record_open_in_place(
+                        cipher, outer_for(cipher, TlsContentType::Handshake), 0x0303, len16, in_place_payload, dst);
+                EXPECT_EQ(TlsRecordCipher::Status::Malformed, r.open.status) << "in place length " << length;
+                EXPECT_FALSE(r.in_chain);
+                EXPECT_EQ(length, in_place_payload.readable_bytes()); // view untouched
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------- open: transcribe
 
 TEST(TlsRecordChainOpen, TranscribeLeavesTheChainUntouched) {
