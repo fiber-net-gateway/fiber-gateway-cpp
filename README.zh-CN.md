@@ -4,19 +4,21 @@
 
 Fiber Gateway 是一个性能优先的 C++23 网关框架，面向反向代理、网关和异步网络服务。仓库以可复用的静态库 `fiber_lib` 为核心，`example/`、测试以及 `apps/` 下的模块共用同一套运行时与协议栈。
 
-这是一个框架仓库，而不是只生成单一可执行程序的项目。默认构建会生成核心库、可运行示例、测试、`lite_nginx` 应用，以及 `fiber::nacos`、`fiber::cat`、`fiber::prometheus` 等可复用组件。
+这是一个框架仓库，而不是只生成单一可执行程序的项目。默认构建会生成核心库、可运行示例、测试、`lite_nginx` 应用，以及 `fiber::nacos`、`fiber::cat`、`fiber::prometheus` 和 `fiber::http_compression` 等可复用组件。
 
 ## 核心能力
 
 - 基于 Linux `epoll` 的事件循环、定时器、跨线程通知和多 EventLoop 调度。
 - 基于 C++23 协程的任务与异步原语，包括互斥锁、读写锁、信号、超时、等待组和带版本的 Watch。
-- TCP、UDP、Unix Domain Socket、TLS Stream、DNS 解析与 DNS 缓存。
+- TCP、UDP、Unix Domain Socket、DNS 解析与缓存，以及面向已解析 IPv4/IPv6 地址的 Happy Eyeballs TCP 连接器。
+- 内置 TLS 1.2/1.3 客户端与服务端引擎，集成 TCP Stream 与 QUIC，使用 BoringSSL 加密原语。
 - HTTP/1.1、HTTP/2 和 HTTP/3 服务端协议栈。
-- HTTP/1.1 连接池，以及 HTTP/2、HTTP/3 客户端连接。
+- HTTP/1.1 和 HTTP/2 连接池，以及 HTTP/3 客户端连接。
 - 内置 QUIC v1 传输实现，包含 TLS、Stream、丢包恢复、拥塞控制、发送 pacing、Connection ID、地址验证，以及系统支持时的 UDP GSO。
 - HPACK、QPACK、流式请求与响应，以及通过 HTTP/1 Upgrade 或 HTTP/2/3 Extended CONNECT 实现的 WebSocket 代理。
 - Nacos 客户端库及其私有的 gRPC/protobuf 传输实现。
 - 面向网关定制的类 JS 字节码引擎，支持编译期宿主绑定、请求级 GC，以及与原生协程协作的 HTTP API。
+- 内置流式 gzip 编码器，以及可选的 HTTP gzip 响应写入组件。
 - 通用 JSON 编解码、结构化日志，以及关注分配成本的 Buffer 和内存工具。
 
 ## 面向网关定制的脚本引擎
@@ -71,6 +73,7 @@ resp.sendJson(200, {status: "ready", path: $req.path});
 ├── example/      # 小型可运行示例和 benchmark 工具
 ├── apps/         # 完整应用和可选应用层库
 ├── tests/        # 核心 GoogleTest 测试集
+├── fuzz/         # TLS libFuzzer harness 和回归语料
 ├── docs/         # 稳定的模块文档
 ├── feature/      # 设计说明、审计记录和实现报告
 ├── cmake/        # 工具链、依赖和 target 辅助逻辑
@@ -78,18 +81,19 @@ resp.sendJson(200, {status: "ready", path: $req.path});
 ```
 
 核心模块的公共头文件位于 `include/fiber/`，实现和私有头文件位于对应的 `src/`
-目录。只有 `include/fiber/` 会传递给使用方；`src/` 仅供核心库和白盒测试私有使用：
+目录。`include/` 作为公共 include 根目录传递给使用方，以支持 `<fiber/...>` 引用；`src/` 仅供核心库和白盒测试私有使用：
 
 - `event/`：事件循环、poller、定时器和 loop group。
 - `async/`：协程任务、调度和同步原语。
 - `net/`：socket、listener、stream、TLS 和地址抽象。
+- `tls/`：TLS 握手、记录层、证书和会话恢复。
+- `compression/`：流式 gzip 编码器。
 - `quic/`：QUIC 传输、加密、恢复、拥塞控制和 stream。
 - `http/`：HTTP/1.1、HTTP/2、HTTP/3、客户端、服务端和连接池。
 - `dns/`：DNS 消息、客户端、resolver 和缓存。
 - `common/`：错误、JSON、内存、容器和通用工具。
 - `script/` 与 `http_script/`：脚本运行时和 HTTP 绑定。
 - `log/`：logger 层级、格式化和 appender。
-- `apps/nacos/`：Nacos 客户端及其私有的 gRPC/protobuf 传输实现。
 
 ## 环境要求
 
@@ -98,7 +102,7 @@ resp.sendJson(200, {status: "ready", path: $req.path});
 - GCC 13+ 或 Clang 17+，并且标准库需提供项目所用的 C++23 能力，包括 `std::expected`。
 - 首次配置通常需要网络；如果依赖源码已缓存在 `temp/_deps` 或自定义 `FIBER_DEPS_DIR` 中，则可直接复用。
 
-未显式指定编译器或 toolchain 时，CMake 会优先选择合适的 Clang，其次选择 GCC。BoringSSL 和 protobuf-lite 是由构建系统管理的核心依赖；启用测试时使用 GoogleTest；jemalloc 是可选依赖。
+未显式指定编译器或 toolchain 时，CMake 会优先选择合适的 Clang，其次选择 GCC。核心库链接 BoringSSL `crypto`，TLS 协议处理由 Fiber 实现；BoringSSL `ssl` 用于测试对端。仅在启用 Nacos 组件时准备 protobuf-lite 与 protoc。启用测试时使用 GoogleTest；jemalloc 是可选依赖。
 
 ## 快速开始
 
@@ -148,6 +152,8 @@ build/apps/lite_nginx
 | `FIBER_BUILD_NACOS` | `FIBER_BUILD_APPS` 的初始值 | 构建可复用的 `fiber::nacos` 组件。 |
 | `FIBER_BUILD_CAT` | `FIBER_BUILD_APPS` 的初始值 | 构建可复用的 `fiber::cat` 组件。 |
 | `FIBER_BUILD_PROMETHEUS` | `FIBER_BUILD_APPS` 的初始值 | 构建可复用的 `fiber::prometheus` 组件。 |
+| `FIBER_BUILD_HTTP_COMPRESSION` | `FIBER_BUILD_APPS` 的初始值 | 构建 `fiber::http_compression`；`lite_nginx` 依赖此组件。 |
+| `FIBER_BUILD_FUZZERS` | `OFF` | 使用 Clang、ASan 和 UBSan 构建 TLS libFuzzer harness，并关闭 LTO。 |
 | `FIBER_BUILD_CAT_DEMO` | `OFF` | 构建 CAT 客户端 demo。 |
 | `FIBER_BUILD_PROMETHEUS_BENCHMARK` | `OFF` | 构建 Prometheus 记录路径 benchmark。 |
 | `FIBER_FETCH_DEPS` | `ON` | 允许获取缺失的 GoogleTest、jemalloc 等可选依赖。 |
@@ -160,11 +166,32 @@ build/apps/lite_nginx
 | `FIBER_USE_LIBCXX` | `OFF` | Clang 工具链使用 libc++。 |
 | `FIBER_STATIC_LIBCXX` | `ON` | `FIBER_USE_LIBCXX=ON` 时静态链接 libc++ runtime。 |
 
-`FIBER_FETCH_DEPS=OFF` 会关闭 GoogleTest 和 jemalloc 等可选依赖的 fallback 下载。BoringSSL、zlib 源码和 protobuf 仍由 `cmake/Deps.cmake` 填充；可以用 `FIBER_DEPS_DIR` 指向可复用或预先准备的源码缓存。
+`FIBER_FETCH_DEPS=OFF` 会关闭 GoogleTest 和 jemalloc 的 fallback 下载，但不会阻止
+BoringSSL 的源码填充，也不会阻止启用 Nacos 时的 protobuf 源码填充。可用 `FIBER_DEPS_DIR`
+选择预先准备的源码缓存。gzip 使用 `src/compression/` 中的内置实现；核心测试编译仓库中
+已纳入版本管理的 zlib 1.3.2 参考源码做差分检查，无需系统 zlib 依赖。
 
-所有下载的源码归档都会进行 SHA-256 校验。受限网络或下游构建可以通过
-`FIBER_<DEPENDENCY>_URL` 和 `FIBER_<DEPENDENCY>_SHA256` cache 变量覆盖
-BoringSSL、zlib、protobuf、GoogleTest 与 jemalloc 的下载地址和校验值，无需修改本仓库源码。
+组件默认值在首次配置构建目录时初始化；之后修改 `FIBER_BUILD_APPS` 不会重置已缓存的组件选项。
+构建 `lite_nginx` 时需保持 `FIBER_BUILD_HTTP_COMPRESSION=ON`。
+
+所有下载的源码归档都会进行 SHA-256 校验。受限网络或下游构建可以覆盖下载地址与校验值：
+
+| 依赖 | URL 变量 | SHA-256 变量 |
+| --- | --- | --- |
+| BoringSSL | `FIBER_BORINGSSL_URL` | `FIBER_BORINGSSL_SHA256` |
+| protobuf | `FIBER_PROTOBUF_URL` | `FIBER_PROTOBUF_SHA256` |
+| GoogleTest | `FIBER_GOOGLETEST_URL` | `FIBER_GOOGLETEST_SHA256` |
+| jemalloc | `FIBER_JEMALLOC_URL` | `FIBER_JEMALLOC_SHA256` |
+
+例如，FetchContent 使用者可以在引入项目之前选择镜像并保留校验：
+
+```cmake
+set(FIBER_PROTOBUF_URL "https://mirror.example/protobuf-v21.12.tar.gz"
+    CACHE STRING "" FORCE)
+set(FIBER_PROTOBUF_SHA256 "<镜像归档的-sha256>"
+    CACHE STRING "" FORCE)
+FetchContent_MakeAvailable(fiber_gateway_cpp)
+```
 
 使用 jemalloc 的典型 Release 构建：
 
@@ -178,14 +205,15 @@ ctest --test-dir build-release --output-on-failure
 
 ## 示例
 
-`example/` 下的单文件程序覆盖 HTTP/HTTPS 服务端、TCP/UDP Echo、DNS 查询、Git Smart HTTP 服务，以及 HTTP/3 benchmark 客户端和服务端。它们用于提供紧凑的 API 参考和 smoke test，不代表完整生产应用的目录结构。
+`example/` 下的单文件程序覆盖 HTTP/HTTPS 服务端、TCP/UDP Echo、DNS 查询、Git Smart HTTP 服务、HTTP/2 连接池与 HTTP/3 benchmark，以及 TLS 探测工具。启用 Nacos 组件时还会构建 `nacos_demo`。它们用于提供紧凑的 API 参考和 smoke test，不代表完整生产应用的目录结构。
 
 详细信息见 [example/README.zh-CN.md](example/README.zh-CN.md)。
 
 ## 应用与可复用模块
 
 Nacos、CAT 和 Prometheus 的源码目前仍位于 `apps/`，但该目录不是下游 CMake API。FetchContent
-使用者通过顶层选项启用组件，并链接稳定目标；启用组件不会隐式添加 demo 或 benchmark：
+使用者通过顶层选项启用组件，并链接稳定目标。CAT demo 和 Prometheus benchmark 需通过独立选项启用；
+启用 Nacos 后，`nacos_demo` 由 `FIBER_BUILD_EXAMPLES` 控制，组件测试由 `FIBER_BUILD_TESTS` 控制：
 
 ```cmake
 include(FetchContent)
@@ -194,12 +222,17 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/fiber-net-gateway/fiber-gateway-cpp.git
     GIT_TAG <固定版本>)
 set(FIBER_BUILD_APPS OFF CACHE BOOL "" FORCE)
+set(FIBER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(FIBER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(FIBER_BUILD_NACOS ON CACHE BOOL "" FORCE)
 set(FIBER_BUILD_CAT ON CACHE BOOL "" FORCE)
 set(FIBER_BUILD_PROMETHEUS ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(fiber_gateway_cpp)
 target_link_libraries(my_gateway PRIVATE fiber::nacos fiber::cat fiber::prometheus)
 ```
+
+使用核心运行时与协议栈可直接链接 `fiber_lib`。使用 `<fiber/http/GzipResponseWriter.h>` 时，
+启用 `FIBER_BUILD_HTTP_COMPRESSION` 并链接 `fiber::http_compression`；关闭应用构建也可独立启用此组件。
 
 应用与可复用组件包括：
 
@@ -217,6 +250,11 @@ target_link_libraries(my_gateway PRIVATE fiber::nacos fiber::cat fiber::promethe
 - [应用目录约定](apps/README.md)
 - [脚本模块使用指南](docs/script-guide.zh-CN.md)（[English](docs/script-guide.md)）
 - [HTTP/1 连接池](docs/http1-connection-pool.md)
+- [HTTP/2 连接池](docs/http2-connection-pool.md)
+- [Happy Eyeballs TCP 连接器](docs/happy-eyeballs-connector.md)
+- [TLS 客户端证书身份](docs/tls-client-identity.md)
+- [TLS 模糊测试](fuzz/README.md)
+- [OpenSSL 互操作测试矩阵](scripts/interop/openssl_matrix.sh)
 - [脚本函数签名 ABI](docs/script-function-signature-abi.md)
 - [HTTP/3 客户端设计](feature/http3_client.md)
 - [QUIC 客户端设计](feature/quic_client.md)
