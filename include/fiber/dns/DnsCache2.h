@@ -193,12 +193,14 @@ public:
     [[nodiscard]] std::size_t entry_count() noexcept;
     [[nodiscard]] std::size_t bytes_used() noexcept;
     [[nodiscard]] common::IoErr lookup(DnsCacheKey key, TimePoint now, DnsCacheOut &out) noexcept;
-    [[nodiscard]] common::IoErr upsert_address_set(DnsCacheKey key, net::IpFamily family,
+    // `now` is caller-supplied monotonic time, normally the caller's EventLoop::now().
+    // These writes do not require a current EventLoop on the calling thread.
+    [[nodiscard]] common::IoErr upsert_address_set(DnsCacheKey key, TimePoint now, net::IpFamily family,
                                                    const net::IpAddress *addresses, std::uint16_t count,
                                                    TimePoint expire_at) noexcept;
-    [[nodiscard]] common::IoErr upsert_cname(DnsCacheKey key, std::string_view normalized_target,
+    [[nodiscard]] common::IoErr upsert_cname(DnsCacheKey key, TimePoint now, std::string_view normalized_target,
                                              TimePoint expire_at) noexcept;
-    [[nodiscard]] common::IoErr upsert_nxdomain(DnsCacheKey key, TimePoint expire_at) noexcept;
+    [[nodiscard]] common::IoErr upsert_nxdomain(DnsCacheKey key, TimePoint now, TimePoint expire_at) noexcept;
     [[nodiscard]] common::IoErr erase(DnsCacheKey key) noexcept;
 
 private:

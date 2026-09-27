@@ -777,7 +777,7 @@ common::IoErr SharedDnsCache2::lookup(DnsCacheKey key, TimePoint now, DnsCacheOu
     return err;
 }
 
-common::IoErr SharedDnsCache2::upsert_address_set(DnsCacheKey key, net::IpFamily family,
+common::IoErr SharedDnsCache2::upsert_address_set(DnsCacheKey key, TimePoint now, net::IpFamily family,
                                                   const net::IpAddress *addresses, std::uint16_t count,
                                                   TimePoint expire_at) noexcept {
     if (stopping_.load(std::memory_order_acquire)) {
@@ -786,14 +786,14 @@ common::IoErr SharedDnsCache2::upsert_address_set(DnsCacheKey key, net::IpFamily
     common::IoErr err;
     {
         std::lock_guard guard(mutex_);
-        cache_.expire_due(event::EventLoop::current().now());
+        cache_.expire_due(now);
         err = cache_.upsert_address_set(key, family, addresses, count, expire_at);
     }
     request_timer_rearm();
     return err;
 }
 
-common::IoErr SharedDnsCache2::upsert_cname(DnsCacheKey key, std::string_view normalized_target,
+common::IoErr SharedDnsCache2::upsert_cname(DnsCacheKey key, TimePoint now, std::string_view normalized_target,
                                             TimePoint expire_at) noexcept {
     if (stopping_.load(std::memory_order_acquire)) {
         return common::IoErr::Invalid;
@@ -801,21 +801,21 @@ common::IoErr SharedDnsCache2::upsert_cname(DnsCacheKey key, std::string_view no
     common::IoErr err;
     {
         std::lock_guard guard(mutex_);
-        cache_.expire_due(event::EventLoop::current().now());
+        cache_.expire_due(now);
         err = cache_.upsert_cname(key, normalized_target, expire_at);
     }
     request_timer_rearm();
     return err;
 }
 
-common::IoErr SharedDnsCache2::upsert_nxdomain(DnsCacheKey key, TimePoint expire_at) noexcept {
+common::IoErr SharedDnsCache2::upsert_nxdomain(DnsCacheKey key, TimePoint now, TimePoint expire_at) noexcept {
     if (stopping_.load(std::memory_order_acquire)) {
         return common::IoErr::Invalid;
     }
     common::IoErr err;
     {
         std::lock_guard guard(mutex_);
-        cache_.expire_due(event::EventLoop::current().now());
+        cache_.expire_due(now);
         err = cache_.upsert_nxdomain(key, expire_at);
     }
     request_timer_rearm();

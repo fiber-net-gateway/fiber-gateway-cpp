@@ -749,7 +749,8 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
         if (authority->has_soa_ttl) {
             const DnsCacheKey key{qname, dns_cache_hash(qname)};
             err = cache_->upsert_nxdomain(
-                    key, ttl_deadline(now, authority->soa_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
+                    key, now,
+                    ttl_deadline(now, authority->soa_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
             if (err != common::IoErr::None) {
                 return std::unexpected(err);
             }
@@ -805,7 +806,7 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
             const net::IpFamily family =
                     qtype == static_cast<std::uint16_t>(RecordType::A) ? net::IpFamily::V4 : net::IpFamily::V6;
             err = cache_->upsert_address_set(
-                    key, family, nullptr, 0,
+                    key, now, family, nullptr, 0,
                     ttl_deadline(now, authority->soa_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
             if (err != common::IoErr::None) {
                 return std::unexpected(err);
@@ -838,7 +839,7 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
             }
             const DnsCacheKey key{chain_owner, dns_cache_hash(chain_owner)};
             err = cache_->upsert_cname(
-                    key, answer_set.cname_target,
+                    key, now, answer_set.cname_target,
                     ttl_deadline(now, answer_set.ttl, options_.min_positive_ttl, options_.max_positive_ttl));
             if (err != common::IoErr::None) {
                 return std::unexpected(err);
@@ -897,7 +898,7 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
             const DnsCacheKey key{chain_owner, dns_cache_hash(chain_owner)};
             const net::IpFamily family =
                     qtype == static_cast<std::uint16_t>(RecordType::A) ? net::IpFamily::V4 : net::IpFamily::V6;
-            err = cache_->upsert_address_set(key, family, temp_records.data(), count, expire_at);
+            err = cache_->upsert_address_set(key, now, family, temp_records.data(), count, expire_at);
             if (err != common::IoErr::None) {
                 return std::unexpected(err);
             }
