@@ -101,6 +101,7 @@ void TlsRecordCipher::move_from(TlsRecordCipher &src) noexcept {
     std::memcpy(static_cast<void *>(&aead_ctx_), &src.aead_ctx_, sizeof aead_ctx_);
     suite_ = src.suite_;
     kind_ = src.kind_;
+    direction_ = src.direction_;
     iv_ = src.iv_;
     explicit_nonce_len_ = src.explicit_nonce_len_;
     seq_ = src.seq_;
@@ -121,7 +122,7 @@ TlsRecordCipher &TlsRecordCipher::operator=(TlsRecordCipher &&other) noexcept {
 }
 
 common::IoResult<void> TlsRecordCipher::init(TlsCipherSuiteId suite, TlsRecordProtectionKind kind,
-                                             std::span<const std::uint8_t> key,
+                                             TlsRecordDirection direction, std::span<const std::uint8_t> key,
                                              std::span<const std::uint8_t> iv) noexcept {
     FIBER_ASSERT(!initialized_);
 
@@ -129,13 +130,18 @@ common::IoResult<void> TlsRecordCipher::init(TlsCipherSuiteId suite, TlsRecordPr
     if (spec.aead == nullptr || key.size() != spec.key_len || iv.size() != spec.iv_len) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    if (EVP_AEAD_CTX_init(&aead_ctx_, spec.aead, key.data(), spec.key_len, EVP_AEAD_DEFAULT_TAG_LENGTH, nullptr) != 1) {
+    // For the AEAD suites this is plain EVP_AEAD_CTX_init (aead.cc); the TLS
+    // CBC AEADs are direction-bound.
+    const evp_aead_direction_t evp_dir = direction == TlsRecordDirection::Seal ? evp_aead_seal : evp_aead_open;
+    if (EVP_AEAD_CTX_init_with_direction(&aead_ctx_, spec.aead, key.data(), spec.key_len, EVP_AEAD_DEFAULT_TAG_LENGTH,
+                                         evp_dir) != 1) {
         EVP_AEAD_CTX_cleanup(&aead_ctx_);
         return std::unexpected(common::IoErr::Invalid);
     }
 
     suite_ = suite;
     kind_ = kind;
+    direction_ = direction;
     std::memcpy(iv_.data(), iv.data(), spec.iv_len);
     explicit_nonce_len_ = static_cast<std::uint8_t>(spec.explicit_nonce_len);
     seq_ = 0;

@@ -80,6 +80,7 @@ using fiber::tls::TlsHandshakeType;
 using fiber::tls::TlsPrivateKey;
 using fiber::tls::TlsProtocolVersion;
 using fiber::tls::TlsRecordCipher;
+using fiber::tls::TlsRecordDirection;
 using fiber::tls::TlsRecordProtectionKind;
 using fiber::tls::TlsSecret;
 using fiber::tls::TlsServerConfig;
@@ -412,8 +413,8 @@ std::vector<std::uint8_t> craft_key_update(TlsConnectedState &client_state, bool
     auto keys = fiber::tls::tls13_traffic_keys(*next, client_state.suite);
     EXPECT_TRUE(keys.has_value());
     TlsRecordCipher fresh;
-    EXPECT_TRUE(fresh.init(client_state.suite, TlsRecordProtectionKind::Tls13, {keys->key.data(), keys->key_len},
-                           {keys->iv.data(), keys->iv_len})
+    EXPECT_TRUE(fresh.init(client_state.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal,
+                           {keys->key.data(), keys->key_len}, {keys->iv.data(), keys->iv_len})
                         .has_value());
     client_state.client_app_secret = std::move(*next);
     client_state.write_cipher = std::move(fresh);
@@ -517,21 +518,25 @@ Synthetic12Pair make_synthetic_12_pair() {
     pair.client.version = TlsProtocolVersion::Tls12;
     pair.client.suite = suite;
     EXPECT_TRUE(pair.client.read_cipher
-                        .init(suite, TlsRecordProtectionKind::Tls12, {block->server.key.data(), block->server.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Open,
+                              {block->server.key.data(), block->server.key_len},
                               {block->server.iv.data(), block->server.iv_len})
                         .has_value());
     EXPECT_TRUE(pair.client.write_cipher
-                        .init(suite, TlsRecordProtectionKind::Tls12, {block->client.key.data(), block->client.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Seal,
+                              {block->client.key.data(), block->client.key_len},
                               {block->client.iv.data(), block->client.iv_len})
                         .has_value());
     pair.server.version = TlsProtocolVersion::Tls12;
     pair.server.suite = suite;
     EXPECT_TRUE(pair.server.read_cipher
-                        .init(suite, TlsRecordProtectionKind::Tls12, {block->client.key.data(), block->client.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Open,
+                              {block->client.key.data(), block->client.key_len},
                               {block->client.iv.data(), block->client.iv_len})
                         .has_value());
     EXPECT_TRUE(pair.server.write_cipher
-                        .init(suite, TlsRecordProtectionKind::Tls12, {block->server.key.data(), block->server.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Seal,
+                              {block->server.key.data(), block->server.key_len},
                               {block->server.iv.data(), block->server.iv_len})
                         .has_value());
     return pair;
@@ -874,8 +879,8 @@ TEST(TlsConnectionTest, TwoPostHandshakeMessagesInOneRecordDrain) {
         auto keys = fiber::tls::tls13_traffic_keys(*next, states.client.suite);
         ASSERT_TRUE(keys.has_value());
         TlsRecordCipher fresh;
-        ASSERT_TRUE(fresh.init(states.client.suite, TlsRecordProtectionKind::Tls13, {keys->key.data(), keys->key_len},
-                               {keys->iv.data(), keys->iv_len})
+        ASSERT_TRUE(fresh.init(states.client.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal,
+                               {keys->key.data(), keys->key_len}, {keys->iv.data(), keys->iv_len})
                             .has_value());
         states.client.client_app_secret = std::move(*next);
         states.client.write_cipher = std::move(fresh);

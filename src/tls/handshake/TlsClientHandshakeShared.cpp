@@ -146,8 +146,8 @@ bool tls_client_init_early_write(TlsKeySchedule13 &sched, const TlsSessionOffer 
         return false;
     }
     TlsTrafficKeys &keys = *derived;
-    if (!fresh.init(session.suite, TlsRecordProtectionKind::Tls13, {keys.key.data(), keys.key_len},
-                    {keys.iv.data(), keys.iv_len})
+    if (!fresh.init(session.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal,
+                    {keys.key.data(), keys.key_len}, {keys.iv.data(), keys.iv_len})
                  .has_value()) {
         return false;
     }

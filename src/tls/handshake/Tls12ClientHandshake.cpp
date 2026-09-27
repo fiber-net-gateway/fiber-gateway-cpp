@@ -168,7 +168,7 @@ void Tls12ClientHandshake::on_ccs() noexcept {
         case St::ExpectServerCcs12:
             // The server's one CCS switches the read side to the key_block
             // server keys; our write side went live with the client flight.
-            if (!swap_cipher_12(ctx_.read_cipher(), kb12_.server)) {
+            if (!swap_cipher_12(ctx_.read_cipher(), TlsRecordDirection::Open, kb12_.server)) {
                 fail(TlsAlertDesc::InternalError);
                 return;
             }
@@ -462,7 +462,7 @@ bool Tls12ClientHandshake::send_client_flight_12() noexcept {
     }
 
     // ---- CCS + write-cipher swap: everything after this is sealed ----
-    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), kb12_.client)) {
+    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), TlsRecordDirection::Seal, kb12_.client)) {
         fail(TlsAlertDesc::InternalError);
         return false;
     }
