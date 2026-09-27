@@ -175,9 +175,10 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
     if (kind_ == TlsRecordProtectionKind::Tls13) {
         if (regions_overlap(dst.data(), dst.size(), plaintext.data(), plaintext.size())) {
             FIBER_ASSERT(dst.data() == plaintext.data());
-        } else if (dst.data() != plaintext.data()) {
+        } else if (dst.data() != plaintext.data() && !plaintext.empty()) {
             // The EVP takes one input region: stage the plaintext, then seal
-            // in place. The only copy this primitive ever makes.
+            // in place. The only copy this primitive ever makes. (An empty
+            // plaintext may be a null span — memcpy(_, nullptr, 0) is UB.)
             std::memcpy(dst.data(), plaintext.data(), plaintext.size());
         }
         dst[plaintext.size()] = static_cast<std::uint8_t>(inner_type);
