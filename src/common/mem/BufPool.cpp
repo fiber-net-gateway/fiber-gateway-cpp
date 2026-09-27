@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 
 #if defined(_WIN32)
 #include <malloc.h>

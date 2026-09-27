@@ -12,7 +12,6 @@
 namespace {
 
 using fiber::util::RoutePathMatcher;
-using fiber::util::RoutePatternError;
 
 struct TestRoute {
     int token = -1;
@@ -41,7 +40,7 @@ public:
 
     int add_path(std::string_view pattern) {
         const int token = next_token_++;
-        builder_.add_route(pattern, TestRoute{.token = token});
+        EXPECT_TRUE(builder_.add_route(pattern, TestRoute{.token = token}));
         return token;
     }
 
@@ -192,13 +191,17 @@ TEST(RoutePathMatcherTest, ReportsMaxPathVarCount) {
 TEST(RoutePathMatcherTest, RejectsWildcardInMiddleSegment) {
     TestVarDefiner definer;
     RoutePathMatcher<int>::Builder<TestRoute, TestVarDefiner> builder(definer);
-    EXPECT_THROW(builder.add_route("/a/*tail/b", TestRoute{.token = 1}), RoutePatternError);
+    auto added = builder.add_route("/a/*tail/b", TestRoute{.token = 1});
+    ASSERT_FALSE(added);
+    EXPECT_EQ(added.error().message, "wildcard segment must be the last path segment");
 }
 
 TEST(RoutePathMatcherTest, RejectsNonAsciiPattern) {
     TestVarDefiner definer;
     RoutePathMatcher<int>::Builder<TestRoute, TestVarDefiner> builder(definer);
-    EXPECT_THROW(builder.add_route("/路由", TestRoute{.token = 1}), RoutePatternError);
+    auto added = builder.add_route("/路径", TestRoute{.token = 1});
+    ASSERT_FALSE(added);
+    EXPECT_EQ(added.error().message, "path pattern must use ASCII bytes only");
 }
 
 TEST(RoutePathMatcherTest, HandlesLargeStaticRouteSets) {
