@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <sys/uio.h>
 
@@ -89,7 +90,9 @@ bool version_bounds_ok(int min_version, int max_version) noexcept {
 // backing storage, trust store) under the documented param contract: valid
 // until the handshake co_returns. select_server_config re-stages per
 // ClientHello through the param's configure callback and latches its error
-// for handshake_once to report after flushing the fatal alert.
+// for handshake_once to report after flushing the fatal alert. A credential
+// the callback hands over by shared_ptr lands in credential_owner and dies
+// with the staging — after the engines.
 // ---------------------------------------------------------------------------
 
 struct TlsStreamFd::Handshake {
@@ -105,6 +108,10 @@ struct TlsStreamFd::Handshake {
     tls::TlsClientHandshakeEngine *client = nullptr;
     tls::TlsServerHandshakeEngine *server = nullptr;
     tls::TlsServerConfigSource selector{};
+    // Retains a dynamically selected credential while the server engine may
+    // still read its chain/key; destroyed after the engines (member teardown
+    // follows the destructor body).
+    std::shared_ptr<const TlsCredential> credential_owner;
 
     ~Handshake() {
         delete client;
@@ -303,14 +310,16 @@ const tls::TlsServerConfig *TlsStreamFd::select_server_config(void *ctx,
     staging->callback_error = common::IoErr::None;
     staging->server_cfg.chain = nullptr;
     staging->server_cfg.key = nullptr;
+    staging->credential_owner.reset();
     std::size_t credential_count = 0;
-    TlsServerHandshakeConfig config(staging->server_cfg, credential_count);
+    TlsServerHandshakeConfig config(staging->server_cfg, credential_count, staging->credential_owner);
     const tls::TlsClientHelloView view = client_hello.view();
     common::IoErr error = staging->param->configure_callback(staging->param->configure_ctx, config, view);
     if (error == common::IoErr::None && credential_count == 0) {
         error = common::IoErr::Invalid;
     }
     if (error != common::IoErr::None) {
+        staging->credential_owner.reset(); // nothing will read it: release now
         staging->callback_error = error;
         return nullptr; // the engine answers handshake_failure
     }

@@ -34,7 +34,10 @@ struct TlsCredentialOptions {
 // in the tls layer's TlsCertificateChain/TlsPrivateKey (09 §4.3) and both
 // faces (TCP engine path, QUIC glue) stage borrowed pointers to it for each
 // handshake: the credential must outlive the handshakes it serves (the
-// documented param contract).
+// documented param contract). A server credential that can be retired while
+// handshakes are in flight is handed to the configure callback's owning
+// TlsServerHandshakeConfig::add_credential(shared_ptr) overload instead, which
+// keeps it alive until each handshake that selected it ends.
 class TlsCredential : public common::NonCopyable, public common::NonMovable {
 public:
     ~TlsCredential() = default;

@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -107,6 +108,10 @@ private:
     tls::TlsTicketMinter minter_{};
     tls::TlsResumptionLookup lookup_{};
     const net::TlsServerParam *server_param_ = nullptr; // selector re-stage source
+    // A credential the configure callback handed over by shared_ptr: held
+    // until the done-transition or a terminal failure (the engine stops
+    // reading chain/key there), else released after the engine in the dtor.
+    std::shared_ptr<const net::TlsCredential> credential_owner_;
     common::IoErr callback_error_ = common::IoErr::None;
     std::array<std::uint8_t, 16> ip_bytes_{}; // client verify_ip backing
     tls::TlsSessionOffer offer_{}; // staged resumption offer (spans borrow members)
