@@ -114,7 +114,7 @@ struct TlsConnection::Impl {
     TlsProtocolVersion version_;
     TlsCipherSuiteId suite_;
     std::uint16_t alpn_len_ = 0;
-    std::uint8_t warning_alerts_ = 0; // 1.2: consecutive dropped warnings (see on_alert_bytes)
+    std::uint8_t warning_alerts_ = 0; // consecutive dropped warnings (see on_alert_bytes)
     bool rekey_pending_ = false; // peer's KeyUpdate(update_requested): owe a response before the next write
     bool peer_closed_ = false; // the peer's close_notify latched
     bool close_sent_ = false; // our close_notify encoded
@@ -247,8 +247,11 @@ common::IoResult<void> TlsConnection::Impl::write_guard() noexcept {
 // ---- inbound record pipeline ----
 
 void TlsConnection::Impl::route_record(TlsRecord &&record) noexcept {
-    if (record.type != TlsContentType::Alert) {
-        warning_alerts_ = 0; // the warning budget counts consecutive alerts only
+    if (record.type != TlsContentType::Alert && record.type != TlsContentType::ApplicationData) {
+        // The warning budget counts consecutive alerts only. A sealed record
+        // (outer application_data) may be a 1.3 alert: open_and_route resets
+        // on its decrypted inner type instead.
+        warning_alerts_ = 0;
     }
     switch (record.type) {
         case TlsContentType::Alert: {
@@ -339,6 +342,9 @@ void TlsConnection::Impl::open_and_route(TlsRecord &record) noexcept {
         return;
     }
 
+    if (result.open.inner_type != TlsContentType::Alert) {
+        warning_alerts_ = 0; // a non-alert record, by its inner type
+    }
     switch (result.open.inner_type) {
         case TlsContentType::Alert:
             if (result.open.plain_len != 2) {
@@ -363,12 +369,15 @@ void TlsConnection::Impl::open_and_route(TlsRecord &record) noexcept {
 void TlsConnection::Impl::on_alert_bytes(const std::uint8_t *bytes) noexcept {
     // close_notify and the peer's fatal alert are the two terminals;
     // plaintext delivered before the alert stays readable. A 1.2 warning
-    // (e.g. no_renegotiation, user_canceled before close_notify) is dropped,
-    // up to kMaxWarningAlerts in a row — the BoringSSL rule. 1.3 has no
-    // warning level, so there every other alert stays terminal.
+    // (e.g. no_renegotiation) is dropped, up to kMaxWarningAlerts in a row
+    // — the BoringSSL rule. 1.3 has no warning level; the one exception is
+    // a warning user_canceled, which RFC 8446 §6.1 keeps and JDK 11 sends
+    // before close_notify — dropped like a 1.2 warning (BoringSSL, NSS and
+    // OpenSSL all skip it). Every other 1.3 alert stays terminal.
+    const bool user_canceled = bytes[1] == static_cast<std::uint8_t>(TlsAlertDesc::UserCanceled);
     if (bytes[1] == static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify)) {
         peer_closed_ = true;
-    } else if (version_ == TlsProtocolVersion::Tls12 && bytes[0] == kAlertLevelWarning) {
+    } else if (bytes[0] == kAlertLevelWarning && (version_ == TlsProtocolVersion::Tls12 || user_canceled)) {
         if (++warning_alerts_ > kMaxWarningAlerts) {
             latch_fatal(TlsAlertDesc::UnexpectedMessage);
         }

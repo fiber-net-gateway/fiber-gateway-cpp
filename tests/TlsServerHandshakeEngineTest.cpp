@@ -794,6 +794,27 @@ TEST(TlsServerHandshakeWarningAlert, TerminalAfterHelloRetryRequest) {
     });
 }
 
+// user_canceled is the one warning 1.3 keeps (RFC 8446 §6.1): dropped even
+// after an HRR fixed 1.3 (BoringSSL — JDK 11 sends it).
+TEST(TlsServerHandshakeWarningAlert, UserCanceledDroppedAfterHelloRetryRequest) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto kx = fiber::tls::TlsKeyExchange::create(fiber::tls::TlsNamedGroup::Secp256r1);
+        ASSERT_TRUE(kx.has_value());
+        ASSERT_TRUE(kx.value()->generate().has_value());
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        const std::array<std::uint8_t, 32> kRandom{};
+        Event event = Event::None;
+        ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0, kx.value()->public_value().bytes()), event));
+        ASSERT_FALSE(engine.done()); // HRR sent, awaiting CH2 — 1.3 is settled
+
+        const std::vector<std::uint8_t> user_canceled{21, 0x03, 0x03, 0, 2, 1, 90};
+        ASSERT_TRUE(feed_raw(engine, user_canceled, event));
+        EXPECT_EQ(Event::None, event);
+        EXPECT_FALSE(engine.done());
+    });
+}
+
 // Message-size caps are enforced on the 4-byte handshake header, before any
 // body byte is buffered: an unauthenticated client cannot pin more than the
 // per-type cap of reassembly memory (16 KiB ordinary, 100 KiB Certificate).
