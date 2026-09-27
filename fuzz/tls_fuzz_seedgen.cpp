@@ -447,6 +447,8 @@ void client_engine_corpus() {
             // A legacy-only server (feature/tls/11): the CBC suite from the client's tail.
             {"tls12-rsa-cbc", PeerOptions{.server = true, .tls12_only = true, .tls12_cipher = "ECDHE-RSA-AES128-SHA"},
              false},
+            // ... and a server without ECDHE: the static-RSA key exchange.
+            {"tls12-static-rsa", PeerOptions{.server = true, .tls12_only = true, .tls12_cipher = "AES128-SHA"}, false},
             {"tls12-client-cert-request", PeerOptions{.server = true, .tls12_only = true, .client_cert = true}, false},
             {"tls12-client-only", PeerOptions{.server = true}, true},
     };

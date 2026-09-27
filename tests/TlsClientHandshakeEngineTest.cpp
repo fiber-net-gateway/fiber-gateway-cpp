@@ -1110,6 +1110,21 @@ TEST(TlsClientHandshake12Legacy, EcdheCbcSuitesNegotiateAndCarryData) {
     });
 }
 
+// A server without ECDHE: the static-RSA key exchange (no ServerKeyExchange,
+// the premaster encrypted to the leaf) under both AEAD and CBC records.
+TEST(TlsClientHandshake12Legacy, StaticRsaSuitesNegotiateAndCarryData) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const LegacySuiteCase &c: {
+                     LegacySuiteCase{"AES128-GCM-SHA256", TlsCipherSuiteId::RsaAes128GcmSha256, false},
+                     LegacySuiteCase{"AES256-GCM-SHA384", TlsCipherSuiteId::RsaAes256GcmSha384, false},
+                     LegacySuiteCase{"AES128-SHA", TlsCipherSuiteId::RsaAes128CbcSha, false},
+                     LegacySuiteCase{"AES256-SHA", TlsCipherSuiteId::RsaAes256CbcSha, false},
+             }) {
+            expect_legacy_suite_negotiates(c);
+        }
+    });
+}
+
 // The legacy tail rides behind every AEAD suite: a server that honors the
 // client's order and supports both picks the AEAD suite.
 TEST(TlsClientHandshake12Legacy, AeadSuiteWinsWhenServerSupportsBoth) {
@@ -1366,8 +1381,8 @@ TEST(TlsClientHandshake12Reject, SuiteNotOfferedAborts) {
                 ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"}, cfg,
                 [](std::vector<std::uint8_t> &flight) {
                     const std::size_t sid_len = flight[43];
-                    flight[44 + sid_len] = 0x00; // TLS_RSA_WITH_AES_128_CBC_SHA — never offered
-                    flight[45 + sid_len] = 0x2F;
+                    flight[44 + sid_len] = 0x00; // TLS_RSA_WITH_3DES_EDE_CBC_SHA — never offered
+                    flight[45 + sid_len] = 0x0A;
                 },
                 TlsAlertDesc::IllegalParameter);
     });
@@ -1404,6 +1419,57 @@ TEST(TlsClientHandshake12Reject, RsaLeafUnderEcdsaSuiteAborts) {
                     const std::size_t sid_len = flight[43];
                     flight[44 + sid_len] = 0xC0; // ECDHE-ECDSA-AES128-GCM-SHA256
                     flight[45 + sid_len] = 0x2B;
+                },
+                TlsAlertDesc::IllegalParameter);
+    });
+}
+
+// Static RSA sends no SKE; one arriving anyway is out of order.
+TEST(TlsClientHandshake12Legacy, ServerKeyExchangeUnderStaticRsaAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        expect_reject_after_sh_mutation(
+                ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-SHA"}, cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0x00; // relabelled AES128-SHA (static RSA)
+                    flight[45 + sid_len] = 0x2F;
+                },
+                TlsAlertDesc::UnexpectedMessage);
+    });
+}
+
+// An ECDHE suite needs the SKE; a static-RSA server flight lacks it.
+TEST(TlsClientHandshake12Legacy, MissingServerKeyExchangeUnderEcdheAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        expect_reject_after_sh_mutation(
+                ServerOptions{.tls12_cipher = "AES128-SHA"}, cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0xC0; // relabelled ECDHE-RSA-AES128-SHA
+                    flight[45 + sid_len] = 0x13;
+                },
+                TlsAlertDesc::UnexpectedMessage);
+    });
+}
+
+// The premaster can only be encrypted to an RSA leaf.
+TEST(TlsClientHandshake12Legacy, EcLeafUnderStaticRsaAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        expect_reject_after_sh_mutation(
+                ServerOptions{.leaf_pem = certfix::kLeafEcP256Pem,
+                              .key_pem = certfix::kP256KeyPem,
+                              .tls12_cipher = "ECDHE-ECDSA-AES128-SHA"},
+                cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0x00; // relabelled AES128-SHA (static RSA)
+                    flight[45 + sid_len] = 0x2F;
                 },
                 TlsAlertDesc::IllegalParameter);
     });

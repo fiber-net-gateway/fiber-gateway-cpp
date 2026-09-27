@@ -43,6 +43,13 @@ public:
     // Same matching rules as TlsPrivateKey::supports — used to pick/validate
     // the scheme for a CertificateVerify received from the peer.
     [[nodiscard]] bool supports(TlsSignatureScheme scheme, TlsProtocolVersion version) const noexcept;
+
+    // RSAES-PKCS1-v1_5 encryption to this key — the TLS 1.2 static-RSA
+    // ClientKeyExchange (RFC 5246 §7.4.7.1, feature/tls/11). Returns the
+    // ciphertext length (the modulus size); Invalid when the key is not RSA
+    // or |out| is smaller than the modulus.
+    [[nodiscard]] common::IoResult<std::size_t> rsa_encrypt_pkcs1(std::span<const std::uint8_t> in,
+                                                                  std::span<std::uint8_t> out) const noexcept;
     [[nodiscard]] bool empty() const noexcept { return impl_ == nullptr; }
 
 private:

@@ -38,6 +38,7 @@ using fiber::tls::tls_encode_certificate_request_13;
 using fiber::tls::tls_encode_certificate_verify;
 using fiber::tls::tls_encode_client_hello;
 using fiber::tls::tls_encode_client_key_exchange;
+using fiber::tls::tls_encode_client_key_exchange_rsa;
 using fiber::tls::tls_encode_encrypted_extensions;
 using fiber::tls::tls_encode_finished;
 using fiber::tls::tls_encode_handshake_message;
@@ -983,6 +984,30 @@ TEST(FlightEncode, ClientKeyExchange12PointForms) {
     const std::vector<std::uint8_t> huge(256, 0x01);
     EXPECT_FALSE(tls_encode_client_key_exchange(huge, scratch).has_value());
     EXPECT_FALSE(tls_encode_client_key_exchange(point, {scratch.data(), 4u + 1u + 65u - 1}).has_value());
+}
+
+// RFC 5246 §7.4.7.1 (static RSA, feature/tls/11): body = u16(len) ||
+// EncryptedPreMasterSecret — the TLS 1.0+ form with its length prefix.
+TEST(FlightEncode, ClientKeyExchange12RsaForm) {
+    std::vector<std::uint8_t> scratch(600, 0);
+    std::vector<std::uint8_t> encrypted(256); // an RSA-2048 ciphertext
+    for (std::size_t i = 0; i < encrypted.size(); ++i) {
+        encrypted[i] = static_cast<std::uint8_t>(i * 3);
+    }
+    const auto len = tls_encode_client_key_exchange_rsa(encrypted, scratch);
+    ASSERT_TRUE(len.has_value());
+    EXPECT_EQ(len.value(), 4u + 2u + 256u);
+    EXPECT_EQ(scratch[0], static_cast<std::uint8_t>(TlsHandshakeType::ClientKeyExchange));
+    EXPECT_EQ(scratch[1], 0); // be24 body length 258
+    EXPECT_EQ(scratch[2], 0x01);
+    EXPECT_EQ(scratch[3], 0x02);
+    EXPECT_EQ(scratch[4], 0x01); // be16 ciphertext length 256
+    EXPECT_EQ(scratch[5], 0x00);
+    EXPECT_EQ(0, std::memcmp(scratch.data() + 6, encrypted.data(), encrypted.size()));
+
+    // Contract violations: empty ciphertext, tight scratch.
+    EXPECT_FALSE(tls_encode_client_key_exchange_rsa({}, scratch).has_value());
+    EXPECT_FALSE(tls_encode_client_key_exchange_rsa(encrypted, {scratch.data(), 4u + 2u + 256u - 1}).has_value());
 }
 
 // ---- 07 server flight encoders ----

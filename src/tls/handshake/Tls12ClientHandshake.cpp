@@ -236,7 +236,10 @@ void Tls12ClientHandshake::handle_certificate_12(std::span<const std::uint8_t> b
             return;
         }
     }
-    st_ = St::ExpectSke12;
+    // Static RSA (feature/tls/11) sends no ServerKeyExchange: the premaster
+    // is encrypted to this leaf in our flight. A stray SKE then falls to the
+    // CR/SHD state's unexpected_message.
+    st_ = suite_info()->kx == TlsSuiteKx::Rsa ? St::ExpectCrShd12 : St::ExpectSke12;
 }
 
 void Tls12ClientHandshake::handle_server_key_exchange_12(std::span<const std::uint8_t> body) noexcept {
@@ -384,9 +387,30 @@ bool Tls12ClientHandshake::send_client_flight_12() noexcept {
         }
     }
 
-    // ---- ClientKeyExchange (plaintext): u8(point_len) || point ----
-    const auto cke_len =
-            tls_encode_client_key_exchange(hello_.kx->public_value().bytes(), {scratch_.data(), scratch_.size()});
+    // ---- ClientKeyExchange (plaintext) ----
+    // ECDHE: u8(point_len) || point. Static RSA (RFC 5246 §7.4.7.1): the
+    // premaster is our ClientHello's client_version (0x0303) || 46 random
+    // bytes, RSAES-PKCS1-v1_5 encrypted to the leaf key (its RSA kind was
+    // checked at the Certificate), u16-length-prefixed.
+    common::IoResult<std::size_t> cke_len = std::unexpected(common::IoErr::Invalid);
+    if (suite_info()->kx == TlsSuiteKx::Rsa) {
+        z12_ = TlsKxShared{};
+        z12_.len = 48;
+        z12_.z[0] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(TlsProtocolVersion::Tls12) >> 8);
+        z12_.z[1] = static_cast<std::uint8_t>(TlsProtocolVersion::Tls12);
+        const auto leaf_key = peer_chain_.leaf().public_key();
+        std::array<std::uint8_t, kClientMaxRsaCiphertext> encrypted{};
+        common::IoResult<std::size_t> encrypted_len = std::unexpected(common::IoErr::Invalid);
+        if (tls_random_bytes({z12_.z.data() + 2, 46}) && leaf_key.has_value()) {
+            encrypted_len = leaf_key->rsa_encrypt_pkcs1(z12_.bytes(), encrypted);
+        }
+        if (encrypted_len.has_value()) {
+            cke_len = tls_encode_client_key_exchange_rsa({encrypted.data(), *encrypted_len},
+                                                         {scratch_.data(), scratch_.size()});
+        }
+    } else {
+        cke_len = tls_encode_client_key_exchange(hello_.kx->public_value().bytes(), {scratch_.data(), scratch_.size()});
+    }
     if (!cke_len.has_value() || !t12_.update({scratch_.data(), cke_len.value()}) ||
         !emit_message({scratch_.data(), cke_len.value()})) {
         fail(TlsAlertDesc::InternalError);

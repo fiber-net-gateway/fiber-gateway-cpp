@@ -623,7 +623,7 @@ TEST(Tls12KeyBlock, CbcLayoutMatchesReference) {
 
 TEST(TlsSuiteRegistry, CoversTheImplementedSuites) {
     EXPECT_EQ(nullptr, tls_suite_info(static_cast<TlsCipherSuiteId>(0x0000)));
-    EXPECT_EQ(14u, kTlsSuiteRegistry.size());
+    EXPECT_EQ(19u, kTlsSuiteRegistry.size());
 
     const auto check = [](TlsCipherSuiteId suite, TlsAeadAlgorithm aead, TlsHashAlgorithm hash, std::uint8_t key_len,
                           bool tls13) {
@@ -665,6 +665,11 @@ TEST(TlsSuiteRegistry, CoversTheImplementedSuites) {
     check(TlsCipherSuiteId::EcdheRsaAes256CbcSha, TlsAeadAlgorithm::Aes256CbcSha1, TlsHashAlgorithm::Sha256, 32, false);
     check(TlsCipherSuiteId::EcdheRsaAes128CbcSha256, TlsAeadAlgorithm::Aes128CbcSha256, TlsHashAlgorithm::Sha256, 16,
           false);
+    check(TlsCipherSuiteId::RsaAes128GcmSha256, TlsAeadAlgorithm::Aes128Gcm, TlsHashAlgorithm::Sha256, 16, false);
+    check(TlsCipherSuiteId::RsaAes256GcmSha384, TlsAeadAlgorithm::Aes256Gcm, TlsHashAlgorithm::Sha384, 32, false);
+    check(TlsCipherSuiteId::RsaAes128CbcSha, TlsAeadAlgorithm::Aes128CbcSha1, TlsHashAlgorithm::Sha256, 16, false);
+    check(TlsCipherSuiteId::RsaAes256CbcSha, TlsAeadAlgorithm::Aes256CbcSha1, TlsHashAlgorithm::Sha256, 32, false);
+    check(TlsCipherSuiteId::RsaAes128CbcSha256, TlsAeadAlgorithm::Aes128CbcSha256, TlsHashAlgorithm::Sha256, 16, false);
     EXPECT_EQ(20, tls_record_mac_len(TlsAeadAlgorithm::Aes128CbcSha1));
     EXPECT_EQ(20, tls_record_mac_len(TlsAeadAlgorithm::Aes256CbcSha1));
     EXPECT_EQ(32, tls_record_mac_len(TlsAeadAlgorithm::Aes128CbcSha256));
@@ -674,6 +679,8 @@ TEST(TlsSuiteRegistry, CoversTheImplementedSuites) {
     check_12(TlsCipherSuiteId::EcdheEcdsaChacha20Poly1305, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Ecdsa);
     check_12(TlsCipherSuiteId::EcdheEcdsaAes256CbcSha, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Ecdsa);
     check_12(TlsCipherSuiteId::EcdheRsaAes128CbcSha256, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Rsa);
+    check_12(TlsCipherSuiteId::RsaAes256GcmSha384, TlsSuiteKx::Rsa, TlsSuiteAuth::Rsa);
+    check_12(TlsCipherSuiteId::RsaAes128CbcSha, TlsSuiteKx::Rsa, TlsSuiteAuth::Rsa);
     for (const TlsSuiteInfo &info: kTlsSuiteRegistry) {
         // The 1.3 suites name no kx/auth half; every 1.2 suite names both.
         EXPECT_EQ(info.is_tls13, info.kx == TlsSuiteKx::None);

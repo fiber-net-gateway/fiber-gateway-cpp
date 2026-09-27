@@ -56,6 +56,9 @@ inline constexpr std::size_t kClientMaxCrSigalgs = kTls12SignaturePreference.siz
                                                            ? kTls12SignaturePreference.size()
                                                            : kTls13SignaturePreference.size();
 inline constexpr std::size_t kClientMaxSigLen = 1024; // RSA-4096 signature bound
+// Static-RSA EncryptedPreMasterSecret bound (feature/tls/11): the server
+// modulus, up to RSA-8192.
+inline constexpr std::size_t kClientMaxRsaCiphertext = 1024;
 
 // A CertificateRequest's signature_algorithms may list far more schemes than
 // we can sign with (OpenSSL sends 20; the vector allows 32767), so the list
