@@ -40,7 +40,10 @@ TlsRecordCipher 是记录保护的**原语层**：输入成品密钥材料与字
 | 换钥时机、KeyUpdate 消息本身、seq 上限策略 | 引擎层（cipher 暴露 `sequence()`） |
 | 记录分帧/头部编解码 | TlsRecordReader/Writer（已完成） |
 | alert 的选择与发送 | 引擎层（cipher 只报 Status） |
-| 1.3 记录 padding、CBC 套件、EtM | 非目标（01 号范围为 AEAD-only） |
+| 1.3 记录 padding、EtM | 非目标 |
+
+> 修订（11 号）：1.2 CBC 套件经 BoringSSL 的 TLS 专用 CBC AEAD 纳入本层（11 §6）。
+> CBC 实例在 init 时有两次堆分配（`HMAC_CTX` 与 `cipher_data`），记录路径仍零分配。
 
 ## 2. 事实依据（代码现状）
 
