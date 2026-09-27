@@ -365,6 +365,68 @@ void check_queued_request_drain(bool peer_goaway) {
 TEST(Http3ClientConnectionTest, LocalDrainCancelsRequestWaitingForStreamCredit) { check_queued_request_drain(false); }
 TEST(Http3ClientConnectionTest, PeerGoawayCancelsRequestWaitingForStreamCredit) { check_queued_request_drain(true); }
 
+TEST(Http3ClientConnectionTest, SendRequestHeaderDeadlineSurvivesStreamAttachWait) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+    auto options = fiber::test::quic_options();
+    fiber::test::QuicTestEndpoint endpoint(group.at(0));
+    options.role = fiber::quic::QuicConnectionRole::Client;
+    options.original_destination_connection_id = connection_id_from({1, 2, 3, 4});
+    options.remote_connection_id = connection_id_from({5, 6, 7, 8});
+    ClientFixture fixture(endpoint.get(), options);
+    auto &h3 = fixture.connection();
+    // Zero bidi-remote flow-control credit parks the HEADERS write after the
+    // stream gate admits the request, isolating the exchange-level deadline.
+    ASSERT_TRUE(start_h3_on_loop(group.at(0), h3.quic(), options, h3, 1024, 0).ok);
+    std::promise<void> done;
+    auto future = done.get_future();
+    fiber::async::spawn(group.at(0), [&h3, &done]() -> fiber::async::DetachedTask {
+        fiber::mem::BufPool pool;
+        auto exchange = h3.open_exchange(pool);
+        for (int i = 0; i != 8; ++i) {
+            auto stream = fiber::http::Http3ControlStreams::create_stream();
+            EXPECT_TRUE(
+                    h3.quic().try_attach_local_stream(std::move(stream), fiber::quic::QuicStreamType::Bidirectional));
+        }
+
+        fiber::async::WaitGroup sent;
+        sent.add();
+        const auto started_at = std::chrono::steady_clock::now();
+        fiber::async::spawn(fiber::event::EventLoop::current(), [&]() -> fiber::async::DetachedTask {
+            auto result = co_await exchange.send_request_header({.method = fiber::http::HttpMethod::Get,
+                                                                 .scheme = "https",
+                                                                 .authority = "example.com",
+                                                                 .path = "/"},
+                                                                false, 500ms);
+            const auto elapsed = std::chrono::steady_clock::now() - started_at;
+            EXPECT_FALSE(result);
+            if (!result) {
+                EXPECT_EQ(result.error(), fiber::common::IoErr::TimedOut);
+            }
+            // Credit is released at 400ms. A restarted budget would time out
+            // near 900ms; the shared deadline must expire near 500ms.
+            EXPECT_GE(elapsed, 480ms);
+            EXPECT_LT(elapsed, 700ms);
+            sent.done();
+        });
+
+        co_await fiber::async::sleep(400ms);
+        EXPECT_EQ(h3.local_stream_gate().waiter_count(fiber::quic::QuicStreamType::Bidirectional), 1U);
+        fiber::quic::QuicMaxStreamsFrame credit{};
+        credit.limit = 9;
+        credit.bidirectional = true;
+        EXPECT_TRUE(h3.quic().recv_max_streams_frame(credit));
+        co_await sent.join();
+        h3.graceful_shutdown();
+        co_await h3.wait_closed();
+        done.set_value();
+    });
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    fixture.finish();
+    group.stop();
+    group.join();
+}
+
 TEST(Http3ClientConnectionTest, WaitClosedResolvesWhenStartupFails) {
     fiber::event::EventLoopGroup group(1);
     group.start();

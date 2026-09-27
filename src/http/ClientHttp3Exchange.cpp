@@ -5,10 +5,38 @@
 #include <utility>
 
 #include <fiber/common/Assert.h>
+#include <fiber/event/EventLoop.h>
 #include <fiber/http/Http3ClientConnection.h>
 #include "http/ClientHttp3Request.h"
 
 namespace fiber::http {
+
+namespace {
+
+using TimePoint = std::chrono::steady_clock::time_point;
+
+TimePoint deadline_after(std::chrono::milliseconds timeout) noexcept {
+    if (timeout == std::chrono::milliseconds::max()) {
+        return TimePoint::max();
+    }
+    if (timeout < std::chrono::milliseconds::zero()) {
+        timeout = std::chrono::milliseconds::zero();
+    }
+    return event::EventLoop::current().now() + timeout;
+}
+
+std::chrono::milliseconds remaining_timeout(TimePoint deadline) noexcept {
+    if (deadline == TimePoint::max()) {
+        return std::chrono::milliseconds::max();
+    }
+    const TimePoint now = event::EventLoop::current().now();
+    if (now >= deadline) {
+        return std::chrono::milliseconds::zero();
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+}
+
+} // namespace
 
 ClientHttp3Exchange::ClientHttp3Exchange(Http3ClientConnection &conn, mem::BufPool &pool) noexcept :
     conn_(&conn), pool_(&pool) {}
@@ -34,11 +62,12 @@ ClientHttp3Exchange &ClientHttp3Exchange::operator=(ClientHttp3Exchange &&other)
 async::Task<common::IoResult<void>>
 ClientHttp3Exchange::send_request_header(const Http3RequestHead &head, bool end_stream,
                                          std::chrono::milliseconds timeout) noexcept {
-    auto opened = co_await ensure_request_opened(timeout);
+    const TimePoint deadline = deadline_after(timeout);
+    auto opened = co_await ensure_request_opened(deadline);
     if (!opened) {
         co_return std::unexpected(opened.error());
     }
-    co_return co_await (*opened)->send_request_header(head, end_stream, timeout);
+    co_return co_await (*opened)->send_request_header(head, end_stream, remaining_timeout(deadline));
 }
 
 async::Task<common::IoResult<std::size_t>> ClientHttp3Exchange::write_all(mem::IoBufChain chunk,
@@ -161,7 +190,7 @@ std::uint64_t ClientHttp3Exchange::stream_id() const noexcept {
 }
 
 async::Task<common::IoResult<ClientHttp3Request *>>
-ClientHttp3Exchange::ensure_request_opened(std::chrono::milliseconds timeout) noexcept {
+ClientHttp3Exchange::ensure_request_opened(TimePoint deadline) noexcept {
     if (stream_) {
         ClientHttp3Request *req = request();
         co_return req == nullptr ? common::IoResult<ClientHttp3Request *>(std::unexpected(common::IoErr::Invalid))
@@ -176,8 +205,8 @@ ClientHttp3Exchange::ensure_request_opened(std::chrono::milliseconds timeout) no
     if (!owned) {
         co_return std::unexpected(common::IoErr::NoMem);
     }
-    auto attached =
-            co_await conn_->local_stream_gate().attach(std::move(owned), quic::QuicStreamType::Bidirectional, timeout);
+    auto attached = co_await conn_->local_stream_gate().attach(std::move(owned), quic::QuicStreamType::Bidirectional,
+                                                               remaining_timeout(deadline));
     if (!attached) {
         co_return std::unexpected(attached.error());
     }

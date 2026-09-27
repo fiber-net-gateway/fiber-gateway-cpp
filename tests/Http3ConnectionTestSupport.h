@@ -385,7 +385,8 @@ CapturedHttp3Request capture_request(const fiber::http::HttpExchange &exchange) 
 }
 
 fiber::quic::QuicTransportParams valid_peer_transport_params(const fiber::quic::QuicConnection::Options &options,
-                                                             std::uint64_t initial_max_stream_data_bidi_local = 1024) {
+                                                             std::uint64_t initial_max_stream_data_bidi_local = 1024,
+                                                             std::uint64_t initial_max_stream_data_bidi_remote = 1024) {
     fiber::quic::QuicTransportParams params{};
     params.has_initial_source_connection_id = true;
     params.initial_source_connection_id = options.remote_connection_id;
@@ -393,7 +394,7 @@ fiber::quic::QuicTransportParams valid_peer_transport_params(const fiber::quic::
     params.active_connection_id_limit = 2;
     params.initial_max_data = 4096;
     params.initial_max_stream_data_bidi_local = initial_max_stream_data_bidi_local;
-    params.initial_max_stream_data_bidi_remote = 1024;
+    params.initial_max_stream_data_bidi_remote = initial_max_stream_data_bidi_remote;
     params.initial_max_stream_data_uni = 1024;
     params.initial_max_streams_uni = 8;
     params.initial_max_streams_bidi = 8;
@@ -418,34 +419,38 @@ fiber::async::DetachedTask start_h3(Connection *h3, std::promise<StartResult> *d
 template<typename Connection>
 StartResult start_h3_on_loop(fiber::event::EventLoop &loop, fiber::quic::QuicConnection &quic,
                              const fiber::quic::QuicConnection::Options &options, Connection &h3,
-                             std::uint64_t initial_max_stream_data_bidi_local = 1024) {
+                             std::uint64_t initial_max_stream_data_bidi_local = 1024,
+                             std::uint64_t initial_max_stream_data_bidi_remote = 1024) {
     std::promise<StartResult> done;
     auto future = done.get_future();
-    fiber::async::spawn(
-            loop, [&quic, &options, &h3, &done, initial_max_stream_data_bidi_local]() -> fiber::async::DetachedTask {
-                auto params = valid_peer_transport_params(options, initial_max_stream_data_bidi_local);
-                if (options.role == fiber::quic::QuicConnectionRole::Client) {
-                    auto adopted = quic.adopt_server_initial_source_connection_id(options.remote_connection_id);
-                    if (!adopted) {
-                        done.set_value(to_start_result(adopted));
-                        co_return;
-                    }
-                    params.has_original_destination_connection_id = true;
-                    params.original_destination_connection_id = options.original_destination_connection_id;
-                }
-                auto applied = quic.apply_peer_transport_params(params);
-                if (!applied) {
-                    done.set_value(to_start_result(applied));
-                    co_return;
-                }
-                auto established = quic.mark_established();
-                if (!established) {
-                    done.set_value(to_start_result(established));
-                    co_return;
-                }
-                fiber::async::spawn(fiber::event::EventLoop::current(),
-                                    [&h3, &done]() { return start_h3(&h3, &done); });
-            });
+    fiber::async::spawn(loop,
+                        [&quic, &options, &h3, &done, initial_max_stream_data_bidi_local,
+                         initial_max_stream_data_bidi_remote]() -> fiber::async::DetachedTask {
+                            auto params = valid_peer_transport_params(options, initial_max_stream_data_bidi_local,
+                                                                      initial_max_stream_data_bidi_remote);
+                            if (options.role == fiber::quic::QuicConnectionRole::Client) {
+                                auto adopted =
+                                        quic.adopt_server_initial_source_connection_id(options.remote_connection_id);
+                                if (!adopted) {
+                                    done.set_value(to_start_result(adopted));
+                                    co_return;
+                                }
+                                params.has_original_destination_connection_id = true;
+                                params.original_destination_connection_id = options.original_destination_connection_id;
+                            }
+                            auto applied = quic.apply_peer_transport_params(params);
+                            if (!applied) {
+                                done.set_value(to_start_result(applied));
+                                co_return;
+                            }
+                            auto established = quic.mark_established();
+                            if (!established) {
+                                done.set_value(to_start_result(established));
+                                co_return;
+                            }
+                            fiber::async::spawn(fiber::event::EventLoop::current(),
+                                                [&h3, &done]() { return start_h3(&h3, &done); });
+                        });
     if (future.wait_for(2s) != std::future_status::ready) {
         return {.ok = false, .error = fiber::common::IoErr::TimedOut};
     }

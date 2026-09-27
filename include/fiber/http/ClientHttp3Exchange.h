@@ -67,7 +67,7 @@ public:
 
 private:
     async::Task<common::IoResult<ClientHttp3Request *>>
-    ensure_request_opened(std::chrono::milliseconds timeout) noexcept;
+    ensure_request_opened(std::chrono::steady_clock::time_point deadline) noexcept;
     [[nodiscard]] ClientHttp3Request *request() noexcept;
     [[nodiscard]] const ClientHttp3Request *request() const noexcept;
 
