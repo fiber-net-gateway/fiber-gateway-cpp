@@ -220,7 +220,11 @@ client_case() {
     probe_line="$(grep '^PROBE' "${err}" | tail -n 1)"
     [[ -z "${probe_line}" ]] && probe_line="(no PROBE line, rc=${rc}) $(tail -n 2 "${err}" | tr '\n' ' ')"
     local got_proto got_cipher
-    got_proto="$(sed -n 's/^New, \(TLSv1\.[0-9]\), Cipher is \(.*\)$/\1/p' "${out}" | head -n 1)"
+    # The session's "Protocol  :" line is the negotiated version; the "New,"
+    # line prints the CIPHER's minimum version (SSL_CIPHER_get_version:
+    # TLSv1.0 for the SHA-1 CBC suites even over a 1.2 session).
+    got_proto="$(sed -n 's/^ *Protocol *: \(TLSv1\.[0-9]\)$/\1/p' "${out}" | head -n 1)"
+    [[ -n "${got_proto}" ]] || got_proto="$(sed -n 's/^New, \(TLSv1\.[0-9]\), Cipher is \(.*\)$/\1/p' "${out}" | head -n 1)"
     got_cipher="$(sed -n 's/^New, \(TLSv1\.[0-9]\), Cipher is \(.*\)$/\2/p' "${out}" | head -n 1)"
 
     local verdict=PASS why=""
@@ -377,8 +381,16 @@ done
 for c in ECDHE-ECDSA-AES128-GCM-SHA256 ECDHE-ECDSA-AES256-GCM-SHA384 ECDHE-ECDSA-CHACHA20-POLY1305; do
     client_case "c/1.2 ${c}" ok TLSv1.2 "${c}" "${P256} -tls1_2 -cipher ${c}" "${CA}"
 done
+# Legacy 1.2 suites (feature/tls/11): the client offers them after the whole
+# AEAD order, for servers that speak nothing newer.
+for c in ECDHE-RSA-AES128-SHA ECDHE-RSA-AES256-SHA ECDHE-RSA-AES128-SHA256; do
+    client_case "c/1.2 legacy ${c}" ok TLSv1.2 "${c}" "${RSA} -tls1_2 -cipher ${c}" "${CA}"
+done
+for c in ECDHE-ECDSA-AES128-SHA ECDHE-ECDSA-AES256-SHA; do
+    client_case "c/1.2 legacy ${c}" ok TLSv1.2 "${c}" "${P256} -tls1_2 -cipher ${c}" "${CA}"
+done
+client_case "c/1.2 legacy tail loses to AEAD" ok TLSv1.2 ECDHE-RSA-AES128-GCM-SHA256 "${RSA} -tls1_2 -cipher ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES128-GCM-SHA256" "${CA}"
 client_case "c/1.2 non-ECDHE only (AES128-GCM-SHA256)" fail - - "${RSA} -tls1_2 -cipher AES128-GCM-SHA256" "${CA}"
-client_case "c/1.2 CBC only (ECDHE-RSA-AES128-SHA256)" fail - - "${RSA} -tls1_2 -cipher ECDHE-RSA-AES128-SHA256" "${CA}"
 
 # -- key exchange groups
 client_case "c/1.3 group X25519" ok TLSv1.3 - "${RSA} -tls1_3 -groups X25519" "${CA}"
@@ -448,6 +460,8 @@ client_case "c/1.3 1 MiB response" ok - - "${RSA} -tls1_3 -WWW" "${CA} --get /bi
 client_case "c/1.2 1 MiB response" ok - - "${RSA} -tls1_2 -WWW" "${CA} --get /big.bin" "bytes>=1048576"
 client_case "c/1.3 1 MiB, 512-byte records" ok - - "${RSA} -tls1_3 -WWW -max_send_frag 512" "${CA} --get /big.bin" "bytes>=1048576"
 client_case "c/1.2 1 MiB, 512-byte records" ok - - "${RSA} -tls1_2 -WWW -max_send_frag 512" "${CA} --get /big.bin" "bytes>=1048576"
+client_case "c/1.2 1 MiB, ECDHE-RSA-AES128-SHA" ok - - "${RSA} -tls1_2 -cipher ECDHE-RSA-AES128-SHA -WWW" "${CA} --get /big.bin" "bytes>=1048576"
+client_case "c/1.2 1 MiB, 512-byte records, ECDHE-RSA-AES128-SHA256" ok - - "${RSA} -tls1_2 -cipher ECDHE-RSA-AES128-SHA256 -WWW -max_send_frag 512" "${CA} --get /big.bin" "bytes>=1048576"
 client_case "c/1.3 8 session tickets" ok TLSv1.3 - "${RSA} -tls1_3 -num_tickets 8" "${CA}"
 client_case "c/1.3 no session tickets" ok TLSv1.3 - "${RSA} -tls1_3 -num_tickets 0" "${CA}"
 client_case "c/1.3 no middlebox compat" ok TLSv1.3 - "${RSA} -tls1_3 -no_middlebox" "${CA}"

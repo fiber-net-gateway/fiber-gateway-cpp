@@ -28,8 +28,9 @@ namespace fiber::tls {
 
 // Suites: kTlsSuitePreference in its hardware-aware effective form
 // (TlsSuitePreference.h; 0xC030 = ECDHE-RSA-AES256-GCM — the IANA value,
-// 0x0030 was never a suite) — the CH offers tls_effective_suite_order()
-// verbatim; the membership check below scans kTlsSuitePreference.
+// 0x0030 was never a suite), plus the legacy 1.2 tail when 1.2 is in the
+// version window — the CH offers tls_client_offer_suites() verbatim; the
+// membership check below scans both tables.
 
 // Share order: X25519 leads (the CH1 share, the only key_share sent); P-256
 // and P-384 are advertised in supported_groups only, reached by an HRR (1.3)
@@ -80,9 +81,16 @@ template<std::size_t N>
 }
 
 // Did the CH offer this suite? (The effective order is a permutation of
-// kTlsSuitePreference, so membership is order-blind.)
+// kTlsSuitePreference, so membership is order-blind. The legacy tail only
+// rides a CH offering 1.2; a 1.2 ServerHello outside the version window is
+// refused at the fork before this check.)
 [[nodiscard]] constexpr bool tls_client_suite_offered(std::uint16_t raw) noexcept {
     for (const std::uint16_t offered: kTlsSuitePreference) {
+        if (offered == raw) {
+            return true;
+        }
+    }
+    for (const std::uint16_t offered: kTlsClientLegacySuites) {
         if (offered == raw) {
             return true;
         }
