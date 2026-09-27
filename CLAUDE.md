@@ -27,6 +27,10 @@ ctest --test-dir build
 
 # Format code (requires clang-format on PATH)
 ./format_code.sh
+
+# TLS fuzzers (separate build tree, Clang + libstdc++; see fuzz/README.md)
+cmake -S . -B build-fuzz -DFIBER_BUILD_FUZZERS=ON -DFIBER_USE_LIBCXX=OFF -DFIBER_BUILD_TESTS=OFF
+cmake --build build-fuzz -j && ./build-fuzz/fuzz/tls_server_engine_fuzzer -runs=0 fuzz/corpus/tls_server_engine_fuzzer
 ```
 
 Build outputs: `fiber_lib` (static library), `fiber_tests`, examples (e.g., `http1_echo`, `dns_dig`), and apps (`build/apps/lite_nginx`). Dependencies (BoringSSL, GoogleTest, optional jemalloc) are auto-fetched into `temp/_deps/`.
@@ -43,6 +47,7 @@ Build outputs: `fiber_lib` (static library), `fiber_tests`, examples (e.g., `htt
 | `FIBER_BUILD_TESTS` | ON | Build tests |
 | `FIBER_BUILD_APPS` | ON | Build multi-file applications under `apps/` |
 | `FIBER_FETCH_DEPS` | ON | Allow CMake to download third-party dependencies |
+| `FIBER_BUILD_FUZZERS` | OFF | Build libFuzzer harnesses under `fuzz/` (Clang; instruments fiber targets with ASan/UBSan) |
 
 ## Architecture Overview
 
@@ -151,6 +156,7 @@ Design state and member variables to be minimal and explicit. Establish required
 - `example/` — Single-file runnable examples (e.g., `http1_echo.cpp`, `dns_dig.cpp`)
 - `apps/` — Multi-file applications. Currently `apps/lite_nginx` (lightweight reverse proxy with its own config parser, tests, and CMakeLists)
 - `tests/` — GoogleTest files (`*Test.cpp`), registered via CTest
+- `fuzz/` — libFuzzer harnesses for the TLS stack, seed corpora, and the seed generator
 - `docs/` — Design documentation
 - `feature/` — Feature design notes for individual subsystems
 - `cmake/` — Build support (toolchain selection, dependency management, executable helpers)
