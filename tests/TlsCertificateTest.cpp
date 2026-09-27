@@ -140,15 +140,17 @@ TEST(TlsCertificateChainParse, PemBundle) {
     EXPECT_EQ(2u, chain->intermediates().size());
 
     // Full capacity is fine.
-    const std::string four = join_pems(
-            {certfix::kLeafRsaPem, certfix::kIntermediateRsaPem, certfix::kRootRsaPem, certfix::kRootUnrelatedPem});
-    auto full = TlsCertificateChain::parse_pem_bundle({four.data(), four.size()});
+    std::string full_pem = join_pems({certfix::kLeafRsaPem, certfix::kIntermediateRsaPem, certfix::kRootRsaPem});
+    for (std::size_t i = 3; i < TlsCertificateChain::kMaxCerts; ++i) {
+        full_pem += certfix::kRootUnrelatedPem;
+    }
+    auto full = TlsCertificateChain::parse_pem_bundle({full_pem.data(), full_pem.size()});
     ASSERT_TRUE(full.has_value());
-    EXPECT_EQ(4u, full->size());
+    EXPECT_EQ(TlsCertificateChain::kMaxCerts, full->size());
 
     // One over capacity is a configuration error.
-    const std::string five = four + certfix::kRootUnrelatedPem;
-    auto over = TlsCertificateChain::parse_pem_bundle({five.data(), five.size()});
+    const std::string over_pem = full_pem + certfix::kRootUnrelatedPem;
+    auto over = TlsCertificateChain::parse_pem_bundle({over_pem.data(), over_pem.size()});
     ASSERT_FALSE(over.has_value());
     EXPECT_EQ(common::IoErr::MessageTooLarge, over.error());
 

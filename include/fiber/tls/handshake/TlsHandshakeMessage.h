@@ -243,14 +243,14 @@ struct TlsEncryptedExtensions {
 // vectors are structurally walked but not extracted (we negotiate no cert
 // extensions). ----
 struct TlsCertificate13 {
-    static constexpr std::size_t kMaxEntries = 4; // parity with the 02b chain cap
+    static constexpr std::size_t kMaxEntries = 10; // parity with TlsCertificateChain::kMaxCerts
     std::string_view certificate_request_context{}; // empty in the initial handshake
     std::span<const std::uint8_t> certs[kMaxEntries]{};
     std::size_t cert_count = 0;
 };
 
 struct TlsCertificate12 {
-    static constexpr std::size_t kMaxEntries = 4;
+    static constexpr std::size_t kMaxEntries = 10; // parity with TlsCertificateChain::kMaxCerts
     std::span<const std::uint8_t> certs[kMaxEntries]{};
     std::size_t cert_count = 0;
 };

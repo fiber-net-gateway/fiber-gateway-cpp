@@ -707,6 +707,32 @@ TEST(TlsClientHandshake13Failure, HostnameMismatchSendsBadCertificate) {
     });
 }
 
+// A server chain longer than four certificates (a sent root plus repeated
+// intermediates here) must still verify: real chains exceed four entries.
+TEST(TlsClientHandshake13Full, LongServerChainAccepted) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server = BoringServer::make(ServerOptions{});
+        ASSERT_NE(nullptr, server);
+        // leaf + intermediate (from make) + 3 intermediates + root = 6 entries.
+        for (int i = 0; i < 3; ++i) {
+            X509 *intermediate = load_cert(certfix::kIntermediateRsaPem);
+            ASSERT_NE(nullptr, intermediate);
+            ASSERT_EQ(1, SSL_add0_chain_cert(server->ssl(), intermediate));
+        }
+        X509 *root = load_cert(certfix::kRootRsaPem);
+        ASSERT_NE(nullptr, root);
+        ASSERT_EQ(1, SSL_add0_chain_cert(server->ssl(), root));
+
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+        DriveLog log;
+        ASSERT_TRUE(drive(*server, engine, false, log));
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(6u, state.peer_chain.size());
+    });
+}
+
 TEST(TlsClientHandshake13Failure, TamperedSealedRecordFailsAuthentication) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         auto server = BoringServer::make(ServerOptions{});

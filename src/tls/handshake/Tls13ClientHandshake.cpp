@@ -14,6 +14,10 @@
 
 namespace fiber::tls {
 
+// Every decoded Certificate message must fit a TlsCertificateChain.
+static_assert(TlsCertificate13::kMaxEntries <= TlsCertificateChain::kMaxCerts);
+static_assert(TlsCertificate12::kMaxEntries <= TlsCertificateChain::kMaxCerts);
+
 namespace {
 
 constexpr std::size_t kServerCvCtxLen = sizeof("TLS 1.3, server CertificateVerify") - 1;
