@@ -207,6 +207,20 @@ void Tls12ClientHandshake::handle_certificate_12(std::span<const std::uint8_t> b
     peer_chain_ = std::move(chain).value();
     feed12(TlsHandshakeType::Certificate, body);
 
+    // The leaf must fit the suite's auth half (BoringSSL
+    // ssl_check_leaf_certificate): RSA suites need an RSA key, ECDSA suites
+    // an EC or Ed25519 one (RFC 8422 §5.1). The SKE check alone cannot catch
+    // an ECDHE-RSA suite over an EC leaf whose SKE is ECDSA-signed.
+    const auto leaf_key = peer_chain_.leaf().public_key();
+    if (!leaf_key.has_value()) {
+        fail(TlsAlertDesc::InternalError);
+        return;
+    }
+    if ((leaf_key->key_kind() == TlsKeyKind::Rsa) != (suite_info()->auth == TlsSuiteAuth::Rsa)) {
+        fail(TlsAlertDesc::IllegalParameter);
+        return;
+    }
+
     if (cfg_.verify_peer) {
         // The check name is check_host when set, else the SNI send name
         // (09 §4.3: the net layer's server_name/verify_name split).
