@@ -1,7 +1,8 @@
 # TLS 自研实现 · 11 客户端兼容老服务器：1.2 CBC 与静态 RSA 套件
 
 日期：2026-09-27
-状态：**设计稿（未实现）**
+分支：`feat/tls-legacy-client-suites`
+状态：**已实现（2026-09-27；§13 的 #1–#7，#8 可选项未做。实现记录见 §16）**
 
 ## 1. 目标与边界
 
@@ -584,3 +585,19 @@ BoringSSL 的 `HMAC` + `EVP_aes_*_cbc` 手工构造/拆解记录，否则就是�
 | **合计** | **~410** | **~850** |
 
 预计 3–4 个工作日（含 interop 与 fuzz 回放）。
+
+## 16. 实现记录（与设计稿的差异）
+
+- **方向参数一路传到 1.3**：除 `swap_cipher_12` 外，1.3 两侧的 `swap_cipher` 也加了
+  `TlsRecordDirection` 参数，所有调用点按 `read_cipher()` / `write_cipher()` 显式传
+  Open / Seal；测试里的 `init_cipher` 辅助函数默认 Seal（AEAD 忽略方向），CBC 用例显式传。
+- **CBC 记录测试单独成文件** `tests/TlsRecordCipherCbcTest.cpp`：参考实现用 `AES_cbc_encrypt`
+  + `HMAC` 手工拼记录，与 `EVP_aead_*_tls` 不共享代码；另含 ASan 下由 fuzz 构建覆盖的
+  move 语义（`tls_connection_fuzzer` 新增 config bits 2-3 选择 CBC 记录套件）。
+- **AD 去重**（§6.8）落为 `write_ad12_prefix()`，AEAD 与 CBC 共用。
+- **interop 脚本读取协商结果的方式**：`s_server -www` 页面的 `New, <ver>, Cipher is <c>`
+  打印的是套件的**最低**协议版本（`SSL_CIPHER_get_version`：SHA-1 CBC 套件为 TLSv1.0、
+  `AES128-SHA` 为 SSLv3），不是会话版本。脚本改为优先读 `SSL_SESSION_print` 的
+  `Protocol  :` / `Cipher    :` 两行，`New,` 行只作回退。结果：112/112（OpenSSL 3.0.13）。
+- **§9.4（放宽 renegotiation_info）未做**：目标服务器支持 TLS 1.2，按设计遇到再加。
+
