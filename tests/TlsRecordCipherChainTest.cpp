@@ -26,6 +26,7 @@ using fiber::mem::IoBufNodePool;
 using fiber::tls::TlsCipherSuiteId;
 using fiber::tls::TlsContentType;
 using fiber::tls::TlsRecordCipher;
+using fiber::tls::TlsRecordDirection;
 using fiber::tls::TlsRecordProtectionKind;
 
 struct KindVec {
@@ -72,8 +73,9 @@ std::vector<std::uint8_t> ramp(std::size_t len, std::uint8_t seed) {
     return out;
 }
 
-void init_cipher(TlsRecordCipher &cipher, const KindVec &v) {
-    EXPECT_TRUE(cipher.init(v.suite, v.kind, v.key, v.iv).has_value());
+// The AEAD suites ignore the direction; CBC tests pass it explicitly.
+void init_cipher(TlsRecordCipher &cipher, const KindVec &v, TlsRecordDirection direction = TlsRecordDirection::Seal) {
+    EXPECT_TRUE(cipher.init(v.suite, v.kind, direction, v.key, v.iv).has_value());
 }
 
 bool is_tls12(const TlsRecordCipher &cipher) { return cipher.kind() == TlsRecordProtectionKind::Tls12; }

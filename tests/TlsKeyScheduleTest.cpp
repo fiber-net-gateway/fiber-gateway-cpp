@@ -356,10 +356,12 @@ TEST(Tls13TrafficKeys, Rfc8448Section3KeysProtectRecords) {
 
     TlsRecordCipher writer, reader;
     ASSERT_TRUE(writer.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13,
-                            {keys->key.data(), keys->key_len}, {keys->iv.data(), keys->iv_len})
+                            TlsRecordDirection::Seal, {keys->key.data(), keys->key_len},
+                            {keys->iv.data(), keys->iv_len})
                         .has_value());
     ASSERT_TRUE(reader.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13,
-                            {keys->key.data(), keys->key_len}, {keys->iv.data(), keys->iv_len})
+                            TlsRecordDirection::Open, {keys->key.data(), keys->key_len},
+                            {keys->iv.data(), keys->iv_len})
                         .has_value());
 
     const std::vector<std::uint8_t> first = ramp(5, 0);
@@ -391,7 +393,8 @@ TEST(Tls13TrafficKeys, Rfc8448Section3KeysProtectRecords) {
     // A fresh reader (seq 0) cannot open the seq-1 record: nonce binding.
     TlsRecordCipher desynced;
     ASSERT_TRUE(desynced.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13,
-                              {keys->key.data(), keys->key_len}, {keys->iv.data(), keys->iv_len})
+                              TlsRecordDirection::Open, {keys->key.data(), keys->key_len},
+                              {keys->iv.data(), keys->iv_len})
                         .has_value());
     auto o3 = desynced.open(TlsContentType::ApplicationData, 0x0303, static_cast<std::uint16_t>(sealed2.size()),
                             sealed2, out);
@@ -527,16 +530,18 @@ TEST(Tls12KeyBlock, DirectionalMaterialPinnedByRecordCipher) {
     ASSERT_TRUE(keys.has_value());
 
     TlsRecordCipher writer, peer_reader, wrong_reader;
-    ASSERT_TRUE(writer.init(suite, TlsRecordProtectionKind::Tls12, {keys->client.key.data(), keys->client.key_len},
+    ASSERT_TRUE(writer.init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Seal,
+                            {keys->client.key.data(), keys->client.key_len},
                             {keys->client.iv.data(), keys->client.iv_len})
                         .has_value());
     ASSERT_TRUE(peer_reader
-                        .init(suite, TlsRecordProtectionKind::Tls12, {keys->client.key.data(), keys->client.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Open,
+                              {keys->client.key.data(), keys->client.key_len},
                               {keys->client.iv.data(), keys->client.iv_len})
                         .has_value());
     ASSERT_TRUE(wrong_reader
-                        .init(suite, TlsRecordProtectionKind::Tls12, {keys->server.key.data(), keys->server.key_len},
-                              {keys->server.iv.data(), 4})
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Open,
+                              {keys->server.key.data(), keys->server.key_len}, {keys->server.iv.data(), 4})
                         .has_value());
 
     const auto plain = ramp(40, 0xAA);

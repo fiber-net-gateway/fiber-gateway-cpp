@@ -39,8 +39,9 @@ namespace {
 using namespace fiber::tls;
 
 bool init_cipher(TlsRecordCipher &cipher, TlsCipherSuiteId suite, TlsRecordProtectionKind kind,
-                 const TlsTrafficKeys &keys) {
-    return cipher.init(suite, kind, {keys.key.data(), keys.key_len}, {keys.iv.data(), keys.iv_len}).has_value();
+                 TlsRecordDirection direction, const TlsTrafficKeys &keys) {
+    return cipher.init(suite, kind, direction, {keys.key.data(), keys.key_len}, {keys.iv.data(), keys.iv_len})
+            .has_value();
 }
 
 TlsSecret fixed_secret(std::uint8_t seed, std::size_t len) {
@@ -80,9 +81,11 @@ bool make_setup(bool tls12, bool server, Setup &out) {
         out.state.client_app_secret = TlsSecret::from_bytes(client_app.bytes());
         out.state.server_app_secret = TlsSecret::from_bytes(server_app.bytes());
         out.peer_secret = TlsSecret::from_bytes((server ? client_app : server_app).bytes());
-        return init_cipher(out.state.write_cipher, out.suite, TlsRecordProtectionKind::Tls13, ours) &&
-               init_cipher(out.state.read_cipher, out.suite, TlsRecordProtectionKind::Tls13, peers) &&
-               init_cipher(out.peer_write, out.suite, TlsRecordProtectionKind::Tls13, peers);
+        return init_cipher(out.state.write_cipher, out.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal,
+                           ours) &&
+               init_cipher(out.state.read_cipher, out.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Open,
+                           peers) &&
+               init_cipher(out.peer_write, out.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal, peers);
     }
     out.tls13 = false;
     out.suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256;
@@ -99,9 +102,11 @@ bool make_setup(bool tls12, bool server, Setup &out) {
     const TlsTrafficKeys &peers = server ? block->client : block->server;
     out.state.version = TlsProtocolVersion::Tls12;
     out.state.suite = out.suite;
-    return init_cipher(out.state.write_cipher, out.suite, TlsRecordProtectionKind::Tls12, ours) &&
-           init_cipher(out.state.read_cipher, out.suite, TlsRecordProtectionKind::Tls12, peers) &&
-           init_cipher(out.peer_write, out.suite, TlsRecordProtectionKind::Tls12, peers);
+    return init_cipher(out.state.write_cipher, out.suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Seal,
+                       ours) &&
+           init_cipher(out.state.read_cipher, out.suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Open,
+                       peers) &&
+           init_cipher(out.peer_write, out.suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Seal, peers);
 }
 
 std::vector<std::uint8_t> seal(Setup &setup, std::uint8_t inner, std::span<const std::uint8_t> plain) {
@@ -139,7 +144,7 @@ void mirror_key_update(Setup &setup, std::uint8_t inner, std::span<const std::ui
     }
     auto keys = tls13_traffic_keys(*next, setup.suite);
     TlsRecordCipher fresh;
-    if (keys && init_cipher(fresh, setup.suite, TlsRecordProtectionKind::Tls13, *keys)) {
+    if (keys && init_cipher(fresh, setup.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal, *keys)) {
         setup.peer_secret = std::move(*next);
         setup.peer_write = std::move(fresh);
     }

@@ -23,6 +23,11 @@ namespace fiber::tls {
 // The AEAD itself is absorbed by EVP_AEAD_CTX.
 enum class TlsRecordProtectionKind : std::uint8_t { Tls13, Tls12 };
 
+// Which way an instance protects records. Every instance serves exactly one
+// direction (see below); the 1.2 CBC AEADs additionally bind it at init
+// (EVP_AEAD_CTX_init_with_direction), the AEAD suites ignore it.
+enum class TlsRecordDirection : std::uint8_t { Seal, Open };
+
 // Record-protection primitive: raw key material + byte ranges in, protected
 // / restored byte ranges out. One instance per DIRECTION per key epoch
 // (RFC 8446 §5.2 / RFC 5246 §6.2.3.3): the suite, key and iv are frozen at
@@ -85,13 +90,13 @@ public:
         std::size_t plain_len = 0; // actual plaintext length (1.3: padding stripped)
     };
 
-    // Freezes (suite, kind, key, iv). The key material is copied into the
-    // EVP_AEAD_CTX; the caller may drop the source spans right after. Fails
-    // with IoErr::Invalid when the suite/kind pairing is not one of the nine
+    // Freezes (suite, kind, direction, key, iv). The key material is copied
+    // into the EVP_AEAD_CTX; the caller may drop the source spans right after.
+    // Fails with IoErr::Invalid when the suite/kind pairing is not one of the
     // implemented combinations or the key/iv length mismatches. Single-shot:
     // re-init of a live instance is a contract violation.
     [[nodiscard]] common::IoResult<void> init(TlsCipherSuiteId suite, TlsRecordProtectionKind kind,
-                                              std::span<const std::uint8_t> key,
+                                              TlsRecordDirection direction, std::span<const std::uint8_t> key,
                                               std::span<const std::uint8_t> iv) noexcept;
 
     // ---- size computation (pure; callers size their buffers from these) ----
@@ -168,6 +173,7 @@ public:
     [[nodiscard]] std::uint64_t sequence() const noexcept { return seq_; }
     [[nodiscard]] TlsCipherSuiteId suite() const noexcept { return suite_; }
     [[nodiscard]] TlsRecordProtectionKind kind() const noexcept { return kind_; }
+    [[nodiscard]] TlsRecordDirection direction() const noexcept { return direction_; }
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 
 private:
@@ -176,6 +182,7 @@ private:
     EVP_AEAD_CTX aead_ctx_{}; // zeroed == uninitialized; cleanup-safe
     TlsCipherSuiteId suite_ = TlsCipherSuiteId::TlsAes128GcmSha256;
     TlsRecordProtectionKind kind_ = TlsRecordProtectionKind::Tls13;
+    TlsRecordDirection direction_ = TlsRecordDirection::Seal;
     std::array<std::uint8_t, 12> iv_{}; // 1.3 static iv (12) / 1.2 iv (GCM 4, ChaCha 12)
     std::uint8_t explicit_nonce_len_ = 0; // 1.2 GCM: 8; 1.3 & 1.2 ChaCha: 0
     std::uint64_t seq_ = 0;

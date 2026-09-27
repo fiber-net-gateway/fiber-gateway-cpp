@@ -159,7 +159,7 @@ void Tls13ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
             return;
         }
         ctx_.set_quic_level(TlsQuicLevel::Handshake);
-    } else if (!swap_cipher(ctx_.read_cipher(), server_hs_)) {
+    } else if (!swap_cipher(ctx_.read_cipher(), TlsRecordDirection::Open, server_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -635,7 +635,7 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
             fail(TlsAlertDesc::InternalError);
             return;
         }
-    } else if (!swap_cipher(ctx_.read_cipher(), server_app0_)) {
+    } else if (!swap_cipher(ctx_.read_cipher(), TlsRecordDirection::Open, server_app0_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -656,7 +656,7 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
         }
     }
     early_.closed = true;
-    if (cfg_.quic == nullptr && !swap_cipher(ctx_.write_cipher(), client_hs_)) {
+    if (cfg_.quic == nullptr && !swap_cipher(ctx_.write_cipher(), TlsRecordDirection::Seal, client_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -703,7 +703,7 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
         // level advances (nothing follows from the client at 1-RTT today,
         // but the tail contract stays uniform).
         ctx_.set_quic_level(TlsQuicLevel::Application);
-    } else if (!swap_cipher(ctx_.write_cipher(), client_app0_)) {
+    } else if (!swap_cipher(ctx_.write_cipher(), TlsRecordDirection::Seal, client_app0_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }

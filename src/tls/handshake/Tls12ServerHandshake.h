@@ -143,9 +143,10 @@ private:
     // The 1.2 key_block handoff: a fresh cipher instance over one direction's
     // sliced material (write side at our CCS, read side at the client's). The
     // cipher copies what it needs; kb12_ is wiped once BOTH directions hold it.
-    [[nodiscard]] bool swap_cipher_12(TlsRecordCipher &slot, const TlsTrafficKeys &keys) noexcept {
+    [[nodiscard]] bool swap_cipher_12(TlsRecordCipher &slot, TlsRecordDirection direction,
+                                      const TlsTrafficKeys &keys) noexcept {
         TlsRecordCipher fresh;
-        if (!fresh.init(suite_, TlsRecordProtectionKind::Tls12, {keys.key.data(), keys.key_len},
+        if (!fresh.init(suite_, TlsRecordProtectionKind::Tls12, direction, {keys.key.data(), keys.key_len},
                         {keys.iv.data(), keys.iv_len})
                      .has_value()) {
             return false;

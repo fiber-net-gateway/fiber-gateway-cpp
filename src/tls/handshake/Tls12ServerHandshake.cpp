@@ -242,7 +242,7 @@ void Tls12ServerHandshake::send_abbreviated_flight_12(const TlsClientHello &ch,
     }
 
     // ---- CCS + write-cipher swap ----
-    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), kb12_.server)) {
+    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), TlsRecordDirection::Seal, kb12_.server)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -423,7 +423,7 @@ void Tls12ServerHandshake::on_ccs() noexcept {
         case St::ExpectClientCcs12:
             // The client's one CCS switches the read side to the key_block
             // client keys; the client Fin is the first sealed record inbound.
-            if (!swap_cipher_12(ctx_.read_cipher(), kb12_.client)) {
+            if (!swap_cipher_12(ctx_.read_cipher(), TlsRecordDirection::Open, kb12_.client)) {
                 fail(TlsAlertDesc::InternalError);
                 return;
             }
@@ -646,7 +646,7 @@ bool Tls12ServerHandshake::send_final_flight_12() noexcept {
     }
 
     // ---- CCS + write-cipher swap ----
-    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), kb12_.server)) {
+    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), TlsRecordDirection::Seal, kb12_.server)) {
         fail(TlsAlertDesc::InternalError);
         return false;
     }

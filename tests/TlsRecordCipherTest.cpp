@@ -29,6 +29,7 @@ namespace {
 using fiber::tls::TlsCipherSuiteId;
 using fiber::tls::TlsContentType;
 using fiber::tls::TlsRecordCipher;
+using fiber::tls::TlsRecordDirection;
 using fiber::tls::TlsRecordProtectionKind;
 
 std::vector<std::uint8_t> ramp(std::size_t len, std::uint8_t seed) {
@@ -197,8 +198,10 @@ const std::vector<SuiteVectors> &tls12_suites() {
     return suites;
 }
 
-void init_cipher(TlsRecordCipher &cipher, const SuiteVectors &v) {
-    EXPECT_TRUE(cipher.init(v.suite, v.kind, v.key, v.iv).has_value());
+// The AEAD suites ignore the direction; CBC tests pass it explicitly.
+void init_cipher(TlsRecordCipher &cipher, const SuiteVectors &v,
+                 TlsRecordDirection direction = TlsRecordDirection::Seal) {
+    EXPECT_TRUE(cipher.init(v.suite, v.kind, direction, v.key, v.iv).has_value());
 }
 
 const std::vector<SuiteVectors> &all_suites(); // defined below, beside the scatter tests
@@ -227,25 +230,29 @@ TEST(TlsRecordCipherInit, RejectsBadPairingAndLengths) {
         const auto iv4 = key_iv("00010203");
 
         TlsRecordCipher mixed;
-        EXPECT_EQ(mixed.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls12, key16, iv4).error(),
+        EXPECT_EQ(mixed.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls12,
+                             TlsRecordDirection::Seal, key16, iv4)
+                          .error(),
                   fiber::common::IoErr::Invalid);
-        EXPECT_EQ(mixed.init(TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsRecordProtectionKind::Tls13, key16, iv12)
+        EXPECT_EQ(mixed.init(TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsRecordProtectionKind::Tls13,
+                             TlsRecordDirection::Seal, key16, iv12)
                           .error(),
                   fiber::common::IoErr::Invalid);
 
         TlsRecordCipher bad_len;
-        EXPECT_EQ(
-                bad_len.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13, key_iv("0001"), iv12)
-                        .error(),
-                fiber::common::IoErr::Invalid);
-        EXPECT_EQ(bad_len.init(TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsRecordProtectionKind::Tls12, key16,
-                               key_iv("0001020304"))
+        EXPECT_EQ(bad_len.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13,
+                               TlsRecordDirection::Seal, key_iv("0001"), iv12)
+                          .error(),
+                  fiber::common::IoErr::Invalid);
+        EXPECT_EQ(bad_len.init(TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsRecordProtectionKind::Tls12,
+                               TlsRecordDirection::Seal, key16, key_iv("0001020304"))
                           .error(),
                   fiber::common::IoErr::Invalid);
         EXPECT_FALSE(bad_len.initialized());
 
         TlsRecordCipher good;
-        EXPECT_TRUE(good.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13, key16, iv12)
+        EXPECT_TRUE(good.init(TlsCipherSuiteId::TlsAes128GcmSha256, TlsRecordProtectionKind::Tls13,
+                              TlsRecordDirection::Seal, key16, iv12)
                             .has_value());
         EXPECT_TRUE(good.initialized());
         EXPECT_EQ(good.suite(), TlsCipherSuiteId::TlsAes128GcmSha256);

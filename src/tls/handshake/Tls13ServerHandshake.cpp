@@ -550,7 +550,7 @@ void Tls13ServerHandshake::send_server_flight(const TlsClientHello &ch, std::spa
             return;
         }
         ctx_.set_quic_level(TlsQuicLevel::Handshake);
-    } else if (!swap_cipher(ctx_.write_cipher(), server_hs_)) {
+    } else if (!swap_cipher(ctx_.write_cipher(), TlsRecordDirection::Seal, server_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -685,7 +685,7 @@ void Tls13ServerHandshake::send_server_flight(const TlsClientHello &ch, std::spa
             return;
         }
         ctx_.set_quic_level(TlsQuicLevel::Application);
-    } else if (!swap_cipher(ctx_.write_cipher(), server_app0_)) {
+    } else if (!swap_cipher(ctx_.write_cipher(), TlsRecordDirection::Seal, server_app0_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -707,7 +707,7 @@ void Tls13ServerHandshake::send_server_flight(const TlsClientHello &ch, std::spa
             st_ = St::WaitClientFin;
             return;
         }
-        if (!swap_cipher(ctx_.read_cipher(), client_early_)) {
+        if (!swap_cipher(ctx_.read_cipher(), TlsRecordDirection::Open, client_early_)) {
             fail(TlsAlertDesc::InternalError);
             return;
         }
@@ -715,7 +715,7 @@ void Tls13ServerHandshake::send_server_flight(const TlsClientHello &ch, std::spa
         st_ = St::WaitEndOfEarlyData;
         return;
     }
-    if (cfg_.quic == nullptr && !swap_cipher(ctx_.read_cipher(), client_hs_)) {
+    if (cfg_.quic == nullptr && !swap_cipher(ctx_.read_cipher(), TlsRecordDirection::Open, client_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -900,7 +900,7 @@ void Tls13ServerHandshake::handle_end_of_early_data(std::span<const std::uint8_t
     }
     feed13(TlsHandshakeType::EndOfEarlyData, body);
     ctx_.disarm_early_data();
-    if (cfg_.quic == nullptr && !swap_cipher(ctx_.read_cipher(), client_hs_)) {
+    if (cfg_.quic == nullptr && !swap_cipher(ctx_.read_cipher(), TlsRecordDirection::Open, client_hs_)) {
         fail(TlsAlertDesc::InternalError); // QUIC: client_hs already exported at the SH
         return;
     }
@@ -940,7 +940,7 @@ void Tls13ServerHandshake::finish_1_3() noexcept {
         return;
     }
     resumption_master_ = std::move(resumption).value();
-    if (cfg_.quic == nullptr && !swap_cipher(ctx_.read_cipher(), client_app0_)) {
+    if (cfg_.quic == nullptr && !swap_cipher(ctx_.read_cipher(), TlsRecordDirection::Open, client_app0_)) {
         fail(TlsAlertDesc::InternalError); // QUIC: client_app0 already exported at the flight tail
         return;
     }
