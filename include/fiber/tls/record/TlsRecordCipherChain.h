@@ -33,7 +33,7 @@ namespace fiber::tls {
 // single-input-region contract).
 
 // Worst-case dst capacity for the open entry points below: the record minus a
-// 1.2 explicit nonce. The straddling path stages body+tag in dst and decrypts
+// 1.2 explicit nonce (GCM nonce / CBC IV). The straddling path stages body+tag in dst and decrypts
 // in place; a contiguous record uses less (the capacity still must be sized
 // for the worst case — the path choice is data-dependent).
 [[nodiscard]] std::size_t tls_record_open_dst_size(const TlsRecordCipher &cipher, std::uint16_t length) noexcept;
@@ -60,10 +60,11 @@ struct TlsRecordOpenChainResult {
 // Open, in place: decrypts into the record's own readable bytes — only the
 // record's own region is ever written, so NO unique() requirement on the node
 // storage — then shrinks the view (1.3: trim the tag+type+padding; 1.2: the
-// explicit nonce is consumed and the tag trimmed). Eligible whenever the
-// ciphertext body and the tag are each contiguous (the body may end at a node
-// boundary with the tag in the next node); otherwise degrades to transcribe
-// into dst.
+// explicit nonce is consumed and the tag — CBC: the MAC and padding — is
+// trimmed). Eligible whenever the ciphertext body and the tag are each
+// contiguous (the body may end at a node boundary with the tag in the next
+// node; CBC has no detached tag, so its whole body past the IV must be
+// contiguous); otherwise degrades to transcribe into dst.
 [[nodiscard]] TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsContentType outer_type,
                                                                 std::uint16_t legacy_version, std::uint16_t length,
                                                                 mem::IoBufChain &payload,
@@ -90,8 +91,9 @@ struct TlsRecordSealChainResult {
 
 // Seal, in place with external prefix/suffix: the ciphertext overwrites the
 // plaintext nodes (length preserved), 1.2's explicit nonce goes to dst_header
-// (8 bytes; must be EMPTY for 1.3 — it has no wire prefix) and the tag to
-// dst_tailer (1.3: 17 bytes, encrypted inner type || tag; 1.2: 16 bytes).
+// (GCM 8 bytes, CBC the 16-byte IV; must be EMPTY for 1.3 — it has no wire
+// prefix) and the tag to dst_tailer (1.3: 17 bytes, encrypted inner type ||
+// tag; 1.2 AEAD: 16 bytes; CBC: the encrypted MAC tail || padding, up to 48).
 // Eligible whenever the plaintext is contiguous in one node; otherwise
 // degrades to transcribe into dst (sized by seal_output_size()).
 [[nodiscard]] TlsRecordSealChainResult tls_record_seal_in_place(TlsRecordCipher &cipher, TlsContentType inner_type,

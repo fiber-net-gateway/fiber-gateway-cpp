@@ -39,10 +39,13 @@ tls12_extended_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_
 
 // Per-direction write material sliced from
 // PRF(master, "key expansion", server_random || client_random)
-// (seed order deliberately REVERSED vs the master secret):
-// client_key || server_key || client_fixed_iv || server_fixed_iv, where the
-// fixed IV length is suite-shaped — 4 (RFC 5288 GCM) or 12 (RFC 7905 §2
-// ChaCha20, whose whole nonce is implicit).
+// (seed order deliberately REVERSED vs the master secret), in RFC 5246 §6.3
+// order: client_mac || server_mac || client_key || server_key ||
+// client_fixed_iv || server_fixed_iv. The MAC keys exist only for CBC suites
+// (empty for AEADs) and ride in front of each direction's key (the CBC
+// record cipher takes MAC key || encryption key); the fixed IV length is
+// suite-shaped — 4 (RFC 5288 GCM), 12 (RFC 7905 §2 ChaCha20, whose whole
+// nonce is implicit) or 0 (CBC, whose IV is explicit per record).
 struct Tls12WriteKeys {
     TlsTrafficKeys client;
     TlsTrafficKeys server;

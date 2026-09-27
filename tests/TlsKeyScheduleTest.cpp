@@ -562,13 +562,68 @@ TEST(Tls12KeyBlock, DirectionalMaterialPinnedByRecordCipher) {
     EXPECT_EQ(TlsRecordCipher::Status::AuthFail, o2.status);
 }
 
+// CBC suites (feature/tls/11): RFC 5246 §6.3 puts the MAC keys first and
+// derives no IV (TLS 1.1+ carries a fresh one in every record); each
+// direction's cipher key is its MAC key || AES key.
+TEST(Tls12KeyBlock, CbcLayoutMatchesReference) {
+    const struct {
+        TlsCipherSuiteId suite;
+        std::uint8_t mac_len;
+        std::uint8_t key_len;
+    } cases[] = {
+            {TlsCipherSuiteId::EcdheRsaAes128CbcSha, 20, 16},
+            {TlsCipherSuiteId::EcdheRsaAes256CbcSha, 20, 32},
+            {TlsCipherSuiteId::EcdheRsaAes128CbcSha256, 32, 16},
+    };
+    for (const auto &c: cases) {
+        const auto z = ramp(32, 0x61);
+        const auto cr = ramp(32, 0x71);
+        const auto sr = ramp(32, 0x81);
+        auto master = tls12_master_secret(c.suite, z, cr, sr);
+        ASSERT_TRUE(master.has_value());
+
+        const std::size_t mac = c.mac_len;
+        const std::size_t key = c.key_len;
+        const auto ref = ref_p_hash(TlsHashAlgorithm::Sha256, master->bytes(),
+                                    label_seed("key expansion", concat({sr, cr})), 2 * mac + 2 * key);
+        auto keys = tls12_key_block(c.suite, *master, cr, sr);
+        ASSERT_TRUE(keys.has_value());
+        EXPECT_EQ(0u, keys->client.iv_len);
+        EXPECT_EQ(0u, keys->server.iv_len);
+        ASSERT_EQ(mac + key, keys->client.key_len);
+        ASSERT_EQ(mac + key, keys->server.key_len);
+        expect_eq_bytes({keys->client.key.data(), mac}, {ref.data(), mac});
+        expect_eq_bytes({keys->server.key.data(), mac}, {ref.data() + mac, mac});
+        expect_eq_bytes({keys->client.key.data() + mac, key}, {ref.data() + 2 * mac, key});
+        expect_eq_bytes({keys->server.key.data() + mac, key}, {ref.data() + 2 * mac + key, key});
+
+        // The sliced material drives the record cipher in both directions.
+        TlsRecordCipher writer, reader;
+        ASSERT_TRUE(writer.init(c.suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Seal,
+                                {keys->client.key.data(), keys->client.key_len}, {})
+                            .has_value());
+        ASSERT_TRUE(reader.init(c.suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Open,
+                                {keys->client.key.data(), keys->client.key_len}, {})
+                            .has_value());
+        const auto plain = ramp(40, 0x3C);
+        std::vector<std::uint8_t> sealed(writer.seal_output_size(plain.size()));
+        ASSERT_EQ(TlsRecordCipher::Status::Ok, writer.seal(TlsContentType::ApplicationData, plain, sealed).status);
+        std::vector<std::uint8_t> out(reader.open_output_size(sealed.size()));
+        const auto opened = reader.open(TlsContentType::ApplicationData, 0x0303,
+                                        static_cast<std::uint16_t>(sealed.size()), sealed, out);
+        ASSERT_EQ(TlsRecordCipher::Status::Ok, opened.status);
+        ASSERT_EQ(plain.size(), opened.plain_len);
+        EXPECT_EQ(0, std::memcmp(out.data(), plain.data(), plain.size()));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Suite registry
 // ---------------------------------------------------------------------------
 
-TEST(TlsSuiteRegistry, CoversTheNineImplementedSuites) {
+TEST(TlsSuiteRegistry, CoversTheImplementedSuites) {
     EXPECT_EQ(nullptr, tls_suite_info(static_cast<TlsCipherSuiteId>(0x0000)));
-    EXPECT_EQ(9u, kTlsSuiteRegistry.size());
+    EXPECT_EQ(14u, kTlsSuiteRegistry.size());
 
     const auto check = [](TlsCipherSuiteId suite, TlsAeadAlgorithm aead, TlsHashAlgorithm hash, std::uint8_t key_len,
                           bool tls13) {
@@ -579,6 +634,12 @@ TEST(TlsSuiteRegistry, CoversTheNineImplementedSuites) {
         EXPECT_EQ(hash, info->hash);
         EXPECT_EQ(key_len, info->key_len);
         EXPECT_EQ(tls13, info->is_tls13);
+    };
+    const auto check_12 = [](TlsCipherSuiteId suite, TlsSuiteKx kx, TlsSuiteAuth auth) {
+        const TlsSuiteInfo *info = tls_suite_info(suite);
+        ASSERT_NE(nullptr, info);
+        EXPECT_EQ(kx, info->kx);
+        EXPECT_EQ(auth, info->auth);
     };
     check(TlsCipherSuiteId::TlsAes128GcmSha256, TlsAeadAlgorithm::Aes128Gcm, TlsHashAlgorithm::Sha256, 16, true);
     check(TlsCipherSuiteId::TlsAes256GcmSha384, TlsAeadAlgorithm::Aes256Gcm, TlsHashAlgorithm::Sha384, 32, true);
@@ -594,6 +655,30 @@ TEST(TlsSuiteRegistry, CoversTheNineImplementedSuites) {
           32, false);
     check(TlsCipherSuiteId::EcdheRsaChacha20Poly1305, TlsAeadAlgorithm::Chacha20Poly1305, TlsHashAlgorithm::Sha256, 32,
           false);
+    // The legacy CBC set (feature/tls/11): the PRF stays SHA-256; the record
+    // MAC hash is the algorithm's.
+    check(TlsCipherSuiteId::EcdheEcdsaAes128CbcSha, TlsAeadAlgorithm::Aes128CbcSha1, TlsHashAlgorithm::Sha256, 16,
+          false);
+    check(TlsCipherSuiteId::EcdheEcdsaAes256CbcSha, TlsAeadAlgorithm::Aes256CbcSha1, TlsHashAlgorithm::Sha256, 32,
+          false);
+    check(TlsCipherSuiteId::EcdheRsaAes128CbcSha, TlsAeadAlgorithm::Aes128CbcSha1, TlsHashAlgorithm::Sha256, 16, false);
+    check(TlsCipherSuiteId::EcdheRsaAes256CbcSha, TlsAeadAlgorithm::Aes256CbcSha1, TlsHashAlgorithm::Sha256, 32, false);
+    check(TlsCipherSuiteId::EcdheRsaAes128CbcSha256, TlsAeadAlgorithm::Aes128CbcSha256, TlsHashAlgorithm::Sha256, 16,
+          false);
+    EXPECT_EQ(20, tls_record_mac_len(TlsAeadAlgorithm::Aes128CbcSha1));
+    EXPECT_EQ(20, tls_record_mac_len(TlsAeadAlgorithm::Aes256CbcSha1));
+    EXPECT_EQ(32, tls_record_mac_len(TlsAeadAlgorithm::Aes128CbcSha256));
+    EXPECT_EQ(0, tls_record_mac_len(TlsAeadAlgorithm::Aes128Gcm));
+
+    check_12(TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Rsa);
+    check_12(TlsCipherSuiteId::EcdheEcdsaChacha20Poly1305, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Ecdsa);
+    check_12(TlsCipherSuiteId::EcdheEcdsaAes256CbcSha, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Ecdsa);
+    check_12(TlsCipherSuiteId::EcdheRsaAes128CbcSha256, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Rsa);
+    for (const TlsSuiteInfo &info: kTlsSuiteRegistry) {
+        // The 1.3 suites name no kx/auth half; every 1.2 suite names both.
+        EXPECT_EQ(info.is_tls13, info.kx == TlsSuiteKx::None);
+        EXPECT_EQ(info.is_tls13, info.auth == TlsSuiteAuth::None);
+    }
 }
 
 // ---------------------------------------------------------------------------
