@@ -86,6 +86,15 @@ co_return co_await (*opened)->send_request_header(head, end_stream, timeout);
    - **`when_any` 保持 `destroy_losers()`**：除非发现某个 awaiter 无法在析构中完成撤回，才为它增加区分于 cancel 的 `detach()`；不要为了对称性预引入。
    - **`Task<T>::operator co_await() &&` ref-qualifier（`Task.h:110,181`）仍然建议做（2026-09-27 复核修正：动机表述与迁移面）**：这与取消无关，但原动机不准确——完成后的 Task 二次 await 并不会 panic：`result_` 是 optional，`return_value` 之后恒 engaged（`Task.h:47-64`），二次 await 拿到的是 moved-from 值，属静默数据 bug 而非崩溃。`&&` 真正在编译期挡住的是三类用法：(a) lvalue 重 await（上述 moved-from 结果）；(b) await moved-from Task——`handle_` 为 null，`await_resume` 里 `handle.promise()` 空解引用，这才是运行期崩溃；(c) 两处并发 await 同一 lvalue——`set_continuation` 被覆盖，第一个父协程永不恢复。迁移面已全库扫描：src/apps/tests/include 无任何 lvalue Task await（现存 `co_await connect_operation` / `co_await waiter` / `co_await saved_combination` 分别是 ConnectAwaiter、WaitAwaiter、WhenAnyAwaiter，不受影响），可零改动落地；`Task::select() &&`（`Task.h:112-113,183-184`）已经示范了该约束的写法。
 
+**落地（2026-09-27）**：四项建议全部实施，2444/2444 ctest 绿（4 个 interop 环境性跳过）。
+
+1. **契约文档化**：四条 Destruction-Cancels 规则写入 `Awaitable.h` 的 `SelectableAwaiter` concept 注释；`feature/coroutine.md` 新增 "Destruction-Cancels Contract" 章节（取消模型、四条规则、与 CancellableAwaiter/rvalue-only await 的关系）。
+2. **`CancellableAwaiter`**：定义于 `Awaitable.h`——不要求 `SelectableAwaiter`（否则排除掉唯一生产实现 `ConnectAwaiter`，它没有 `completed()`），要求 `Awaiter<T> + nothrow dtor + cancel() noexcept`，注释钉死 must-resume 契约。`TimeoutAwaiter::cancel()` 的 ad-hoc requires 换用该 concept。`Watch::NextAwaiter::cancel()` 改为私有 `retract()`（仅析构调用），使其不再满足 concept。
+3. **destruction-safety 回归**：新增 `tests/AwaiterDestructionTest.cpp`（3 用例 + 4 static_assert）：timeout-over-Task 挂在 sleep 的整帧销毁（善后窗口长于被销毁任务自身的 sleep deadline，漏撤 timer 即 UAF）、timeout 销毁挂起的 `RWFd::WaitAwaiter`（内层 500ms timer + 订阅双撤销、迟到字节无 waiter、fd 后续可用）、timeout 销毁挂在 `ConnectAwaiter` 的 Task（poller 注册数回基线断言）。
+4. **`Task::operator co_await() &&`**：`Task.h` 两处加 `&&` + `& = delete`。落地中发现 6 处显式 `task.operator co_await()` 调用（`Http1ClientConnection.cpp` 的 IoAwaiter 手动 await + 5 个测试的手动启动 helper）——这正是编译期暴露出的“保留所有权的合法手动 await”形态，统一改为 `std::move(task).operator co_await()` 借用（operator 不改 Task，语义不变），并在 Task.h 注释中写明该逃生口。
+
+实施中的两个新发现（均已修）：`RWFd::WaitAwaiter` 没有 `completed()`，本就不进 when_any，其析构路径是 `timeout_for`（与 `HttpTransport` 生产用法一致），回归按此设计；`~ConnectAwaiter()` 因 `cancel_wait()` 未标 noexcept 而隐式 potentially-throwing，违反契约第 (iv) 条，已显式标 noexcept。
+
 ### 3.3 `SharedDnsCache2` 在 mutex 内隐式依赖 current EventLoop ✅ 已修复
 
 三个 upsert 路径都在持锁状态下调用 `event::EventLoop::current().now()`：
@@ -342,8 +351,8 @@ EventLoop 定时器、QUIC 重传等高频使用。intrusive 设计换来了 O(l
 
 ### 第一阶段（1-2 周，契约修复，不改 ABI）
 1. ~~`Deadline` 类型 + HTTP/3 timeout 修复与回归（3.1）；~~ 已完成（HTTP/3 exchange 层；通用 `Deadline` 类型待 3.2 一并收敛）；
-2. 文档化 Destruction-Cancels 契约 + 补齐 destruction-safety 回归缺口（fd 系 awaiter 与 timeout-over-Task，3.2）；
-3. `Task::operator co_await() &&`（3.2）；
+2. ~~文档化 Destruction-Cancels 契约 + 补齐 destruction-safety 回归缺口（fd 系 awaiter 与 timeout-over-Task，3.2）；~~ 已完成；
+3. ~~`Task::operator co_await() &&`（3.2）；~~ 已完成；
 4. ~~`SharedDnsCache2` upsert 显式传 `now`（3.3）；~~ 已完成；
 5. ~~`EventLoopGroup` 成员私有化（3.5）；~~ 已完成；
 6. `Interator -> Iterator` 改名（6.1）；
