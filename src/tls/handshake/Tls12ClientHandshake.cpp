@@ -69,7 +69,7 @@ void Tls12ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
         fail(TlsAlertDesc::HandshakeFailure);
         return;
     }
-    if (tls_client_suite_offer_index(sh.cipher_suite) == kTlsSuitePreference.size()) {
+    if (!tls_client_suite_offered(sh.cipher_suite)) {
         fail(TlsAlertDesc::IllegalParameter); // never offered
         return;
     }

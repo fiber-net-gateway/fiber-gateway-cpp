@@ -79,13 +79,15 @@ template<std::size_t N>
     return n;
 }
 
-[[nodiscard]] constexpr std::size_t tls_client_suite_offer_index(std::uint16_t raw) noexcept {
-    for (std::size_t i = 0; i < kTlsSuitePreference.size(); ++i) {
-        if (kTlsSuitePreference[i] == raw) {
-            return i;
+// Did the CH offer this suite? (The effective order is a permutation of
+// kTlsSuitePreference, so membership is order-blind.)
+[[nodiscard]] constexpr bool tls_client_suite_offered(std::uint16_t raw) noexcept {
+    for (const std::uint16_t offered: kTlsSuitePreference) {
+        if (offered == raw) {
+            return true;
         }
     }
-    return kTlsSuitePreference.size();
+    return false;
 }
 
 [[nodiscard]] constexpr bool tls_client_group_offered(std::uint16_t raw) noexcept {
