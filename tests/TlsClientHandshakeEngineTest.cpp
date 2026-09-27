@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "TlsCertFixtures.h"
+#include "tls/handshake/TlsClientHandshakeShared.h" // src-side header (tests may include it)
 
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
@@ -982,6 +983,69 @@ TEST(TlsClientHandshake12ByteFeed, OneByteAtATimeCompletes) {
         EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
         EXPECT_EQ(static_cast<std::uint16_t>(TlsCipherSuiteId::EcdheRsaAes128GcmSha256),
                   static_cast<std::uint16_t>(state.suite));
+    });
+}
+
+// A CertificateRequest may list far more signature schemes than we can sign
+// with — OpenSSL 3.0 sends 20 (this is its exact 1.2 list), the vector allows
+// 32767. Only our own schemes are kept (in our preference order); the list
+// length is never an error.
+TEST(TlsClientCrSigalgs, LongListKeepsOnlyOurSchemes) {
+    const std::vector<std::uint8_t> openssl_list{0x04, 0x03, 0x05, 0x03, 0x06, 0x03, 0x08, 0x07, 0x08, 0x08,
+                                                 0x08, 0x09, 0x08, 0x0a, 0x08, 0x0b, 0x08, 0x04, 0x08, 0x05,
+                                                 0x08, 0x06, 0x04, 0x01, 0x05, 0x01, 0x06, 0x01, 0x03, 0x03,
+                                                 0x03, 0x01, 0x03, 0x02, 0x04, 0x02, 0x05, 0x02, 0x06, 0x02};
+    const auto listed = [&](std::uint16_t code) {
+        for (std::size_t i = 0; i + 1 < openssl_list.size(); i += 2) {
+            if (((openssl_list[i] << 8) | openssl_list[i + 1]) == code) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto check = [&](const auto &ours) {
+        std::array<std::uint16_t, fiber::tls::kClientMaxCrSigalgs> kept{};
+        const std::size_t n = fiber::tls::tls_client_keep_cr_sigalgs(openssl_list, ours, kept);
+        std::size_t expected = 0;
+        for (const auto scheme: ours) {
+            if (listed(static_cast<std::uint16_t>(scheme))) {
+                ASSERT_LT(expected, n);
+                EXPECT_EQ(static_cast<std::uint16_t>(scheme), kept[expected]); // our order, ours only
+                ++expected;
+            }
+        }
+        EXPECT_EQ(expected, n);
+        EXPECT_GT(n, 0u);
+    };
+    check(fiber::tls::kTls12SignaturePreference);
+    check(fiber::tls::kTls13SignaturePreference);
+
+    std::array<std::uint16_t, fiber::tls::kClientMaxCrSigalgs> none{};
+    EXPECT_EQ(0u, fiber::tls::tls_client_keep_cr_sigalgs({}, fiber::tls::kTls12SignaturePreference, none));
+}
+
+// A 1.2 CertificateRequest whose list holds none of our schemes is "nothing
+// in common", not the absent-list "no constraint": our client refuses to sign
+// (handshake_failure) instead of picking a scheme the server never offered.
+TEST(TlsClientHandshake12Mtls, CrListWithoutOurSchemesFails) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server = BoringServer::make(ServerOptions{
+                .client_trust_pem = certfix::kRootRsaPem,
+                .require_client_cert = true,
+                .tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256",
+        });
+        ASSERT_NE(nullptr, server);
+        const std::uint16_t sha1_only[] = {SSL_SIGN_RSA_PKCS1_SHA1}; // not in our preference table
+        ASSERT_EQ(1, SSL_set_verify_algorithm_prefs(server->ssl(), sha1_only, 1));
+        ClientMaterial material;
+        ASSERT_NO_FATAL_FAILURE(material.load_client_credential());
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+        DriveLog log;
+        EXPECT_FALSE(drive(*server, engine, false, log));
+        EXPECT_TRUE(engine.failed());
+        EXPECT_EQ(TlsAlertDesc::HandshakeFailure, engine.failure_alert());
     });
 }
 

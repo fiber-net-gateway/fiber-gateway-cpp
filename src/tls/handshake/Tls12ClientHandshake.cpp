@@ -306,17 +306,14 @@ void Tls12ClientHandshake::handle_certificate_request_12(std::span<const std::ui
         fail(TlsAlertDesc::DecodeError);
         return;
     }
-    if (cr.signature_algorithms.size() % 2 != 0 || cr.signature_algorithms.size() / 2 > cr_sigalgs_.size()) {
+    if (cr.signature_algorithms.size() % 2 != 0) {
         fail(TlsAlertDesc::DecodeError);
         return;
     }
     feed12(TlsHandshakeType::CertificateRequest, body);
     cr12_received_ = true;
-    cr_sigalgs_n_ = cr.signature_algorithms.size() / 2; // 0 = absent = no constraint
-    for (std::size_t i = 0; i < cr_sigalgs_n_; ++i) {
-        cr_sigalgs_[i] =
-                static_cast<std::uint16_t>((cr.signature_algorithms[2 * i] << 8) | cr.signature_algorithms[2 * i + 1]);
-    }
+    cr_sigalgs_present_ = cr.has_signature_algorithms; // absent = no constraint
+    cr_sigalgs_n_ = tls_client_keep_cr_sigalgs(cr.signature_algorithms, kTls12SignaturePreference, cr_sigalgs_);
     // stays in ExpectCrShd12 — ServerHelloDone still terminates the flight
 }
 
@@ -421,7 +418,7 @@ bool Tls12ClientHandshake::send_client_flight_12() noexcept {
             if (!cfg_.client_key->supports(scheme, TlsProtocolVersion::Tls12)) {
                 continue;
             }
-            bool offered_by_cr = cr_sigalgs_n_ == 0; // absent list = no constraint
+            bool offered_by_cr = !cr_sigalgs_present_; // absent list = no constraint
             for (std::size_t i = 0; !offered_by_cr && i < cr_sigalgs_n_; ++i) {
                 offered_by_cr = cr_sigalgs_[i] == static_cast<std::uint16_t>(scheme);
             }
