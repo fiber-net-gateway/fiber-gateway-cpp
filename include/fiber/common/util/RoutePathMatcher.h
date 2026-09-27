@@ -4,17 +4,17 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <expected>
 #include <limits>
-#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace fiber::util {
 
-class RoutePatternError : public std::invalid_argument {
-public:
-    using std::invalid_argument::invalid_argument;
+struct RoutePatternError {
+    std::string message;
 };
 
 template<typename Handler>
@@ -212,13 +212,20 @@ public:
         nodes_.push_back(BuildNode{});
     }
 
-    void add_route(std::string_view pattern, BuilderPayload payload) {
-        ensure_mutable();
-        validate_ascii_pattern(pattern);
+    [[nodiscard]] std::expected<void, RoutePatternError> add_route(std::string_view pattern, BuilderPayload payload) {
+        assert(!complete_);
+        auto valid = validate_ascii_pattern(pattern);
+        if (!valid) {
+            return std::unexpected(std::move(valid.error()));
+        }
 
         payloads_.push_back(std::move(payload));
         const std::uint32_t payload_index = static_cast<std::uint32_t>(payloads_.size() - 1);
-        const std::uint32_t node_index = add_path(pattern, payloads_[payload_index]);
+        auto node_result = add_path(pattern, payloads_[payload_index]);
+        if (!node_result) {
+            return std::unexpected(std::move(node_result.error()));
+        }
+        const std::uint32_t node_index = *node_result;
         BuildNode &node = nodes_[node_index];
         if (node.id == kInvalidIndex) {
             node.id = next_node_id_++;
@@ -228,10 +235,11 @@ public:
                 .full_path_offset = append_text(pattern.data(), pattern.size()),
                 .full_path_size = static_cast<std::uint32_t>(pattern.size()),
         });
+        return {};
     }
 
     [[nodiscard]] RoutePathMatcher build() {
-        ensure_mutable();
+        assert(!complete_);
         complete_ = true;
 
         RoutePathMatcher matcher;
@@ -339,21 +347,16 @@ private:
         std::vector<MountedRoute> mounted_routes{};
     };
 
-    void ensure_mutable() const {
-        if (complete_) {
-            throw std::logic_error("route matcher builder already completed");
-        }
-    }
-
-    static void validate_ascii_pattern(std::string_view pattern) {
+    [[nodiscard]] static std::expected<void, RoutePatternError> validate_ascii_pattern(std::string_view pattern) {
         if (pattern.empty()) {
-            throw RoutePatternError("empty path pattern is not allowed");
+            return std::unexpected(RoutePatternError{"empty path pattern is not allowed"});
         }
         for (const unsigned char ch: pattern) {
             if ((ch & 0x80u) != 0) {
-                throw RoutePatternError("path pattern must use ASCII bytes only");
+                return std::unexpected(RoutePatternError{"path pattern must use ASCII bytes only"});
             }
         }
+        return {};
     }
 
     [[nodiscard]] std::uint32_t append_text(const char *data, std::size_t size) {
@@ -460,7 +463,8 @@ private:
         return created;
     }
 
-    [[nodiscard]] std::uint32_t add_path(std::string_view pattern, BuilderPayload &payload) {
+    [[nodiscard]] std::expected<std::uint32_t, RoutePatternError> add_path(std::string_view pattern,
+                                                                           BuilderPayload &payload) {
         const char *chars = pattern.data();
         const std::size_t length = pattern.size();
 
@@ -476,7 +480,7 @@ private:
                 std::uint32_t child_index = node_index;
                 if (wild == 2) {
                     if (ch != 0) {
-                        throw RoutePatternError("wildcard segment must be the last path segment");
+                        return std::unexpected(RoutePatternError{"wildcard segment must be the last path segment"});
                     }
                     child_index =
                             add_or_get_wildcard(node_index, chars + segment_start + 1, i - segment_start - 1, hash);

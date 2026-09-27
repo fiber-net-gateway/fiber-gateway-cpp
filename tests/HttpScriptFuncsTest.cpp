@@ -338,7 +338,7 @@ fiber::http::HttpHandler make_route_script_handler(CompiledRouteScript compiled,
     auto matcher = std::make_shared<fiber::util::RoutePathMatcher<std::uint32_t>>();
     TestRouteVarDefiner definer;
     fiber::util::RoutePathMatcher<std::uint32_t>::Builder<int, TestRouteVarDefiner> builder(definer);
-    builder.add_route(pattern, 0);
+    EXPECT_TRUE(builder.add_route(pattern, 0));
     *matcher = builder.build();
     auto script = compiled.script;
     auto const_package = compiled.const_package;

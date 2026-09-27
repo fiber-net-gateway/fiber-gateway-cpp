@@ -2,9 +2,6 @@
 #define FIBER_BUF_POOL_H
 
 #include <cstddef>
-#include <memory>
-#include <new>
-#include <type_traits>
 
 #include "../NonCopyable.h"
 #include "../NonMovable.h"
@@ -49,47 +46,6 @@ private:
     Block *current_ = nullptr;
     LargeBlock *large_head_ = nullptr;
     size_t block_size_ = 0;
-};
-
-template<typename T>
-class PoolAllocator {
-public:
-    using value_type = T;
-
-    PoolAllocator() noexcept = default;
-    explicit PoolAllocator(BufPool &pool) noexcept : pool_(&pool) {}
-
-    template<typename U>
-    PoolAllocator(const PoolAllocator<U> &other) noexcept : pool_(other.pool_) {}
-
-    T *allocate(std::size_t n) {
-        if (!pool_) {
-            throw std::bad_alloc();
-        }
-        auto *ptr = pool_->alloc(sizeof(T) * n, alignof(T));
-        if (!ptr) {
-            throw std::bad_alloc();
-        }
-        return static_cast<T *>(ptr);
-    }
-
-    void deallocate(T *, std::size_t) noexcept {}
-
-    template<typename U>
-    bool operator==(const PoolAllocator<U> &other) const noexcept {
-        return pool_ == other.pool_;
-    }
-
-    template<typename U>
-    bool operator!=(const PoolAllocator<U> &other) const noexcept {
-        return pool_ != other.pool_;
-    }
-
-private:
-    template<typename U>
-    friend class PoolAllocator;
-
-    BufPool *pool_ = nullptr;
 };
 
 } // namespace fiber::mem

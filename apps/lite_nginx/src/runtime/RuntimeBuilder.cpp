@@ -27,8 +27,6 @@ constexpr std::chrono::milliseconds kDefaultReadTimeout{60000};
 constexpr std::chrono::milliseconds kDefaultSendTimeout{60000};
 constexpr std::uint8_t kSkipHeaderValue = 1;
 
-using fiber::util::RoutePatternError;
-
 RuntimeError make_error(const config::SourceLocation &location, std::string message) {
     return RuntimeError{
             .message = std::move(message),
@@ -331,12 +329,11 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
                 // references are validated at compile time.
                 std::vector<std::string> path_var_names;
                 route_definer.path_var_names_out = &path_var_names;
-                try {
-                    matcher_builder.add_route(runtime_location.pattern,
-                                              LocationRoutePayload{.location_index = location_index});
-                } catch (const RoutePatternError &error) {
+                auto added = matcher_builder.add_route(runtime_location.pattern,
+                                                       LocationRoutePayload{.location_index = location_index});
+                if (!added) {
                     route_definer.path_var_names_out = nullptr;
-                    return std::unexpected(make_error(location.location, error.what()));
+                    return std::unexpected(make_error(location.location, std::move(added.error().message)));
                 }
                 route_definer.path_var_names_out = nullptr;
 
@@ -432,12 +429,11 @@ std::expected<RuntimeConfig, RuntimeError> RuntimeBuilder::build(const config::M
             const std::uint32_t location_index = static_cast<std::uint32_t>(runtime_server.locations.size());
             std::vector<std::string> path_var_names;
             route_definer.path_var_names_out = &path_var_names;
-            try {
-                matcher_builder.add_route(runtime_location.pattern,
-                                          LocationRoutePayload{.location_index = location_index});
-            } catch (const RoutePatternError &error) {
+            auto added = matcher_builder.add_route(runtime_location.pattern,
+                                                   LocationRoutePayload{.location_index = location_index});
+            if (!added) {
                 route_definer.path_var_names_out = nullptr;
-                return std::unexpected(make_error(location.proxy_pass.location, error.what()));
+                return std::unexpected(make_error(location.proxy_pass.location, std::move(added.error().message)));
             }
             route_definer.path_var_names_out = nullptr;
 
