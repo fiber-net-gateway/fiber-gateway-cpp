@@ -707,6 +707,44 @@ TEST(TlsClientHandshake13Failure, HostnameMismatchSendsBadCertificate) {
     });
 }
 
+// The client raises the ordinary message cap to the chain-sized one (a 1.2
+// CertificateRequest may carry a long CA list); the cap is still enforced on
+// the header before any body byte is buffered.
+TEST(TlsClientHandshake13Failure, OversizedHandshakeHeaderRefusedBeforeBody) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        constexpr std::size_t kCap = 100u << 10;
+        const auto sh_header = [](std::size_t body_len) {
+            return std::vector<std::uint8_t>{22,
+                                             0x03,
+                                             0x03,
+                                             0,
+                                             4,
+                                             2, // ServerHello
+                                             static_cast<std::uint8_t>(body_len >> 16),
+                                             static_cast<std::uint8_t>(body_len >> 8),
+                                             static_cast<std::uint8_t>(body_len)};
+        };
+        {
+            TlsClientHandshakeEngine engine(cfg, nullptr);
+            (void) engine.take_output(); // the ClientHello
+            Event event = Event::None;
+            ASSERT_TRUE(feed_bytes(engine, sh_header(kCap), false, event));
+            EXPECT_EQ(Event::None, event); // at cap: awaits the body
+            EXPECT_FALSE(engine.done());
+        }
+        {
+            TlsClientHandshakeEngine engine(cfg, nullptr);
+            (void) engine.take_output();
+            Event event = Event::None;
+            ASSERT_TRUE(feed_bytes(engine, sh_header(kCap + 1), false, event));
+            EXPECT_EQ(Event::Failed, event);
+            EXPECT_EQ(TlsAlertDesc::DecodeError, engine.failure_alert());
+        }
+    });
+}
+
 // A server chain longer than four certificates (a sent root plus repeated
 // intermediates here) must still verify: real chains exceed four entries.
 TEST(TlsClientHandshake13Full, LongServerChainAccepted) {

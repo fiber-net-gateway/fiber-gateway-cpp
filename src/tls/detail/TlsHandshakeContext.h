@@ -8,7 +8,7 @@
 // instances swap — belongs to the engine:
 //
 //   inbound   reader framing → record routing (decrypt / alert / CCS surface)
-//             → handshake reassembly (4 MiB cap) → one complete message per
+//             → handshake reassembly (per-type caps, below) → one complete message per
 //             step() as a borrowed span
 //   outbound  emit() (plaintext via the Writer, sealed per-record chunk),
 //             send_ccs(), fatal-alert encoding, out_ accumulation
@@ -71,7 +71,17 @@ public:
     // RFC 8446 §4.1.2 DOs limits, 06 §2.6: bounded pre-key handshake records
     // (1.3) and reassembled message size (both versions).
     static constexpr std::size_t kMaxPlaintextHandshakeRecords13 = 4;
-    static constexpr std::size_t kMaxReassembledMessage = 4u << 20; // 4 MiB
+    // Declared body-length caps, checked on the 4-byte header before any
+    // body byte is buffered — a server's unauthenticated peer can pin at
+    // most this much reassembly memory per connection. Parity with
+    // BoringSSL: kMaxMessageLen (16 KiB) for ordinary messages and
+    // SSL_MAX_CERT_LIST_DEFAULT (100 KiB) for certificate chains. The
+    // client engine raises the ordinary cap to the chain cap (a 1.2
+    // CertificateRequest may carry a long certificate_authorities list —
+    // BoringSSL's client allows max_cert_list for every in-handshake
+    // message).
+    static constexpr std::size_t kMaxHandshakeMessage = 16u << 10;
+    static constexpr std::size_t kMaxCertificateMessage = 100u << 10;
     static constexpr std::size_t kOpenScratchSize = kTlsMaxCiphertextRecordSize;
 
     TlsHandshakeContext() noexcept;
@@ -93,6 +103,10 @@ public:
     [[nodiscard]] bool provide_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept;
 
     void set_inbound_mode(TlsInboundMode mode) noexcept { mode_ = mode; }
+
+    // Ordinary (non-Certificate) message cap; default kMaxHandshakeMessage.
+    // Certificate messages are always capped at kMaxCertificateMessage.
+    void set_max_handshake_message(std::size_t limit) noexcept { max_message_ = limit; }
     [[nodiscard]] TlsInboundMode inbound_mode() const noexcept { return mode_; }
 
     // Pulls the next protocol event: a complete handshake message (possibly
@@ -220,6 +234,7 @@ private:
     [[nodiscard]] bool append_fragment(std::span<const std::uint8_t> bytes) noexcept;
     [[nodiscard]] TlsInboundStep extract_message() noexcept;
     [[nodiscard]] TlsInboundStep quic_step() noexcept;
+    [[nodiscard]] std::size_t max_body_len(std::uint8_t type) const noexcept;
 
     mem::IoBufChain out_{};
     mem::IoBufChain reassembly_{};
@@ -235,6 +250,7 @@ private:
     std::size_t current_off_ = 0; // bytes of plain_[0..plain_len_) already consumed
     std::size_t plain_len_ = 0;
     std::size_t plaintext_records_13_ = 0;
+    std::size_t max_message_ = kMaxHandshakeMessage;
     bool has_current_ = false;
     bool failed_ = false;
     // ---- 0-RTT window state (see the arm/disarm API above) ----

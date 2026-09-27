@@ -17,9 +17,10 @@ namespace {
 constexpr std::uint8_t kAlertLevelFatal = 2;
 constexpr std::uint8_t kAlertLevelWarning = 1;
 
-// Post-handshake handshake-message cap (the engine-side reassembler's
-// bound): NSTs can straddle records; KeyUpdate is 4+1 bytes.
-constexpr std::size_t kMaxPostHandshakeMessage = 4u << 20;
+// Post-handshake handshake-message cap: NSTs can straddle records;
+// KeyUpdate is 4+1 bytes. 16 KiB = BoringSSL's kMaxMessageLen — either peer
+// can send these at any time, so the bound caps pinned reassembly memory.
+constexpr std::size_t kMaxPostHandshakeMessage = 16u << 10;
 
 // Worst-case open workspace: one record, straddling topology (the gather
 // destination when the body is not contiguous in the record's chain).

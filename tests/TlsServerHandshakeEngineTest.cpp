@@ -757,6 +757,58 @@ TEST(TlsServerHandshake13Refuse, NonHelloFirstMessageRefused) {
     });
 }
 
+// Message-size caps are enforced on the 4-byte handshake header, before any
+// body byte is buffered: an unauthenticated client cannot pin more than the
+// per-type cap of reassembly memory (16 KiB ordinary, 100 KiB Certificate).
+namespace {
+
+// One plaintext handshake record carrying only a handshake header.
+Event feed_handshake_header(TlsServerHandshakeEngine &engine, std::uint8_t type, std::size_t body_len) {
+    const std::vector<std::uint8_t> wire{22,
+                                         0x03,
+                                         0x01,
+                                         0,
+                                         4,
+                                         type,
+                                         static_cast<std::uint8_t>(body_len >> 16),
+                                         static_cast<std::uint8_t>(body_len >> 8),
+                                         static_cast<std::uint8_t>(body_len)};
+    Event event = Event::None;
+    EXPECT_TRUE(feed_raw(engine, wire, event));
+    return event;
+}
+
+} // namespace
+
+TEST(TlsServerHandshake13Refuse, OversizedHandshakeHeaderRefusedBeforeBody) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        constexpr std::size_t kOrdinary = 16u << 10;
+        constexpr std::size_t kCertificate = 100u << 10;
+        {
+            TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+            EXPECT_EQ(Event::None, feed_handshake_header(engine, 1, kOrdinary)); // at cap: awaits the body
+            EXPECT_FALSE(engine.done());
+        }
+        {
+            TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+            EXPECT_EQ(Event::Failed, feed_handshake_header(engine, 1, kOrdinary + 1));
+            EXPECT_EQ(TlsAlertDesc::DecodeError, engine.failure_alert());
+        }
+        {
+            // Certificate headers get the chain-sized cap.
+            TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+            EXPECT_EQ(Event::None, feed_handshake_header(engine, 11, kCertificate));
+            EXPECT_FALSE(engine.done());
+        }
+        {
+            TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+            EXPECT_EQ(Event::Failed, feed_handshake_header(engine, 11, kCertificate + 1));
+            EXPECT_EQ(TlsAlertDesc::DecodeError, engine.failure_alert());
+        }
+    });
+}
+
 // =====================================================================
 // §8.4 — mTLS (1.3 CertificateRequest + client Cert/CV + verify_chain)
 // =====================================================================

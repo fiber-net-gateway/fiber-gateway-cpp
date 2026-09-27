@@ -138,6 +138,9 @@ TlsClientHandshakeEngine::TlsClientHandshakeEngine(const TlsClientConfig &config
     }
     Impl &impl = *impl_;
     impl.ctx.set_legacy_version(kTlsRecordVersionTls10); // first flight (06 §2.3)
+    // The client talks to a server it chose: every in-handshake message may
+    // use the chain-sized cap (BoringSSL client parity, see the ctx caps).
+    impl.ctx.set_max_handshake_message(TlsHandshakeContext::kMaxCertificateMessage);
 
     if (impl.cfg.quic != nullptr) {
         // QUIC (10 §3): records never frame; the CH rides Initial-level

@@ -337,6 +337,10 @@ TlsInboundStep TlsHandshakeContext::route_current(TlsRecord &&record) noexcept {
     return extract_message();
 }
 
+std::size_t TlsHandshakeContext::max_body_len(std::uint8_t type) const noexcept {
+    return type == static_cast<std::uint8_t>(TlsHandshakeType::Certificate) ? kMaxCertificateMessage : max_message_;
+}
+
 bool TlsHandshakeContext::append_fragment(std::span<const std::uint8_t> bytes) noexcept {
     mem::IoBuf fragment = mem::IoBuf::allocate(bytes.size());
     if (!fragment.valid()) {
@@ -367,7 +371,7 @@ TlsInboundStep TlsHandshakeContext::extract_message() noexcept {
         }
         const std::size_t body_len = (static_cast<std::size_t>(header[1]) << 16) |
                                      (static_cast<std::size_t>(header[2]) << 8) | static_cast<std::size_t>(header[3]);
-        if (body_len > kMaxReassembledMessage) {
+        if (body_len > max_body_len(header[0])) {
             return step_fatal(TlsAlertDesc::DecodeError);
         }
         const std::size_t message_len = kTlsHandshakeHeaderSize + body_len;
@@ -414,7 +418,7 @@ TlsInboundStep TlsHandshakeContext::extract_message() noexcept {
     const std::size_t body_len = (static_cast<std::size_t>(plain_[off + 1]) << 16) |
                                  (static_cast<std::size_t>(plain_[off + 2]) << 8) |
                                  static_cast<std::size_t>(plain_[off + 3]);
-    if (body_len > kMaxReassembledMessage) {
+    if (body_len > max_body_len(plain_[off])) {
         return step_fatal(TlsAlertDesc::DecodeError);
     }
     if (off + kTlsHandshakeHeaderSize + body_len <= plain_len_) {
@@ -435,7 +439,7 @@ TlsInboundStep TlsHandshakeContext::extract_message() noexcept {
 // QUIC inbound (10 §3.3): the CRYPTO stream is raw handshake messages — the
 // same 4-byte-header reassembly contract as the record path, minus records,
 // alerts, CCS, and the 1.3 plaintext-record DOs bound (a CH may arrive in
-// any fragmentation; the 4 MiB per-message bound below is the surviving
+// any fragmentation; the per-type message bound below is the surviving
 // limit). Each message materializes into message_buf_ (one exact-size copy —
 // the borrowed body span stays valid until the next step()).
 TlsInboundStep TlsHandshakeContext::quic_step() noexcept {
@@ -449,7 +453,7 @@ TlsInboundStep TlsHandshakeContext::quic_step() noexcept {
     }
     const std::size_t body_len = (static_cast<std::size_t>(header[1]) << 16) |
                                  (static_cast<std::size_t>(header[2]) << 8) | static_cast<std::size_t>(header[3]);
-    if (body_len > kMaxReassembledMessage) {
+    if (body_len > max_body_len(header[0])) {
         return step_fatal(TlsAlertDesc::DecodeError);
     }
     const std::size_t message_len = kTlsHandshakeHeaderSize + body_len;
