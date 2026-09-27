@@ -10,7 +10,8 @@ reusable `fiber_lib` static library; examples, tests, and the modules under
 This is a framework repository rather than a single executable. A normal build
 produces the core library, runnable examples, tests, the `lite_nginx`
 application, and optional application-layer libraries such as
-`fiber::nacos`, `fiber::cat`, and `fiber::prometheus`.
+`fiber::nacos`, `fiber::cat`, `fiber::prometheus`, and
+`fiber::http_compression`.
 
 ## Highlights
 
@@ -18,9 +19,12 @@ application, and optional application-layer libraries such as
   multi-loop scheduling.
 - C++23 coroutine tasks and asynchronous primitives, including mutexes,
   read/write locks, signals, timeouts, wait groups, and versioned watches.
-- TCP, UDP, Unix domain sockets, TLS streams, DNS resolution, and DNS caches.
+- TCP, UDP, Unix domain sockets, DNS resolution and caches, and a Happy Eyeballs
+  TCP connector for already-resolved IPv4/IPv6 addresses.
+- In-tree TLS 1.2/1.3 client and server engines, integrated with TCP streams
+  and QUIC, using BoringSSL crypto primitives.
 - HTTP/1.1, HTTP/2, and HTTP/3 server stacks.
-- HTTP/1.1 connection pooling plus HTTP/2 and HTTP/3 client connections.
+- HTTP/1.1 and HTTP/2 connection pools, plus HTTP/3 client connections.
 - In-tree QUIC v1 transport with TLS, streams, loss recovery, congestion
   control, pacing, connection IDs, address validation, and UDP GSO support
   where available.
@@ -29,6 +33,7 @@ application, and optional application-layer libraries such as
 - A Nacos client library with its own private gRPC/protobuf transport.
 - A purpose-built JS-like bytecode engine with compile-time host bindings,
   request-scoped GC, and native coroutine-aware HTTP APIs.
+- In-tree streaming gzip encoding and an optional HTTP gzip response writer.
 - Common JSON codecs, structured logging, and allocation-conscious buffer and
   memory utilities.
 
@@ -100,6 +105,7 @@ library, HTTP API, and C++ embedding contract.
 ├── example/      # Small runnable examples and benchmark helpers
 ├── apps/         # Applications and optional app-layer libraries
 ├── tests/        # Core GoogleTest suite
+├── fuzz/         # TLS libFuzzer harnesses and regression corpora
 ├── docs/         # Stable module documentation
 ├── feature/      # Design notes, audits, and implementation reports
 ├── cmake/        # Toolchain, dependency, and target helpers
@@ -108,19 +114,20 @@ library, HTTP API, and C++ embedding contract.
 
 The main core modules have public headers under `include/fiber/` and
 implementations plus private headers under the corresponding `src/` directory.
-Only `include/fiber/` is propagated to consumers; `src/` is available privately
-to the core library and its white-box tests:
+The `include/` root is propagated to consumers for `<fiber/...>` includes;
+`src/` is available privately to the core library and its white-box tests:
 
 - `event/` — event loops, pollers, timers, and loop groups.
 - `async/` — coroutine tasks, scheduling, and synchronization primitives.
 - `net/` — socket, listener, stream, TLS, and address abstractions.
+- `tls/` — TLS handshakes, records, certificates, and session resumption.
+- `compression/` — streaming gzip encoder.
 - `quic/` — QUIC transport, crypto, recovery, congestion, and streams.
 - `http/` — HTTP/1.1, HTTP/2, HTTP/3, clients, servers, and pools.
 - `dns/` — DNS messages, clients, resolvers, and caches.
 - `common/` — errors, JSON, memory, containers, and shared utilities.
 - `script/` and `http_script/` — scripting runtime and HTTP bindings.
 - `log/` — logger hierarchy, formatting, and appenders.
-- `apps/nacos/` — Nacos client and its private gRPC/protobuf transport.
 
 ## Requirements
 
@@ -132,9 +139,11 @@ to the core library and its white-box tests:
   already cached under `temp/_deps` or a different `FIBER_DEPS_DIR`.
 
 CMake prefers a suitable Clang toolchain, then GCC, when no compiler or
-toolchain is selected explicitly. BoringSSL and protobuf-lite are core
-dependencies managed by the build. GoogleTest is used when tests are enabled;
-jemalloc is optional.
+toolchain is selected explicitly. The core library links BoringSSL
+`crypto`; TLS protocol handling lives in Fiber. BoringSSL `ssl` is used by
+test peers. protobuf-lite and protoc are prepared only when the Nacos
+component is enabled. GoogleTest is used when tests are enabled; jemalloc is
+optional.
 
 ## Quick Start
 
@@ -185,6 +194,8 @@ benchmark invocation.
 | `FIBER_BUILD_NACOS` | initial value of `FIBER_BUILD_APPS` | Build the reusable `fiber::nacos` component. |
 | `FIBER_BUILD_CAT` | initial value of `FIBER_BUILD_APPS` | Build the reusable `fiber::cat` component. |
 | `FIBER_BUILD_PROMETHEUS` | initial value of `FIBER_BUILD_APPS` | Build the reusable `fiber::prometheus` component. |
+| `FIBER_BUILD_HTTP_COMPRESSION` | initial value of `FIBER_BUILD_APPS` | Build `fiber::http_compression`; required by `lite_nginx`. |
+| `FIBER_BUILD_FUZZERS` | `OFF` | Build TLS libFuzzer harnesses with Clang, ASan and UBSan; disables LTO. |
 | `FIBER_BUILD_CAT_DEMO` | `OFF` | Build the CAT demo program. |
 | `FIBER_BUILD_PROMETHEUS_BENCHMARK` | `OFF` | Build the Prometheus record-path benchmark. |
 | `FIBER_FETCH_DEPS` | `ON` | Allow fetching missing optional dependencies such as GoogleTest and jemalloc. |
@@ -197,14 +208,16 @@ benchmark invocation.
 | `FIBER_USE_LIBCXX` | `OFF` | Use libc++ with Clang. |
 | `FIBER_STATIC_LIBCXX` | `ON` | Statically link libc++ runtimes when `FIBER_USE_LIBCXX=ON`. |
 
-`FIBER_FETCH_DEPS=OFF` disables fallback downloads for optional GoogleTest and
-jemalloc dependencies. BoringSSL and protobuf are still populated by
-`cmake/Deps.cmake`; use `FIBER_DEPS_DIR` to point at a reusable or
-pre-populated source cache. zlib is no longer a build dependency: gzip
-compression uses the in-tree port in `src/compression/`, and tooling that
-needs real zlib sources (e.g. `scripts/build_nginx.sh`) prepares the pinned
-1.3.2 reference under `temp/zlib-reference/` via
-`scripts/prepare_zlib_reference.sh`.
+`FIBER_FETCH_DEPS=OFF` disables fallback downloads for GoogleTest and
+jemalloc. It does not disable BoringSSL population or protobuf population
+when Nacos is enabled. Use `FIBER_DEPS_DIR` to select a pre-populated source
+cache. gzip uses the in-tree implementation in `src/compression/`; core tests
+compile the checked-in zlib 1.3.2 reference for differential checks, without
+a system zlib dependency.
+
+Component defaults are initialized when a build directory is first configured;
+changing `FIBER_BUILD_APPS` later does not reset cached component options.
+Keep `FIBER_BUILD_HTTP_COMPRESSION=ON` when building `lite_nginx`.
 
 All downloaded source archives are SHA-256 verified. Restricted-network and
 downstream builds can replace an archive URL and its expected digest without
@@ -241,17 +254,18 @@ ctest --test-dir build-release --output-on-failure
 ## Examples
 
 The single-file programs under `example/` cover HTTP/HTTPS servers, TCP and
-UDP echo services, DNS lookup, a Git smart-HTTP server, and HTTP/3 benchmark
-client/server tooling. They are intended as compact API references and smoke
+UDP echo services, DNS lookup, a Git smart-HTTP server, HTTP/2 pool and
+HTTP/3 benchmarks, and TLS probes. `nacos_demo` is also built when the Nacos
+component is enabled. They are intended as compact API references and smoke
 tests, not as production application layouts.
 
 Read [example/README.md](example/README.md) for details.
 
 ## Applications and Reusable Modules
 
-The top-level build exposes three optional reusable components layered on
-`fiber_lib`. Their source currently lives under `apps/`, but that path is an
-internal repository detail: in-tree and FetchContent consumers select them
+The top-level build exposes optional reusable components layered on
+`fiber_lib`. Nacos, CAT, and Prometheus sources live under `apps/`, but that
+path is an internal repository detail: in-tree and FetchContent consumers select them
 with top-level options and link their stable aliases.
 
 ```cmake
@@ -262,6 +276,8 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/fiber-net-gateway/fiber-gateway-cpp.git
     GIT_TAG <pinned-revision>)
 set(FIBER_BUILD_APPS OFF CACHE BOOL "" FORCE)
+set(FIBER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(FIBER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(FIBER_BUILD_NACOS ON CACHE BOOL "" FORCE)
 set(FIBER_BUILD_CAT ON CACHE BOOL "" FORCE)
 set(FIBER_BUILD_PROMETHEUS ON CACHE BOOL "" FORCE)
@@ -273,9 +289,13 @@ target_link_libraries(my_gateway PRIVATE
     fiber::prometheus)
 ```
 
-Enabling a component does not add its demos or benchmarks. Tests continue to
-follow `FIBER_BUILD_TESTS`; use the dedicated opt-in options for the CAT demo
-and Prometheus benchmark.
+The CAT demo and Prometheus benchmark require their dedicated opt-in options.
+`nacos_demo` follows `FIBER_BUILD_EXAMPLES` when Nacos is enabled; component
+tests follow `FIBER_BUILD_TESTS`.
+
+Link `fiber_lib` directly for the core runtime and protocols. To use
+`<fiber/http/GzipResponseWriter.h>`, enable `FIBER_BUILD_HTTP_COMPRESSION`
+and link `fiber::http_compression`; it can be built with applications disabled.
 
 The reusable components and complete applications are:
 
@@ -304,6 +324,10 @@ See [apps/README.md](apps/README.md) for module layout and CMake conventions.
 - [Applications](apps/README.md)
 - [Script module guide](docs/script-guide.md) ([简体中文](docs/script-guide.zh-CN.md))
 - [HTTP/1 connection pool](docs/http1-connection-pool.md)
+- [HTTP/2 connection pool](docs/http2-connection-pool.md)
+- [Happy Eyeballs TCP connector](docs/happy-eyeballs-connector.md)
+- [TLS fuzzing](fuzz/README.md)
+- [OpenSSL interoperability matrix](scripts/interop/openssl_matrix.sh)
 - [TLS client certificate identity](docs/tls-client-identity.md)
 - [Script function signature ABI](docs/script-function-signature-abi.md)
 - [HTTP/3 client design](feature/http3_client.md)
