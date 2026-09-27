@@ -745,6 +745,52 @@ TEST(TlsClientHandshake13Failure, OversizedHandshakeHeaderRefusedBeforeBody) {
     });
 }
 
+// A misconfigured 1.2 server sends unrecognized_name as a WARNING — OpenSSL
+// even before its ServerHello, while the version is still open. Such
+// warnings are dropped (BoringSSL: up to four in a row), and the handshake
+// proceeds; a fifth consecutive warning is unexpected_message.
+namespace {
+const std::vector<std::uint8_t> kUnrecognizedNameWarning{21, 0x03, 0x03, 0, 2, 1, 112};
+}
+
+TEST(TlsClientHandshakeWarningAlert, TolerantBeforeServerHelloUpToLimit) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+        (void) engine.take_output(); // the ClientHello
+        Event event = Event::None;
+        for (int i = 0; i < 4; ++i) {
+            ASSERT_TRUE(feed_bytes(engine, kUnrecognizedNameWarning, false, event));
+            EXPECT_EQ(Event::None, event);
+            EXPECT_FALSE(engine.done());
+        }
+        ASSERT_TRUE(feed_bytes(engine, kUnrecognizedNameWarning, false, event));
+        EXPECT_EQ(Event::Failed, event);
+        EXPECT_EQ(TlsAlertDesc::UnexpectedMessage, engine.failure_alert());
+    });
+}
+
+TEST(TlsClientHandshakeWarningAlert, HandshakeCompletesAfterWarningBothVersions) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const bool tls12: {false, true}) {
+            auto server = BoringServer::make(tls12 ? ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"}
+                                                   : ServerOptions{});
+            ASSERT_NE(nullptr, server);
+            ClientMaterial material;
+            const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+            TlsClientHandshakeEngine engine(cfg, nullptr);
+            Event event = Event::None;
+            ASSERT_TRUE(feed_bytes(engine, kUnrecognizedNameWarning, false, event));
+            EXPECT_EQ(Event::None, event);
+            DriveLog log;
+            ASSERT_TRUE(drive(*server, engine, false, log)) << (tls12 ? "1.2" : "1.3");
+            EXPECT_EQ(tls12 ? fiber::tls::TlsProtocolVersion::Tls12 : fiber::tls::TlsProtocolVersion::Tls13,
+                      engine.take_state().version);
+        }
+    });
+}
+
 // A server chain longer than four certificates (a sent root plus repeated
 // intermediates here) must still verify: real chains exceed four entries.
 TEST(TlsClientHandshake13Full, LongServerChainAccepted) {

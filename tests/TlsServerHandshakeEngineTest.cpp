@@ -757,6 +757,43 @@ TEST(TlsServerHandshake13Refuse, NonHelloFirstMessageRefused) {
     });
 }
 
+// Warning alerts are dropped while the version is open (BoringSSL: up to
+// four in a row), but once an HRR has fixed TLS 1.3 — which has no warning
+// level (RFC 8446 §6) — any alert is terminal.
+TEST(TlsServerHandshakeWarningAlert, DroppedBeforeClientHello) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto client = BoringClient::make(ClientOptions{});
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        const std::vector<std::uint8_t> warning{21, 0x03, 0x01, 0, 2, 1, 90}; // warning, user_canceled
+        Event event = Event::None;
+        ASSERT_TRUE(feed_raw(engine, warning, event));
+        EXPECT_EQ(Event::None, event);
+        EXPECT_FALSE(engine.done());
+        EXPECT_TRUE(drive(*client, engine, false));
+    });
+}
+
+TEST(TlsServerHandshakeWarningAlert, TerminalAfterHelloRetryRequest) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto kx = fiber::tls::TlsKeyExchange::create(fiber::tls::TlsNamedGroup::Secp256r1);
+        ASSERT_TRUE(kx.has_value());
+        ASSERT_TRUE(kx.value()->generate().has_value());
+        ServerMaterial material;
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        const std::array<std::uint8_t, 32> kRandom{};
+        Event event = Event::None;
+        ASSERT_TRUE(feed_raw(engine, build_client_hello(kRandom, 0, kx.value()->public_value().bytes()), event));
+        ASSERT_FALSE(engine.done()); // HRR sent, awaiting CH2 — 1.3 is settled
+
+        const std::vector<std::uint8_t> warning{21, 0x03, 0x03, 0, 2, 1, 112}; // warning, unrecognized_name
+        ASSERT_TRUE(feed_raw(engine, warning, event));
+        EXPECT_EQ(Event::Failed, event);
+        EXPECT_TRUE(engine.failed());
+    });
+}
+
 // Message-size caps are enforced on the 4-byte handshake header, before any
 // body byte is buffered: an unauthenticated client cannot pin more than the
 // per-type cap of reassembly memory (16 KiB ordinary, 100 KiB Certificate).
