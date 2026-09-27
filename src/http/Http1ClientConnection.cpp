@@ -24,7 +24,9 @@ bool supports_http1_alpn(std::string_view alpn) noexcept { return alpn.empty() |
 
 Http1ClientConnection::IoAwaiter::IoAwaiter(Http1ClientConnection &connection, IoAwaiter *&slot, IoTask task) noexcept :
     connection_(connection), slot_(&slot), loop_(connection.active_loop_), task_(std::move(task)),
-    task_awaiter_(task_.operator co_await()) {
+    // operator co_await is rvalue-qualified; the std::move only binds it, the
+    // awaiter borrows the handle and task_ keeps owning the frame.
+    task_awaiter_(std::move(task_).operator co_await()) {
     FIBER_ASSERT(loop_ != nullptr);
 }
 

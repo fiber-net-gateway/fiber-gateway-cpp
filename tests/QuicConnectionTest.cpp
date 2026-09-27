@@ -3468,7 +3468,9 @@ namespace {
 
 template<class T>
 auto start_pending_task(fiber::async::Task<T> &task) {
-    auto handle = task.operator co_await().handle;
+    // std::move only binds the rvalue-qualified operator co_await; task keeps
+    // owning the frame.
+    auto handle = std::move(task).operator co_await().handle;
     handle.promise().set_continuation(std::noop_coroutine());
     handle.resume();
     return handle;

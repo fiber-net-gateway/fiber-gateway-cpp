@@ -107,7 +107,15 @@ public:
         T await_resume() { return handle.promise().result(); }
     };
 
-    Awaiter operator co_await() { return Awaiter{handle_}; }
+    // Rvalue-only on purpose. The awaiter borrows the handle; the Task keeps
+    // owning the frame, so only one await chain may consume it: re-awaiting
+    // an lvalue silently reads a moved-from result, awaiting a moved-from
+    // Task dereferences a null handle, and two concurrent awaits of one
+    // lvalue overwrite the single continuation -- all compile errors here.
+    // Deliberate manual awaiters keep ownership with an explicit
+    // std::move(task).operator co_await() borrow.
+    Awaiter operator co_await() && { return Awaiter{handle_}; }
+    Awaiter operator co_await() & = delete;
 
     [[nodiscard]] TaskSelectAwaiter<T> select() && noexcept;
     TaskSelectAwaiter<T> select() & = delete;
@@ -178,7 +186,8 @@ public:
         void await_resume() { handle.promise().result(); }
     };
 
-    Awaiter operator co_await() { return Awaiter{handle_}; }
+    Awaiter operator co_await() && { return Awaiter{handle_}; }
+    Awaiter operator co_await() & = delete;
 
     [[nodiscard]] TaskSelectAwaiter<void> select() && noexcept;
     TaskSelectAwaiter<void> select() & = delete;
