@@ -3,6 +3,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <future>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
