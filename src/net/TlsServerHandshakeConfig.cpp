@@ -14,7 +14,14 @@ common::IoErr TlsServerHandshakeConfig::clear_credentials() noexcept {
     engine_->chain = nullptr;
     engine_->key = nullptr;
     *credential_count_ = 0;
+    credential_owner_->reset();
     return common::IoErr::None;
+}
+
+void TlsServerHandshakeConfig::stage(const TlsCredential &credential) noexcept {
+    engine_->chain = &credential.tls_chain();
+    engine_->key = &credential.tls_key();
+    ++*credential_count_;
 }
 
 common::IoErr TlsServerHandshakeConfig::add_credential(const TlsCredential &credential) noexcept {
@@ -22,10 +29,22 @@ common::IoErr TlsServerHandshakeConfig::add_credential(const TlsCredential &cred
         return common::IoErr::Invalid;
     }
     // Staged by pointer: the credential must outlive the handshake (the
-    // documented param contract — server options hold their material).
-    engine_->chain = &credential.tls_chain();
-    engine_->key = &credential.tls_key();
-    ++*credential_count_;
+    // documented param contract — server options hold their material). The
+    // single engine slot now points here, so an earlier owner is dead weight.
+    stage(credential);
+    credential_owner_->reset();
+    return common::IoErr::None;
+}
+
+common::IoErr TlsServerHandshakeConfig::add_credential(std::shared_ptr<const TlsCredential> credential) noexcept {
+    if (credential == nullptr || credential->tls_chain().empty() || credential->tls_key().empty()) {
+        return common::IoErr::Invalid;
+    }
+    // Staged by pointer, kept alive by the handshake's owner slot for as long
+    // as the engine may still read it (HRR defers Certificate/CertificateVerify
+    // past the callback by a full round trip).
+    stage(*credential);
+    *credential_owner_ = std::move(credential);
     return common::IoErr::None;
 }
 

@@ -2,6 +2,7 @@
 #define FIBER_NET_TLS_SERVER_HANDSHAKE_CONFIG_H
 
 #include <cstddef>
+#include <memory>
 #include <span>
 
 #include "../common/IoError.h"
@@ -25,14 +26,25 @@ class TlsStreamFd;
 
 // A synchronous, callback-duration view for configuring the current server
 // handshake (09 §5): it stages into a caller-held tls::TlsServerConfig whose
-// spans borrow the caller's material for the handshake's duration. It owns
-// and exposes neither the config nor the material.
+// spans point at the selected credential's material for the handshake's
+// duration. It exposes neither the config nor the material. The credential is
+// either borrowed (static material the caller keeps alive) or retained by the
+// handshake through the owning add_credential overload (dynamic material that
+// may be retired while a handshake is still suspended).
 class TlsServerHandshakeConfig {
 public:
+    // Drops the staged credential, releasing a retained owner.
     [[nodiscard]] common::IoErr clear_credentials() noexcept;
     // The staged config borrows the credential's tls material; the credential
-    // must outlive the handshake (the documented param contract).
+    // must outlive the handshake (the documented param contract). Replaces
+    // (and releases) a credential staged earlier in the same callback.
     [[nodiscard]] common::IoErr add_credential(const TlsCredential &credential) noexcept;
+    // The handshake retains `credential` (an aliasing pointer into a larger
+    // snapshot keeps the whole snapshot alive) until the handshake that
+    // staged it ends: success, failure, cancellation or engine teardown —
+    // the QUIC face releases it at its done-transition. Replaces (and
+    // releases) a credential staged earlier in the same callback.
+    [[nodiscard]] common::IoErr add_credential(std::shared_ptr<const TlsCredential> credential) noexcept;
     // The staged config borrows the store's anchors; the store must outlive
     // the handshake.
     [[nodiscard]] common::IoErr set_trust_store(const TrustStore &trust_store) noexcept;
@@ -54,16 +66,20 @@ private:
     friend class fiber::quic::QuicTlsSession;
 
     // The caller owns `engine` (borrowed for the callback's duration and the
-    // handshake it feeds) and watches `credential_count` for the
-    // must-add-one rule.
-    TlsServerHandshakeConfig(fiber::tls::TlsServerConfig &engine, std::size_t &credential_count) noexcept :
-        engine_(&engine), credential_count_(&credential_count) {}
+    // handshake it feeds), watches `credential_count` for the must-add-one
+    // rule, and holds `credential_owner` for as long as the engine may read
+    // the staged chain/key.
+    TlsServerHandshakeConfig(fiber::tls::TlsServerConfig &engine, std::size_t &credential_count,
+                             std::shared_ptr<const TlsCredential> &credential_owner) noexcept :
+        engine_(&engine), credential_count_(&credential_count), credential_owner_(&credential_owner) {}
 
     [[nodiscard]] std::size_t credential_count() const noexcept { return *credential_count_; }
 
+    void stage(const TlsCredential &credential) noexcept;
+
     fiber::tls::TlsServerConfig *engine_ = nullptr;
-    std::size_t count_storage_ = 0;
-    std::size_t *credential_count_ = &count_storage_;
+    std::size_t *credential_count_ = nullptr;
+    std::shared_ptr<const TlsCredential> *credential_owner_ = nullptr;
 };
 
 // Convenience callback for static single-certificate servers. Dynamic servers
