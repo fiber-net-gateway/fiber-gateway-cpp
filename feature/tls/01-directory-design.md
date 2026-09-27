@@ -11,7 +11,7 @@
 
 - 传输：仅 TCP 上的 TLS（不做 DTLS）
 - 套件：1.3 = TLS_AES_128_GCM_SHA256 / TLS_AES_256_GCM_SHA384 / TLS_CHACHA20_POLY1305_SHA256；
-  1.2 = ECDHE 套件（ECDHE-RSA / ECDHE-ECDSA，X25519 + P-256，GCM + ChaCha20）。1.2 CBC 与静态 RSA KX 不做
+  1.2 = ECDHE 套件（ECDHE-RSA / ECDHE-ECDSA，X25519 + P-256，GCM + ChaCha20）。1.2 CBC 与静态 RSA KX 服务端不做；客户端为兼容老服务器额外 offer（11 号）
 - 恢复：1.3 session ticket + PSK resumption + 0-RTT；1.2 session ticket（最小实现）
 - 1.2 重协商：收到即拒绝（renegotiation_info 扩展仍要正确编解码，现代实践）
 - 密钥更新：1.3 KeyUpdate（对齐 QUIC key-update 已有经验）

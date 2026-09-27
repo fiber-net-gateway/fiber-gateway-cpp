@@ -23,7 +23,7 @@
 | 1.2：SH→[Cert→SKE→[CertReq]→SHD]→client flight [Cert]/CKE/[CV]/CCS/Fin→server CCS+Fin 验证 | post-handshake 消息（NST/KeyUpdate/post CertReq——ConnectedEngine 与 08） |
 | 0-RTT **写路径**：early data seal/发送、接受/拒绝判定、拒绝回滚（01 修订 2：封引擎内） | 会话存储与 PSK 推导（ticket 解析、resumption PSK 计算、obfuscated_ticket_age——08；06 只消费 `TlsSessionOffer` 输入） |
 | 证书链验证（02b `tls_verify_chain`，SNI/IP 名字校验）、CV 验签（02b `tls_verify` + 偏好表） | 1.2 session ticket 的**消费与存储**（收到 NST 只校验结构+转录后忽略；08 接管） |
-| alert 的收（路由/终止判定）与发（含密文 alert） | OCSP stapling / compress_certificate / 1.2 CBC / 静态 RSA KX（01 §1 既定不做） |
+| alert 的收（路由/终止判定）与发（含密文 alert） | OCSP stapling / compress_certificate（01 §1 既定不做；1.2 CBC / 静态 RSA KX 由 11 号补入客户端） |
 | 密钥时点编排：1.3 三次换 cipher 实例；1.2 key_block 切片 + 双向 CCS 时点 | record_size_limit / max_early_data_bytes 之外的策略协商（后续按需加扩展） |
 
 ### 1.2 与后续编号的切分
