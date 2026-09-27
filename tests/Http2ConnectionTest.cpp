@@ -6665,7 +6665,9 @@ void exercise_http2_cancelled_waiter(std::size_t cancelled) {
         auto middle = attach_owned_for_cancellation(connection);
         auto last = attach_owned_for_cancellation(connection);
         auto start = [](auto &task) {
-            auto handle = task.operator co_await().handle;
+            // std::move only binds the rvalue-qualified operator co_await;
+            // task keeps owning the frame.
+            auto handle = std::move(task).operator co_await().handle;
             handle.promise().set_continuation(std::noop_coroutine());
             handle.resume();
             return handle;

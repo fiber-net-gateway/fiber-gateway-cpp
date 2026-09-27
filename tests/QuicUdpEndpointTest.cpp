@@ -4060,14 +4060,16 @@ TEST_P(QuicUdpEndpointSocketErrorTest, DetachesConnectionsAndWaitsForOutstanding
         };
         auto task = shutdown();
         const bool shutdown_started = std::get<1>(GetParam());
+        // std::move only binds the rvalue-qualified operator co_await; task
+        // keeps owning the frame for its destructor.
         if (shutdown_started) {
-            task.operator co_await().await_suspend(std::noop_coroutine()).resume();
+            std::move(task).operator co_await().await_suspend(std::noop_coroutine()).resume();
         }
         fiber::quic::QuicUdpEndpointTestAccess::socket_error(endpoint, std::get<0>(GetParam()));
         if (!shutdown_started) {
             EXPECT_EQ(lease->close_info().error_code,
                       static_cast<std::uint64_t>(fiber::quic::QuicErrorCode::InternalError));
-            task.operator co_await().await_suspend(std::noop_coroutine()).resume();
+            std::move(task).operator co_await().await_suspend(std::noop_coroutine()).resume();
         }
         EXPECT_FALSE(endpoint.valid());
         EXPECT_FALSE(endpoint.running());

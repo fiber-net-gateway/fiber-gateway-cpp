@@ -134,7 +134,9 @@ fiber::async::Task<void> join_and_count(LocalWaitGroup &group, int &resumes) {
 }
 
 void start_join(fiber::async::Task<void> &task) {
-    task.operator co_await().await_suspend(std::noop_coroutine()).resume();
+    // std::move only binds the rvalue-qualified operator co_await; the awaiter
+    // borrows the handle and task keeps owning the frame.
+    std::move(task).operator co_await().await_suspend(std::noop_coroutine()).resume();
 }
 
 } // namespace
