@@ -91,7 +91,7 @@ common::IoResult<TlsSecret> tls12_master_secret(TlsCipherSuiteId suite, std::spa
                                                 std::span<const std::uint8_t> client_random,
                                                 std::span<const std::uint8_t> server_random) noexcept {
     const TlsSuiteInfo &info = suite_info_or_assert(suite, false);
-    FIBER_ASSERT(z.size() == 32 && client_random.size() == 32 && server_random.size() == 32);
+    FIBER_ASSERT((z.size() == 32 || z.size() == 48) && client_random.size() == 32 && server_random.size() == 32);
 
     std::array<std::uint8_t, 64> seed{};
     std::memcpy(seed.data(), client_random.data(), 32);
@@ -112,7 +112,7 @@ common::IoResult<TlsSecret> tls12_master_secret(TlsCipherSuiteId suite, std::spa
 common::IoResult<TlsSecret> tls12_extended_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_t> z,
                                                          std::span<const std::uint8_t> session_hash) noexcept {
     const TlsSuiteInfo &info = suite_info_or_assert(suite, false);
-    FIBER_ASSERT(z.size() == 32);
+    FIBER_ASSERT(z.size() == 32 || z.size() == 48); // premaster: X25519/P-256 or P-384
     FIBER_ASSERT(session_hash.size() == tls_hash_len(info.hash));
 
     std::array<std::uint8_t, 48> out{};

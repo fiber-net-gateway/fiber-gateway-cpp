@@ -106,22 +106,33 @@ void tls_x25519_keypair(std::uint8_t out_public[32], std::uint8_t out_private[32
 [[nodiscard]] bool tls_x25519_shared(std::uint8_t out_shared[32], const std::uint8_t private_key[32],
                                      const std::uint8_t peer_public[32]) noexcept;
 
-// ---- P-256: EVP_PKEY is opaque in the public headers, so the key lives on
-// the heap behind a void* handle. Public values are uncompressed points
-// (0x04 || X || Y, 65 bytes); the shared secret is the fixed-length 32-byte
-// x-coordinate (leading zeros kept). ----
+// ---- NIST ECDH (P-256, P-384): EVP_PKEY is opaque in the public headers,
+// so the key lives on the heap behind a void* handle. Public values are
+// uncompressed points (0x04 || X || Y: 65 / 97 bytes); the shared secret is
+// the fixed-length x-coordinate (32 / 48 bytes, leading zeros kept). ----
 
-struct TlsP256Key {
+enum class TlsEcCurve : std::uint8_t { P256, P384 };
+
+[[nodiscard]] constexpr std::size_t tls_ec_field_len(TlsEcCurve curve) noexcept {
+    return curve == TlsEcCurve::P256 ? 32 : 48;
+}
+[[nodiscard]] constexpr std::size_t tls_ec_point_len(TlsEcCurve curve) noexcept {
+    return 1 + 2 * tls_ec_field_len(curve);
+}
+
+struct TlsEcKey {
     void *impl = nullptr; // EVP_PKEY*, owned by whoever holds this handle
 };
 
-void tls_p256_free(TlsP256Key &key) noexcept;
-[[nodiscard]] bool tls_p256_generate(TlsP256Key &key) noexcept;
-[[nodiscard]] bool tls_p256_public(const TlsP256Key &key, std::uint8_t out_uncompressed[65]) noexcept;
-// peer must be exactly 65 bytes. False = invalid point (not on the curve) or
+void tls_ec_free(TlsEcKey &key) noexcept;
+[[nodiscard]] bool tls_ec_generate(TlsEcKey &key, TlsEcCurve curve) noexcept;
+// out receives tls_ec_point_len(curve) bytes.
+[[nodiscard]] bool tls_ec_public(const TlsEcKey &key, TlsEcCurve curve, std::uint8_t *out_uncompressed) noexcept;
+// peer must be exactly tls_ec_point_len(curve) bytes; out receives
+// tls_ec_field_len(curve) bytes. False = invalid point (not on the curve) or
 // derive failure; invalid encodings are the caller's protocol error to raise.
-[[nodiscard]] bool tls_p256_shared(const TlsP256Key &key, std::span<const std::uint8_t> peer_uncompressed,
-                                   std::uint8_t out_shared[32]) noexcept;
+[[nodiscard]] bool tls_ec_shared(const TlsEcKey &key, TlsEcCurve curve, std::span<const std::uint8_t> peer_uncompressed,
+                                 std::uint8_t *out_shared) noexcept;
 
 } // namespace fiber::tls
 

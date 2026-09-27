@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <openssl/ec.h>
+#include <openssl/ecdh.h>
 #include <openssl/evp.h>
 
 #include <fiber/tls/crypto/TlsKeyExchange.h>
@@ -187,6 +188,98 @@ TEST(TlsKeyExchange, P256RejectsBadPeerData) {
 }
 
 // ---------------------------------------------------------------------------
+// P-384: 97-byte uncompressed points, 48-byte shared secret
+// ---------------------------------------------------------------------------
+
+TEST(TlsKeyExchange, P384AgreesBothWays) {
+    auto a = make_kx(TlsNamedGroup::Secp384r1);
+    auto b = make_kx(TlsNamedGroup::Secp384r1);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_NE(nullptr, b.get());
+    EXPECT_EQ(TlsNamedGroup::Secp384r1, a->group());
+    ASSERT_TRUE(a->generate().has_value());
+    ASSERT_TRUE(b->generate().has_value());
+    EXPECT_EQ(97u, a->public_value().len);
+    EXPECT_EQ(0x04, a->public_value().buf[0]);
+
+    const TlsKxShared za = a->decap(b->public_value().bytes());
+    const TlsKxShared zb = b->decap(a->public_value().bytes());
+    ASSERT_EQ(TlsKxStatus::Ok, za.status);
+    ASSERT_EQ(TlsKxStatus::Ok, zb.status);
+    EXPECT_EQ(48u, za.len);
+    EXPECT_EQ(48u, za.bytes().size());
+    EXPECT_EQ(0, std::memcmp(za.z.data(), zb.z.data(), 48));
+}
+
+TEST(TlsKeyExchange, P384InteropWithBoringSSLDerive) {
+    // As the P-256 case: our secret must equal a plain BoringSSL derive.
+    EC_KEY *peer_ec = EC_KEY_new_by_curve_name(NID_secp384r1);
+    ASSERT_NE(nullptr, peer_ec);
+    ASSERT_EQ(1, EC_KEY_generate_key(peer_ec));
+    std::vector<std::uint8_t> peer_pub(97);
+    ASSERT_EQ(97u, EC_POINT_point2oct(EC_KEY_get0_group(peer_ec), EC_KEY_get0_public_key(peer_ec),
+                                      POINT_CONVERSION_UNCOMPRESSED, peer_pub.data(), 97, nullptr));
+
+    auto ours = make_kx(TlsNamedGroup::Secp384r1);
+    ASSERT_NE(nullptr, ours.get());
+    ASSERT_TRUE(ours->generate().has_value());
+    const TlsKxShared z1 = ours->decap(peer_pub);
+    ASSERT_EQ(TlsKxStatus::Ok, z1.status);
+
+    const auto our_pub = ours->public_value().bytes();
+    ASSERT_EQ(97u, our_pub.size());
+    EC_POINT *our_point = EC_POINT_new(EC_KEY_get0_group(peer_ec));
+    ASSERT_NE(nullptr, our_point);
+    ASSERT_EQ(1, EC_POINT_oct2point(EC_KEY_get0_group(peer_ec), our_point, our_pub.data(), 97, nullptr));
+    std::uint8_t z2[48];
+    ASSERT_EQ(48, ECDH_compute_key(z2, sizeof(z2), our_point, peer_ec, nullptr));
+    EC_POINT_free(our_point);
+    EC_KEY_free(peer_ec);
+
+    ASSERT_EQ(48u, z1.len);
+    EXPECT_EQ(0, std::memcmp(z1.z.data(), z2, 48));
+}
+
+TEST(TlsKeyExchange, P384RejectsBadPeerData) {
+    auto a = make_kx(TlsNamedGroup::Secp384r1);
+    ASSERT_NE(nullptr, a.get());
+    ASSERT_TRUE(a->generate().has_value());
+
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(ramp(96, 0x04)).status);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(ramp(98, 0x04)).status);
+    // A valid P-256 point is the wrong size (and curve) here.
+    auto p256 = make_kx(TlsNamedGroup::Secp256r1);
+    ASSERT_TRUE(p256->generate().has_value());
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(p256->public_value().bytes()).status);
+    // Compressed marker, and the off-curve point (0,0).
+    std::vector<std::uint8_t> bad(97, 0);
+    bad[0] = 0x02;
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(bad).status);
+    bad[0] = 0x04;
+    EXPECT_EQ(TlsKxStatus::BadPeerData, a->decap(bad).status);
+    // encap applies the same checks and stays ungenerated.
+    auto server = make_kx(TlsNamedGroup::Secp384r1);
+    EXPECT_EQ(TlsKxStatus::BadPeerData, server->encap(bad).status);
+}
+
+TEST(TlsKeyExchange, P384EncapAgreesWithDecap) {
+    auto client = make_kx(TlsNamedGroup::Secp384r1);
+    auto server = make_kx(TlsNamedGroup::Secp384r1);
+    ASSERT_NE(nullptr, client.get());
+    ASSERT_NE(nullptr, server.get());
+    ASSERT_TRUE(client->generate().has_value());
+
+    const TlsKxShared zs = server->encap(client->public_value().bytes());
+    ASSERT_EQ(TlsKxStatus::Ok, zs.status);
+    EXPECT_EQ(97u, server->public_value().len);
+    const TlsKxShared zc = client->decap(server->public_value().bytes());
+    ASSERT_EQ(TlsKxStatus::Ok, zc.status);
+    ASSERT_EQ(48u, zs.len);
+    ASSERT_EQ(48u, zc.len);
+    EXPECT_EQ(0, std::memcmp(zs.z.data(), zc.z.data(), 48));
+}
+
+// ---------------------------------------------------------------------------
 // encap — the server-side composite (07's consumer; keygen + shared secret)
 // ---------------------------------------------------------------------------
 
@@ -289,7 +382,7 @@ TEST(TlsKeyExchange, P256FreshInstanceFreesTheKeyHandle) {
 // ---------------------------------------------------------------------------
 
 TEST(TlsKeyExchangeDeath, ContractViolations) {
-    EXPECT_DEATH((void) TlsKeyExchange::create(TlsNamedGroup::Secp384r1), "FIBER_ASSERT failed");
+    EXPECT_DEATH((void) TlsKeyExchange::create(TlsNamedGroup::Ffdhe2048), "FIBER_ASSERT failed");
 
     EXPECT_DEATH(
             {

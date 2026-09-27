@@ -31,8 +31,9 @@ namespace fiber::tls {
 // takes the first suite the client offered.
 
 // Server group preference: X25519 leads; P-256 is the fallback (and the HRR
-// answer when the client's first share misses).
-inline constexpr std::array<std::uint16_t, 2> kServerGroups{0x001D, 0x0017};
+// answer when the client's first share misses); P-384 comes last, so clients
+// restricted to it (CNSA/FIPS-style profiles) are served instead of refused.
+inline constexpr std::array<std::uint16_t, 3> kServerGroups{0x001D, 0x0017, 0x0018};
 
 // The CertificateRequest signature_algorithms offer = the 02b 1.3 preference
 // (what we can verify; the client's CV scheme must come from this list).

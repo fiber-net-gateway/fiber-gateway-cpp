@@ -163,7 +163,7 @@ void Tls13ServerHandshake::start(const TlsClientHello &ch, std::span<const std::
         }
         client_early_ = std::move(early).value();
     }
-    send_server_flight(ch, {z.z.data(), z.z.size()}, false);
+    send_server_flight(ch, z.bytes(), false);
 }
 
 // =====================================================================
@@ -501,7 +501,7 @@ void Tls13ServerHandshake::handle_client_hello2(std::span<const std::uint8_t> bo
         fail(TlsAlertDesc::InternalError);
         return;
     }
-    send_server_flight(ch2, {z.z.data(), z.z.size()}, true);
+    send_server_flight(ch2, z.bytes(), true);
 }
 
 // SH + compat CCS + EE + [Cert/CV] + Fin — everything up to (and including)

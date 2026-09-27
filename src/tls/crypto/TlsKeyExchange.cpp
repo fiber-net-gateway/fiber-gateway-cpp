@@ -53,6 +53,7 @@ public:
             out.status = TlsKxStatus::BadPeerData;
             return out;
         }
+        out.len = 32;
         pub_.len = 32;
         generated_ = true;
         return out;
@@ -67,7 +68,9 @@ public:
         }
         if (!tls_x25519_shared(out.z.data(), scalar_.data(), peer_public.data())) {
             out.status = TlsKxStatus::BadPeerData; // rejected peer (small-order / zero)
+            return out;
         }
+        out.len = 32;
         return out;
     }
 
@@ -79,21 +82,26 @@ private:
 
 // ---- P-256: EVP_PKEY on the heap behind the adapter's typed handle ----
 
-class P256KeyExchange final : public TlsKeyExchange {
+// NIST ECDH over P-256 or P-384: one class, the curve fixes the point and
+// shared-secret sizes.
+class EcdhKeyExchange final : public TlsKeyExchange {
 public:
-    ~P256KeyExchange() override { tls_p256_free(key_); }
+    explicit EcdhKeyExchange(TlsEcCurve curve) noexcept : curve_(curve) {}
+    ~EcdhKeyExchange() override { tls_ec_free(key_); }
 
-    [[nodiscard]] TlsNamedGroup group() const noexcept override { return TlsNamedGroup::Secp256r1; }
+    [[nodiscard]] TlsNamedGroup group() const noexcept override {
+        return curve_ == TlsEcCurve::P256 ? TlsNamedGroup::Secp256r1 : TlsNamedGroup::Secp384r1;
+    }
 
     [[nodiscard]] common::IoResult<void> generate() noexcept override {
         FIBER_ASSERT(!generated_);
-        if (!tls_p256_generate(key_)) {
+        if (!tls_ec_generate(key_, curve_)) {
             return std::unexpected(common::IoErr::NoMem);
         }
-        if (!tls_p256_public(key_, pub_.buf.data())) {
+        if (!tls_ec_public(key_, curve_, pub_.buf.data())) {
             return std::unexpected(common::IoErr::Unknown);
         }
-        pub_.len = 65;
+        pub_.len = static_cast<std::uint8_t>(tls_ec_point_len(curve_));
         generated_ = true;
         return {};
     }
@@ -106,25 +114,26 @@ public:
     [[nodiscard]] TlsKxShared encap(std::span<const std::uint8_t> peer_public) noexcept override {
         FIBER_ASSERT(!generated_);
         TlsKxShared out;
-        if (peer_public.size() != 65 || peer_public.front() != 0x04) {
+        if (!well_formed(peer_public)) {
             out.status = TlsKxStatus::BadPeerData;
             return out;
         }
-        if (!tls_p256_generate(key_)) {
+        if (!tls_ec_generate(key_, curve_)) {
             out.status = TlsKxStatus::PrimitiveFail; // allocation — our side
             return out;
         }
-        if (!tls_p256_shared(key_, peer_public, out.z.data())) {
-            tls_p256_free(key_);
+        if (!tls_ec_shared(key_, curve_, peer_public, out.z.data())) {
+            tls_ec_free(key_);
             out.status = TlsKxStatus::BadPeerData; // malformed or off-curve point
             return out;
         }
-        if (!tls_p256_public(key_, pub_.buf.data())) {
-            tls_p256_free(key_);
+        if (!tls_ec_public(key_, curve_, pub_.buf.data())) {
+            tls_ec_free(key_);
             out.status = TlsKxStatus::PrimitiveFail;
             return out;
         }
-        pub_.len = 65;
+        out.len = static_cast<std::uint8_t>(tls_ec_field_len(curve_));
+        pub_.len = static_cast<std::uint8_t>(tls_ec_point_len(curve_));
         generated_ = true;
         return out;
     }
@@ -132,19 +141,27 @@ public:
     [[nodiscard]] TlsKxShared decap(std::span<const std::uint8_t> peer_public) noexcept override {
         FIBER_ASSERT(generated_);
         TlsKxShared out;
-        if (peer_public.size() != 65 || peer_public.front() != 0x04) {
+        if (!well_formed(peer_public)) {
             out.status = TlsKxStatus::BadPeerData;
             return out;
         }
-        if (!tls_p256_shared(key_, peer_public, out.z.data())) {
+        if (!tls_ec_shared(key_, curve_, peer_public, out.z.data())) {
             out.status = TlsKxStatus::BadPeerData; // malformed or off-curve point
+            return out;
         }
+        out.len = static_cast<std::uint8_t>(tls_ec_field_len(curve_));
         return out;
     }
 
 private:
-    TlsP256Key key_{}; // EVP_PKEY* — generate frees, dtor frees; null when empty
+    // Uncompressed form of exactly this curve's size (RFC 8446 §4.2.8.2).
+    [[nodiscard]] bool well_formed(std::span<const std::uint8_t> peer_public) const noexcept {
+        return peer_public.size() == tls_ec_point_len(curve_) && peer_public.front() == 0x04;
+    }
+
+    TlsEcKey key_{}; // EVP_PKEY* — generate frees, dtor frees; null when empty
     TlsKeySharePub pub_{};
+    TlsEcCurve curve_;
     bool generated_ = false;
 };
 
@@ -157,7 +174,10 @@ common::IoResult<std::unique_ptr<TlsKeyExchange>> TlsKeyExchange::create(TlsName
             kx.reset(new (std::nothrow) X25519KeyExchange());
             break;
         case TlsNamedGroup::Secp256r1:
-            kx.reset(new (std::nothrow) P256KeyExchange());
+            kx.reset(new (std::nothrow) EcdhKeyExchange(TlsEcCurve::P256));
+            break;
+        case TlsNamedGroup::Secp384r1:
+            kx.reset(new (std::nothrow) EcdhKeyExchange(TlsEcCurve::P384));
             break;
         default:
             FIBER_ASSERT(false); // ctor-equivalent contract: the negotiated set only

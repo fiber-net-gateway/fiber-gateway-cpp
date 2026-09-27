@@ -609,6 +609,45 @@ TEST(TlsClientHandshake13Hrr, SecondFlightAfterRetryCompletes) {
 // §8.4 — client certificates (mTLS)
 // =====================================================================
 
+// P-384 is advertised but never sent as a key share: a server restricted to
+// it answers with an HRR, and the second flight completes over P-384.
+TEST(TlsClientHandshake13Hrr, RetryToP384Completes) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server = BoringServer::make(ServerOptions{.groups = "P-384"});
+        ASSERT_NE(nullptr, server);
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+        DriveLog log;
+        ASSERT_TRUE(drive(*server, engine, false, log));
+        EXPECT_EQ(SSL_GROUP_SECP384R1, SSL_get_group_id(server->ssl()));
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls13, engine.take_state().version);
+    });
+}
+
+// 1.2 with a P-384 ECDSA certificate: reachable only because P-384 is in our
+// supported_groups (RFC 8422 §5.1), and the ECDHE runs over P-384 too.
+TEST(TlsClientHandshake12Full, P384EcdheWithP384Certificate) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server = BoringServer::make(ServerOptions{
+                .leaf_pem = certfix::kLeafEcP384Pem,
+                .key_pem = certfix::kP384KeyPem,
+                .groups = "P-384",
+                .tls12_cipher = "ECDHE-ECDSA-AES128-GCM-SHA256",
+        });
+        ASSERT_NE(nullptr, server);
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+        DriveLog log;
+        ASSERT_TRUE(drive(*server, engine, false, log));
+        EXPECT_EQ(SSL_GROUP_SECP384R1, SSL_get_group_id(server->ssl()));
+        TlsConnectedState state = engine.take_state();
+        EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+        EXPECT_EQ(TlsCipherSuiteId::EcdheEcdsaAes128GcmSha256, state.suite);
+    });
+}
+
 TEST(TlsClientHandshake13Mtls, ServerRequiresClientCertificate) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         auto server = BoringServer::make(

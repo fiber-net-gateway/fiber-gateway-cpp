@@ -178,16 +178,24 @@ bool tls_x25519_shared(std::uint8_t out_shared[32], const std::uint8_t private_k
     return true;
 }
 
-void tls_p256_free(TlsP256Key &key) noexcept {
+namespace {
+
+[[nodiscard]] int ec_nid(TlsEcCurve curve) noexcept {
+    return curve == TlsEcCurve::P256 ? NID_X9_62_prime256v1 : NID_secp384r1;
+}
+
+} // namespace
+
+void tls_ec_free(TlsEcKey &key) noexcept {
     if (key.impl != nullptr) {
         EVP_PKEY_free(static_cast<EVP_PKEY *>(key.impl));
         key.impl = nullptr;
     }
 }
 
-bool tls_p256_generate(TlsP256Key &key) noexcept {
-    tls_p256_free(key);
-    EC_KEY *ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+bool tls_ec_generate(TlsEcKey &key, TlsEcCurve curve) noexcept {
+    tls_ec_free(key);
+    EC_KEY *ec = EC_KEY_new_by_curve_name(ec_nid(curve));
     if (ec == nullptr || EC_KEY_generate_key(ec) != 1) {
         EC_KEY_free(ec);
         drain_errors();
@@ -204,8 +212,9 @@ bool tls_p256_generate(TlsP256Key &key) noexcept {
     return true;
 }
 
-bool tls_p256_public(const TlsP256Key &key, std::uint8_t out_uncompressed[65]) noexcept {
+bool tls_ec_public(const TlsEcKey &key, TlsEcCurve curve, std::uint8_t *out_uncompressed) noexcept {
     FIBER_ASSERT(key.impl != nullptr);
+    const std::size_t point_len = tls_ec_point_len(curve);
     // get1 semantics: returns an up-referenced copy we must free.
     EC_KEY *ec = EVP_PKEY_get1_EC_KEY(static_cast<const EVP_PKEY *>(key.impl));
     if (ec == nullptr) {
@@ -213,32 +222,34 @@ bool tls_p256_public(const TlsP256Key &key, std::uint8_t out_uncompressed[65]) n
         return false;
     }
     const size_t len = EC_POINT_point2oct(EC_KEY_get0_group(ec), EC_KEY_get0_public_key(ec),
-                                          POINT_CONVERSION_UNCOMPRESSED, out_uncompressed, 65, nullptr);
+                                          POINT_CONVERSION_UNCOMPRESSED, out_uncompressed, point_len, nullptr);
     EC_KEY_free(ec);
-    if (len != 65) {
+    if (len != point_len) {
         drain_errors();
         return false;
     }
     return true;
 }
 
-bool tls_p256_shared(const TlsP256Key &key, std::span<const std::uint8_t> peer_uncompressed,
-                     std::uint8_t out_shared[32]) noexcept {
+bool tls_ec_shared(const TlsEcKey &key, TlsEcCurve curve, std::span<const std::uint8_t> peer_uncompressed,
+                   std::uint8_t *out_shared) noexcept {
     FIBER_ASSERT(key.impl != nullptr);
-    if (peer_uncompressed.size() != 65) {
+    const std::size_t point_len = tls_ec_point_len(curve);
+    const std::size_t field_len = tls_ec_field_len(curve);
+    if (peer_uncompressed.size() != point_len) {
         return false;
     }
 
     // Parse the peer point first: oct2point rejects encodings that are not a
     // point on the curve, so a malformed peer never reaches the derive.
     EVP_PKEY *peer_pkey = nullptr;
-    EC_KEY *peer_ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_KEY *peer_ec = EC_KEY_new_by_curve_name(ec_nid(curve));
     EC_POINT *point = nullptr;
     bool ok = peer_ec != nullptr;
     if (ok) {
         const EC_GROUP *group = EC_KEY_get0_group(peer_ec);
         point = EC_POINT_new(group);
-        ok = point != nullptr && EC_POINT_oct2point(group, point, peer_uncompressed.data(), 65, nullptr) == 1 &&
+        ok = point != nullptr && EC_POINT_oct2point(group, point, peer_uncompressed.data(), point_len, nullptr) == 1 &&
              EC_KEY_set_public_key(peer_ec, point) == 1;
     }
     EC_POINT_free(point);
@@ -256,8 +267,8 @@ bool tls_p256_shared(const TlsP256Key &key, std::span<const std::uint8_t> peer_u
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(static_cast<EVP_PKEY *>(key.impl), nullptr);
     ok = ctx != nullptr && EVP_PKEY_derive_init(ctx) == 1 && EVP_PKEY_derive_set_peer(ctx, peer_pkey) == 1;
     if (ok) {
-        size_t out_len = 32;
-        ok = EVP_PKEY_derive(ctx, out_shared, &out_len) == 1 && out_len == 32;
+        size_t out_len = field_len;
+        ok = EVP_PKEY_derive(ctx, out_shared, &out_len) == 1 && out_len == field_len;
     }
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(peer_pkey);

@@ -180,7 +180,7 @@ TlsKeySchedule13::client_early_traffic_secret(std::span<const std::uint8_t> hash
 common::IoResult<void> TlsKeySchedule13::handshake_secrets(std::span<const std::uint8_t> z,
                                                            std::span<const std::uint8_t> hash_ch_sh,
                                                            TlsSecret &client_hs, TlsSecret &server_hs) noexcept {
-    FIBER_ASSERT(stage_ == Stage::Early && z.size() == 32 && hash_ch_sh.size() == hash_len_);
+    FIBER_ASSERT(stage_ == Stage::Early && (z.size() == 32 || z.size() == 48) && hash_ch_sh.size() == hash_len_);
 
     common::IoResult<TlsSecret> derived =
             derive_secret_empty_transcript(early_secret_, kLabelDerived, hash_, hash_len_);

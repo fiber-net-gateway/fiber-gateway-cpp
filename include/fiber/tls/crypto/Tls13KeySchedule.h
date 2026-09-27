@@ -59,7 +59,7 @@ public:
 
     // ---- stage transitions ----
 
-    // z: the 32-byte (EC)DHE shared secret (X25519 or P-256 x-coordinate).
+    // z: the (EC)DHE shared secret (32 bytes for X25519/P-256, 48 for P-384).
     // Input hash = Hash(CH..SH). Advances to the handshake stage.
     [[nodiscard]] common::IoResult<void> handshake_secrets(std::span<const std::uint8_t> z,
                                                            std::span<const std::uint8_t> hash_ch_sh,
