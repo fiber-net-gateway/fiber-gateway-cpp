@@ -9,6 +9,7 @@ set(FIBER_SIMPLE_EXAMPLES
     https_echo
     tcp_echo
     tls_ab_bench
+    tls_probe
     udp_echo
 )
 
