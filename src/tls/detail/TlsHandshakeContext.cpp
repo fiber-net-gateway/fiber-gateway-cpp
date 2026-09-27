@@ -121,7 +121,32 @@ TlsInboundStep TlsHandshakeContext::step() noexcept {
     }
 }
 
+// Warning-level alerts other than close_notify are dropped until TLS 1.3 is
+// settled — the BoringSSL rule (ssl_process_alert): misconfigured 1.2 servers
+// send unrecognized_name as a warning, OpenSSL even before its ServerHello,
+// while our client cannot yet know the version. More than
+// kMaxWarningAlerts in a row is unexpected_message. Every other alert
+// (fatal, close_notify, any 1.3 warning) is surfaced and terminal.
+TlsInboundStep TlsHandshakeContext::alert_step(const std::uint8_t *bytes) noexcept {
+    const bool close_notify = bytes[1] == static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify);
+    if (bytes[0] == static_cast<std::uint8_t>(TlsAlertLevel::Warning) && !close_notify &&
+        mode_ != TlsInboundMode::Sealed13 && !tls13_settled_) {
+        if (++warning_alerts_ > kMaxWarningAlerts) {
+            return step_fatal(TlsAlertDesc::UnexpectedMessage);
+        }
+        return step_need_more();
+    }
+    TlsInboundStep step;
+    step.kind = TlsInboundStep::Kind::Alert;
+    step.alert = static_cast<TlsAlertDesc>(bytes[1]);
+    step.close_notify = close_notify;
+    return step;
+}
+
 TlsInboundStep TlsHandshakeContext::take_record(TlsRecord &&record) noexcept {
+    if (record.type != TlsContentType::Alert) {
+        warning_alerts_ = 0; // the warning budget counts consecutive alerts only
+    }
     switch (record.type) {
         case TlsContentType::Alert: {
             if (mode_ == TlsInboundMode::Sealed12) {
@@ -143,13 +168,7 @@ TlsInboundStep TlsHandshakeContext::take_record(TlsRecord &&record) noexcept {
             if (bytes == nullptr) {
                 return step_fatal(TlsAlertDesc::DecodeError);
             }
-            TlsInboundStep step;
-            step.kind = TlsInboundStep::Kind::Alert;
-            step.alert = static_cast<TlsAlertDesc>(bytes[1]);
-            step.close_notify = bytes[1] == static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify);
-            return step; // severity byte ignored: mid-handshake every inbound alert
-                         // is terminal (06 §2.3 for 1.3; 1.2 has no benign warning
-                         // inside the initial handshake either)
+            return alert_step(bytes);
         }
         case TlsContentType::ChangeCipherSpec: {
             // RFC 8446 §5: any CCS value other than a single 0x01 aborts the
@@ -277,11 +296,7 @@ TlsInboundStep TlsHandshakeContext::open_current(TlsRecord &record) noexcept {
             return step_fatal(TlsAlertDesc::DecodeError);
         }
         current_off_ = plain_len_; // consumed
-        TlsInboundStep step;
-        step.kind = TlsInboundStep::Kind::Alert;
-        step.alert = static_cast<TlsAlertDesc>(plain_[1]);
-        step.close_notify = plain_[1] == static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify);
-        return step;
+        return alert_step(plain_);
     }
     if (result.open.inner_type == TlsContentType::ApplicationData && early_sink_armed_) {
         // Accepted-0-RTT window: the content bytes (the inner type byte and

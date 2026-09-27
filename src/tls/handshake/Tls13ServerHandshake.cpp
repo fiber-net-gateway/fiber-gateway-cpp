@@ -360,6 +360,7 @@ void Tls13ServerHandshake::send_hello_retry() noexcept {
         return;
     }
     ccs_sent_ = true;
+    ctx_.settle_tls13(); // an HRR fixes 1.3: warnings are terminal from here
     if (hello_.view.has_early_data) {
         // CH1 offered 0-RTT: its early records are in flight and no key of
         // ours can open them — discard outer application_data by type while

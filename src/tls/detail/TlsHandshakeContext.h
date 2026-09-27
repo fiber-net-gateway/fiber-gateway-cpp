@@ -82,6 +82,9 @@ public:
     // message).
     static constexpr std::size_t kMaxHandshakeMessage = 16u << 10;
     static constexpr std::size_t kMaxCertificateMessage = 100u << 10;
+    // Consecutive warning alerts tolerated before 1.3 is settled (BoringSSL
+    // kMaxWarningAlerts; any non-alert record resets the count).
+    static constexpr std::uint8_t kMaxWarningAlerts = 4;
     static constexpr std::size_t kOpenScratchSize = kTlsMaxCiphertextRecordSize;
 
     TlsHandshakeContext() noexcept;
@@ -103,6 +106,11 @@ public:
     [[nodiscard]] bool provide_quic(TlsQuicLevel level, std::span<const std::uint8_t> bytes) noexcept;
 
     void set_inbound_mode(TlsInboundMode mode) noexcept { mode_ = mode; }
+
+    // Marks the version as settled to TLS 1.3 while inbound records are
+    // still plaintext (HRR sent / received). From here, and in Sealed13,
+    // warning alerts are terminal: 1.3 has no warning level (RFC 8446 §6).
+    void settle_tls13() noexcept { tls13_settled_ = true; }
 
     // Ordinary (non-Certificate) message cap; default kMaxHandshakeMessage.
     // Certificate messages are always capped at kMaxCertificateMessage.
@@ -235,6 +243,7 @@ private:
     [[nodiscard]] TlsInboundStep extract_message() noexcept;
     [[nodiscard]] TlsInboundStep quic_step() noexcept;
     [[nodiscard]] std::size_t max_body_len(std::uint8_t type) const noexcept;
+    [[nodiscard]] TlsInboundStep alert_step(const std::uint8_t *bytes) noexcept;
 
     mem::IoBufChain out_{};
     mem::IoBufChain reassembly_{};
@@ -251,6 +260,8 @@ private:
     std::size_t plain_len_ = 0;
     std::size_t plaintext_records_13_ = 0;
     std::size_t max_message_ = kMaxHandshakeMessage;
+    std::uint8_t warning_alerts_ = 0; // consecutive dropped warnings (see alert_step)
+    bool tls13_settled_ = false;
     bool has_current_ = false;
     bool failed_ = false;
     // ---- 0-RTT window state (see the arm/disarm API above) ----

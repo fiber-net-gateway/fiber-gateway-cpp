@@ -22,6 +22,9 @@ constexpr std::uint8_t kAlertLevelWarning = 1;
 // can send these at any time, so the bound caps pinned reassembly memory.
 constexpr std::size_t kMaxPostHandshakeMessage = 16u << 10;
 
+// 1.2 consecutive warning alerts tolerated (BoringSSL kMaxWarningAlerts).
+constexpr std::uint8_t kMaxWarningAlerts = 4;
+
 // Worst-case open workspace: one record, straddling topology (the gather
 // destination when the body is not contiguous in the record's chain).
 constexpr std::size_t kOpenScratchSize = kTlsMaxCiphertextRecordSize;
@@ -111,6 +114,7 @@ struct TlsConnection::Impl {
     TlsProtocolVersion version_;
     TlsCipherSuiteId suite_;
     std::uint16_t alpn_len_ = 0;
+    std::uint8_t warning_alerts_ = 0; // 1.2: consecutive dropped warnings (see on_alert_bytes)
     bool rekey_pending_ = false; // peer's KeyUpdate(update_requested): owe a response before the next write
     bool peer_closed_ = false; // the peer's close_notify latched
     bool close_sent_ = false; // our close_notify encoded
@@ -243,6 +247,9 @@ common::IoResult<void> TlsConnection::Impl::write_guard() noexcept {
 // ---- inbound record pipeline ----
 
 void TlsConnection::Impl::route_record(TlsRecord &&record) noexcept {
+    if (record.type != TlsContentType::Alert) {
+        warning_alerts_ = 0; // the warning budget counts consecutive alerts only
+    }
     switch (record.type) {
         case TlsContentType::Alert: {
             if (version_ == TlsProtocolVersion::Tls13) {
@@ -352,10 +359,17 @@ void TlsConnection::Impl::open_and_route(TlsRecord &record) noexcept {
 }
 
 void TlsConnection::Impl::on_alert_bytes(const std::uint8_t *bytes) noexcept {
-    // Severity byte ignored: close_notify and the peer's fatal alert are the
-    // two terminals; plaintext delivered before the alert stays readable.
+    // close_notify and the peer's fatal alert are the two terminals;
+    // plaintext delivered before the alert stays readable. A 1.2 warning
+    // (e.g. no_renegotiation, user_canceled before close_notify) is dropped,
+    // up to kMaxWarningAlerts in a row — the BoringSSL rule. 1.3 has no
+    // warning level, so there every other alert stays terminal.
     if (bytes[1] == static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify)) {
         peer_closed_ = true;
+    } else if (version_ == TlsProtocolVersion::Tls12 && bytes[0] == kAlertLevelWarning) {
+        if (++warning_alerts_ > kMaxWarningAlerts) {
+            latch_fatal(TlsAlertDesc::UnexpectedMessage);
+        }
     } else {
         failed_ = true; // the peer's fatal alert: terminal, nothing to send
     }

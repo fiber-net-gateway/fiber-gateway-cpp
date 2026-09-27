@@ -969,6 +969,40 @@ TEST(TlsConnectionTest, HandshakeRecordAfter12HandshakeIsFatal) {
     });
 }
 
+// 1.2 warning alerts (no_renegotiation here) are dropped up to four in a row
+// — the BoringSSL rule; any non-alert record resets the budget, the fifth
+// consecutive warning is unexpected_message.
+TEST(TlsConnectionTest, WarningAlertsToleratedUpToConsecutiveLimit12) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material; // pool only
+        Synthetic12Pair pair = make_synthetic_12_pair();
+        TlsConnection server_conn(TlsConnectionRole::Server, std::move(pair.server));
+        WireFeeder server_feeds;
+        const std::uint8_t warning[2] = {1, 100}; // warning, no_renegotiation
+        const auto send_warnings = [&](int count) {
+            for (int i = 0; i < count; ++i) {
+                ASSERT_TRUE(server_feeds.feed(
+                        server_conn, craft_12_record(pair.client.write_cipher, TlsContentType::Alert, warning)));
+            }
+        };
+
+        send_warnings(4);
+        EXPECT_FALSE(server_conn.failed());
+        EXPECT_FALSE(server_conn.peer_closed());
+
+        const std::vector<std::uint8_t> hi{'h', 'i'};
+        ASSERT_TRUE(server_feeds.feed(server_conn,
+                                      craft_12_record(pair.client.write_cipher, TlsContentType::ApplicationData, hi)));
+        EXPECT_EQ(hi, read_all(server_conn)); // warnings dropped, the stream lives
+
+        send_warnings(4); // the app record reset the budget
+        EXPECT_FALSE(server_conn.failed());
+        send_warnings(1);
+        EXPECT_TRUE(server_conn.failed());
+        EXPECT_FALSE(chain_bytes(server_conn.take_output()).empty()); // our unexpected_message flies
+    });
+}
+
 TEST(TlsConnectionTest, DegenerateShortSealedRecordLatchesBadRecordMac12) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         ServerMaterial material; // pool only

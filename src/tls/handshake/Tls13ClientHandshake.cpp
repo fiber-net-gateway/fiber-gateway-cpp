@@ -254,6 +254,7 @@ void Tls13ClientHandshake::start_hello_retry_request(const TlsServerHello &sh,
         return;
     }
     ccs_sent_ = true;
+    ctx_.settle_tls13(); // an HRR fixes 1.3: warnings are terminal from here
     hrr_count_ = 1;
     hrr_suite_ = static_cast<TlsCipherSuiteId>(sh.cipher_suite);
     // st_ stays WaitServerHello — the real SH is the next message.
