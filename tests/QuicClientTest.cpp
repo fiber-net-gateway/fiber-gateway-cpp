@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <memory>
 #include <new>
 #include <string>
 #include <utility>
@@ -638,6 +640,86 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
     summary.client_endpoint_connections = client_endpoint->active_connection_count();
     summary.server_endpoint_connections = server_endpoint->active_connection_count();
     promise->set_value(std::move(summary));
+}
+
+// Dynamic credential ownership (issue #41): the configure callback hands the
+// selected identity over by an aliasing shared_ptr and the publisher retires
+// its reference at once — the QUIC session alone keeps it alive, and must let
+// go at its done-transition rather than at connection teardown.
+struct QuicIdentitySnapshot {
+    std::unique_ptr<fiber::net::TlsCredential> credential;
+    std::atomic_bool *destroyed = nullptr;
+
+    ~QuicIdentitySnapshot() {
+        if (destroyed != nullptr) {
+            destroyed->store(true, std::memory_order_release);
+        }
+    }
+};
+
+struct QuicRotatingSelector {
+    std::shared_ptr<QuicIdentitySnapshot> published;
+    bool selected = false;
+};
+
+fiber::common::IoErr quic_select_and_retire(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
+                                            const fiber::tls::TlsClientHelloView &) noexcept {
+    auto *selector = static_cast<QuicRotatingSelector *>(ctx);
+    selector->selected = true;
+    if (selector->published == nullptr) {
+        return fiber::common::IoErr::Invalid;
+    }
+    std::shared_ptr<QuicIdentitySnapshot> snapshot = std::move(selector->published);
+    const fiber::net::TlsCredential *credential = snapshot->credential.get();
+    return config.add_credential(std::shared_ptr<const fiber::net::TlsCredential>(std::move(snapshot), credential));
+}
+
+struct RetainedCredentialSummary {
+    fiber::common::IoErr error = fiber::common::IoErr::None;
+    bool released_while_connected = false;
+    std::size_t server_connections_when_checked = 0;
+};
+
+fiber::async::DetachedTask connect_and_observe_release(fiber::quic::QuicUdpEndpoint *server_endpoint,
+                                                       fiber::quic::QuicUdpEndpoint *client_endpoint,
+                                                       const fiber::net::TlsClientSecurity *security,
+                                                       const std::atomic_bool *destroyed,
+                                                       std::promise<RetainedCredentialSummary> *promise) {
+    RetainedCredentialSummary summary{};
+    auto server_started = server_endpoint->start();
+    auto client_started = client_endpoint->start();
+    if (!server_started || !client_started) {
+        summary.error = !server_started ? server_started.error() : client_started.error();
+        co_await client_endpoint->shutdown();
+        co_await server_endpoint->shutdown();
+        promise->set_value(summary);
+        co_return;
+    }
+
+    auto options = make_client_options(*client_endpoint,
+                                       {fiber::net::IpAddress::loopback_v4(), server_endpoint->local_addr().port()});
+    if (!options) {
+        summary.error = options.error();
+    } else {
+        fiber::quic::QuicConnection connection(*client_endpoint, *options);
+        const auto params = make_connect_params(*security, "localhost");
+        auto connected = connection.connect(params);
+        if (!connected) {
+            summary.error = connected.error();
+        } else if (auto confirmed = co_await connection.wait_confirmed(2s); !confirmed) {
+            // Confirmation = the server's HANDSHAKE_DONE: its handshake has
+            // finished, while both connections are still open.
+            summary.error = confirmed.error();
+        } else {
+            summary.released_while_connected = destroyed->load(std::memory_order_acquire);
+            summary.server_connections_when_checked = server_endpoint->active_connection_count();
+        }
+        co_await close_and_wait(connection);
+    }
+
+    co_await client_endpoint->shutdown();
+    co_await server_endpoint->shutdown();
+    promise->set_value(summary);
 }
 
 } // namespace
@@ -1305,6 +1387,61 @@ TEST(QuicClientTest, EarlyDataRejectedWhenServerDeclinesEarlyData) {
     EXPECT_TRUE(summary.session_reused);
     EXPECT_TRUE(summary.early_data_attempted);
     EXPECT_FALSE(summary.early_data_accepted);
+
+    group.stop();
+    group.join();
+}
+
+TEST(QuicClientTest, RetainedDynamicCredentialReleasesAtHandshakeDone) {
+    fiber::test::QuicTestTlsFile cert("cert", fiber::test::kQuicTestCertificatePem);
+    fiber::test::QuicTestTlsFile key("key", fiber::test::kQuicTestPrivateKeyPem);
+    ASSERT_TRUE(cert.valid());
+    ASSERT_TRUE(key.valid());
+
+    std::atomic_bool destroyed{false};
+    auto server_material = create_quic_tls(cert.path(), key.path());
+    ASSERT_TRUE(server_material);
+    auto snapshot = std::make_shared<QuicIdentitySnapshot>();
+    snapshot->credential = std::move(server_material->credential);
+    snapshot->destroyed = &destroyed;
+    QuicRotatingSelector selector{};
+    selector.published = std::move(snapshot);
+
+    fiber::net::TlsServerParam server_tls = make_quic_server_tls(*server_material);
+    server_tls.configure_callback = &quic_select_and_retire;
+    server_tls.configure_ctx = &selector;
+    auto client_material = create_quic_tls({}, {}, cert.path());
+    ASSERT_TRUE(client_material);
+    auto client_tls = make_quic_client_tls(*client_material);
+
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    fiber::quic::QuicUdpEndpoint server_endpoint(group.at(0));
+    fiber::quic::QuicUdpEndpoint::Options server_options{};
+    server_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    server_options.tls = &server_tls;
+    server_options.create_connection = create_connection;
+    ASSERT_TRUE(server_endpoint.init(server_options));
+
+    fiber::quic::QuicUdpEndpoint client_endpoint(group.at(0));
+    fiber::quic::QuicUdpEndpoint::EndpointOptions client_options{};
+    client_options.bind_addr = {fiber::net::IpAddress::loopback_v4(), 0};
+    ASSERT_TRUE(client_endpoint.init(client_options));
+
+    std::promise<RetainedCredentialSummary> promise;
+    auto future = promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return connect_and_observe_release(&server_endpoint, &client_endpoint, &client_tls, &destroyed, &promise);
+    });
+
+    ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
+    const RetainedCredentialSummary summary = future.get();
+    EXPECT_EQ(summary.error, fiber::common::IoErr::None);
+    EXPECT_TRUE(selector.selected);
+    EXPECT_EQ(summary.server_connections_when_checked, 1u) << "the server connection is still alive";
+    EXPECT_TRUE(summary.released_while_connected) << "released at the done-transition, not at teardown";
+    EXPECT_TRUE(destroyed.load(std::memory_order_acquire));
 
     group.stop();
     group.join();

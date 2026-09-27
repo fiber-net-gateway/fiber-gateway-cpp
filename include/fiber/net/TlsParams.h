@@ -130,12 +130,16 @@ struct TlsServerParam {
     // Trivially copyable, non-owning view assembled per handshake. The
     // handshake borrows it until it co_returns: the param, the storage its
     // alpn span points into, and the pointees of configure_ctx and trust_store
-    // must stay valid until the handshake completes (the configure callback
-    // runs at ClientHello; afterwards the SSL retains its own material
-    // references). Copying the param is free and extends the borrow — but the
-    // alpn span keeps pointing at the original backing. Required for TLS: the
-    // callback configures the current SSL after ClientHello and must add at
-    // least one credential.
+    // must stay valid until the handshake completes. Copying the param is free
+    // and extends the borrow — but the alpn span keeps pointing at the
+    // original backing. Required for TLS: the callback runs at the first
+    // ClientHello and must add at least one credential. The engine reads the
+    // credential after the callback returns (Certificate/CertificateVerify,
+    // a full round trip later after a HelloRetryRequest): a borrowed
+    // credential must outlive the handshake, while one added through the
+    // owning TlsServerHandshakeConfig::add_credential(shared_ptr) overload is
+    // retained by the handshake itself — the shape for dynamically published
+    // credentials that may be retired mid-handshake.
     ConfigureTlsCallback configure_callback = nullptr;
     void *configure_ctx = nullptr;
     const TrustStore *trust_store = nullptr;
