@@ -120,10 +120,11 @@ public:
         }
     }
 
+    // External active cancellation only (CancellableAwaiter contract: the
+    // inner cancel() performs the one resume); on_timeout must not call this
+    // before its own resume -- it cancels through temporary destruction.
     void cancel() noexcept
-        requires requires(InnerAwaiter &awaiter) {
-            { awaiter.cancel() } noexcept;
-        }
+        requires CancellableAwaiter<InnerAwaiter>
     {
         if (!waiting_) {
             return;
