@@ -30,6 +30,25 @@ fiber_validate_cxx_toolchain()
 fiber_detect_epoll_pwait2_syscall()
 fiber_detect_udp_gso()
 
+# libFuzzer harnesses under fuzz/ (fuzz/README.md). A fuzz build is its own
+# build tree: every fiber target (not the third-party deps above, so coverage
+# feedback stays on our code) gets ASan + UBSan and libFuzzer coverage
+# instrumentation, and LTO is forced off.
+option(FIBER_BUILD_FUZZERS "Build libFuzzer harnesses under fuzz/ (Clang; instruments fiber targets)" OFF)
+if (FIBER_BUILD_FUZZERS)
+    if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "FIBER_BUILD_FUZZERS requires Clang (libFuzzer)")
+    endif()
+    set(FIBER_ENABLE_LTO OFF CACHE BOOL "Enable LTO/IPO for fiber targets" FORCE)
+    if (FIBER_USE_LIBCXX)
+        message(WARNING "FIBER_BUILD_FUZZERS with FIBER_USE_LIBCXX: distribution libFuzzer runtimes are "
+                        "usually built against libstdc++ and fail to link; configure with FIBER_USE_LIBCXX=OFF")
+    endif()
+    add_compile_options(-fsanitize=address,undefined,fuzzer-no-link -fno-sanitize-recover=undefined
+                        -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 set(FIBER_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 configure_file(cmake/FiberPlatformConfig.h.in
     "${FIBER_GENERATED_INCLUDE_DIR}/fiber/FiberPlatformConfig.h")
@@ -253,4 +272,9 @@ endif()
 # nacos_demo can resolve their reusable library targets.
 if (FIBER_BUILD_EXAMPLES)
     add_subdirectory(example)
+endif()
+
+if (FIBER_BUILD_FUZZERS)
+    enable_testing() # the corpus-replay tests, also with FIBER_BUILD_TESTS=OFF
+    add_subdirectory(fuzz)
 endif()
