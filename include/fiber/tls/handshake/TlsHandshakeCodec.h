@@ -153,6 +153,12 @@ tls_encode_certificate_12(std::span<const std::span<const std::uint8_t>> certs,
 [[nodiscard]] common::IoResult<std::size_t> tls_encode_client_key_exchange(std::span<const std::uint8_t> point,
                                                                            std::span<std::uint8_t> scratch) noexcept;
 
+// 1.2 static-RSA ClientKeyExchange (RFC 5246 §7.4.7.1, feature/tls/11): the
+// EncryptedPreMasterSecret with its 2-byte length prefix (the TLS 1.0+ form).
+[[nodiscard]] common::IoResult<std::size_t>
+tls_encode_client_key_exchange_rsa(std::span<const std::uint8_t> encrypted_premaster,
+                                   std::span<std::uint8_t> scratch) noexcept;
+
 // ---- encode（07 补充：server flight）----
 
 // Everything the ServerHello encoder needs; one struct covers the three wire

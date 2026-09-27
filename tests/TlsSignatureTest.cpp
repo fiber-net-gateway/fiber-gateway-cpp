@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <openssl/evp.h>
+#include <openssl/rsa.h>
+
 #include <array>
 #include <cstddef>
 #include <cstring>
@@ -352,6 +355,46 @@ TEST(TlsSignatureRoundtrip, SignThenVerifyEverySupportedPair) {
 // ---------------------------------------------------------------------------
 // Contract violations are engine bugs — FIBER_ASSERT
 // ---------------------------------------------------------------------------
+
+// The static-RSA ClientKeyExchange primitive (feature/tls/11): PKCS#1 v1.5
+// encryption to a certificate's RSA key decrypts under the paired private
+// key; a non-RSA key or a short output buffer is Invalid.
+TEST(TlsRsaEncrypt, Pkcs1RoundTripsUnderThePairedKey) {
+    TlsCertificateChain rsa_holder;
+    const TlsPublicKeyView rsa_cert = cert_public_key(certfix::kLeafRsaPem, rsa_holder);
+    auto private_key = TlsPrivateKey::parse_pem(pem_span(certfix::kRsa2048KeyPem));
+    ASSERT_TRUE(private_key.has_value());
+
+    std::array<std::uint8_t, 48> premaster{};
+    for (std::size_t i = 0; i < premaster.size(); ++i) {
+        premaster[i] = static_cast<std::uint8_t>(0x03 + i);
+    }
+    std::array<std::uint8_t, 512> encrypted{};
+    const auto len = rsa_cert.rsa_encrypt_pkcs1(premaster, encrypted);
+    ASSERT_TRUE(len.has_value());
+    EXPECT_EQ(256u, len.value()); // the RSA-2048 modulus
+
+    RSA *rsa = EVP_PKEY_get0_RSA(static_cast<EVP_PKEY *>(private_key->evp_pkey_handle()));
+    ASSERT_NE(nullptr, rsa);
+    std::array<std::uint8_t, 256> decrypted{};
+    std::size_t decrypted_len = 0;
+    ASSERT_EQ(1, RSA_decrypt(rsa, &decrypted_len, decrypted.data(), decrypted.size(), encrypted.data(), len.value(),
+                             RSA_PKCS1_PADDING));
+    ASSERT_EQ(premaster.size(), decrypted_len);
+    EXPECT_EQ(0, std::memcmp(premaster.data(), decrypted.data(), premaster.size()));
+
+    // PKCS#1 v1.5 padding is randomized: the same premaster never encrypts twice alike.
+    std::array<std::uint8_t, 512> again{};
+    ASSERT_TRUE(rsa_cert.rsa_encrypt_pkcs1(premaster, again).has_value());
+    EXPECT_NE(0, std::memcmp(encrypted.data(), again.data(), 256));
+
+    std::array<std::uint8_t, 255> short_out{};
+    EXPECT_FALSE(rsa_cert.rsa_encrypt_pkcs1(premaster, short_out).has_value());
+
+    TlsCertificateChain ec_holder;
+    const TlsPublicKeyView ec_cert = cert_public_key(certfix::kLeafEcP256Pem, ec_holder);
+    EXPECT_FALSE(ec_cert.rsa_encrypt_pkcs1(premaster, encrypted).has_value());
+}
 
 TEST(TlsSignatureDeath, ContractViolations) {
     auto key = TlsPrivateKey::parse_pem(pem_span(certfix::kRsa2048KeyPem));

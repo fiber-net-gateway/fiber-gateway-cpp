@@ -1402,6 +1402,21 @@ common::IoResult<std::size_t> tls_encode_client_key_exchange(std::span<const std
     return w.offset();
 }
 
+common::IoResult<std::size_t> tls_encode_client_key_exchange_rsa(std::span<const std::uint8_t> encrypted_premaster,
+                                                                 std::span<std::uint8_t> scratch) noexcept {
+    const std::size_t len = encrypted_premaster.size();
+    if (len < 1 || len > 0xFFFF || scratch.size() < kTlsHandshakeHeaderSize + 2 + len) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    TlsWriteCursor w(scratch);
+    if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::ClientKeyExchange)) ||
+        !w.be24(static_cast<std::uint32_t>(2 + len)) || !w.be16(static_cast<std::uint16_t>(len)) ||
+        !w.bytes(encrypted_premaster)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return w.offset();
+}
+
 common::IoResult<void> tls_decode_client_key_exchange(const std::uint8_t *body, std::size_t len,
                                                       TlsClientKeyExchange &out) noexcept {
     TlsReadCursor cursor(body, len);

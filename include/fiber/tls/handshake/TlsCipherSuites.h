@@ -27,6 +27,11 @@ enum class TlsCipherSuiteId : std::uint16_t {
     EcdheRsaAes128CbcSha = 0xC013,
     EcdheRsaAes256CbcSha = 0xC014,
     EcdheRsaAes128CbcSha256 = 0xC027,
+    RsaAes128GcmSha256 = 0x009C, // static RSA key exchange from here on
+    RsaAes256GcmSha384 = 0x009D,
+    RsaAes128CbcSha = 0x002F,
+    RsaAes256CbcSha = 0x0035,
+    RsaAes128CbcSha256 = 0x003C,
 };
 
 // Named groups for (EC)DHE key exchange.
@@ -86,8 +91,10 @@ enum class TlsAeadAlgorithm : std::uint8_t {
 }
 
 // The key exchange / authentication halves of a 1.2 suite name (ECDHE-RSA vs
-// ECDHE-ECDSA). None for the 1.3 suites, which carry neither.
-enum class TlsSuiteKx : std::uint8_t { None, Ecdhe };
+// ECDHE-ECDSA vs static RSA). None for the 1.3 suites, which carry neither.
+// Rsa: no ServerKeyExchange; the client encrypts the premaster secret to the
+// server certificate's RSA key (RFC 5246 §7.4.7.1) — client side only.
+enum class TlsSuiteKx : std::uint8_t { None, Ecdhe, Rsa };
 enum class TlsSuiteAuth : std::uint8_t { None, Rsa, Ecdsa };
 
 // Per-suite parameters — the single source of truth shared by the record
@@ -109,7 +116,7 @@ struct TlsSuiteInfo {
     TlsSuiteAuth auth; // the credential kind the server authenticates with
 };
 
-inline constexpr std::array<TlsSuiteInfo, 14> kTlsSuiteRegistry{
+inline constexpr std::array<TlsSuiteInfo, 19> kTlsSuiteRegistry{
         TlsSuiteInfo{TlsCipherSuiteId::TlsAes128GcmSha256, TlsAeadAlgorithm::Aes128Gcm, TlsHashAlgorithm::Sha256, 16,
                      true, TlsSuiteKx::None, TlsSuiteAuth::None},
         TlsSuiteInfo{TlsCipherSuiteId::TlsAes256GcmSha384, TlsAeadAlgorithm::Aes256Gcm, TlsHashAlgorithm::Sha384, 32,
@@ -138,6 +145,16 @@ inline constexpr std::array<TlsSuiteInfo, 14> kTlsSuiteRegistry{
                      32, false, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Rsa},
         TlsSuiteInfo{TlsCipherSuiteId::EcdheRsaAes128CbcSha256, TlsAeadAlgorithm::Aes128CbcSha256,
                      TlsHashAlgorithm::Sha256, 16, false, TlsSuiteKx::Ecdhe, TlsSuiteAuth::Rsa},
+        TlsSuiteInfo{TlsCipherSuiteId::RsaAes128GcmSha256, TlsAeadAlgorithm::Aes128Gcm, TlsHashAlgorithm::Sha256, 16,
+                     false, TlsSuiteKx::Rsa, TlsSuiteAuth::Rsa},
+        TlsSuiteInfo{TlsCipherSuiteId::RsaAes256GcmSha384, TlsAeadAlgorithm::Aes256Gcm, TlsHashAlgorithm::Sha384, 32,
+                     false, TlsSuiteKx::Rsa, TlsSuiteAuth::Rsa},
+        TlsSuiteInfo{TlsCipherSuiteId::RsaAes128CbcSha, TlsAeadAlgorithm::Aes128CbcSha1, TlsHashAlgorithm::Sha256, 16,
+                     false, TlsSuiteKx::Rsa, TlsSuiteAuth::Rsa},
+        TlsSuiteInfo{TlsCipherSuiteId::RsaAes256CbcSha, TlsAeadAlgorithm::Aes256CbcSha1, TlsHashAlgorithm::Sha256, 32,
+                     false, TlsSuiteKx::Rsa, TlsSuiteAuth::Rsa},
+        TlsSuiteInfo{TlsCipherSuiteId::RsaAes128CbcSha256, TlsAeadAlgorithm::Aes128CbcSha256, TlsHashAlgorithm::Sha256,
+                     16, false, TlsSuiteKx::Rsa, TlsSuiteAuth::Rsa},
 };
 
 // Registry lookup; nullptr for suites outside the implemented set.

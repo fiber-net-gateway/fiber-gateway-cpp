@@ -21,7 +21,8 @@
 namespace fiber::tls {
 
 // master_secret = PRF(z, "master secret", client_random || server_random)[48].
-// z is the ECDHE shared secret (32 bytes; 48 for P-384); both randoms are 32 bytes. Asserts a
+// z is the premaster: the ECDHE shared secret (32 bytes; 48 for P-384) or the
+// static-RSA premaster (48 bytes); both randoms are 32 bytes. Asserts a
 // 1.2 suite.
 [[nodiscard]] common::IoResult<TlsSecret> tls12_master_secret(TlsCipherSuiteId suite, std::span<const std::uint8_t> z,
                                                               std::span<const std::uint8_t> client_random,
