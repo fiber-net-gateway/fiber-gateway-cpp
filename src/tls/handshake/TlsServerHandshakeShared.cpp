@@ -36,27 +36,19 @@ bool tls_server_suite_select(const TlsClientHello &ch, bool tls13, TlsCipherSuit
     return false;
 }
 
-namespace {
-
-// Which credential kind signs a 1.2 registry suite (ECDHE-RSA vs
-// ECDHE-ECDSA — the auth half of the suite name).
-constexpr TlsKeyKind suite_auth(TlsCipherSuiteId suite) noexcept {
-    switch (suite) {
-        case TlsCipherSuiteId::EcdheRsaAes128GcmSha256:
-        case TlsCipherSuiteId::EcdheRsaAes256GcmSha384:
-        case TlsCipherSuiteId::EcdheRsaChacha20Poly1305:
-            return TlsKeyKind::Rsa;
-        default:
-            return TlsKeyKind::Ec; // the ECDHE-ECDSA half of the registry
-    }
-}
-
-} // namespace
-
 bool tls_server_suite_select_12(const TlsClientHello &ch, const TlsPrivateKey &key, TlsCipherSuiteId &out) noexcept {
-    const TlsKeyKind auth = key.key_kind();
-    if (auth == TlsKeyKind::Ed25519) {
-        return false; // no 1.2 registry entry signs with Ed25519
+    // The suite's auth half the credential signs for: an RSA key drives
+    // ECDHE-RSA, a P-256/384 key ECDHE-ECDSA.
+    TlsSuiteAuth auth = TlsSuiteAuth::None;
+    switch (key.key_kind()) {
+        case TlsKeyKind::Rsa:
+            auth = TlsSuiteAuth::Rsa;
+            break;
+        case TlsKeyKind::Ec:
+            auth = TlsSuiteAuth::Ecdsa;
+            break;
+        case TlsKeyKind::Ed25519:
+            return false; // no 1.2 registry entry signs with Ed25519
     }
     for (const std::uint16_t raw: tls_effective_suite_order()) {
         if (!tls_server_list_contains(ch.cipher_suites, raw)) {
@@ -64,7 +56,7 @@ bool tls_server_suite_select_12(const TlsClientHello &ch, const TlsPrivateKey &k
         }
         const auto suite = static_cast<TlsCipherSuiteId>(raw);
         const TlsSuiteInfo *info = tls_suite_info(suite);
-        if (info == nullptr || info->is_tls13 || suite_auth(suite) != auth) {
+        if (info == nullptr || info->is_tls13 || info->auth != auth) {
             continue;
         }
         out = suite;
