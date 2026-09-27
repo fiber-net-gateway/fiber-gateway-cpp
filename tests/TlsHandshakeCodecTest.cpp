@@ -195,6 +195,22 @@ std::vector<std::uint8_t> cert13_body(std::span<const std::uint8_t> ctx,
     return body;
 }
 
+// `count` copies of one entry (1.3 empty-context form, or the bare 1.2 list
+// when `tls13` is false) — the chain-count cap cases.
+std::vector<std::uint8_t> cert_body_repeat(bool tls13, std::span<const std::uint8_t> entry, std::size_t count) {
+    std::vector<std::uint8_t> list;
+    for (std::size_t i = 0; i < count; ++i) {
+        list.insert(list.end(), entry.begin(), entry.end());
+    }
+    std::vector<std::uint8_t> body;
+    if (tls13) {
+        put_u8(body, 0);
+    }
+    put_u24(body, static_cast<std::uint32_t>(list.size()));
+    body.insert(body.end(), list.begin(), list.end());
+    return body;
+}
+
 std::vector<std::uint8_t> cert12_entry(std::span<const std::uint8_t> der) {
     std::vector<std::uint8_t> out;
     put_u24(out, static_cast<std::uint32_t>(der.size()));
@@ -481,9 +497,12 @@ TEST(CertificateDecode, MalformedTable) {
             bad(body);
         }
         {
-            // chain-count cap (kMaxEntries = 4)
-            bad(cert13_body({}, {cert_entry(kDerA, {}), cert_entry(kDerA, {}), cert_entry(kDerA, {}),
-                                 cert_entry(kDerA, {}), cert_entry(kDerA, {})}));
+            // chain-count cap: kMaxEntries decodes, one more is rejected
+            const auto entry = cert_entry(kDerA, {});
+            const auto at_cap = cert_body_repeat(true, entry, TlsCertificate13::kMaxEntries);
+            ASSERT_TRUE(tls_decode_certificate_13(at_cap.data(), at_cap.size(), out).has_value());
+            EXPECT_EQ(out.cert_count, TlsCertificate13::kMaxEntries);
+            bad(cert_body_repeat(true, entry, TlsCertificate13::kMaxEntries + 1));
         }
     }
     {
@@ -494,6 +513,14 @@ TEST(CertificateDecode, MalformedTable) {
         auto body = cert12_body({cert12_entry(kDerB)});
         body.push_back(0x00); // trailing byte
         EXPECT_FALSE(tls_decode_certificate_12(body.data(), body.size(), out).has_value());
+
+        // chain-count cap: kMaxEntries decodes, one more is rejected
+        const auto entry = cert12_entry(kDerB);
+        const auto at_cap = cert_body_repeat(false, entry, TlsCertificate12::kMaxEntries);
+        ASSERT_TRUE(tls_decode_certificate_12(at_cap.data(), at_cap.size(), out).has_value());
+        EXPECT_EQ(out.cert_count, TlsCertificate12::kMaxEntries);
+        const auto over_cap = cert_body_repeat(false, entry, TlsCertificate12::kMaxEntries + 1);
+        EXPECT_FALSE(tls_decode_certificate_12(over_cap.data(), over_cap.size(), out).has_value());
     }
 }
 
@@ -869,8 +896,8 @@ TEST(FlightEncode, CertificateBothFormsRoundTrip) {
     EXPECT_EQ(cert12.cert_count, 2u);
     EXPECT_EQ(cert12.certs[1].size(), 20u);
 
-    // cap: 5 entries rejected (kMaxEntries = 4)
-    const std::span<const std::uint8_t> many[] = {der_a, der_a, der_a, der_a, der_a};
+    // cap: kMaxEntries + 1 entries rejected
+    const std::vector<std::span<const std::uint8_t>> many(TlsCertificate13::kMaxEntries + 1, der_a);
     EXPECT_FALSE(tls_encode_certificate_12(many, scratch).has_value());
     EXPECT_FALSE(tls_encode_certificate_13({}, many, scratch).has_value());
 

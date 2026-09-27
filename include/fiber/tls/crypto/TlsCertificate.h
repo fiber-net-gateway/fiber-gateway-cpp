@@ -99,11 +99,13 @@ private:
 
 // A leaf-first certificate chain (leaf at [0]). Loading only — no structural
 // chain validation here (issuer/subject linking is tls_verify_chain's job).
-// Capacity 4 = leaf + up to three intermediates, the realistic serving
-// configuration; a longer bundle is a configuration error. Move-only.
+// Capacity 10 = leaf + up to nine extra certificates. Peer chains in the
+// wild exceed four (a sent root, cross-signed paths), and this type also
+// holds the peer's wire chain, so the cap must not reject them; the wire
+// message itself is byte-bounded by the handshake reassembly cap. Move-only.
 class TlsCertificateChain {
 public:
-    static constexpr std::size_t kMaxCerts = 4;
+    static constexpr std::size_t kMaxCerts = 10;
 
     TlsCertificateChain() noexcept = default;
     TlsCertificateChain(const TlsCertificateChain &) = delete;
