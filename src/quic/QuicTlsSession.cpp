@@ -355,14 +355,16 @@ const tls::TlsServerConfig *QuicTlsSession::select_server_config(const tls::TlsC
     callback_error_ = common::IoErr::None;
     server_cfg_.chain = nullptr;
     server_cfg_.key = nullptr;
+    credential_owner_.reset();
     std::size_t credential_count = 0;
-    net::TlsServerHandshakeConfig config(server_cfg_, credential_count);
+    net::TlsServerHandshakeConfig config(server_cfg_, credential_count, credential_owner_);
     const tls::TlsClientHelloView view = client_hello.view();
     common::IoErr error = server_param_->configure_callback(server_param_->configure_ctx, config, view);
     if (error == common::IoErr::None && credential_count == 0) {
         error = common::IoErr::Invalid;
     }
     if (error != common::IoErr::None) {
+        credential_owner_.reset(); // nothing will read it: release now
         callback_error_ = error;
         return nullptr; // the engine answers handshake_failure
     }
@@ -586,6 +588,11 @@ common::IoResult<void> QuicTlsSession::finish_handshake() noexcept {
     // transport parameters, then the client's early-data verdict — all before
     // the caller marks the connection Established.
     result_taken_ = true;
+    // The server engine outlives its handshake (post-handshake NST minting)
+    // but never reads the certificate chain or key again: release a retained
+    // credential here rather than pinning it for the connection's lifetime.
+    // The engine's staged chain/key pointers are dead from this point on.
+    credential_owner_.reset();
     tls::TlsQuicHandshakeResult result = client_mode_ ? client().take_quic_result() : server().take_quic_result();
     resumption_master_ = std::move(result.resumption_master);
     alpn_ = result.alpn;
@@ -625,6 +632,7 @@ common::IoResult<void> QuicTlsSession::finish_handshake() noexcept {
 }
 
 common::IoResult<void> QuicTlsSession::fail_terminal() noexcept {
+    credential_owner_.reset(); // a failed engine reads no more material
     const tls::TlsAlertDesc alert = client_mode_ && client_ != nullptr ? client().failure_alert()
                                     : server_ != nullptr               ? server().failure_alert()
                                                                        : tls::TlsAlertDesc::InternalError;

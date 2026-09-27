@@ -34,6 +34,7 @@
 
 #include <openssl/ssl.h>
 
+#include <fcntl.h>
 #include <poll.h>
 #include "LoopTestSupport.h"
 
@@ -1509,6 +1510,348 @@ TEST(TlsStreamFdTest, BoringsslClientResumesAcrossTicketServiceRebuild) {
 
     group.stop();
     group.join();
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic credential ownership (issue #41): a configure callback selects an
+// identity out of a published snapshot, hands it over by shared_ptr, and the
+// publisher retires its own reference right away — the handshake alone must
+// keep the identity alive until it stops reading it.
+// ---------------------------------------------------------------------------
+
+struct IdentitySnapshot {
+    std::unique_ptr<fiber::net::TlsCredential> credential;
+    std::atomic_bool *destroyed = nullptr;
+
+    ~IdentitySnapshot() {
+        if (destroyed != nullptr) {
+            destroyed->store(true, std::memory_order_release);
+        }
+    }
+};
+
+std::shared_ptr<IdentitySnapshot> make_identity_snapshot(const std::string &cert_path, const std::string &key_path,
+                                                         std::atomic_bool *destroyed) {
+    fiber::net::TlsCredentialOptions options{};
+    options.certificate_chain = fiber::net::TlsPemSource::from_file(cert_path);
+    options.private_key = fiber::net::TlsPemSource::from_file(key_path);
+    auto credential = fiber::net::TlsCredential::create(options);
+    if (!credential) {
+        return nullptr;
+    }
+    auto snapshot = std::make_shared<IdentitySnapshot>();
+    snapshot->credential = std::move(*credential);
+    snapshot->destroyed = destroyed;
+    return snapshot;
+}
+
+// An aliasing owner: the credential pointer keeps the whole snapshot alive.
+std::shared_ptr<const fiber::net::TlsCredential> retire_into_credential(std::shared_ptr<IdentitySnapshot> &published) {
+    std::shared_ptr<IdentitySnapshot> snapshot = std::move(published);
+    const fiber::net::TlsCredential *credential = snapshot->credential.get();
+    return {std::move(snapshot), credential};
+}
+
+struct RotatingSelector {
+    enum class Mode : std::uint8_t {
+        Owned, // hand the snapshot over and retire it
+        OwnedThenFail, // hand it over, then fail the callback
+        Replace, // owned A → borrowed static → owned B → clear → borrowed static
+    };
+
+    Mode mode = Mode::Owned;
+    std::shared_ptr<IdentitySnapshot> published; // the publisher's reference
+    std::shared_ptr<IdentitySnapshot> published_second; // Replace only
+    const fiber::net::TlsCredential *static_credential = nullptr; // Replace only
+    std::atomic_bool *destroyed = nullptr;
+    std::atomic_bool *destroyed_second = nullptr;
+    std::atomic_bool selected{false};
+    // Replace only: what the callback observed right after each step.
+    bool released_by_borrowed_replace = false;
+    bool released_by_clear = false;
+    bool callback_ok = false;
+};
+
+fiber::common::IoErr select_and_retire(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
+                                       const fiber::tls::TlsClientHelloView &) noexcept {
+    auto *selector = static_cast<RotatingSelector *>(ctx);
+    selector->selected.store(true, std::memory_order_release);
+    switch (selector->mode) {
+        case RotatingSelector::Mode::Owned:
+            return config.add_credential(retire_into_credential(selector->published));
+        case RotatingSelector::Mode::OwnedThenFail:
+            if (config.add_credential(retire_into_credential(selector->published)) != fiber::common::IoErr::None) {
+                return fiber::common::IoErr::Invalid;
+            }
+            return fiber::common::IoErr::Permission;
+        case RotatingSelector::Mode::Replace: {
+            if (config.add_credential(retire_into_credential(selector->published)) != fiber::common::IoErr::None ||
+                selector->destroyed->load(std::memory_order_acquire) ||
+                config.add_credential(*selector->static_credential) != fiber::common::IoErr::None) {
+                return fiber::common::IoErr::Invalid;
+            }
+            selector->released_by_borrowed_replace = selector->destroyed->load(std::memory_order_acquire);
+            if (config.add_credential(retire_into_credential(selector->published_second)) !=
+                        fiber::common::IoErr::None ||
+                selector->destroyed_second->load(std::memory_order_acquire) ||
+                config.clear_credentials() != fiber::common::IoErr::None) {
+                return fiber::common::IoErr::Invalid;
+            }
+            selector->released_by_clear = selector->destroyed_second->load(std::memory_order_acquire);
+            selector->callback_ok = true;
+            return config.add_credential(*selector->static_credential);
+        }
+    }
+    return fiber::common::IoErr::Invalid;
+}
+
+fiber::net::TlsServerParam make_rotating_server_param(RotatingSelector &selector) {
+    fiber::net::TlsServerParam param{};
+    param.configure_callback = &select_and_retire;
+    param.configure_ctx = &selector;
+    return param;
+}
+
+bool set_nonblocking(int fd, bool enabled) {
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return false;
+    }
+    return ::fcntl(fd, F_SETFL, enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK)) == 0;
+}
+
+bool wait_fd_readable(int fd, int timeout_ms) {
+    pollfd watched{.fd = fd, .events = POLLIN, .revents = 0};
+    return ::poll(&watched, 1, timeout_ms) == 1 && (watched.revents & POLLIN) != 0;
+}
+
+// Sends ClientHello #1 offering a P-256 share only — the server prefers
+// X25519, so it answers with a HelloRetryRequest — and returns once that HRR
+// is readable. The server has then run its configure callback and parked
+// waiting for ClientHello #2, with Certificate/CertificateVerify still ahead.
+bool client_send_first_hello_and_await_hrr(BsslSocketClient &client, int fd) {
+    if (SSL_set1_curves_list(client.ssl, "P-256:X25519") != 1 || !set_nonblocking(fd, true)) {
+        return false;
+    }
+    const int ret = SSL_do_handshake(client.ssl);
+    if (ret == 1 || SSL_get_error(client.ssl, ret) != SSL_ERROR_WANT_READ) {
+        return false;
+    }
+    return wait_fd_readable(fd, 5000);
+}
+
+// Drives the non-blocking client to handshake completion.
+bool client_finish_handshake(BsslSocketClient &client, int fd) {
+    for (int i = 0; i < 100; ++i) {
+        const int ret = SSL_do_handshake(client.ssl);
+        if (ret == 1) {
+            return set_nonblocking(fd, false);
+        }
+        if (SSL_get_error(client.ssl, ret) != SSL_ERROR_WANT_READ || !wait_fd_readable(fd, 5000)) {
+            return false;
+        }
+    }
+    return false;
+}
+
+TEST(TlsStreamFdTest, RetiredDynamicCredentialSurvivesHelloRetryRequest) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_owned_hrr", kSelfSignedCertPem);
+        TempFile key("key_owned_hrr", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+
+        std::atomic_bool destroyed{false};
+        RotatingSelector selector{};
+        selector.published = make_identity_snapshot(cert.path, key.path, &destroyed);
+        ASSERT_NE(selector.published, nullptr);
+        fiber::net::TlsServerParam param = make_rotating_server_param(selector);
+
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        arm_receive_timeout(fds[1]);
+
+        fiber::event::EventLoopGroup group(1);
+        group.start();
+
+        std::unique_ptr<BsslSocketClient> client;
+        ASSERT_TRUE(BsslSocketClient::make(false, false, client));
+        client->attach_fd(fds[1]);
+
+        auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
+        std::promise<fiber::common::IoResult<std::string>> server_promise;
+        auto server_future = server_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return run_tls_server(server_stream, param, &server_promise); });
+
+        ASSERT_TRUE(client_send_first_hello_and_await_hrr(*client, fds[1]));
+        EXPECT_TRUE(selector.selected.load(std::memory_order_acquire));
+        EXPECT_EQ(selector.published, nullptr) << "the publisher retired its reference";
+        EXPECT_FALSE(destroyed.load(std::memory_order_acquire)) << "the parked handshake must retain the identity";
+
+        ASSERT_TRUE(client_finish_handshake(*client, fds[1]));
+        EXPECT_EQ(SSL_used_hello_retry_request(client->ssl), 1);
+        EXPECT_TRUE(client->round_trip("ping", "pong"));
+        ASSERT_EQ(server_future.wait_for(5s), std::future_status::ready);
+        auto served = server_future.get();
+        ASSERT_TRUE(served);
+        EXPECT_EQ(*served, "ping");
+        EXPECT_TRUE(destroyed.load(std::memory_order_acquire)) << "released once the handshake ended";
+
+        (void) SSL_shutdown(client->ssl);
+        ::close(fds[1]);
+        std::promise<void> close_done;
+        auto close_future = close_done.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_tls_streams(server_stream, nullptr, &close_done); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
+    });
+}
+
+TEST(TlsStreamFdTest, CanceledHandshakeReleasesRetainedCredential) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_owned_cancel", kSelfSignedCertPem);
+        TempFile key("key_owned_cancel", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+
+        std::atomic_bool destroyed{false};
+        RotatingSelector selector{};
+        selector.published = make_identity_snapshot(cert.path, key.path, &destroyed);
+        ASSERT_NE(selector.published, nullptr);
+        fiber::net::TlsServerParam param = make_rotating_server_param(selector);
+
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+
+        fiber::event::EventLoopGroup group(1);
+        group.start();
+
+        std::unique_ptr<BsslSocketClient> client;
+        ASSERT_TRUE(BsslSocketClient::make(false, false, client));
+        client->attach_fd(fds[1]);
+
+        auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
+        std::promise<fiber::common::IoErr> server_promise;
+        auto server_future = server_promise.get_future();
+        fiber::async::spawn(group.at(0),
+                            [&]() { return await_handshake_result(server_stream, param, &server_promise); });
+
+        // The server is parked awaiting ClientHello #2 with the identity
+        // retained; closing it cancels the handshake mid-flight.
+        ASSERT_TRUE(client_send_first_hello_and_await_hrr(*client, fds[1]));
+        EXPECT_FALSE(destroyed.load(std::memory_order_acquire));
+
+        std::promise<void> close_promise;
+        auto close_future = close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_parked_handshake(server_stream, &close_promise); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
+        EXPECT_EQ(server_future.get(), fiber::common::IoErr::Canceled);
+        EXPECT_TRUE(destroyed.load(std::memory_order_acquire));
+
+        ::close(fds[1]);
+        group.stop();
+        group.join();
+    });
+}
+
+TEST(TlsStreamFdTest, FailedConfigureCallbackReleasesRetainedCredential) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_owned_fail", kSelfSignedCertPem);
+        TempFile key("key_owned_fail", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+
+        std::atomic_bool destroyed{false};
+        RotatingSelector selector{};
+        selector.mode = RotatingSelector::Mode::OwnedThenFail;
+        selector.published = make_identity_snapshot(cert.path, key.path, &destroyed);
+        ASSERT_NE(selector.published, nullptr);
+        fiber::net::TlsServerParam param = make_rotating_server_param(selector);
+
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        arm_receive_timeout(fds[1]);
+
+        fiber::event::EventLoopGroup group(1);
+        group.start();
+
+        std::unique_ptr<BsslSocketClient> client;
+        ASSERT_TRUE(BsslSocketClient::make(false, false, client));
+        client->attach_fd(fds[1]);
+
+        auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), fds[0]);
+        std::promise<fiber::common::IoErr> server_promise;
+        auto server_future = server_promise.get_future();
+        fiber::async::spawn(group.at(0),
+                            [&]() { return await_handshake_result(server_stream, param, &server_promise); });
+
+        EXPECT_FALSE(client->handshake());
+        ASSERT_EQ(server_future.wait_for(5s), std::future_status::ready);
+        EXPECT_EQ(server_future.get(), fiber::common::IoErr::Permission);
+        EXPECT_TRUE(selector.selected.load(std::memory_order_acquire));
+        EXPECT_TRUE(destroyed.load(std::memory_order_acquire));
+
+        ::close(fds[1]);
+        std::promise<void> close_done;
+        auto close_future = close_done.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_tls_streams(server_stream, nullptr, &close_done); });
+        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+
+        group.stop();
+        group.join();
+    });
+}
+
+TEST(TlsStreamFdTest, ReplacingOrClearingCredentialReleasesEarlierOwner) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_owned_replace", kSelfSignedCertPem);
+        TempFile key("key_owned_replace", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+
+        std::atomic_bool destroyed_first{false};
+        std::atomic_bool destroyed_second{false};
+        RotatingSelector selector{};
+        selector.mode = RotatingSelector::Mode::Replace;
+        selector.published = make_identity_snapshot(cert.path, key.path, &destroyed_first);
+        selector.published_second = make_identity_snapshot(cert.path, key.path, &destroyed_second);
+        ASSERT_NE(selector.published, nullptr);
+        ASSERT_NE(selector.published_second, nullptr);
+        selector.static_credential = tls_pair->server_credential.get();
+        selector.destroyed = &destroyed_first;
+        selector.destroyed_second = &destroyed_second;
+        fiber::net::TlsServerParam param = make_rotating_server_param(selector);
+
+        int fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+        arm_receive_timeout(fds[1]);
+
+        fiber::event::EventLoopGroup group(1);
+        group.start();
+
+        std::unique_ptr<BsslSocketClient> client;
+        ASSERT_TRUE(BsslSocketClient::make(false, false, client));
+        client->attach_fd(fds[1]);
+
+        // The borrowed static credential ends up serving the handshake.
+        EXPECT_EQ(run_server_against_bssl_client(group, fds[0], param, *client, fds[1], "ping", false), "ping");
+        EXPECT_TRUE(selector.callback_ok);
+        EXPECT_TRUE(selector.released_by_borrowed_replace);
+        EXPECT_TRUE(selector.released_by_clear);
+
+        group.stop();
+        group.join();
+    });
 }
 
 } // namespace
