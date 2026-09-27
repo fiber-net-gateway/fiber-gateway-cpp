@@ -107,7 +107,9 @@ struct Writer {
         if (n + v.size() > buf.size()) {
             return false;
         }
-        std::memcpy(buf.data() + n, v.data(), v.size());
+        if (!v.empty()) { // an empty span may be null: memcpy(_, nullptr, 0) is UB
+            std::memcpy(buf.data() + n, v.data(), v.size());
+        }
         n += v.size();
         return true;
     }
@@ -191,7 +193,9 @@ struct Reader {
     aad[0] = kContainerVersion;
     store_be32(aad.data() + 1, key_id);
     store_be16(aad.data() + 5, static_cast<std::uint16_t>(name.size()));
-    std::memcpy(aad.data() + 7, name.data(), name.size());
+    if (!name.empty()) { // no SNI = a null string_view: memcpy(_, nullptr, 0) is UB
+        std::memcpy(aad.data() + 7, name.data(), name.size());
+    }
     return 7 + name.size();
 }
 

@@ -53,7 +53,9 @@ constexpr std::string_view kLabelIv = "iv";
     std::memcpy(info + n, label.data(), label.size());
     n += label.size();
     info[n++] = static_cast<std::uint8_t>(context.size());
-    std::memcpy(info + n, context.data(), context.size());
+    if (!context.empty()) { // an empty context may be a null span: memcpy(_, nullptr, 0) is UB
+        std::memcpy(info + n, context.data(), context.size());
+    }
     n += context.size();
     return tls_hkdf_expand(out, hash, secret, {info, n});
 }
