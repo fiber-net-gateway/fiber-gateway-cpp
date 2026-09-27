@@ -405,7 +405,7 @@ DetachedTask run_cache_hit_resolve(fiber::event::EventLoop *loop, fiber::dns::Sh
     auto now = loop->now();
     const std::string_view cache_name = "cache.example";
     const fiber::dns::DnsCacheKey cache_key{cache_name, fiber::dns::dns_cache_hash(cache_name)};
-    auto cache_err = cache->upsert_address_set(cache_key, fiber::net::IpFamily::V4, records.data(), 1, now + 30s);
+    auto cache_err = cache->upsert_address_set(cache_key, now, fiber::net::IpFamily::V4, records.data(), 1, now + 30s);
     if (cache_err != IoErr::None) {
         outcome.err = cache_err;
         resolver.release();

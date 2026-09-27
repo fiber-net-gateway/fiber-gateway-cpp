@@ -665,10 +665,11 @@ fiber::async::DetachedTask run_dns_router_client(fiber::event::EventLoop *loop, 
     const std::array addresses{fiber::net::IpAddress::v4({127, 0, 0, 2}), fiber::net::IpAddress::loopback_v4()};
     const fiber::dns::DnsCacheKey key{.normalized_name = "router.test",
                                       .hash = fiber::dns::dns_cache_hash("router.test")};
-    const auto expires = loop->now() + 1min;
+    const auto now = loop->now();
+    const auto expires = now + 1min;
     const auto v4 =
-            cache.upsert_address_set(key, fiber::net::IpFamily::V4, addresses.data(), addresses.size(), expires);
-    const auto v6 = cache.upsert_address_set(key, fiber::net::IpFamily::V6, nullptr, 0, expires);
+            cache.upsert_address_set(key, now, fiber::net::IpFamily::V4, addresses.data(), addresses.size(), expires);
+    const auto v6 = cache.upsert_address_set(key, now, fiber::net::IpFamily::V6, nullptr, 0, expires);
 
     fiber::dns::DnsClient::Options dns_options;
     (void) dns_options.nameservers.add({fiber::net::IpAddress::loopback_v4(), 1});

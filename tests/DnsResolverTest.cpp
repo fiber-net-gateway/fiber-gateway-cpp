@@ -523,10 +523,11 @@ DetachedTask run_cached_many_dual_resolve(fiber::event::EventLoop *loop, fiber::
     }
 
     const fiber::dns::DnsCacheKey key{host, fiber::dns::dns_cache_hash(host)};
-    const auto expire_at = loop->now() + 60s;
-    outcome.err = cache->upsert_address_set(key, fiber::net::IpFamily::V4, v4.data(), v4.size(), expire_at);
+    const auto now = loop->now();
+    const auto expire_at = now + 60s;
+    outcome.err = cache->upsert_address_set(key, now, fiber::net::IpFamily::V4, v4.data(), v4.size(), expire_at);
     if (outcome.err == IoErr::None) {
-        outcome.err = cache->upsert_address_set(key, fiber::net::IpFamily::V6, v6.data(), v6.size(), expire_at);
+        outcome.err = cache->upsert_address_set(key, now, fiber::net::IpFamily::V6, v6.data(), v6.size(), expire_at);
     }
     if (outcome.err != IoErr::None) {
         promise->set_value(std::move(outcome));

@@ -39,10 +39,11 @@ public:
                 net::IpAddress::loopback_v4(),
         };
         const dns::DnsCacheKey key{normalized_host, dns::dns_cache_hash(normalized_host)};
-        const auto expire_at = loop.now() + std::chrono::seconds(60);
+        const auto now = loop.now();
+        const auto expire_at = now + std::chrono::seconds(60);
         const common::IoErr v4 =
-                cache_.upsert_address_set(key, net::IpFamily::V4, addresses, std::size(addresses), expire_at);
-        const common::IoErr v6 = cache_.upsert_address_set(key, net::IpFamily::V6, nullptr, 0, expire_at);
+                cache_.upsert_address_set(key, now, net::IpFamily::V4, addresses, std::size(addresses), expire_at);
+        const common::IoErr v6 = cache_.upsert_address_set(key, now, net::IpFamily::V6, nullptr, 0, expire_at);
         return v4 == common::IoErr::None && v6 == common::IoErr::None;
     }
 

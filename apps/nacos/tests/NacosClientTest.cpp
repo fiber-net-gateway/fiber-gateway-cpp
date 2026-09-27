@@ -378,9 +378,10 @@ DetachedTask collect_domain_auth_and_release_dns(NacosClient *client, NacosClien
         outcome.error = fiber::common::IoErr::Invalid;
     } else {
         const fiber::dns::DnsCacheKey key{Host, fiber::dns::dns_cache_hash(Host)};
-        const auto expire_at = fiber::event::EventLoop::current().now() + 60s;
-        const auto v4 = cache->upsert_address_set(key, fiber::net::IpFamily::V4, addresses, 2, expire_at);
-        const auto v6 = cache->upsert_address_set(key, fiber::net::IpFamily::V6, nullptr, 0, expire_at);
+        const auto now = fiber::event::EventLoop::current().now();
+        const auto expire_at = now + 60s;
+        const auto v4 = cache->upsert_address_set(key, now, fiber::net::IpFamily::V4, addresses, 2, expire_at);
+        const auto v6 = cache->upsert_address_set(key, now, fiber::net::IpFamily::V6, nullptr, 0, expire_at);
         if (v4 != fiber::common::IoErr::None || v6 != fiber::common::IoErr::None) {
             outcome.error = v4 != fiber::common::IoErr::None ? v4 : v6;
         } else {
