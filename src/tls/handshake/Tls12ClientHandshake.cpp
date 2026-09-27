@@ -386,14 +386,14 @@ bool Tls12ClientHandshake::send_client_flight_12() noexcept {
     // the CKE — only the still-unwritten CV is excluded.
     if (ems_negotiated_) {
         snapshot12();
-        auto master = tls12_extended_master_secret(suite_, z12_.z, {hash_buf_.data(), hash_len()});
+        auto master = tls12_extended_master_secret(suite_, z12_.bytes(), {hash_buf_.data(), hash_len()});
         if (!master.has_value()) {
             fail(TlsAlertDesc::InternalError);
             return false;
         }
         master12_ = std::move(master).value();
     } else {
-        auto master = tls12_master_secret(suite_, z12_.z, hello_.client_random, server_random_);
+        auto master = tls12_master_secret(suite_, z12_.bytes(), hello_.client_random, server_random_);
         if (!master.has_value()) {
             fail(TlsAlertDesc::InternalError);
             return false;

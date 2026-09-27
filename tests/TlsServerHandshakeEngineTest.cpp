@@ -757,6 +757,48 @@ TEST(TlsServerHandshake13Refuse, NonHelloFirstMessageRefused) {
     });
 }
 
+// A client restricted to P-384 (CNSA/FIPS-style profiles) is served — P-384
+// is the last server group — in 1.3 (its share is used directly, no HRR)
+// and 1.2 (P-384 ECDHE), including with a P-384 certificate.
+TEST(TlsServerHandshakeP384, P384OnlyClientBothVersions) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const bool tls12: {false, true}) {
+            ClientOptions opt{};
+            opt.groups = "P-384";
+            opt.tls12_only = tls12;
+            auto client = BoringClient::make(opt);
+            ASSERT_NE(nullptr, client);
+            ServerMaterial material;
+            TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+            DriveLog log;
+            ASSERT_TRUE(drive(*client, engine, false, &log)) << (tls12 ? "1.2" : "1.3");
+            EXPECT_FALSE(wire_contains(log.server_to_client, {fiber::tls::kTlsHelloRetryRandom.data(),
+                                                              fiber::tls::kTlsHelloRetryRandom.size()}));
+            EXPECT_EQ(1, client->handshake_step());
+            EXPECT_EQ(SSL_GROUP_SECP384R1, SSL_get_group_id(client->ssl()));
+        }
+    });
+}
+
+TEST(TlsServerHandshakeP384, P384CertificateOver12) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientOptions opt{};
+        opt.groups = "P-384";
+        opt.tls12_only = true;
+        auto client = BoringClient::make(opt);
+        ASSERT_NE(nullptr, client);
+        ServerMaterial material;
+        material.load(certfix::kLeafEcP384Pem, certfix::kP384KeyPem);
+        TlsServerHandshakeEngine engine(material.config(), nullptr, nullptr);
+        ASSERT_TRUE(drive(*client, engine, false));
+        EXPECT_EQ(1, client->handshake_step());
+        EXPECT_EQ(SSL_GROUP_SECP384R1, SSL_get_group_id(client->ssl()));
+        const SSL_CIPHER *cipher = SSL_get_current_cipher(client->ssl());
+        ASSERT_NE(nullptr, cipher);
+        EXPECT_EQ(NID_auth_ecdsa, SSL_CIPHER_get_auth_nid(cipher));
+    });
+}
+
 // Warning alerts are dropped while the version is open (BoringSSL: up to
 // four in a row), but once an HRR has fixed TLS 1.3 — which has no warning
 // level (RFC 8446 §6) — any alert is terminal.

@@ -384,10 +384,11 @@ client_case "c/1.2 CBC only (ECDHE-RSA-AES128-SHA256)" fail - - "${RSA} -tls1_2 
 client_case "c/1.3 group X25519" ok TLSv1.3 - "${RSA} -tls1_3 -groups X25519" "${CA}"
 client_case "c/1.3 group P-256" ok TLSv1.3 - "${RSA} -tls1_3 -groups P-256" "${CA}"
 client_case "c/1.3 group P-256 (server prefers, HRR if needed)" ok TLSv1.3 - "${RSA} -tls1_3 -groups P-256:X25519 -serverpref" "${CA}"
-client_case "c/1.3 group P-384 only (unsupported)" fail - - "${RSA} -tls1_3 -groups P-384" "${CA}"
+client_case "c/1.3 group P-384 only (HRR to P-384)" ok TLSv1.3 - "${RSA} -tls1_3 -groups P-384" "${CA}"
 client_case "c/1.3 group ffdhe2048 only (unsupported)" fail - - "${RSA} -tls1_3 -groups ffdhe2048" "${CA}"
 client_case "c/1.2 group X25519" ok TLSv1.2 - "${RSA} -tls1_2 -groups X25519" "${CA}"
 client_case "c/1.2 group P-256" ok TLSv1.2 - "${RSA} -tls1_2 -groups P-256" "${CA}"
+client_case "c/1.2 group P-384" ok TLSv1.2 - "${RSA} -tls1_2 -groups P-384" "${CA}"
 
 # -- server key / signature algorithm
 client_case "c/1.3 RSA-2048 rsa_pss_rsae_sha256" ok TLSv1.3 - "${RSA} -tls1_3 -sigalgs rsa_pss_rsae_sha256" "${CA}"
@@ -402,10 +403,9 @@ client_case "c/1.2 RSA rsa_pkcs1_sha256" ok TLSv1.2 - "${RSA} -tls1_2 -sigalgs R
 client_case "c/1.2 RSA rsa_pkcs1_sha384" ok TLSv1.2 - "${RSA} -tls1_2 -sigalgs RSA+SHA384" "${CA}"
 client_case "c/1.2 RSA rsa_pss_rsae_sha256" ok TLSv1.2 - "${RSA} -tls1_2 -sigalgs rsa_pss_rsae_sha256" "${CA}"
 client_case "c/1.2 ECDSA P-256" ok TLSv1.2 - "${P256} -tls1_2" "${CA}"
-# Known limitation: in 1.2 the client's supported_groups also bounds the
-# server certificate's curve (RFC 8422 §5.1) and we offer only X25519/P-256,
-# so OpenSSL refuses a P-384 certificate (no shared cipher). 1.3 decouples it.
-client_case "c/1.2 ECDSA P-384 (P-384 not in our groups)" fail - - "-cert p384.pem -key p384.key -cert_chain int.pem -tls1_2" "${CA}"
+# In 1.2 the client's supported_groups also bounds the server certificate's
+# curve (RFC 8422 §5.1): this needs P-384 in our supported_groups.
+client_case "c/1.2 ECDSA P-384" ok TLSv1.2 - "-cert p384.pem -key p384.key -cert_chain int.pem -tls1_2" "${CA}"
 client_case "c/1.2 Ed25519" ok TLSv1.2 - "-cert ed25519.pem -key ed25519.key -cert_chain int.pem -tls1_2" "${CA}"
 
 # -- certificate verification
@@ -489,12 +489,16 @@ server_case "s/1.2 CBC only offered" fail - - "${SRV_RSA}" "${CLI} -tls1_2 -ciph
 server_case "s/1.3 group X25519" ok TLSv1.3 - "${SRV_RSA}" "${CLI} -tls1_3 -groups X25519"
 server_case "s/1.3 group P-256" ok TLSv1.3 - "${SRV_RSA}" "${CLI} -tls1_3 -groups P-256"
 server_case "s/1.3 HRR (shares P-384, also offers P-256)" ok TLSv1.3 - "${SRV_RSA}" "${CLI} -tls1_3 -groups P-384:P-256"
-server_case "s/1.3 group P-384 only (unsupported)" fail - - "${SRV_RSA}" "${CLI} -tls1_3 -groups P-384"
+server_case "s/1.3 group P-384 only" ok TLSv1.3 - "${SRV_RSA}" "${CLI} -tls1_3 -groups P-384"
+server_case "s/1.3 group ffdhe2048 only (unsupported)" fail - - "${SRV_RSA}" "${CLI} -tls1_3 -groups ffdhe2048"
 server_case "s/1.3 ECDSA P-256" ok TLSv1.3 - "${SRV_P256}" "${CLI} -tls1_3"
 server_case "s/1.3 Ed25519" ok TLSv1.3 - "--cert ed25519.chain.pem --key ed25519.key" "${CLI} -tls1_3"
 server_case "s/1.3 RSA sigalg rsa_pss_rsae_sha384" ok TLSv1.3 - "${SRV_RSA}" "${CLI} -tls1_3 -sigalgs rsa_pss_rsae_sha384"
 server_case "s/1.2 RSA sigalg rsa_pkcs1_sha256" ok TLSv1.2 - "${SRV_RSA}" "${CLI} -tls1_2 -sigalgs RSA+SHA256"
 server_case "s/1.2 group P-256" ok TLSv1.2 - "${SRV_RSA}" "${CLI} -tls1_2 -groups P-256"
+server_case "s/1.2 group P-384" ok TLSv1.2 - "${SRV_RSA}" "${CLI} -tls1_2 -groups P-384"
+server_case "s/1.3 ECDSA P-384 certificate" ok TLSv1.3 - "--cert p384.chain.pem --key p384.key" "${CLI} -tls1_3"
+server_case "s/1.2 ECDSA P-384 certificate" ok TLSv1.2 ECDHE-ECDSA-AES128-GCM-SHA256 "--cert p384.chain.pem --key p384.key" "${CLI} -tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256"
 server_case "s/alpn h2" ok - - "${SRV_RSA} --alpn h2,http/1.1" "${CLI} -alpn h2,http/1.1" "alpn=h2"
 server_case "s/alpn http/1.1 only" ok - - "${SRV_RSA} --alpn h2,http/1.1" "${CLI} -alpn http/1.1" "alpn=http/1.1"
 server_case "s/1.3 mTLS required, cert sent" ok TLSv1.3 - "${SRV_RSA} --ca root.pem --require-client-cert 1" "${CLI} -tls1_3 -cert client.pem -key client.key -cert_chain int.pem"

@@ -31,8 +31,12 @@ namespace fiber::tls {
 // 0x0030 was never a suite) — the CH offers tls_effective_suite_order()
 // verbatim; the membership check below scans kTlsSuitePreference.
 
-// Share order: X25519 leads (the CH1 share); P-256 is the HRR alternative.
-inline constexpr std::array<std::uint16_t, 2> kOfferedGroups{0x001D, 0x0017};
+// Share order: X25519 leads (the CH1 share, the only key_share sent); P-256
+// and P-384 are advertised in supported_groups only, reached by an HRR (1.3)
+// or the server's SKE curve (1.2). P-384 also matters in 1.2 beyond ECDHE:
+// supported_groups bounds the server certificate's ECDSA curve (RFC 8422
+// §5.1), so without it a P-384-certificate server is unreachable.
+inline constexpr std::array<std::uint16_t, 3> kOfferedGroups{0x001D, 0x0017, 0x0018};
 
 // The CH signature_algorithms offer = the 02b 1.2 preference (a superset:
 // rsa_pkcs1_* only negotiates in 1.2; the 1.3 verify path gates by version).
@@ -85,7 +89,12 @@ template<std::size_t N>
 }
 
 [[nodiscard]] constexpr bool tls_client_group_offered(std::uint16_t raw) noexcept {
-    return raw == kOfferedGroups[0] || raw == kOfferedGroups[1];
+    for (const std::uint16_t offered: kOfferedGroups) {
+        if (raw == offered) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The SKE/CV scheme must be one the CH offered (kOfferedSigalgs is a superset

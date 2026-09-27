@@ -515,14 +515,14 @@ void Tls12ServerHandshake::handle_client_key_exchange_12(std::span<const std::ui
     // excluded.
     if (ems_negotiated_) {
         snapshot12();
-        auto master = tls12_extended_master_secret(suite_, z12_.z, {hash_buf_.data(), hash_len()});
+        auto master = tls12_extended_master_secret(suite_, z12_.bytes(), {hash_buf_.data(), hash_len()});
         if (!master.has_value()) {
             fail(TlsAlertDesc::InternalError);
             return;
         }
         master12_ = std::move(master).value();
     } else {
-        auto master = tls12_master_secret(suite_, z12_.z, hello_.view.random, hello_.server_random);
+        auto master = tls12_master_secret(suite_, z12_.bytes(), hello_.view.random, hello_.server_random);
         if (!master.has_value()) {
             fail(TlsAlertDesc::InternalError);
             return;

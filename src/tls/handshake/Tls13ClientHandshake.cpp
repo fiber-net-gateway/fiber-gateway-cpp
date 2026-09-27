@@ -144,8 +144,7 @@ void Tls13ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
     feed13(TlsHandshakeType::ServerHello, body);
     snapshot13(); // Hash(CH..SH)
 
-    if (!sched_->handshake_secrets({z.z.data(), z.z.size()}, {hash_buf_.data(), hash_len()}, client_hs_, server_hs_)
-                 .has_value()) {
+    if (!sched_->handshake_secrets(z.bytes(), {hash_buf_.data(), hash_len()}, client_hs_, server_hs_).has_value()) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
