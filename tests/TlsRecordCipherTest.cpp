@@ -718,6 +718,78 @@ TEST_F(Tls13Failure, AadIsBoundToHeaderFields) {
     });
 }
 
+// An authenticated plaintext over the protocol limit is Overflow (the caller
+// sends record_overflow): 2^14 in 1.2, 2^14 + 1 for the whole 1.3
+// TLSInnerPlaintext — the ciphertext bounds alone admit more.
+TEST(TlsRecordCipherOverflow, PlaintextOverLimitIsOverflowInBothOpenForms) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const SuiteVectors &v: all_suites()) {
+            const bool tls13 = v.kind == TlsRecordProtectionKind::Tls13;
+            const TlsContentType type = TlsContentType::ApplicationData;
+            for (const std::size_t plain_len:
+                 {fiber::tls::kTlsMaxPlaintextSize, fiber::tls::kTlsMaxPlaintextSize + 1}) {
+                const bool over = plain_len > fiber::tls::kTlsMaxPlaintextSize;
+                const auto plain = ramp(plain_len, 0x21);
+                TlsRecordCipher sealer;
+                init_cipher(sealer, v);
+                std::vector<std::uint8_t> wire(sealer.seal_output_size(plain.size()));
+                ASSERT_EQ(sealer.seal(type, plain, wire).status, TlsRecordCipher::Status::Ok);
+                const std::uint16_t length = static_cast<std::uint16_t>(wire.size());
+                const auto expected = over ? TlsRecordCipher::Status::Overflow : TlsRecordCipher::Status::Ok;
+
+                TlsRecordCipher opener;
+                init_cipher(opener, v);
+                std::vector<std::uint8_t> out(opener.open_output_size(length));
+                EXPECT_EQ(opener.open(type, 0x0303, length, wire, out).status, expected)
+                        << (tls13 ? "1.3" : "1.2") << " open, plain_len=" << plain_len;
+
+                const std::size_t off = wire_nonce_len(v);
+                const std::size_t body_len = wire.size() - off - 16;
+                TlsRecordCipher scatter;
+                init_cipher(scatter, v);
+                std::vector<std::uint8_t> dst(scatter.open_output_size(length));
+                EXPECT_EQ(scatter.open_scatter(type, 0x0303, length, {wire.data(), off}, {wire.data() + off, body_len},
+                                               {wire.data() + off + body_len, 16}, dst)
+                                  .status,
+                          expected)
+                        << (tls13 ? "1.3" : "1.2") << " open_scatter, plain_len=" << plain_len;
+            }
+        }
+    });
+}
+
+TEST_F(Tls13Failure, PaddingPastInnerPlaintextLimitIsOverflow) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        // 8 content bytes + type + zero padding to 2^14 + 2 inner bytes: the
+        // limit counts the padding (RFC 8446 §5.4), not just the content.
+        std::vector<std::uint8_t> input = ramp(8, 3);
+        input.push_back(23); // application_data
+        input.resize(fiber::tls::kTlsMaxPlaintextSize + 2, 0);
+        std::array<std::uint8_t, 12> nonce{};
+        std::memcpy(nonce.data(), v.iv.data(), 12); // seq 0
+        const std::size_t out_len = input.size() + 16;
+        const std::array<std::uint8_t, 5> aad{23, 0x03, 0x03, static_cast<std::uint8_t>(out_len >> 8),
+                                              static_cast<std::uint8_t>(out_len)};
+        EVP_AEAD_CTX ctx;
+        EVP_AEAD_CTX_zero(&ctx);
+        ASSERT_EQ(EVP_AEAD_CTX_init(&ctx, aead_for(v.suite), v.key.data(), v.key.size(), EVP_AEAD_DEFAULT_TAG_LENGTH,
+                                    nullptr),
+                  1);
+        std::vector<std::uint8_t> wire(out_len);
+        size_t written = 0;
+        ASSERT_EQ(EVP_AEAD_CTX_seal(&ctx, wire.data(), &written, wire.size(), nonce.data(), 12, input.data(),
+                                    input.size(), aad.data(), aad.size()),
+                  1);
+        EVP_AEAD_CTX_cleanup(&ctx);
+
+        std::vector<std::uint8_t> out(wire.size());
+        EXPECT_EQ(
+                cipher.open(TlsContentType::ApplicationData, 0x0303, static_cast<std::uint16_t>(wire.size()), wire, out)
+                        .status,
+                TlsRecordCipher::Status::Overflow);
+    });
+}
+
 TEST(Tls12Failure, LengthBoundsAndReplayAreRejected) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         const SuiteVectors &v = tls12_suites()[0];

@@ -65,8 +65,13 @@ void store_be64(std::uint8_t *dst, std::uint64_t value) noexcept {
 // Strips the TLS 1.3 inner plaintext tail (content || type || zero padding):
 // the last non-zero byte is the content type, everything before it is the
 // plaintext. Shared by open() and open_scatter(); the caller advances the
-// sequence number on Ok.
+// sequence number on Ok. The whole TLSInnerPlaintext, padding included, is
+// capped at 2^14 + 1 (RFC 8446 §5.4) — the ciphertext bound alone admits
+// up to 2^14 + 239.
 [[nodiscard]] TlsRecordCipher::OpenResult finish_tls13_inner(std::uint8_t *dst, std::size_t written) noexcept {
+    if (written > kTlsMaxPlaintextSize + 1) {
+        return {TlsRecordCipher::Status::Overflow, TlsContentType::ApplicationData, 0};
+    }
     std::size_t end = written;
     while (end > 0 && dst[end - 1] == 0) {
         --end;
@@ -310,6 +315,9 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
             return {Status::AuthFail, TlsContentType::ApplicationData, 0};
         }
         FIBER_ASSERT(written == plain_len);
+        if (written > kTlsMaxPlaintextSize) {
+            return {Status::Overflow, TlsContentType::ApplicationData, 0}; // RFC 5246 §6.2.1
+        }
 
         ++seq_;
         return {Status::Ok, outer_type, written};
@@ -338,6 +346,9 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
         return {Status::AuthFail, TlsContentType::ApplicationData, 0};
     }
     FIBER_ASSERT(written == plain_len);
+    if (written > kTlsMaxPlaintextSize) {
+        return {Status::Overflow, TlsContentType::ApplicationData, 0}; // RFC 5246 §6.2.1
+    }
 
     ++seq_;
     return {Status::Ok, outer_type, written};
@@ -498,6 +509,9 @@ TlsRecordCipher::open_scatter(TlsContentType outer_type, std::uint16_t legacy_ve
     if (EVP_AEAD_CTX_open_gather(&aead_ctx_, dst.data(), nonce.data(), 12, body.data(), plain_len, tag.data(), 16,
                                  aad.data(), aad_len) != 1) {
         return {Status::AuthFail, TlsContentType::ApplicationData, 0};
+    }
+    if (plain_len > kTlsMaxPlaintextSize) {
+        return {Status::Overflow, TlsContentType::ApplicationData, 0}; // RFC 5246 §6.2.1
     }
 
     ++seq_;
