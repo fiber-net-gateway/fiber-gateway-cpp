@@ -65,6 +65,17 @@ const KindVec &tls12_chacha_vec() {
     return v;
 }
 
+// The 1.2 CBC form (feature/tls/11): a 16-byte random IV on the wire and no
+// detached tag — the MAC and padding sit inside the body. Key = MAC key (20,
+// SHA-1) || AES-128 key; no derived IV.
+const KindVec &tls12_cbc_vec() {
+    static const KindVec v{TlsCipherSuiteId::EcdheRsaAes128CbcSha,
+                           TlsRecordProtectionKind::Tls12,
+                           key_iv("0102030405060708090a0b0c0d0e0f1011121314a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"),
+                           {}};
+    return v;
+}
+
 std::vector<std::uint8_t> ramp(std::size_t len, std::uint8_t seed) {
     std::vector<std::uint8_t> out(len);
     for (std::size_t i = 0; i < len; ++i) {
@@ -599,6 +610,124 @@ TEST(TlsRecordChainRoundTrip, InPlaceSealFeedsInPlaceOpen) {
             EXPECT_EQ(o.open.inner_type, type);
             EXPECT_EQ(r.record.payload.readable_bytes(), plain.size());
             EXPECT_EQ(chain_bytes(r.record.payload), plain);
+        }
+    });
+}
+
+// ---------------------------------------------------------------- 1.2 CBC
+
+// Every two-node split of a CBC record. The IV is staged on the stack, so the
+// open stays in place whenever the body past the IV is contiguous (splits
+// inside the IV); a split inside the body degrades to one transcription.
+TEST(TlsRecordChainCbc, OpenEveryTwoNodeSplit) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        const KindVec &v = tls12_cbc_vec();
+        TlsRecordCipher seal_side;
+        init_cipher(seal_side, v, TlsRecordDirection::Seal);
+        const auto plain = ramp(100, 0x15);
+        const TlsContentType type = TlsContentType::ApplicationData;
+        const auto wire = seal_wire(seal_side, type, plain);
+        const auto len16 = static_cast<std::uint16_t>(wire.size());
+
+        {
+            TlsRecordCipher opener;
+            init_cipher(opener, v, TlsRecordDirection::Open);
+            IoBufChain chain = make_chain(pool, {wire});
+            std::vector<std::uint8_t> dst(fiber::tls::tls_record_open_dst_size(opener, len16));
+            EXPECT_EQ(wire.size() - 16, dst.size()); // everything past the IV
+            const auto r = fiber::tls::tls_record_open_in_place(opener, type, 0x0303, len16, chain, dst);
+            ASSERT_EQ(TlsRecordCipher::Status::Ok, r.open.status);
+            EXPECT_TRUE(r.in_chain);
+            EXPECT_EQ(plain, chain_bytes(chain)); // IV consumed, MAC + padding trimmed
+        }
+
+        for (std::size_t split = 1; split < wire.size(); ++split) {
+            TlsRecordCipher opener;
+            init_cipher(opener, v, TlsRecordDirection::Open);
+            IoBufChain chain = make_chain(pool, split_at(wire, {split}));
+            std::vector<std::uint8_t> dst(fiber::tls::tls_record_open_dst_size(opener, len16));
+            const auto r = fiber::tls::tls_record_open_in_place(opener, type, 0x0303, len16, chain, dst);
+            ASSERT_EQ(TlsRecordCipher::Status::Ok, r.open.status) << "split " << split;
+            ASSERT_EQ(plain.size(), r.open.plain_len);
+            EXPECT_EQ(split <= 16, r.in_chain) << "split " << split;
+            if (r.in_chain) {
+                EXPECT_EQ(plain, chain_bytes(chain));
+            } else {
+                EXPECT_EQ(plain, std::vector<std::uint8_t>(dst.begin(), dst.begin() + plain.size()));
+                EXPECT_EQ(wire, chain_bytes(chain)); // the transcription left the chain alone
+            }
+
+            TlsRecordCipher transcriber;
+            init_cipher(transcriber, v, TlsRecordDirection::Open);
+            IoBufChain again = make_chain(pool, split_at(wire, {split}));
+            std::vector<std::uint8_t> out(dst.size());
+            const auto t = fiber::tls::tls_record_open_transcribe(transcriber, type, 0x0303, len16, again, out);
+            ASSERT_EQ(TlsRecordCipher::Status::Ok, t.status) << "split " << split;
+            EXPECT_EQ(plain, std::vector<std::uint8_t>(out.begin(), out.begin() + plain.size()));
+            EXPECT_EQ(wire, chain_bytes(again));
+        }
+    });
+}
+
+TEST(TlsRecordChainCbc, TamperedRecordFailsInPlaceWithoutShrinking) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        const KindVec &v = tls12_cbc_vec();
+        TlsRecordCipher seal_side;
+        init_cipher(seal_side, v, TlsRecordDirection::Seal);
+        auto wire = seal_wire(seal_side, TlsContentType::ApplicationData, ramp(50, 0x77));
+        wire.back() ^= 0x01; // the padding block
+        const auto len16 = static_cast<std::uint16_t>(wire.size());
+
+        TlsRecordCipher opener;
+        init_cipher(opener, v, TlsRecordDirection::Open);
+        IoBufChain chain = make_chain(pool, {wire});
+        std::vector<std::uint8_t> dst(fiber::tls::tls_record_open_dst_size(opener, len16));
+        const auto r = fiber::tls::tls_record_open_in_place(opener, TlsContentType::ApplicationData, 0x0303, len16,
+                                                            chain, dst);
+        EXPECT_EQ(TlsRecordCipher::Status::AuthFail, r.open.status);
+        EXPECT_FALSE(r.in_chain);
+        EXPECT_EQ(wire.size(), chain.readable_bytes()); // view untouched
+    });
+}
+
+TEST(TlsRecordChainCbc, SealShapesRoundTrip) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        const KindVec &v = tls12_cbc_vec();
+        TlsRecordCipher seal_side;
+        init_cipher(seal_side, v, TlsRecordDirection::Seal);
+        TlsRecordCipher opener;
+        init_cipher(opener, v, TlsRecordDirection::Open);
+        const auto plain = ramp(90, 0x52);
+        const TlsContentType type = TlsContentType::Handshake;
+
+        // Straddling plaintext: transcribed as IV || body into dst.
+        IoBufChain straddling = make_chain(pool, split_at(plain, {40}));
+        std::vector<std::uint8_t> wire(seal_side.seal_output_size(plain.size()));
+        const auto t = fiber::tls::tls_record_seal_transcribe(seal_side, type, straddling, wire);
+        ASSERT_EQ(TlsRecordCipher::Status::Ok, t.status);
+        ASSERT_EQ(wire.size(), t.out_len);
+
+        // Contiguous plaintext: ciphertext in place, the IV to the header
+        // span, the encrypted MAC tail || padding to the tailer span.
+        IoBufChain contiguous = make_chain(pool, {plain});
+        std::array<std::uint8_t, 16> header{};
+        std::array<std::uint8_t, 48> tailer{};
+        std::vector<std::uint8_t> fallback(seal_side.seal_output_size(plain.size()));
+        const auto p = fiber::tls::tls_record_seal_in_place(seal_side, type, contiguous, header, tailer, fallback);
+        ASSERT_EQ(TlsRecordCipher::Status::Ok, p.seal.status);
+        ASSERT_TRUE(p.in_chain);
+        std::vector<std::uint8_t> wire2(header.begin(), header.end());
+        const auto body = chain_bytes(contiguous);
+        wire2.insert(wire2.end(), body.begin(), body.end());
+        wire2.insert(wire2.end(), tailer.begin(),
+                     tailer.begin() + static_cast<std::ptrdiff_t>(p.seal.out_len - 16 - plain.size()));
+        ASSERT_EQ(p.seal.out_len, wire2.size());
+
+        for (const std::vector<std::uint8_t> *w: {&wire, &wire2}) {
+            std::vector<std::uint8_t> out(w->size());
+            const auto o = opener.open(type, 0x0303, static_cast<std::uint16_t>(w->size()), *w, out);
+            ASSERT_EQ(TlsRecordCipher::Status::Ok, o.status);
+            EXPECT_EQ(plain, std::vector<std::uint8_t>(out.begin(), out.begin() + o.plain_len));
         }
     });
 }

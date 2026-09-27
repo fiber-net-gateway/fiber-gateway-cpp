@@ -2,21 +2,33 @@
 
 #include <cstring>
 
+#include "../crypto/TlsCryptoPrimitives.h"
+
 namespace fiber::tls {
 
 namespace {
 
+// 1.2 CBC (feature/tls/11): the AES block, which is also the IV size — the IV
+// is the EVP nonce and rides the wire ahead of the CBC body.
+constexpr std::size_t kCbcBlockLen = 16;
+
+// The 1.2 AD prefix seq_num || type || version (RFC 5246 §6.2.3). The AEAD
+// constructions append the 2-byte plaintext length (13 bytes); the TLS CBC
+// AEADs take these 11 bytes and add the length themselves.
+constexpr std::size_t kAd12PrefixLen = 11;
+
 struct SuiteSpec {
     const EVP_AEAD *aead = nullptr;
-    std::size_t key_len = 0;
-    std::size_t iv_len = 0; // static iv (1.3, 12); 1.2: fixed iv (GCM, 4) or implicit iv (ChaCha, 12)
-    std::size_t explicit_nonce_len = 0; // 1.2 GCM carries 8 explicit nonce bytes (RFC 5288)
+    std::size_t key_len = 0; // the EVP key: the AEAD key, or CBC MAC key || encryption key
+    std::size_t iv_len = 0; // static iv (1.3, 12); 1.2: fixed iv (GCM, 4), implicit iv (ChaCha, 12) or none (CBC)
+    std::size_t explicit_nonce_len = 0; // 1.2 GCM: 8 explicit nonce bytes (RFC 5288); CBC: the 16-byte IV
+    std::size_t mac_len = 0; // 1.2 CBC HMAC length; 0 for the AEADs
 };
 
 // (suite, kind) pairing resolved through the shared registry
 // (handshake/TlsCipherSuites.h); a null aead rejects every other pairing at
-// init. The nine implemented combinations and their key/iv lengths all live
-// in kTlsSuiteRegistry — this only maps the AEAD pick.
+// init. The implemented combinations and their key/iv lengths all live in
+// kTlsSuiteRegistry — this only maps the EVP pick.
 [[nodiscard]] SuiteSpec suite_spec(TlsCipherSuiteId suite, TlsRecordProtectionKind kind) noexcept {
     const TlsSuiteInfo *info = tls_suite_info(suite);
     if (info == nullptr || info->is_tls13 != (kind == TlsRecordProtectionKind::Tls13)) {
@@ -33,12 +45,33 @@ struct SuiteSpec {
         case TlsAeadAlgorithm::Chacha20Poly1305:
             aead = EVP_aead_chacha20_poly1305();
             break;
+        case TlsAeadAlgorithm::Aes128CbcSha1:
+            aead = EVP_aead_aes_128_cbc_sha1_tls();
+            break;
+        case TlsAeadAlgorithm::Aes256CbcSha1:
+            aead = EVP_aead_aes_256_cbc_sha1_tls();
+            break;
+        case TlsAeadAlgorithm::Aes128CbcSha256:
+            aead = EVP_aead_aes_128_cbc_sha256_tls();
+            break;
+    }
+    const std::size_t mac_len = tls_record_mac_len(info->aead);
+    if (mac_len != 0) {
+        // TLS 1.1+ CBC: no derived IV — a fresh one rides every record as the
+        // EVP nonce; the EVP key is MAC key || AES key (ssl_aead_ctx.cc).
+        return {aead, mac_len + info->key_len, 0, kCbcBlockLen, mac_len};
     }
     // RFC 7905 §2: 1.2 ChaCha20 derives the whole 12-byte nonce implicitly
     // (fixed IV XOR sequence) — nothing on the wire, unlike GCM's 4+8 split.
     const bool chacha = info->aead == TlsAeadAlgorithm::Chacha20Poly1305;
     return {aead, info->key_len, static_cast<std::size_t>(info->is_tls13 || chacha ? 12 : 4),
-            static_cast<std::size_t>(!info->is_tls13 && !chacha ? 8 : 0)};
+            static_cast<std::size_t>(!info->is_tls13 && !chacha ? 8 : 0), 0};
+}
+
+// The CBC body after the IV: plaintext || MAC || padding in whole blocks,
+// with at least one padding byte (the padding-length byte itself).
+[[nodiscard]] constexpr std::size_t cbc_body_len(std::size_t plaintext_len, std::size_t mac_len) noexcept {
+    return (plaintext_len + mac_len + kCbcBlockLen) / kCbcBlockLen * kCbcBlockLen;
 }
 
 void store_be64(std::uint8_t *dst, std::uint64_t value) noexcept {
@@ -54,6 +87,13 @@ void store_be64(std::uint8_t *dst, std::uint64_t value) noexcept {
         value = (value << 8) | src[i];
     }
     return value;
+}
+
+void write_ad12_prefix(std::uint8_t *ad, std::uint64_t seq, TlsContentType type, std::uint16_t version) noexcept {
+    store_be64(ad, seq);
+    ad[8] = static_cast<std::uint8_t>(type);
+    ad[9] = static_cast<std::uint8_t>(version >> 8);
+    ad[10] = static_cast<std::uint8_t>(version);
 }
 
 // Zero-length regions never overlap anything.
@@ -104,6 +144,7 @@ void TlsRecordCipher::move_from(TlsRecordCipher &src) noexcept {
     direction_ = src.direction_;
     iv_ = src.iv_;
     explicit_nonce_len_ = src.explicit_nonce_len_;
+    mac_len_ = src.mac_len_;
     seq_ = src.seq_;
     initialized_ = src.initialized_;
     std::memset(static_cast<void *>(&src.aead_ctx_), 0, sizeof src.aead_ctx_);
@@ -142,22 +183,34 @@ common::IoResult<void> TlsRecordCipher::init(TlsCipherSuiteId suite, TlsRecordPr
     suite_ = suite;
     kind_ = kind;
     direction_ = direction;
-    std::memcpy(iv_.data(), iv.data(), spec.iv_len);
+    if (spec.iv_len != 0) { // CBC derives none; an empty iv may be a null span
+        std::memcpy(iv_.data(), iv.data(), spec.iv_len);
+    }
     explicit_nonce_len_ = static_cast<std::uint8_t>(spec.explicit_nonce_len);
+    mac_len_ = static_cast<std::uint8_t>(spec.mac_len);
     seq_ = 0;
     initialized_ = true;
     return {};
 }
 
 std::size_t TlsRecordCipher::seal_output_size(std::size_t plaintext_len) const noexcept {
+    if (is_cbc()) {
+        return kCbcBlockLen + cbc_body_len(plaintext_len, mac_len_);
+    }
     return plaintext_len + (kind_ == TlsRecordProtectionKind::Tls13 ? 17 : 16 + explicit_nonce_len_);
 }
 
 std::size_t TlsRecordCipher::open_output_size(std::size_t ciphertext_len) const noexcept {
+    if (is_cbc()) {
+        return ciphertext_len - kCbcBlockLen; // the EVP needs room for the MAC + padding it strips
+    }
     return ciphertext_len - (kind_ == TlsRecordProtectionKind::Tls13 ? 16 : 16 + explicit_nonce_len_);
 }
 
 std::size_t TlsRecordCipher::min_ciphertext_size() const noexcept {
+    if (is_cbc()) {
+        return kCbcBlockLen + cbc_body_len(0, mac_len_); // IV + one MAC-and-padding body: 48 (SHA-1) / 64 (SHA-256)
+    }
     return kind_ == TlsRecordProtectionKind::Tls13 ? 17 : 16 + explicit_nonce_len_;
 }
 
@@ -199,6 +252,26 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
                               plaintext.size() + 1, aad.data(), aad_len) != 1) {
             return {Status::AuthFail, 0};
         }
+    } else if (is_cbc()) {
+        // 1.2 CBC: a fresh unpredictable IV per record (RFC 5246 §6.2.3.2) is
+        // the EVP nonce and rides the wire at dst's head; the EVP output is
+        // the CBC body — plaintext || MAC || padding, encrypted.
+        FIBER_ASSERT(direction_ == TlsRecordDirection::Seal);
+        if (regions_overlap(dst.data(), dst.size(), plaintext.data(), plaintext.size())) {
+            FIBER_ASSERT(dst.data() + kCbcBlockLen == plaintext.data());
+        }
+        std::array<std::uint8_t, kCbcBlockLen> cbc_iv{};
+        if (!tls_random_bytes(cbc_iv)) {
+            return {Status::AuthFail, 0};
+        }
+        std::memcpy(dst.data(), cbc_iv.data(), kCbcBlockLen);
+        write_ad12_prefix(aad.data(), seq_, inner_type, kTlsRecordVersionTls12);
+
+        // The exact body capacity: the EVP requires room for MAC + padding.
+        if (EVP_AEAD_CTX_seal(&aead_ctx_, dst.data() + kCbcBlockLen, &written, out_len - kCbcBlockLen, cbc_iv.data(),
+                              kCbcBlockLen, plaintext.data(), plaintext.size(), aad.data(), kAd12PrefixLen) != 1) {
+            return {Status::AuthFail, 0};
+        }
     } else if (explicit_nonce_len_ == 0) {
         // RFC 7905 §2: nonce = 12-byte implicit IV XOR sequence — the 1.3
         // construction with the 1.2 AAD; nothing precedes the ciphertext.
@@ -209,10 +282,7 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
         std::memcpy(nonce.data(), iv_.data(), 12);
         store_be64(nonce.data() + 4, load_be64(nonce.data() + 4) ^ seq_);
 
-        store_be64(aad.data(), seq_);
-        aad[8] = static_cast<std::uint8_t>(inner_type);
-        aad[9] = 0x03;
-        aad[10] = 0x03;
+        write_ad12_prefix(aad.data(), seq_, inner_type, kTlsRecordVersionTls12);
         aad[11] = static_cast<std::uint8_t>(plaintext.size() >> 8);
         aad[12] = static_cast<std::uint8_t>(plaintext.size());
         aad_len = 13;
@@ -230,10 +300,7 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
         std::memcpy(nonce.data(), iv_.data(), iv_len);
         std::memcpy(nonce.data() + 4, dst.data(), 8);
 
-        store_be64(aad.data(), seq_);
-        aad[8] = static_cast<std::uint8_t>(inner_type);
-        aad[9] = 0x03;
-        aad[10] = 0x03;
+        write_ad12_prefix(aad.data(), seq_, inner_type, kTlsRecordVersionTls12);
         aad[11] = static_cast<std::uint8_t>(plaintext.size() >> 8);
         aad[12] = static_cast<std::uint8_t>(plaintext.size());
         aad_len = 13;
@@ -244,8 +311,8 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
         }
     }
 
-    // 1.3 and 1.2-ChaCha: EVP output is the whole payload. 1.2-GCM: EVP
-    // output excludes the 8-byte nonce prefix written at dst's head.
+    // 1.3 and 1.2-ChaCha: EVP output is the whole payload. 1.2-GCM/CBC: EVP
+    // output excludes the nonce / IV prefix written at dst's head.
     FIBER_ASSERT(written == out_len - explicit_nonce_len_);
     ++seq_;
     return {Status::Ok, out_len};
@@ -263,6 +330,13 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
         return {Status::Malformed, TlsContentType::ApplicationData, 0};
     }
     FIBER_ASSERT(ciphertext.size() >= length);
+
+    if (is_cbc()) {
+        // One CBC implementation: the IV and the body are split off the
+        // record and opened through the scatter form (no detached tag).
+        return open_scatter(outer_type, legacy_version, length, ciphertext.first(kCbcBlockLen),
+                            ciphertext.subspan(kCbcBlockLen, length - kCbcBlockLen), {}, dst);
+    }
 
     const std::size_t iv_len = kind_ == TlsRecordProtectionKind::Tls13 ? 12 : 4;
     std::array<std::uint8_t, 12> nonce{};
@@ -308,10 +382,7 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
         std::memcpy(nonce.data(), iv_.data(), 12);
         store_be64(nonce.data() + 4, load_be64(nonce.data() + 4) ^ seq_);
 
-        store_be64(aad.data(), seq_);
-        aad[8] = static_cast<std::uint8_t>(outer_type);
-        aad[9] = static_cast<std::uint8_t>(legacy_version >> 8);
-        aad[10] = static_cast<std::uint8_t>(legacy_version);
+        write_ad12_prefix(aad.data(), seq_, outer_type, legacy_version);
         const std::uint16_t plain_len = static_cast<std::uint16_t>(length - 16);
         aad[11] = static_cast<std::uint8_t>(plain_len >> 8);
         aad[12] = static_cast<std::uint8_t>(plain_len);
@@ -337,10 +408,7 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
     std::memcpy(nonce.data(), iv_.data(), iv_len);
     std::memcpy(nonce.data() + 4, ciphertext.data(), 8);
 
-    store_be64(aad.data(), seq_);
-    aad[8] = static_cast<std::uint8_t>(outer_type);
-    aad[9] = static_cast<std::uint8_t>(legacy_version >> 8);
-    aad[10] = static_cast<std::uint8_t>(legacy_version);
+    write_ad12_prefix(aad.data(), seq_, outer_type, legacy_version);
     const std::uint16_t plain_len = static_cast<std::uint16_t>(length - 24);
     aad[11] = static_cast<std::uint8_t>(plain_len >> 8);
     aad[12] = static_cast<std::uint8_t>(plain_len);
@@ -372,6 +440,36 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal_scatter(TlsContentType inner_t
     // The EVP requires the tag output to not alias any other argument.
     FIBER_ASSERT(!regions_overlap(dst_tag.data(), dst_tag.size(), dst_ct.data(), dst_ct.size()));
     FIBER_ASSERT(!regions_overlap(dst_tag.data(), dst_tag.size(), plaintext.data(), plaintext.size()));
+
+    if (is_cbc()) {
+        // 1.2 CBC: the random IV to dst_prefix, the first n body bytes to
+        // dst_ct, the rest of the body (the encrypted MAC tail || padding) to
+        // dst_tag. No extra_in: 1.2 binds the type through the AD.
+        FIBER_ASSERT(direction_ == TlsRecordDirection::Seal);
+        FIBER_ASSERT(dst_prefix.size() >= kCbcBlockLen);
+        const std::size_t tag_len = out_len - kCbcBlockLen - plaintext.size();
+        FIBER_ASSERT(dst_tag.size() >= tag_len);
+        FIBER_ASSERT(!regions_overlap(dst_prefix.data(), kCbcBlockLen, dst_ct.data(), dst_ct.size()));
+        if (regions_overlap(dst_ct.data(), dst_ct.size(), plaintext.data(), plaintext.size())) {
+            FIBER_ASSERT(dst_ct.data() == plaintext.data());
+        }
+        std::array<std::uint8_t, kCbcBlockLen> cbc_iv{};
+        if (!tls_random_bytes(cbc_iv)) {
+            return {Status::AuthFail, 0};
+        }
+        std::memcpy(dst_prefix.data(), cbc_iv.data(), kCbcBlockLen);
+        std::array<std::uint8_t, kAd12PrefixLen> ad{};
+        write_ad12_prefix(ad.data(), seq_, inner_type, kTlsRecordVersionTls12);
+        std::size_t cbc_tag_written = 0;
+        if (EVP_AEAD_CTX_seal_scatter(&aead_ctx_, dst_ct.data(), dst_tag.data(), &cbc_tag_written, tag_len,
+                                      cbc_iv.data(), kCbcBlockLen, plaintext.data(), plaintext.size(), nullptr, 0,
+                                      ad.data(), kAd12PrefixLen) != 1) {
+            return {Status::AuthFail, 0};
+        }
+        FIBER_ASSERT(cbc_tag_written == tag_len);
+        ++seq_;
+        return {Status::Ok, out_len};
+    }
 
     const std::size_t iv_len = kind_ == TlsRecordProtectionKind::Tls13 ? 12 : 4;
     std::array<std::uint8_t, 12> nonce{};
@@ -418,10 +516,7 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal_scatter(TlsContentType inner_t
             FIBER_ASSERT(dst_ct.data() == plaintext.data());
         }
 
-        store_be64(aad.data(), seq_);
-        aad[8] = static_cast<std::uint8_t>(inner_type);
-        aad[9] = 0x03;
-        aad[10] = 0x03;
+        write_ad12_prefix(aad.data(), seq_, inner_type, kTlsRecordVersionTls12);
         aad[11] = static_cast<std::uint8_t>(plaintext.size() >> 8);
         aad[12] = static_cast<std::uint8_t>(plaintext.size());
         aad_len = 13;
@@ -450,6 +545,38 @@ TlsRecordCipher::open_scatter(TlsContentType outer_type, std::uint16_t legacy_ve
     // decrypt oracle; out-of-range lengths are peer data, not caller bugs).
     if (length < min_ciphertext_size() || length > max_ciphertext_size()) {
         return {Status::Malformed, TlsContentType::ApplicationData, 0};
+    }
+
+    if (is_cbc()) {
+        // Whole blocks past the IV — public, so rejected before any crypto.
+        const std::size_t body_len = length - kCbcBlockLen;
+        if (body_len % kCbcBlockLen != 0) {
+            return {Status::Malformed, TlsContentType::ApplicationData, 0};
+        }
+        FIBER_ASSERT(direction_ == TlsRecordDirection::Open);
+        FIBER_ASSERT(explicit_nonce.size() >= kCbcBlockLen);
+        FIBER_ASSERT(tag.empty()); // no open_gather: the body covers everything past the IV
+        FIBER_ASSERT(body.size() >= body_len);
+        FIBER_ASSERT(dst.size() >= body_len);
+        if (regions_overlap(dst.data(), dst.size(), body.data(), body.size())) {
+            FIBER_ASSERT(dst.data() == body.data());
+        }
+        std::array<std::uint8_t, kCbcBlockLen> cbc_iv{};
+        std::memcpy(cbc_iv.data(), explicit_nonce.data(), kCbcBlockLen);
+        std::array<std::uint8_t, kAd12PrefixLen> ad{};
+        write_ad12_prefix(ad.data(), seq_, outer_type, legacy_version);
+        std::size_t written = 0;
+        // Padding and MAC failures are indistinguishable here (the EVP checks
+        // both in constant time) and both surface as AuthFail.
+        if (EVP_AEAD_CTX_open(&aead_ctx_, dst.data(), &written, body_len, cbc_iv.data(), kCbcBlockLen, body.data(),
+                              body_len, ad.data(), kAd12PrefixLen) != 1) {
+            return {Status::AuthFail, TlsContentType::ApplicationData, 0};
+        }
+        if (written > kTlsMaxPlaintextSize) {
+            return {Status::Overflow, TlsContentType::ApplicationData, 0}; // RFC 5246 §6.2.1
+        }
+        ++seq_;
+        return {Status::Ok, outer_type, written};
     }
 
     const std::size_t iv_len = kind_ == TlsRecordProtectionKind::Tls13 ? 12 : 4;
@@ -505,10 +632,7 @@ TlsRecordCipher::open_scatter(TlsContentType outer_type, std::uint16_t legacy_ve
         store_be64(nonce.data() + 4, load_be64(nonce.data() + 4) ^ seq_);
     }
 
-    store_be64(aad.data(), seq_);
-    aad[8] = static_cast<std::uint8_t>(outer_type);
-    aad[9] = static_cast<std::uint8_t>(legacy_version >> 8);
-    aad[10] = static_cast<std::uint8_t>(legacy_version);
+    write_ad12_prefix(aad.data(), seq_, outer_type, legacy_version);
     aad[11] = static_cast<std::uint8_t>(plain_len >> 8);
     aad[12] = static_cast<std::uint8_t>(plain_len);
     aad_len = 13;

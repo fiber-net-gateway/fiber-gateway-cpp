@@ -48,9 +48,12 @@ void chain_copy_region(const mem::IoBufChain &chain, std::size_t offset, std::si
     FIBER_ASSERT(len == 0);
 }
 
+// The largest explicit nonce on the wire: the 1.2 CBC IV (GCM carries 8).
+constexpr std::size_t kMaxExplicitNonce = 16;
+
 // Record length bounds, checked BEFORE any body/tag size arithmetic: a
 // sealed record shorter than its AEAD overhead would underflow
-// `length - 16 - explicit_nonce` into a huge span (the cipher rejects the
+// `length - tag - explicit_nonce` into a huge span (the cipher rejects the
 // length too, but only after the spans are formed). Found by the
 // tls_server_engine fuzzer via the handshake context's sealed-record path.
 [[nodiscard]] bool length_in_bounds(const TlsRecordCipher &cipher, std::uint16_t length) noexcept {
@@ -65,8 +68,9 @@ void chain_copy_region(const mem::IoBufChain &chain, std::size_t offset, std::si
 
 std::size_t tls_record_open_dst_size(const TlsRecordCipher &cipher, std::uint16_t length) noexcept {
     // Saturating: a length below the explicit nonce is a malformed record
-    // (rejected by the open itself), never a wrapped, enormous size.
-    const std::size_t nonce = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
+    // (rejected by the open itself), never a wrapped, enormous size. The
+    // explicit nonce is 0 at 1.3 by construction.
+    const std::size_t nonce = cipher.explicit_nonce_len();
     return length > nonce ? length - nonce : 0;
 }
 
@@ -80,38 +84,33 @@ TlsRecordCipher::OpenResult tls_record_open_transcribe(TlsRecordCipher &cipher, 
         return malformed();
     }
 
-    const std::size_t expl = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
-    const std::size_t body_off = expl; // past the 1.2-GCM explicit nonce
-    const std::size_t body_len = length - 16 - expl;
-    std::array<std::uint8_t, 8> nonce_prefix{};
+    // Record = explicit nonce (1.2 GCM 8 / CBC 16; 0 otherwise) || body ||
+    // detached tag (16; 0 for CBC, whose MAC + padding sit in the body).
+    const std::size_t expl = cipher.explicit_nonce_len();
+    const std::size_t tag_len = cipher.detached_tag_len();
+    const std::size_t body_off = expl;
+    const std::size_t body_len = length - tag_len - expl;
 
+    // The nonce is only read to build the AEAD nonce / CBC IV — it never
+    // belongs in dst. At most 16 bytes, so staging it on the stack beats
+    // requiring the region to be contiguous.
+    std::array<std::uint8_t, kMaxExplicitNonce> nonce_prefix{};
     if (expl > 0) {
-        // The nonce is only read to build the AEAD nonce — it never belongs
-        // in dst. Eight bytes, so staging it on the stack beats requiring the
-        // region to be contiguous.
-        chain_copy_region(payload, 0, 8, nonce_prefix.data());
-        const std::uint8_t *body = nullptr;
-        const std::uint8_t *tag = nullptr;
-        if (chain_contiguous(payload, body_off, body_len, &body) &&
-            chain_contiguous(payload, body_off + body_len, 16, &tag)) {
-            return cipher.open_scatter(outer_type, legacy_version, length, nonce_prefix, {body, body_len}, {tag, 16},
-                                       dst);
-        }
-        // Stage body+tag in dst, then decrypt in place — the plaintext keeps
-        // its home at dst.data().
-        chain_copy_region(payload, body_off, length - body_off, dst.data());
-        return cipher.open_scatter(outer_type, legacy_version, length, nonce_prefix, {dst.data(), body_len},
-                                   {dst.data() + body_len, 16}, {dst.data(), body_len});
+        chain_copy_region(payload, 0, expl, nonce_prefix.data());
     }
+    const std::span<const std::uint8_t> nonce{nonce_prefix.data(), expl};
 
     const std::uint8_t *body = nullptr;
     const std::uint8_t *tag = nullptr;
-    if (chain_contiguous(payload, 0, body_len, &body) && chain_contiguous(payload, body_len, 16, &tag)) {
-        return cipher.open_scatter(outer_type, legacy_version, length, {}, {body, body_len}, {tag, 16}, dst);
+    if (chain_contiguous(payload, body_off, body_len, &body) &&
+        chain_contiguous(payload, body_off + body_len, tag_len, &tag)) {
+        return cipher.open_scatter(outer_type, legacy_version, length, nonce, {body, body_len}, {tag, tag_len}, dst);
     }
-    chain_copy_region(payload, 0, length, dst.data());
-    return cipher.open_scatter(outer_type, legacy_version, length, {}, {dst.data(), body_len},
-                               {dst.data() + body_len, 16}, {dst.data(), body_len});
+    // Stage body+tag in dst, then decrypt in place — the plaintext keeps its
+    // home at dst.data().
+    chain_copy_region(payload, body_off, length - body_off, dst.data());
+    return cipher.open_scatter(outer_type, legacy_version, length, nonce, {dst.data(), body_len},
+                               {dst.data() + body_len, tag_len}, {dst.data(), body_len});
 }
 
 TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsContentType outer_type,
@@ -123,42 +122,37 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
         return {malformed(), false};
     }
 
-    const std::size_t expl = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
+    const std::size_t expl = cipher.explicit_nonce_len();
+    const std::size_t tag_len = cipher.detached_tag_len();
     const std::size_t body_off = expl;
-    const std::size_t body_len = length - 16 - expl;
+    const std::size_t body_len = length - tag_len - expl;
 
     const std::uint8_t *body = nullptr;
     const std::uint8_t *tag = nullptr;
     if (!chain_contiguous(payload, body_off, body_len, &body) ||
-        !chain_contiguous(payload, body_off + body_len, 16, &tag)) {
+        !chain_contiguous(payload, body_off + body_len, tag_len, &tag)) {
         return {tls_record_open_transcribe(cipher, outer_type, legacy_version, length, payload, dst), false};
     }
 
     // In place over the record's own bytes — the only mutation of the chain.
     auto *body_mut = const_cast<std::uint8_t *>(body);
-    TlsRecordCipher::OpenResult result;
+    std::array<std::uint8_t, kMaxExplicitNonce> nonce_prefix{};
     if (expl > 0) {
-        std::array<std::uint8_t, 8> nonce_prefix{};
-        chain_copy_region(payload, 0, 8, nonce_prefix.data());
-        result = cipher.open_scatter(outer_type, legacy_version, length, nonce_prefix, {body, body_len}, {tag, 16},
-                                     {body_mut, body_len});
-    } else {
-        result = cipher.open_scatter(outer_type, legacy_version, length, {}, {body, body_len}, {tag, 16},
-                                     {body_mut, body_len});
+        chain_copy_region(payload, 0, expl, nonce_prefix.data());
     }
+    const TlsRecordCipher::OpenResult result =
+            cipher.open_scatter(outer_type, legacy_version, length, {nonce_prefix.data(), expl}, {body, body_len},
+                                {tag, tag_len}, {body_mut, body_len});
     if (result.status != TlsRecordCipher::Status::Ok) {
         return {result, false}; // touched bytes zeroed by the AEAD; view untouched
     }
-    // Shrink the view: drop the tag plus the 1.2-GCM nonce prefix / the 1.3
-    // inner type and padding.
+    // Shrink the view to the plaintext: drop the explicit nonce (1.2 GCM /
+    // CBC) and everything past the plaintext — the tag, 1.3's inner type and
+    // padding, or CBC's MAC and padding.
     if (expl > 0) {
-        payload.consume(8);
-        payload.trim_end(16);
-    } else if (cipher.kind() == TlsRecordProtectionKind::Tls12) {
-        payload.trim_end(16); // 1.2 ChaCha: no nonce prefix, tag only
-    } else {
-        payload.trim_end(length - result.plain_len);
+        payload.consume(expl);
     }
+    payload.trim_end(length - expl - result.plain_len);
     return {result, true};
 }
 
@@ -169,8 +163,7 @@ TlsRecordCipher::SealResult tls_record_seal_transcribe(TlsRecordCipher &cipher, 
     FIBER_ASSERT(plain <= kTlsMaxPlaintextSize);
     FIBER_ASSERT(dst.size() >= cipher.seal_output_size(plain));
 
-    const std::size_t off =
-            cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0; // 1.2-GCM prefix
+    const std::size_t off = cipher.explicit_nonce_len(); // 1.2 GCM nonce / CBC IV prefix; 0 otherwise
     const std::uint8_t *pt = nullptr;
     if (chain_contiguous(plaintext, 0, plain, &pt)) {
         // Disjoint dst: the EVP move is the transcription itself.

@@ -20,6 +20,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -493,9 +494,14 @@ void connection_corpus() {
     const Bytes warning{1, 90};
     const Bytes close_notify{1, 0};
     const Bytes hello_request{0, 0, 0, 0};
-    for (std::uint8_t config = 0; config < 4; ++config) {
+    // Configs 0-3: 1.3/1.2 x client/server (1.2 = AES128-GCM). Then the 1.2
+    // CBC record suites (config bits 2-3 = 1..3, feature/tls/11).
+    constexpr std::array<std::uint8_t, 10> kConfigs{0, 1, 2, 3, 0x05, 0x07, 0x09, 0x0B, 0x0D, 0x0F};
+    constexpr std::array<const char *, 4> kSuiteTags{"", "-aes128-sha", "-aes256-sha", "-aes128-sha256"};
+    for (const std::uint8_t config: kConfigs) {
         const bool tls12 = (config & 1) != 0;
-        const std::string tag = std::string(tls12 ? "tls12" : "tls13") + ((config & 2) ? "-server" : "-client");
+        const std::string tag = std::string(tls12 ? "tls12" : "tls13") + ((config & 2) ? "-server" : "-client") +
+                                kSuiteTags[(config >> 2) & 3];
         Bytes flow{config};
         record(flow, 0x80 | 3, app); // app data, drain
         if (!tls12) {

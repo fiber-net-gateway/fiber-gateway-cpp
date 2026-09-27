@@ -37,7 +37,7 @@ constexpr std::size_t kPrfLabelSeedCap = 96; // longest use: 22 + 48 (EMS sessio
 [[nodiscard]] bool prf(TlsHashAlgorithm hash, std::span<const std::uint8_t> secret, std::string_view label,
                        std::span<const std::uint8_t> seed, std::span<std::uint8_t> out) noexcept {
     const std::size_t hash_len = tls_hash_len(hash);
-    FIBER_ASSERT(!out.empty() && out.size() <= 128); // largest consumer: key_block = 88
+    FIBER_ASSERT(!out.empty() && out.size() <= 128); // largest consumer: key_block = 104 (AES256-SHA)
     FIBER_ASSERT(label.size() <= kPrfLabelExtendedMaster.size()); // longest label we use (22)
     FIBER_ASSERT(label.size() + seed.size() <= kPrfLabelSeedCap);
 
@@ -137,13 +137,15 @@ common::IoResult<Tls12WriteKeys> tls12_key_block(TlsCipherSuiteId suite, const T
     std::memcpy(seed.data(), server_random.data(), 32);
     std::memcpy(seed.data() + 32, client_random.data(), 32);
 
-    // MAC keys are empty for AEAD suites: key_block = c_key || s_key ||
-    // c_iv || s_iv. The fixed IV length is suite-shaped: 4 for RFC 5288 GCM
-    // (the other 8 nonce bytes ride the wire), 12 for RFC 7905 ChaCha20 (the
-    // whole nonce is implicit).
-    const std::size_t iv_len = info.aead == TlsAeadAlgorithm::Chacha20Poly1305 ? 12 : 4;
-    const std::size_t block_len = 2 * info.key_len + 2 * iv_len;
-    std::array<std::uint8_t, 88> block{}; // largest: 2*32 key + 2*12 iv (chacha)
+    // key_block = c_mac || s_mac || c_key || s_key || c_iv || s_iv. The MAC
+    // keys are empty for AEAD suites. The fixed IV length is suite-shaped: 4
+    // for RFC 5288 GCM (the other 8 nonce bytes ride the wire), 12 for RFC
+    // 7905 ChaCha20 (the whole nonce is implicit), 0 for CBC (TLS 1.1+
+    // carries a fresh IV in every record; none is derived).
+    const std::size_t mac_len = tls_record_mac_len(info.aead);
+    const std::size_t iv_len = mac_len != 0 ? 0 : info.aead == TlsAeadAlgorithm::Chacha20Poly1305 ? 12 : 4;
+    const std::size_t block_len = 2 * mac_len + 2 * info.key_len + 2 * iv_len;
+    std::array<std::uint8_t, 128> block{}; // largest: 2*20 mac + 2*32 key (AES256-SHA) = 104
     if (!prf(info.hash, master.bytes(), kPrfLabelKeyExpansion, seed, {block.data(), block_len})) {
         tls_secure_wipe(seed.data(), seed.size());
         tls_secure_wipe(block.data(), block.size());
@@ -151,15 +153,26 @@ common::IoResult<Tls12WriteKeys> tls12_key_block(TlsCipherSuiteId suite, const T
     }
     tls_secure_wipe(seed.data(), seed.size());
 
+    // Each direction's cipher key is its MAC key (CBC only) followed by its
+    // encryption key — the merged key BoringSSL's TLS CBC AEADs take
+    // (ssl_aead_ctx.cc); for AEAD suites it is the encryption key alone.
+    const std::uint8_t *const c_mac = block.data();
+    const std::uint8_t *const s_mac = c_mac + mac_len;
+    const std::uint8_t *const c_key = s_mac + mac_len;
+    const std::uint8_t *const s_key = c_key + info.key_len;
+    const std::uint8_t *const c_iv = s_key + info.key_len;
+    const std::uint8_t *const s_iv = c_iv + iv_len;
     Tls12WriteKeys keys;
-    keys.client.key_len = info.key_len;
+    keys.client.key_len = static_cast<std::uint8_t>(mac_len + info.key_len);
     keys.client.iv_len = static_cast<std::uint8_t>(iv_len);
-    keys.server.key_len = info.key_len;
+    keys.server.key_len = static_cast<std::uint8_t>(mac_len + info.key_len);
     keys.server.iv_len = static_cast<std::uint8_t>(iv_len);
-    std::memcpy(keys.client.key.data(), block.data(), info.key_len);
-    std::memcpy(keys.server.key.data(), block.data() + info.key_len, info.key_len);
-    std::memcpy(keys.client.iv.data(), block.data() + 2 * info.key_len, iv_len);
-    std::memcpy(keys.server.iv.data(), block.data() + 2 * info.key_len + iv_len, iv_len);
+    std::memcpy(keys.client.key.data(), c_mac, mac_len);
+    std::memcpy(keys.client.key.data() + mac_len, c_key, info.key_len);
+    std::memcpy(keys.server.key.data(), s_mac, mac_len);
+    std::memcpy(keys.server.key.data() + mac_len, s_key, info.key_len);
+    std::memcpy(keys.client.iv.data(), c_iv, iv_len);
+    std::memcpy(keys.server.iv.data(), s_iv, iv_len);
     tls_secure_wipe(block.data(), block.size());
     return keys;
 }
