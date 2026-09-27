@@ -1106,7 +1106,7 @@ TEST(TlsQuicHandshake, MessageCapPartialAndPing) {
         {
             EngineQuicSink sink;
             TlsServerHandshakeEngine engine(material.server_cfg(sink), nullptr, nullptr);
-            // Declared body_len 0x400001 (> 4 MiB reassembly cap): fatal.
+            // Declared body_len 0x400001 (> the ClientHello reassembly cap): fatal.
             const std::array<std::uint8_t, 5> oversize{0x01, 0x40, 0x00, 0x01, 0xFF};
             const auto event = engine.feed_quic(TlsQuicLevel::Initial, oversize);
             ASSERT_TRUE(event.has_value());
