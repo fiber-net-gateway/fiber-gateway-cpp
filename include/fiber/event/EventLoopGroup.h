@@ -35,10 +35,10 @@ public:
     EventLoop &at(std::size_t index);
     const EventLoop &at(std::size_t index) const;
 
+private:
     std::vector<std::unique_ptr<EventLoop>> loops_;
     fiber::async::ThreadGroup threads_;
 
-private:
     void start_with_mask(const fiber::async::SignalSet *mask);
     std::atomic<bool> running_{false};
 };
