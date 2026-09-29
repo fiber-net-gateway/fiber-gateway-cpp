@@ -31,6 +31,9 @@ enum class TlsCertPurpose : std::uint8_t {
     SslClient, // we are the server, verifying a client chain (mTLS)
 };
 
+// Operation required by the negotiated suite, independent of chain trust.
+enum class TlsCertificateKeyUsage : std::uint8_t { DigitalSignature, KeyEncipherment };
+
 class TlsCertificateChain;
 class TlsTrustStore;
 struct TlsCertVerification;
@@ -55,7 +58,8 @@ public:
     ~TlsCertificate();
 
     // Shared by wire parsing (06 receives certificate entries) and
-    // configuration loading. Invalid = unparsable DER / unsupported key type.
+    // configuration loading. Invalid = unparsable DER. Public key support
+    // is checked separately by public_key().
     [[nodiscard]] static common::IoResult<TlsCertificate> parse_der(std::span<const std::uint8_t> der) noexcept;
 
     // The exact DER bytes handed to parse_der (zero-copy view, lives as long
@@ -63,7 +67,13 @@ public:
     [[nodiscard]] std::span<const std::uint8_t> der() const noexcept;
 
     // Public key as a borrowed view — its lifetime is this certificate.
+    // Invalid = unparseable key or a type other than RSA, EC, or Ed25519;
+    // a successful view can always be queried with key_kind().
     [[nodiscard]] common::IoResult<TlsPublicKeyView> public_key() const noexcept;
+
+    // No KeyUsage extension allows either operation. Malformed or duplicate
+    // extensions fail closed, even when the caller disables chain validation.
+    [[nodiscard]] bool allows_key_usage(TlsCertificateKeyUsage usage) const noexcept;
 
     struct Validity {
         std::int64_t not_before_ms = 0;

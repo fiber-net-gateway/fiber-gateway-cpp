@@ -213,11 +213,20 @@ void Tls12ClientHandshake::handle_certificate_12(std::span<const std::uint8_t> b
     // an ECDHE-RSA suite over an EC leaf whose SKE is ECDSA-signed.
     const auto leaf_key = peer_chain_.leaf().public_key();
     if (!leaf_key.has_value()) {
-        fail(TlsAlertDesc::InternalError);
+        fail(TlsAlertDesc::UnsupportedCertificate);
         return;
     }
     if ((leaf_key->key_kind() == TlsKeyKind::Rsa) != (suite_info()->auth == TlsSuiteAuth::Rsa)) {
         fail(TlsAlertDesc::IllegalParameter);
+        return;
+    }
+
+    // Suite suitability is independent of trust verification: static RSA
+    // encrypts to the leaf, while ECDHE authenticates a signed exchange.
+    const auto usage = suite_info()->kx == TlsSuiteKx::Rsa ? TlsCertificateKeyUsage::KeyEncipherment
+                                                           : TlsCertificateKeyUsage::DigitalSignature;
+    if (!peer_chain_.leaf().allows_key_usage(usage)) {
+        fail(TlsAlertDesc::BadCertificate);
         return;
     }
 

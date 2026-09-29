@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "TlsCertFixtures.h"
+#include "TlsCertificateTestSupport.h"
 #include "tls/handshake/TlsClientHandshakeShared.h" // src-side header (tests may include it)
 
 #include <fiber/common/IoError.h>
@@ -1141,6 +1142,137 @@ TEST(TlsClientHandshake12Legacy, AeadSuiteWinsWhenServerSupportsBoth) {
                   static_cast<std::uint16_t>(engine.take_state().suite));
     });
 }
+
+TEST(TlsClientHandshake12Legacy, ServerPreferenceCanSelectStaticRsaCbcOverEcdheAead) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server = BoringServer::make(ServerOptions{.tls12_cipher = "AES128-SHA:ECDHE-RSA-AES128-GCM-SHA256"});
+        ASSERT_NE(nullptr, server);
+        SSL_set_options(server->ssl(), SSL_OP_CIPHER_SERVER_PREFERENCE);
+        ClientMaterial material;
+        const auto cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+        DriveLog log;
+        ASSERT_TRUE(drive(*server, engine, false, log));
+        ASSERT_FALSE(engine.failed());
+        EXPECT_EQ(TlsCipherSuiteId::RsaAes128CbcSha, engine.take_state().suite);
+        EXPECT_EQ(1, server->handshake_step());
+    });
+}
+
+// Rejection must produce only a fatal alert after ClientHello: no
+// ClientKeyExchange, CCS, or encrypted Finished may leave the client.
+void expect_only_certificate_alert(const std::vector<std::uint8_t> &wire, TlsAlertDesc alert) {
+    ASSERT_GE(wire.size(), 5u);
+    ASSERT_EQ(22, wire[0]);
+    const std::size_t hello_len = 5 + (static_cast<std::size_t>(wire[3]) << 8) + wire[4];
+    ASSERT_EQ(hello_len + 7, wire.size());
+    const std::vector<std::uint8_t> expected{21, 3, 3, 0, 2, 2, static_cast<std::uint8_t>(alert)};
+    EXPECT_EQ(expected, std::vector<std::uint8_t>(wire.begin() + hello_len, wire.end()));
+}
+
+TEST(TlsClientHandshake12Legacy, KeyUsageMatchesKeyExchangeWithAndWithoutPeerVerification) {
+    namespace ct = fiber::tls::certtest;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const auto usage: ct::kKeyUsages) {
+            auto leaf = ct::leaf();
+            ASSERT_NE(nullptr, leaf);
+            ASSERT_NO_FATAL_FAILURE(ct::set_key_usage(leaf.get(), usage));
+            ASSERT_NO_FATAL_FAILURE(ct::sign(leaf.get()));
+            const auto pem = ct::pem(leaf.get());
+            for (const bool rsa: {false, true}) {
+                for (const bool verify: {false, true}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "usage=" << static_cast<int>(usage) << " rsa=" << rsa << " verify=" << verify);
+                    auto server = BoringServer::make(
+                            ServerOptions{.leaf_pem = pem.c_str(),
+                                          .tls12_cipher = rsa ? "AES128-GCM-SHA256" : "ECDHE-RSA-AES128-GCM-SHA256"});
+                    ASSERT_NE(nullptr, server);
+                    ClientMaterial material;
+                    auto cfg = material.config("example.com", certfix::kRefNowMs);
+                    cfg.verify_peer = verify;
+                    TlsClientHandshakeEngine engine(cfg, nullptr);
+                    DriveLog log;
+                    const bool allowed = usage == ct::KeyUsage::Absent || usage == ct::KeyUsage::Both ||
+                                         usage == (rsa ? ct::KeyUsage::Encipherment : ct::KeyUsage::Signature);
+                    EXPECT_EQ(allowed, drive(*server, engine, false, log));
+                    ASSERT_EQ(!allowed, engine.failed());
+                    if (allowed) {
+                        EXPECT_EQ(1, server->handshake_step());
+                    } else {
+                        EXPECT_EQ(TlsAlertDesc::BadCertificate, engine.failure_alert());
+                        expect_only_certificate_alert(log.client_to_server, TlsAlertDesc::BadCertificate);
+                    }
+                }
+            }
+        }
+    });
+}
+
+class TlsClientUnsupportedLeafTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(TlsClientUnsupportedLeafTest, RejectsWithoutPanicking) {
+    namespace ct = fiber::tls::certtest;
+    auto leaf = ct::leaf();
+    ASSERT_NE(nullptr, leaf);
+    if (GetParam()) {
+        ASSERT_NO_FATAL_FAILURE(ct::set_dsa_public_key(leaf.get()));
+    } else {
+        ASSERT_NO_FATAL_FAILURE(ct::set_rsa_pss_public_key(leaf.get()));
+    }
+    ASSERT_NO_FATAL_FAILURE(ct::sign(leaf.get()));
+    const auto der = ct::der(leaf.get());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const bool verify: {false, true}) {
+            for (const char *cipher: {"AES128-GCM-SHA256", "ECDHE-RSA-AES128-GCM-SHA256"}) {
+                SCOPED_TRACE(::testing::Message() << "verify=" << verify << " cipher=" << cipher);
+                auto server = BoringServer::make(ServerOptions{.tls12_cipher = cipher});
+                ASSERT_NE(nullptr, server);
+                ClientMaterial material;
+                auto cfg = material.config("example.com", certfix::kRefNowMs);
+                cfg.verify_peer = verify;
+                TlsClientHandshakeEngine engine(cfg, nullptr);
+                auto client_wire = chain_bytes(engine.take_output());
+                ASSERT_TRUE(server->ship(client_wire));
+                ASSERT_EQ(0, server->handshake_step());
+                const auto flight = server->drain_wbio();
+                // Feed only the genuine ServerHello, followed by a replacement
+                // Certificate record. No SKE or SHD is needed for rejection.
+                ASSERT_GT(flight.size(), 9u);
+                const std::size_t sh_len = 4 + (static_cast<std::size_t>(flight[6]) << 16) +
+                                           (static_cast<std::size_t>(flight[7]) << 8) + flight[8];
+                ASSERT_LE(5 + sh_len, flight.size());
+                std::vector<std::uint8_t> hello(flight.begin(), flight.begin() + 5 + sh_len);
+                hello[3] = static_cast<std::uint8_t>(sh_len >> 8);
+                hello[4] = static_cast<std::uint8_t>(sh_len);
+                Event event;
+                ASSERT_TRUE(feed_bytes(engine, hello, false, event));
+                ASSERT_FALSE(engine.done());
+                std::vector<std::uint8_t> cert{22, 3, 3};
+                const auto u24 = [&](std::size_t n) {
+                    cert.push_back(static_cast<std::uint8_t>(n >> 16));
+                    cert.push_back(static_cast<std::uint8_t>(n >> 8));
+                    cert.push_back(static_cast<std::uint8_t>(n));
+                };
+                const auto record_len = der.size() + 10;
+                cert.push_back(static_cast<std::uint8_t>(record_len >> 8));
+                cert.push_back(static_cast<std::uint8_t>(record_len));
+                cert.push_back(11); // Certificate
+                u24(der.size() + 6);
+                u24(der.size() + 3);
+                u24(der.size());
+                cert.insert(cert.end(), der.begin(), der.end());
+                ASSERT_TRUE(feed_bytes(engine, cert, false, event));
+                ASSERT_TRUE(engine.failed());
+                EXPECT_EQ(TlsAlertDesc::UnsupportedCertificate, engine.failure_alert());
+                const auto alert = chain_bytes(engine.take_output());
+                client_wire.insert(client_wire.end(), alert.begin(), alert.end());
+                expect_only_certificate_alert(client_wire, TlsAlertDesc::UnsupportedCertificate);
+            }
+        }
+    });
+}
+
+INSTANTIATE_TEST_SUITE_P(Tls12, TlsClientUnsupportedLeafTest, ::testing::Bool());
 
 // A tampered sealed server Finished under a CBC suite fails authentication
 // like any AEAD record.

@@ -239,7 +239,25 @@ common::IoResult<TlsPublicKeyView> TlsCertificate::public_key() const noexcept {
         ERR_clear_error();
         return std::unexpected(common::IoErr::Invalid);
     }
-    return TlsPublicKeyView(pkey);
+    switch (EVP_PKEY_id(pkey)) {
+        case EVP_PKEY_RSA:
+        case EVP_PKEY_EC:
+        case EVP_PKEY_ED25519:
+            return TlsPublicKeyView(pkey);
+        default:
+            return std::unexpected(common::IoErr::Invalid);
+    }
+}
+
+bool TlsCertificate::allows_key_usage(TlsCertificateKeyUsage usage) const noexcept {
+    FIBER_ASSERT(x509_ != nullptr);
+    const std::uint32_t required = usage == TlsCertificateKeyUsage::DigitalSignature ? X509v3_KU_DIGITAL_SIGNATURE
+                                                                                     : X509v3_KU_KEY_ENCIPHERMENT;
+    const auto allowed = X509_get_key_usage(static_cast<X509 *>(x509_));
+    if (allowed == 0) {
+        ERR_clear_error();
+    }
+    return (allowed & required) != 0;
 }
 
 common::IoResult<TlsCertificate::Validity> TlsCertificate::validity() const noexcept {
