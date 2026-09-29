@@ -22,9 +22,11 @@ inline constexpr std::array<std::uint16_t, 9> kTlsSuitePreference{
 };
 
 // The client-only legacy tail (feature/tls/11): 1.2 suites for upstreams that
-// speak none of the above, offered AFTER the whole AEAD order so a server
-// supporting anything modern never picks them. The server never walks this
-// table. Order mirrors BoringSSL's client list: forward-secret CBC first,
+// speak none of the above, offered AFTER the whole ECDHE+AEAD order. This
+// expresses client preference only: a peer using server preference may
+// select a legacy suite even when it supports modern suites. Static RSA
+// provides no forward secrecy. Our server never walks this table. Order
+// mirrors BoringSSL's client list: forward-secret CBC first,
 // then static-RSA GCM, then static-RSA CBC.
 inline constexpr std::array<std::uint16_t, 10> kTlsClientLegacySuites{
         0xC009, 0xC013, 0xC00A, 0xC014, 0xC027, 0x009C, 0x009D, 0x002F, 0x0035, 0x003C,

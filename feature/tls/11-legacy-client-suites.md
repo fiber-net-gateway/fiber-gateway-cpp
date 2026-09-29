@@ -15,8 +15,10 @@
   （`scripts/interop/openssl_matrix.sh:488` 的 `s/1.2 CBC only offered` 继续
   预期失败，作为回归钉子）。
 - **不加配置项**。客户端 ClientHello 在现有 AEAD 顺序**之后**固定追加 legacy
-  尾巴；支持任何现代套件的服务器按自身偏好只会选到前面的 AEAD 套件，行为不变。
-  降级不可被中间人强制：Finished 覆盖 CH/SH 转录。
+  尾巴；该顺序仅表达客户端偏好。遵循客户端顺序的服务器会优先选择现代套件，
+  按自身偏好选择的服务器仍可选择 CBC 或静态 RSA，即使双方支持 ECDHE+AEAD。
+  Finished 保护 CH/SH 转录不被篡改，但不保证套件优先级或协商结果与追加前相同。
+  静态 RSA 不提供前向保密。
 
 非目标：
 
@@ -392,7 +394,7 @@ inline constexpr std::array<std::uint16_t, 10> kTlsClientLegacySuites{
 
 ```cpp
 const auto leaf_key = peer_chain_.leaf().public_key();
-// ... has_value 检查 → InternalError
+// ... has_value 检查 → UnsupportedCertificate
 const bool fits = suite_info()->auth == TlsSuiteAuth::Rsa
                           ? leaf_key->key_kind() == TlsKeyKind::Rsa
                           : leaf_key->key_kind() != TlsKeyKind::Rsa; // ECDSA 套件：EC 或 Ed25519（RFC 8422）
@@ -401,8 +403,13 @@ if (!fits) { fail(TlsAlertDesc::IllegalParameter); return; }
 
 静态 RSA 需要 RSA 公钥来加密，这个检查是它的前提；它同时收紧了现有 ECDHE 套件：
 今天 ECDHE-RSA 套件配 EC 证书且 SKE 用 ECDSA 签名能通过，改后在 Certificate 处
-以 illegal_parameter 拒绝。keyUsage（keyEncipherment）不检查——与现状一致，也避免
-老证书误伤。
+以 illegal_parameter 拒绝。不支持的公钥类型由 `TlsCertificate::public_key()`
+返回 Invalid，握手发送 unsupported_certificate，不能进入 `key_kind()` 的 panic 分支。
+
+证书用途与套件绑定检查：`TlsCertificate::allows_key_usage(TlsCertificateKeyUsage)`
+封装 BoringSSL `X509_get_key_usage()`，静态 RSA 要求 KeyEncipherment，ECDHE 要求
+DigitalSignature。不声明 KeyUsage 时允许；畸形或重复扩展拒绝。此检查独立于
+`verify_peer`，在 Certificate 处以 bad_certificate 拒绝，尚未发送 ClientKeyExchange。
 
 ### 9.2 状态分支
 
@@ -568,8 +575,8 @@ BoringSSL 的 `HMAC` + `EVP_aes_*_cbc` 手工构造/拆解记录，否则就是�
   `RAND_bytes(16)`，加上 HMAC 和串行的 CBC 加密，吞吐明显低于 GCM——只影响协商到
   legacy 套件的连接。
 - **安全姿态**：客户端会接受无前向保密（静态 RSA）和 MAC-then-encrypt（CBC）的
-  连接，但只在服务器选择它们时才会发生，而服务器只有在不支持任何 AEAD/ECDHE 套件
-  时才会这样选。CH 多 20 字节，客户端指纹（JA3）会变化。
+  连接。服务器按自身偏好选择时，即使支持 ECDHE+AEAD，也可能选择这些旧套件；
+  追加到客户端列表末尾并不能防止这种选择。CH 多 20 字节，客户端指纹（JA3）会变化。
 - **记录层"零分配"措辞**：CBC 实例在 init 时有两次堆分配，05 §1 的描述要相应修订。
 
 ## 15. 工作量
@@ -601,3 +608,10 @@ BoringSSL 的 `HMAC` + `EVP_aes_*_cbc` 手工构造/拆解记录，否则就是�
   `Protocol  :` / `Cipher    :` 两行，`New,` 行只作回退。结果：112/112（OpenSSL 3.0.13）。
 - **§9.4（放宽 renegotiation_info）未做**：目标服务器支持 TLS 1.2，按设计遇到再加。
 
+### PR #43 评论修复回归
+
+- 证书用途覆盖未声明、仅 digitalSignature、仅 keyEncipherment、两者都有、畸形和重复扩展。
+- 静态 RSA 与 ECDHE 均在 verify_peer 开/关下验证用途；拒绝时只输出 fatal alert，
+  不发送 ClientKeyExchange、CCS 或 Finished。
+- 不支持的叶证书公钥在 Certificate 阶段拒绝，不使进程退出。
+- 保留遵循客户端顺序时 AEAD 优先的测试，另覆盖服务端强制自身顺序时选择静态 RSA CBC。

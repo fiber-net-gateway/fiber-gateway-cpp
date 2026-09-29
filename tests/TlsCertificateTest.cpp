@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "TlsCertFixtures.h"
+#include "TlsCertificateTestSupport.h"
 
 #include <fiber/common/util/Base64.h>
 #include <fiber/tls/crypto/TlsCertificate.h>
@@ -121,6 +122,44 @@ TEST(TlsCertificateParse, RejectsBadInput) {
     // Over the 1 MiB sanity bound.
     const std::string huge(TlsCertificate::kMaxDerLen + 1, '\0');
     EXPECT_EQ(TlsCertificate::parse_der(der_span(huge)).error(), common::IoErr::Invalid);
+}
+
+TEST(TlsCertificateKeyUsage, MissingRestrictedAndInvalidExtensions) {
+    for (const auto usage: certtest::kKeyUsages) {
+        SCOPED_TRACE(static_cast<int>(usage));
+        auto raw = certtest::leaf();
+        ASSERT_NE(nullptr, raw);
+        ASSERT_NO_FATAL_FAILURE(certtest::set_key_usage(raw.get(), usage));
+        ASSERT_NO_FATAL_FAILURE(certtest::sign(raw.get()));
+        const auto der = certtest::der(raw.get());
+        auto cert = TlsCertificate::parse_der(der);
+        ASSERT_TRUE(cert.has_value());
+        const bool unrestricted = usage == certtest::KeyUsage::Absent || usage == certtest::KeyUsage::Both;
+        EXPECT_EQ(unrestricted || usage == certtest::KeyUsage::Signature,
+                  cert->allows_key_usage(TlsCertificateKeyUsage::DigitalSignature));
+        EXPECT_EQ(unrestricted || usage == certtest::KeyUsage::Encipherment,
+                  cert->allows_key_usage(TlsCertificateKeyUsage::KeyEncipherment));
+    }
+}
+
+TEST(TlsCertificateParse, UnsupportedPublicKeyTypesReturnInvalid) {
+    for (const bool dsa: {false, true}) {
+        SCOPED_TRACE(dsa ? "DSA" : "RSA-PSS SPKI");
+        auto raw = certtest::leaf();
+        ASSERT_NE(nullptr, raw);
+        if (dsa) {
+            ASSERT_NO_FATAL_FAILURE(certtest::set_dsa_public_key(raw.get()));
+        } else {
+            ASSERT_NO_FATAL_FAILURE(certtest::set_rsa_pss_public_key(raw.get()));
+        }
+        ASSERT_NO_FATAL_FAILURE(certtest::sign(raw.get()));
+        const auto der = certtest::der(raw.get());
+        auto cert = TlsCertificate::parse_der(der);
+        ASSERT_TRUE(cert.has_value()); // valid X509, unsupported TLS key
+        const auto key = cert->public_key();
+        ASSERT_FALSE(key.has_value());
+        EXPECT_EQ(common::IoErr::Invalid, key.error());
+    }
 }
 
 // ---------------------------------------------------------------------------
