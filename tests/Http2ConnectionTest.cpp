@@ -34,6 +34,7 @@
 #include <fiber/http/Http2LocalStreamGate.h>
 #include <fiber/http/Http2Stream.h>
 #include <fiber/http/ServerRequestFactory.h>
+#include <fiber/http/detail/Http2SendAwaiter.h>
 #include "Http2TestSupport.h"
 #include "HttpTransportStub.h"
 #include "LoopTestSupport.h"
@@ -99,7 +100,14 @@ public:
         if (closed_) {
             return std::unexpected(fiber::common::IoErr::ConnReset);
         }
-        const size_t take = next_write_size(buf.readable_bytes());
+        size_t take = next_write_size(buf.readable_bytes());
+        if (write_limit_) {
+            if (*write_limit_ == 0) {
+                return std::unexpected(fiber::common::IoErr::WouldBlock);
+            }
+            take = std::min(take, *write_limit_);
+            *write_limit_ -= take;
+        }
         std::array<iovec, 16> iov{};
         const int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
         size_t remaining = take;
@@ -151,6 +159,13 @@ public:
         chunks_.push_back(std::move(chunk));
         notify_read_ready();
     }
+    // Later writes take at most `bytes` in total, then report WouldBlock until
+    // release_writes() lifts the cap and signals write readiness.
+    void limit_writes(size_t bytes) noexcept { write_limit_ = bytes; }
+    void release_writes() noexcept {
+        write_limit_.reset();
+        notify_write_ready();
+    }
 
     [[nodiscard]] bool valid() const noexcept override { return !closed_; }
     [[nodiscard]] int fd() const noexcept override { return -1; }
@@ -176,6 +191,7 @@ private:
 
     std::vector<std::string> chunks_;
     std::vector<size_t> write_steps_;
+    std::optional<size_t> write_limit_;
     size_t next_chunk_ = 0;
     size_t write_call_count_ = 0;
     bool closed_ = false;
@@ -1019,9 +1035,16 @@ RunOutcome execute_connection(std::vector<std::string> chunks, fiber::http::Http
     return outcome;
 }
 
+// Lets a handler reach the connection and transport serving its request.
+struct ServerRequestContext {
+    TestHttp2Connection *connection = nullptr;
+    FakeHttpTransport *transport = nullptr;
+};
+
 DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderRunOutcome>> promise,
                                       std::vector<std::string> chunks, fiber::http::HttpHandler handler,
-                                      fiber::http::Http2Connection::Options options, bool hold_eof = true) {
+                                      fiber::http::Http2Connection::Options options, bool hold_eof = true,
+                                      std::shared_ptr<ServerRequestContext> context = nullptr) {
     auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, false, hold_eof);
     FakeHttpTransport *fake_transport = transport.get();
     fiber::http::HttpHandler wrapped_handler =
@@ -1037,6 +1060,10 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
     TestHttp2Connection connection(options, &factory, fiber::http::ServerRequestFactory::ops());
     fiber::http::Http2CloseGate close_gate(fiber::event::EventLoop::current(), connection);
     connection.observe_close_gate(close_gate);
+    if (context) {
+        context->connection = &connection;
+        context->transport = fake_transport;
+    }
     ServerHeaderRunOutcome outcome;
     fiber::common::IoErr start_err = connection.start(std::move(transport));
     if (start_err != fiber::common::IoErr::None) {
@@ -1055,17 +1082,19 @@ DetachedTask run_http2_server_request(std::shared_ptr<std::promise<ServerHeaderR
 }
 
 ServerHeaderRunOutcome execute_server_request(std::vector<std::string> chunks, fiber::http::HttpHandler handler,
-                                              fiber::http::Http2Connection::Options options = {},
-                                              bool hold_eof = true) {
+                                              fiber::http::Http2Connection::Options options = {}, bool hold_eof = true,
+                                              std::shared_ptr<ServerRequestContext> context = nullptr) {
     fiber::event::EventLoopGroup group(1);
     auto promise = std::make_shared<std::promise<ServerHeaderRunOutcome>>();
     auto future = promise->get_future();
 
     group.start();
-    fiber::async::spawn(group.at(0), [promise = std::move(promise), chunks = std::move(chunks),
-                                      handler = std::move(handler), options, hold_eof]() mutable {
-        return run_http2_server_request(std::move(promise), std::move(chunks), std::move(handler), options, hold_eof);
-    });
+    fiber::async::spawn(group.at(0),
+                        [promise = std::move(promise), chunks = std::move(chunks), handler = std::move(handler),
+                         options, hold_eof, context = std::move(context)]() mutable {
+                            return run_http2_server_request(std::move(promise), std::move(chunks), std::move(handler),
+                                                            options, hold_eof, std::move(context));
+                        });
 
     auto status = future.wait_for(std::chrono::seconds(2));
     if (status != std::future_status::ready) {
@@ -6715,4 +6744,901 @@ TEST(Http2ConnectionTest, DestroyingSignaledGateHeadRedistributesCapacity) {
 
 TEST(Http2ConnectionTest, DestroyingSignaledGateMiddleRedistributesCapacity) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) { exercise_http2_cancelled_waiter(1); });
+}
+
+namespace {
+
+using Http2HookState = fiber::http::Http2OutboundHook::State;
+using Http2WaitState = fiber::http::Http2Stream::OutboundWaitState;
+
+constexpr std::uint8_t kDataFrameType = 0x0;
+constexpr std::uint8_t kHeadersFrameType = 0x1;
+constexpr std::uint8_t kRstStreamFrameType = 0x3;
+constexpr std::string_view kRstCancelPayload{"\x00\x00\x00\x08", 4};
+
+// Starts `task` without awaiting it. The task keeps owning the frame, so
+// resetting it destroys the coroutine wherever it is suspended.
+template<typename T>
+typename fiber::async::Task<T>::handle_type start_task(fiber::async::Task<T> &task) {
+    auto handle = std::move(task).operator co_await().handle;
+    handle.promise().set_continuation(std::noop_coroutine());
+    handle.resume();
+    return handle;
+}
+
+std::vector<EncodedFrame> frames_for_stream(std::string_view written, std::uint32_t stream_id) {
+    std::vector<EncodedFrame> out;
+    for (EncodedFrame &frame: parse_frames(written)) {
+        if (frame.stream_id == stream_id) {
+            out.push_back(std::move(frame));
+        }
+    }
+    return out;
+}
+
+std::size_t count_frames(const std::vector<EncodedFrame> &frames, std::uint8_t type) {
+    return static_cast<std::size_t>(std::count_if(frames.begin(), frames.end(),
+                                                  [type](const EncodedFrame &frame) { return frame.type == type; }));
+}
+
+struct RawSendProbe {
+    std::size_t encode_calls = 0;
+    std::size_t send_done_calls = 0;
+    std::size_t ops_destroyed = 0;
+    std::size_t resumed = 0;
+};
+
+// Plays the request's part for Http2SendAwaiter over a raw local stream.
+struct RawSendOwner {
+    fiber::http::Http2Connection *conn = nullptr;
+    fiber::http::Http2Stream *stream_ptr = nullptr;
+
+    [[nodiscard]] fiber::http::Http2Stream &stream() noexcept { return *stream_ptr; }
+    [[nodiscard]] bool cancel_queued_send() noexcept { return conn->cancel_queued_stream_send(*stream_ptr); }
+};
+
+// Sends `total` DATA payload bytes, at most `batch` per encoded batch.
+struct RawDataSendOp {
+    using SuccessType = std::size_t;
+
+    RawDataSendOp(RawSendProbe &probe, std::size_t total, std::size_t batch) noexcept :
+        probe_(&probe), remaining_(total), batch_(batch) {}
+    RawDataSendOp(const RawDataSendOp &) = delete;
+    RawDataSendOp &operator=(const RawDataSendOp &) = delete;
+    ~RawDataSendOp() { ++probe_->ops_destroyed; }
+
+    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return remaining_; }
+
+    [[nodiscard]] fiber::common::IoErr submit(RawSendOwner &owner) noexcept {
+        return owner.conn->request_stream_send(owner.stream(), fiber::http::Http2OutboundKind::Data);
+    }
+
+    fiber::common::IoErr on_encode(RawSendOwner &, fiber::http::Http2Stream &stream,
+                                   const fiber::http::Http2OutboundEncodeRequest &req,
+                                   fiber::http::Http2OutboundEncodeTarget &target,
+                                   fiber::http::Http2OutboundEncodeResult &result) noexcept {
+        ++probe_->encode_calls;
+        const auto bytes = static_cast<std::uint32_t>(
+                std::min<std::size_t>({remaining_, batch_, static_cast<std::size_t>(req.payload_budget)}));
+        const std::string frame = make_frame(bytes, kDataFrameType, 0x0, stream.stream_id(), std::string(bytes, 'd'));
+        const fiber::common::IoErr err = target.append_copy(frame.data(), frame.size());
+        if (err != fiber::common::IoErr::None) {
+            return err;
+        }
+        remaining_ -= bytes;
+        accepted_ += bytes;
+        result.flow_controlled_bytes = bytes;
+        result.operation_final_batch = remaining_ == 0;
+        return fiber::common::IoErr::None;
+    }
+
+    void on_send_done(RawSendOwner &, std::uint32_t, bool) noexcept { ++probe_->send_done_calls; }
+
+    [[nodiscard]] std::size_t success_result() const noexcept { return accepted_; }
+
+    RawSendProbe *probe_;
+    std::size_t remaining_;
+    std::size_t batch_;
+    std::size_t accepted_ = 0;
+};
+
+using RawDataSendAwaiter = fiber::http::detail::Http2SendAwaiter<RawSendOwner, RawDataSendOp>;
+
+fiber::async::Task<fiber::common::IoResult<std::size_t>> send_raw_data(RawSendOwner owner, RawSendProbe *probe,
+                                                                       std::size_t total, std::size_t batch) {
+    auto result = co_await RawDataSendAwaiter(owner, std::chrono::seconds(30), *probe, total, batch);
+    ++probe->resumed;
+    co_return result;
+}
+
+// A raw local stream; `held` keeps it inspectable after the connection lets go.
+struct RawStream {
+    fiber::http::Http2Stream *stream = nullptr;
+    fiber::http::Http2Stream::Lease held;
+
+    [[nodiscard]] RawSendOwner owner(fiber::http::Http2Connection &connection) const noexcept {
+        return {&connection, stream};
+    }
+};
+
+RawStream attach_raw_stream(fiber::http::Http2Connection &connection) {
+    auto *owner = TestHttp2StreamOwner::create_owner();
+    FIBER_ASSERT(owner != nullptr);
+    auto attached = connection.try_attach_local_stream(owner->stream);
+    FIBER_ASSERT(attached.has_value());
+    // DATA-only probes model an already opened stream and capture traffic
+    // after its opening HEADERS. Real opening/cancellation uses exchanges below.
+    owner->stream.opening_committed_ = true;
+    return {&owner->stream, std::move(*attached)};
+}
+
+// Runs `scenario` against a started client connection whose peer stays
+// silent, then shuts the connection down.
+template<typename Scenario>
+void run_client_send_scenario(fiber::http::Http2Connection::Options options, Scenario scenario) {
+    fiber::event::EventLoop loop;
+    fiber::async::spawn(loop, [&]() -> DetachedTask {
+        options.role = fiber::http::Http2Connection::ConnectionRole::Client;
+        auto transport =
+                std::make_unique<FakeHttpTransport>(std::vector<std::string>{}, std::vector<size_t>{}, false, true);
+        auto *fake = transport.get();
+        {
+            SendingHttp2Connection connection(std::move(transport), fake, options);
+            // The client preface goes out before any stream sends.
+            co_await fiber::async::sleep(std::chrono::milliseconds(1));
+            co_await scenario(connection, *fake);
+            co_await connection.stop_and_join();
+        }
+        loop.stop();
+    });
+    loop.run();
+}
+
+void exercise_abandoned_window_wait(Http2WaitState wait) {
+    fiber::http::Http2Connection::Options options;
+    if (wait == Http2WaitState::ConnectionWindow) {
+        options.initial_connection_send_window = 0;
+    } else {
+        options.initial_stream_send_window = 0;
+    }
+    run_client_send_scenario(
+            options,
+            [wait](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                RawStream raw = attach_raw_stream(connection);
+                fiber::http::Http2Stream &stream = *raw.stream;
+                RawSendProbe probe;
+                auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                (void) start_task(send);
+                EXPECT_EQ(stream.outbound_wait_state_, wait);
+                EXPECT_EQ(probe.encode_calls, 0U);
+
+                send = {};
+
+                EXPECT_EQ(probe.ops_destroyed, 1U);
+                EXPECT_FALSE(stream.outbound_operation_);
+                EXPECT_EQ(stream.outbound_wait_state_, Http2WaitState::None);
+                EXPECT_TRUE(connection.connection_window_waiters_.empty());
+                EXPECT_EQ(stream.outbound_kind_, fiber::http::Http2OutboundKind::None);
+                EXPECT_TRUE(stream.local_rst());
+                EXPECT_EQ(stream.close_reason(), fiber::common::IoErr::Canceled);
+                EXPECT_FALSE(stream.attached_to_connection());
+
+                co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                EXPECT_EQ(probe.encode_calls, 0U);
+                EXPECT_EQ(probe.resumed, 0U);
+                const auto frames = frames_for_stream(strip_client_initial_flight(transport.written()), 1);
+                EXPECT_EQ(frames.size(), 1U) << describe_frames(frames);
+                EXPECT_EQ(count_frames(frames, kRstStreamFrameType), 1U) << describe_frames(frames);
+            });
+}
+
+} // namespace
+
+TEST(Http2ConnectionTest, AbandonedQueuedSendIsWithdrawnAndResetsStream) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        run_client_send_scenario(
+                {}, [](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                    RawStream raw = attach_raw_stream(connection);
+                    fiber::http::Http2Stream &stream = *raw.stream;
+                    const std::int32_t conn_window = connection.conn_send_window_;
+                    const std::int32_t stream_window = stream.send_window();
+                    RawSendProbe probe;
+                    auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                    (void) start_task(send);
+                    // Encoded and queued; the pump has not run yet.
+                    EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::Queued);
+                    EXPECT_EQ(connection.conn_send_window_, conn_window - 5);
+
+                    send = {};
+
+                    EXPECT_EQ(probe.ops_destroyed, 1U);
+                    EXPECT_FALSE(stream.outbound_operation_);
+                    EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::Idle);
+                    EXPECT_TRUE(stream.outbound_hook_.encoded_.empty());
+                    EXPECT_EQ(stream.outbound_kind_, fiber::http::Http2OutboundKind::None);
+                    EXPECT_EQ(connection.conn_send_window_, conn_window);
+                    EXPECT_EQ(stream.send_window(), stream_window);
+                    EXPECT_TRUE(stream.local_rst());
+                    EXPECT_EQ(stream.close_reason(), fiber::common::IoErr::Canceled);
+                    EXPECT_FALSE(stream.attached_to_connection());
+
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                    EXPECT_EQ(probe.encode_calls, 1U);
+                    EXPECT_EQ(probe.send_done_calls, 0U);
+                    EXPECT_EQ(probe.resumed, 0U);
+                    const auto frames = frames_for_stream(strip_client_initial_flight(transport.written()), 1);
+                    EXPECT_EQ(frames.size(), 1U) << describe_frames(frames);
+                    if (frames.size() == 1U) {
+                        EXPECT_EQ(frames[0].type, kRstStreamFrameType);
+                        EXPECT_EQ(frames[0].payload, kRstCancelPayload);
+                    }
+                });
+    });
+}
+
+TEST(Http2ConnectionTest, AbandonedConnectionWindowWaitIsWithdrawnAndResetsStream) {
+    ::fiber::test::run_in_loop(
+            [&](::fiber::mem::IoBufNodePool &) { exercise_abandoned_window_wait(Http2WaitState::ConnectionWindow); });
+}
+
+TEST(Http2ConnectionTest, AbandonedStreamWindowWaitIsWithdrawnAndResetsStream) {
+    ::fiber::test::run_in_loop(
+            [&](::fiber::mem::IoBufNodePool &) { exercise_abandoned_window_wait(Http2WaitState::StreamWindow); });
+}
+
+TEST(Http2ConnectionTest, AbandonedInFlightSendDrainsWithoutReachingTheAwaiter) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        run_client_send_scenario(
+                {}, [](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                    RawStream first = attach_raw_stream(connection);
+                    RawStream second = attach_raw_stream(connection);
+                    fiber::http::Http2Stream &stream = *first.stream;
+                    fiber::http::Http2OutboundHook &hook = stream.outbound_hook_;
+                    const std::int32_t conn_window = connection.conn_send_window_;
+
+                    // Two batches (5 + 3 bytes); two payload bytes of the first DATA
+                    // frame reach the wire before the transport blocks.
+                    RawSendProbe probe;
+                    transport.limit_writes(9 + 2);
+                    auto send = send_raw_data(first.owner(connection), &probe, 8, 5);
+                    (void) start_task(send);
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                    EXPECT_EQ(hook.state_, Http2HookState::InFlight);
+                    EXPECT_EQ(hook.inflight_wire_bytes_, 3U);
+
+                    send = {};
+
+                    // The batch stays with the connection, and so does its window.
+                    EXPECT_EQ(probe.ops_destroyed, 1U);
+                    EXPECT_FALSE(stream.outbound_operation_);
+                    EXPECT_EQ(hook.state_, Http2HookState::InFlight);
+                    EXPECT_EQ(hook.inflight_wire_bytes_, 3U);
+                    EXPECT_EQ(connection.conn_send_window_, conn_window - 5);
+                    EXPECT_EQ(stream.outbound_kind_, fiber::http::Http2OutboundKind::None);
+                    EXPECT_EQ(stream.outbound_pending_flow_controlled_bytes_, 0U);
+                    EXPECT_TRUE(stream.local_rst());
+                    EXPECT_EQ(stream.close_reason(), fiber::common::IoErr::Canceled);
+                    EXPECT_TRUE(stream.attached_to_connection());
+
+                    // A new send must not inherit the draining batch.
+                    RawSendProbe retry_probe;
+                    auto retry = send_raw_data(first.owner(connection), &retry_probe, 1, 1);
+                    auto retry_handle = start_task(retry);
+                    EXPECT_TRUE(retry_handle.done());
+                    if (retry_handle.done()) {
+                        auto result = retry_handle.promise().result();
+                        EXPECT_FALSE(result.has_value());
+                        if (!result) {
+                            EXPECT_EQ(result.error(), fiber::common::IoErr::Already);
+                        }
+                    }
+
+                    // Another stream's send queues behind the draining bytes.
+                    RawSendProbe other_probe;
+                    auto other = send_raw_data(second.owner(connection), &other_probe, 4, 4);
+                    auto other_handle = start_task(other);
+
+                    transport.release_writes();
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+
+                    EXPECT_EQ(hook.state_, Http2HookState::Idle);
+                    EXPECT_FALSE(stream.attached_to_connection());
+                    EXPECT_EQ(probe.encode_calls, 1U);
+                    EXPECT_EQ(probe.send_done_calls, 0U);
+                    EXPECT_EQ(probe.resumed, 0U);
+                    EXPECT_EQ(connection.conn_send_window_, conn_window - 5 - 4);
+                    EXPECT_TRUE(other_handle.done());
+                    if (other_handle.done()) {
+                        auto result = other_handle.promise().result();
+                        EXPECT_TRUE(result.has_value());
+                        if (result) {
+                            EXPECT_EQ(*result, 4U);
+                        }
+                    }
+
+                    RawSendProbe closed_probe;
+                    auto closed = send_raw_data(first.owner(connection), &closed_probe, 1, 1);
+                    auto closed_handle = start_task(closed);
+                    EXPECT_TRUE(closed_handle.done());
+                    if (closed_handle.done()) {
+                        auto result = closed_handle.promise().result();
+                        EXPECT_FALSE(result.has_value());
+                        if (!result) {
+                            EXPECT_EQ(result.error(), fiber::common::IoErr::Canceled);
+                        }
+                    }
+
+                    // Whole frames in order: the drained batch, its reset, then the
+                    // other stream.
+                    const auto frames = parse_frames(strip_client_initial_flight(transport.written()));
+                    std::vector<std::pair<std::uint32_t, std::uint8_t>> order;
+                    for (const EncodedFrame &frame: frames) {
+                        if (frame.stream_id != 0) {
+                            order.emplace_back(frame.stream_id, frame.type);
+                        }
+                    }
+                    const std::vector<std::pair<std::uint32_t, std::uint8_t>> expected{
+                            {1U, kDataFrameType},
+                            {1U, kRstStreamFrameType},
+                            {3U, kDataFrameType},
+                    };
+                    EXPECT_EQ(order, expected) << describe_frames(frames);
+                    const auto stream_frames = frames_for_stream(strip_client_initial_flight(transport.written()), 1);
+                    if (stream_frames.size() == 2U) {
+                        EXPECT_EQ(stream_frames[0].payload, "ddddd");
+                        EXPECT_EQ(stream_frames[1].payload, kRstCancelPayload);
+                    }
+                });
+    });
+}
+
+TEST(Http2ConnectionTest, DestroyingCompletedSendBeforeResumeKeepsStreamUsable) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        run_client_send_scenario(
+                {}, [](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                    RawStream raw = attach_raw_stream(connection);
+                    fiber::http::Http2Stream &stream = *raw.stream;
+                    RawSendProbe probe;
+                    auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                    (void) start_task(send);
+                    // Write inline: the completion posts a resume that has not run yet.
+                    connection.drive_io();
+                    EXPECT_EQ(probe.send_done_calls, 1U);
+                    EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::Idle);
+
+                    send = {};
+
+                    EXPECT_EQ(probe.ops_destroyed, 1U);
+                    EXPECT_FALSE(stream.outbound_operation_);
+                    EXPECT_FALSE(stream.local_rst());
+                    EXPECT_EQ(stream.close_reason(), fiber::common::IoErr::None);
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                    EXPECT_EQ(probe.resumed, 0U);
+
+                    RawSendProbe next_probe;
+                    auto next = co_await send_raw_data(raw.owner(connection), &next_probe, 3, 3);
+                    EXPECT_TRUE(next.has_value());
+                    if (next) {
+                        EXPECT_EQ(*next, 3U);
+                    }
+                    const auto frames = frames_for_stream(strip_client_initial_flight(transport.written()), 1);
+                    EXPECT_EQ(count_frames(frames, kDataFrameType), 2U) << describe_frames(frames);
+                    EXPECT_EQ(count_frames(frames, kRstStreamFrameType), 0U) << describe_frames(frames);
+                    stream.close(fiber::common::IoErr::Canceled);
+                    connection.try_release_stream(stream);
+                });
+    });
+}
+
+TEST(Http2ConnectionTest, AbandonedInFlightSendIsReleasedWhenConnectionShutsDown) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        run_client_send_scenario(
+                {}, [](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                    RawStream raw = attach_raw_stream(connection);
+                    fiber::http::Http2Stream &stream = *raw.stream;
+                    RawSendProbe probe;
+                    transport.limit_writes(0);
+                    auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                    (void) start_task(send);
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                    EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::InFlight);
+
+                    send = {};
+                    EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::InFlight);
+                    EXPECT_TRUE(stream.attached_to_connection());
+
+                    const std::size_t closes = transport.close_count();
+                    connection.request_stop();
+
+                    // The transport may still point into the in-flight chain, so it
+                    // closes before the chain is dropped.
+                    EXPECT_GT(transport.close_count(), closes);
+                    EXPECT_TRUE(connection.inflight_outbound_chain_.empty());
+                    EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::Idle);
+                    EXPECT_TRUE(stream.outbound_hook_.encoded_.empty());
+                    EXPECT_FALSE(stream.attached_to_connection());
+                    EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Closed);
+                    EXPECT_EQ(probe.send_done_calls, 0U);
+                    co_return;
+                });
+    });
+}
+
+TEST(Http2ConnectionTest, AbandonedSendThatCannotQueueRstClosesConnection) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        run_client_send_scenario(
+                {}, [](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                    RawStream raw = attach_raw_stream(connection);
+                    fiber::http::Http2Stream &stream = *raw.stream;
+                    RawSendProbe probe;
+                    transport.limit_writes(0);
+                    auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                    (void) start_task(send);
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                    EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::InFlight);
+
+                    // The connection still runs but can no longer queue control frames.
+                    connection.outbound_stop_reason_ = fiber::common::IoErr::NoMem;
+                    send = {};
+
+                    EXPECT_FALSE(stream.local_rst());
+                    EXPECT_EQ(stream.close_reason(), fiber::common::IoErr::Canceled);
+                    EXPECT_FALSE(stream.attached_to_connection());
+                    EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Closed);
+                    EXPECT_EQ(connection.terminal_error(), fiber::common::IoErr::NoMem);
+                    EXPECT_GE(transport.close_count(), 1U);
+                    EXPECT_TRUE(connection.inflight_outbound_chain_.empty());
+                    co_return;
+                });
+    });
+}
+
+TEST(Http2ConnectionTest, ServerWriteTaskDestroyedWithDataInFlightResetsStreamAfterDrain) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        std::string request = std::string(kClientConnectionPreface);
+        request += make_frame(0, 0x4, 0x0, 0, {});
+        request += build_headers_frame_bytes(1,
+                                             {
+                                                     {":method", "GET"},
+                                                     {":scheme", "https"},
+                                                     {":path", "/stream"},
+                                                     {":authority", "example.com"},
+                                             },
+                                             true);
+
+        struct Snapshot {
+            bool in_flight_before = false;
+            bool in_flight_after = false;
+            bool unbound = false;
+            bool local_rst = false;
+            fiber::common::IoErr retry_error = fiber::common::IoErr::None;
+            bool released = false;
+        };
+        auto context = std::make_shared<ServerRequestContext>();
+        auto snapshot = std::make_shared<Snapshot>();
+        fiber::http::HttpHandler handler = [context,
+                                            snapshot](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto header = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .end_stream = false,
+            });
+            if (!header) {
+                co_return;
+            }
+            fiber::http::Http2Stream *stream = context->connection->streams_.find(1);
+            if (stream == nullptr) {
+                co_return;
+            }
+
+            // A streamed body chunk; two payload bytes reach the wire before
+            // the transport blocks.
+            fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(6);
+            std::memcpy(buf.writable_data(), "stream", 6);
+            buf.commit(6);
+            fiber::mem::IoBufChain chunk;
+            (void) chunk.append(std::move(buf));
+            context->transport->limit_writes(9 + 2);
+            auto write = exchange.write(chunk);
+            (void) start_task(write);
+            co_await fiber::async::sleep(std::chrono::milliseconds(1));
+            snapshot->in_flight_before = stream->outbound_hook_.state_ == Http2HookState::InFlight;
+
+            // What a proxy does when it tears down its body pipe mid-write.
+            write = {};
+
+            snapshot->in_flight_after = stream->outbound_hook_.state_ == Http2HookState::InFlight;
+            snapshot->unbound = !stream->outbound_operation_;
+            snapshot->local_rst = stream->local_rst();
+            auto retry = co_await exchange.write(reinterpret_cast<const std::uint8_t *>("x"), 1, false);
+            snapshot->retry_error = retry ? fiber::common::IoErr::None : retry.error();
+
+            context->transport->release_writes();
+            co_await fiber::async::sleep(std::chrono::milliseconds(1));
+            snapshot->released = context->connection->streams_.find(1) == nullptr;
+            co_return;
+        };
+
+        ServerHeaderRunOutcome outcome =
+                execute_server_request({std::move(request)}, std::move(handler), {}, true, context);
+
+        ASSERT_TRUE(outcome.result.has_value());
+        EXPECT_TRUE(snapshot->in_flight_before);
+        EXPECT_TRUE(snapshot->in_flight_after);
+        EXPECT_TRUE(snapshot->unbound);
+        EXPECT_TRUE(snapshot->local_rst);
+        EXPECT_EQ(snapshot->retry_error, fiber::common::IoErr::Canceled);
+        EXPECT_TRUE(snapshot->released);
+
+        const auto frames = frames_for_stream(outcome.written, 1);
+        ASSERT_EQ(frames.size(), 3U) << describe_frames(frames);
+        EXPECT_EQ(frames[0].type, kHeadersFrameType);
+        EXPECT_EQ(frames[1].type, kDataFrameType);
+        EXPECT_EQ(frames[1].payload, "stream");
+        EXPECT_EQ(frames[1].flags & 0x1U, 0x0U);
+        EXPECT_EQ(frames[2].type, kRstStreamFrameType);
+        EXPECT_EQ(frames[2].payload, kRstCancelPayload);
+    });
+}
+
+TEST(Http2ConnectionTest, ClientWriteAllTaskDestroyedWithFirstBatchInFlightStopsBatching) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        fiber::http::Http2Connection::Options options;
+        options.initial_connection_send_window = 1 << 20;
+        options.initial_stream_send_window = 1 << 20;
+        run_client_send_scenario(
+                options,
+                [](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                    fiber::mem::BufPool pool;
+                    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
+                    auto header = co_await exchange.send_request_header(
+                            {
+                                    .method = fiber::http::HttpMethod::Post,
+                                    .scheme = "https",
+                                    .authority = "example.com",
+                                    .path = "/upload",
+                            },
+                            false);
+                    EXPECT_TRUE(header.has_value());
+                    fiber::http::Http2Stream *stream = exchange.stream();
+                    if (!header || stream == nullptr) {
+                        co_return;
+                    }
+
+                    // 80 KiB goes out as a 64 KiB batch and then the rest; 100 bytes
+                    // of the first batch reach the wire before the transport blocks.
+                    const std::string body(80 * 1024, 'b');
+                    transport.limit_writes(100);
+                    auto write =
+                            exchange.write_all(reinterpret_cast<const std::uint8_t *>(body.data()), body.size(), true);
+                    (void) start_task(write);
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                    EXPECT_EQ(stream->outbound_hook_.state_, Http2HookState::InFlight);
+
+                    write = {};
+
+                    EXPECT_FALSE(stream->outbound_operation_);
+                    EXPECT_EQ(stream->outbound_hook_.state_, Http2HookState::InFlight);
+                    EXPECT_TRUE(stream->local_rst());
+                    auto retry = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("x"), 1, true);
+                    EXPECT_FALSE(retry.has_value());
+                    if (!retry) {
+                        EXPECT_EQ(retry.error(), fiber::common::IoErr::Canceled);
+                    }
+
+                    transport.release_writes();
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                    EXPECT_EQ(stream->outbound_hook_.state_, Http2HookState::Idle);
+                    EXPECT_FALSE(stream->attached_to_connection());
+
+                    const auto frames = frames_for_stream(strip_client_initial_flight(transport.written()), 1);
+                    std::size_t data_bytes = 0;
+                    bool reset_seen = false;
+                    bool data_after_reset = false;
+                    for (const EncodedFrame &frame: frames) {
+                        if (frame.type == kDataFrameType) {
+                            data_bytes += frame.payload.size();
+                            data_after_reset = data_after_reset || reset_seen;
+                        } else if (frame.type == kRstStreamFrameType) {
+                            reset_seen = true;
+                        }
+                    }
+                    EXPECT_EQ(data_bytes, 64U * 1024U);
+                    EXPECT_FALSE(data_after_reset);
+                    EXPECT_EQ(count_frames(frames, kRstStreamFrameType), 1U) << describe_frames(frames);
+                });
+    });
+}
+
+namespace {
+
+// Aborts the connection under an in-flight send, which drops its batch. With
+// `reset_first` the peer has reset the stream already, so closing the
+// connection's streams does not report to the send again.
+void exercise_in_flight_send_through_connection_abort(bool reset_first) {
+    run_client_send_scenario({},
+                             [reset_first](SendingHttp2Connection &connection,
+                                           FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                                 RawStream raw = attach_raw_stream(connection);
+                                 fiber::http::Http2Stream &stream = *raw.stream;
+                                 RawSendProbe probe;
+                                 transport.limit_writes(0);
+                                 auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                                 auto handle = start_task(send);
+                                 co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                                 EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::InFlight);
+                                 if (reset_first) {
+                                     stream.on_rst_recv(fiber::http::Http2ErrorCode::Cancel);
+                                     connection.try_release_stream(stream);
+                                     EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::InFlight);
+                                     EXPECT_FALSE(handle.done());
+                                 }
+
+                                 connection.request_stop(fiber::common::IoErr::ConnReset);
+                                 co_await fiber::async::sleep(std::chrono::milliseconds(1));
+
+                                 EXPECT_TRUE(handle.done());
+                                 EXPECT_EQ(probe.resumed, 1U);
+                                 EXPECT_EQ(probe.send_done_calls, 0U);
+                                 if (handle.done()) {
+                                     auto result = handle.promise().result();
+                                     EXPECT_FALSE(result.has_value());
+                                     if (!result) {
+                                         // A reset stream reports its own close reason, as a finished
+                                         // batch would have; otherwise the connection's stop reason.
+                                         EXPECT_EQ(result.error(), reset_first ? fiber::common::IoErr::Canceled
+                                                                               : fiber::common::IoErr::ConnReset);
+                                     }
+                                 }
+                                 EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::Idle);
+                                 EXPECT_FALSE(stream.attached_to_connection());
+                                 EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Closed);
+                             });
+}
+
+} // namespace
+
+TEST(Http2ConnectionTest, InFlightSendOnResetStreamCompletesWhenConnectionAborts) {
+    ::fiber::test::run_in_loop(
+            [&](::fiber::mem::IoBufNodePool &) { exercise_in_flight_send_through_connection_abort(true); });
+}
+
+TEST(Http2ConnectionTest, InFlightSendCompletesWithStopReasonWhenConnectionAborts) {
+    ::fiber::test::run_in_loop(
+            [&](::fiber::mem::IoBufNodePool &) { exercise_in_flight_send_through_connection_abort(false); });
+}
+
+TEST(Http2ConnectionTest, ServerWriteOnResetStreamReturnsWhenTransportFailsMidFlight) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        std::string request = std::string(kClientConnectionPreface);
+        request += make_frame(0, 0x4, 0x0, 0, {});
+        request += build_headers_frame_bytes(1,
+                                             {
+                                                     {":method", "GET"},
+                                                     {":scheme", "https"},
+                                                     {":path", "/reset-then-fail"},
+                                                     {":authority", "example.com"},
+                                             },
+                                             true);
+
+        struct Snapshot {
+            bool in_flight = false;
+            bool reset_seen = false;
+            bool write_returned = false;
+            fiber::common::IoErr write_error = fiber::common::IoErr::None;
+        };
+        auto context = std::make_shared<ServerRequestContext>();
+        auto snapshot = std::make_shared<Snapshot>();
+        fiber::http::HttpHandler handler = [context,
+                                            snapshot](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto header = co_await exchange.send_header({
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .end_stream = false,
+            });
+            if (!header) {
+                co_return;
+            }
+            fiber::http::Http2Stream *stream = context->connection->streams_.find(1);
+            if (stream == nullptr) {
+                co_return;
+            }
+
+            // While the write sits on the blocked transport, the peer resets
+            // the stream and then the socket fails.
+            context->transport->limit_writes(0);
+            fiber::async::spawn([context, snapshot, stream]() -> DetachedTask {
+                co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                snapshot->in_flight = stream->outbound_hook_.state_ == Http2HookState::InFlight;
+                context->transport->append_read_chunk(make_frame(4, kRstStreamFrameType, 0x0, 1, kRstCancelPayload));
+                snapshot->reset_seen = stream->remote_rst();
+                context->transport->close();
+                context->transport->release_writes();
+            });
+            auto result = co_await exchange.write(reinterpret_cast<const std::uint8_t *>("stream"), 6, false);
+            snapshot->write_returned = true;
+            snapshot->write_error = result ? fiber::common::IoErr::None : result.error();
+            co_return;
+        };
+
+        (void) execute_server_request({std::move(request)}, std::move(handler), {}, true, context);
+
+        EXPECT_TRUE(snapshot->in_flight);
+        EXPECT_TRUE(snapshot->reset_seen);
+        EXPECT_TRUE(snapshot->write_returned);
+        EXPECT_EQ(snapshot->write_error, fiber::common::IoErr::Canceled);
+    });
+}
+
+namespace {
+
+void exercise_canceled_queued_initial_headers(bool explicit_abort) {
+    std::string client_wire;
+    run_client_send_scenario(
+            {}, [&](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                fiber::mem::BufPool pool;
+                fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
+                const fiber::http::Http2RequestHead head{
+                        .method = fiber::http::HttpMethod::Get,
+                        .scheme = "https",
+                        .authority = "example.com",
+                        .path = "/cancel-before-headers",
+                };
+                auto send = exchange.send_request_header(head, false);
+                auto handle = start_task(send);
+                EXPECT_FALSE(handle.done());
+                auto *stream = exchange.stream();
+                EXPECT_NE(stream, nullptr);
+                if (!stream) {
+                    co_return;
+                }
+                EXPECT_EQ(stream->outbound_hook_.state_, Http2HookState::Queued);
+
+                if (explicit_abort) {
+                    EXPECT_TRUE(exchange.abort().has_value());
+                    co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                    EXPECT_TRUE(handle.done());
+                    if (handle.done()) {
+                        auto result = handle.promise().result();
+                        EXPECT_FALSE(result.has_value());
+                        if (!result) {
+                            EXPECT_EQ(result.error(), fiber::common::IoErr::Canceled);
+                        }
+                    }
+                }
+                send = {};
+                co_await fiber::async::sleep(std::chrono::milliseconds(1));
+
+                EXPECT_FALSE(stream->local_rst());
+                EXPECT_EQ(stream->close_reason(), fiber::common::IoErr::Canceled);
+                EXPECT_FALSE(stream->attached_to_connection());
+                const auto canceled_frames = frames_for_stream(strip_client_initial_flight(transport.written()), 1);
+                EXPECT_TRUE(canceled_frames.empty()) << describe_frames(canceled_frames);
+
+                // The same connection can open a later stream; the canceled ID
+                // was never exposed to the peer and needs no RST_STREAM.
+                fiber::http::ClientHttp2Exchange next(connection.gate(), pool);
+                auto result = co_await next.send_request_header(head, true);
+                EXPECT_TRUE(result.has_value());
+                EXPECT_EQ(next.stream_id(), 3U);
+                client_wire = transport.written();
+                const auto next_frames = frames_for_stream(strip_client_initial_flight(client_wire), 3);
+                EXPECT_EQ(count_frames(next_frames, kHeadersFrameType), 1U);
+                EXPECT_EQ(count_frames(next_frames, kRstStreamFrameType), 0U);
+            });
+
+    // Feed actual client bytes to a peer parser: an RST for the unsent opening
+    // would fail the entire connection with Invalid here.
+    auto peer = execute_connection({std::move(client_wire)});
+    EXPECT_TRUE(peer.result.has_value());
+}
+
+void exercise_abandoned_in_flight_initial_headers(std::size_t bytes_before_block) {
+    std::string client_wire;
+    run_client_send_scenario(
+            {}, [&](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                fiber::mem::BufPool pool;
+                fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
+                const fiber::http::Http2RequestHead head{
+                        .method = fiber::http::HttpMethod::Get,
+                        .scheme = "https",
+                        .authority = "example.com",
+                        .path = "/cancel-in-flight-headers",
+                };
+                transport.limit_writes(bytes_before_block);
+                auto send = exchange.send_request_header(head, false);
+                (void) start_task(send);
+                auto *stream = exchange.stream();
+                EXPECT_NE(stream, nullptr);
+                if (!stream) {
+                    co_return;
+                }
+                co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                EXPECT_EQ(stream->outbound_hook_.state_, Http2HookState::InFlight);
+                EXPECT_EQ(strip_client_initial_flight(transport.written()).size(), bytes_before_block);
+
+                send = {};
+
+                EXPECT_FALSE(stream->outbound_operation_);
+                EXPECT_TRUE(stream->local_rst());
+                EXPECT_EQ(stream->close_reason(), fiber::common::IoErr::Canceled);
+                EXPECT_TRUE(stream->attached_to_connection());
+                transport.release_writes();
+                co_await fiber::async::sleep(std::chrono::milliseconds(1));
+                EXPECT_FALSE(stream->attached_to_connection());
+                client_wire = transport.written();
+                const auto frames = frames_for_stream(strip_client_initial_flight(client_wire), 1);
+                EXPECT_EQ(frames.size(), 2U) << describe_frames(frames);
+                if (frames.size() == 2U) {
+                    EXPECT_EQ(frames[0].type, kHeadersFrameType);
+                    EXPECT_NE(frames[0].flags & 0x4U, 0U);
+                    EXPECT_EQ(frames[1].type, kRstStreamFrameType);
+                    EXPECT_EQ(frames[1].payload, kRstCancelPayload);
+                }
+            });
+    auto peer = execute_connection({std::move(client_wire)});
+    EXPECT_TRUE(peer.result.has_value());
+}
+
+} // namespace
+
+TEST(Http2ConnectionTest, DestroyingQueuedInitialHeadersClosesLocallyAndKeepsConnectionUsable) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) { exercise_canceled_queued_initial_headers(false); });
+}
+
+TEST(Http2ConnectionTest, AbortingQueuedInitialHeadersClosesLocallyAndKeepsConnectionUsable) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) { exercise_canceled_queued_initial_headers(true); });
+}
+
+TEST(Http2ConnectionTest, AbandonedBlockedInitialHeadersDrainBeforeReset) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) { exercise_abandoned_in_flight_initial_headers(0); });
+}
+
+TEST(Http2ConnectionTest, AbandonedPartiallyWrittenInitialHeadersDrainBeforeReset) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) { exercise_abandoned_in_flight_initial_headers(5); });
+}
+
+TEST(Http2ConnectionTest, DestroyingQueuedResponseHeadersStillResetsPeerStream) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        std::string request = std::string(kClientConnectionPreface);
+        request += make_frame(0, 0x4, 0x0, 0, {});
+        request += build_headers_frame_bytes(1,
+                                             {
+                                                     {":method", "GET"},
+                                                     {":scheme", "https"},
+                                                     {":path", "/cancel-response-headers"},
+                                                     {":authority", "example.com"},
+                                             },
+                                             true);
+        auto context = std::make_shared<ServerRequestContext>();
+        fiber::http::HttpHandler handler = [context](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto *stream = context->connection->streams_.find(1);
+            EXPECT_NE(stream, nullptr);
+            if (!stream) {
+                co_return;
+            }
+            auto held = stream->lease();
+            const fiber::http::OutgoingHeaderBlockView header{
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .end_stream = false,
+            };
+            auto send = exchange.send_header(header);
+            (void) start_task(send);
+            EXPECT_EQ(stream->outbound_hook_.state_, Http2HookState::Queued);
+
+            send = {};
+
+            EXPECT_TRUE(stream->local_rst());
+            EXPECT_EQ(stream->close_reason(), fiber::common::IoErr::Canceled);
+            EXPECT_FALSE(stream->attached_to_connection());
+            co_await fiber::async::sleep(std::chrono::milliseconds(1));
+        };
+        auto outcome = execute_server_request({std::move(request)}, std::move(handler), {}, true, context);
+        ASSERT_TRUE(outcome.result.has_value());
+        const auto frames = frames_for_stream(outcome.written, 1);
+        ASSERT_EQ(frames.size(), 1U) << describe_frames(frames);
+        EXPECT_EQ(frames[0].type, kRstStreamFrameType);
+        EXPECT_EQ(frames[0].payload, kRstCancelPayload);
+    });
 }

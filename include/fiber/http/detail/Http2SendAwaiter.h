@@ -21,7 +21,8 @@ public:
     template<class... Args>
     Http2SendAwaiter(Owner &owner, std::chrono::milliseconds timeout,
                      Args &&...args) noexcept(std::is_nothrow_constructible_v<Op, Args...>) :
-        owner_(&owner), timeout_(timeout), op_(static_cast<Args &&>(args)...) {}
+        owner_(&owner), timeout_(timeout), loop_(fiber::event::EventLoop::current()),
+        op_(static_cast<Args &&>(args)...) {}
 
     Http2SendAwaiter(const Http2SendAwaiter &) = delete;
     Http2SendAwaiter &operator=(const Http2SendAwaiter &) = delete;
@@ -51,11 +52,10 @@ public:
         if (!owner_ || completed_) {
             return false;
         }
-        loop_ = &fiber::event::EventLoop::current();
         handle_ = handle;
         if (has_timer()) {
-            loop_->template post_at<Http2SendAwaiter, &Http2SendAwaiter::timer_entry_, &Http2SendAwaiter::on_timeout>(
-                    loop_->now() + timeout_, *this);
+            loop_.post_at<Http2SendAwaiter, &Http2SendAwaiter::timer_entry_, &Http2SendAwaiter::on_timeout>(
+                    loop_.now() + timeout_, *this);
         }
         return true;
     }
@@ -113,7 +113,6 @@ private:
         if (!awaiter) {
             return;
         }
-        awaiter->resume_posted_ = false;
         auto handle = awaiter->handle_;
         awaiter->handle_ = {};
         if (handle) {
@@ -144,8 +143,10 @@ private:
             }
         }();
 
-        if (!owner_->stream().try_arm_outbound(kOutboundOps, this, pending_flow_controlled_bytes)) {
-            complete(common::IoErr::Already);
+        const common::IoErr arm_error =
+                owner_->stream().try_arm_outbound(kOutboundOps, this, pending_flow_controlled_bytes);
+        if (arm_error != common::IoErr::None) {
+            complete(arm_error);
             return;
         }
         armed_ = true;
@@ -169,31 +170,30 @@ private:
         }
         completed_ = true;
         result_ = result;
-        if (!loop_ || resume_posted_) {
+        if (notify_entry_.is_in_queue()) {
             return;
         }
-        resume_posted_ = true;
-        loop_->template post_local<Http2SendAwaiter, &Http2SendAwaiter::notify_entry_, &Http2SendAwaiter::on_notify>(
-                *this);
+        loop_.post_local<Http2SendAwaiter, &Http2SendAwaiter::notify_entry_, &Http2SendAwaiter::on_notify>(*this);
     }
 
-    void cleanup(bool cancel_send) noexcept {
-        if (loop_ && timer_entry_.is_in_heap()) {
-            loop_->template cancel<Http2SendAwaiter, &Http2SendAwaiter::timer_entry_>(*this);
+    // `abandon` is the destructor path, where the send may still be pending:
+    // the stream withdraws or detaches it instead of expecting an idle hook.
+    void cleanup(bool abandon) noexcept {
+        if (timer_entry_.is_in_heap()) {
+            loop_.cancel<Http2SendAwaiter, &Http2SendAwaiter::timer_entry_>(*this);
         }
-        if (loop_ && resume_posted_) {
-            loop_->template cancel<Http2SendAwaiter, &Http2SendAwaiter::notify_entry_>(*this);
-            resume_posted_ = false;
+        if (notify_entry_.is_in_queue()) {
+            loop_.cancel<Http2SendAwaiter, &Http2SendAwaiter::notify_entry_>(*this);
         }
         if (owner_ && armed_) {
-            if (cancel_send) {
-                (void) owner_->cancel_queued_send();
+            if (abandon) {
+                owner_->stream().abandon_outbound(this);
+            } else {
+                owner_->stream().disarm_outbound(this);
             }
-            owner_->stream().disarm_outbound(this);
         }
         armed_ = false;
         owner_ = nullptr;
-        loop_ = nullptr;
         handle_ = {};
     }
 
@@ -216,7 +216,7 @@ private:
 
     Owner *owner_ = nullptr;
     std::chrono::milliseconds timeout_{};
-    fiber::event::EventLoop *loop_ = nullptr;
+    fiber::event::EventLoop &loop_;
     std::coroutine_handle<> handle_{};
     fiber::event::EventLoop::DeferEntry notify_entry_{};
     fiber::event::EventLoop::TimerEntry timer_entry_{};
@@ -224,7 +224,6 @@ private:
     Op op_;
     bool armed_ = false;
     bool completed_ = false;
-    bool resume_posted_ = false;
 };
 
 } // namespace fiber::http::detail
