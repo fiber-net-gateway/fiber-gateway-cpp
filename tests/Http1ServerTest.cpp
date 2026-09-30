@@ -317,10 +317,12 @@ TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
             const auto *range = exchange.range_header();
             const auto *if_range = exchange.if_range_header();
             const auto *expect = exchange.expect_header();
+            const auto *accept_encoding = exchange.accept_encoding_header();
             const bool ok = host && host->value_view() == "localhost" && content_type &&
                             content_type->value_view() == "text/plain" && range && range->value_view() == "bytes=0-9" &&
                             if_range && if_range->value_view() == "\"etag\"" && expect &&
-                            expect->value_view() == "100-continue";
+                            expect->value_view() == "100-continue" && accept_encoding &&
+                            accept_encoding->value_view() == "gzip";
             auto header_result =
                     co_await send_final_header(exchange, ok ? 200 : 500, nullptr,
                                                fiber::http::ResponseBodySpec::ContentLength(ok ? 2 : 3), {}, false);
@@ -352,6 +354,7 @@ TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
                           "Range: bytes=0-9\r\n"
                           "If-Range: \"etag\"\r\n"
                           "Expect: 100-continue\r\n"
+                          "Accept-Encoding: gzip\r\n"
                           "Connection: close\r\n"
                           "\r\n";
     ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));

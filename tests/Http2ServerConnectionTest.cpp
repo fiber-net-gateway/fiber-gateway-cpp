@@ -308,6 +308,35 @@ TEST(Http2ServerConnectionTest, RequestEndStreamDoesNotRetireAnUnfinishedRespons
     });
 }
 
+TEST(Http2ServerConnectionTest, CachesAcceptEncodingRequestHeaderRef) {
+    run([]() -> async::Task<void> {
+        std::promise<std::string> seen;
+        auto future = seen.get_future();
+        Session s(kIdle, io_options(), [&](http::HttpExchange &exchange) -> async::Task<void> {
+            const auto *field = exchange.accept_encoding_header();
+            seen.set_value(field == nullptr ? std::string("<null>") : std::string(field->value_view()));
+            co_await respond(exchange);
+        });
+        s.preface();
+        // The fake transport does not latch readiness: only feed after the
+        // connection is Running, or the notification is dropped.
+        EXPECT_TRUE(co_await until([&] { return s.connection.http2().state() == State::Running; }));
+        // request(1) pseudo-headers plus a literal-without-indexing
+        // accept-encoding field (no Huffman): 0x00, name len 0x0f, value len 0x04.
+        s.wire->feed(frame(Type::Headers, 4, 1,
+                           std::string_view("\x82\x86\x84\x01\x01x"
+                                            "\x00\x0f"
+                                            "accept-encoding"
+                                            "\x04"
+                                            "gzip",
+                                            28)));
+        EXPECT_TRUE(co_await until([&] { return future.wait_for(0s) == std::future_status::ready; }));
+        s.wire->feed(frame(Type::Data, 1, 1));
+        co_await s.finish(1);
+        EXPECT_EQ(future.get(), "gzip");
+    });
+}
+
 TEST(Http2ServerConnectionTest, PingAndSettingsDoNotRefreshIdleDeadline) {
     run([]() -> async::Task<void> {
         Session s(200ms);

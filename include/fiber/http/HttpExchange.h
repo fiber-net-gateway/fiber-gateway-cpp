@@ -51,6 +51,7 @@ public:
         const HttpHeaders::HeaderField *range = nullptr;
         const HttpHeaders::HeaderField *if_range = nullptr;
         const HttpHeaders::HeaderField *expect = nullptr;
+        const HttpHeaders::HeaderField *accept_encoding = nullptr;
     };
 
     explicit HttpExchange(net::SocketAddress remote_addr);
@@ -74,6 +75,9 @@ public:
         return request_header_refs_.if_range;
     }
     [[nodiscard]] const HttpHeaders::HeaderField *expect_header() const noexcept { return request_header_refs_.expect; }
+    [[nodiscard]] const HttpHeaders::HeaderField *accept_encoding_header() const noexcept {
+        return request_header_refs_.accept_encoding;
+    }
     [[nodiscard]] const HttpHeaders &request_headers() const noexcept { return request_headers_; };
     [[nodiscard]] const HttpHeaders &request_trailers() const noexcept { return request_trailers_; };
     [[nodiscard]] HttpBodySpec request_body_spec() const noexcept { return request_body_spec_; }
@@ -97,7 +101,8 @@ public:
     //    yourself: set() returns the new field — assign it directly; after
     //    remove(), null the ref or re-lookup via get_all(lowcase, hash).begin().
     //    Stale refs silently read the orphaned old value. Current post-parse
-    //    readers: host (access log), expect (100-continue limiter).
+    //    readers: host (access log), expect (100-continue limiter),
+    //    accept_encoding (gzip decision).
     // 4. uri() returns four coupled views with no storage of their own:
     //    reseat only to exchange-pool storage (pool().alloc + memcpy), never
     //    coroutine-frame or temporary strings; keep path (decoded) /

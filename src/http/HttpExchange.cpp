@@ -18,6 +18,7 @@ enum class RequestHeaderRefKind : std::uint8_t {
     Range,
     IfRange,
     Expect,
+    AcceptEncoding,
 };
 
 bool is_terminal_response_write_error(common::IoErr error) noexcept {
@@ -37,12 +38,13 @@ bool is_terminal_response_write_error(common::IoErr error) noexcept {
 
 const HeaderMap<RequestHeaderRefKind> &request_header_ref_map() noexcept {
     static HeaderMap<RequestHeaderRefKind> refs = []() {
-        HeaderMap<RequestHeaderRefKind>::Builder builder(5);
+        HeaderMap<RequestHeaderRefKind>::Builder builder(6);
         builder.insert("host", RequestHeaderRefKind::Host);
         builder.insert("content-type", RequestHeaderRefKind::ContentType);
         builder.insert("range", RequestHeaderRefKind::Range);
         builder.insert("if-range", RequestHeaderRefKind::IfRange);
         builder.insert("expect", RequestHeaderRefKind::Expect);
+        builder.insert("accept-encoding", RequestHeaderRefKind::AcceptEncoding);
         return std::move(builder).build();
     }();
     return refs;
@@ -236,6 +238,11 @@ void HttpExchange::cache_request_header_field(const HttpHeaders::HeaderField &fi
         case RequestHeaderRefKind::Expect:
             if (request_header_refs_.expect == nullptr) {
                 request_header_refs_.expect = &field;
+            }
+            break;
+        case RequestHeaderRefKind::AcceptEncoding:
+            if (request_header_refs_.accept_encoding == nullptr) {
+                request_header_refs_.accept_encoding = &field;
             }
             break;
     }
