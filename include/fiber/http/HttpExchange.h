@@ -79,6 +79,40 @@ public:
     [[nodiscard]] HttpBodySpec request_body_spec() const noexcept { return request_body_spec_; }
     [[nodiscard]] bool request_trailers_complete() const noexcept { return request_trailers_complete_; }
     mem::BufPool &pool() noexcept { return pool_; }
+
+    // --- Mutable request-phase access (HttpHandler context only) ---------------
+    //
+    // 1. Framing state is frozen at parse time and never re-derived from the
+    //    table (request_body_spec(), keep-alive/close decisions, H2/H3 stream
+    //    framing). NEVER rewrite the protocol-control names: content-length,
+    //    transfer-encoding, connection, te, trailer, expect, upgrade,
+    //    sec-websocket-*. Doing so desyncs the table from wire truth already
+    //    consumed. accept-encoding / cache-control are safe: gzip negotiation
+    //    reads them lazily at first response write.
+    // 2. Use only the copying overloads (add / add_prehashed / set): they
+    //    pool-copy name and value. The add_view / set_view family retains
+    //    external pointers and dangles here.
+    // 3. refs cache the FIRST matching field per name (first-wins, wire
+    //    order). After any structural change you must fix the affected ref
+    //    yourself: set() returns the new field — assign it directly; after
+    //    remove(), null the ref or re-lookup via get_all(lowcase, hash).begin().
+    //    Stale refs silently read the orphaned old value. Current post-parse
+    //    readers: host (access log), expect (100-continue limiter).
+    // 4. uri() returns four coupled views with no storage of their own:
+    //    reseat only to exchange-pool storage (pool().alloc + memcpy), never
+    //    coroutine-frame or temporary strings; keep path (decoded) /
+    //    unparsed_uri (raw) / query coherent — the proxy target builder
+    //    prefers unparsed_uri wholesale and takes the query suffix from it
+    //    (HttpProxyCore.h request_target_view, ProxyHandler raw_query_suffix);
+    //    a new path must stay origin-form; route matching is not re-run.
+    // 5. Timing: mutate before the first $header script access
+    //    (ScriptExchangeCtx materializes the header object once). $path /
+    //    $query / $req.uri read live per access.
+    // 6. request_trailers() intentionally has no non-const overload: the
+    //    parser appends to it while the request body is being read.
+    [[nodiscard]] HttpHeaders &request_headers() noexcept { return request_headers_; }
+    [[nodiscard]] RequestHeaderRefs &request_header_refs() noexcept { return request_header_refs_; }
+    [[nodiscard]] HttpUri &uri() noexcept { return uri_; }
     [[nodiscard]] const net::SocketAddress &remote_addr() const noexcept { return remote_addr_; }
     [[nodiscard]] const HttpResponseStats &response_stats() const noexcept { return response_stats_; }
     // This is response-direction state: request EOF/END_STREAM alone does not

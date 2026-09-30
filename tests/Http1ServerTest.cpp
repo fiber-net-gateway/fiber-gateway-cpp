@@ -21,6 +21,8 @@
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/event/EventLoopGroup.h>
+#include <fiber/http/HttpHeaderHash.h>
+#include <fiber/http/HttpProxyCore.h>
 #include <fiber/http/Server.h>
 #include <fiber/http/endpoint/Http1Endpoint.h>
 #include <fiber/net/SocketAddress.h>
@@ -352,6 +354,305 @@ TEST(Http1ServerTest, CachesImportantRequestHeaderPointers) {
                           "Expect: 100-continue\r\n"
                           "Connection: close\r\n"
                           "\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("ok"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+TEST(Http1ServerTest, MutableRequestHeadersSetRewritesHostAndRef) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            static constexpr std::uint64_t kHostHash = fiber::http::http_header_name_hash("host");
+            auto *field = exchange.request_headers().set("host", "b.example.com", "host", kHostHash);
+            exchange.request_header_refs().host = field;
+            const bool ok = field != nullptr && exchange.header("Host") == "b.example.com" &&
+                            exchange.host_header() == field && field->value_view() == "b.example.com";
+            auto header_result =
+                    co_await send_final_header(exchange, ok ? 200 : 500, nullptr,
+                                               fiber::http::ResponseBodySpec::ContentLength(ok ? 2 : 3), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(client, 0);
+    fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
+    sockaddr_storage storage{};
+    socklen_t len = 0;
+    ASSERT_TRUE(target.to_sockaddr(storage, len));
+    ASSERT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&storage), len), 0);
+
+    const char *request = "GET / HTTP/1.1\r\nHost: a.example.com\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("ok"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+TEST(Http1ServerTest, MutableRequestHeadersSetCopiesValueIntoPool) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            static constexpr std::uint64_t kHostHash = fiber::http::http_header_name_hash("host");
+            // The source lives in this coroutine frame; scribbling over it after
+            // set() must not affect the stored value (set pool-copies).
+            std::string value("pooled-copy");
+            auto *field = exchange.request_headers().set("host", value, "host", kHostHash);
+            value.assign(16, 'x');
+            const bool ok = field != nullptr && exchange.header("Host") == "pooled-copy";
+            auto header_result =
+                    co_await send_final_header(exchange, ok ? 200 : 500, nullptr,
+                                               fiber::http::ResponseBodySpec::ContentLength(ok ? 2 : 3), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(client, 0);
+    fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
+    sockaddr_storage storage{};
+    socklen_t len = 0;
+    ASSERT_TRUE(target.to_sockaddr(storage, len));
+    ASSERT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&storage), len), 0);
+
+    const char *request = "GET / HTTP/1.1\r\nHost: a.example.com\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("ok"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+TEST(Http1ServerTest, MutableRequestHeadersSetInsertsAbsentAndCollapsesDuplicates) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            static constexpr std::uint64_t kDupHash = fiber::http::http_header_name_hash("x-dup");
+            static constexpr std::uint64_t kAddedHash = fiber::http::http_header_name_hash("x-added");
+            auto *field = exchange.request_headers().set("x-dup", "three", "x-dup", kDupHash);
+            std::size_t count = 0;
+            for ([[maybe_unused]] const auto &dup: exchange.request_headers().get_all("x-dup", kDupHash)) {
+                ++count;
+            }
+            auto *added = exchange.request_headers().set("x-added", "v", "x-added", kAddedHash);
+            const bool ok = field != nullptr && count == 1 && field->value_view() == "three" && added != nullptr &&
+                            exchange.header("x-added") == "v";
+            auto header_result =
+                    co_await send_final_header(exchange, ok ? 200 : 500, nullptr,
+                                               fiber::http::ResponseBodySpec::ContentLength(ok ? 2 : 3), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(client, 0);
+    fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
+    sockaddr_storage storage{};
+    socklen_t len = 0;
+    ASSERT_TRUE(target.to_sockaddr(storage, len));
+    ASSERT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&storage), len), 0);
+
+    const char *request = "GET / HTTP/1.1\r\n"
+                          "Host: localhost\r\n"
+                          "X-Dup: one\r\n"
+                          "X-Dup: two\r\n"
+                          "Connection: close\r\n"
+                          "\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("ok"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+TEST(Http1ServerTest, MutableRequestHeadersRemoveOrphansCachedRefUntilNulled) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            static constexpr std::uint64_t kHostHash = fiber::http::http_header_name_hash("host");
+            const auto *orphan = exchange.host_header();
+            exchange.request_headers().remove("host", kHostHash);
+            // Anchors the documented orphan behavior: the stale ref keeps
+            // reading the old value until the caller fixes it.
+            const bool orphan_reads_old = exchange.host_header() == orphan && orphan->value_view() == "localhost";
+            exchange.request_header_refs().host = nullptr;
+            const bool ok = orphan_reads_old && exchange.host_header() == nullptr && exchange.header("host").empty();
+            auto header_result =
+                    co_await send_final_header(exchange, ok ? 200 : 500, nullptr,
+                                               fiber::http::ResponseBodySpec::ContentLength(ok ? 2 : 3), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(client, 0);
+    fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
+    sockaddr_storage storage{};
+    socklen_t len = 0;
+    ASSERT_TRUE(target.to_sockaddr(storage, len));
+    ASSERT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&storage), len), 0);
+
+    const char *request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
+
+    std::string response = recv_all(client);
+    ::close(client);
+
+    EXPECT_NE(response.find("200"), std::string::npos);
+    EXPECT_NE(response.find("ok"), std::string::npos);
+
+    fiber::async::spawn(group.at(0), [&]() { return stop_server(&group.at(0), server); });
+    group.join();
+    delete server;
+}
+
+TEST(Http1ServerTest, MutableUriReseatUsesPoolStorage) {
+    fiber::event::EventLoopGroup group(1);
+    group.start();
+
+    std::promise<uint16_t> port_promise;
+    std::promise<fiber::http::Server *> server_promise;
+    auto port_future = port_promise.get_future();
+    auto server_future = server_promise.get_future();
+
+    fiber::async::spawn(group.at(0), [&]() {
+        auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            constexpr std::string_view kNewPath = "/c/d";
+            auto *mem = static_cast<char *>(exchange.pool().alloc(kNewPath.size()));
+            bool ok = mem != nullptr;
+            if (ok) {
+                std::memcpy(mem, kNewPath.data(), kNewPath.size());
+                auto &uri = exchange.uri();
+                uri.path = std::string_view(mem, kNewPath.size());
+                uri.unparsed_uri = {};
+                uri.query = {};
+                uri.exten = {};
+            }
+            std::string scratch;
+            ok = ok && exchange.uri().path == "/c/d" &&
+                 fiber::http::proxy_core::request_target_view(exchange.uri(), scratch) == "/c/d";
+            auto header_result =
+                    co_await send_final_header(exchange, ok ? 200 : 500, nullptr,
+                                               fiber::http::ResponseBodySpec::ContentLength(ok ? 2 : 3), {}, false);
+            if (!header_result) {
+                co_return;
+            }
+            co_await exchange.write_all(reinterpret_cast<const uint8_t *>(ok ? "ok" : "bad"), ok ? 2 : 3, true);
+            co_return;
+        };
+        return start_server(&group.at(0), handler, nullptr, &port_promise, &server_promise);
+    });
+
+    auto *server = server_future.get();
+    ASSERT_NE(server, nullptr);
+    uint16_t port = port_future.get();
+    ASSERT_NE(port, 0);
+
+    int client = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(client, 0);
+    fiber::net::SocketAddress target(fiber::net::IpAddress::loopback_v4(), port);
+    sockaddr_storage storage{};
+    socklen_t len = 0;
+    ASSERT_TRUE(target.to_sockaddr(storage, len));
+    ASSERT_EQ(::connect(client, reinterpret_cast<sockaddr *>(&storage), len), 0);
+
+    const char *request = "GET /a/b?q=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     ASSERT_EQ(::send(client, request, std::strlen(request), 0), static_cast<ssize_t>(std::strlen(request)));
 
     std::string response = recv_all(client);
