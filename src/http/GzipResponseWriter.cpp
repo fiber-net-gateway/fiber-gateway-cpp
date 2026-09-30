@@ -293,9 +293,13 @@ async::Task<common::IoResult<void>> GzipResponseWriter::send_header(const Outgoi
             headers != nullptr && !has_nonempty_header(*headers, "content-encoding") &&
             !contains_directive(*headers, "cache-control", "no-transform") && matches_content_type(*headers, options_);
     const bool add_vary = intrinsic_candidate && !vary_contains_accept_encoding(*headers);
-    const bool request_accepts_gzip = options_.request_accepts_gzip.has_value()
-                                              ? *options_.request_accepts_gzip
-                                              : accepts_gzip(exchange_->request_headers());
+    // The cached ref is an existence check only: accept-encoding negotiation
+    // folds every matching field with q-values, so a present header still
+    // goes through the full accepts_gzip scan.
+    const bool request_accepts_gzip =
+            options_.request_accepts_gzip.has_value()
+                    ? *options_.request_accepts_gzip
+                    : exchange_->accept_encoding_header() != nullptr && accepts_gzip(exchange_->request_headers());
     const bool active = intrinsic_candidate &&
                         !contains_directive(exchange_->request_headers(), "cache-control", "no-transform") &&
                         request_accepts_gzip;

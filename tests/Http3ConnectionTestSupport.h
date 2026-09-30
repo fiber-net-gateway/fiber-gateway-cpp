@@ -373,7 +373,7 @@ CapturedHttp3Request capture_request(const fiber::http::HttpExchange &exchange) 
             .range = field_value(exchange.range_header()),
             .if_range = field_value(exchange.if_range_header()),
             .expect = field_value(exchange.expect_header()),
-            .accept_encoding = std::string(exchange.request_headers().get("accept-encoding")),
+            .accept_encoding = field_value(exchange.accept_encoding_header()),
             .accept_language = std::string(exchange.request_headers().get("accept-language")),
             .method_uses_static_storage =
                     have_method_entry && exchange.method_view().data() == method_entry.value.data(),
