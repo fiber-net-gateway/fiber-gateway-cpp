@@ -375,6 +375,7 @@ private:
                                                                      std::size_t byte_budget) noexcept;
     void close_outbound() noexcept;
     void abort_outbound(common::IoErr reason) noexcept;
+    void drop_outbound_hook(Http2OutboundHook &hook) noexcept;
     [[nodiscard]] bool outbound_idle() const noexcept;
     [[nodiscard]] common::IoResult<ReadPumpResult> pump_read(std::size_t operation_budget,
                                                              std::size_t byte_budget) noexcept;

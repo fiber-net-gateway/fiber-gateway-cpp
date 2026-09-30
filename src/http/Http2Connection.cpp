@@ -1659,6 +1659,7 @@ Http2Stream *Http2Connection::create_peer_stream(std::uint32_t stream_id) noexce
     Http2Stream *stream_ptr = stream.get();
     stream_ptr->attach_to_connection(*this, stream_id);
     stream_ptr->active_ = true;
+    stream_ptr->opening_committed_ = true;
     stream_ptr->send_window_ = peer_initial_stream_send_window_;
     stream_ptr->recv_window_target_ = configured_initial_stream_recv_window();
     stream_ptr->recv_window_low_watermark_ = options_.stream_recv_window_low_watermark;
@@ -2273,6 +2274,12 @@ void Http2Connection::build_outbound_batch(std::size_t operation_budget, std::si
         hook->inflight_wire_bytes_ = hook_bytes;
         hook->state_ = Http2OutboundHook::State::InFlight;
         inflight_outbound_hooks_.push_back(*hook);
+        if (hook->ctx_) {
+            auto &stream = *static_cast<Http2Stream *>(hook->ctx_);
+            if (stream.outbound_kind_ == Http2OutboundKind::Headers) {
+                stream.opening_committed_ = true;
+            }
+        }
         ++selected;
     }
 }
@@ -2406,31 +2413,36 @@ void Http2Connection::abort_outbound(common::IoErr reason) noexcept {
 
     while (Http2OutboundHook *hook = outbound_queue_.front()) {
         outbound_queue_.erase(*hook);
-        hook->encoded_.clear();
-        hook->inflight_wire_bytes_ = 0;
-        hook->window_consumed_ = 0;
-        hook->completion_result_ = common::IoErr::None;
-        hook->operation_final_batch_ = false;
-        hook->state_ = Http2OutboundHook::State::Idle;
-        if (hook->ctx_) {
-            static_cast<Http2Stream *>(hook->ctx_)->outbound_kind_ = Http2OutboundKind::None;
-        }
+        drop_outbound_hook(*hook);
     }
     while (Http2OutboundHook *hook = inflight_outbound_hooks_.front()) {
         inflight_outbound_hooks_.erase(*hook);
-        hook->encoded_.clear();
-        hook->inflight_wire_bytes_ = 0;
-        hook->window_consumed_ = 0;
-        hook->completion_result_ = common::IoErr::None;
-        hook->operation_final_batch_ = false;
-        hook->state_ = Http2OutboundHook::State::Idle;
-        if (hook->ctx_) {
-            static_cast<Http2Stream *>(hook->ctx_)->outbound_kind_ = Http2OutboundKind::None;
-        }
+        drop_outbound_hook(*hook);
     }
     inflight_outbound_chain_.clear();
     control_hook_.encoded_.clear();
     outbound_stopped_ = true;
+}
+
+void Http2Connection::drop_outbound_hook(Http2OutboundHook &hook) noexcept {
+    const common::IoErr completion =
+            hook.completion_result_ != common::IoErr::None ? hook.completion_result_ : outbound_stop_reason_;
+    hook.encoded_.clear();
+    hook.inflight_wire_bytes_ = 0;
+    hook.window_consumed_ = 0;
+    hook.completion_result_ = common::IoErr::None;
+    hook.operation_final_batch_ = false;
+    hook.state_ = Http2OutboundHook::State::Idle;
+    auto *stream = static_cast<Http2Stream *>(hook.ctx_);
+    if (!stream) {
+        return;
+    }
+    stream->outbound_kind_ = Http2OutboundKind::None;
+    // These bytes never finish on the wire, so the operation waiting on them
+    // hears it here. A stream closed while the batch was in flight is not told
+    // again when the connection closes its streams. Only the operation is
+    // notified: the stream's idle path would re-enter connection teardown.
+    stream->notify_outbound_send_done(completion, 0, false);
 }
 
 void Http2Connection::on_stream_outbound_idle(Http2Stream &stream) noexcept {

@@ -135,9 +135,16 @@ private:
         ConnectionWindow,
     };
 
-    [[nodiscard]] bool try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
-                                        std::size_t pending_flow_controlled_bytes) noexcept;
+    // Binds one send operation. Rejected while an earlier send still owns the
+    // hook, a window wait or the kind, even after its operation let go.
+    [[nodiscard]] common::IoErr try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
+                                                 std::size_t pending_flow_controlled_bytes) noexcept;
+    // Unbinds an operation whose send has finished.
     void disarm_outbound(void *ctx) noexcept;
+    // Unbinds an operation that is going away before its send finished. The
+    // send is withdrawn where it can be and otherwise left to drain without an
+    // operation, and the stream is canceled.
+    void abandon_outbound(void *ctx) noexcept;
     [[nodiscard]] common::IoErr encode_outbound_batch(const Http2OutboundEncodeRequest &req,
                                                       Http2OutboundEncodeTarget &target,
                                                       Http2OutboundEncodeResult &result) noexcept;
@@ -156,6 +163,9 @@ private:
     bool local_end_stream_ = false;
     bool local_rst_ = false;
     bool active_ = false;
+    // Opening HEADERS were received or committed to the in-flight chain,
+    // which must drain before a later RST_STREAM.
+    bool opening_committed_ = false;
     Http2Connection *conn_ = nullptr;
     // RFC 7540 allows the stream-level send window to become negative after a
     // smaller SETTINGS_INITIAL_WINDOW_SIZE is applied to in-flight streams.

@@ -91,15 +91,26 @@ common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) 
     if (!conn_) {
         return close_reason_ != common::IoErr::None ? close_reason_ : common::IoErr::Canceled;
     }
-
-    common::IoErr err = conn_->send_rst_stream(stream_id_, code);
-    if (err != common::IoErr::None) {
-        return err;
+    if (local_rst_ || remote_rst_) {
+        // Already reset and closed; no frame may follow on a closed stream.
+        return common::IoErr::None;
     }
 
-    local_rst_ = true;
+    Lease held(this);
+    // A locally allocated stream whose opening HEADERS can still be withdrawn
+    // is idle at the peer. Resetting it on the wire would fail the connection.
+    if (opening_committed_) {
+        common::IoErr err = conn_->send_rst_stream(stream_id_, code);
+        if (err != common::IoErr::None) {
+            return err;
+        }
+        local_rst_ = true;
+    }
+
     close(result);
-    conn_->try_release_stream(*this);
+    if (conn_) {
+        conn_->try_release_stream(*this);
+    }
     return common::IoErr::None;
 }
 
@@ -167,10 +178,16 @@ void Http2Stream::close(common::IoErr result) noexcept {
     }
 }
 
-bool Http2Stream::try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
-                                   std::size_t pending_flow_controlled_bytes) noexcept {
-    if (outbound_operation_) {
-        return false;
+common::IoErr Http2Stream::try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
+                                            std::size_t pending_flow_controlled_bytes) noexcept {
+    // An abandoned batch can still be draining with no operation bound; a new
+    // operation must not inherit its completion.
+    if (outbound_operation_ || outbound_hook_.state_ != Http2OutboundHook::State::Idle ||
+        outbound_wait_state_ != OutboundWaitState::None || outbound_kind_ != Http2OutboundKind::None) {
+        return common::IoErr::Already;
+    }
+    if (close_reason_ != common::IoErr::None) {
+        return close_reason_;
     }
     FIBER_ASSERT(ctx != nullptr);
     FIBER_ASSERT(ops.on_encode != nullptr);
@@ -180,7 +197,7 @@ bool Http2Stream::try_arm_outbound(const Http2OutboundOperation::Ops &ops, void 
             .ctx = ctx,
     };
     outbound_pending_flow_controlled_bytes_ = pending_flow_controlled_bytes;
-    return true;
+    return common::IoErr::None;
 }
 
 void Http2Stream::disarm_outbound(void *ctx) noexcept {
@@ -192,6 +209,59 @@ void Http2Stream::disarm_outbound(void *ctx) noexcept {
     FIBER_ASSERT(outbound_kind_ == Http2OutboundKind::None);
     outbound_operation_ = {};
     outbound_pending_flow_controlled_bytes_ = 0;
+}
+
+void Http2Stream::abandon_outbound(void *ctx) noexcept {
+    if (outbound_operation_.ctx != ctx) {
+        return;
+    }
+    // Closing below can detach the stream and drop the connection's lease.
+    Lease held(this);
+    const bool send_pending = outbound_kind_ != Http2OutboundKind::None ||
+                              outbound_wait_state_ != OutboundWaitState::None ||
+                              outbound_hook_.state_ != Http2OutboundHook::State::Idle;
+    // Unbind before anything that can call back: the operation is being
+    // destroyed, and without it no further batch is encoded.
+    outbound_operation_ = {};
+    outbound_pending_flow_controlled_bytes_ = 0;
+    if (!send_pending) {
+        return;
+    }
+
+    // Window waits and a queued batch are withdrawn. An in-flight batch stays
+    // with the connection: part of it may be on the wire and the transport may
+    // still reference its chain. It drains, or goes with the connection, and
+    // the stream is released once the hook is idle again.
+    if (conn_) {
+        (void) conn_->cancel_queued_stream_send(*this);
+    }
+    outbound_kind_ = Http2OutboundKind::None;
+
+    // The caller cannot learn how much of the send went out, so the stream
+    // ends here.
+    if (close_reason_ != common::IoErr::None) {
+        if (conn_) {
+            conn_->try_release_stream(*this);
+        }
+        return;
+    }
+    const common::IoErr err = close_rst(Http2ErrorCode::Cancel, common::IoErr::Canceled);
+    if (err == common::IoErr::None) {
+        return;
+    }
+    // RST_STREAM could not be queued: cancel locally anyway. A connection that
+    // is still sending would leave the peer holding an open stream, so it goes
+    // down with the stream.
+    Http2Connection *conn = conn_;
+    close(common::IoErr::Canceled);
+    if (!conn) {
+        return;
+    }
+    if (!conn->outbound_closed_) {
+        conn->enter_closing(err);
+        return;
+    }
+    conn->try_release_stream(*this);
 }
 
 common::IoErr Http2Stream::encode_outbound_batch(const Http2OutboundEncodeRequest &req,
