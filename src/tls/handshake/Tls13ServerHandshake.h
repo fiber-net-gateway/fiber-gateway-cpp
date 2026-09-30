@@ -158,14 +158,15 @@ private:
     // Derives traffic keys from `secret` and swaps a FRESH cipher instance
     // into `slot` (06's swap_cipher form: re-init of a live instance is a 05
     // contract violation; every key change is an instance swap).
-    [[nodiscard]] bool swap_cipher(TlsRecordCipher &slot, const TlsSecret &secret) noexcept {
+    [[nodiscard]] bool swap_cipher(TlsRecordCipher &slot, TlsRecordDirection direction,
+                                   const TlsSecret &secret) noexcept {
         TlsRecordCipher fresh;
         auto derived = tls13_traffic_keys(secret, suite_);
         if (!derived.has_value()) {
             return false;
         }
         TlsTrafficKeys &keys = *derived;
-        if (!fresh.init(suite_, TlsRecordProtectionKind::Tls13, {keys.key.data(), keys.key_len},
+        if (!fresh.init(suite_, TlsRecordProtectionKind::Tls13, direction, {keys.key.data(), keys.key_len},
                         {keys.iv.data(), keys.iv_len})
                      .has_value()) {
             return false;

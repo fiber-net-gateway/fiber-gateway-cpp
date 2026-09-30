@@ -177,7 +177,7 @@ bool TlsConnection::Impl::handle_key_update(std::span<const std::uint8_t> body) 
         return false;
     }
     TlsRecordCipher fresh;
-    if (!fresh.init(suite_, TlsRecordProtectionKind::Tls13, {keys->key.data(), keys->key_len},
+    if (!fresh.init(suite_, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Open, {keys->key.data(), keys->key_len},
                     {keys->iv.data(), keys->iv_len})
                  .has_value()) {
         latch_fatal(TlsAlertDesc::InternalError);
@@ -207,8 +207,8 @@ common::IoResult<void> TlsConnection::Impl::send_pending_rekey() noexcept {
         return std::unexpected(keys.error());
     }
     TlsRecordCipher fresh;
-    auto init = fresh.init(suite_, TlsRecordProtectionKind::Tls13, {keys->key.data(), keys->key_len},
-                           {keys->iv.data(), keys->iv_len});
+    auto init = fresh.init(suite_, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal,
+                           {keys->key.data(), keys->key_len}, {keys->iv.data(), keys->iv_len});
     if (!init.has_value()) {
         return init;
     }

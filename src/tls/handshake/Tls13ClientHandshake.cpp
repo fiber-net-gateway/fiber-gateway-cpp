@@ -69,7 +69,7 @@ void Tls13ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
         fail(TlsAlertDesc::UnsupportedExtension); // 1.2-only echoes never appear in a 1.3 SH
         return;
     }
-    if (tls_client_suite_offer_index(sh.cipher_suite) == kTlsSuitePreference.size()) {
+    if (!tls_client_suite_offered(sh.cipher_suite)) {
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }
@@ -159,7 +159,7 @@ void Tls13ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
             return;
         }
         ctx_.set_quic_level(TlsQuicLevel::Handshake);
-    } else if (!swap_cipher(ctx_.read_cipher(), server_hs_)) {
+    } else if (!swap_cipher(ctx_.read_cipher(), TlsRecordDirection::Open, server_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -185,8 +185,7 @@ void Tls13ClientHandshake::start_hello_retry_request(const TlsServerHello &sh,
         return;
     }
     const TlsSuiteInfo *info = tls_suite_info(static_cast<TlsCipherSuiteId>(sh.cipher_suite));
-    if (tls_client_suite_offer_index(sh.cipher_suite) == kTlsSuitePreference.size() || info == nullptr ||
-        !info->is_tls13) {
+    if (!tls_client_suite_offered(sh.cipher_suite) || info == nullptr || !info->is_tls13) {
         fail(TlsAlertDesc::IllegalParameter);
         return;
     }
@@ -636,7 +635,7 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
             fail(TlsAlertDesc::InternalError);
             return;
         }
-    } else if (!swap_cipher(ctx_.read_cipher(), server_app0_)) {
+    } else if (!swap_cipher(ctx_.read_cipher(), TlsRecordDirection::Open, server_app0_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -657,7 +656,7 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
         }
     }
     early_.closed = true;
-    if (cfg_.quic == nullptr && !swap_cipher(ctx_.write_cipher(), client_hs_)) {
+    if (cfg_.quic == nullptr && !swap_cipher(ctx_.write_cipher(), TlsRecordDirection::Seal, client_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }
@@ -704,7 +703,7 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
         // level advances (nothing follows from the client at 1-RTT today,
         // but the tail contract stays uniform).
         ctx_.set_quic_level(TlsQuicLevel::Application);
-    } else if (!swap_cipher(ctx_.write_cipher(), client_app0_)) {
+    } else if (!swap_cipher(ctx_.write_cipher(), TlsRecordDirection::Seal, client_app0_)) {
         fail(TlsAlertDesc::InternalError);
         return;
     }

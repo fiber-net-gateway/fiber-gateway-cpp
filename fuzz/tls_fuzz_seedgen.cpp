@@ -20,6 +20,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -69,18 +70,17 @@ Bytes chain_bytes(fiber::mem::IoBufChain chain) {
     return out;
 }
 
-X509 *load_cert(const char *pem) {
-    BIO *bio = BIO_new_mem_buf(pem, -1);
-    X509 *cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    return cert;
+// Owning handles: X509_STORE_add_cert and the *_use_certificate /
+// *_use_PrivateKey setters take their own reference, so the loaded object is
+// ours to free; only the add0_* setters adopt it (pass .release()).
+bssl::UniquePtr<X509> load_cert(const char *pem) {
+    bssl::UniquePtr<BIO> bio(BIO_new_mem_buf(pem, -1));
+    return bssl::UniquePtr<X509>(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
 }
 
-EVP_PKEY *load_key(const char *pem) {
-    BIO *bio = BIO_new_mem_buf(pem, -1);
-    EVP_PKEY *key = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    return key;
+bssl::UniquePtr<EVP_PKEY> load_key(const char *pem) {
+    bssl::UniquePtr<BIO> bio(BIO_new_mem_buf(pem, -1));
+    return bssl::UniquePtr<EVP_PKEY>(PEM_read_bio_PrivateKey(bio.get(), nullptr, nullptr, nullptr));
 }
 
 // ---- a BoringSSL endpoint over memory BIOs ----
@@ -138,11 +138,11 @@ public:
         if (opt.early_data) {
             SSL_CTX_set_early_data_enabled(ctx_, 1);
         }
-        X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx_), load_cert(certfix::kRootRsaPem));
+        X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx_), load_cert(certfix::kRootRsaPem).get());
         if (opt.server) {
-            SSL_CTX_use_certificate(ctx_, load_cert(opt.leaf_pem));
-            SSL_CTX_add0_chain_cert(ctx_, load_cert(certfix::kIntermediateRsaPem));
-            SSL_CTX_use_PrivateKey(ctx_, load_key(opt.key_pem));
+            SSL_CTX_use_certificate(ctx_, load_cert(opt.leaf_pem).get());
+            SSL_CTX_add0_chain_cert(ctx_, load_cert(certfix::kIntermediateRsaPem).release());
+            SSL_CTX_use_PrivateKey(ctx_, load_key(opt.key_pem).get());
             SSL_CTX_set_alpn_select_cb(ctx_, select_first_alpn, nullptr);
             if (opt.client_cert) {
                 SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
@@ -170,9 +170,9 @@ public:
                                                    "http/1.1";
             SSL_set_alpn_protos(ssl_, kProtos, sizeof(kProtos) - 1);
             if (opt.client_cert) {
-                SSL_use_certificate(ssl_, load_cert(certfix::kClientRsaPem));
-                SSL_add0_chain_cert(ssl_, load_cert(certfix::kIntermediateRsaPem));
-                SSL_use_PrivateKey(ssl_, load_key(certfix::kRsa2048KeyPem));
+                SSL_use_certificate(ssl_, load_cert(certfix::kClientRsaPem).get());
+                SSL_add0_chain_cert(ssl_, load_cert(certfix::kIntermediateRsaPem).release());
+                SSL_use_PrivateKey(ssl_, load_key(certfix::kRsa2048KeyPem).get());
             }
             if (opt.resume != nullptr) {
                 SSL_set_session(ssl_, opt.resume);
@@ -443,6 +443,11 @@ void client_engine_corpus() {
                          .leaf_pem = certfix::kLeafEcP384Pem,
                          .key_pem = certfix::kP384KeyPem},
              false},
+            // A legacy-only server (feature/tls/11): the CBC suite from the client's tail.
+            {"tls12-rsa-cbc", PeerOptions{.server = true, .tls12_only = true, .tls12_cipher = "ECDHE-RSA-AES128-SHA"},
+             false},
+            // ... and a server without ECDHE: the static-RSA key exchange.
+            {"tls12-static-rsa", PeerOptions{.server = true, .tls12_only = true, .tls12_cipher = "AES128-SHA"}, false},
             {"tls12-client-cert-request", PeerOptions{.server = true, .tls12_only = true, .client_cert = true}, false},
             {"tls12-client-only", PeerOptions{.server = true}, true},
     };
@@ -493,9 +498,14 @@ void connection_corpus() {
     const Bytes warning{1, 90};
     const Bytes close_notify{1, 0};
     const Bytes hello_request{0, 0, 0, 0};
-    for (std::uint8_t config = 0; config < 4; ++config) {
+    // Configs 0-3: 1.3/1.2 x client/server (1.2 = AES128-GCM). Then the 1.2
+    // CBC record suites (config bits 2-3 = 1..3, feature/tls/11).
+    constexpr std::array<std::uint8_t, 10> kConfigs{0, 1, 2, 3, 0x05, 0x07, 0x09, 0x0B, 0x0D, 0x0F};
+    constexpr std::array<const char *, 4> kSuiteTags{"", "-aes128-sha", "-aes256-sha", "-aes128-sha256"};
+    for (const std::uint8_t config: kConfigs) {
         const bool tls12 = (config & 1) != 0;
-        const std::string tag = std::string(tls12 ? "tls12" : "tls13") + ((config & 2) ? "-server" : "-client");
+        const std::string tag = std::string(tls12 ? "tls12" : "tls13") + ((config & 2) ? "-server" : "-client") +
+                                kSuiteTags[(config >> 2) & 3];
         Bytes flow{config};
         record(flow, 0x80 | 3, app); // app data, drain
         if (!tls12) {

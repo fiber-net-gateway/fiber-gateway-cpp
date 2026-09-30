@@ -80,6 +80,7 @@ using fiber::tls::TlsHandshakeType;
 using fiber::tls::TlsPrivateKey;
 using fiber::tls::TlsProtocolVersion;
 using fiber::tls::TlsRecordCipher;
+using fiber::tls::TlsRecordDirection;
 using fiber::tls::TlsRecordProtectionKind;
 using fiber::tls::TlsSecret;
 using fiber::tls::TlsServerConfig;
@@ -412,8 +413,8 @@ std::vector<std::uint8_t> craft_key_update(TlsConnectedState &client_state, bool
     auto keys = fiber::tls::tls13_traffic_keys(*next, client_state.suite);
     EXPECT_TRUE(keys.has_value());
     TlsRecordCipher fresh;
-    EXPECT_TRUE(fresh.init(client_state.suite, TlsRecordProtectionKind::Tls13, {keys->key.data(), keys->key_len},
-                           {keys->iv.data(), keys->iv_len})
+    EXPECT_TRUE(fresh.init(client_state.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal,
+                           {keys->key.data(), keys->key_len}, {keys->iv.data(), keys->iv_len})
                         .has_value());
     client_state.client_app_secret = std::move(*next);
     client_state.write_cipher = std::move(fresh);
@@ -497,8 +498,7 @@ struct Synthetic12Pair {
     TlsConnectedState server;
 };
 
-Synthetic12Pair make_synthetic_12_pair() {
-    const TlsCipherSuiteId suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256;
+Synthetic12Pair make_synthetic_12_pair(TlsCipherSuiteId suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256) {
     std::array<std::uint8_t, 48> master_bytes{};
     for (std::size_t i = 0; i < master_bytes.size(); ++i) {
         master_bytes[i] = static_cast<std::uint8_t>(i * 5 + 1);
@@ -517,21 +517,25 @@ Synthetic12Pair make_synthetic_12_pair() {
     pair.client.version = TlsProtocolVersion::Tls12;
     pair.client.suite = suite;
     EXPECT_TRUE(pair.client.read_cipher
-                        .init(suite, TlsRecordProtectionKind::Tls12, {block->server.key.data(), block->server.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Open,
+                              {block->server.key.data(), block->server.key_len},
                               {block->server.iv.data(), block->server.iv_len})
                         .has_value());
     EXPECT_TRUE(pair.client.write_cipher
-                        .init(suite, TlsRecordProtectionKind::Tls12, {block->client.key.data(), block->client.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Seal,
+                              {block->client.key.data(), block->client.key_len},
                               {block->client.iv.data(), block->client.iv_len})
                         .has_value());
     pair.server.version = TlsProtocolVersion::Tls12;
     pair.server.suite = suite;
     EXPECT_TRUE(pair.server.read_cipher
-                        .init(suite, TlsRecordProtectionKind::Tls12, {block->client.key.data(), block->client.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Open,
+                              {block->client.key.data(), block->client.key_len},
                               {block->client.iv.data(), block->client.iv_len})
                         .has_value());
     EXPECT_TRUE(pair.server.write_cipher
-                        .init(suite, TlsRecordProtectionKind::Tls12, {block->server.key.data(), block->server.key_len},
+                        .init(suite, TlsRecordProtectionKind::Tls12, TlsRecordDirection::Seal,
+                              {block->server.key.data(), block->server.key_len},
                               {block->server.iv.data(), block->server.iv_len})
                         .has_value());
     return pair;
@@ -874,8 +878,8 @@ TEST(TlsConnectionTest, TwoPostHandshakeMessagesInOneRecordDrain) {
         auto keys = fiber::tls::tls13_traffic_keys(*next, states.client.suite);
         ASSERT_TRUE(keys.has_value());
         TlsRecordCipher fresh;
-        ASSERT_TRUE(fresh.init(states.client.suite, TlsRecordProtectionKind::Tls13, {keys->key.data(), keys->key_len},
-                               {keys->iv.data(), keys->iv_len})
+        ASSERT_TRUE(fresh.init(states.client.suite, TlsRecordProtectionKind::Tls13, TlsRecordDirection::Seal,
+                               {keys->key.data(), keys->key_len}, {keys->iv.data(), keys->iv_len})
                             .has_value());
         states.client.client_app_secret = std::move(*next);
         states.client.write_cipher = std::move(fresh);
@@ -1070,6 +1074,72 @@ TEST(TlsConnectionTest, DegenerateShortSealedRecordLatchesBadRecordMac12) {
         ASSERT_TRUE(server_feeds.feed(server_conn, short_record));
         EXPECT_TRUE(server_conn.failed());
         EXPECT_FALSE(chain_bytes(server_conn.take_output()).empty()); // our fatal alert flies
+    });
+}
+
+// The 1.2 CBC record suites (feature/tls/11) through the connection: writes
+// that walk the padding boundaries and split into several records, and the
+// sealed close_notify alert (a 2-byte plaintext, padded like any other).
+TEST(TlsConnectionTest, Synthetic12CbcAppAndCloseNotifyBothWays) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material; // pool only
+        for (const TlsCipherSuiteId suite:
+             {TlsCipherSuiteId::EcdheRsaAes128CbcSha, TlsCipherSuiteId::EcdheRsaAes256CbcSha,
+              TlsCipherSuiteId::EcdheRsaAes128CbcSha256}) {
+            Synthetic12Pair pair = make_synthetic_12_pair(suite);
+            TlsConnection client(TlsConnectionRole::Client, std::move(pair.client));
+            TlsConnection server(TlsConnectionRole::Server, std::move(pair.server));
+            WireFeeder server_feeds;
+            WireFeeder client_feeds;
+
+            for (const std::size_t n:
+                 {std::size_t{1}, std::size_t{15}, std::size_t{16}, std::size_t{17}, std::size_t{40000}}) {
+                std::vector<std::uint8_t> up(n);
+                std::vector<std::uint8_t> down(n);
+                for (std::size_t i = 0; i < n; ++i) {
+                    up[i] = static_cast<std::uint8_t>(i * 7);
+                    down[i] = static_cast<std::uint8_t>(i * 13 + 1);
+                }
+                const std::vector<std::uint8_t> up_wire = connection_wire(client, up);
+                EXPECT_EQ((n + 16383) / 16384, count_records(up_wire));
+                ASSERT_TRUE(server_feeds.feed(server, up_wire));
+                EXPECT_EQ(up, read_all(server));
+                ASSERT_TRUE(client_feeds.feed(client, connection_wire(server, down)));
+                EXPECT_EQ(down, read_all(client));
+            }
+
+            ASSERT_TRUE(client.close_notify().has_value());
+            const std::vector<std::uint8_t> close_wire = chain_bytes(client.take_output());
+            ASSERT_EQ(1u, count_records(close_wire));
+            EXPECT_EQ(kTypeAlert, close_wire[0]);
+            ASSERT_TRUE(server_feeds.feed(server, close_wire));
+            EXPECT_TRUE(server.peer_closed());
+            EXPECT_FALSE(server.failed());
+        }
+    });
+}
+
+// A CBC record whose body is not whole blocks is publicly malformed: it is
+// refused before any crypto and collapses to bad_record_mac like any
+// unauthentic record.
+TEST(TlsConnectionTest, MisalignedCbcRecordLatchesBadRecordMac12) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material; // pool only
+        Synthetic12Pair pair = make_synthetic_12_pair(TlsCipherSuiteId::EcdheRsaAes128CbcSha);
+        TlsConnection client(TlsConnectionRole::Client, std::move(pair.client));
+        TlsConnection server(TlsConnectionRole::Server, std::move(pair.server));
+
+        std::vector<std::uint8_t> wire = connection_wire(client, std::vector<std::uint8_t>(30, 0x42));
+        ASSERT_EQ(1u, count_records(wire));
+        wire.push_back(0x00); // one byte past the last block
+        const std::uint16_t length = static_cast<std::uint16_t>(((wire[3] << 8) | wire[4]) + 1);
+        wire[3] = static_cast<std::uint8_t>(length >> 8);
+        wire[4] = static_cast<std::uint8_t>(length);
+
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire));
+        EXPECT_TRUE(server.failed());
+        EXPECT_FALSE(chain_bytes(server.take_output()).empty()); // our fatal alert flies
     });
 }
 

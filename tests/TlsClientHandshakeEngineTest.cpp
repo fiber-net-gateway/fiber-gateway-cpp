@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "TlsCertFixtures.h"
+#include "TlsCertificateTestSupport.h"
 #include "tls/handshake/TlsClientHandshakeShared.h" // src-side header (tests may include it)
 
 #include <fiber/common/IoError.h>
@@ -1007,6 +1008,300 @@ TEST(TlsClientHandshake12Full, EcdsaSuiteAgrees) {
     });
 }
 
+// ---- legacy 1.2 suites (feature/tls/11) ----
+
+namespace {
+
+// App data both ways over the moved 1.2 ciphers, with payload sizes that walk
+// the CBC padding boundaries up to a full record.
+void expect_tls12_app_round_trips(BoringServer &server, TlsConnectedState &state) {
+    ASSERT_EQ(1, server.handshake_step());
+    for (const std::size_t n: {std::size_t{1}, std::size_t{15}, std::size_t{16}, std::size_t{17}, std::size_t{1000},
+                               fiber::tls::kTlsMaxPlaintextSize}) {
+        std::vector<std::uint8_t> down(n);
+        std::vector<std::uint8_t> up(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            down[i] = static_cast<std::uint8_t>(i * 3 + 1);
+            up[i] = static_cast<std::uint8_t>(i * 5 + 2);
+        }
+
+        // Server -> us: one record, opened by our read cipher.
+        ASSERT_EQ(static_cast<int>(n), SSL_write(server.ssl(), down.data(), static_cast<int>(n)));
+        const std::vector<std::uint8_t> sealed_in = server.drain_wbio();
+        ASSERT_GE(sealed_in.size(), fiber::tls::kTlsRecordHeaderSize);
+        ASSERT_EQ(static_cast<int>(fiber::tls::TlsContentType::ApplicationData), sealed_in[0]);
+        const std::size_t rec_len = (static_cast<std::size_t>(sealed_in[3]) << 8) | sealed_in[4];
+        ASSERT_EQ(fiber::tls::kTlsRecordHeaderSize + rec_len, sealed_in.size());
+        std::vector<std::uint8_t> opened(rec_len);
+        const auto open = state.read_cipher.open(
+                fiber::tls::TlsContentType::ApplicationData,
+                static_cast<std::uint16_t>((sealed_in[1] << 8) | sealed_in[2]), static_cast<std::uint16_t>(rec_len),
+                {sealed_in.data() + fiber::tls::kTlsRecordHeaderSize, rec_len}, opened);
+        ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, open.status) << "n=" << n;
+        ASSERT_EQ(n, open.plain_len);
+        EXPECT_EQ(0, std::memcmp(down.data(), opened.data(), n));
+
+        // Us -> server: sealed by our write cipher, read back by BoringSSL.
+        const std::size_t sealed_len = state.write_cipher.seal_output_size(n);
+        std::vector<std::uint8_t> wire(fiber::tls::kTlsRecordHeaderSize + sealed_len);
+        wire[0] = static_cast<std::uint8_t>(fiber::tls::TlsContentType::ApplicationData);
+        wire[1] = 0x03;
+        wire[2] = 0x03;
+        wire[3] = static_cast<std::uint8_t>(sealed_len >> 8);
+        wire[4] = static_cast<std::uint8_t>(sealed_len);
+        const auto sealed = state.write_cipher.seal(fiber::tls::TlsContentType::ApplicationData, up,
+                                                    {wire.data() + fiber::tls::kTlsRecordHeaderSize, sealed_len});
+        ASSERT_EQ(fiber::tls::TlsRecordCipher::Status::Ok, sealed.status);
+        ASSERT_TRUE(server.ship(wire));
+        std::vector<std::uint8_t> back(n);
+        std::size_t got = 0;
+        while (got < n) {
+            const int read = SSL_read(server.ssl(), back.data() + got, static_cast<int>(n - got));
+            ASSERT_GT(read, 0) << "n=" << n;
+            got += static_cast<std::size_t>(read);
+        }
+        EXPECT_EQ(up, back);
+    }
+}
+
+struct LegacySuiteCase {
+    const char *openssl_name;
+    TlsCipherSuiteId suite;
+    bool ecdsa; // a P-256 leaf instead of the RSA one
+};
+
+void expect_legacy_suite_negotiates(const LegacySuiteCase &c) {
+    ServerOptions opt{.tls12_cipher = c.openssl_name};
+    if (c.ecdsa) {
+        opt.leaf_pem = certfix::kLeafEcP256Pem;
+        opt.key_pem = certfix::kP256KeyPem;
+    }
+    auto server = BoringServer::make(opt);
+    ASSERT_NE(nullptr, server) << c.openssl_name;
+    ClientMaterial material;
+    const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+    TlsClientHandshakeEngine engine(cfg, nullptr);
+    DriveLog log;
+    ASSERT_TRUE(drive(*server, engine, false, log)) << c.openssl_name;
+
+    TlsConnectedState state = engine.take_state();
+    EXPECT_EQ(fiber::tls::TlsProtocolVersion::Tls12, state.version);
+    EXPECT_EQ(static_cast<std::uint16_t>(c.suite), static_cast<std::uint16_t>(state.suite)) << c.openssl_name;
+    const SSL_CIPHER *negotiated = SSL_get_current_cipher(server->ssl());
+    ASSERT_NE(nullptr, negotiated);
+    EXPECT_EQ(SSL_CIPHER_get_protocol_id(negotiated), static_cast<std::uint16_t>(state.suite));
+    expect_tls12_app_round_trips(*server, state);
+}
+
+} // namespace
+
+// A server speaking only the ECDHE CBC suites: the client's legacy tail gets
+// the handshake through, and the key_block-derived CBC ciphers interoperate.
+TEST(TlsClientHandshake12Legacy, EcdheCbcSuitesNegotiateAndCarryData) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const LegacySuiteCase &c: {
+                     LegacySuiteCase{"ECDHE-RSA-AES128-SHA", TlsCipherSuiteId::EcdheRsaAes128CbcSha, false},
+                     LegacySuiteCase{"ECDHE-RSA-AES256-SHA", TlsCipherSuiteId::EcdheRsaAes256CbcSha, false},
+                     LegacySuiteCase{"ECDHE-RSA-AES128-SHA256", TlsCipherSuiteId::EcdheRsaAes128CbcSha256, false},
+                     LegacySuiteCase{"ECDHE-ECDSA-AES128-SHA", TlsCipherSuiteId::EcdheEcdsaAes128CbcSha, true},
+                     LegacySuiteCase{"ECDHE-ECDSA-AES256-SHA", TlsCipherSuiteId::EcdheEcdsaAes256CbcSha, true},
+             }) {
+            expect_legacy_suite_negotiates(c);
+        }
+    });
+}
+
+// A server without ECDHE: the static-RSA key exchange (no ServerKeyExchange,
+// the premaster encrypted to the leaf) under both AEAD and CBC records.
+TEST(TlsClientHandshake12Legacy, StaticRsaSuitesNegotiateAndCarryData) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const LegacySuiteCase &c: {
+                     LegacySuiteCase{"AES128-GCM-SHA256", TlsCipherSuiteId::RsaAes128GcmSha256, false},
+                     LegacySuiteCase{"AES256-GCM-SHA384", TlsCipherSuiteId::RsaAes256GcmSha384, false},
+                     LegacySuiteCase{"AES128-SHA", TlsCipherSuiteId::RsaAes128CbcSha, false},
+                     LegacySuiteCase{"AES256-SHA", TlsCipherSuiteId::RsaAes256CbcSha, false},
+             }) {
+            expect_legacy_suite_negotiates(c);
+        }
+    });
+}
+
+// The legacy tail rides behind every AEAD suite: a server that honors the
+// client's order and supports both picks the AEAD suite.
+TEST(TlsClientHandshake12Legacy, AeadSuiteWinsWhenServerSupportsBoth) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server =
+                BoringServer::make(ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES128-GCM-SHA256"});
+        ASSERT_NE(nullptr, server);
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+        DriveLog log;
+        ASSERT_TRUE(drive(*server, engine, false, log));
+        EXPECT_EQ(static_cast<std::uint16_t>(TlsCipherSuiteId::EcdheRsaAes128GcmSha256),
+                  static_cast<std::uint16_t>(engine.take_state().suite));
+    });
+}
+
+TEST(TlsClientHandshake12Legacy, ServerPreferenceCanSelectStaticRsaCbcOverEcdheAead) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server = BoringServer::make(ServerOptions{.tls12_cipher = "AES128-SHA:ECDHE-RSA-AES128-GCM-SHA256"});
+        ASSERT_NE(nullptr, server);
+        SSL_set_options(server->ssl(), SSL_OP_CIPHER_SERVER_PREFERENCE);
+        ClientMaterial material;
+        const auto cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+        DriveLog log;
+        ASSERT_TRUE(drive(*server, engine, false, log));
+        ASSERT_FALSE(engine.failed());
+        EXPECT_EQ(TlsCipherSuiteId::RsaAes128CbcSha, engine.take_state().suite);
+        EXPECT_EQ(1, server->handshake_step());
+    });
+}
+
+// Rejection must produce only a fatal alert after ClientHello: no
+// ClientKeyExchange, CCS, or encrypted Finished may leave the client.
+void expect_only_certificate_alert(const std::vector<std::uint8_t> &wire, TlsAlertDesc alert) {
+    ASSERT_GE(wire.size(), 5u);
+    ASSERT_EQ(22, wire[0]);
+    const std::size_t hello_len = 5 + (static_cast<std::size_t>(wire[3]) << 8) + wire[4];
+    ASSERT_EQ(hello_len + 7, wire.size());
+    const std::vector<std::uint8_t> expected{21, 3, 3, 0, 2, 2, static_cast<std::uint8_t>(alert)};
+    EXPECT_EQ(expected, std::vector<std::uint8_t>(wire.begin() + hello_len, wire.end()));
+}
+
+TEST(TlsClientHandshake12Legacy, KeyUsageMatchesKeyExchangeWithAndWithoutPeerVerification) {
+    namespace ct = fiber::tls::certtest;
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const auto usage: ct::kKeyUsages) {
+            auto leaf = ct::leaf();
+            ASSERT_NE(nullptr, leaf);
+            ASSERT_NO_FATAL_FAILURE(ct::set_key_usage(leaf.get(), usage));
+            ASSERT_NO_FATAL_FAILURE(ct::sign(leaf.get()));
+            const auto pem = ct::pem(leaf.get());
+            for (const bool rsa: {false, true}) {
+                for (const bool verify: {false, true}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "usage=" << static_cast<int>(usage) << " rsa=" << rsa << " verify=" << verify);
+                    auto server = BoringServer::make(
+                            ServerOptions{.leaf_pem = pem.c_str(),
+                                          .tls12_cipher = rsa ? "AES128-GCM-SHA256" : "ECDHE-RSA-AES128-GCM-SHA256"});
+                    ASSERT_NE(nullptr, server);
+                    ClientMaterial material;
+                    auto cfg = material.config("example.com", certfix::kRefNowMs);
+                    cfg.verify_peer = verify;
+                    TlsClientHandshakeEngine engine(cfg, nullptr);
+                    DriveLog log;
+                    const bool allowed = usage == ct::KeyUsage::Absent || usage == ct::KeyUsage::Both ||
+                                         usage == (rsa ? ct::KeyUsage::Encipherment : ct::KeyUsage::Signature);
+                    EXPECT_EQ(allowed, drive(*server, engine, false, log));
+                    ASSERT_EQ(!allowed, engine.failed());
+                    if (allowed) {
+                        EXPECT_EQ(1, server->handshake_step());
+                    } else {
+                        EXPECT_EQ(TlsAlertDesc::BadCertificate, engine.failure_alert());
+                        expect_only_certificate_alert(log.client_to_server, TlsAlertDesc::BadCertificate);
+                    }
+                }
+            }
+        }
+    });
+}
+
+class TlsClientUnsupportedLeafTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(TlsClientUnsupportedLeafTest, RejectsWithoutPanicking) {
+    namespace ct = fiber::tls::certtest;
+    auto leaf = ct::leaf();
+    ASSERT_NE(nullptr, leaf);
+    if (GetParam()) {
+        ASSERT_NO_FATAL_FAILURE(ct::set_dsa_public_key(leaf.get()));
+    } else {
+        ASSERT_NO_FATAL_FAILURE(ct::set_rsa_pss_public_key(leaf.get()));
+    }
+    ASSERT_NO_FATAL_FAILURE(ct::sign(leaf.get()));
+    const auto der = ct::der(leaf.get());
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        for (const bool verify: {false, true}) {
+            for (const char *cipher: {"AES128-GCM-SHA256", "ECDHE-RSA-AES128-GCM-SHA256"}) {
+                SCOPED_TRACE(::testing::Message() << "verify=" << verify << " cipher=" << cipher);
+                auto server = BoringServer::make(ServerOptions{.tls12_cipher = cipher});
+                ASSERT_NE(nullptr, server);
+                ClientMaterial material;
+                auto cfg = material.config("example.com", certfix::kRefNowMs);
+                cfg.verify_peer = verify;
+                TlsClientHandshakeEngine engine(cfg, nullptr);
+                auto client_wire = chain_bytes(engine.take_output());
+                ASSERT_TRUE(server->ship(client_wire));
+                ASSERT_EQ(0, server->handshake_step());
+                const auto flight = server->drain_wbio();
+                // Feed only the genuine ServerHello, followed by a replacement
+                // Certificate record. No SKE or SHD is needed for rejection.
+                ASSERT_GT(flight.size(), 9u);
+                const std::size_t sh_len = 4 + (static_cast<std::size_t>(flight[6]) << 16) +
+                                           (static_cast<std::size_t>(flight[7]) << 8) + flight[8];
+                ASSERT_LE(5 + sh_len, flight.size());
+                std::vector<std::uint8_t> hello(flight.begin(), flight.begin() + 5 + sh_len);
+                hello[3] = static_cast<std::uint8_t>(sh_len >> 8);
+                hello[4] = static_cast<std::uint8_t>(sh_len);
+                Event event;
+                ASSERT_TRUE(feed_bytes(engine, hello, false, event));
+                ASSERT_FALSE(engine.done());
+                std::vector<std::uint8_t> cert{22, 3, 3};
+                const auto u24 = [&](std::size_t n) {
+                    cert.push_back(static_cast<std::uint8_t>(n >> 16));
+                    cert.push_back(static_cast<std::uint8_t>(n >> 8));
+                    cert.push_back(static_cast<std::uint8_t>(n));
+                };
+                const auto record_len = der.size() + 10;
+                cert.push_back(static_cast<std::uint8_t>(record_len >> 8));
+                cert.push_back(static_cast<std::uint8_t>(record_len));
+                cert.push_back(11); // Certificate
+                u24(der.size() + 6);
+                u24(der.size() + 3);
+                u24(der.size());
+                cert.insert(cert.end(), der.begin(), der.end());
+                ASSERT_TRUE(feed_bytes(engine, cert, false, event));
+                ASSERT_TRUE(engine.failed());
+                EXPECT_EQ(TlsAlertDesc::UnsupportedCertificate, engine.failure_alert());
+                const auto alert = chain_bytes(engine.take_output());
+                client_wire.insert(client_wire.end(), alert.begin(), alert.end());
+                expect_only_certificate_alert(client_wire, TlsAlertDesc::UnsupportedCertificate);
+            }
+        }
+    });
+}
+
+INSTANTIATE_TEST_SUITE_P(Tls12, TlsClientUnsupportedLeafTest, ::testing::Bool());
+
+// A tampered sealed server Finished under a CBC suite fails authentication
+// like any AEAD record.
+TEST(TlsClientHandshake12Legacy, TamperedCbcFinishedIsBadRecordMac) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        auto server = BoringServer::make(ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-SHA"});
+        ASSERT_NE(nullptr, server);
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        TlsClientHandshakeEngine engine(cfg, nullptr);
+
+        // CH -> server flight -> our flight -> server CCS + Finished.
+        ASSERT_TRUE(server->ship(chain_bytes(engine.take_output())));
+        ASSERT_EQ(0, server->handshake_step());
+        Event event = Event::None;
+        ASSERT_TRUE(feed_bytes(engine, server->drain_wbio(), false, event));
+        ASSERT_FALSE(engine.done());
+        ASSERT_TRUE(server->ship(chain_bytes(engine.take_output()))); // CKE, CCS, Finished
+        (void) server->handshake_step();
+        std::vector<std::uint8_t> final_flight = server->drain_wbio(); // CCS, sealed Finished
+        ASSERT_GT(final_flight.size(), 6u + fiber::tls::kTlsRecordHeaderSize);
+        final_flight.back() ^= 0x01; // the sealed Finished's last (padding) block
+        ASSERT_TRUE(feed_bytes(engine, final_flight, false, event));
+        ASSERT_TRUE(engine.done());
+        ASSERT_TRUE(engine.failed());
+        EXPECT_EQ(TlsAlertDesc::BadRecordMac, engine.failure_alert());
+    });
+}
+
 TEST(TlsClientHandshake12ByteFeed, OneByteAtATimeCompletes) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         auto server = BoringServer::make(ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"});
@@ -1218,7 +1513,94 @@ TEST(TlsClientHandshake12Reject, SuiteNotOfferedAborts) {
                 ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"}, cfg,
                 [](std::vector<std::uint8_t> &flight) {
                     const std::size_t sid_len = flight[43];
-                    flight[44 + sid_len] = 0x00; // TLS_RSA_WITH_AES_128_CBC_SHA — never offered
+                    flight[44 + sid_len] = 0x00; // TLS_RSA_WITH_3DES_EDE_CBC_SHA — never offered
+                    flight[45 + sid_len] = 0x0A;
+                },
+                TlsAlertDesc::IllegalParameter);
+    });
+}
+
+TEST(TlsClientHandshake12Reject, LeafKeyNotMatchingSuiteAuthAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        // An ECDSA server relabelled as ECDHE-RSA: its ECDSA-signed SKE would
+        // verify against the EC leaf, so only the Certificate-time auth check
+        // catches the mismatch.
+        expect_reject_after_sh_mutation(
+                ServerOptions{.leaf_pem = certfix::kLeafEcP256Pem,
+                              .key_pem = certfix::kP256KeyPem,
+                              .tls12_cipher = "ECDHE-ECDSA-AES128-GCM-SHA256"},
+                cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0xC0; // ECDHE-RSA-AES128-GCM-SHA256
+                    flight[45 + sid_len] = 0x2F;
+                },
+                TlsAlertDesc::IllegalParameter);
+    });
+}
+
+TEST(TlsClientHandshake12Reject, RsaLeafUnderEcdsaSuiteAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        expect_reject_after_sh_mutation(
+                ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-GCM-SHA256"}, cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0xC0; // ECDHE-ECDSA-AES128-GCM-SHA256
+                    flight[45 + sid_len] = 0x2B;
+                },
+                TlsAlertDesc::IllegalParameter);
+    });
+}
+
+// Static RSA sends no SKE; one arriving anyway is out of order.
+TEST(TlsClientHandshake12Legacy, ServerKeyExchangeUnderStaticRsaAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        expect_reject_after_sh_mutation(
+                ServerOptions{.tls12_cipher = "ECDHE-RSA-AES128-SHA"}, cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0x00; // relabelled AES128-SHA (static RSA)
+                    flight[45 + sid_len] = 0x2F;
+                },
+                TlsAlertDesc::UnexpectedMessage);
+    });
+}
+
+// An ECDHE suite needs the SKE; a static-RSA server flight lacks it.
+TEST(TlsClientHandshake12Legacy, MissingServerKeyExchangeUnderEcdheAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        expect_reject_after_sh_mutation(
+                ServerOptions{.tls12_cipher = "AES128-SHA"}, cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0xC0; // relabelled ECDHE-RSA-AES128-SHA
+                    flight[45 + sid_len] = 0x13;
+                },
+                TlsAlertDesc::UnexpectedMessage);
+    });
+}
+
+// The premaster can only be encrypted to an RSA leaf.
+TEST(TlsClientHandshake12Legacy, EcLeafUnderStaticRsaAborts) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ClientMaterial material;
+        const TlsClientConfig cfg = material.config("example.com", certfix::kRefNowMs);
+        expect_reject_after_sh_mutation(
+                ServerOptions{.leaf_pem = certfix::kLeafEcP256Pem,
+                              .key_pem = certfix::kP256KeyPem,
+                              .tls12_cipher = "ECDHE-ECDSA-AES128-SHA"},
+                cfg,
+                [](std::vector<std::uint8_t> &flight) {
+                    const std::size_t sid_len = flight[43];
+                    flight[44 + sid_len] = 0x00; // relabelled AES128-SHA (static RSA)
                     flight[45 + sid_len] = 0x2F;
                 },
                 TlsAlertDesc::IllegalParameter);

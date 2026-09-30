@@ -54,10 +54,12 @@ private:
 // the 1.2 key_block. Plain data: consumed by TlsRecordCipher::init, which
 // copies it into the EVP_AEAD_CTX; the caller wipes it at that handoff.
 struct TlsTrafficKeys {
-    std::array<std::uint8_t, 32> key{};
-    std::array<std::uint8_t, 12> iv{}; // 1.3: static iv (12B); 1.2: fixed iv (4 GCM / 12 ChaCha)
-    std::uint8_t key_len = 0;
-    std::uint8_t iv_len = 0; // 12 (1.3) / 4|12 (1.2 GCM|ChaCha)
+    // The record cipher's key: the AEAD key, or for a 1.2 CBC suite the MAC
+    // key || encryption key concatenation BoringSSL's TLS CBC AEADs take.
+    std::array<std::uint8_t, 64> key{};
+    std::array<std::uint8_t, 12> iv{}; // 1.3: static iv (12B); 1.2: fixed iv (4 GCM / 12 ChaCha / none CBC)
+    std::uint8_t key_len = 0; // 16|32 AEAD; 36|52|48 CBC (SHA-1+AES-128 | SHA-1+AES-256 | SHA-256+AES-128)
+    std::uint8_t iv_len = 0; // 12 (1.3) / 4|12|0 (1.2 GCM|ChaCha|CBC — the CBC IV is explicit per record)
 };
 
 } // namespace fiber::tls

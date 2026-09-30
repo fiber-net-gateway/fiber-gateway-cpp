@@ -158,6 +158,21 @@ bool TlsPublicKeyView::supports(TlsSignatureScheme scheme, TlsProtocolVersion ve
     return pkey_supports(impl_, scheme, version);
 }
 
+common::IoResult<std::size_t> TlsPublicKeyView::rsa_encrypt_pkcs1(std::span<const std::uint8_t> in,
+                                                                  std::span<std::uint8_t> out) const noexcept {
+    FIBER_ASSERT(impl_ != nullptr);
+    RSA *rsa = EVP_PKEY_get0_RSA(static_cast<const EVP_PKEY *>(impl_));
+    if (rsa == nullptr || out.size() < RSA_size(rsa)) {
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    std::size_t out_len = 0;
+    if (RSA_encrypt(rsa, &out_len, out.data(), out.size(), in.data(), in.size(), RSA_PKCS1_PADDING) != 1) {
+        ERR_clear_error();
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    return out_len;
+}
+
 TlsPrivateKey::TlsPrivateKey(TlsPrivateKey &&other) noexcept : impl_(other.impl_) { other.impl_ = nullptr; }
 
 TlsPrivateKey &TlsPrivateKey::operator=(TlsPrivateKey &&other) noexcept {

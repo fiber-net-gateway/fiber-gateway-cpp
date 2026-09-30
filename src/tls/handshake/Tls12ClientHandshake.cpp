@@ -69,7 +69,7 @@ void Tls12ClientHandshake::start(const TlsServerHello &sh, std::span<const std::
         fail(TlsAlertDesc::HandshakeFailure);
         return;
     }
-    if (tls_client_suite_offer_index(sh.cipher_suite) == kTlsSuitePreference.size()) {
+    if (!tls_client_suite_offered(sh.cipher_suite)) {
         fail(TlsAlertDesc::IllegalParameter); // never offered
         return;
     }
@@ -168,7 +168,7 @@ void Tls12ClientHandshake::on_ccs() noexcept {
         case St::ExpectServerCcs12:
             // The server's one CCS switches the read side to the key_block
             // server keys; our write side went live with the client flight.
-            if (!swap_cipher_12(ctx_.read_cipher(), kb12_.server)) {
+            if (!swap_cipher_12(ctx_.read_cipher(), TlsRecordDirection::Open, kb12_.server)) {
                 fail(TlsAlertDesc::InternalError);
                 return;
             }
@@ -207,6 +207,29 @@ void Tls12ClientHandshake::handle_certificate_12(std::span<const std::uint8_t> b
     peer_chain_ = std::move(chain).value();
     feed12(TlsHandshakeType::Certificate, body);
 
+    // The leaf must fit the suite's auth half (BoringSSL
+    // ssl_check_leaf_certificate): RSA suites need an RSA key, ECDSA suites
+    // an EC or Ed25519 one (RFC 8422 §5.1). The SKE check alone cannot catch
+    // an ECDHE-RSA suite over an EC leaf whose SKE is ECDSA-signed.
+    const auto leaf_key = peer_chain_.leaf().public_key();
+    if (!leaf_key.has_value()) {
+        fail(TlsAlertDesc::UnsupportedCertificate);
+        return;
+    }
+    if ((leaf_key->key_kind() == TlsKeyKind::Rsa) != (suite_info()->auth == TlsSuiteAuth::Rsa)) {
+        fail(TlsAlertDesc::IllegalParameter);
+        return;
+    }
+
+    // Suite suitability is independent of trust verification: static RSA
+    // encrypts to the leaf, while ECDHE authenticates a signed exchange.
+    const auto usage = suite_info()->kx == TlsSuiteKx::Rsa ? TlsCertificateKeyUsage::KeyEncipherment
+                                                           : TlsCertificateKeyUsage::DigitalSignature;
+    if (!peer_chain_.leaf().allows_key_usage(usage)) {
+        fail(TlsAlertDesc::BadCertificate);
+        return;
+    }
+
     if (cfg_.verify_peer) {
         // The check name is check_host when set, else the SNI send name
         // (09 §4.3: the net layer's server_name/verify_name split).
@@ -222,7 +245,10 @@ void Tls12ClientHandshake::handle_certificate_12(std::span<const std::uint8_t> b
             return;
         }
     }
-    st_ = St::ExpectSke12;
+    // Static RSA (feature/tls/11) sends no ServerKeyExchange: the premaster
+    // is encrypted to this leaf in our flight. A stray SKE then falls to the
+    // CR/SHD state's unexpected_message.
+    st_ = suite_info()->kx == TlsSuiteKx::Rsa ? St::ExpectCrShd12 : St::ExpectSke12;
 }
 
 void Tls12ClientHandshake::handle_server_key_exchange_12(std::span<const std::uint8_t> body) noexcept {
@@ -370,9 +396,30 @@ bool Tls12ClientHandshake::send_client_flight_12() noexcept {
         }
     }
 
-    // ---- ClientKeyExchange (plaintext): u8(point_len) || point ----
-    const auto cke_len =
-            tls_encode_client_key_exchange(hello_.kx->public_value().bytes(), {scratch_.data(), scratch_.size()});
+    // ---- ClientKeyExchange (plaintext) ----
+    // ECDHE: u8(point_len) || point. Static RSA (RFC 5246 §7.4.7.1): the
+    // premaster is our ClientHello's client_version (0x0303) || 46 random
+    // bytes, RSAES-PKCS1-v1_5 encrypted to the leaf key (its RSA kind was
+    // checked at the Certificate), u16-length-prefixed.
+    common::IoResult<std::size_t> cke_len = std::unexpected(common::IoErr::Invalid);
+    if (suite_info()->kx == TlsSuiteKx::Rsa) {
+        z12_ = TlsKxShared{};
+        z12_.len = 48;
+        z12_.z[0] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(TlsProtocolVersion::Tls12) >> 8);
+        z12_.z[1] = static_cast<std::uint8_t>(TlsProtocolVersion::Tls12);
+        const auto leaf_key = peer_chain_.leaf().public_key();
+        std::array<std::uint8_t, kClientMaxRsaCiphertext> encrypted{};
+        common::IoResult<std::size_t> encrypted_len = std::unexpected(common::IoErr::Invalid);
+        if (tls_random_bytes({z12_.z.data() + 2, 46}) && leaf_key.has_value()) {
+            encrypted_len = leaf_key->rsa_encrypt_pkcs1(z12_.bytes(), encrypted);
+        }
+        if (encrypted_len.has_value()) {
+            cke_len = tls_encode_client_key_exchange_rsa({encrypted.data(), *encrypted_len},
+                                                         {scratch_.data(), scratch_.size()});
+        }
+    } else {
+        cke_len = tls_encode_client_key_exchange(hello_.kx->public_value().bytes(), {scratch_.data(), scratch_.size()});
+    }
     if (!cke_len.has_value() || !t12_.update({scratch_.data(), cke_len.value()}) ||
         !emit_message({scratch_.data(), cke_len.value()})) {
         fail(TlsAlertDesc::InternalError);
@@ -448,7 +495,7 @@ bool Tls12ClientHandshake::send_client_flight_12() noexcept {
     }
 
     // ---- CCS + write-cipher swap: everything after this is sealed ----
-    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), kb12_.client)) {
+    if (!ctx_.send_ccs().has_value() || !swap_cipher_12(ctx_.write_cipher(), TlsRecordDirection::Seal, kb12_.client)) {
         fail(TlsAlertDesc::InternalError);
         return false;
     }
