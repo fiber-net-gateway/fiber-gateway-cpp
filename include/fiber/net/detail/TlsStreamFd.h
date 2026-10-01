@@ -97,36 +97,36 @@ public:
     void abandon_pending_write() noexcept;
 
 private:
-    enum class Role : std::uint8_t {
-        None,
-        Client,
-        Server,
-    };
+    // Each handshake() is its own coroutine owning its staging and engine as
+    // frame locals, dying with the frame at co_return or unwind. Staged
+    // configs borrow the caller's param material under the documented param
+    // contract (valid until the handshake co_returns). The engine's chains
+    // resolve the current loop's node pool, so the frame — the Task — must be
+    // destroyed on the connection's loop.
 
-    // Handshake staging + engines (defined in the .cpp): a coroutine-frame
-    // local of handshake_impl, dying with the frame at co_return or unwind.
-    // Staged configs borrow the caller's param material under the documented
-    // param contract (valid until the handshake co_returns). The engines'
-    // chains resolve the current loop's node pool, so the frame — the Task —
-    // must be destroyed on the connection's loop.
-    struct Handshake;
-
-    common::IoResult<void> start_client(Handshake &staging, const TlsClientParam &param) noexcept;
-    common::IoResult<void> start_server(Handshake &staging, const TlsServerParam &param) noexcept;
+    // Start checks shared by both roles: Already, BadFd, version window.
+    fiber::common::IoErr check_handshake_start(int min_version, int max_version) const noexcept;
     // TlsServerConfigSource::select — re-stages the server config per
-    // ClientHello through the param's configure callback.
+    // ClientHello through the param's configure callback (ctx: the server
+    // handshake's frame-local selection, defined in the .cpp).
     static const tls::TlsServerConfig *select_server_config(void *ctx,
                                                             const tls::TlsClientHello &client_hello) noexcept;
-    [[nodiscard]] HandshakeTask handshake_impl(Role role, const TlsClientParam *client_param,
-                                               const TlsServerParam *server_param, std::chrono::milliseconds timeout);
-    fiber::common::IoErr handshake_once(Handshake &staging, fiber::event::IoEvent &event) noexcept;
+    // One drive pass over either engine (instantiated in the .cpp): flush its
+    // flights, feed it fd bytes, and at HandshakeDone swap it for the
+    // connected-phase connection. A failed engine reports Invalid once its
+    // alert is on the wire.
+    template<class Engine>
+    fiber::common::IoErr handshake_step(Engine &engine, fiber::event::IoEvent &event) noexcept;
+    // Reads one wire chunk for the handshake engine (EOF: ConnReset).
+    fiber::common::IoErr read_handshake_chunk(mem::IoBuf &chunk, fiber::event::IoEvent &event) noexcept;
+    // HandshakeDone: builds the connection from the engine's state and frames
+    // the engine's inbound leftover through record_reader_.
+    fiber::common::IoErr install_connection(tls::TlsConnectionRole role, tls::TlsConnectedState &&state,
+                                            mem::IoBufChain &&leftover) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
-    // Moves connection output — or the live handshake engines' output when
-    // staging is passed — into out_pending_ and writes it out. The connected
-    // phase passes nullptr (a live staging outranks nothing there).
-    fiber::common::IoErr flush_output(Handshake *staging, fiber::event::IoEvent &event) noexcept;
-    // Reads the fd to drain and feeds the live engine (handshake phase).
-    fiber::common::IoErr feed_engine(Handshake &staging, fiber::event::IoEvent &event) noexcept;
+    // Moves the connection's output (once connected) into out_pending_ and
+    // writes it out; the handshake step queues the engine's output itself.
+    fiber::common::IoErr flush_output(fiber::event::IoEvent &event) noexcept;
     // Splits complete records off the connected-phase reader and hands each
     // to the connection (open + route happen there; a trailing partial
     // record stays buffered in record_reader_ across feeds). Reader- and
@@ -148,7 +148,7 @@ private:
     mem::IoBufChain *pending_write_chain_ = nullptr;
     size_t pending_write_len_ = 0;
     std::unique_ptr<std::uint8_t[]> write_scratch_{};
-    Role role_ = Role::None;
+    bool handshake_started_ = false;
     bool handshake_done_ = false;
     bool shutdown_started_ = false;
     bool busy_ = false;

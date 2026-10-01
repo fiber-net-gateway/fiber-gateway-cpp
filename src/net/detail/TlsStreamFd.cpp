@@ -10,6 +10,7 @@
 #include <memory>
 #include <new>
 #include <sys/uio.h>
+#include <type_traits>
 
 #include <fiber/common/Assert.h>
 #include <fiber/net/TlsCredential.h>
@@ -77,48 +78,23 @@ bool version_bounds_ok(int min_version, int max_version) noexcept {
     return in_domain(min_version) && in_domain(max_version) && min_version <= max_version;
 }
 
-} // namespace
-
-// ---------------------------------------------------------------------------
-// Handshake staging (09 §5).
-//
-// A coroutine-frame local of handshake_impl — no TlsStreamFd member holds
-// it: the staging and its engines die with the handshake's frame (at
-// co_return, or the Canceled unwind of a mid-handshake close), which runs on
-// the connection's loop as the engines' node-pool affinity requires.
-//
-// The staged configs borrow the caller's param material (TlsCredential, ALPN
-// backing storage, trust store) under the documented param contract: valid
-// until the handshake co_returns. select_server_config re-stages per
-// ClientHello through the param's configure callback and latches its error
-// for handshake_once to report after flushing the fatal alert. A credential
-// the callback hands over through add_credential lands in credential_owner and
-// is released with the staging — after the engines.
-// ---------------------------------------------------------------------------
-
-struct TlsStreamFd::Handshake {
-    const TlsServerParam *param = nullptr; // server only
-    tls::TlsClientConfig client_cfg{};
-    tls::TlsServerConfig server_cfg{};
-    // Ticket service adapters (09 §6): filled from param.ticket_service, the
-    // borrowed fn+ctx pairs die with this staging alongside the engine.
-    tls::TlsTicketMinter minter{};
-    tls::TlsResumptionLookup lookup{};
-    common::IoErr callback_error = common::IoErr::None;
-    std::array<std::uint8_t, 16> ip_bytes{}; // client verify_ip backing
-    tls::TlsClientHandshakeEngine *client = nullptr;
-    tls::TlsServerHandshakeEngine *server = nullptr;
-    tls::TlsServerConfigSource selector{};
-    // Retains a dynamically selected credential while the server engine may
-    // still read its chain/key; destroyed after the engines (member teardown
-    // follows the destructor body).
+// Per-ClientHello server config selection (09 §4.1): the
+// TlsServerConfigSource ctx, a frame local of the server handshake declared
+// ahead of the engine that borrows it. cfg starts as the template staged from
+// the param; select_server_config re-stages it through the param's configure
+// callback and latches the callback's error for the handshake to report after
+// flushing the fatal alert. A credential the callback hands over through
+// add_credential lands in credential_owner, which is destroyed after the
+// engine (reverse declaration order) — the engine may read its chain/key
+// until then.
+struct ServerSelection {
+    const TlsServerParam &param;
+    tls::TlsServerConfig cfg{};
     TlsCredential credential_owner;
-
-    ~Handshake() {
-        delete client;
-        delete server;
-    }
+    common::IoErr callback_error = common::IoErr::None;
 };
+
+} // namespace
 
 TlsStreamFd::TlsStreamFd(fiber::event::EventLoop &loop, int fd) : stream_fd_(loop, fd) {}
 
@@ -170,19 +146,19 @@ void TlsStreamFd::close() {
             (void) conn_->close_notify();
         }
         fiber::event::IoEvent event = fiber::event::IoEvent::None;
-        (void) flush_output(nullptr, event); // best-effort single drain; fd may be gone
+        (void) flush_output(event); // best-effort single drain; fd may be gone
         delete conn_;
         conn_ = nullptr;
     }
     // A mid-handshake close touches no handshake state here: the fd close
     // below wakes the suspended handshake with Canceled (inline resume), it
-    // unwinds, and its frame-local staging — engines included — dies with the
-    // coroutine frame on this loop.
+    // unwinds, and its frame-local staging — the engine included — dies with
+    // the coroutine frame on this loop.
     if (stream_fd_.valid()) {
         stream_fd_.close();
     }
     record_reader_.reset();
-    role_ = Role::None;
+    handshake_started_ = false;
     handshake_done_ = false;
     shutdown_started_ = false;
     busy_ = false;
@@ -225,140 +201,70 @@ fiber::common::IoErr TlsStreamFd::clear_terminal_callback(ReadyCallback callback
     return stream_fd_.clear_terminal_callback(callback, ctx);
 }
 
-common::IoResult<void> TlsStreamFd::start_client(Handshake &staging, const TlsClientParam &param) noexcept {
-    if (role_ != Role::None) {
-        return std::unexpected(common::IoErr::Already);
+fiber::common::IoErr TlsStreamFd::check_handshake_start(int min_version, int max_version) const noexcept {
+    if (handshake_started_) {
+        return fiber::common::IoErr::Already;
     }
     if (!stream_fd_.valid()) {
-        return std::unexpected(common::IoErr::BadFd);
+        return fiber::common::IoErr::BadFd;
     }
-    if (!version_bounds_ok(param.min_version, param.max_version)) {
-        return std::unexpected(common::IoErr::Invalid);
+    if (!version_bounds_ok(min_version, max_version)) {
+        return fiber::common::IoErr::Invalid;
     }
-
-    auto &cfg = staging.client_cfg;
-    if (auto staged = TlsClientStager::stage(param, cfg, staging.ip_bytes); !staged) {
-        return std::unexpected(staged.error());
-    }
-    cfg.min_version = static_cast<std::uint16_t>(param.min_version);
-    cfg.max_version = static_cast<std::uint16_t>(param.max_version);
-
-    staging.client = new (std::nothrow) tls::TlsClientHandshakeEngine(cfg, nullptr);
-    if (staging.client == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    // A construction failure (entropy/allocation) is already terminal with
-    // any alert encoded — the handshake loop flushes it, then reports.
-
-    role_ = Role::Client;
-    handshake_done_ = false;
-    return {};
-}
-
-common::IoResult<void> TlsStreamFd::start_server(Handshake &staging, const TlsServerParam &param) noexcept {
-    if (role_ != Role::None) {
-        return std::unexpected(common::IoErr::Already);
-    }
-    if (!stream_fd_.valid()) {
-        return std::unexpected(common::IoErr::BadFd);
-    }
-    if (!param.enabled() || !version_bounds_ok(param.min_version, param.max_version)) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-    // Client-certificate verification needs a trust store up front.
-    if (param.client_certificate_mode != TlsClientCertificateMode::None && param.trust_store == nullptr) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
-
-    auto &cfg = staging.server_cfg;
-    if (param.trust_store != nullptr) {
-        cfg.client_trust = &param.trust_store->tls_store();
-    }
-    cfg.require_client_cert = param.client_certificate_mode == TlsClientCertificateMode::Required;
-    cfg.alpn = param.alpn;
-    cfg.min_version = static_cast<std::uint16_t>(param.min_version);
-    cfg.max_version = static_cast<std::uint16_t>(param.max_version);
-    cfg.enable_early_data = param.enable_early_data;
-    cfg.now_unix_ms = system_now_unix_ms();
-
-    staging.param = &param;
-    staging.selector.select = &TlsStreamFd::select_server_config;
-    staging.selector.ctx = &staging;
-    // Session tickets (09 §6): the service's adapters are staged here so the
-    // engine borrows them for the handshake. Unconfigured stays null — no NST,
-    // no resumption (decision 1) — which the engine treats natively.
-    if (param.ticket_service != nullptr) {
-        staging.minter = param.ticket_service->minter();
-        staging.lookup = param.ticket_service->lookup();
-    }
-    // Credentials arrive per ClientHello through the selector, so the
-    // template config passes only the selector-mode invariant checks.
-    staging.server = new (std::nothrow) tls::TlsServerHandshakeEngine(
-            cfg, param.ticket_service != nullptr ? &staging.lookup : nullptr,
-            param.ticket_service != nullptr ? &staging.minter : nullptr, &staging.selector);
-    if (staging.server == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-
-    role_ = Role::Server;
-    handshake_done_ = false;
-    return {};
+    return fiber::common::IoErr::None;
 }
 
 const tls::TlsServerConfig *TlsStreamFd::select_server_config(void *ctx,
                                                               const tls::TlsClientHello &client_hello) noexcept {
-    auto *staging = static_cast<Handshake *>(ctx);
-    staging->callback_error = common::IoErr::None;
-    staging->server_cfg.chain = nullptr;
-    staging->server_cfg.key = nullptr;
-    staging->credential_owner.reset();
+    auto *selection = static_cast<ServerSelection *>(ctx);
+    selection->callback_error = common::IoErr::None;
+    selection->cfg.chain = nullptr;
+    selection->cfg.key = nullptr;
+    selection->credential_owner.reset();
     std::size_t credential_count = 0;
-    TlsServerHandshakeConfig config(staging->server_cfg, credential_count, staging->credential_owner);
+    TlsServerHandshakeConfig config(selection->cfg, credential_count, selection->credential_owner);
     const tls::TlsClientHelloView view = client_hello.view();
-    common::IoErr error = staging->param->configure_callback(staging->param->configure_ctx, config, view);
+    common::IoErr error = selection->param.configure_callback(selection->param.configure_ctx, config, view);
     if (error == common::IoErr::None && credential_count == 0) {
         error = common::IoErr::Invalid;
     }
     if (error != common::IoErr::None) {
-        staging->credential_owner.reset(); // nothing will read it: release now
-        staging->callback_error = error;
+        selection->credential_owner.reset(); // nothing will read it: release now
+        selection->callback_error = error;
         return nullptr; // the engine answers handshake_failure
     }
-    return &staging->server_cfg;
+    return &selection->cfg;
 }
 
 TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsClientParam &param, std::chrono::milliseconds timeout) {
-    return handshake_impl(Role::Client, &param, nullptr, timeout);
-}
-
-TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, std::chrono::milliseconds timeout) {
-    return handshake_impl(Role::Server, nullptr, &param, timeout);
-}
-
-TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(Role role, const TlsClientParam *client_param,
-                                                       const TlsServerParam *server_param,
-                                                       std::chrono::milliseconds timeout) {
     if (busy_) {
         co_return std::unexpected(fiber::common::IoErr::Busy);
     }
-
     busy_ = true;
     BusyResetGuard busy_reset(&busy_);
 
-    // Frame-local staging: constructed and started only once the coroutine
-    // runs, torn down with the frame at co_return or unwind — the engines
-    // never outlive the handshake that owns them.
-    Handshake staging{};
-    common::IoResult<void> start =
-            role == Role::Client ? start_client(staging, *client_param) : start_server(staging, *server_param);
-    if (!start) {
-        co_return std::unexpected(start.error());
+    if (const fiber::common::IoErr err = check_handshake_start(param.min_version, param.max_version);
+        err != fiber::common::IoErr::None) {
+        co_return std::unexpected(err);
     }
+    // Frame-local staging: the engine copies cfg, but cfg.verify_ip keeps
+    // borrowing ip_bytes, which therefore outlives the engine.
+    tls::TlsClientConfig cfg{};
+    std::array<std::uint8_t, 16> ip_bytes{};
+    if (auto staged = TlsClientStager::stage(param, cfg, ip_bytes); !staged) {
+        co_return std::unexpected(staged.error());
+    }
+    cfg.min_version = static_cast<std::uint16_t>(param.min_version);
+    cfg.max_version = static_cast<std::uint16_t>(param.max_version);
+    // A construction failure (entropy/allocation) is already terminal with
+    // any alert encoded — the first step flushes it, then reports.
+    tls::TlsClientHandshakeEngine engine(cfg, nullptr);
+    handshake_started_ = true;
 
-    Deadline deadline = make_deadline(timeout);
+    const Deadline deadline = make_deadline(timeout);
     for (;;) {
         fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
-        fiber::common::IoErr err = handshake_once(staging, wait_event);
+        const fiber::common::IoErr err = handshake_step(engine, wait_event);
         if (err == fiber::common::IoErr::None) {
             co_return fiber::common::IoResult<void>{};
         }
@@ -369,21 +275,97 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake_impl(Role role, const TlsClien
         if (!remaining) {
             co_return std::unexpected(remaining.error());
         }
+        fiber::common::IoResult<void> waited{};
         if (wait_event == fiber::event::IoEvent::Read) {
-            auto wait_result = co_await stream_fd_.wait_readable(*remaining);
-            if (!wait_result) {
-                co_return std::unexpected(wait_result.error());
-            }
-            continue;
+            waited = co_await stream_fd_.wait_readable(*remaining);
+        } else {
+            waited = co_await stream_fd_.wait_writable(*remaining);
         }
-        if (wait_event == fiber::event::IoEvent::Write) {
-            auto wait_result = co_await stream_fd_.wait_writable(*remaining);
-            if (!wait_result) {
-                co_return std::unexpected(wait_result.error());
-            }
-            continue;
+        if (!waited) {
+            co_return std::unexpected(waited.error());
         }
+    }
+}
+
+TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, std::chrono::milliseconds timeout) {
+    if (busy_) {
+        co_return std::unexpected(fiber::common::IoErr::Busy);
+    }
+    busy_ = true;
+    BusyResetGuard busy_reset(&busy_);
+
+    if (const fiber::common::IoErr err = check_handshake_start(param.min_version, param.max_version);
+        err != fiber::common::IoErr::None) {
+        co_return std::unexpected(err);
+    }
+    if (!param.enabled()) {
         co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+    // Client-certificate verification needs a trust store up front.
+    if (param.client_certificate_mode != TlsClientCertificateMode::None && param.trust_store == nullptr) {
+        co_return std::unexpected(fiber::common::IoErr::Invalid);
+    }
+
+    // Frame-local staging, declared ahead of the engine that borrows all of
+    // it: the selection, the ticket adapters and the source die after it.
+    ServerSelection selection{param};
+    tls::TlsServerConfig &cfg = selection.cfg;
+    if (param.trust_store != nullptr) {
+        cfg.client_trust = &param.trust_store->tls_store();
+    }
+    cfg.require_client_cert = param.client_certificate_mode == TlsClientCertificateMode::Required;
+    cfg.alpn = param.alpn;
+    cfg.min_version = static_cast<std::uint16_t>(param.min_version);
+    cfg.max_version = static_cast<std::uint16_t>(param.max_version);
+    cfg.enable_early_data = param.enable_early_data;
+    cfg.now_unix_ms = system_now_unix_ms();
+    // Session tickets (09 §6): the service's adapters are staged here so the
+    // engine borrows them for the handshake. Unconfigured stays null — no NST,
+    // no resumption (decision 1) — which the engine treats natively.
+    const bool tickets = param.ticket_service != nullptr;
+    tls::TlsTicketMinter minter{};
+    tls::TlsResumptionLookup lookup{};
+    if (tickets) {
+        minter = param.ticket_service->minter();
+        lookup = param.ticket_service->lookup();
+    }
+    tls::TlsServerConfigSource source{};
+    source.select = &TlsStreamFd::select_server_config;
+    source.ctx = &selection;
+    // Credentials arrive per ClientHello through the source, so the template
+    // config passes only the selector-mode invariant checks.
+    tls::TlsServerHandshakeEngine engine(cfg, tickets ? &lookup : nullptr, tickets ? &minter : nullptr, &source);
+    handshake_started_ = true;
+
+    const Deadline deadline = make_deadline(timeout);
+    for (;;) {
+        fiber::event::IoEvent wait_event = fiber::event::IoEvent::None;
+        const fiber::common::IoErr err = handshake_step(engine, wait_event);
+        if (err == fiber::common::IoErr::None) {
+            co_return fiber::common::IoResult<void>{};
+        }
+        if (err != fiber::common::IoErr::WouldBlock) {
+            // A failed engine's report yields to the configure callback's
+            // latched error (the alert is already on the wire).
+            if (err == fiber::common::IoErr::Invalid && engine.failed() &&
+                selection.callback_error != common::IoErr::None) {
+                co_return std::unexpected(selection.callback_error);
+            }
+            co_return std::unexpected(err);
+        }
+        auto remaining = remaining_timeout(deadline);
+        if (!remaining) {
+            co_return std::unexpected(remaining.error());
+        }
+        fiber::common::IoResult<void> waited{};
+        if (wait_event == fiber::event::IoEvent::Read) {
+            waited = co_await stream_fd_.wait_readable(*remaining);
+        } else {
+            waited = co_await stream_fd_.wait_writable(*remaining);
+        }
+        if (!waited) {
+            co_return std::unexpected(waited.error());
+        }
     }
 }
 
@@ -480,80 +462,77 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> TlsStreamFd::readv(std:
     }
 }
 
-fiber::common::IoErr TlsStreamFd::handshake_once(Handshake &staging, fiber::event::IoEvent &event) noexcept {
+template<class Engine>
+fiber::common::IoErr TlsStreamFd::handshake_step(Engine &engine, fiber::event::IoEvent &event) noexcept {
+    constexpr bool kServer = std::is_same_v<Engine, tls::TlsServerHandshakeEngine>;
     if (!stream_fd_.valid()) {
         return fiber::common::IoErr::BadFd;
-    }
-    if (handshake_done_) {
-        if (conn_ != nullptr && conn_->failed()) {
-            return fiber::common::IoErr::Invalid;
-        }
-        return fiber::common::IoErr::None;
     }
     for (;;) {
         // Flights and alerts go out before anything else — including the
         // fatal alert that ends a failed handshake (the failure return only
-        // happens once the wire is clean).
-        fiber::common::IoErr err = flush_output(&staging, event);
+        // happens once the wire is clean). Once connected, the engine is
+        // spent and flush_output queues the connection's output instead.
+        if (conn_ == nullptr) {
+            FIBER_ASSERT(out_pending_.append_chain(engine.take_output()));
+        }
+        fiber::common::IoErr err = flush_output(event);
         if (err != fiber::common::IoErr::None) {
             return err;
         }
-        // The success path falls through to this check on its second pass:
-        // tail output flushed, then done (a leftover-fed record violation
+        // The success path falls through to this check on its next pass, and
+        // a step resumed after a WouldBlock tail flush lands here too: tail
+        // output flushed, then done (a leftover-fed record violation
         // surfacing as conn_->failed() reports Invalid here).
         if (handshake_done_) {
-            if (conn_ != nullptr && conn_->failed()) {
-                return fiber::common::IoErr::Invalid;
-            }
-            return fiber::common::IoErr::None;
+            return conn_->failed() ? fiber::common::IoErr::Invalid : fiber::common::IoErr::None;
         }
 
-        const bool done = role_ == Role::Client ? staging.client->done() : staging.server->done();
-        if (!done) {
-            err = feed_engine(staging, event);
+        if (!engine.done()) {
+            mem::IoBuf chunk;
+            err = read_handshake_chunk(chunk, event);
             if (err != fiber::common::IoErr::None) {
                 return err;
             }
+            auto fed = engine.feed(std::move(chunk));
+            if (!fed) {
+                return fed.error();
+            }
             continue;
         }
-        if (role_ == Role::Client ? staging.client->failed() : staging.server->failed()) {
-            // The alert (if any) is on the wire per the flush above; report
-            // the callback's error when one was latched, else the failure.
-            // The staging dies with the coroutine frame on the way out.
-            const common::IoErr callback_error = staging.callback_error;
-            return callback_error != common::IoErr::None ? callback_error : fiber::common::IoErr::Invalid;
+        if (engine.failed()) {
+            return fiber::common::IoErr::Invalid; // the alert (if any) is on the wire per the flush above
         }
 
         // Success: swap the handshake engine for the connected-phase engine.
-        // The engine's pending output (a TLS 1.3 client's Finished record is
-        // sealed after this feed and still lives in the engine's chain) must
-        // move into the glue's flush chain before the engine dies.
-        FIBER_ASSERT(out_pending_.append_chain(role_ == Role::Client ? staging.client->take_output()
-                                                                     : staging.server->take_output()));
-        tls::TlsConnectedState state =
-                role_ == Role::Client ? staging.client->take_state() : staging.server->take_state();
-        mem::IoBufChain leftover = role_ == Role::Client ? staging.client->take_inbound_leftover()
-                                                         : staging.server->take_inbound_leftover();
-        if (role_ == Role::Server) {
-            early_data_ = staging.server->take_early_data();
+        // The flush above already moved the engine's final output (a TLS 1.3
+        // client's Finished, sealed by the last feed) into out_pending_.
+        tls::TlsConnectedState state = engine.take_state();
+        mem::IoBufChain leftover = engine.take_inbound_leftover();
+        if constexpr (kServer) {
+            early_data_ = engine.take_early_data();
         }
-        conn_ = new (std::nothrow) tls::TlsConnection(role_ == Role::Client ? tls::TlsConnectionRole::Client
-                                                                            : tls::TlsConnectionRole::Server,
-                                                      std::move(state));
-        if (conn_ == nullptr) {
-            return fiber::common::IoErr::NoMem;
-        }
-        // The leftover bytes ride the glue's connected-phase reader — records
-        // past the final flight (app data piggybacked behind it) frame here.
-        if (!leftover.empty() && !record_reader_.feed(std::move(leftover))) {
-            return fiber::common::IoErr::NoMem;
-        }
-        const fiber::common::IoErr drain_err = drain_records();
-        if (drain_err != fiber::common::IoErr::None) {
-            return drain_err;
+        err = install_connection(kServer ? tls::TlsConnectionRole::Server : tls::TlsConnectionRole::Client,
+                                 std::move(state), std::move(leftover));
+        if (err != fiber::common::IoErr::None) {
+            return err;
         }
         handshake_done_ = true;
     }
+}
+
+fiber::common::IoErr TlsStreamFd::install_connection(tls::TlsConnectionRole role, tls::TlsConnectedState &&state,
+                                                     mem::IoBufChain &&leftover) noexcept {
+    conn_ = new (std::nothrow) tls::TlsConnection(role, std::move(state));
+    if (conn_ == nullptr) {
+        return fiber::common::IoErr::NoMem;
+    }
+    // The leftover bytes ride the glue's connected-phase reader — records
+    // past the final flight (app data piggybacked behind it) frame here.
+    if (!leftover.empty() && !record_reader_.feed(std::move(leftover))) {
+        return fiber::common::IoErr::NoMem;
+    }
+    return drain_records();
 }
 
 fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) noexcept {
@@ -573,7 +552,7 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
     }
     // Send our close_notify and be done: waiting for the peer's echo is the
     // reader's business (read_once surfaces PeerClosed), not the closer's.
-    return flush_output(nullptr, event);
+    return flush_output(event);
 }
 
 // TLS writes seal a contiguous input buffer into records. Unlike sendmsg,
@@ -647,7 +626,7 @@ fiber::common::IoResult<std::size_t> TlsStreamFd::try_write(mem::IoBufChain &buf
     }
 
     fiber::event::IoEvent event = fiber::event::IoEvent::None;
-    const fiber::common::IoErr err = flush_output(nullptr, event);
+    const fiber::common::IoErr err = flush_output(event);
     if (err != fiber::common::IoErr::None) {
         if (err != fiber::common::IoErr::WouldBlock) {
             // The group is dead (no resume after a hard error): drop its
@@ -695,12 +674,9 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> TlsStreamFd::writev(mem
     }
 }
 
-fiber::common::IoErr TlsStreamFd::flush_output(Handshake *staging, fiber::event::IoEvent &event) noexcept {
+fiber::common::IoErr TlsStreamFd::flush_output(fiber::event::IoEvent &event) noexcept {
     if (conn_ != nullptr) {
         FIBER_ASSERT(out_pending_.append_chain(conn_->take_output()));
-    } else if (staging != nullptr) {
-        FIBER_ASSERT(out_pending_.append_chain(role_ == Role::Client ? staging->client->take_output()
-                                                                     : staging->server->take_output()));
     }
     while (!out_pending_.empty()) {
         struct iovec iov[kMaxIov];
@@ -727,8 +703,8 @@ fiber::common::IoErr TlsStreamFd::flush_output(Handshake *staging, fiber::event:
     return fiber::common::IoErr::None;
 }
 
-fiber::common::IoErr TlsStreamFd::feed_engine(Handshake &staging, fiber::event::IoEvent &event) noexcept {
-    mem::IoBuf chunk = mem::IoBuf::allocate(kReadChunk);
+fiber::common::IoErr TlsStreamFd::read_handshake_chunk(mem::IoBuf &chunk, fiber::event::IoEvent &event) noexcept {
+    chunk = mem::IoBuf::allocate(kReadChunk);
     if (!chunk.valid()) {
         return fiber::common::IoErr::NoMem;
     }
@@ -745,17 +721,6 @@ fiber::common::IoErr TlsStreamFd::feed_engine(Handshake &staging, fiber::event::
         return fiber::common::IoErr::ConnReset;
     }
     chunk.commit(*read_result);
-    if (role_ == Role::Client) {
-        auto fed = staging.client->feed(std::move(chunk));
-        if (!fed) {
-            return fed.error();
-        }
-    } else {
-        auto fed = staging.server->feed(std::move(chunk));
-        if (!fed) {
-            return fed.error();
-        }
-    }
     return fiber::common::IoErr::None;
 }
 
