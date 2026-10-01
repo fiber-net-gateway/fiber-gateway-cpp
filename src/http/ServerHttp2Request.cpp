@@ -13,9 +13,9 @@
 #include <fiber/event/EventLoop.h>
 #include <fiber/http/Http2Connection.h>
 #include <fiber/http/HttpUriParse.h>
-#include "http/Http2DataFrameEncoder.h"
 #include "http/Http2HeadersFrameEncoder.h"
 #include "http/Huffman.h"
+#include "http/detail/Http2DataSendOps.h"
 
 namespace fiber::http {
 
@@ -70,46 +70,6 @@ struct ServerHttp2Request::SendResponseHeaderOp {
     const HttpHeaders *headers_ = nullptr;
     int status_code_ = 0;
     bool end_stream_ = false;
-};
-
-struct ServerHttp2Request::SendResponseBodyAllOp {
-    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
-
-    explicit SendResponseBodyAllOp(mem::IoBufChain &&chunk) noexcept :
-        chunk_(std::move(chunk)), end_(chunk_.complete()) {}
-
-    [[nodiscard]] std::size_t flow_controlled_bytes() const noexcept { return chunk_.readable_bytes(); }
-    [[nodiscard]] bool end_stream() const noexcept { return end_; }
-
-    common::IoErr on_encode(const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
-                            Http2OutboundEncodeResult &result) noexcept;
-
-    mem::IoBufChain chunk_;
-    // Read once up front: encoding the last bytes moves the chain's
-    // completion marker along with them.
-    bool end_ = false;
-};
-
-struct ServerHttp2Request::SendResponseBodySomeOp {
-    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
-    inline static constexpr bool kAllowsPartialFinalBatch = true;
-
-    explicit SendResponseBodySomeOp(mem::IoBufChain &chunk) noexcept :
-        chunk_(&chunk), total_bytes_(chunk.readable_bytes()), end_(chunk.complete()) {}
-
-    SendResponseBodySomeOp(const std::uint8_t *buf, std::size_t len, bool end) noexcept :
-        buf_(buf), total_bytes_(len), end_(end) {}
-
-    [[nodiscard]] std::size_t flow_controlled_bytes() const noexcept { return total_bytes_; }
-    [[nodiscard]] bool end_stream() const noexcept { return end_; }
-
-    common::IoErr on_encode(const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
-                            Http2OutboundEncodeResult &result) noexcept;
-
-    mem::IoBufChain *chunk_ = nullptr;
-    const std::uint8_t *buf_ = nullptr;
-    std::size_t total_bytes_ = 0;
-    bool end_ = false;
 };
 
 const Http2Stream::Ops &ServerHttp2Request::stream_ops() noexcept {
@@ -330,116 +290,6 @@ common::IoErr ServerHttp2Request::SendResponseHeaderOp::on_encode(const Http2Out
     result.flow_controlled_bytes = 0;
     result.operation_final_batch = true;
     result.end_stream = end_stream_;
-    return common::IoErr::None;
-}
-
-common::IoErr ServerHttp2Request::SendResponseBodyAllOp::on_encode(const Http2OutboundEncodeRequest &req,
-                                                                   Http2OutboundEncodeTarget &target,
-                                                                   Http2OutboundEncodeResult &result) noexcept {
-    const std::size_t remaining = chunk_.readable_bytes();
-    if (remaining == 0) {
-        FIBER_ASSERT(end_);
-
-        Http2DataFrameEncoder frame_encoder({
-                .stream_id = req.stream_id,
-                .max_frame_size = req.max_frame_size,
-                .end_stream = true,
-        });
-        common::IoErr err = frame_encoder.encode(target, chunk_, 0);
-        if (err != common::IoErr::None) {
-            return err;
-        }
-        result.flow_controlled_bytes = 0;
-        result.operation_final_batch = true;
-        result.end_stream = true;
-        return common::IoErr::None;
-    }
-
-    FIBER_ASSERT(req.payload_budget != 0);
-    const std::size_t payload_budget = std::min<std::size_t>(remaining, req.payload_budget);
-    const bool end_stream = end_ && payload_budget == remaining;
-    Http2DataFrameEncoder frame_encoder({
-            .stream_id = req.stream_id,
-            .max_frame_size = req.max_frame_size,
-            .end_stream = end_stream,
-    });
-    common::IoErr err = frame_encoder.encode(target, chunk_, payload_budget);
-    if (err != common::IoErr::None) {
-        return err;
-    }
-
-    result.flow_controlled_bytes = static_cast<std::uint32_t>(payload_budget);
-    result.operation_final_batch = chunk_.readable_bytes() == 0;
-    result.end_stream = end_stream;
-    return common::IoErr::None;
-}
-
-common::IoErr ServerHttp2Request::SendResponseBodySomeOp::on_encode(const Http2OutboundEncodeRequest &req,
-                                                                    Http2OutboundEncodeTarget &target,
-                                                                    Http2OutboundEncodeResult &result) noexcept {
-    if (total_bytes_ == 0) {
-        FIBER_ASSERT(end_);
-        mem::IoBufChain empty;
-        Http2DataFrameEncoder frame_encoder({
-                .stream_id = req.stream_id,
-                .max_frame_size = req.max_frame_size,
-                .end_stream = true,
-        });
-        common::IoErr err = frame_encoder.encode(target, empty, 0);
-        if (err != common::IoErr::None) {
-            return err;
-        }
-        // The terminal-only batch (empty complete chain) consumed the borrowed
-        // chain's completion marker, same as the data branch below: callers
-        // (http::pipe_http_body) require a successful terminal write to flip
-        // complete() to false or their completion-progress invariant trips.
-        if (chunk_ != nullptr) {
-            chunk_->clear_complete();
-        }
-        result.flow_controlled_bytes = 0;
-        result.operation_final_batch = true;
-        result.end_stream = true;
-        return common::IoErr::None;
-    }
-
-    FIBER_ASSERT(req.payload_budget != 0);
-    const std::size_t payload_bytes = std::min(total_bytes_, static_cast<std::size_t>(req.payload_budget));
-    const bool end_stream = end_ && payload_bytes == total_bytes_;
-    mem::IoBufChain staged;
-    mem::IoBufChain *payload = chunk_;
-
-    if (chunk_ == nullptr) {
-        mem::IoBuf owned = mem::IoBuf::allocate(payload_bytes);
-        if (!owned) {
-            return common::IoErr::NoMem;
-        }
-        std::memcpy(owned.writable_data(), buf_, payload_bytes);
-        owned.commit(payload_bytes);
-        if (!staged.append(std::move(owned))) {
-            return common::IoErr::NoMem;
-        }
-        if (end_stream) {
-            staged.mark_complete();
-        }
-        payload = &staged;
-    }
-
-    Http2DataFrameEncoder frame_encoder({
-            .stream_id = req.stream_id,
-            .max_frame_size = req.max_frame_size,
-            .end_stream = end_stream,
-    });
-    common::IoErr err = frame_encoder.encode(target, *payload, payload_bytes);
-    if (err != common::IoErr::None) {
-        return err;
-    }
-    if (chunk_ != nullptr && end_stream) {
-        chunk_->clear_complete();
-    }
-
-    result.flow_controlled_bytes = static_cast<std::uint32_t>(payload_bytes);
-    result.operation_final_batch = true;
-    result.end_stream = end_stream;
     return common::IoErr::None;
 }
 
@@ -963,7 +813,7 @@ std::string_view ServerHttp2Request::copy_to_pool(const std::uint8_t *data, std:
         return {};
     }
     std::memcpy(mem, data, len);
-    return std::string_view(mem, len);
+    return {mem, len};
 }
 
 std::string_view ServerHttp2Request::copy_to_pool(std::string_view value) noexcept {
