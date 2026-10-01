@@ -2120,29 +2120,29 @@ DetachedTask write_record_and_park(fiber::net::detail::TlsStreamFd *client, fibe
     while (!*server_done) {
         co_await fiber::async::sleep(1ms);
     }
-    // Torn down on the loop: a close_notify the gone peer never took stays
-    // queued in the stream until its destruction.
+    // The client closes first: the server's close_notify then meets a gone
+    // peer and stays unflushed.
     client->close();
-    delete client;
     server->close();
-    delete server;
     fiber::event::EventLoop::current().stop();
 }
 
 // Both ends on one loop, so the sequencing flag needs no synchronization.
+// The streams are closed on the loop and destroyed after it stopped.
 void run_pending_plaintext_probe(TestTlsPair &tls_pair, const std::string &payload, PendingPlaintextProbe probe,
                                  PendingPlaintextOutcome &outcome, fiber::common::IoErr &client_err) {
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
     fiber::event::EventLoop loop;
-    auto *server = new fiber::net::detail::TlsStreamFd(loop, fds[0]);
-    auto *client = new fiber::net::detail::TlsStreamFd(loop, fds[1]);
+    fiber::net::detail::TlsStreamFd server(loop, fds[0]);
+    fiber::net::detail::TlsStreamFd client(loop, fds[1]);
     bool server_done = false;
     fiber::async::spawn(loop, [&]() {
-        return probe_pending_plaintext(server, &tls_pair.server_options, payload.size(), probe, &server_done, &outcome);
+        return probe_pending_plaintext(&server, &tls_pair.server_options, payload.size(), probe, &server_done,
+                                       &outcome);
     });
     fiber::async::spawn(loop, [&]() {
-        return write_record_and_park(client, server, &tls_pair.client_options, &payload, &server_done, &client_err);
+        return write_record_and_park(&client, &server, &tls_pair.client_options, &payload, &server_done, &client_err);
     });
     loop.run();
 }
@@ -2194,6 +2194,50 @@ TEST(TlsStreamFdDeathTest, ReadSubscriptionOverBufferedPlaintextAsserts) {
                 run_pending_plaintext_probe(*tls_pair, payload, PendingPlaintextProbe::Subscribe, outcome, client_err);
             },
             "FIBER_ASSERT failed: !has_pending_read");
+}
+
+DetachedTask handshake_and_flag(fiber::net::detail::TlsStreamFd *stream, const fiber::net::TlsServerParam *param,
+                                fiber::common::IoErr *err, bool *done) {
+    auto handshake_result = co_await stream->handshake(*param, 5s);
+    *err = handshake_result ? fiber::common::IoErr::None : handshake_result.error();
+    *done = true;
+}
+
+// close() drops the output its best-effort drain could not send (here the
+// close_notify a gone peer refuses) on the loop, so the closed stream holds
+// no loop-bound buffers and may be destroyed after the loop stopped.
+TEST(TlsStreamFdTest, CloseReleasesUnflushedOutput) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert_close", kSelfSignedCertPem);
+    TempFile key("key_close", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
+
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+    const std::string payload = byte_pattern(100, 13);
+    fiber::common::IoErr server_err = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr client_err = fiber::common::IoErr::Unknown;
+    {
+        fiber::event::EventLoop loop;
+        fiber::net::detail::TlsStreamFd server(loop, fds[0]);
+        fiber::net::detail::TlsStreamFd client(loop, fds[1]);
+        bool server_done = false;
+        fiber::async::spawn(loop, [&]() {
+            return handshake_and_flag(&server, &tls_pair->server_options, &server_err, &server_done);
+        });
+        fiber::async::spawn(loop, [&]() {
+            return write_record_and_park(&client, &server, &tls_pair->client_options, &payload, &server_done,
+                                         &client_err);
+        });
+        loop.run();
+        EXPECT_FALSE(server.valid());
+        EXPECT_FALSE(client.valid());
+    } // both destroyed here, with no loop running on this thread
+    EXPECT_EQ(server_err, fiber::common::IoErr::None);
+    EXPECT_EQ(client_err, fiber::common::IoErr::None);
 }
 
 // =====================================================================
