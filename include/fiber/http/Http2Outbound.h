@@ -6,6 +6,8 @@
 #include <utility>
 
 #include "../common/IoError.h"
+#include "../common/NonCopyable.h"
+#include "../common/NonMovable.h"
 #include "../common/mem/IoBufChain.h"
 
 namespace fiber::http {
@@ -30,24 +32,48 @@ struct Http2OutboundEncodeResult {
 
 struct Http2OutboundSendResult {
     common::IoErr error = common::IoErr::None;
-    std::uint32_t flow_controlled_bytes = 0;
     bool operation_final_batch = false;
 };
 
-class Http2OutboundEncodeTarget {
+// Appends encoded frames straight onto a connection's in-flight chain. Small
+// writes go into the chain's tail node when it alone owns its storage and has
+// room, so consecutive frames share one buffer instead of allocating one each.
+// Nothing appended reaches the transport before the encode returns, and a
+// failed encode takes its bytes back with rollback().
+class Http2OutboundEncodeTarget : public common::NonCopyable, public common::NonMovable {
 public:
-    Http2OutboundEncodeTarget() noexcept = default;
+    explicit Http2OutboundEncodeTarget(mem::IoBufChain &chain) noexcept;
+    ~Http2OutboundEncodeTarget();
 
-    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] bool empty() const noexcept { return total_bytes() == 0; }
+    // Bytes appended since construction.
     [[nodiscard]] std::size_t total_bytes() const noexcept;
-    [[nodiscard]] mem::IoBufChain take_chain() noexcept { return std::move(chain_); }
+
+    // Contiguous room for at least `min_bytes` at the end of the chain: the
+    // tail node's free space when that node alone owns its storage, else a
+    // fresh buffer of max(min_bytes, capacity_hint) that joins the chain on
+    // its first commit. The room stays valid until the next acquire or append.
+    [[nodiscard]] common::IoErr acquire(std::size_t min_bytes, std::size_t capacity_hint, std::uint8_t *&dst,
+                                        std::size_t &len) noexcept;
+    // Makes the next `bytes` of the acquired room readable.
+    void commit(std::size_t bytes) noexcept;
 
     [[nodiscard]] common::IoErr append_copy(const void *src, std::size_t bytes) noexcept;
-    [[nodiscard]] common::IoErr append_buffer(mem::IoBuf &&buf) noexcept;
+    // Moves the chain's nodes in. Its completion marker belongs to the
+    // payload's producer and is dropped.
     [[nodiscard]] common::IoErr append_chain(mem::IoBufChain &&chain) noexcept;
 
+    // Takes back everything appended since construction.
+    void rollback() noexcept;
+
 private:
-    mem::IoBufChain chain_{};
+    void release_pending() noexcept;
+
+    mem::IoBufChain *chain_;
+    std::size_t base_bytes_;
+    // A fresh buffer and its node, linked into the chain by the first commit:
+    // an empty node must never sit in the chain.
+    mem::IoBufNode *pending_ = nullptr;
 };
 
 struct Http2OutboundOperation {

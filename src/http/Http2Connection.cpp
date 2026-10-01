@@ -52,6 +52,11 @@ constexpr std::size_t kIoPumpTurnByteBudget = 2 * 1024 * 1024;
 // streams interleaving on the connection without forcing one loop
 // round-trip per frame.
 constexpr std::size_t kStreamOutboundBatchBytes = 64 * 1024;
+// Ready streams are encoded only while the in-flight chain holds less than
+// this, so control frames appended to its tail wait behind at most this plus
+// one stream batch. It covers about one writev's worth (16 iovecs of DATA
+// frames, or one TLS record group); anything more is just lookahead.
+constexpr std::size_t kOutboundEncodeWatermark = 64 * 1024;
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -551,7 +556,7 @@ void Http2Connection::drive_io() noexcept {
             return true;
         }
         outbound_ready_hint_ = false;
-        auto result = this->pump_outbound(kIoPumpOperationBudget, byte_budget);
+        auto result = this->pump_outbound(byte_budget);
         if (!result) {
             enter_closing(result.error());
             return false;
@@ -1759,7 +1764,6 @@ void Http2Connection::try_release_stream(Http2Stream &stream) noexcept {
         return;
     }
     if (stream.outbound_hook_.state_ != Http2OutboundHook::State::Idle ||
-        stream.outbound_wait_state_ != Http2Stream::OutboundWaitState::None ||
         stream.outbound_kind_ != Http2OutboundKind::None) {
         return;
     }
@@ -2051,50 +2055,58 @@ void Http2Connection::enter_closing(common::IoErr reason, bool report_error) noe
     finish_connection();
 }
 
-void Http2Connection::enqueue_outbound_hook(Http2OutboundHook &hook, bool priority) noexcept {
-    FIBER_ASSERT(hook.state_ == Http2OutboundHook::State::Idle);
-    FIBER_ASSERT(hook.encoded_.readable_bytes() != 0);
-    if (priority) {
-        outbound_queue_.push_front(hook);
-    } else {
-        outbound_queue_.push_back(hook);
+// Parks a DATA send that still has payload but no window to send it in.
+bool Http2Connection::wait_for_send_window(Http2Stream &stream) noexcept {
+    if (stream.outbound_kind_ != Http2OutboundKind::Data || stream.outbound_pending_flow_controlled_bytes_ == 0) {
+        return false;
     }
-    hook.state_ = Http2OutboundHook::State::Queued;
-}
-
-void Http2Connection::enqueue_connection_window_wait(Http2Stream &stream) noexcept {
-    FIBER_ASSERT(stream.outbound_wait_state_ == Http2Stream::OutboundWaitState::None);
-    connection_window_waiters_.push_back(stream);
-    stream.outbound_wait_state_ = Http2Stream::OutboundWaitState::ConnectionWindow;
-}
-
-void Http2Connection::remove_connection_window_wait(Http2Stream &stream) noexcept {
-    if (stream.outbound_wait_state_ != Http2Stream::OutboundWaitState::ConnectionWindow) {
-        return;
+    Http2OutboundHook &hook = stream.outbound_hook_;
+    if (stream.send_window_ <= 0) {
+        hook.state_ = Http2OutboundHook::State::WaitStreamWindow;
+        return true;
     }
-    connection_window_waiters_.erase(stream);
-    stream.outbound_wait_state_ = Http2Stream::OutboundWaitState::None;
+    if (conn_send_window_ <= 0) {
+        hook.state_ = Http2OutboundHook::State::WaitConnWindow;
+        connection_window_waiters_.push_back(hook);
+        return true;
+    }
+    return false;
 }
 
-common::IoErr Http2Connection::try_encode_stream_outbound(Http2Stream &stream) noexcept {
+// Queues the stream to encode its next batch on the pump. Nothing is encoded
+// or charged to a window before then, so the send can still be withdrawn.
+void Http2Connection::queue_stream_send(Http2Stream &stream) noexcept {
     FIBER_ASSERT(stream.conn_ == this);
     FIBER_ASSERT(stream.outbound_operation_);
     FIBER_ASSERT(stream.outbound_kind_ != Http2OutboundKind::None);
     FIBER_ASSERT(stream.outbound_hook_.state_ == Http2OutboundHook::State::Idle);
-    FIBER_ASSERT(stream.outbound_wait_state_ == Http2Stream::OutboundWaitState::None);
+    if (wait_for_send_window(stream)) {
+        return;
+    }
+
+    Http2OutboundHook &hook = stream.outbound_hook_;
+    hook.state_ = Http2OutboundHook::State::Ready;
+    outbound_ready_queue_.push_back(hook);
+    schedule_io_pump();
+}
+
+// Encodes the stream's next batch straight onto the in-flight chain, packing
+// into its tail buffer where there is room. Once there it must reach the wire,
+// so the windows are charged for good.
+void Http2Connection::encode_stream_batch(Http2Stream &stream) noexcept {
+    FIBER_ASSERT(stream.conn_ == this);
+    FIBER_ASSERT(stream.outbound_operation_);
+    FIBER_ASSERT(stream.outbound_kind_ != Http2OutboundKind::None);
+    FIBER_ASSERT(stream.outbound_hook_.state_ == Http2OutboundHook::State::Idle);
+    // Streams encoded first, or a smaller SETTINGS_INITIAL_WINDOW_SIZE, can
+    // spend the windows while this one waits in the ready queue.
+    if (wait_for_send_window(stream)) {
+        return;
+    }
 
     const std::size_t pending_flow_controlled = stream.outbound_pending_flow_controlled_bytes_;
     std::uint32_t payload_budget = 0;
     if (stream.outbound_kind_ == Http2OutboundKind::Data && pending_flow_controlled != 0) {
-        if (stream.send_window_ <= 0) {
-            stream.outbound_wait_state_ = Http2Stream::OutboundWaitState::StreamWindow;
-            return common::IoErr::None;
-        }
-        if (conn_send_window_ <= 0) {
-            enqueue_connection_window_wait(stream);
-            return common::IoErr::None;
-        }
-
         payload_budget = static_cast<std::uint32_t>(
                 std::min<std::size_t>({pending_flow_controlled, static_cast<std::size_t>(stream.send_window_),
                                        static_cast<std::size_t>(conn_send_window_), kStreamOutboundBatchBytes}));
@@ -2104,38 +2116,57 @@ common::IoErr Http2Connection::try_encode_stream_outbound(Http2Stream &stream) n
     Http2OutboundEncodeRequest request;
     request.max_frame_size = peer_max_outbound_frame_size_;
     request.payload_budget = payload_budget;
-    Http2OutboundEncodeTarget target;
+    Http2OutboundEncodeTarget target(inflight_outbound_chain_);
     Http2OutboundEncodeResult result;
+    outbound_encoding_ = true;
     common::IoErr err = stream.encode_outbound_batch(request, target, result);
+    outbound_encoding_ = false;
+    if (err == common::IoErr::None && (target.empty() || result.flow_controlled_bytes > payload_budget)) {
+        err = common::IoErr::Invalid;
+    }
+    if (err == common::IoErr::None && result.operation_final_batch &&
+        result.flow_controlled_bytes != pending_flow_controlled &&
+        !stream.outbound_operation_.ops->allow_partial_final_batch) {
+        err = common::IoErr::Invalid;
+    }
     if (err != common::IoErr::None) {
-        return err;
-    }
-    if (target.empty() || result.flow_controlled_bytes > payload_budget ||
-        result.flow_controlled_bytes > stream.outbound_pending_flow_controlled_bytes_ ||
-        (stream.outbound_kind_ == Http2OutboundKind::Headers && result.flow_controlled_bytes != 0)) {
-        return common::IoErr::Invalid;
-    }
-    stream.outbound_pending_flow_controlled_bytes_ -= result.flow_controlled_bytes;
-    if (result.operation_final_batch && stream.outbound_pending_flow_controlled_bytes_ != 0) {
-        if (!stream.outbound_operation_.ops->allow_partial_final_batch) {
-            return common::IoErr::Invalid;
-        }
-        stream.outbound_pending_flow_controlled_bytes_ = 0;
+        // The partial batch leaves the chain, so only this operation fails.
+        target.rollback();
+        stream.notify_outbound_send_done(err, false);
+        return;
     }
 
-    Http2OutboundHook &hook = stream.outbound_hook_;
-    FIBER_ASSERT(hook.encoded_.empty());
-    hook.encoded_ = target.take_chain();
-    hook.ctx_ = &stream;
-    hook.send_done_cb_ = &Http2Stream::on_outbound_hook_send_done;
-    hook.window_consumed_ = result.flow_controlled_bytes;
-    hook.completion_result_ = common::IoErr::None;
-    hook.operation_final_batch_ = result.operation_final_batch;
+    stream.outbound_pending_flow_controlled_bytes_ =
+            result.operation_final_batch ? 0 : pending_flow_controlled - result.flow_controlled_bytes;
     conn_send_window_ -= static_cast<std::int32_t>(result.flow_controlled_bytes);
     stream.send_window_ -= static_cast<std::int32_t>(result.flow_controlled_bytes);
-    enqueue_outbound_hook(hook, false);
-    schedule_io_pump();
-    return common::IoErr::None;
+    if (stream.outbound_kind_ == Http2OutboundKind::Headers) {
+        stream.opening_committed_ = true;
+    }
+
+    outbound_appended_bytes_ += target.total_bytes();
+
+    Http2OutboundHook &hook = stream.outbound_hook_;
+    hook.inflight_end_ = outbound_appended_bytes_;
+    hook.completion_result_ = common::IoErr::None;
+    hook.operation_final_batch_ = result.operation_final_batch;
+    hook.state_ = Http2OutboundHook::State::InFlight;
+    inflight_outbound_hooks_.push_back(hook);
+}
+
+// Encodes ready streams while the in-flight chain holds less than the
+// watermark, so a control frame never waits behind more than the watermark
+// plus one batch.
+void Http2Connection::encode_ready_streams() noexcept {
+    while (inflight_outbound_chain_.readable_bytes() < kOutboundEncodeWatermark) {
+        Http2OutboundHook *hook = outbound_ready_queue_.front();
+        if (!hook) {
+            return;
+        }
+        outbound_ready_queue_.erase(*hook);
+        hook->state_ = Http2OutboundHook::State::Idle;
+        encode_stream_batch(*static_cast<Http2Stream *>(hook->ctx_));
+    }
 }
 
 common::IoErr Http2Connection::request_stream_send(Http2Stream &stream, Http2OutboundKind kind) noexcept {
@@ -2149,177 +2180,116 @@ common::IoErr Http2Connection::request_stream_send(Http2Stream &stream, Http2Out
         return common::IoErr::Invalid;
     }
     if (stream.outbound_kind_ != Http2OutboundKind::None ||
-        stream.outbound_hook_.state_ != Http2OutboundHook::State::Idle ||
-        stream.outbound_wait_state_ != Http2Stream::OutboundWaitState::None) {
+        stream.outbound_hook_.state_ != Http2OutboundHook::State::Idle) {
         return common::IoErr::Already;
     }
 
     stream.outbound_kind_ = kind;
-    common::IoErr err = try_encode_stream_outbound(stream);
-    if (err != common::IoErr::None) {
-        stream.outbound_kind_ = Http2OutboundKind::None;
-    }
-    return err;
+    queue_stream_send(stream);
+    return common::IoErr::None;
 }
 
+// Withdraws a send that is not encoded yet: no window was charged and
+// nothing reaches the peer.
 bool Http2Connection::cancel_queued_stream_send(Http2Stream &stream) noexcept {
-    if (stream.outbound_wait_state_ == Http2Stream::OutboundWaitState::ConnectionWindow) {
-        remove_connection_window_wait(stream);
-        stream.outbound_kind_ = Http2OutboundKind::None;
-        return true;
+    Http2OutboundHook &hook = stream.outbound_hook_;
+    switch (hook.state_) {
+        case Http2OutboundHook::State::Ready:
+            outbound_ready_queue_.erase(hook);
+            break;
+        case Http2OutboundHook::State::WaitConnWindow:
+            connection_window_waiters_.erase(hook);
+            break;
+        case Http2OutboundHook::State::WaitStreamWindow:
+            break;
+        case Http2OutboundHook::State::Idle:
+        case Http2OutboundHook::State::InFlight:
+            return false;
     }
-    if (stream.outbound_wait_state_ == Http2Stream::OutboundWaitState::StreamWindow) {
-        stream.outbound_wait_state_ = Http2Stream::OutboundWaitState::None;
-        stream.outbound_kind_ = Http2OutboundKind::None;
-        return true;
-    }
-    if (stream.outbound_hook_.state_ != Http2OutboundHook::State::Queued) {
-        return false;
-    }
-
+    hook.state_ = Http2OutboundHook::State::Idle;
     stream.outbound_kind_ = Http2OutboundKind::None;
-    abandon_queued_stream_hook(stream, true);
     return true;
 }
 
-void Http2Connection::abandon_queued_stream_hook(Http2Stream &stream, bool restore_stream_window) noexcept {
-    Http2OutboundHook &hook = stream.outbound_hook_;
-    FIBER_ASSERT(hook.state_ == Http2OutboundHook::State::Queued);
-    outbound_queue_.erase(hook);
-    conn_send_window_ += static_cast<std::int32_t>(hook.window_consumed_);
-    if (restore_stream_window) {
-        stream.send_window_ += static_cast<std::int32_t>(hook.window_consumed_);
-    }
-    hook.encoded_.clear();
-    hook.window_consumed_ = 0;
-    hook.completion_result_ = common::IoErr::None;
-    hook.operation_final_batch_ = false;
-    hook.state_ = Http2OutboundHook::State::Idle;
-    wake_connection_window_waiters();
-}
-
 void Http2Connection::cancel_stream_send(Http2Stream &stream, common::IoErr reason) noexcept {
-    if (stream.outbound_wait_state_ == Http2Stream::OutboundWaitState::ConnectionWindow) {
-        remove_connection_window_wait(stream);
-    } else if (stream.outbound_wait_state_ == Http2Stream::OutboundWaitState::StreamWindow) {
-        stream.outbound_wait_state_ = Http2Stream::OutboundWaitState::None;
-    }
-
+    // A send not yet encoded is withdrawn; an encoded batch drains first and
+    // then reports `reason`.
+    (void) cancel_queued_stream_send(stream);
     stream.outbound_kind_ = Http2OutboundKind::None;
-    if (stream.outbound_hook_.state_ == Http2OutboundHook::State::Queued) {
-        // The DATA never reached the transport, so only the connection-level
-        // reservation is reusable. The closing stream's window is discarded.
-        abandon_queued_stream_hook(stream, false);
-    }
     if (stream.outbound_hook_.state_ == Http2OutboundHook::State::InFlight) {
         stream.outbound_hook_.completion_result_ = reason;
     } else if (stream.outbound_operation_) {
-        stream.notify_outbound_send_done(reason, 0, false);
+        stream.notify_outbound_send_done(reason, false);
     }
 }
 
 void Http2Connection::on_stream_send_window_update(Http2Stream &stream) noexcept {
-    if (stream.outbound_wait_state_ != Http2Stream::OutboundWaitState::StreamWindow || stream.send_window_ <= 0 ||
+    Http2OutboundHook &hook = stream.outbound_hook_;
+    if (hook.state_ != Http2OutboundHook::State::WaitStreamWindow || stream.send_window_ <= 0 ||
         stream.close_reason_ != common::IoErr::None) {
         return;
     }
-    stream.outbound_wait_state_ = Http2Stream::OutboundWaitState::None;
-    common::IoErr err = try_encode_stream_outbound(stream);
-    if (err != common::IoErr::None) {
-        enter_closing(err);
-    }
+    hook.state_ = Http2OutboundHook::State::Idle;
+    queue_stream_send(stream);
 }
 
 void Http2Connection::wake_connection_window_waiters() noexcept {
-    while (conn_send_window_ > 0) {
-        Http2Stream *stream = connection_window_waiters_.front();
-        if (!stream) {
-            return;
-        }
-        connection_window_waiters_.erase(*stream);
-        stream->outbound_wait_state_ = Http2Stream::OutboundWaitState::None;
-        if (stream->close_reason_ != common::IoErr::None) {
-            stream->outbound_kind_ = Http2OutboundKind::None;
+    if (conn_send_window_ <= 0) {
+        return;
+    }
+    // Every waiter requeues. Encoding charges the window in queue order, and a
+    // stream that finds it spent again parks behind the rest.
+    while (Http2OutboundHook *hook = connection_window_waiters_.front()) {
+        connection_window_waiters_.erase(*hook);
+        hook->state_ = Http2OutboundHook::State::Idle;
+        auto &stream = *static_cast<Http2Stream *>(hook->ctx_);
+        if (stream.close_reason_ != common::IoErr::None) {
+            stream.outbound_kind_ = Http2OutboundKind::None;
             continue;
         }
-        common::IoErr err = try_encode_stream_outbound(*stream);
-        if (err != common::IoErr::None) {
-            enter_closing(err);
-            return;
-        }
+        queue_stream_send(stream);
     }
 }
 
-void Http2Connection::build_outbound_batch(std::size_t operation_budget, std::size_t byte_budget) noexcept {
-    FIBER_ASSERT(inflight_outbound_chain_.empty());
-    FIBER_ASSERT(inflight_outbound_hooks_.empty());
-    operation_budget = std::max<std::size_t>(operation_budget, 1);
-    byte_budget = std::max<std::size_t>(byte_budget, 1);
-
-    std::size_t selected = 0;
-    while (selected < operation_budget) {
-        Http2OutboundHook *hook = outbound_queue_.front();
-        if (!hook) {
-            break;
+// Drops both kinds of window wait without notifying their operations: closing
+// the streams reports them.
+void Http2Connection::clear_window_waits() noexcept {
+    while (Http2OutboundHook *hook = connection_window_waiters_.front()) {
+        connection_window_waiters_.erase(*hook);
+        hook->state_ = Http2OutboundHook::State::Idle;
+        static_cast<Http2Stream *>(hook->ctx_)->outbound_kind_ = Http2OutboundKind::None;
+    }
+    for (Http2Stream *stream = owned_stream_list_.front(); stream != nullptr;
+         stream = owned_stream_list_.next_of(*stream)) {
+        if (stream->outbound_hook_.state_ == Http2OutboundHook::State::WaitStreamWindow) {
+            stream->outbound_hook_.state_ = Http2OutboundHook::State::Idle;
+            stream->outbound_kind_ = Http2OutboundKind::None;
         }
-        const std::size_t hook_bytes = hook->encoded_.readable_bytes();
-        FIBER_ASSERT(hook_bytes != 0);
-        if (selected != 0 && inflight_outbound_chain_.readable_bytes() >= byte_budget) {
-            break;
-        }
-
-        outbound_queue_.erase(*hook);
-        const bool transferred = hook->encoded_.take_prefix(hook_bytes, inflight_outbound_chain_);
-        FIBER_ASSERT(transferred);
-        hook->inflight_wire_bytes_ = hook_bytes;
-        hook->state_ = Http2OutboundHook::State::InFlight;
-        inflight_outbound_hooks_.push_back(*hook);
-        if (hook->ctx_) {
-            auto &stream = *static_cast<Http2Stream *>(hook->ctx_);
-            if (stream.outbound_kind_ == Http2OutboundKind::Headers) {
-                stream.opening_committed_ = true;
-            }
-        }
-        ++selected;
     }
 }
 
 void Http2Connection::finish_written_outbound_hooks(std::size_t bytes_written) noexcept {
-    std::size_t remaining = bytes_written;
-    while (remaining != 0) {
-        Http2OutboundHook *hook = inflight_outbound_hooks_.front();
-        FIBER_ASSERT(hook != nullptr);
-        const std::size_t consumed = std::min(remaining, hook->inflight_wire_bytes_);
-        hook->inflight_wire_bytes_ -= consumed;
-        remaining -= consumed;
-        if (hook->inflight_wire_bytes_ != 0) {
+    outbound_written_bytes_ += bytes_written;
+    while (Http2OutboundHook *hook = inflight_outbound_hooks_.front()) {
+        if (hook->inflight_end_ > outbound_written_bytes_) {
             break;
         }
-
         inflight_outbound_hooks_.erase(*hook);
         hook->state_ = Http2OutboundHook::State::Idle;
-        if (hook == &control_hook_ && !hook->encoded_.empty()) {
-            enqueue_outbound_hook(*hook, true);
-        }
         common::IoErr completion_result = std::exchange(hook->completion_result_, common::IoErr::None);
-        if (hook->send_done_cb_) {
-            hook->send_done_cb_(*hook, completion_result);
-        }
+        hook->send_done_cb_(*hook, completion_result);
     }
-    FIBER_ASSERT(remaining == 0);
 }
 
-common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outbound(std::size_t operation_budget,
-                                                                                     std::size_t byte_budget) noexcept {
+common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outbound(std::size_t byte_budget) noexcept {
     OutboundPumpResult result;
     byte_budget = std::max<std::size_t>(byte_budget, 1);
     // A TLS transport writes one record group per try_writev, so keep writing until
     // the transport blocks, the queue drains or the byte budget is spent
-    // instead of handing each record back to the loop.
+    // instead of handing each record back to the loop. Ready streams are
+    // encoded just ahead of each write, against the windows of that moment.
     while (!outbound_stopped_ && state_ != State::Closed && result.bytes_written < byte_budget) {
-        if (inflight_outbound_chain_.empty()) {
-            build_outbound_batch(operation_budget, byte_budget - result.bytes_written);
-        }
+        encode_ready_streams();
         if (inflight_outbound_chain_.empty()) {
             if (outbound_closed_ && outbound_idle()) {
                 outbound_stopped_ = true;
@@ -2348,7 +2318,8 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
         result.bytes_written += *written_result;
         finish_written_outbound_hooks(*written_result);
     }
-    result.needs_reschedule = !outbound_stopped_ && (!inflight_outbound_chain_.empty() || !outbound_queue_.empty());
+    result.needs_reschedule =
+            !outbound_stopped_ && (!inflight_outbound_chain_.empty() || !outbound_ready_queue_.empty());
     if (outbound_closed_ && outbound_idle()) {
         outbound_stopped_ = true;
         result.needs_reschedule = false;
@@ -2357,7 +2328,7 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
 }
 
 bool Http2Connection::outbound_idle() const noexcept {
-    return outbound_queue_.empty() && inflight_outbound_hooks_.empty() && inflight_outbound_chain_.empty() &&
+    return outbound_ready_queue_.empty() && inflight_outbound_hooks_.empty() && inflight_outbound_chain_.empty() &&
            connection_window_waiters_.empty();
 }
 
@@ -2366,19 +2337,7 @@ void Http2Connection::close_outbound() noexcept {
         return;
     }
     outbound_closed_ = true;
-
-    for (Http2Stream *stream = owned_stream_list_.front(); stream != nullptr;
-         stream = owned_stream_list_.next_of(*stream)) {
-        if (stream->outbound_wait_state_ == Http2Stream::OutboundWaitState::ConnectionWindow) {
-            remove_connection_window_wait(*stream);
-        } else if (stream->outbound_wait_state_ == Http2Stream::OutboundWaitState::StreamWindow) {
-            stream->outbound_wait_state_ = Http2Stream::OutboundWaitState::None;
-        } else {
-            continue;
-        }
-        stream->outbound_kind_ = Http2OutboundKind::None;
-    }
-
+    clear_window_waits();
     if (outbound_idle()) {
         outbound_stopped_ = true;
     }
@@ -2398,21 +2357,9 @@ void Http2Connection::abort_outbound(common::IoErr reason) noexcept {
         transport_->close();
     }
 
-    while (Http2Stream *stream = connection_window_waiters_.front()) {
-        connection_window_waiters_.erase(*stream);
-        stream->outbound_wait_state_ = Http2Stream::OutboundWaitState::None;
-        stream->outbound_kind_ = Http2OutboundKind::None;
-    }
-    for (Http2Stream *stream = owned_stream_list_.front(); stream != nullptr;
-         stream = owned_stream_list_.next_of(*stream)) {
-        if (stream->outbound_wait_state_ == Http2Stream::OutboundWaitState::StreamWindow) {
-            stream->outbound_wait_state_ = Http2Stream::OutboundWaitState::None;
-            stream->outbound_kind_ = Http2OutboundKind::None;
-        }
-    }
-
-    while (Http2OutboundHook *hook = outbound_queue_.front()) {
-        outbound_queue_.erase(*hook);
+    clear_window_waits();
+    while (Http2OutboundHook *hook = outbound_ready_queue_.front()) {
+        outbound_ready_queue_.erase(*hook);
         drop_outbound_hook(*hook);
     }
     while (Http2OutboundHook *hook = inflight_outbound_hooks_.front()) {
@@ -2420,38 +2367,28 @@ void Http2Connection::abort_outbound(common::IoErr reason) noexcept {
         drop_outbound_hook(*hook);
     }
     inflight_outbound_chain_.clear();
-    control_hook_.encoded_.clear();
     outbound_stopped_ = true;
 }
 
 void Http2Connection::drop_outbound_hook(Http2OutboundHook &hook) noexcept {
     const common::IoErr completion =
             hook.completion_result_ != common::IoErr::None ? hook.completion_result_ : outbound_stop_reason_;
-    hook.encoded_.clear();
-    hook.inflight_wire_bytes_ = 0;
-    hook.window_consumed_ = 0;
     hook.completion_result_ = common::IoErr::None;
     hook.operation_final_batch_ = false;
     hook.state_ = Http2OutboundHook::State::Idle;
     auto *stream = static_cast<Http2Stream *>(hook.ctx_);
-    if (!stream) {
-        return;
-    }
+    FIBER_ASSERT(stream != nullptr);
     stream->outbound_kind_ = Http2OutboundKind::None;
     // These bytes never finish on the wire, so the operation waiting on them
     // hears it here. A stream closed while the batch was in flight is not told
     // again when the connection closes its streams. Only the operation is
     // notified: the stream's idle path would re-enter connection teardown.
-    stream->notify_outbound_send_done(completion, 0, false);
+    stream->notify_outbound_send_done(completion, false);
 }
 
 void Http2Connection::on_stream_outbound_idle(Http2Stream &stream) noexcept {
     if (stream.close_reason_ == common::IoErr::None && stream.outbound_kind_ != Http2OutboundKind::None) {
-        common::IoErr err = try_encode_stream_outbound(stream);
-        if (err != common::IoErr::None) {
-            enter_closing(err);
-            return;
-        }
+        queue_stream_send(stream);
     }
     try_release_stream(stream);
 }

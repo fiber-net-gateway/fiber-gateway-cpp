@@ -270,8 +270,8 @@ TEST(Http2StreamTest, MaybeReplenishRecvWindowEnqueuesWindowUpdateAndTracksRemai
             stream->recv_window_remaining_ = 15;
             outcome.result = stream->maybe_replenish_recv_window(15);
             outcome.recv_window_remaining = stream->recv_window_remaining();
-            outcome.pending_control_bytes = connection.control_hook_.encoded_.readable_bytes();
-            if (fiber::mem::IoBuf *control = connection.control_hook_.encoded_.first_readable()) {
+            outcome.pending_control_bytes = connection.inflight_outbound_chain_.readable_bytes();
+            if (fiber::mem::IoBuf *control = connection.inflight_outbound_chain_.first_readable()) {
                 outcome.control_bytes = control->readable();
                 const std::uint8_t *data = control->readable_data();
                 outcome.frame_type = data[3];

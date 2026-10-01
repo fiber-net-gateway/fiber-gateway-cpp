@@ -136,7 +136,8 @@ fiber::common::IoErr EncodeOperation::on_encode(fiber::http::Http2Stream &,
 }
 
 std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
-    fiber::http::Http2OutboundEncodeTarget target;
+    fiber::mem::IoBufChain chain;
+    fiber::http::Http2OutboundEncodeTarget target(chain);
     EncodeOperation operation(test_case);
     fiber::http::Http2Stream stream(&operation, kStreamOps);
     fiber::http::Http2OutboundEncodeRequest request{.max_frame_size = test_case.options.max_frame_size};
@@ -145,7 +146,6 @@ std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
         return {};
     }
 
-    fiber::mem::IoBufChain chain = target.take_chain();
     if (fiber::mem::IoBuf *first = chain.first_readable()) {
         test_case.first_buffer_capacity = first->capacity();
     }

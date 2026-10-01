@@ -1,5 +1,7 @@
 #include <fiber/http/Http2Stream.h>
 
+#include <utility>
+
 #include <fiber/common/Assert.h>
 #include <fiber/http/Http2Connection.h>
 
@@ -12,6 +14,8 @@ Http2Stream::Http2Stream(void *owner, const Ops &ops) noexcept : owner_(owner), 
     FIBER_ASSERT(ops_->on_header_block_start != nullptr);
     FIBER_ASSERT(ops_->on_header_block_complete != nullptr);
     FIBER_ASSERT(ops_->on_body != nullptr);
+    outbound_hook_.ctx_ = this;
+    outbound_hook_.send_done_cb_ = &Http2Stream::on_outbound_hook_send_done;
 }
 
 common::IoErr Http2Stream::on_headers_payload_recv(const mem::IoBuf &payload, bool block_start, bool end_headers,
@@ -116,7 +120,7 @@ common::IoErr Http2Stream::close_rst(Http2ErrorCode code, common::IoErr result) 
 
 void Http2Stream::update_send_window(std::int32_t delta) noexcept {
     send_window_ += delta;
-    if (delta > 0 && conn_ && outbound_wait_state_ == OutboundWaitState::StreamWindow) {
+    if (delta > 0 && conn_ && outbound_hook_.state_ == Http2OutboundHook::State::WaitStreamWindow) {
         conn_->on_stream_send_window_update(*this);
     }
 }
@@ -174,7 +178,7 @@ void Http2Stream::close(common::IoErr result) noexcept {
         ops_->on_abort(owner_, close_reason_);
     }
     if (first_abort && !conn_ && outbound_operation_) {
-        notify_outbound_send_done(close_reason_, 0, false);
+        notify_outbound_send_done(close_reason_, false);
     }
 }
 
@@ -183,7 +187,7 @@ common::IoErr Http2Stream::try_arm_outbound(const Http2OutboundOperation::Ops &o
     // An abandoned batch can still be draining with no operation bound; a new
     // operation must not inherit its completion.
     if (outbound_operation_ || outbound_hook_.state_ != Http2OutboundHook::State::Idle ||
-        outbound_wait_state_ != OutboundWaitState::None || outbound_kind_ != Http2OutboundKind::None) {
+        outbound_kind_ != Http2OutboundKind::None) {
         return common::IoErr::Already;
     }
     if (close_reason_ != common::IoErr::None) {
@@ -205,7 +209,6 @@ void Http2Stream::disarm_outbound(void *ctx) noexcept {
         return;
     }
     FIBER_ASSERT(outbound_hook_.state_ == Http2OutboundHook::State::Idle);
-    FIBER_ASSERT(outbound_wait_state_ == OutboundWaitState::None);
     FIBER_ASSERT(outbound_kind_ == Http2OutboundKind::None);
     outbound_operation_ = {};
     outbound_pending_flow_controlled_bytes_ = 0;
@@ -217,9 +220,8 @@ void Http2Stream::abandon_outbound(void *ctx) noexcept {
     }
     // Closing below can detach the stream and drop the connection's lease.
     Lease held(this);
-    const bool send_pending = outbound_kind_ != Http2OutboundKind::None ||
-                              outbound_wait_state_ != OutboundWaitState::None ||
-                              outbound_hook_.state_ != Http2OutboundHook::State::Idle;
+    const bool send_pending =
+            outbound_kind_ != Http2OutboundKind::None || outbound_hook_.state_ != Http2OutboundHook::State::Idle;
     // Unbind before anything that can call back: the operation is being
     // destroyed, and without it no further batch is encoded.
     outbound_operation_ = {};
@@ -228,10 +230,10 @@ void Http2Stream::abandon_outbound(void *ctx) noexcept {
         return;
     }
 
-    // Window waits and a queued batch are withdrawn. An in-flight batch stays
-    // with the connection: part of it may be on the wire and the transport may
-    // still reference its chain. It drains, or goes with the connection, and
-    // the stream is released once the hook is idle again.
+    // Window waits and a send still in the ready queue are withdrawn. An
+    // encoded batch stays with the connection: nothing in its in-flight chain
+    // is withdrawn. It drains, or goes with the connection, and the stream is
+    // released once the hook is idle again.
     if (conn_) {
         (void) conn_->cancel_queued_stream_send(*this);
     }
@@ -271,8 +273,7 @@ common::IoErr Http2Stream::encode_outbound_batch(const Http2OutboundEncodeReques
     return outbound_operation_.ops->on_encode(outbound_operation_.ctx, *this, req, target, result);
 }
 
-void Http2Stream::notify_outbound_send_done(common::IoErr error, std::uint32_t flow_controlled_bytes,
-                                            bool operation_final_batch) noexcept {
+void Http2Stream::notify_outbound_send_done(common::IoErr error, bool operation_final_batch) noexcept {
     if (!outbound_operation_) {
         return;
     }
@@ -284,7 +285,6 @@ void Http2Stream::notify_outbound_send_done(common::IoErr error, std::uint32_t f
 
     Http2OutboundSendResult result{
             .error = error,
-            .flow_controlled_bytes = error == common::IoErr::None ? flow_controlled_bytes : 0,
             .operation_final_batch = error == common::IoErr::None && operation_final_batch,
     };
     Http2OutboundOperation operation = outbound_operation_;
@@ -297,15 +297,12 @@ void Http2Stream::on_outbound_hook_send_done(Http2OutboundHook &hook, common::Io
     FIBER_ASSERT(&stream->outbound_hook_ == &hook);
     FIBER_ASSERT(hook.state_ == Http2OutboundHook::State::Idle);
 
-    const std::uint32_t flow_controlled_bytes = hook.window_consumed_;
-    const bool operation_final_batch = hook.operation_final_batch_;
-    hook.window_consumed_ = 0;
-    hook.operation_final_batch_ = false;
+    const bool operation_final_batch = std::exchange(hook.operation_final_batch_, false);
     common::IoErr completion_result = result;
     if (completion_result == common::IoErr::None && stream->close_reason_ != common::IoErr::None) {
         completion_result = stream->close_reason_;
     }
-    stream->notify_outbound_send_done(completion_result, flow_controlled_bytes, operation_final_batch);
+    stream->notify_outbound_send_done(completion_result, operation_final_batch);
 
     if (stream->conn_) {
         stream->conn_->on_stream_outbound_idle(*stream);

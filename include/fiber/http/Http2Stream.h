@@ -9,6 +9,7 @@
 #include "../common/SpecialMember.h"
 #include "../common/mem/IoBuf.h"
 #include "Http2HpackDecoder.h"
+#include "Http2Outbound.h"
 #include "Http2OutboundHook.h"
 #include "Http2Protocol.h"
 
@@ -129,14 +130,8 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
-    enum class OutboundWaitState : std::uint8_t {
-        None = 0,
-        StreamWindow,
-        ConnectionWindow,
-    };
-
     // Binds one send operation. Rejected while an earlier send still owns the
-    // hook, a window wait or the kind, even after its operation let go.
+    // hook or the kind, even after its operation let go.
     [[nodiscard]] common::IoErr try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
                                                  std::size_t pending_flow_controlled_bytes) noexcept;
     // Unbinds an operation whose send has finished.
@@ -148,8 +143,7 @@ private:
     [[nodiscard]] common::IoErr encode_outbound_batch(const Http2OutboundEncodeRequest &req,
                                                       Http2OutboundEncodeTarget &target,
                                                       Http2OutboundEncodeResult &result) noexcept;
-    void notify_outbound_send_done(common::IoErr error, std::uint32_t flow_controlled_bytes,
-                                   bool operation_final_batch) noexcept;
+    void notify_outbound_send_done(common::IoErr error, bool operation_final_batch) noexcept;
     static void on_outbound_hook_send_done(Http2OutboundHook &hook, common::IoErr result) noexcept;
     [[nodiscard]] bool ready_for_connection_release() const noexcept;
     [[nodiscard]] bool ready_for_destruction() const noexcept;
@@ -176,9 +170,7 @@ private:
     Http2OutboundOperation outbound_operation_{};
     std::size_t outbound_pending_flow_controlled_bytes_ = 0;
     Http2OutboundHook outbound_hook_{};
-    common::IntrusiveListHook conn_window_wait_hook_{};
     Http2OutboundKind outbound_kind_ = Http2OutboundKind::None;
-    OutboundWaitState outbound_wait_state_ = OutboundWaitState::None;
     common::IntrusiveListHook owned_hook_{};
     void *owner_ = nullptr;
     const Ops *ops_ = nullptr;

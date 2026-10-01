@@ -49,8 +49,7 @@ struct ClientHttp2Request::SendRequestHeaderOp {
         return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Headers);
     }
 
-    void on_send_done(ClientHttp2Request &request, std::uint32_t flow_controlled_bytes,
-                      bool operation_final_batch) noexcept;
+    void on_send_done(ClientHttp2Request &request, bool operation_final_batch) noexcept;
 
     common::IoErr on_encode(ClientHttp2Request &request, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
                             Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept;
@@ -79,8 +78,7 @@ struct ClientHttp2Request::SendRequestBodyAllOp {
     }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return chunk_.readable_bytes(); }
-    void on_send_done(ClientHttp2Request &request, std::uint32_t flow_controlled_bytes,
-                      bool operation_final_batch) noexcept;
+    void on_send_done(ClientHttp2Request &request, bool operation_final_batch) noexcept;
 
     common::IoErr on_encode(ClientHttp2Request &request, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
                             Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept;
@@ -108,8 +106,7 @@ struct ClientHttp2Request::SendRequestBodySomeOp {
     }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return total_bytes_; }
-    void on_send_done(ClientHttp2Request &request, std::uint32_t flow_controlled_bytes,
-                      bool operation_final_batch) noexcept;
+    void on_send_done(ClientHttp2Request &request, bool operation_final_batch) noexcept;
 
     common::IoErr on_encode(ClientHttp2Request &request, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
                             Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept;
@@ -132,8 +129,7 @@ struct ClientHttp2Request::SendRequestTrailerOp {
         return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Headers);
     }
 
-    void on_send_done(ClientHttp2Request &request, std::uint32_t flow_controlled_bytes,
-                      bool operation_final_batch) noexcept;
+    void on_send_done(ClientHttp2Request &request, bool operation_final_batch) noexcept;
 
     common::IoErr on_encode(ClientHttp2Request &request, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
                             Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept;
@@ -611,9 +607,7 @@ common::IoErr ClientHttp2Request::SendRequestHeaderOp::on_encode(ClientHttp2Requ
 }
 
 void ClientHttp2Request::SendRequestHeaderOp::on_send_done(ClientHttp2Request &request,
-                                                           std::uint32_t flow_controlled_bytes,
                                                            bool operation_final_batch) noexcept {
-    FIBER_ASSERT(flow_controlled_bytes == 0);
     FIBER_ASSERT(operation_final_batch);
     request.request_headers_sent_ = true;
     if (end_stream_) {
@@ -667,7 +661,7 @@ common::IoErr ClientHttp2Request::SendRequestBodyAllOp::on_encode(ClientHttp2Req
     return common::IoErr::None;
 }
 
-void ClientHttp2Request::SendRequestBodyAllOp::on_send_done(ClientHttp2Request &request, std::uint32_t,
+void ClientHttp2Request::SendRequestBodyAllOp::on_send_done(ClientHttp2Request &request,
                                                             bool operation_final_batch) noexcept {
     if (!operation_final_batch) {
         return;
@@ -751,10 +745,8 @@ common::IoErr ClientHttp2Request::SendRequestBodySomeOp::on_encode(ClientHttp2Re
 }
 
 void ClientHttp2Request::SendRequestBodySomeOp::on_send_done(ClientHttp2Request &request,
-                                                             std::uint32_t flow_controlled_bytes,
                                                              bool operation_final_batch) noexcept {
     FIBER_ASSERT(operation_final_batch);
-    FIBER_ASSERT(flow_controlled_bytes == accepted_bytes_);
     if (end_stream_ && accepted_bytes_ == total_bytes_) {
         request.stream_.local_end_stream_ = true;
         request.request_finished_ = true;
@@ -809,9 +801,7 @@ common::IoErr ClientHttp2Request::SendRequestTrailerOp::on_encode(ClientHttp2Req
 }
 
 void ClientHttp2Request::SendRequestTrailerOp::on_send_done(ClientHttp2Request &request,
-                                                            std::uint32_t flow_controlled_bytes,
                                                             bool operation_final_batch) noexcept {
-    FIBER_ASSERT(flow_controlled_bytes == 0);
     FIBER_ASSERT(operation_final_batch);
     request.stream_.local_end_stream_ = true;
     request.request_finished_ = true;
