@@ -3,7 +3,6 @@
 
 #include <chrono>
 #include <cstddef>
-#include <memory>
 #include <optional>
 #include <string_view>
 
@@ -161,12 +160,10 @@ private:
     mem::IoBuf inbound_{};
     mem::IoBufChain out_pending_{}; // sealed records not yet on the wire
     mem::IoBufChain early_data_{}; // server: decrypted 0-RTT, delivered first
-    // Write-side retry state: the chain whose group is sealed in out_pending_
-    // (null once abandoned) and its plaintext length, plus the record
-    // coalescing scratch — a plain allocation so it is loop-independent.
+    // Write-side retry state: the chain whose batch is sealed in out_pending_
+    // (null once abandoned) and its plaintext length.
     mem::IoBufChain *pending_write_chain_ = nullptr;
     size_t pending_write_len_ = 0;
-    std::unique_ptr<std::uint8_t[]> write_scratch_{};
     // NoMem while sealing a batch: records may sit sealed but unreported, so
     // the stream's integrity is gone — latched until close().
     fiber::common::IoErr write_error_ = fiber::common::IoErr::None;

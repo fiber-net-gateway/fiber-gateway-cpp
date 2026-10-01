@@ -7,8 +7,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <memory>
-#include <new>
 #include <span>
 #include <sys/uio.h>
 #include <type_traits>
@@ -258,7 +256,6 @@ void TlsStreamFd::close() {
     busy_ = false;
     pending_write_chain_ = nullptr;
     pending_write_len_ = 0;
-    write_scratch_.reset();
     write_error_ = fiber::common::IoErr::None;
 }
 
@@ -666,6 +663,12 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
 fiber::common::IoErr TlsStreamFd::seal_write_batch(const mem::IoBufChain &buf, std::size_t &batch_len) noexcept {
     ChainCursor cursor(buf);
     FIBER_ASSERT(!cursor.at_end()); // readable_bytes() > 0 with no pending batch
+    // Coalescing scratch on the stack: a group is copied in and sealed out
+    // before the next one starts, and nothing of it outlives this call (the
+    // retry state is the sealed records), so the thread's stack serves every
+    // connection — no per-connection 16 KiB, no allocation, always hot.
+    // Uninitialized on purpose: only the copied prefix is ever read.
+    std::array<std::uint8_t, kRecordPlaintextMax> scratch;
     while (batch_len < kWriteBatchBytes && !cursor.at_end()) {
         // Zero-copy groups take whole records, at least one, within the
         // batch's remaining room.
@@ -680,15 +683,7 @@ fiber::common::IoErr TlsStreamFd::seal_write_batch(const mem::IoBufChain &buf, s
             // group so it does not become a short record of its own.
             group = segment.first(std::min(segment.size() - segment.size() % kRecordPlaintextMax, record_room));
         } else {
-            if (!write_scratch_) {
-                write_scratch_.reset(new (std::nothrow) std::uint8_t[kRecordPlaintextMax]);
-                if (!write_scratch_) {
-                    // Nothing of this group is sealed: a batch already
-                    // holding groups still goes out whole.
-                    return batch_len > 0 ? fiber::common::IoErr::None : fiber::common::IoErr::NoMem;
-                }
-            }
-            group = {write_scratch_.get(), cursor.copy_out({write_scratch_.get(), kRecordPlaintextMax})};
+            group = {scratch.data(), cursor.copy_out(scratch)};
         }
         auto sealed = conn_->write(group);
         if (!sealed) {
