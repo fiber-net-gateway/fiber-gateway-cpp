@@ -37,7 +37,7 @@ enum class TlsRecordProtectionKind : std::uint8_t { Tls13, Tls12 };
 // adjustments, chain building) lives in the engine (feature/tls/05 §5.3).
 //
 // Aliasing (in-place) contract, per operation — anything else that overlaps
-// FIBER_ASSERTs; disjoint dst never copies except the one 1.3 case below:
+// FIBER_ASSERTs; a disjoint dst never copies:
 //   seal 1.3   dst.data() == plaintext.data()      (inner-type byte written
 //              into dst at plaintext_len — may be past the plaintext span
 //              but inside dst's capacity, i.e. the node's tailroom)
@@ -46,9 +46,9 @@ enum class TlsRecordProtectionKind : std::uint8_t { Tls13, Tls12 };
 //   open 1.3   dst.data() == ciphertext.data()
 //   open 1.2   dst.data() == ciphertext.data() + explicit_nonce_len()
 //              (the plaintext always lands at dst.data(); ChaCha in-place)
-// With a disjoint dst, seal 1.3 performs the only memcpy (the EVP takes one
-// input region, so the inner-type byte is appended first); seal/open 1.2 and
-// open 1.3 are moved natively by the EVP (out != in, no overlap).
+// With a disjoint dst every transform is moved natively by the EVP (out != in,
+// no overlap); seal 1.3 routes the inner-type byte through the EVP's extra_in
+// (seal_scatter) instead of appending it to a staged copy of the plaintext.
 //
 // After protection starts, record headers are always 0x0303 on the wire
 // (1.3 by spec; 1.2 post-CCS conventional — the engine resets the writer's
