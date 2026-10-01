@@ -528,7 +528,8 @@ common::IoResult<void> QuicTlsSession::provide_crypto_data(QuicEncryptionLevel l
         return std::unexpected(common::IoErr::Invalid);
     }
     const tls::TlsQuicLevel tls_level = tls_level_from_encryption(level);
-    const bool done = client_mode_ ? client().done() : server().done();
+    // The done-transition releases the engine, so result_taken_ answers first.
+    const bool done = result_taken_ || (client_mode_ ? client().done() : server().done());
     if (done) {
         // Post-handshake tail: the engine is terminal, app-level CRYPTO
         // belongs to the consumer (10 §7). The gate always runs
@@ -564,17 +565,18 @@ common::IoResult<void> QuicTlsSession::drive_handshake() noexcept {
     if (!initialized()) {
         return std::unexpected(common::IoErr::Invalid);
     }
+    if (result_taken_) {
+        return process_post_handshake(); // the engine is released past the done-transition
+    }
     const bool failed = client_mode_ ? client().failed() : server().failed();
     if (failed) {
         return fail_terminal();
     }
     const bool done = client_mode_ ? client().done() : server().done();
     if (done) {
-        if (!result_taken_) {
-            auto finished = finish_handshake();
-            if (!finished) {
-                return finished;
-            }
+        auto finished = finish_handshake();
+        if (!finished) {
+            return finished;
         }
         return process_post_handshake();
     }
@@ -590,11 +592,6 @@ common::IoResult<void> QuicTlsSession::finish_handshake() noexcept {
     // transport parameters, then the client's early-data verdict — all before
     // the caller marks the connection Established.
     result_taken_ = true;
-    // The server engine outlives its handshake (post-handshake NST minting)
-    // but never reads the certificate chain or key again: release a retained
-    // credential here rather than pinning it for the connection's lifetime.
-    // The engine's staged chain/key pointers are dead from this point on.
-    credential_owner_.reset();
     tls::TlsQuicHandshakeResult result = client_mode_ ? client().take_quic_result() : server().take_quic_result();
     resumption_master_ = std::move(result.resumption_master);
     alpn_ = result.alpn;
@@ -602,6 +599,16 @@ common::IoResult<void> QuicTlsSession::finish_handshake() noexcept {
     session_resumed_ = result.session_resumed;
     early_data_accepted_ = result.early_data_accepted;
     take_engine_leftover();
+    // The engine is spent: the server's NST went out with the final flight
+    // and post-handshake CRYPTO belongs to the consumer. Release it — and a
+    // credential retained for it — rather than pinning ~64-72 KiB for the
+    // connection's lifetime. This runs on the connection's loop, as the
+    // engine's node-pool affinity requires.
+    delete client_;
+    delete server_;
+    client_ = nullptr;
+    server_ = nullptr;
+    credential_owner_.reset();
 
     auto applied = apply_peer_transport_params();
     if (!applied && applied.error() != common::IoErr::WouldBlock) {
@@ -800,7 +807,8 @@ void QuicTlsSession::handle_new_session_ticket(std::span<const std::uint8_t> bod
 // accessors
 // =====================================================================
 
-bool QuicTlsSession::initialized() const noexcept { return client_ != nullptr || server_ != nullptr; }
+// An engine is live until the done-transition releases it.
+bool QuicTlsSession::initialized() const noexcept { return client_ != nullptr || server_ != nullptr || result_taken_; }
 
 bool QuicTlsSession::handshake_done() const noexcept { return result_taken_; }
 

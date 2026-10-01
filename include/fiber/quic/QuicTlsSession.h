@@ -35,8 +35,9 @@ class QuicConnection;
 // plaintext forever — every traffic secret is exported to the QUIC layer via
 // quic_set_encryption_secret, outbound handshake messages land directly in
 // CRYPTO frames, and the handshake tail is handed over through
-// take_quic_result() instead of a TlsConnectedState. After the handshake,
-// app-level CRYPTO bytes feed the post-handshake consumer (10 §7):
+// take_quic_result() instead of a TlsConnectedState — at which point the
+// engine is released. After the handshake, app-level CRYPTO bytes feed the
+// post-handshake consumer (10 §7):
 // NewSessionTicket receipts on the client, fatal unexpected_message for
 // everything else (KeyUpdate is packet-layer-only in QUIC, RFC 9001 §6).
 //
@@ -102,6 +103,8 @@ private:
     [[nodiscard]] const tls::TlsServerHandshakeEngine &server() const noexcept;
 
     QuicConnection *connection_ = nullptr; // borrowed; the session is a member
+    // The role's engine, from init_* until the done-transition (or the dtor
+    // on a failed/abandoned handshake).
     tls::TlsClientHandshakeEngine *client_ = nullptr;
     tls::TlsServerHandshakeEngine *server_ = nullptr;
 
@@ -115,8 +118,9 @@ private:
     tls::TlsResumptionLookup lookup_{};
     const net::TlsServerParam *server_param_ = nullptr; // selector re-stage source
     // A credential the configure callback handed over through add_credential:
-    // held until the done-transition or a terminal failure (the engine stops
-    // reading chain/key there), else released after the engine in the dtor.
+    // held until the done-transition (released after the engine) or a
+    // terminal failure (the engine stops reading chain/key there), else
+    // released after the engine in the dtor.
     net::TlsCredential credential_owner_;
     common::IoErr callback_error_ = common::IoErr::None;
     std::array<std::uint8_t, 16> ip_bytes_{}; // client verify_ip backing
