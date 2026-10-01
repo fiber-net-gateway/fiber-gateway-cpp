@@ -12,8 +12,6 @@
 
 namespace fiber::http {
 
-class Http2Stream;
-
 enum class Http2OutboundKind : std::uint8_t {
     None = 0,
     Headers,
@@ -21,13 +19,18 @@ enum class Http2OutboundKind : std::uint8_t {
 };
 
 struct Http2OutboundEncodeRequest {
+    std::uint32_t stream_id = 0;
     std::uint32_t max_frame_size = 0;
+    std::uint32_t max_hpack_string_size = 0;
     std::uint32_t payload_budget = 0;
 };
 
 struct Http2OutboundEncodeResult {
     std::uint32_t flow_controlled_bytes = 0;
     bool operation_final_batch = false;
+    // The batch's last frame carries END_STREAM; only an operation's final
+    // batch may.
+    bool end_stream = false;
 };
 
 struct Http2OutboundSendResult {
@@ -78,8 +81,7 @@ private:
 
 struct Http2OutboundOperation {
     struct Ops {
-        common::IoErr (*on_encode)(void *ctx, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
-                                   Http2OutboundEncodeTarget &target,
+        common::IoErr (*on_encode)(void *ctx, const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
                                    Http2OutboundEncodeResult &result) noexcept = nullptr;
         void (*on_send_done)(void *ctx, const Http2OutboundSendResult &result) noexcept = nullptr;
         Http2OutboundKind kind = Http2OutboundKind::None;

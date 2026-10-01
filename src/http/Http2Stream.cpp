@@ -281,7 +281,10 @@ common::IoErr Http2Stream::encode_outbound_batch(const Http2OutboundEncodeReques
                                                  Http2OutboundEncodeTarget &target,
                                                  Http2OutboundEncodeResult &result) noexcept {
     FIBER_ASSERT(outbound_operation_);
-    return outbound_operation_.ops->on_encode(outbound_operation_.ctx, *this, req, target, result);
+    // Closing withdraws a send that is not encoded yet, and nothing requeues
+    // a closed stream.
+    FIBER_ASSERT(close_reason_ == common::IoErr::None);
+    return outbound_operation_.ops->on_encode(outbound_operation_.ctx, req, target, result);
 }
 
 void Http2Stream::notify_outbound_send_done(common::IoErr error, bool operation_final_batch) noexcept {
@@ -309,9 +312,15 @@ void Http2Stream::on_outbound_hook_send_done(Http2OutboundHook &hook, common::Io
     FIBER_ASSERT(hook.state_ == Http2OutboundHook::State::Idle);
 
     const bool operation_final_batch = std::exchange(hook.operation_final_batch_, false);
+    const bool end_stream = std::exchange(hook.end_stream_, false);
     common::IoErr completion_result = result;
     if (completion_result == common::IoErr::None && stream->close_reason_ != common::IoErr::None) {
         completion_result = stream->close_reason_;
+    }
+    // Set before the connection's idle hook, which releases a stream that has
+    // ended both ways.
+    if (completion_result == common::IoErr::None && end_stream) {
+        stream->local_end_stream_ = true;
     }
     stream->notify_outbound_send_done(completion_result, operation_final_batch);
 

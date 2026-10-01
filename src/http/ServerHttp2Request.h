@@ -62,9 +62,9 @@ private:
     struct SendResponseHeaderOp;
     struct SendResponseBodyAllOp;
     struct SendResponseBodySomeOp;
-    using HeaderSendAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseHeaderOp>;
-    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseBodyAllOp>;
-    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<ServerHttp2Request, SendResponseBodySomeOp>;
+    using HeaderSendAwaiter = detail::Http2SendAwaiter<SendResponseHeaderOp>;
+    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<SendResponseBodyAllOp>;
+    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<SendResponseBodySomeOp>;
 
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;
@@ -127,20 +127,12 @@ private:
     bool handler_started_ = false;
     bool handler_done_ = false;
     bool discard_request_body_ = false;
-    bool response_headers_sent_ = false;
-    bool response_finished_ = false;
     bool response_channel_closed_ = false;
     bool protocol_seen_ = false;
-    int response_status_code_ = 0;
-    std::string_view response_reason_;
-    const HttpHeaders *response_headers_ = nullptr;
     ResponseConnectionMode response_connection_mode_ = ResponseConnectionMode::Auto;
     std::string_view pending_name_;
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_stable_ = false;
-
-    template<class, class>
-    friend class detail::Http2SendAwaiter;
 };
 
 } // namespace fiber::http

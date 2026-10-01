@@ -3,27 +3,41 @@
 
 #include <chrono>
 #include <coroutine>
+#include <cstddef>
 #include <type_traits>
+#include <utility>
 
 #include "../../common/Assert.h"
 #include "../../common/IoError.h"
 #include "../../event/EventLoop.h"
 #include "../Http2Outbound.h"
+#include "../Http2Stream.h"
 
 namespace fiber::http::detail {
 
-template<class Owner, class Op>
+// Runs one send operation on a stream. The operation encodes its frames:
+//
+//   static constexpr Http2OutboundKind kOutboundKind;  // Headers or Data
+//   static constexpr bool kAllowsPartialFinalBatch;    // optional
+//   std::size_t flow_controlled_bytes() const;          // Data only
+//   bool end_stream() const;                            // Data only
+//   common::IoErr on_encode(const Http2OutboundEncodeRequest &, Http2OutboundEncodeTarget &,
+//                           Http2OutboundEncodeResult &);
+//
+// A DATA send resolves to the payload bytes it sent.
+template<class Op>
 class Http2SendAwaiter {
     static_assert(Op::kOutboundKind != Http2OutboundKind::None);
+    static constexpr bool kData = Op::kOutboundKind == Http2OutboundKind::Data;
 
 public:
-    using SuccessType = typename Op::SuccessType;
+    using SuccessType = std::conditional_t<kData, std::size_t, void>;
     using AwaitResult = common::IoResult<SuccessType>;
 
     template<class... Args>
-    Http2SendAwaiter(Owner &owner, std::chrono::milliseconds timeout,
+    Http2SendAwaiter(Http2Stream &stream, std::chrono::milliseconds timeout,
                      Args &&...args) noexcept(std::is_nothrow_constructible_v<Op, Args...>) :
-        owner_(&owner), timeout_(timeout), loop_(fiber::event::EventLoop::current()),
+        stream_(stream), timeout_(timeout), loop_(fiber::event::EventLoop::current()),
         op_(static_cast<Args &&>(args)...) {}
 
     Http2SendAwaiter(const Http2SendAwaiter &) = delete;
@@ -35,25 +49,19 @@ public:
 
     bool await_ready() noexcept {
         start();
-        if (completed_) {
-            return true;
-        }
-        if (timeout_.count() != 0) {
-            return false;
+        if (completed_ || timeout_.count() != 0) {
+            return completed_;
         }
 
-        const bool canceled = owner_ && owner_->stream().cancel_queued_outbound();
+        // A zero timeout never waits, and a send only just queued has nothing
+        // encoded yet.
+        const bool canceled = stream_.cancel_queued_outbound();
         FIBER_ASSERT(canceled);
-        if (canceled) {
-            complete(common::IoErr::TimedOut);
-        }
-        return completed_;
+        complete(common::IoErr::TimedOut);
+        return true;
     }
 
     bool await_suspend(std::coroutine_handle<> handle) noexcept {
-        if (!owner_ || completed_) {
-            return false;
-        }
         handle_ = handle;
         if (has_timer()) {
             loop_.post_at<Http2SendAwaiter, &Http2SendAwaiter::timer_entry_, &Http2SendAwaiter::on_timeout>(
@@ -63,99 +71,68 @@ public:
     }
 
     AwaitResult await_resume() noexcept {
-        const common::IoErr result = result_;
-        if (result != common::IoErr::None) {
-            cleanup(false);
-            return std::unexpected(result);
+        cleanup(false);
+        if (result_ != common::IoErr::None) {
+            return std::unexpected(result_);
         }
-        if constexpr (std::is_void_v<SuccessType>) {
-            cleanup(false);
-            return AwaitResult{};
+        if constexpr (kData) {
+            return AwaitResult{sent_bytes_};
         } else {
-            SuccessType value = op_.success_result();
-            cleanup(false);
-            return AwaitResult{static_cast<SuccessType &&>(value)};
+            return AwaitResult{};
         }
     }
 
 private:
-    static common::IoErr on_encode(void *ctx, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
-                                   Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept {
+    static common::IoErr on_encode(void *ctx, const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
+                                   Http2OutboundEncodeResult &result) noexcept {
         auto *awaiter = static_cast<Http2SendAwaiter *>(ctx);
-        FIBER_ASSERT(awaiter != nullptr);
-        if (!awaiter->owner_) {
-            return common::IoErr::Invalid;
+        // A failed encode reaches on_send_done through the connection.
+        const common::IoErr err = awaiter->op_.on_encode(req, target, result);
+        if (err == common::IoErr::None) {
+            awaiter->sent_bytes_ += result.flow_controlled_bytes;
         }
-
-        common::IoErr error = awaiter->op_.on_encode(*awaiter->owner_, stream, req, target, result);
-        if (error != common::IoErr::None) {
-            awaiter->complete(error);
-        }
-        return error;
+        return err;
     }
 
     static void on_send_done(void *ctx, const Http2OutboundSendResult &result) noexcept {
         auto *awaiter = static_cast<Http2SendAwaiter *>(ctx);
-        FIBER_ASSERT(awaiter != nullptr);
-        if (!awaiter->owner_ || awaiter->completed_) {
-            return;
-        }
         if (result.error != common::IoErr::None) {
             awaiter->complete(result.error);
-            return;
-        }
-
-        awaiter->op_.on_send_done(*awaiter->owner_, result.operation_final_batch);
-        if (result.operation_final_batch) {
+        } else if (result.operation_final_batch) {
             awaiter->complete(common::IoErr::None);
         }
     }
 
     static void on_notify(Http2SendAwaiter *awaiter) noexcept {
-        if (!awaiter) {
-            return;
-        }
-        auto handle = awaiter->handle_;
-        awaiter->handle_ = {};
-        if (handle) {
-            handle.resume();
-        }
+        FIBER_ASSERT(awaiter->handle_);
+        std::exchange(awaiter->handle_, {}).resume();
     }
 
     static void on_timeout(Http2SendAwaiter *awaiter) noexcept {
-        if (!awaiter || !awaiter->owner_ || awaiter->completed_) {
+        if (awaiter->completed_) {
             return;
         }
-        if (awaiter->owner_->stream().cancel_queued_outbound()) {
+        // An encoded batch must reach the wire, so the timeout only withdraws
+        // a send that is still queued.
+        if (awaiter->stream_.cancel_queued_outbound()) {
             awaiter->complete(common::IoErr::TimedOut);
         }
     }
 
     void start() noexcept {
-        if (!owner_) {
-            complete(common::IoErr::Invalid);
-            return;
-        }
-
-        Http2Stream &stream = owner_->stream();
-        if constexpr (requires(const Op &op) { op.should_complete_without_submit(); }) {
-            if (op_.should_complete_without_submit()) {
-                complete(stream.outbound_idle_status());
+        std::size_t flow_controlled_bytes = 0;
+        if constexpr (kData) {
+            flow_controlled_bytes = op_.flow_controlled_bytes();
+            if (flow_controlled_bytes == 0 && !op_.end_stream()) {
+                // Nothing to send, but the write still answers as one would.
+                complete(stream_.outbound_idle_status());
                 return;
             }
         }
 
-        const std::size_t pending_flow_controlled_bytes = [this]() noexcept {
-            if constexpr (requires(const Op &op) { op.pending_flow_controlled_bytes(); }) {
-                return op_.pending_flow_controlled_bytes();
-            } else {
-                return std::size_t{0};
-            }
-        }();
-
-        const common::IoErr arm_error = stream.try_arm_outbound(kOutboundOps, this, pending_flow_controlled_bytes);
-        if (arm_error != common::IoErr::None) {
-            complete(arm_error);
+        const common::IoErr err = stream_.try_arm_outbound(kOutboundOps, this, flow_controlled_bytes);
+        if (err != common::IoErr::None) {
+            complete(err);
             return;
         }
         armed_ = true;
@@ -167,9 +144,6 @@ private:
         }
         completed_ = true;
         result_ = result;
-        if (notify_entry_.is_in_queue()) {
-            return;
-        }
         loop_.post_local<Http2SendAwaiter, &Http2SendAwaiter::notify_entry_, &Http2SendAwaiter::on_notify>(*this);
     }
 
@@ -182,15 +156,14 @@ private:
         if (notify_entry_.is_in_queue()) {
             loop_.cancel<Http2SendAwaiter, &Http2SendAwaiter::notify_entry_>(*this);
         }
-        if (owner_ && armed_) {
+        if (armed_) {
+            armed_ = false;
             if (abandon) {
-                owner_->stream().abandon_outbound(this);
+                stream_.abandon_outbound(this);
             } else {
-                owner_->stream().disarm_outbound(this);
+                stream_.disarm_outbound(this);
             }
         }
-        armed_ = false;
-        owner_ = nullptr;
         handle_ = {};
     }
 
@@ -212,7 +185,7 @@ private:
                     }(),
     };
 
-    Owner *owner_ = nullptr;
+    Http2Stream &stream_;
     std::chrono::milliseconds timeout_{};
     fiber::event::EventLoop &loop_;
     std::coroutine_handle<> handle_{};
@@ -220,6 +193,7 @@ private:
     fiber::event::EventLoop::TimerEntry timer_entry_{};
     common::IoErr result_ = common::IoErr::None;
     Op op_;
+    std::size_t sent_bytes_ = 0;
     bool armed_ = false;
     bool completed_ = false;
 };

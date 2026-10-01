@@ -20,7 +20,7 @@ class ServerHttp2Request;
 
 namespace detail {
 
-template<class Owner, class Op>
+template<class Op>
 class Http2SendAwaiter;
 
 } // namespace detail
@@ -186,7 +186,7 @@ private:
     friend class Http2Connection;
     friend class ServerHttp2Request;
     friend class ClientHttp2Request;
-    template<class Owner, class Op>
+    template<class Op>
     friend class detail::Http2SendAwaiter;
 };
 

@@ -55,10 +55,10 @@ private:
     struct SendRequestBodyAllOp;
     struct SendRequestBodySomeOp;
     struct SendRequestTrailerOp;
-    using HeaderSendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestHeaderOp>;
-    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestBodyAllOp>;
-    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestBodySomeOp>;
-    using TrailerSendAwaiter = detail::Http2SendAwaiter<ClientHttp2Request, SendRequestTrailerOp>;
+    using HeaderSendAwaiter = detail::Http2SendAwaiter<SendRequestHeaderOp>;
+    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<SendRequestBodyAllOp>;
+    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<SendRequestBodySomeOp>;
+    using TrailerSendAwaiter = detail::Http2SendAwaiter<SendRequestTrailerOp>;
 
     explicit ClientHttp2Request(Http2Connection &conn, mem::BufPool &pool) noexcept;
     static const Http2Stream::Ops &stream_ops() noexcept;
@@ -101,7 +101,6 @@ private:
     detail::Http2HeaderBlockQueue response_header_recv_;
     common::IoErr abort_reason_ = common::IoErr::None;
     bool request_headers_sent_ = false;
-    bool request_finished_ = false;
     bool response_head_received_ = false;
     bool reading_trailers_ = false;
     bool current_block_has_status_ = false;
@@ -110,9 +109,6 @@ private:
     std::string_view pending_name_{};
     std::uint64_t pending_name_hash_ = 0;
     bool pending_name_stable_ = false;
-
-    template<class, class>
-    friend class detail::Http2SendAwaiter;
 };
 
 } // namespace fiber::http

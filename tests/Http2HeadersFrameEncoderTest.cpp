@@ -15,7 +15,6 @@
 #include "http/Http2HeadersFrameEncoder.h"
 #define private public
 #include <fiber/http/Http2Outbound.h>
-#include <fiber/http/Http2Stream.h>
 #include <fiber/http/HttpTransport.h>
 #undef private
 
@@ -79,7 +78,7 @@ class EncodeOperation final {
 public:
     explicit EncodeOperation(EncodeCase &test_case) noexcept : test_case_(test_case) {}
 
-    fiber::common::IoErr on_encode(fiber::http::Http2Stream &stream, const fiber::http::Http2OutboundEncodeRequest &req,
+    fiber::common::IoErr on_encode(const fiber::http::Http2OutboundEncodeRequest &req,
                                    fiber::http::Http2OutboundEncodeTarget &target,
                                    fiber::http::Http2OutboundEncodeResult &result) noexcept;
 
@@ -87,23 +86,7 @@ private:
     EncodeCase &test_case_;
 };
 
-fiber::common::IoErr on_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept {
-    return fiber::common::IoErr::None;
-}
-
-fiber::common::IoErr on_header_block_complete(void *, bool) noexcept { return fiber::common::IoErr::None; }
-
-fiber::common::IoErr on_body(void *, fiber::mem::IoBuf &&, bool) noexcept { return fiber::common::IoErr::None; }
-
-void on_abort(void *, fiber::common::IoErr) noexcept {}
-void on_destroy(void *) noexcept {}
-
-const fiber::http::Http2Stream::Ops kStreamOps{
-        &on_destroy, &on_header_block_start, &on_header_block_complete, &on_body, &on_abort,
-};
-
-fiber::common::IoErr EncodeOperation::on_encode(fiber::http::Http2Stream &,
-                                                const fiber::http::Http2OutboundEncodeRequest &,
+fiber::common::IoErr EncodeOperation::on_encode(const fiber::http::Http2OutboundEncodeRequest &,
                                                 fiber::http::Http2OutboundEncodeTarget &target,
                                                 fiber::http::Http2OutboundEncodeResult &result) noexcept {
     Http2HeadersFrameEncoder frame_encoder(test_case_.options);
@@ -139,10 +122,9 @@ std::vector<std::uint8_t> encode_headers_bytes_in_place(EncodeCase &test_case) {
     fiber::mem::IoBufChain chain;
     fiber::http::Http2OutboundEncodeTarget target(chain);
     EncodeOperation operation(test_case);
-    fiber::http::Http2Stream stream(&operation, kStreamOps);
     fiber::http::Http2OutboundEncodeRequest request{.max_frame_size = test_case.options.max_frame_size};
     fiber::http::Http2OutboundEncodeResult encode_result;
-    if (operation.on_encode(stream, request, target, encode_result) != fiber::common::IoErr::None) {
+    if (operation.on_encode(request, target, encode_result) != fiber::common::IoErr::None) {
         return {};
     }
 
