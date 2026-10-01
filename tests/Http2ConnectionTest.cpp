@@ -6797,12 +6797,12 @@ struct RawSendOwner {
     fiber::http::Http2Stream *stream_ptr = nullptr;
 
     [[nodiscard]] fiber::http::Http2Stream &stream() noexcept { return *stream_ptr; }
-    [[nodiscard]] bool cancel_queued_send() noexcept { return conn->cancel_queued_stream_send(*stream_ptr); }
 };
 
 // Sends `total` DATA payload bytes, at most `batch` per encoded batch.
 struct RawDataSendOp {
     using SuccessType = std::size_t;
+    inline static constexpr fiber::http::Http2OutboundKind kOutboundKind = fiber::http::Http2OutboundKind::Data;
 
     RawDataSendOp(RawSendProbe &probe, std::size_t total, std::size_t batch) noexcept :
         probe_(&probe), remaining_(total), batch_(batch) {}
@@ -6811,10 +6811,6 @@ struct RawDataSendOp {
     ~RawDataSendOp() { ++probe_->ops_destroyed; }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return remaining_; }
-
-    [[nodiscard]] fiber::common::IoErr submit(RawSendOwner &owner) noexcept {
-        return owner.conn->request_stream_send(owner.stream(), fiber::http::Http2OutboundKind::Data);
-    }
 
     fiber::common::IoErr on_encode(RawSendOwner &, fiber::http::Http2Stream &stream,
                                    const fiber::http::Http2OutboundEncodeRequest &req,

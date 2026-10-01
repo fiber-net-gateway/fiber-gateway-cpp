@@ -365,7 +365,7 @@ private:
         return common::IoErr::None;
     }
 
-    [[nodiscard]] common::IoErr request_stream_send(Http2Stream &stream, Http2OutboundKind kind) noexcept;
+    [[nodiscard]] common::IoErr request_stream_send(Http2Stream &stream) noexcept;
     [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
     void cancel_stream_send(Http2Stream &stream, common::IoErr reason) noexcept;
     void on_stream_send_window_update(Http2Stream &stream) noexcept;

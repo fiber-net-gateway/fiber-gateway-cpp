@@ -76,7 +76,6 @@ private:
                                           Http2HpackDecoder::FieldView *out) noexcept;
     static void on_stream_abort(void *owner, common::IoErr reason) noexcept;
     static void destroy_owner(void *owner) noexcept;
-    [[nodiscard]] bool cancel_queued_send() noexcept;
     void record_request_write_error(common::IoErr error) noexcept;
     void on_stream_aborted(common::IoErr reason) noexcept;
     [[nodiscard]] common::IoErr handle_status(std::string_view value) noexcept;

@@ -58,14 +58,11 @@ bool is_pseudo_header(std::string_view name) noexcept { return !name.empty() && 
 
 struct ServerHttp2Request::SendResponseHeaderOp {
     using SuccessType = void;
+    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
 
     SendResponseHeaderOp(const OutgoingHeaderBlockView &header) noexcept :
         kind_(header.kind), headers_(header.headers), status_code_(header.status_code), reason_(header.reason),
         end_stream_(header.end_stream), informational_(header.kind == OutgoingHeaderKind::Informational) {}
-
-    [[nodiscard]] common::IoErr submit(ServerHttp2Request &request) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Headers);
-    }
 
     void on_send_done(ServerHttp2Request &request, bool operation_final_batch) noexcept;
 
@@ -82,15 +79,12 @@ struct ServerHttp2Request::SendResponseHeaderOp {
 
 struct ServerHttp2Request::SendResponseBodyAllOp {
     using SuccessType = std::size_t;
+    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
 
     explicit SendResponseBodyAllOp(mem::IoBufChain &&chunk) noexcept :
         chunk_(std::move(chunk)), total_bytes_(chunk_.readable_bytes()), end_(chunk_.complete()) {}
 
     [[nodiscard]] bool should_complete_without_submit() const noexcept { return total_bytes_ == 0 && !end_; }
-
-    [[nodiscard]] common::IoErr submit(ServerHttp2Request &request) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Data);
-    }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return chunk_.readable_bytes(); }
     void on_send_done(ServerHttp2Request &request, bool operation_final_batch) noexcept;
@@ -109,6 +103,7 @@ struct ServerHttp2Request::SendResponseBodyAllOp {
 
 struct ServerHttp2Request::SendResponseBodySomeOp {
     using SuccessType = std::size_t;
+    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
     inline static constexpr bool kAllowsPartialFinalBatch = true;
 
     explicit SendResponseBodySomeOp(mem::IoBufChain &chunk) noexcept :
@@ -118,10 +113,6 @@ struct ServerHttp2Request::SendResponseBodySomeOp {
         buf_(buf), total_bytes_(len), end_(end) {}
 
     [[nodiscard]] bool should_complete_without_submit() const noexcept { return total_bytes_ == 0 && !end_; }
-
-    [[nodiscard]] common::IoErr submit(ServerHttp2Request &request) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Data);
-    }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return total_bytes_; }
     void on_send_done(ServerHttp2Request &request, bool operation_final_batch) noexcept;
@@ -513,16 +504,6 @@ void ServerHttp2Request::SendResponseBodySomeOp::on_send_done(ServerHttp2Request
         request.stream_.local_end_stream_ = true;
         request.response_finished_ = true;
     }
-}
-
-bool ServerHttp2Request::cancel_queued_send() noexcept {
-    if (abort_reason_ != common::IoErr::None) {
-        return false;
-    }
-    if (conn_ == nullptr) {
-        return false;
-    }
-    return conn_->cancel_queued_stream_send(stream_);
 }
 
 void ServerHttp2Request::on_stream_aborted(common::IoErr reason) noexcept {

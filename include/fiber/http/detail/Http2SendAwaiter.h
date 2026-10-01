@@ -14,6 +14,8 @@ namespace fiber::http::detail {
 
 template<class Owner, class Op>
 class Http2SendAwaiter {
+    static_assert(Op::kOutboundKind != Http2OutboundKind::None);
+
 public:
     using SuccessType = typename Op::SuccessType;
     using AwaitResult = common::IoResult<SuccessType>;
@@ -40,7 +42,7 @@ public:
             return false;
         }
 
-        const bool canceled = owner_ && owner_->cancel_queued_send();
+        const bool canceled = owner_ && owner_->stream().cancel_queued_outbound();
         FIBER_ASSERT(canceled);
         if (canceled) {
             complete(common::IoErr::TimedOut);
@@ -124,7 +126,7 @@ private:
         if (!awaiter || !awaiter->owner_ || awaiter->completed_) {
             return;
         }
-        if (awaiter->owner_->cancel_queued_send()) {
+        if (awaiter->owner_->stream().cancel_queued_outbound()) {
             awaiter->complete(common::IoErr::TimedOut);
         }
     }
@@ -135,6 +137,14 @@ private:
             return;
         }
 
+        Http2Stream &stream = owner_->stream();
+        if constexpr (requires(const Op &op) { op.should_complete_without_submit(); }) {
+            if (op_.should_complete_without_submit()) {
+                complete(stream.outbound_idle_status());
+                return;
+            }
+        }
+
         const std::size_t pending_flow_controlled_bytes = [this]() noexcept {
             if constexpr (requires(const Op &op) { op.pending_flow_controlled_bytes(); }) {
                 return op_.pending_flow_controlled_bytes();
@@ -143,25 +153,12 @@ private:
             }
         }();
 
-        const common::IoErr arm_error =
-                owner_->stream().try_arm_outbound(kOutboundOps, this, pending_flow_controlled_bytes);
+        const common::IoErr arm_error = stream.try_arm_outbound(kOutboundOps, this, pending_flow_controlled_bytes);
         if (arm_error != common::IoErr::None) {
             complete(arm_error);
             return;
         }
         armed_ = true;
-
-        if constexpr (requires(const Op &op) { op.should_complete_without_submit(); }) {
-            if (op_.should_complete_without_submit()) {
-                complete(common::IoErr::None);
-                return;
-            }
-        }
-
-        common::IoErr error = op_.submit(*owner_);
-        if (error != common::IoErr::None) {
-            complete(error);
-        }
     }
 
     void complete(common::IoErr result) noexcept {
@@ -204,6 +201,7 @@ private:
     inline static constexpr Http2OutboundOperation::Ops kOutboundOps{
             .on_encode = &Http2SendAwaiter::on_encode,
             .on_send_done = &Http2SendAwaiter::on_send_done,
+            .kind = Op::kOutboundKind,
             .allow_partial_final_batch =
                     []() constexpr {
                         if constexpr (requires { Op::kAllowsPartialFinalBatch; }) {
