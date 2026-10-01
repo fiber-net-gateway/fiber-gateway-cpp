@@ -43,6 +43,7 @@ private:
     std::uint64_t inflight_end_ = 0;
     common::IoErr completion_result_ = common::IoErr::None;
     bool operation_final_batch_ = false;
+    bool end_stream_ = false;
     State state_ = State::Idle;
 
     friend class Http2Connection;

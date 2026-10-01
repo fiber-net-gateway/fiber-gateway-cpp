@@ -607,34 +607,17 @@ std::vector<std::uint8_t> chain_to_bytes(fiber::mem::IoBufChain chain) {
     return out;
 }
 
-fiber::common::IoErr noop_test_header_block_start(void *, fiber::http::Http2HpackDecoder::Sink &) noexcept {
-    return fiber::common::IoErr::None;
-}
-
-fiber::common::IoErr noop_test_header_block_complete(void *, bool) noexcept { return fiber::common::IoErr::None; }
-
-fiber::common::IoErr noop_test_body(void *, fiber::mem::IoBuf &&, bool) noexcept { return fiber::common::IoErr::None; }
-
-void noop_test_abort(void *, fiber::common::IoErr) noexcept {}
-void noop_test_destroy(void *) noexcept {}
-
-const fiber::http::Http2Stream::Ops kHeaderEncodeStreamOps{
-        &noop_test_destroy, &noop_test_header_block_start, &noop_test_header_block_complete, &noop_test_body,
-        &noop_test_abort,
-};
-
 struct HeaderEncodeCase final {
     std::uint32_t stream_id = 0;
     bool end_stream = false;
     std::vector<std::pair<std::string_view, std::string_view>> headers;
 
-    fiber::common::IoErr on_encode(fiber::http::Http2Stream &stream, const fiber::http::Http2OutboundEncodeRequest &req,
+    fiber::common::IoErr on_encode(const fiber::http::Http2OutboundEncodeRequest &req,
                                    fiber::http::Http2OutboundEncodeTarget &target,
                                    fiber::http::Http2OutboundEncodeResult &result) noexcept;
 };
 
-fiber::common::IoErr HeaderEncodeCase::on_encode(fiber::http::Http2Stream &,
-                                                 const fiber::http::Http2OutboundEncodeRequest &req,
+fiber::common::IoErr HeaderEncodeCase::on_encode(const fiber::http::Http2OutboundEncodeRequest &req,
                                                  fiber::http::Http2OutboundEncodeTarget &target,
                                                  fiber::http::Http2OutboundEncodeResult &result) noexcept {
     fiber::http::Http2HeadersFrameEncoder frame_encoder({
@@ -675,10 +658,9 @@ std::string build_headers_frame_bytes(std::uint32_t stream_id,
     auto &node_pool = ::fiber::event::EventLoop::current().io_buf_node_pool();
     fiber::mem::IoBufChain chain;
     fiber::http::Http2OutboundEncodeTarget target(chain);
-    fiber::http::Http2Stream stream(&test_case, kHeaderEncodeStreamOps);
     fiber::http::Http2OutboundEncodeRequest request{.max_frame_size = 16384};
     fiber::http::Http2OutboundEncodeResult encode_result;
-    if (test_case.on_encode(stream, request, target, encode_result) != fiber::common::IoErr::None) {
+    if (test_case.on_encode(request, target, encode_result) != fiber::common::IoErr::None) {
         return {};
     }
     std::vector<std::uint8_t> bytes = chain_to_bytes(std::move(chain));
@@ -6783,7 +6765,6 @@ std::size_t count_frames(const std::vector<EncodedFrame> &frames, std::uint8_t t
 
 struct RawSendProbe {
     std::size_t encode_calls = 0;
-    std::size_t send_done_calls = 0;
     std::size_t ops_destroyed = 0;
     std::size_t resumed = 0;
     // The encode call (1-based) that appends a partial frame and then fails
@@ -6791,17 +6772,8 @@ struct RawSendProbe {
     std::size_t fail_encode_at = 0;
 };
 
-// Plays the request's part for Http2SendAwaiter over a raw local stream.
-struct RawSendOwner {
-    fiber::http::Http2Connection *conn = nullptr;
-    fiber::http::Http2Stream *stream_ptr = nullptr;
-
-    [[nodiscard]] fiber::http::Http2Stream &stream() noexcept { return *stream_ptr; }
-};
-
 // Sends `total` DATA payload bytes, at most `batch` per encoded batch.
 struct RawDataSendOp {
-    using SuccessType = std::size_t;
     inline static constexpr fiber::http::Http2OutboundKind kOutboundKind = fiber::http::Http2OutboundKind::Data;
 
     RawDataSendOp(RawSendProbe &probe, std::size_t total, std::size_t batch) noexcept :
@@ -6810,10 +6782,10 @@ struct RawDataSendOp {
     RawDataSendOp &operator=(const RawDataSendOp &) = delete;
     ~RawDataSendOp() { ++probe_->ops_destroyed; }
 
-    [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return remaining_; }
+    [[nodiscard]] std::size_t flow_controlled_bytes() const noexcept { return remaining_; }
+    [[nodiscard]] bool end_stream() const noexcept { return false; }
 
-    fiber::common::IoErr on_encode(RawSendOwner &, fiber::http::Http2Stream &stream,
-                                   const fiber::http::Http2OutboundEncodeRequest &req,
+    fiber::common::IoErr on_encode(const fiber::http::Http2OutboundEncodeRequest &req,
                                    fiber::http::Http2OutboundEncodeTarget &target,
                                    fiber::http::Http2OutboundEncodeResult &result) noexcept {
         ++probe_->encode_calls;
@@ -6823,33 +6795,27 @@ struct RawDataSendOp {
         }
         const auto bytes = static_cast<std::uint32_t>(
                 std::min<std::size_t>({remaining_, batch_, static_cast<std::size_t>(req.payload_budget)}));
-        const std::string frame = make_frame(bytes, kDataFrameType, 0x0, stream.stream_id(), std::string(bytes, 'd'));
+        const std::string frame = make_frame(bytes, kDataFrameType, 0x0, req.stream_id, std::string(bytes, 'd'));
         const fiber::common::IoErr err = target.append_copy(frame.data(), frame.size());
         if (err != fiber::common::IoErr::None) {
             return err;
         }
         remaining_ -= bytes;
-        accepted_ += bytes;
         result.flow_controlled_bytes = bytes;
         result.operation_final_batch = remaining_ == 0;
         return fiber::common::IoErr::None;
     }
 
-    void on_send_done(RawSendOwner &, bool) noexcept { ++probe_->send_done_calls; }
-
-    [[nodiscard]] std::size_t success_result() const noexcept { return accepted_; }
-
     RawSendProbe *probe_;
     std::size_t remaining_;
     std::size_t batch_;
-    std::size_t accepted_ = 0;
 };
 
-using RawDataSendAwaiter = fiber::http::detail::Http2SendAwaiter<RawSendOwner, RawDataSendOp>;
+using RawDataSendAwaiter = fiber::http::detail::Http2SendAwaiter<RawDataSendOp>;
 
-fiber::async::Task<fiber::common::IoResult<std::size_t>> send_raw_data(RawSendOwner owner, RawSendProbe *probe,
-                                                                       std::size_t total, std::size_t batch) {
-    auto result = co_await RawDataSendAwaiter(owner, std::chrono::seconds(30), *probe, total, batch);
+fiber::async::Task<fiber::common::IoResult<std::size_t>>
+send_raw_data(fiber::http::Http2Stream *stream, RawSendProbe *probe, std::size_t total, std::size_t batch) {
+    auto result = co_await RawDataSendAwaiter(*stream, std::chrono::seconds(30), *probe, total, batch);
     ++probe->resumed;
     co_return result;
 }
@@ -6858,10 +6824,6 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> send_raw_data(RawSendOw
 struct RawStream {
     fiber::http::Http2Stream *stream = nullptr;
     fiber::http::Http2Stream::Lease held;
-
-    [[nodiscard]] RawSendOwner owner(fiber::http::Http2Connection &connection) const noexcept {
-        return {&connection, stream};
-    }
 };
 
 RawStream attach_raw_stream(fiber::http::Http2Connection &connection) {
@@ -6910,7 +6872,7 @@ void exercise_abandoned_window_wait(Http2HookState wait) {
                 RawStream raw = attach_raw_stream(connection);
                 fiber::http::Http2Stream &stream = *raw.stream;
                 RawSendProbe probe;
-                auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                auto send = send_raw_data(raw.stream, &probe, 5, 5);
                 (void) start_task(send);
                 EXPECT_EQ(stream.outbound_hook_.state_, wait);
                 EXPECT_EQ(probe.encode_calls, 0U);
@@ -6946,7 +6908,7 @@ TEST(Http2ConnectionTest, AbandonedQueuedSendIsWithdrawnAndResetsStream) {
                     const std::int32_t conn_window = connection.conn_send_window_;
                     const std::int32_t stream_window = stream.send_window();
                     RawSendProbe probe;
-                    auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                    auto send = send_raw_data(raw.stream, &probe, 5, 5);
                     (void) start_task(send);
                     // Queued for the pump, which has not run yet: nothing is
                     // encoded and no window is charged.
@@ -6969,7 +6931,6 @@ TEST(Http2ConnectionTest, AbandonedQueuedSendIsWithdrawnAndResetsStream) {
 
                     co_await fiber::async::sleep(std::chrono::milliseconds(1));
                     EXPECT_EQ(probe.encode_calls, 0U);
-                    EXPECT_EQ(probe.send_done_calls, 0U);
                     EXPECT_EQ(probe.resumed, 0U);
                     const auto frames = frames_for_stream(strip_client_initial_flight(transport.written()), 1);
                     EXPECT_EQ(frames.size(), 1U) << describe_frames(frames);
@@ -7005,7 +6966,7 @@ TEST(Http2ConnectionTest, AbandonedInFlightSendDrainsWithoutReachingTheAwaiter) 
                     // frame reach the wire before the transport blocks.
                     RawSendProbe probe;
                     transport.limit_writes(9 + 2);
-                    auto send = send_raw_data(first.owner(connection), &probe, 8, 5);
+                    auto send = send_raw_data(first.stream, &probe, 8, 5);
                     (void) start_task(send);
                     co_await fiber::async::sleep(std::chrono::milliseconds(1));
                     EXPECT_EQ(hook.state_, Http2HookState::InFlight);
@@ -7027,7 +6988,7 @@ TEST(Http2ConnectionTest, AbandonedInFlightSendDrainsWithoutReachingTheAwaiter) 
 
                     // A new send must not inherit the draining batch.
                     RawSendProbe retry_probe;
-                    auto retry = send_raw_data(first.owner(connection), &retry_probe, 1, 1);
+                    auto retry = send_raw_data(first.stream, &retry_probe, 1, 1);
                     auto retry_handle = start_task(retry);
                     EXPECT_TRUE(retry_handle.done());
                     if (retry_handle.done()) {
@@ -7040,7 +7001,7 @@ TEST(Http2ConnectionTest, AbandonedInFlightSendDrainsWithoutReachingTheAwaiter) 
 
                     // Another stream's send queues behind the draining bytes.
                     RawSendProbe other_probe;
-                    auto other = send_raw_data(second.owner(connection), &other_probe, 4, 4);
+                    auto other = send_raw_data(second.stream, &other_probe, 4, 4);
                     auto other_handle = start_task(other);
 
                     transport.release_writes();
@@ -7049,7 +7010,6 @@ TEST(Http2ConnectionTest, AbandonedInFlightSendDrainsWithoutReachingTheAwaiter) 
                     EXPECT_EQ(hook.state_, Http2HookState::Idle);
                     EXPECT_FALSE(stream.attached_to_connection());
                     EXPECT_EQ(probe.encode_calls, 1U);
-                    EXPECT_EQ(probe.send_done_calls, 0U);
                     EXPECT_EQ(probe.resumed, 0U);
                     EXPECT_EQ(connection.conn_send_window_, conn_window - 5 - 4);
                     EXPECT_TRUE(other_handle.done());
@@ -7062,7 +7022,7 @@ TEST(Http2ConnectionTest, AbandonedInFlightSendDrainsWithoutReachingTheAwaiter) 
                     }
 
                     RawSendProbe closed_probe;
-                    auto closed = send_raw_data(first.owner(connection), &closed_probe, 1, 1);
+                    auto closed = send_raw_data(first.stream, &closed_probe, 1, 1);
                     auto closed_handle = start_task(closed);
                     EXPECT_TRUE(closed_handle.done());
                     if (closed_handle.done()) {
@@ -7113,10 +7073,10 @@ TEST(Http2ConnectionTest, ControlFramesQueueAheadOfStreamsNotYetEncoded) {
                     // stream stays queued without being encoded.
                     transport.limit_writes(0);
                     RawSendProbe first_probe;
-                    auto first_send = send_raw_data(first.owner(connection), &first_probe, 64 * 1024, 64 * 1024);
+                    auto first_send = send_raw_data(first.stream, &first_probe, 64 * 1024, 64 * 1024);
                     auto first_handle = start_task(first_send);
                     RawSendProbe second_probe;
-                    auto second_send = send_raw_data(second.owner(connection), &second_probe, 5, 5);
+                    auto second_send = send_raw_data(second.stream, &second_probe, 5, 5);
                     auto second_handle = start_task(second_send);
                     co_await fiber::async::sleep(std::chrono::milliseconds(1));
                     EXPECT_EQ(first.stream->outbound_hook_.state_, Http2HookState::InFlight);
@@ -7161,13 +7121,12 @@ TEST(Http2ConnectionTest, EncodeFailureFailsOnlyItsSend) {
                     // The second batch fails to encode after the first one went out.
                     RawSendProbe probe;
                     probe.fail_encode_at = 2;
-                    auto result = co_await send_raw_data(first.owner(connection), &probe, 8, 5);
+                    auto result = co_await send_raw_data(first.stream, &probe, 8, 5);
                     EXPECT_FALSE(result.has_value());
                     if (!result) {
                         EXPECT_EQ(result.error(), fiber::common::IoErr::NoMem);
                     }
                     EXPECT_EQ(probe.encode_calls, 2U);
-                    EXPECT_EQ(probe.send_done_calls, 1U);
                     // Only the encoded batch was charged to the window.
                     EXPECT_EQ(connection.conn_send_window_, conn_window - 5);
                     EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::Idle);
@@ -7178,7 +7137,7 @@ TEST(Http2ConnectionTest, EncodeFailureFailsOnlyItsSend) {
 
                     // The connection keeps serving other streams.
                     RawSendProbe other_probe;
-                    auto other = co_await send_raw_data(second.owner(connection), &other_probe, 4, 4);
+                    auto other = co_await send_raw_data(second.stream, &other_probe, 4, 4);
                     EXPECT_TRUE(other.has_value());
                     if (other) {
                         EXPECT_EQ(*other, 4U);
@@ -7353,12 +7312,13 @@ TEST(Http2ConnectionTest, DestroyingCompletedSendBeforeResumeKeepsStreamUsable) 
                     RawStream raw = attach_raw_stream(connection);
                     fiber::http::Http2Stream &stream = *raw.stream;
                     RawSendProbe probe;
-                    auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                    auto send = send_raw_data(raw.stream, &probe, 5, 5);
                     (void) start_task(send);
                     // Write inline: the completion posts a resume that has not run yet.
                     connection.drive_io();
-                    EXPECT_EQ(probe.send_done_calls, 1U);
                     EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::Idle);
+                    EXPECT_EQ(stream.outbound_kind_, fiber::http::Http2OutboundKind::None);
+                    EXPECT_EQ(probe.resumed, 0U);
 
                     send = {};
 
@@ -7370,7 +7330,7 @@ TEST(Http2ConnectionTest, DestroyingCompletedSendBeforeResumeKeepsStreamUsable) 
                     EXPECT_EQ(probe.resumed, 0U);
 
                     RawSendProbe next_probe;
-                    auto next = co_await send_raw_data(raw.owner(connection), &next_probe, 3, 3);
+                    auto next = co_await send_raw_data(raw.stream, &next_probe, 3, 3);
                     EXPECT_TRUE(next.has_value());
                     if (next) {
                         EXPECT_EQ(*next, 3U);
@@ -7392,7 +7352,7 @@ TEST(Http2ConnectionTest, AbandonedInFlightSendIsReleasedWhenConnectionShutsDown
                     fiber::http::Http2Stream &stream = *raw.stream;
                     RawSendProbe probe;
                     transport.limit_writes(0);
-                    auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                    auto send = send_raw_data(raw.stream, &probe, 5, 5);
                     (void) start_task(send);
                     co_await fiber::async::sleep(std::chrono::milliseconds(1));
                     EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::InFlight);
@@ -7412,7 +7372,6 @@ TEST(Http2ConnectionTest, AbandonedInFlightSendIsReleasedWhenConnectionShutsDown
                     EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::Idle);
                     EXPECT_FALSE(stream.attached_to_connection());
                     EXPECT_EQ(connection.state(), fiber::http::Http2Connection::State::Closed);
-                    EXPECT_EQ(probe.send_done_calls, 0U);
                     co_return;
                 });
     });
@@ -7426,7 +7385,7 @@ TEST(Http2ConnectionTest, AbandonedSendThatCannotQueueRstClosesConnection) {
                     fiber::http::Http2Stream &stream = *raw.stream;
                     RawSendProbe probe;
                     transport.limit_writes(0);
-                    auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                    auto send = send_raw_data(raw.stream, &probe, 5, 5);
                     (void) start_task(send);
                     co_await fiber::async::sleep(std::chrono::milliseconds(1));
                     EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::InFlight);
@@ -7617,7 +7576,7 @@ void exercise_in_flight_send_through_connection_abort(bool reset_first) {
                                  fiber::http::Http2Stream &stream = *raw.stream;
                                  RawSendProbe probe;
                                  transport.limit_writes(0);
-                                 auto send = send_raw_data(raw.owner(connection), &probe, 5, 5);
+                                 auto send = send_raw_data(raw.stream, &probe, 5, 5);
                                  auto handle = start_task(send);
                                  co_await fiber::async::sleep(std::chrono::milliseconds(1));
                                  EXPECT_EQ(stream.outbound_hook_.state_, Http2HookState::InFlight);
@@ -7633,7 +7592,6 @@ void exercise_in_flight_send_through_connection_abort(bool reset_first) {
 
                                  EXPECT_TRUE(handle.done());
                                  EXPECT_EQ(probe.resumed, 1U);
-                                 EXPECT_EQ(probe.send_done_calls, 0U);
                                  if (handle.done()) {
                                      auto result = handle.promise().result();
                                      EXPECT_FALSE(result.has_value());

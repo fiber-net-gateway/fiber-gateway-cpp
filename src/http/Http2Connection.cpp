@@ -2114,7 +2114,9 @@ void Http2Connection::encode_stream_batch(Http2Stream &stream) noexcept {
     }
 
     Http2OutboundEncodeRequest request;
+    request.stream_id = stream.stream_id_;
     request.max_frame_size = peer_max_outbound_frame_size_;
+    request.max_hpack_string_size = options_.max_hpack_string_size;
     request.payload_budget = payload_budget;
     Http2OutboundEncodeTarget target(inflight_outbound_chain_);
     Http2OutboundEncodeResult result;
@@ -2135,6 +2137,7 @@ void Http2Connection::encode_stream_batch(Http2Stream &stream) noexcept {
         stream.notify_outbound_send_done(err, false);
         return;
     }
+    FIBER_ASSERT(!result.end_stream || result.operation_final_batch);
 
     stream.outbound_pending_flow_controlled_bytes_ =
             result.operation_final_batch ? 0 : pending_flow_controlled - result.flow_controlled_bytes;
@@ -2150,6 +2153,7 @@ void Http2Connection::encode_stream_batch(Http2Stream &stream) noexcept {
     hook.inflight_end_ = outbound_appended_bytes_;
     hook.completion_result_ = common::IoErr::None;
     hook.operation_final_batch_ = result.operation_final_batch;
+    hook.end_stream_ = result.end_stream;
     hook.state_ = Http2OutboundHook::State::InFlight;
     inflight_outbound_hooks_.push_back(hook);
 }
@@ -2373,6 +2377,7 @@ void Http2Connection::drop_outbound_hook(Http2OutboundHook &hook) noexcept {
             hook.completion_result_ != common::IoErr::None ? hook.completion_result_ : outbound_stop_reason_;
     hook.completion_result_ = common::IoErr::None;
     hook.operation_final_batch_ = false;
+    hook.end_stream_ = false;
     hook.state_ = Http2OutboundHook::State::Idle;
     auto *stream = static_cast<Http2Stream *>(hook.ctx_);
     FIBER_ASSERT(stream != nullptr);
