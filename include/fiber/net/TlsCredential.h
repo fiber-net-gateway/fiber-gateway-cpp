@@ -1,12 +1,12 @@
 #ifndef FIBER_NET_TLS_CREDENTIAL_H
 #define FIBER_NET_TLS_CREDENTIAL_H
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
-#include <memory>
 
+#include "../common/Assert.h"
 #include "../common/IoError.h"
-#include "../common/NonCopyable.h"
-#include "../common/NonMovable.h"
 #include "../tls/crypto/TlsCertificate.h"
 #include "../tls/crypto/TlsSignature.h"
 #include "TlsPemSource.h"
@@ -30,20 +30,33 @@ struct TlsCredentialOptions {
     TlsPemSource private_key{};
 };
 
-// Immutable, reusable certificate chain and private key. The material lives
-// in the tls layer's TlsCertificateChain/TlsPrivateKey (09 §4.3) and both
-// faces (TCP engine path, QUIC glue) stage borrowed pointers to it for each
-// handshake: the credential must outlive the handshakes it serves (the
-// documented param contract). A server credential that can be retired while
-// handshakes are in flight is handed to the configure callback's owning
-// TlsServerHandshakeConfig::add_credential(shared_ptr) overload instead, which
-// keeps it alive until each handshake that selected it ends.
-class TlsCredential : public common::NonCopyable, public common::NonMovable {
+// Immutable, reusable certificate chain and private key behind a refcounted
+// handle — one reference count for the whole credential, like BoringSSL's
+// SSL_CREDENTIAL. The material lives in the tls layer's
+// TlsCertificateChain/TlsPrivateKey (09 §4.3) and both faces (TCP engine path,
+// QUIC glue) stage borrowed pointers into it for each handshake, so a handle
+// move or copy never relocates what a handshake reads. Copying a handle takes
+// one atomic reference; handles to the same material may be copied and
+// destroyed concurrently on different threads, while a single handle object
+// follows the usual one-writer rule. A handle is empty only when
+// default-constructed, moved from or reset.
+class TlsCredential {
 public:
-    ~TlsCredential() = default;
+    TlsCredential() noexcept = default;
+    TlsCredential(const TlsCredential &other) noexcept;
+    TlsCredential &operator=(const TlsCredential &other) noexcept;
+    TlsCredential(TlsCredential &&other) noexcept : impl_(other.impl_) { other.impl_ = nullptr; }
+    TlsCredential &operator=(TlsCredential &&other) noexcept;
+    ~TlsCredential() { release(); }
 
-    [[nodiscard]] static common::IoResult<std::unique_ptr<TlsCredential>>
-    create(const TlsCredentialOptions &options) noexcept;
+    [[nodiscard]] static common::IoResult<TlsCredential> create(const TlsCredentialOptions &options) noexcept;
+
+    [[nodiscard]] bool empty() const noexcept { return impl_ == nullptr; }
+    // Handles currently sharing this material, this one included; 0 when
+    // empty. A diagnostic snapshot: other threads may change it at any time.
+    [[nodiscard]] std::size_t use_count() const noexcept;
+    // Drops this handle's reference and leaves it empty.
+    void reset() noexcept;
 
 private:
     friend class TlsServerHandshakeConfig;
@@ -51,15 +64,28 @@ private:
     friend class detail::TlsClientStager;
     friend class quic::QuicTlsSession;
 
-    TlsCredential() noexcept = default;
+    struct Impl {
+        std::atomic<std::uint32_t> refs{1};
+        tls::TlsCertificateChain chain;
+        tls::TlsPrivateKey key;
+    };
 
-    // Borrowed tls material for the engine paths. Never empty on an object
-    // create() returned successfully.
-    [[nodiscard]] const tls::TlsCertificateChain &tls_chain() const noexcept { return chain_; }
-    [[nodiscard]] const tls::TlsPrivateKey &tls_key() const noexcept { return key_; }
+    explicit TlsCredential(Impl *impl) noexcept : impl_(impl) {}
 
-    tls::TlsCertificateChain chain_;
-    tls::TlsPrivateKey key_;
+    void release() noexcept;
+
+    // Borrowed tls material for the engine paths; valid while any handle to
+    // this material lives. The edges reject empty handles before staging.
+    [[nodiscard]] const tls::TlsCertificateChain &tls_chain() const noexcept {
+        FIBER_ASSERT(impl_ != nullptr);
+        return impl_->chain;
+    }
+    [[nodiscard]] const tls::TlsPrivateKey &tls_key() const noexcept {
+        FIBER_ASSERT(impl_ != nullptr);
+        return impl_->key;
+    }
+
+    Impl *impl_ = nullptr;
 };
 
 } // namespace fiber::net

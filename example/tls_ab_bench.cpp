@@ -137,10 +137,18 @@ struct TempFile {
     TempFile &operator=(const TempFile &) = delete;
 };
 
+// server_param points at server_credential, so the pair is built in place and
+// never moved.
 struct BenchPair {
-    std::unique_ptr<fiber::net::TlsCredential> server_credential;
-    fiber::net::TlsServerParam server_param;
-    fiber::net::TlsClientParam client_param;
+    explicit BenchPair(fiber::net::TlsCredential credential) : server_credential(std::move(credential)) {
+        server_param.configure_callback = &fiber::net::configure_tls_with_credential;
+        server_param.configure_ctx = &server_credential;
+    }
+    BenchPair(BenchPair &&) = delete;
+
+    fiber::net::TlsCredential server_credential;
+    fiber::net::TlsServerParam server_param{};
+    fiber::net::TlsClientParam client_param{};
 };
 
 fiber::common::IoResult<BenchPair> make_bench_pair(const std::string &cert_path, const std::string &key_path) {
@@ -151,11 +159,7 @@ fiber::common::IoResult<BenchPair> make_bench_pair(const std::string &cert_path,
     if (!credential) {
         return std::unexpected(credential.error());
     }
-    BenchPair pair{};
-    pair.server_credential = std::move(*credential);
-    pair.server_param.configure_callback = &fiber::net::configure_tls_with_credential;
-    pair.server_param.configure_ctx = pair.server_credential.get();
-    return pair;
+    return fiber::common::IoResult<BenchPair>(std::in_place, std::move(*credential));
 }
 
 struct Workload {

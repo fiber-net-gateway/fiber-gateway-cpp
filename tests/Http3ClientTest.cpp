@@ -627,7 +627,7 @@ TEST(Http3ClientTest, RoundTripsStreamingRequestAndResponse) {
     ASSERT_TRUE(credential);
     fiber::http::Http3Endpoint::Options server_options{};
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = credential->get();
+    server_options.tls.configure_ctx = &*credential;
 
     fiber::http::HttpHandler handler = [server_promise](fiber::http::HttpExchange &exchange) {
         return echo_handler(exchange, server_promise);
@@ -703,7 +703,7 @@ TEST(Http3ClientTest, PartialWriteContinuesDataFrameWithoutRepeatingHeader) {
     ASSERT_TRUE(credential);
     fiber::http::Http3Endpoint::Options server_options{};
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = credential->get();
+    server_options.tls.configure_ctx = &*credential;
 
     server_options.http3.recv_flow.stream_buffer_limit = 128;
     server_options.http3.recv_flow.stream_low_water = 64;

@@ -48,6 +48,9 @@ common::IoResult<void> TlsClientStager::stage(const TlsClientParam &param, tls::
         cfg.verify_peer = false;
     }
     if (param.security.credential != nullptr) {
+        if (param.security.credential->empty()) {
+            return std::unexpected(common::IoErr::Invalid);
+        }
         cfg.client_chain = &param.security.credential->tls_chain();
         cfg.client_key = &param.security.credential->tls_key();
     }

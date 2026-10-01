@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <new>
 #include <string>
+#include <utility>
 
 namespace fiber::net {
 
@@ -46,14 +47,52 @@ common::IoErr read_pem_text(const TlsPemSource &source, std::string &out) noexce
 
 } // namespace
 
-common::IoResult<std::unique_ptr<TlsCredential>> TlsCredential::create(const TlsCredentialOptions &options) noexcept {
+TlsCredential::TlsCredential(const TlsCredential &other) noexcept : impl_(other.impl_) {
+    if (impl_ != nullptr) {
+        impl_->refs.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+TlsCredential &TlsCredential::operator=(const TlsCredential &other) noexcept {
+    // Retain before releasing: self-assignment and two handles to the same
+    // material both stay balanced.
+    if (other.impl_ != nullptr) {
+        other.impl_->refs.fetch_add(1, std::memory_order_relaxed);
+    }
+    release();
+    impl_ = other.impl_;
+    return *this;
+}
+
+TlsCredential &TlsCredential::operator=(TlsCredential &&other) noexcept {
+    if (this != &other) {
+        release();
+        impl_ = other.impl_;
+        other.impl_ = nullptr;
+    }
+    return *this;
+}
+
+std::size_t TlsCredential::use_count() const noexcept {
+    return impl_ == nullptr ? 0 : impl_->refs.load(std::memory_order_relaxed);
+}
+
+void TlsCredential::reset() noexcept {
+    release();
+    impl_ = nullptr;
+}
+
+void TlsCredential::release() noexcept {
+    // acq_rel: the last owner sees every other owner's reads of the material
+    // before it frees it.
+    if (impl_ != nullptr && impl_->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete impl_;
+    }
+}
+
+common::IoResult<TlsCredential> TlsCredential::create(const TlsCredentialOptions &options) noexcept {
     if (options.certificate_chain.empty() || options.private_key.empty()) {
         return std::unexpected(common::IoErr::Invalid);
-    }
-
-    std::unique_ptr<TlsCredential> result(new (std::nothrow) TlsCredential());
-    if (!result) {
-        return std::unexpected(common::IoErr::NoMem);
     }
 
     std::string chain_pem;
@@ -78,9 +117,13 @@ common::IoResult<std::unique_ptr<TlsCredential>> TlsCredential::create(const Tls
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    result->chain_ = std::move(*chain);
-    result->key_ = std::move(*key);
-    return result;
+    auto *impl = new (std::nothrow) Impl();
+    if (impl == nullptr) {
+        return std::unexpected(common::IoErr::NoMem);
+    }
+    impl->chain = std::move(*chain);
+    impl->key = std::move(*key);
+    return TlsCredential(impl);
 }
 
 } // namespace fiber::net

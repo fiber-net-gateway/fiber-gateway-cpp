@@ -103,7 +103,7 @@ struct SelectorState {
 };
 
 struct IdentityTls {
-    std::unique_ptr<fiber::net::TlsCredential> credential;
+    fiber::net::TlsCredential credential;
     std::unique_ptr<fiber::net::TrustStore> trust_store;
 };
 
@@ -126,7 +126,7 @@ fiber::common::IoErr capture_client_hello(void *ctx, fiber::net::TlsServerHandsh
         }
         selector.saw_test_alpn = input.offered_alpn.contains("fiber-mtls-test");
     }
-    return config.add_credential(*state->credential);
+    return config.add_borrowed_credential(*state->credential);
 }
 
 fiber::common::IoErr reject_server_configuration(void *, fiber::net::TlsServerHandshakeConfig &,
@@ -269,7 +269,7 @@ fiber::common::IoResult<IdentityTls> make_client_material(const IdentityFiles &f
 
 fiber::net::TlsServerParam make_server_options(const IdentityTls &material, ServerCallbackState &callback_state,
                                                SelectorState *selector_state) {
-    callback_state.credential = material.credential.get();
+    callback_state.credential = &material.credential;
     callback_state.selector = selector_state;
     fiber::net::TlsServerParam options{};
     options.configure_callback = &capture_client_hello;
@@ -287,7 +287,7 @@ constexpr std::string_view kMtlsTestAlpn[] = {"fiber-mtls-test"};
 
 fiber::net::TlsClientParam make_client_options(const IdentityTls &material) {
     fiber::net::TlsClientParam options{};
-    options.security.credential = material.credential.get();
+    options.security.credential = material.credential.empty() ? nullptr : &material.credential;
     options.security.trust_store = material.trust_store.get();
     options.security.verify_peer = true;
     options.alpn = kMtlsTestAlpn;

@@ -457,7 +457,7 @@ fiber::http::HttpServerTlsOptions tls_options(fiber::net::TlsCredential &credent
 struct TestCredential {
     fiber::test::QuicTestTlsFile cert{"h3-endpoint-cert", fiber::test::kQuicTestCertificatePem};
     fiber::test::QuicTestTlsFile key{"h3-endpoint-key", fiber::test::kQuicTestPrivateKeyPem};
-    std::unique_ptr<fiber::net::TlsCredential> credential{};
+    fiber::net::TlsCredential credential{};
 
     bool init() {
         if (!cert.valid() || !key.valid()) {
@@ -489,7 +489,7 @@ TEST(Http3EndpointTest, ServesHttp3Requests) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .handler =
                     [&handled](fiber::http::HttpExchange &exchange) {
                         handled.fetch_add(1, std::memory_order_relaxed);
@@ -554,7 +554,7 @@ TEST(Http3EndpointTest, IdleConnectionTimeoutRetiresASessionWithNoRequests) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .http3 = http3_options,
             .handler =
                     [&handled](fiber::http::HttpExchange &exchange) {
@@ -611,7 +611,7 @@ TEST(Http3EndpointTest, IdleConnectionTimeoutRetiresASessionThatNeverSentAReques
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .http3 = http3_options,
             .handler =
                     [&handled](fiber::http::HttpExchange &exchange) {
@@ -666,7 +666,7 @@ TEST(Http3EndpointTest, IdleConnectionTimeoutPreservesLongRequestsAndRestartsAft
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .http3 = http3_options,
             .handler = [&handled](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
                 handled.fetch_add(1, std::memory_order_relaxed);
@@ -724,7 +724,7 @@ TEST(Http3EndpointTest, IdleConnectionTimeoutDisabledKeepsTheSession) {
     // case pins the disabled behavior.
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .http3 = {.idle_connection_timeout = 0ms},
             .handler =
                     [&handled](fiber::http::HttpExchange &exchange) {
@@ -782,7 +782,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyViaChainWriteCompletes) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
                 fiber::http::HttpHeaders headers(exchange.pool());
                 headers.set("content-type", "application/json");
@@ -868,7 +868,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyWithTinyRequestStreamWindow) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
                 fiber::http::HttpHeaders headers(exchange.pool());
                 headers.set("content-type", "application/json");
@@ -985,7 +985,7 @@ TEST(Http3EndpointTest, DestroyedSuspendedBodyWriterKeepsLoopIntact) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
                 fiber::http::HttpHeaders headers(exchange.pool());
                 headers.set("content-type", "application/json");
@@ -1124,7 +1124,7 @@ TEST(Http3EndpointTest, DrainLetsAnInFlightRequestFinish) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .handler = [&](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
                 if (!entered.exchange(true)) {
                     in_handler.set_value();
@@ -1179,7 +1179,7 @@ TEST(Http3EndpointTest, StoppedEndpointRefusesNewConnections) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .handler = [](fiber::http::HttpExchange &exchange) { return write_text(exchange, 200, "ok"); },
     });
     ASSERT_NE(running.endpoint, nullptr);
@@ -1239,7 +1239,7 @@ TEST(Http3EndpointTest, OneShardPerWorkerLoop) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{}, &workers);
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .handler = [](fiber::http::HttpExchange &exchange) { return write_text(exchange, 200, "ok"); },
     });
     ASSERT_NE(running.endpoint, nullptr);
@@ -1280,7 +1280,7 @@ TEST(Http3EndpointTest, InheritsPortFromTcpEndpoint) {
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
             .inherit_port_from = running.tcp_endpoint,
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
     });
     ASSERT_NE(running.endpoint, nullptr);
     ASSERT_TRUE(running.server->start().has_value());
@@ -1391,7 +1391,7 @@ TEST(Http3EndpointTest, StreamedAutoBodyThroughPipeCompletes) {
     running.server = std::make_unique<Server>(group.at(0), fiber::http::HttpHandler{});
     running.endpoint = running.server->add_endpoint<Http3Endpoint>(Http3Endpoint::Options{
             .address = {fiber::net::IpAddress::loopback_v4(), 0},
-            .tls = tls_options(*tls.credential),
+            .tls = tls_options(tls.credential),
             .handler = [&pipe_promise](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
                 fiber::http::HttpHeaders headers(exchange.pool());
                 auto sent = co_await exchange.send_header(

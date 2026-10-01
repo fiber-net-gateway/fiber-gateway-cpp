@@ -46,6 +46,41 @@ TEST(TlsCredentialTest, PemContentCreatesCredential) {
                                         << fiber::common::io_err_name(credential.error());
 }
 
+// A handle copy shares the material under one reference count; moves and
+// resets hand references over or drop them without touching the material.
+TEST(TlsCredentialTest, HandlesShareOneReferenceCount) {
+    fiber::net::TlsCredentialOptions options{};
+    options.certificate_chain =
+            fiber::net::TlsPemSource::from_content(std::string(fiber::test::kQuicTestCertificatePem));
+    options.private_key = fiber::net::TlsPemSource::from_content(std::string(fiber::test::kQuicTestPrivateKeyPem));
+    auto created = fiber::net::TlsCredential::create(options);
+    ASSERT_TRUE(created.has_value());
+
+    fiber::net::TlsCredential first = std::move(*created);
+    EXPECT_TRUE(created->empty());
+    EXPECT_EQ(first.use_count(), 1u);
+
+    fiber::net::TlsCredential second = first;
+    EXPECT_EQ(first.use_count(), 2u);
+    fiber::net::TlsCredential &alias = second;
+    second = alias; // self-assignment keeps the count balanced
+    EXPECT_EQ(first.use_count(), 2u);
+
+    fiber::net::TlsCredential third = std::move(second);
+    EXPECT_TRUE(second.empty());
+    EXPECT_EQ(third.use_count(), 2u);
+    third = first; // same material: retain-then-release
+    EXPECT_EQ(first.use_count(), 2u);
+
+    third.reset();
+    EXPECT_TRUE(third.empty());
+    EXPECT_EQ(third.use_count(), 0u);
+    EXPECT_EQ(first.use_count(), 1u);
+
+    first = fiber::net::TlsCredential{};
+    EXPECT_TRUE(first.empty());
+}
+
 // The tls pem setters do not check key/chain pairing, so create() must reject
 // a private key that does not match the leaf certificate at creation time.
 TEST(TlsCredentialTest, MismatchedKeyPairIsRejected) {

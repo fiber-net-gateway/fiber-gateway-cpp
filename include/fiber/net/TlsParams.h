@@ -32,8 +32,9 @@ using ConfigureTlsCallback = common::IoErr (*)(void *ctx, TlsServerHandshakeConf
                                                const tls::TlsClientHelloView &client_hello) noexcept;
 
 struct TlsClientSecurity {
-    // The SSL retains its own references after successful installation.
-    // TLS clients without a client certificate leave credential null.
+    // Borrowed under the TlsClientParam contract below; an empty handle is
+    // rejected at staging. TLS clients without a client certificate leave
+    // credential null.
     const TlsCredential *credential = nullptr;
     // Trust anchors for peer verification. Null with verify_peer set means
     // the process-wide system roots (TrustStore::system_default): pass an
@@ -135,11 +136,11 @@ struct TlsServerParam {
     // original backing. Required for TLS: the callback runs at the first
     // ClientHello and must add at least one credential. The engine reads the
     // credential after the callback returns (Certificate/CertificateVerify,
-    // a full round trip later after a HelloRetryRequest): a borrowed
-    // credential must outlive the handshake, while one added through the
-    // owning TlsServerHandshakeConfig::add_credential(shared_ptr) overload is
-    // retained by the handshake itself — the shape for dynamically published
-    // credentials that may be retired mid-handshake.
+    // a full round trip later after a HelloRetryRequest): one added through
+    // TlsServerHandshakeConfig::add_credential is retained by the handshake
+    // itself — the shape for dynamically published credentials that may be
+    // retired mid-handshake — while one staged through
+    // add_borrowed_credential must outlive the handshake.
     ConfigureTlsCallback configure_callback = nullptr;
     void *configure_ctx = nullptr;
     const TrustStore *trust_store = nullptr;

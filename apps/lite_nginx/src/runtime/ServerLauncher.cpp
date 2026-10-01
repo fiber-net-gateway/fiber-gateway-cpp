@@ -46,10 +46,10 @@ namespace fiber::lite_nginx::runtime {
 struct ListenerTlsCredentials {
     struct Entry {
         std::string name;
-        std::unique_ptr<fiber::net::TlsCredential> credential;
+        fiber::net::TlsCredential credential;
     };
 
-    std::unique_ptr<fiber::net::TlsCredential> default_credential;
+    fiber::net::TlsCredential default_credential;
     std::vector<Entry> identities;
 };
 
@@ -229,19 +229,21 @@ run_script(fiber::http::HttpExchange &exchange, fiber::http::HttpResponseWriter 
 fiber::common::IoErr configure_identity_by_server_name(void *ctx, fiber::net::TlsServerHandshakeConfig &config,
                                                        const fiber::tls::TlsClientHelloView &client_hello) noexcept {
     auto *credentials = static_cast<const ListenerTlsCredentials *>(ctx);
-    if (!credentials || !credentials->default_credential) {
+    if (!credentials || credentials->default_credential.empty()) {
         return fiber::common::IoErr::Invalid;
     }
-    const fiber::net::TlsCredential *selected = credentials->default_credential.get();
+    const fiber::net::TlsCredential *selected = &credentials->default_credential;
     if (!client_hello.server_name.empty()) {
         auto it = std::lower_bound(
                 credentials->identities.begin(), credentials->identities.end(), client_hello.server_name,
                 [](const ListenerTlsCredentials::Entry &entry, std::string_view name) { return entry.name < name; });
         if (it != credentials->identities.end() && it->name == client_hello.server_name) {
-            selected = it->credential.get();
+            selected = &it->credential;
         }
     }
-    return config.add_credential(*selected);
+    // The launcher keeps every listener's credentials for the server's
+    // lifetime, so the handshake borrows them.
+    return config.add_borrowed_credential(*selected);
 }
 
 std::expected<std::unique_ptr<ListenerTlsCredentials>, RuntimeError>

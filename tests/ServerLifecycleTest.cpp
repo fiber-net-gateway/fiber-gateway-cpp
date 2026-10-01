@@ -617,7 +617,7 @@ TEST(ServerLifecycleTest, WorkerAllocationFailureRollsBackTcpAndUdpAndAllowsRetr
         h3.address = tcp.address;
         h3.inherit_port_from = endpoint;
         h3.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-        h3.tls.configure_ctx = credential->get();
+        h3.tls.configure_ctx = &*credential;
         EXPECT_NE(server.add_endpoint<fiber::http::Http3Endpoint>(h3), nullptr);
         auto *failing = server.add_endpoint<TestEndpoint>(TestEndpoint::Config{.trace = &trace, .fail_worker = true});
         EXPECT_NE(failing, nullptr);

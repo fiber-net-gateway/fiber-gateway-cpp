@@ -714,7 +714,7 @@ DetachedTask run_client(fiber::event::EventLoop *loop, std::uint16_t port, Scena
 
 struct ServerCtx {
     TlsCert cert;
-    std::unique_ptr<fiber::net::TlsCredential> tls_credential;
+    fiber::net::TlsCredential tls_credential;
     std::uint16_t port = 0;
     fiber::http::Server *server = nullptr;
 
@@ -732,7 +732,7 @@ struct ServerCtx {
         tls_credential = std::move(*created_credential);
         fiber::http::Http2Endpoint::Options server_options;
         server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-        server_options.tls.configure_ctx = tls_credential.get();
+        server_options.tls.configure_ctx = &tls_credential;
         std::promise<std::uint16_t> port_promise;
         std::promise<fiber::http::Server *> server_promise;
         auto port_future = port_promise.get_future();

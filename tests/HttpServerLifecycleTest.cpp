@@ -329,7 +329,7 @@ TEST(HttpServerLifecycleTest, ShutdownClosesAnIdleHttp2Connection) {
     ASSERT_TRUE(credential);
     fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = credential->get();
+    server_options.tls.configure_ctx = &*credential;
 
     fiber::http::Server server(group.at(0), std::move(handler), &group);
 
