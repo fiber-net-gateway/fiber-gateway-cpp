@@ -2037,6 +2037,166 @@ TEST(TlsStreamFdTest, AppDataBehindClientFinishedIsReadableAfterHandshake) {
 }
 
 // =====================================================================
+// buffered plaintext is read readiness
+// =====================================================================
+
+enum class PendingPlaintextProbe {
+    Observe,
+    // Subscribes for read with the plaintext buffered: a contract violation.
+    Subscribe,
+};
+
+// What the server sees with plaintext buffered behind a drained socket, then
+// once it is read out.
+struct PendingPlaintextOutcome {
+    fiber::common::IoErr err = fiber::common::IoErr::Unknown;
+    bool pending = false;
+    bool ready = false;
+    fiber::common::IoErr wait = fiber::common::IoErr::Unknown;
+    bool drained_ready = true;
+    fiber::common::IoErr drained_wait = fiber::common::IoErr::None;
+    std::string received;
+};
+
+void ignore_ready(void *, fiber::common::IoErr) noexcept {}
+
+fiber::async::Task<fiber::common::IoErr> read_append(fiber::net::detail::TlsStreamFd &stream, std::size_t size,
+                                                     std::string &out) {
+    fiber::mem::IoBufChain chain;
+    auto read_result = co_await stream.readv(size, chain, 5s);
+    if (!read_result) {
+        co_return read_result.error();
+    }
+    if (*read_result == 0) {
+        co_return fiber::common::IoErr::ConnReset;
+    }
+    for (const fiber::mem::IoBufNode *node = chain.front_node(); node != nullptr; node = node->next) {
+        out.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+    }
+    co_return fiber::common::IoErr::None;
+}
+
+DetachedTask probe_pending_plaintext(fiber::net::detail::TlsStreamFd *stream, const fiber::net::TlsServerParam *param,
+                                     std::size_t total, PendingPlaintextProbe probe, bool *server_done,
+                                     PendingPlaintextOutcome *outcome) {
+    auto handshake_result = co_await stream->handshake(*param, 5s);
+    fiber::common::IoErr err = handshake_result ? fiber::common::IoErr::None : handshake_result.error();
+    if (err == fiber::common::IoErr::None) {
+        // The peer's one record lands whole in a wire read that comes up
+        // short (the socket drained); a quarter of it is delivered.
+        err = co_await read_append(*stream, total / 4, outcome->received);
+    }
+    if (err == fiber::common::IoErr::None) {
+        outcome->pending = stream->has_pending_read();
+        outcome->ready = stream->read_ready();
+        if (probe == PendingPlaintextProbe::Subscribe) {
+            (void) stream->set_read_callback(&ignore_ready, nullptr);
+        }
+        // No socket edge can come: the peer stays silent until server_done.
+        auto waited = co_await stream->wait_readable(1s);
+        outcome->wait = waited ? fiber::common::IoErr::None : waited.error();
+        while (err == fiber::common::IoErr::None && outcome->received.size() < total) {
+            err = co_await read_append(*stream, total, outcome->received);
+        }
+    }
+    if (err == fiber::common::IoErr::None) {
+        outcome->drained_ready = stream->read_ready();
+        auto waited = co_await stream->wait_readable(50ms);
+        outcome->drained_wait = waited ? fiber::common::IoErr::None : waited.error();
+    }
+    outcome->err = err;
+    *server_done = true;
+}
+
+DetachedTask write_record_and_park(fiber::net::detail::TlsStreamFd *client, fiber::net::detail::TlsStreamFd *server,
+                                   const fiber::net::TlsClientParam *param, const std::string *payload,
+                                   const bool *server_done, fiber::common::IoErr *client_err) {
+    auto handshake_result = co_await client->handshake(*param, 5s);
+    *client_err = handshake_result ? fiber::common::IoErr::None : handshake_result.error();
+    if (*client_err == fiber::common::IoErr::None) {
+        auto written = co_await tls_poll_write(*client, payload->data(), payload->size());
+        *client_err = written ? fiber::common::IoErr::None : written.error();
+    }
+    while (!*server_done) {
+        co_await fiber::async::sleep(1ms);
+    }
+    // Torn down on the loop: a close_notify the gone peer never took stays
+    // queued in the stream until its destruction.
+    client->close();
+    delete client;
+    server->close();
+    delete server;
+    fiber::event::EventLoop::current().stop();
+}
+
+// Both ends on one loop, so the sequencing flag needs no synchronization.
+void run_pending_plaintext_probe(TestTlsPair &tls_pair, const std::string &payload, PendingPlaintextProbe probe,
+                                 PendingPlaintextOutcome &outcome, fiber::common::IoErr &client_err) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoop loop;
+    auto *server = new fiber::net::detail::TlsStreamFd(loop, fds[0]);
+    auto *client = new fiber::net::detail::TlsStreamFd(loop, fds[1]);
+    bool server_done = false;
+    fiber::async::spawn(loop, [&]() {
+        return probe_pending_plaintext(server, &tls_pair.server_options, payload.size(), probe, &server_done, &outcome);
+    });
+    fiber::async::spawn(loop, [&]() {
+        return write_record_and_park(client, server, &tls_pair.client_options, &payload, &server_done, &client_err);
+    });
+    loop.run();
+}
+
+// Plaintext opened from an already-consumed wire read is never announced by
+// a socket edge: read_ready() and wait_readable() report it, and stop doing
+// so once it is read out.
+TEST(TlsStreamFdTest, BufferedPlaintextIsReadReadiness) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert_pending", kSelfSignedCertPem);
+    TempFile key("key_pending", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
+
+    const std::string payload = byte_pattern(4096, 11);
+    PendingPlaintextOutcome outcome;
+    fiber::common::IoErr client_err = fiber::common::IoErr::Unknown;
+    run_pending_plaintext_probe(*tls_pair, payload, PendingPlaintextProbe::Observe, outcome, client_err);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+
+    EXPECT_EQ(client_err, fiber::common::IoErr::None);
+    ASSERT_EQ(outcome.err, fiber::common::IoErr::None);
+    EXPECT_TRUE(outcome.pending);
+    EXPECT_TRUE(outcome.ready);
+    EXPECT_EQ(outcome.wait, fiber::common::IoErr::None);
+    EXPECT_FALSE(outcome.drained_ready);
+    EXPECT_EQ(outcome.drained_wait, fiber::common::IoErr::TimedOut);
+    EXPECT_TRUE(outcome.received == payload);
+}
+
+// A read subscription over buffered plaintext would never fire: rejected
+// like a subscription on a Ready fd.
+TEST(TlsStreamFdDeathTest, ReadSubscriptionOverBufferedPlaintextAsserts) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert_pending_death", kSelfSignedCertPem);
+    TempFile key("key_pending_death", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
+
+    const std::string payload = byte_pattern(4096, 12);
+    EXPECT_DEATH(
+            {
+                PendingPlaintextOutcome outcome;
+                fiber::common::IoErr client_err = fiber::common::IoErr::Unknown;
+                run_pending_plaintext_probe(*tls_pair, payload, PendingPlaintextProbe::Subscribe, outcome, client_err);
+            },
+            "FIBER_ASSERT failed: !has_pending_read");
+}
+
+// =====================================================================
 // batched write flush (feature/tls/13)
 // =====================================================================
 
