@@ -563,6 +563,7 @@ std::string build_distinct_chain(fiber::mem::IoBufNodePool &pool, fiber::mem::Io
 struct PollWriteStats {
     std::size_t written = 0;
     std::size_t would_block_count = 0;
+    std::vector<std::size_t> calls; // what each successful try_writev reported
 };
 
 struct AbandonPendingWriteStats {
@@ -684,6 +685,7 @@ DetachedTask run_poll_transport_client(fiber::http::TlsTransport *transport, con
             co_return;
         }
         stats.written += *result;
+        stats.calls.push_back(*result);
     }
 
     done->set_value(stats);
@@ -1028,81 +1030,6 @@ DetachedTask write_chain_recording_records(fiber::http::TlsTransport *transport,
     (void) co_await transport->shutdown(5s);
     done->set_value(std::move(records));
     co_return;
-}
-
-TEST(TlsStreamFdTest, TlsTransportWritevFillsRecordsAcrossSmallAndLargeNodes) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
-        SigpipeGuard sigpipe_guard;
-        TempFile cert("cert", kSelfSignedCertPem);
-        TempFile key("key", kSelfSignedKeyPem);
-        ASSERT_TRUE(cert.ok);
-        ASSERT_TRUE(key.ok);
-
-        auto tls_pair = create_tls_pair(cert.path, key.path);
-        ASSERT_TRUE(tls_pair);
-
-        int fds[2] = {-1, -1};
-        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
-
-        fiber::event::EventLoopGroup group(2);
-        group.start();
-
-        fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-        auto server_transport_result =
-                fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
-        auto client_transport_result =
-                fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
-        ASSERT_TRUE(server_transport_result);
-        ASSERT_TRUE(client_transport_result);
-        auto *server_transport = server_transport_result->release();
-        auto *client_transport = client_transport_result->release();
-
-
-        fiber::mem::IoBufChain chain;
-        // HTTP/2 DATA frame shape: 9-byte header node + 16 KiB payload node, three
-        // times, then an oversized node followed by small nodes.
-        std::vector<std::size_t> sizes = {9, 16384, 9, 16384, 9, 16384, 20000, 9, 300};
-        std::string expected = build_distinct_chain(pool, chain, sizes);
-
-        std::promise<fiber::common::IoResult<std::string>> server_promise;
-        std::promise<fiber::common::IoResult<std::vector<std::size_t>>> client_promise;
-        auto server_future = server_promise.get_future();
-        auto client_future = client_promise.get_future();
-
-        fiber::async::spawn(group.at(0), [&]() {
-            return run_transport_server(server_transport, tls_pair->server_options, &server_promise);
-        });
-        fiber::async::spawn(group.at(1), [&]() {
-            return write_chain_recording_records(client_transport, tls_pair->client_options, std::move(chain),
-                                                 &client_promise);
-        });
-
-        ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
-        ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
-
-        auto client_result = client_future.get();
-        auto server_result = server_future.get();
-        ASSERT_TRUE(client_result);
-        ASSERT_TRUE(server_result);
-        EXPECT_EQ(*server_result, expected);
-        // 3 x (9 + 16384) = 49179 -> three full records + 27 bytes carried into
-        // the fourth, which is filled from the 20000 node; its 3643-byte tail is
-        // coalesced with the trailing [9][300] instead of becoming its own record.
-        const std::vector<std::size_t> expected_records = {16384, 16384, 16384, 16384, 3643 + 9 + 300};
-        EXPECT_EQ(*client_result, expected_records);
-
-        std::promise<void> close_promise;
-        auto close_future = close_promise.get_future();
-        fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &close_promise); });
-        ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
-        std::promise<void> close_promise2;
-        auto close_future2 = close_promise2.get_future();
-        fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &close_promise2); });
-        ASSERT_EQ(close_future2.wait_for(2s), std::future_status::ready);
-
-        group.stop();
-        group.join();
-    });
 }
 
 TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBlock) {
@@ -2106,6 +2033,240 @@ TEST(TlsStreamFdTest, AppDataBehindClientFinishedIsReadableAfterHandshake) {
 
         const std::vector<std::string> pieces{byte_pattern(3000, 7)};
         check_wire_transfer(*tls_pair, pieces, 4096, WirePath::Gathered, true);
+    });
+}
+
+// =====================================================================
+// batched write flush (feature/tls/13)
+// =====================================================================
+
+// Writes a chain of `sizes` nodes through a TLS pair (default socket buffers)
+// and reports what each try_writev returned; the peer must read the bytes
+// back unchanged. A sealed batch is only ever reported whole, so the
+// sequence of returns is deterministic whatever WouldBlock does.
+void write_chain_through_tls(::fiber::mem::IoBufNodePool &pool, const std::vector<std::size_t> &sizes,
+                             PollWriteStats &stats) {
+    SigpipeGuard sigpipe_guard;
+    TempFile cert("cert_batch", kSelfSignedCertPem);
+    TempFile key("key_batch", kSelfSignedKeyPem);
+    ASSERT_TRUE(cert.ok);
+    ASSERT_TRUE(key.ok);
+    auto tls_pair = create_tls_pair(cert.path, key.path);
+    ASSERT_TRUE(tls_pair);
+
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+    fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+    auto server_transport_result =
+            fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
+    auto client_transport_result =
+            fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
+    ASSERT_TRUE(server_transport_result);
+    ASSERT_TRUE(client_transport_result);
+    auto *server_transport = server_transport_result->release();
+    auto *client_transport = client_transport_result->release();
+
+    fiber::mem::IoBufChain chain;
+    const std::string expected = build_distinct_chain(pool, chain, sizes);
+
+    std::promise<fiber::common::IoResult<std::string>> server_promise;
+    std::promise<fiber::common::IoResult<PollWriteStats>> client_promise;
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return run_poll_transport_server(server_transport, tls_pair->server_options, expected.size(), &server_promise);
+    });
+    fiber::async::spawn(group.at(1), [&]() {
+        return run_poll_transport_client(client_transport, tls_pair->client_options, std::move(chain), &client_promise);
+    });
+    ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+    ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+    auto client_result = client_future.get();
+    auto server_result = server_future.get();
+
+    std::promise<void> server_close_promise;
+    std::promise<void> client_close_promise;
+    auto server_close_future = server_close_promise.get_future();
+    auto client_close_future = client_close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
+    fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
+    ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+
+    ASSERT_TRUE(client_result);
+    ASSERT_TRUE(server_result);
+    EXPECT_EQ(client_result->written, expected.size());
+    EXPECT_TRUE(*server_result == expected);
+    stats = std::move(*client_result);
+}
+
+// H2's outbound shape — a 9-byte frame header node before each payload node.
+// Every group coalesces a full record across the header/payload seam, and
+// four of them go out per call instead of one.
+TEST(TlsStreamFdTest, TlsTransportWritevBatchesH2ShapedChain) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        std::vector<std::size_t> sizes;
+        for (int frame = 0; frame < 8; ++frame) {
+            sizes.push_back(9);
+            sizes.push_back(16384);
+        }
+        PollWriteStats stats;
+        write_chain_through_tls(pool, sizes, stats);
+        EXPECT_EQ(stats.calls, (std::vector<std::size_t>{65536, 65536, 72}));
+    });
+}
+
+// Coalescing walks any number of nodes: 2000 ten-byte nodes fill whole
+// records (a 16-iovec walk would seal 160-byte records).
+TEST(TlsStreamFdTest, TlsTransportWritevCoalescesManySmallNodesIntoFullRecords) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        PollWriteStats stats;
+        write_chain_through_tls(pool, std::vector<std::size_t>(2000, 10), stats);
+        EXPECT_EQ(stats.calls, (std::vector<std::size_t>{20000}));
+    });
+}
+
+// A large single node seals one batch per call, not the whole node at once:
+// sealed-but-unwritten output stays bounded by a batch.
+TEST(TlsStreamFdTest, TlsTransportWritevBatchesALargeNode) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        PollWriteStats stats;
+        write_chain_through_tls(pool, {std::size_t{1} << 20}, stats);
+        EXPECT_EQ(stats.calls, std::vector<std::size_t>(16, 65536));
+    });
+}
+
+// Forwards src → dst unchanged and logs every TLS record crossing it as
+// (outer content type, record length), parsing headers across reads.
+void relay_logging_records(int src, int dst, std::vector<std::pair<std::uint8_t, std::size_t>> *records) {
+    std::vector<std::uint8_t> buf(64 * 1024);
+    std::vector<std::uint8_t> pending;
+    for (;;) {
+        const ssize_t got = ::read(src, buf.data(), buf.size());
+        if (got <= 0) {
+            break;
+        }
+        std::size_t off = 0;
+        while (off < static_cast<std::size_t>(got)) {
+            const ssize_t put = ::write(dst, buf.data() + off, static_cast<std::size_t>(got) - off);
+            if (put <= 0) {
+                return;
+            }
+            off += static_cast<std::size_t>(put);
+        }
+        pending.insert(pending.end(), buf.begin(), buf.begin() + got);
+        std::size_t pos = 0;
+        while (pending.size() - pos >= 5) {
+            const std::size_t len = (static_cast<std::size_t>(pending[pos + 3]) << 8) | pending[pos + 4];
+            if (pending.size() - pos < 5 + len) {
+                break;
+            }
+            records->emplace_back(pending[pos], len);
+            pos += 5 + len;
+        }
+        pending.erase(pending.begin(), pending.begin() + static_cast<std::ptrdiff_t>(pos));
+    }
+    ::shutdown(dst, SHUT_WR);
+}
+
+// Record boundaries on the wire, not just per-call returns: H2-shaped
+// [9][16 KiB] nodes, an oversized node and small trailing nodes fill 16 KiB
+// records, and the oversized node's tail is coalesced with the trailing
+// nodes instead of becoming a short record of its own. One write batch
+// covers the first four records.
+TEST(TlsStreamFdTest, TlsTransportWritevFillsRecordsAcrossSmallAndLargeNodes) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_fill", kSelfSignedCertPem);
+        TempFile key("key_fill", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+        // TLS 1.3: every record past the handshake is outer type 23 and
+        // carries plaintext of its length minus 17 (inner type + tag).
+        tls_pair->client_options.min_version = 0x0304;
+        tls_pair->client_options.max_version = 0x0304;
+
+        int server_fds[2] = {-1, -1};
+        int client_fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, server_fds), 0);
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, client_fds), 0);
+        std::vector<std::pair<std::uint8_t, std::size_t>> records; // client → server
+        WireRelay relay;
+        relay.fds[0] = server_fds[1];
+        relay.fds[1] = client_fds[1];
+        relay.up = std::thread(relay_logging_records, relay.fds[1], relay.fds[0], &records);
+        relay.down = std::thread(relay_bytes, relay.fds[0], relay.fds[1], WirePath::Direct);
+
+        fiber::event::EventLoopGroup group(2);
+        group.start();
+        fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
+        auto server_transport_result =
+                fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(server_fds[0], peer));
+        auto client_transport_result =
+                fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(client_fds[0], peer));
+        ASSERT_TRUE(server_transport_result);
+        ASSERT_TRUE(client_transport_result);
+        auto *server_transport = server_transport_result->release();
+        auto *client_transport = client_transport_result->release();
+
+        fiber::mem::IoBufChain chain;
+        const std::vector<std::size_t> sizes = {9, 16384, 9, 16384, 9, 16384, 20000, 9, 300};
+        const std::string expected = build_distinct_chain(pool, chain, sizes);
+
+        std::promise<fiber::common::IoResult<std::string>> server_promise;
+        std::promise<fiber::common::IoResult<std::vector<std::size_t>>> client_promise;
+        auto server_future = server_promise.get_future();
+        auto client_future = client_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() {
+            return run_transport_server(server_transport, tls_pair->server_options, &server_promise);
+        });
+        fiber::async::spawn(group.at(1), [&]() {
+            return write_chain_recording_records(client_transport, tls_pair->client_options, std::move(chain),
+                                                 &client_promise);
+        });
+        ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
+        ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
+        auto client_result = client_future.get();
+        auto server_result = server_future.get();
+
+        std::promise<void> server_close_promise;
+        std::promise<void> client_close_promise;
+        auto server_close_future = server_close_promise.get_future();
+        auto client_close_future = client_close_promise.get_future();
+        fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
+        fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
+        ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+        ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+        group.stop();
+        group.join();
+        relay.up.join(); // both streams closed: the record log is complete
+        relay.down.join();
+
+        ASSERT_TRUE(client_result);
+        ASSERT_TRUE(server_result);
+        EXPECT_TRUE(*server_result == expected);
+        // 3 x (9 + 16384) = 49179 -> three full records + 27 bytes carried into
+        // the fourth, which is filled from the 20000 node (one 64 KiB batch);
+        // its 3643-byte tail is coalesced with the trailing [9][300].
+        EXPECT_EQ(*client_result, (std::vector<std::size_t>{65536, 3643 + 9 + 300}));
+
+        // Client records after ClientHello/CCS: [Finished][app data x5][close_notify].
+        std::vector<std::size_t> sealed;
+        for (const auto &[type, len]: records) {
+            if (type == 23) {
+                sealed.push_back(len - 17);
+            }
+        }
+        ASSERT_GE(sealed.size(), 7u);
+        const std::vector<std::size_t> app(sealed.begin() + 1, sealed.end() - 1);
+        EXPECT_EQ(app, (std::vector<std::size_t>{16384, 16384, 16384, 16384, 3643 + 9 + 300}));
+        EXPECT_EQ(sealed.back(), 2u); // close_notify: level + description
     });
 }
 

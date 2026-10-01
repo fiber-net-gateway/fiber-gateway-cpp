@@ -9,6 +9,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <span>
 #include <sys/uio.h>
 #include <type_traits>
 
@@ -82,6 +83,75 @@ static_assert(kInboundMinCapacity >= tls::kTlsRecordHeaderSize + tls::kTlsMaxCip
 constexpr int kMaxIov = 16;
 // One TLS record's maximum plaintext — the write-side grouping granularity.
 constexpr std::size_t kRecordPlaintextMax = tls::kTlsMaxPlaintextSize;
+// Plaintext sealed per try_write before the one flush (feature/tls/13): ~4
+// records, so a chain of small nodes (H2's 9-byte frame headers between
+// payloads) costs one sendmsg per batch instead of one per record.
+constexpr std::size_t kWriteBatchBytes = 64 * 1024;
+
+// Read-only walk over a chain's readable bytes: the current node and the
+// offset into its readable region. Empty nodes are skipped.
+class ChainCursor {
+public:
+    explicit ChainCursor(const mem::IoBufChain &chain) noexcept : node_(chain.front_node()) { skip_empty(); }
+
+    [[nodiscard]] bool at_end() const noexcept { return node_ == nullptr; }
+
+    // The rest of the current node.
+    [[nodiscard]] std::span<const std::uint8_t> segment() const noexcept {
+        return {node_->buf.readable_data() + offset_, node_->buf.readable() - offset_};
+    }
+
+    // No readable byte follows the current segment.
+    [[nodiscard]] bool last_segment() const noexcept {
+        for (const mem::IoBufNode *node = node_->next; node != nullptr; node = node->next) {
+            if (node->buf.readable() > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Copies up to dst.size() bytes from the cursor on, across nodes; the
+    // cursor itself does not move. Returns the bytes copied.
+    std::size_t copy_out(std::span<std::uint8_t> dst) const noexcept {
+        std::size_t copied = 0;
+        std::size_t offset = offset_;
+        for (const mem::IoBufNode *node = node_; node != nullptr && copied < dst.size(); node = node->next) {
+            const std::size_t take = std::min(node->buf.readable() - offset, dst.size() - copied);
+            if (take > 0) {
+                std::memcpy(dst.data() + copied, node->buf.readable_data() + offset, take);
+                copied += take;
+            }
+            offset = 0;
+        }
+        return copied;
+    }
+
+    // Moves past `bytes` readable bytes (at most what remains).
+    void advance(std::size_t bytes) noexcept {
+        while (bytes > 0) {
+            const std::size_t left = node_->buf.readable() - offset_;
+            if (bytes < left) {
+                offset_ += bytes;
+                return;
+            }
+            bytes -= left;
+            node_ = node_->next;
+            offset_ = 0;
+            skip_empty();
+        }
+    }
+
+private:
+    void skip_empty() noexcept {
+        while (node_ != nullptr && node_->buf.readable() == 0) {
+            node_ = node_->next;
+        }
+    }
+
+    const mem::IoBufNode *node_ = nullptr;
+    std::size_t offset_ = 0;
+};
 
 // Total size of the incomplete record heading `buf`: header plus body once
 // the header is in (process_inbound left it validated), else just the header.
@@ -162,11 +232,16 @@ bool TlsStreamFd::has_pending_read() const noexcept {
 void TlsStreamFd::close() {
     FIBER_ASSERT(loop().in_loop());
     if (conn_) {
-        if (!conn_->failed() && !conn_->peer_closed()) {
-            (void) conn_->close_notify();
+        // After a latched write error the output may hold sealed records the
+        // caller never saw written: send nothing — no close_notify that
+        // would pass the truncated stream off as complete.
+        if (write_error_ == fiber::common::IoErr::None) {
+            if (!conn_->failed() && !conn_->peer_closed()) {
+                (void) conn_->close_notify();
+            }
+            fiber::event::IoEvent event = fiber::event::IoEvent::None;
+            (void) flush_output(event); // best-effort single drain; fd may be gone
         }
-        fiber::event::IoEvent event = fiber::event::IoEvent::None;
-        (void) flush_output(event); // best-effort single drain; fd may be gone
         conn_.reset();
     }
     // A mid-handshake close touches no handshake state here: the fd close
@@ -184,6 +259,7 @@ void TlsStreamFd::close() {
     pending_write_chain_ = nullptr;
     pending_write_len_ = 0;
     write_scratch_.reset();
+    write_error_ = fiber::common::IoErr::None;
 }
 
 fiber::common::IoErr TlsStreamFd::detach_for_handover() noexcept {
@@ -561,6 +637,9 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
         // Nothing to close gracefully (never started / mid-handshake).
         return fiber::common::IoErr::None;
     }
+    if (write_error_ != fiber::common::IoErr::None) {
+        return write_error_; // no graceful close for a stream that lost integrity
+    }
     if (!shutdown_started_) {
         auto closed = conn_->close_notify();
         if (!closed) {
@@ -577,87 +656,102 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
 // there is no scatter-gather seal API, so multi-node chains would otherwise
 // produce one record per IoBuf: an HTTP/2 DATA frame is a 9-byte header node
 // followed by its payload node, and writing the header as its own record
-// costs a full send() for 31 bytes on the wire. A node that is itself at
-// least one full record is passed to the seal with the node's own pointer
-// (zero copy). Anything smaller is coalesced into a scratch buffer with the
-// nodes that follow it, splitting the last node when needed, so that each
-// scratch write is a full record whenever the chain holds enough data.
+// costs a record of overhead for 9 bytes. A node that is itself at least one
+// full record is passed to the seal with the node's own pointer (zero copy).
+// Anything smaller is coalesced into a scratch buffer with the nodes that
+// follow it, splitting the last node when needed, so that each scratch write
+// is a full record whenever the chain holds enough data. Groups seal back to
+// back into one batch (feature/tls/13) and the batch takes one flush: one
+// sendmsg per ~64 KiB instead of one per record.
+fiber::common::IoErr TlsStreamFd::seal_write_batch(const mem::IoBufChain &buf, std::size_t &batch_len) noexcept {
+    ChainCursor cursor(buf);
+    FIBER_ASSERT(!cursor.at_end()); // readable_bytes() > 0 with no pending batch
+    while (batch_len < kWriteBatchBytes && !cursor.at_end()) {
+        // Zero-copy groups take whole records, at least one, within the
+        // batch's remaining room.
+        const std::size_t room = kWriteBatchBytes - batch_len;
+        const std::size_t record_room = std::max(kRecordPlaintextMax, room - room % kRecordPlaintextMax);
+        const std::span<const std::uint8_t> segment = cursor.segment();
+        std::span<const std::uint8_t> group;
+        if (cursor.last_segment()) {
+            group = segment.first(std::min(segment.size(), record_room)); // a short final record is fine
+        } else if (segment.size() >= kRecordPlaintextMax) {
+            // Whole records straight from the node; its tail joins the next
+            // group so it does not become a short record of its own.
+            group = segment.first(std::min(segment.size() - segment.size() % kRecordPlaintextMax, record_room));
+        } else {
+            if (!write_scratch_) {
+                write_scratch_.reset(new (std::nothrow) std::uint8_t[kRecordPlaintextMax]);
+                if (!write_scratch_) {
+                    // Nothing of this group is sealed: a batch already
+                    // holding groups still goes out whole.
+                    return batch_len > 0 ? fiber::common::IoErr::None : fiber::common::IoErr::NoMem;
+                }
+            }
+            group = {write_scratch_.get(), cursor.copy_out({write_scratch_.get(), kRecordPlaintextMax})};
+        }
+        auto sealed = conn_->write(group);
+        if (!sealed) {
+            // Invalid (a terminal connection) only ever fails the first group,
+            // before anything is sealed. NoMem may leave records of this or
+            // earlier groups sealed but unreported: latch it.
+            if (sealed.error() == fiber::common::IoErr::NoMem) {
+                write_error_ = fiber::common::IoErr::NoMem;
+            }
+            return sealed.error();
+        }
+        cursor.advance(group.size());
+        batch_len += group.size();
+    }
+    return fiber::common::IoErr::None;
+}
+
 fiber::common::IoResult<std::size_t> TlsStreamFd::try_write(mem::IoBufChain &buf) noexcept {
     if (!stream_fd_.valid() || !conn_) {
         return std::unexpected(fiber::common::IoErr::BadFd);
+    }
+    if (write_error_ != fiber::common::IoErr::None) {
+        return std::unexpected(write_error_);
     }
     if (buf.readable_bytes() == 0 && pending_write_chain_ == nullptr) {
         return std::size_t{0};
     }
     if (!out_pending_.empty() && pending_write_chain_ != &buf) {
-        // A sealed group is still flushing: only its own chain may resume it
+        // A sealed batch is still flushing: only its own chain may resume it
         // (the BoringSSL WANT_WRITE same-buffer contract, chain-shaped).
         return std::unexpected(fiber::common::IoErr::Busy);
     }
 
-    std::size_t group_len = 0;
+    std::size_t batch_len = 0;
     if (out_pending_.empty()) {
-        std::array<iovec, kMaxIov> iov{};
-        const int count = buf.fill_write_iov(iov.data(), static_cast<int>(iov.size()));
-        FIBER_ASSERT(count > 0); // readable_bytes() > 0 with no pending group
-
-        const void *write_data = nullptr;
-        std::size_t write_len = 0;
-        if (count == 1) {
-            write_data = iov[0].iov_base;
-            write_len = iov[0].iov_len;
-        } else if (iov[0].iov_len >= kRecordPlaintextMax) {
-            // Whole records straight from the node; its tail joins the next
-            // group so it does not become a short record of its own.
-            write_data = iov[0].iov_base;
-            write_len = iov[0].iov_len - iov[0].iov_len % kRecordPlaintextMax;
-        } else {
-            if (!write_scratch_) {
-                write_scratch_.reset(new (std::nothrow) std::uint8_t[kRecordPlaintextMax]);
-                if (!write_scratch_) {
-                    return std::unexpected(fiber::common::IoErr::NoMem);
-                }
-            }
-            std::uint8_t *dst = write_scratch_.get();
-            std::size_t coalesced = 0;
-            for (int i = 0; i < count && coalesced < kRecordPlaintextMax; ++i) {
-                const std::size_t take = std::min(iov[i].iov_len, kRecordPlaintextMax - coalesced);
-                std::memcpy(dst + coalesced, iov[i].iov_base, take);
-                coalesced += take;
-            }
-            write_data = write_scratch_.get();
-            write_len = coalesced;
-        }
-
-        group_len = write_len;
-        pending_write_chain_ = &buf;
-        pending_write_len_ = group_len;
-        auto sealed = conn_->write({static_cast<const std::uint8_t *>(write_data), group_len});
-        if (!sealed) {
-            // The group never sealed: no retry state to keep.
+        const fiber::common::IoErr err = seal_write_batch(buf, batch_len);
+        if (err != fiber::common::IoErr::None) {
+            // The batch never completed sealing: no retry state to keep.
             pending_write_chain_ = nullptr;
             pending_write_len_ = 0;
-            return std::unexpected(sealed.error()); // terminal/closed (Invalid) or NoMem
+            return std::unexpected(err); // terminal/closed (Invalid) or NoMem
         }
+        pending_write_chain_ = &buf;
+        pending_write_len_ = batch_len;
     } else {
-        group_len = pending_write_len_; // resume: the plaintext is already sealed
+        batch_len = pending_write_len_; // resume: the plaintext is already sealed
     }
 
     fiber::event::IoEvent event = fiber::event::IoEvent::None;
     const fiber::common::IoErr err = flush_output(event);
     if (err != fiber::common::IoErr::None) {
         if (err != fiber::common::IoErr::WouldBlock) {
-            // The group is dead (no resume after a hard error): drop its
+            // The batch is dead (no resume after a hard error): drop its
             // identity; the sealed remainder lingers until close, and a
             // write on any chain reports Busy meanwhile.
             abandon_pending_write();
         }
         return std::unexpected(err);
     }
-    buf.consume_and_compact(group_len);
+    buf.consume_and_compact(batch_len);
     pending_write_chain_ = nullptr;
     pending_write_len_ = 0;
-    return group_len;
+    return batch_len;
 }
 
 void TlsStreamFd::abandon_pending_write() noexcept {
