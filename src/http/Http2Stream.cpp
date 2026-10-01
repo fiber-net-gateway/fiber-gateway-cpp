@@ -230,17 +230,12 @@ void Http2Stream::abandon_outbound(void *ctx) noexcept {
         return;
     }
 
-    // Window waits and a send still in the ready queue are withdrawn. An
-    // encoded batch stays with the connection: nothing in its in-flight chain
-    // is withdrawn. It drains, or goes with the connection, and the stream is
-    // released once the hook is idle again.
-    if (conn_) {
-        (void) conn_->cancel_queued_stream_send(*this);
-    }
-    outbound_kind_ = Http2OutboundKind::None;
-
     // The caller cannot learn how much of the send went out, so the stream
-    // ends here.
+    // ends here. Closing withdraws a send that is not encoded yet; an encoded
+    // batch stays with the connection, since nothing in its in-flight chain is
+    // withdrawn. It drains, or goes with the connection, and the stream is
+    // released once the hook is idle again. A stream closed earlier had its
+    // send withdrawn then.
     if (close_reason_ != common::IoErr::None) {
         if (conn_) {
             conn_->try_release_stream(*this);
