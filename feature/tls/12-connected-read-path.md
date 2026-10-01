@@ -1,6 +1,6 @@
 # TLS 自研实现 · 12 已连接阶段读路径重做(连续 wire 缓冲 + 批量开记录 + TlsConnection 去 pimpl)
 
-状态:§3 拆分器(c55ab263)、§4–§5 读路径(a4612e5d)、§4.3 去 pimpl(第 3 步)已实现;bench 待做。范围仅 TCP 面已连接阶段(`TlsStreamFd` 读路径 +
+状态:§3 拆分器(c55ab263)、§4–§5 读路径(a4612e5d)、§4.3 去 pimpl(23a73445)已实现;bench 见 §11。范围仅 TCP 面已连接阶段(`TlsStreamFd` 读路径 +
 `TlsConnection`);握手路径(`TlsHandshakeContext`/`TlsRecordReader`/
 `TlsRecordCipherChain`)与写路径不动。
 
@@ -425,3 +425,42 @@ cmake --build build && ./build/fiber_tests --gtest_filter='Tls*' && ctest --test
   开销明显时再做。
 - **与 legacy CBC 分支的冲突**:只有 `TlsConnection.cpp` 里两处 `init()` 多一个
   `TlsRecordDirection` 参数,合并时机械处理即可。
+
+## 11. Bench(2026-10-01,WSL2 i7-13700H)
+
+**方法**
+- before = d4bdde31(本系列之前),after = 23a73445。两者都用 `git archive` 导出到 `temp/ab/<v>-src`,
+  以相同配置构建(Release、libc++、LTO、clang-22,各自独立 deps 目录),只换 lite_nginx 二进制;
+  backend 共用。
+- temp/bench 的 lite_nginx 代理场景:lite 4 个 worker 绑 CPU 4–9,压测工具绑 10–15,backend 绑 0–3,
+  每轮 20 s,4 个样本,before/after 顺序逐样本交替(`ab_tls.sh`,`ab_parse.py` 汇总)。
+- h2 = h2load `-t6 -c32 -m16`(TLS);h1s = wrk `-t6 -c256` 走 TLS 端口(HTTP/1.1,无 ALPN)——
+  harness 原有的 `h1` 是明文,不经过 TLS。
+- CPU/req = 代理进程 utime+stime(全部线程)÷ 成功请求数。
+
+**结果**(中位数;64 轮,0 错误)
+
+| 协议 | 场景 | RPS before | RPS after | Δ RPS | CPU µs/req before | after | Δ CPU/req |
+|---|---|---:|---:|---:|---:|---:|---:|
+| h1s | get1k | 135,920 | 137,913 | +1.5% | 29.3 | 28.9 | −1.2% |
+| h1s | get64k | 55,865 | 56,407 | +1.0% | 71.3 | 70.8 | −0.7% |
+| h1s | get1m | 5,605 | 5,633 | +0.5% | 713.7 | 709.9 | −0.5% |
+| h1s | post1m | 2,836 | 2,856 | +0.7% | 1,411.6 | 1,400.8 | −0.8% |
+| h2 | get1k | 189,301 | 189,609 | +0.2% | 21.0 | 20.9 | −0.4% |
+| h2 | get64k | 38,858 | 39,149 | +0.7% | 102.3 | 101.8 | −0.5% |
+| h2 | get1m | 3,668 | 3,615 | −1.5% | 1,092.0 | 1,105.2 | +1.2% |
+| h2 | post1m | 1,695 | 1,738 | **+2.5%** | 2,356.9 | 2,294.2 | **−2.7%** |
+
+h2 get1k 一行是追加的 8 样本复测:4 样本时中位数是 −2.7%,但单样本波动约 ±10%(before 第一轮
+226k 是离群值);8 样本下两边持平。
+
+**解读**
+- 代理场景里,只有 POST 的请求体是大块数据经过代理的 TLS 读路径;GET 场景经 TLS 读进来的只是小请求,
+  1 MiB 响应走的是 TLS 写路径,本系列没有改。
+- h2 post1m 是唯一明确的变化:+2.5% RPS,4 个 after 样本(1,730–1,751)全部高于 4 个 before 样本
+  (1,630–1,701);每请求省约 63 µs CPU,与去掉约 1 MiB 的跨界双拷贝量级相符。
+- h1s post1m 只有 +0.7% / −11 µs,比 h2 小得多,原因未查(可能与 H1 请求体读取时传入的 size 有关,
+  未验证)。
+- 其余场景 |Δ| ≤ 1.5%,在噪声范围内,没有回退。
+- 每连接常驻内存从约 20.6 KB(3 次分配)降到 2.3 KB(1 次分配),这在吞吐测试里看不出来,
+  影响的是连接数规模下的内存占用。
