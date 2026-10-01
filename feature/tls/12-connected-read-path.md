@@ -417,8 +417,9 @@ cmake --build build && ./build/fiber_tests --gtest_filter='Tls*' && ctest --test
   直接返回 WouldBlock(Unknown 仍然要试读)。TCP 路径同样适用,单独评估。
 - **carry 时复用缓冲**:`inbound_.unique()` 且容量够时 memmove 到开头复用,省掉一次分配。
   不保留空缓冲(否则每个空闲连接都要钉住 64K)。
-- **写侧 `write_scratch_`**(每连接懒分配 16K):改成每线程 scratch;H2 DATA 帧 9 字节
-  header 节点导致的合并拷贝也在写侧,另案处理。
+- ~~**写侧 `write_scratch_`**(每连接懒分配 16K):改成每线程 scratch~~ 已完成:改为
+  `seal_write_batch` 里的栈缓冲,见 feature/tls/13 §9。H2 DATA 帧 9 字节 header 节点导致的合并
+  拷贝已在 feature/tls/13 评估(去掉拷贝没有收益,改为合并 flush)。
 - **握手迁移到同一个拆分器**:`TlsHandshakeContext` 的 `open_scratch_` 只在握手期间存在
   于协程帧中,不常驻,优先级低。
 - **小 record 明文压缩**:把相邻的小明文 memmove 到一起以减少节点,只有 bench 显示节点
