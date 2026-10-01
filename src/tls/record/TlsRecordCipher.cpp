@@ -173,14 +173,15 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
     std::size_t written = 0;
 
     if (kind_ == TlsRecordProtectionKind::Tls13) {
-        if (regions_overlap(dst.data(), dst.size(), plaintext.data(), plaintext.size())) {
-            FIBER_ASSERT(dst.data() == plaintext.data());
-        } else if (dst.data() != plaintext.data() && !plaintext.empty()) {
-            // The EVP takes one input region: stage the plaintext, then seal
-            // in place. The only copy this primitive ever makes. (An empty
-            // plaintext may be a null span — memcpy(_, nullptr, 0) is UB.)
-            std::memcpy(dst.data(), plaintext.data(), plaintext.size());
+        if (!plaintext.empty() && !regions_overlap(dst.data(), dst.size(), plaintext.data(), plaintext.size())) {
+            // Disjoint dst: the inner-type byte rides the EVP's extra_in, its
+            // ciphertext landing right behind the body in front of the tag —
+            // the plaintext is read once, never staged.
+            return seal_scatter(inner_type, plaintext, dst.first(plaintext.size()), {}, dst.subspan(plaintext.size()));
         }
+        // In place (or empty): the type byte goes into dst behind the
+        // plaintext — the node's tailroom — and the EVP seals the run whole.
+        FIBER_ASSERT(plaintext.empty() || dst.data() == plaintext.data());
         dst[plaintext.size()] = static_cast<std::uint8_t>(inner_type);
 
         std::memcpy(nonce.data(), iv_.data(), iv_len);
