@@ -119,7 +119,7 @@ struct ServerSelection {
 TlsStreamFd::TlsStreamFd(fiber::event::EventLoop &loop, int fd) : stream_fd_(loop, fd) {}
 
 TlsStreamFd::~TlsStreamFd() {
-    if (!stream_fd_.valid() && conn_ == nullptr) {
+    if (!stream_fd_.valid() && !conn_) {
         return;
     }
     if (loop().in_loop()) {
@@ -136,7 +136,7 @@ int TlsStreamFd::fd() const noexcept { return stream_fd_.fd(); }
 fiber::event::EventLoop &TlsStreamFd::loop() const noexcept { return stream_fd_.loop(); }
 
 std::string_view TlsStreamFd::selected_alpn() const noexcept {
-    if (conn_ == nullptr) {
+    if (!conn_) {
         return {};
     }
     const std::span<const std::uint8_t> proto = conn_->alpn();
@@ -149,7 +149,7 @@ std::string_view TlsStreamFd::selected_alpn() const noexcept {
 bool TlsStreamFd::handshake_done() const noexcept { return handshake_done_; }
 
 bool TlsStreamFd::has_pending_read() const noexcept {
-    if (conn_ == nullptr) {
+    if (!conn_) {
         return false;
     }
     // Terminals included: a latched peer close_notify (EOF) or fatal is a read
@@ -161,14 +161,13 @@ bool TlsStreamFd::has_pending_read() const noexcept {
 
 void TlsStreamFd::close() {
     FIBER_ASSERT(loop().in_loop());
-    if (conn_ != nullptr) {
+    if (conn_) {
         if (!conn_->failed() && !conn_->peer_closed()) {
             (void) conn_->close_notify();
         }
         fiber::event::IoEvent event = fiber::event::IoEvent::None;
         (void) flush_output(event); // best-effort single drain; fd may be gone
-        delete conn_;
-        conn_ = nullptr;
+        conn_.reset();
     }
     // A mid-handshake close touches no handshake state here: the fd close
     // below wakes the suspended handshake with Canceled (inline resume), it
@@ -400,7 +399,7 @@ StreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable(std::chrono::millisecon
 fiber::common::IoErr TlsStreamFd::poll_shutdown(fiber::event::IoEvent &event) noexcept { return shutdown_once(event); }
 
 fiber::common::IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem::IoBufChain &out) noexcept {
-    if (!stream_fd_.valid() || conn_ == nullptr) {
+    if (!stream_fd_.valid() || !conn_) {
         return std::unexpected(fiber::common::IoErr::BadFd);
     }
     if (size == 0) {
@@ -478,7 +477,7 @@ fiber::common::IoErr TlsStreamFd::handshake_step(Engine &engine, fiber::event::I
         // fatal alert that ends a failed handshake (the failure return only
         // happens once the wire is clean). Once connected, the engine is
         // spent and flush_output queues the connection's output instead.
-        if (conn_ == nullptr) {
+        if (!conn_) {
             FIBER_ASSERT(out_pending_.append_chain(engine.take_output()));
         }
         fiber::common::IoErr err = flush_output(event);
@@ -528,10 +527,7 @@ fiber::common::IoErr TlsStreamFd::handshake_step(Engine &engine, fiber::event::I
 
 fiber::common::IoErr TlsStreamFd::install_connection(tls::TlsConnectionRole role, tls::TlsConnectedState &&state,
                                                      mem::IoBufChain &&leftover) noexcept {
-    conn_ = new (std::nothrow) tls::TlsConnection(role, std::move(state));
-    if (conn_ == nullptr) {
-        return fiber::common::IoErr::NoMem;
-    }
+    conn_.emplace(role, std::move(state));
     // The leftover bytes — records past the final flight (app data
     // piggybacked behind it) — become the first wire buffer. Usually one view
     // of the engine's last read chunk, framed in place; otherwise gathered
@@ -561,7 +557,7 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
     if (!stream_fd_.valid()) {
         return fiber::common::IoErr::BadFd;
     }
-    if (!handshake_done_ || conn_ == nullptr) {
+    if (!handshake_done_ || !conn_) {
         // Nothing to close gracefully (never started / mid-handshake).
         return fiber::common::IoErr::None;
     }
@@ -587,7 +583,7 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
 // nodes that follow it, splitting the last node when needed, so that each
 // scratch write is a full record whenever the chain holds enough data.
 fiber::common::IoResult<std::size_t> TlsStreamFd::try_write(mem::IoBufChain &buf) noexcept {
-    if (!stream_fd_.valid() || conn_ == nullptr) {
+    if (!stream_fd_.valid() || !conn_) {
         return std::unexpected(fiber::common::IoErr::BadFd);
     }
     if (buf.readable_bytes() == 0 && pending_write_chain_ == nullptr) {
@@ -697,7 +693,7 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> TlsStreamFd::writev(mem
 }
 
 fiber::common::IoErr TlsStreamFd::flush_output(fiber::event::IoEvent &event) noexcept {
-    if (conn_ != nullptr) {
+    if (conn_) {
         FIBER_ASSERT(out_pending_.append_chain(conn_->take_output()));
     }
     while (!out_pending_.empty()) {
@@ -790,7 +786,7 @@ fiber::common::IoErr TlsStreamFd::read_wire(std::size_t hint) noexcept {
 }
 
 void TlsStreamFd::process_inbound() noexcept {
-    FIBER_ASSERT(conn_ != nullptr);
+    FIBER_ASSERT(conn_.has_value());
     std::array<tls::TlsRecordSpan, tls::kTlsRecordBatchMax> batch;
     for (;;) {
         const tls::TlsFrameResult framed =

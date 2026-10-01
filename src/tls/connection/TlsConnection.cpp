@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <new>
 #include <utility>
 
 #include <fiber/common/Assert.h>
@@ -42,81 +41,7 @@ const std::uint8_t *gather_small(const mem::IoBufChain &chain, std::span<std::ui
 
 } // namespace
 
-struct TlsConnection::Impl {
-    Impl(TlsConnectionRole role, TlsConnectedState &&state) noexcept;
-
-    // Post-handshake handshake-message dispatch (1.3 NST/KeyUpdate; 1.2 all
-    // fatal). False = terminal latched, fragment processing stops.
-    [[nodiscard]] bool dispatch_post_handshake(TlsHandshakeType type, std::span<const std::uint8_t> body) noexcept;
-    [[nodiscard]] bool handle_key_update(std::span<const std::uint8_t> body) noexcept;
-
-    // Sends the armed KeyUpdate response (RFC 8446 §4.6.1 MUST): the message
-    // itself under the CURRENT write keys, the rotation applying to the
-    // records after it. Everything that can fail is staged before any state
-    // moves. No-op when nothing is armed.
-    [[nodiscard]] common::IoResult<void> send_pending_rekey() noexcept;
-
-    // Latches a terminal and encodes our fatal alert into the outbound
-    // chain (sealed — the write cipher always lives here; the glue flushes
-    // best-effort, then tears down). Idempotent; NoMem while encoding
-    // leaves failed_ set without bytes (the connection dies either way).
-    void latch_fatal(TlsAlertDesc alert) noexcept;
-
-    [[nodiscard]] common::IoResult<void> write_guard() noexcept;
-
-    // ---- inbound record pipeline ----
-    // Every record is contiguous inside the glue's wire buffer (`wire`,
-    // payload at wire.readable_data() + record.offset).
-
-    // Outer-type dispatch (the mode is fixed: sealed, per version).
-    void route_record(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept;
-    // Opens the sealed body in place and routes the inner content type. 1.2
-    // preserves the outer type under encryption (the AAD-bound inner type IS
-    // it); 1.3 routes the decrypted trailing type.
-    void open_and_route(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept;
-    // Two decoded alert bytes (severity, description).
-    void on_alert_bytes(const std::uint8_t *bytes) noexcept;
-    // App data delivery: the opened plaintext wire[offset, offset + plain_len)
-    // joins the delivery chain as a retained slice of the wire buffer — zero
-    // copies.
-    void deliver_plaintext(mem::IoBuf &wire, std::size_t offset, std::size_t plain_len) noexcept;
-    // Post-handshake handshake-message reassembly across records, then
-    // dispatch per complete message (borrowed bodies).
-    void feed_handshake_fragment(const std::uint8_t *frag, std::size_t len) noexcept;
-    [[nodiscard]] bool append_fragment(std::span<const std::uint8_t> bytes) noexcept;
-    [[nodiscard]] bool materialize_message(std::size_t message_len) noexcept;
-    // 1.3 rewrites every sealed record's outer type to application_data;
-    // 1.2 preserves the payload's true type under encryption (the AAD binds
-    // it either way). Both fly at 0x0303.
-    [[nodiscard]] TlsContentType outer_record_type(TlsContentType type) const noexcept {
-        return version_ == TlsProtocolVersion::Tls13 ? TlsContentType::ApplicationData : type;
-    }
-    // Frames payload as sealed records into out_ (<=14KiB per record; 1.3
-    // outer application_data, 1.2 type-preserved, both at 0x0303; empty
-    // payload → one zero-length record).
-    [[nodiscard]] common::IoResult<void> emit_sealed(TlsContentType type,
-                                                     std::span<const std::uint8_t> payload) noexcept;
-
-    TlsRecordCipher read_cipher_;
-    TlsRecordCipher write_cipher_;
-    mem::IoBufChain out_{};
-    mem::IoBufChain plaintext_{}; // delivered app data awaiting read()
-    mem::IoBufChain reassembly_{}; // straddling post-handshake message bytes
-    mem::IoBuf message_buf_{}; // materialized straddling message (owns the dispatched body)
-    TlsSecret own_secret_; // 1.3 write-side rekey base; empty on 1.2
-    TlsSecret peer_secret_; // 1.3 read-side rekey base; empty on 1.2
-    std::array<std::uint8_t, 256> alpn_{};
-    TlsProtocolVersion version_;
-    TlsCipherSuiteId suite_;
-    std::uint16_t alpn_len_ = 0;
-    std::uint8_t warning_alerts_ = 0; // consecutive dropped warnings (see on_alert_bytes)
-    bool rekey_pending_ = false; // peer's KeyUpdate(update_requested): owe a response before the next write
-    bool peer_closed_ = false; // the peer's close_notify latched
-    bool close_sent_ = false; // our close_notify encoded
-    bool failed_ = false; // terminal latched (ours or the peer's)
-};
-
-TlsConnection::Impl::Impl(TlsConnectionRole role, TlsConnectedState &&state) noexcept :
+TlsConnection::TlsConnection(TlsConnectionRole role, TlsConnectedState &&state) noexcept :
     read_cipher_(std::move(state.read_cipher)), write_cipher_(std::move(state.write_cipher)),
     own_secret_(std::move(role == TlsConnectionRole::Client ? state.client_app_secret : state.server_app_secret)),
     peer_secret_(std::move(role == TlsConnectionRole::Client ? state.server_app_secret : state.client_app_secret)),
@@ -127,7 +52,7 @@ TlsConnection::Impl::Impl(TlsConnectionRole role, TlsConnectedState &&state) noe
     // ciphers themselves are already endpoint-oriented by the engines' move.
 }
 
-bool TlsConnection::Impl::dispatch_post_handshake(TlsHandshakeType type, std::span<const std::uint8_t> body) noexcept {
+bool TlsConnection::dispatch_post_handshake(TlsHandshakeType type, std::span<const std::uint8_t> body) noexcept {
     if (version_ != TlsProtocolVersion::Tls13) {
         // 1.2 has no post-handshake message we accept: HelloRequest
         // (renegotiation) is refused outright (09 §1 decision 3), and a
@@ -150,7 +75,7 @@ bool TlsConnection::Impl::dispatch_post_handshake(TlsHandshakeType type, std::sp
     }
 }
 
-bool TlsConnection::Impl::handle_key_update(std::span<const std::uint8_t> body) noexcept {
+bool TlsConnection::handle_key_update(std::span<const std::uint8_t> body) noexcept {
     // RFC 8446 §4.6.1: exactly one byte, update_not_requested(0) or
     // update_requested(1). Malformed either way → decode_error (BoringSSL's
     // alert choice — kept identical for interop).
@@ -189,7 +114,7 @@ bool TlsConnection::Impl::handle_key_update(std::span<const std::uint8_t> body) 
     return true;
 }
 
-common::IoResult<void> TlsConnection::Impl::send_pending_rekey() noexcept {
+common::IoResult<void> TlsConnection::send_pending_rekey() noexcept {
     if (!rekey_pending_) {
         return {};
     }
@@ -220,7 +145,7 @@ common::IoResult<void> TlsConnection::Impl::send_pending_rekey() noexcept {
     return {};
 }
 
-void TlsConnection::Impl::latch_fatal(TlsAlertDesc alert) noexcept {
+void TlsConnection::latch_fatal(TlsAlertDesc alert) noexcept {
     if (failed_) {
         return;
     }
@@ -229,7 +154,7 @@ void TlsConnection::Impl::latch_fatal(TlsAlertDesc alert) noexcept {
     (void) emit_sealed(TlsContentType::Alert, alert_bytes);
 }
 
-common::IoResult<void> TlsConnection::Impl::write_guard() noexcept {
+common::IoResult<void> TlsConnection::write_guard() noexcept {
     if (failed_) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -241,7 +166,7 @@ common::IoResult<void> TlsConnection::Impl::write_guard() noexcept {
 
 // ---- inbound record pipeline ----
 
-void TlsConnection::Impl::route_record(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept {
+void TlsConnection::route_record(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept {
     if (record.type != TlsContentType::Alert && record.type != TlsContentType::ApplicationData) {
         // The warning budget counts consecutive alerts only. A sealed record
         // (outer application_data) may be a 1.3 alert: open_and_route resets
@@ -289,7 +214,7 @@ void TlsConnection::Impl::route_record(mem::IoBuf &wire, const TlsRecordSpan &re
     latch_fatal(TlsAlertDesc::UnexpectedMessage); // unreachable: the reader rejects unknown types
 }
 
-void TlsConnection::Impl::open_and_route(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept {
+void TlsConnection::open_and_route(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept {
     // Length bounds before any buffer arithmetic — no decrypt oracle, and
     // the in-place spans below stay underflow-free (the cipher's own check
     // would come too late for them on degenerate lengths).
@@ -340,7 +265,7 @@ void TlsConnection::Impl::open_and_route(mem::IoBuf &wire, const TlsRecordSpan &
     }
 }
 
-void TlsConnection::Impl::on_alert_bytes(const std::uint8_t *bytes) noexcept {
+void TlsConnection::on_alert_bytes(const std::uint8_t *bytes) noexcept {
     // close_notify and the peer's fatal alert are the two terminals;
     // plaintext delivered before the alert stays readable. A 1.2 warning
     // (e.g. no_renegotiation) is dropped, up to kMaxWarningAlerts in a row
@@ -360,7 +285,7 @@ void TlsConnection::Impl::on_alert_bytes(const std::uint8_t *bytes) noexcept {
     }
 }
 
-void TlsConnection::Impl::deliver_plaintext(mem::IoBuf &wire, std::size_t offset, std::size_t plain_len) noexcept {
+void TlsConnection::deliver_plaintext(mem::IoBuf &wire, std::size_t offset, std::size_t plain_len) noexcept {
     if (plain_len == 0) {
         return; // empty inner app data (the 1.3 keep-alive form): nothing to deliver
     }
@@ -370,7 +295,7 @@ void TlsConnection::Impl::deliver_plaintext(mem::IoBuf &wire, std::size_t offset
     }
 }
 
-void TlsConnection::Impl::feed_handshake_fragment(const std::uint8_t *frag, std::size_t len) noexcept {
+void TlsConnection::feed_handshake_fragment(const std::uint8_t *frag, std::size_t len) noexcept {
     if (len == 0) {
         return; // empty handshake fragments carry no message bytes
     }
@@ -446,7 +371,7 @@ void TlsConnection::Impl::feed_handshake_fragment(const std::uint8_t *frag, std:
     }
 }
 
-bool TlsConnection::Impl::append_fragment(std::span<const std::uint8_t> bytes) noexcept {
+bool TlsConnection::append_fragment(std::span<const std::uint8_t> bytes) noexcept {
     mem::IoBuf fragment = mem::IoBuf::allocate(bytes.size());
     if (!fragment.valid()) {
         return false;
@@ -456,7 +381,7 @@ bool TlsConnection::Impl::append_fragment(std::span<const std::uint8_t> bytes) n
     return reassembly_.append(std::move(fragment));
 }
 
-bool TlsConnection::Impl::materialize_message(std::size_t message_len) noexcept {
+bool TlsConnection::materialize_message(std::size_t message_len) noexcept {
     // Copy the complete message out of the chain (the one materializing
     // copy for straddling messages) and consume what it held.
     message_buf_ = mem::IoBuf::allocate(message_len);
@@ -478,8 +403,7 @@ bool TlsConnection::Impl::materialize_message(std::size_t message_len) noexcept 
     return true;
 }
 
-common::IoResult<void> TlsConnection::Impl::emit_sealed(TlsContentType type,
-                                                        std::span<const std::uint8_t> payload) noexcept {
+common::IoResult<void> TlsConnection::emit_sealed(TlsContentType type, std::span<const std::uint8_t> payload) noexcept {
     std::size_t off = 0;
     do {
         const std::size_t chunk = std::min(payload.size() - off, kTlsMaxPlaintextSize);
@@ -505,45 +429,29 @@ common::IoResult<void> TlsConnection::Impl::emit_sealed(TlsContentType type,
 }
 
 // =====================================================================
-// public shell
+// public API
 // =====================================================================
 
-TlsConnection::TlsConnection(TlsConnectionRole role, TlsConnectedState &&state) noexcept :
-    impl_(new (std::nothrow) Impl(role, std::move(state))) {}
-
-TlsConnection::~TlsConnection() { delete impl_; }
-
 void TlsConnection::on_records(mem::IoBuf &wire, std::span<const TlsRecordSpan> records) noexcept {
-    if (impl_ == nullptr) {
-        return;
-    }
     for (const TlsRecordSpan &record: records) {
-        if (impl_->failed_ || impl_->peer_closed_) {
+        if (failed_ || peer_closed_) {
             return; // terminal: the rest of the batch drops
         }
         FIBER_ASSERT(record.offset + record.length <= wire.readable());
-        impl_->route_record(wire, record);
+        route_record(wire, record);
     }
 }
 
-void TlsConnection::on_framing_fatal(TlsAlertDesc alert) noexcept {
-    if (impl_ == nullptr) {
-        return;
-    }
-    impl_->latch_fatal(alert);
-}
+void TlsConnection::on_framing_fatal(TlsAlertDesc alert) noexcept { latch_fatal(alert); }
 
 TlsConnection::ReadStatus TlsConnection::read(void *buf, std::size_t len, std::size_t &out_len) noexcept {
     out_len = 0;
-    if (impl_ == nullptr) {
-        return ReadStatus::Fatal;
-    }
-    const std::size_t available = impl_->plaintext_.readable_bytes();
+    const std::size_t available = plaintext_.readable_bytes();
     if (len == 0 || available == 0) {
-        if (impl_->failed_) {
+        if (failed_) {
             return ReadStatus::Fatal;
         }
-        if (impl_->peer_closed_) {
+        if (peer_closed_) {
             return ReadStatus::PeerClosed;
         }
         return ReadStatus::NeedMore;
@@ -551,13 +459,13 @@ TlsConnection::ReadStatus TlsConnection::read(void *buf, std::size_t len, std::s
     const std::size_t take = len < available ? len : available;
     std::size_t done = 0;
     while (done < take) {
-        mem::IoBuf *front = impl_->plaintext_.first_readable();
+        mem::IoBuf *front = plaintext_.first_readable();
         if (front == nullptr) {
             break; // readable_bytes() and the chain agree by construction
         }
         const std::size_t n = front->readable() < take - done ? front->readable() : take - done;
         std::memcpy(static_cast<std::uint8_t *>(buf) + done, front->readable_data(), n);
-        impl_->plaintext_.consume_and_compact(n);
+        plaintext_.consume_and_compact(n);
         done += n;
     }
     out_len = done;
@@ -566,79 +474,60 @@ TlsConnection::ReadStatus TlsConnection::read(void *buf, std::size_t len, std::s
 
 TlsConnection::ReadStatus TlsConnection::take(std::size_t size, mem::IoBufChain &out, std::size_t &out_len) noexcept {
     out_len = 0;
-    if (impl_ == nullptr) {
-        return ReadStatus::Fatal;
-    }
-    const std::size_t available = impl_->plaintext_.readable_bytes();
+    const std::size_t available = plaintext_.readable_bytes();
     if (size == 0 || available == 0) {
-        if (impl_->failed_) {
+        if (failed_) {
             return ReadStatus::Fatal;
         }
-        if (impl_->peer_closed_) {
+        if (peer_closed_) {
             return ReadStatus::PeerClosed;
         }
         return ReadStatus::NeedMore;
     }
     const std::size_t bytes = size < available ? size : available;
-    if (!impl_->plaintext_.take_prefix(bytes, out)) {
+    if (!plaintext_.take_prefix(bytes, out)) {
         return ReadStatus::NoMem; // rolled back — the plaintext is untouched
     }
     out_len = bytes;
     return ReadStatus::Ok;
 }
 
-std::size_t TlsConnection::pending_plaintext() const noexcept {
-    return impl_ == nullptr ? 0 : impl_->plaintext_.readable_bytes();
-}
+std::size_t TlsConnection::pending_plaintext() const noexcept { return plaintext_.readable_bytes(); }
 
 common::IoResult<void> TlsConnection::write(std::span<const std::uint8_t> payload) noexcept {
-    if (impl_ == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    const auto guard = impl_->write_guard();
+    const auto guard = write_guard();
     if (!guard.has_value()) {
         return guard;
     }
-    return impl_->emit_sealed(TlsContentType::ApplicationData, payload);
+    return emit_sealed(TlsContentType::ApplicationData, payload);
 }
 
 common::IoResult<void> TlsConnection::close_notify() noexcept {
-    if (impl_ == nullptr) {
-        return std::unexpected(common::IoErr::NoMem);
-    }
-    if (impl_->close_sent_) {
+    if (close_sent_) {
         return {};
     }
-    if (impl_->failed_) {
+    if (failed_) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    const auto rekey = impl_->send_pending_rekey();
+    const auto rekey = send_pending_rekey();
     if (!rekey.has_value()) {
         return rekey;
     }
     const std::uint8_t alert[2] = {kAlertLevelWarning, static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify)};
-    const auto emitted = impl_->emit_sealed(TlsContentType::Alert, alert);
+    const auto emitted = emit_sealed(TlsContentType::Alert, alert);
     if (!emitted.has_value()) {
         return emitted;
     }
-    impl_->close_sent_ = true;
+    close_sent_ = true;
     return {};
 }
 
-mem::IoBufChain TlsConnection::take_output() noexcept {
-    if (impl_ == nullptr) {
-        return mem::IoBufChain{};
-    }
-    return std::move(impl_->out_);
-}
+mem::IoBufChain TlsConnection::take_output() noexcept { return std::move(out_); }
 
-bool TlsConnection::peer_closed() const noexcept { return impl_ != nullptr && impl_->peer_closed_; }
+bool TlsConnection::peer_closed() const noexcept { return peer_closed_; }
 
-bool TlsConnection::failed() const noexcept { return impl_ == nullptr || impl_->failed_; }
+bool TlsConnection::failed() const noexcept { return failed_; }
 
-std::span<const std::uint8_t> TlsConnection::alpn() const noexcept {
-    return impl_ == nullptr ? std::span<const std::uint8_t>{}
-                            : std::span<const std::uint8_t>{impl_->alpn_.data(), impl_->alpn_len_};
-}
+std::span<const std::uint8_t> TlsConnection::alpn() const noexcept { return {alpn_.data(), alpn_len_}; }
 
 } // namespace fiber::tls

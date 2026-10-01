@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include "../../async/Task.h"
@@ -141,7 +142,9 @@ private:
     void process_inbound() noexcept;
 
     StreamFd stream_fd_;
-    tls::TlsConnection *conn_ = nullptr; // the connected phase
+    // The connected phase: engaged at HandshakeDone (the engine's state moves
+    // in), reset by close(). Held by value — no allocation of its own.
+    std::optional<tls::TlsConnection> conn_;
     // Connected-phase wire bytes not framed yet: empty, or ONE incomplete
     // record — the tail of the last wire read (a view into that read's
     // buffer) or of the engine's take_inbound_leftover. It never holds a
