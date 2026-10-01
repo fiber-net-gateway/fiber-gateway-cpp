@@ -84,12 +84,15 @@ public:
     [[nodiscard]] fiber::common::IoResult<std::size_t> try_read(std::size_t size, mem::IoBufChain &out) noexcept;
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::size_t>>
     readv(std::size_t size, mem::IoBufChain &out, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
-    // Chain-based write: prepares one record group from the chain (a node
-    // holding whole records passes through zero-copy, smaller runs coalesce
-    // into a scratch record), seals and flushes it, then consumes the group
-    // from the chain. WouldBlock: the sealed remainder is retained — retry
-    // with the same chain after wait_writable; any other chain (empty
-    // included) reports Busy until the group completes.
+    // Chain-based write: seals a batch of record groups from the chain (a
+    // node holding whole records passes through zero-copy, smaller runs
+    // coalesce into a scratch record) until ~64 KiB of plaintext, flushes
+    // them in one go, then consumes the batch from the chain and returns its
+    // length (feature/tls/13). WouldBlock: the sealed remainder is retained —
+    // retry with the same chain after wait_writable; any other chain (empty
+    // included) reports Busy until the batch completes. NoMem while sealing
+    // is connection-fatal and latched: every later write and poll_shutdown
+    // report it, and close() sends nothing more.
     [[nodiscard]] fiber::common::IoResult<std::size_t> try_write(mem::IoBufChain &buf) noexcept;
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::size_t>>
     writev(mem::IoBufChain &buf, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
@@ -126,6 +129,11 @@ private:
     fiber::common::IoErr install_connection(tls::TlsConnectionRole role, tls::TlsConnectedState &&state,
                                             mem::IoBufChain &&leftover) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
+    // Seals one write batch off the head of `buf` into the connection's
+    // output: groups back to back until kWriteBatchBytes of plaintext (a soft
+    // cap — one record may overshoot) or the chain's end. `batch_len` reports
+    // the plaintext sealed.
+    fiber::common::IoErr seal_write_batch(const mem::IoBufChain &buf, std::size_t &batch_len) noexcept;
     // Moves the connection's output (once connected) into out_pending_ and
     // writes it out; the handshake step queues the engine's output itself.
     fiber::common::IoErr flush_output(fiber::event::IoEvent &event) noexcept;
@@ -159,6 +167,9 @@ private:
     mem::IoBufChain *pending_write_chain_ = nullptr;
     size_t pending_write_len_ = 0;
     std::unique_ptr<std::uint8_t[]> write_scratch_{};
+    // NoMem while sealing a batch: records may sit sealed but unreported, so
+    // the stream's integrity is gone — latched until close().
+    fiber::common::IoErr write_error_ = fiber::common::IoErr::None;
     bool handshake_started_ = false;
     bool handshake_done_ = false;
     bool shutdown_started_ = false;
