@@ -35,9 +35,11 @@
 //
 // Node pool semantics as everywhere else: chains resolve the current
 // loop's node pool per operation — run/destroy the connection on the
-// connection's loop. Internal state lives behind a pimpl in src/tls —
-// this header pulls no OpenSSL.
+// connection's loop. All state is held by value (two record ciphers, the
+// rekey secrets, three chains — ~1.8 KB, no allocation of its own), so the
+// glue embeds the connection directly.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -50,6 +52,7 @@
 
 #include "TlsConnectedState.h"
 #include "TlsTypes.h"
+#include "handshake/TlsHandshakeMessage.h"
 #include "record/TlsRecordFramer.h"
 
 namespace fiber::tls {
@@ -68,7 +71,6 @@ public:
     // emptied). The version picks the dispatch table; the role picks which
     // app secret is ours (write-side rekey base) vs the peer's.
     TlsConnection(TlsConnectionRole role, TlsConnectedState &&state) noexcept;
-    ~TlsConnection();
 
     // ---- inbound ----
 
@@ -127,8 +129,75 @@ public:
     [[nodiscard]] std::span<const std::uint8_t> alpn() const noexcept; // the negotiated protocol
 
 private:
-    struct Impl;
-    Impl *impl_ = nullptr; // null only on allocation failure (failed() reports it)
+    // Post-handshake handshake-message dispatch (1.3 NST/KeyUpdate; 1.2 all
+    // fatal). False = terminal latched, fragment processing stops.
+    [[nodiscard]] bool dispatch_post_handshake(TlsHandshakeType type, std::span<const std::uint8_t> body) noexcept;
+    [[nodiscard]] bool handle_key_update(std::span<const std::uint8_t> body) noexcept;
+
+    // Sends the armed KeyUpdate response (RFC 8446 §4.6.1 MUST): the message
+    // itself under the CURRENT write keys, the rotation applying to the
+    // records after it. Everything that can fail is staged before any state
+    // moves. No-op when nothing is armed.
+    [[nodiscard]] common::IoResult<void> send_pending_rekey() noexcept;
+
+    // Latches a terminal and encodes our fatal alert into the outbound
+    // chain (sealed — the write cipher always lives here; the glue flushes
+    // best-effort, then tears down). Idempotent; NoMem while encoding
+    // leaves failed_ set without bytes (the connection dies either way).
+    void latch_fatal(TlsAlertDesc alert) noexcept;
+
+    [[nodiscard]] common::IoResult<void> write_guard() noexcept;
+
+    // ---- inbound record pipeline ----
+    // Every record is contiguous inside the glue's wire buffer (`wire`,
+    // payload at wire.readable_data() + record.offset).
+
+    // Outer-type dispatch (the mode is fixed: sealed, per version).
+    void route_record(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept;
+    // Opens the sealed body in place and routes the inner content type. 1.2
+    // preserves the outer type under encryption (the AAD-bound inner type IS
+    // it); 1.3 routes the decrypted trailing type.
+    void open_and_route(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept;
+    // Two decoded alert bytes (severity, description).
+    void on_alert_bytes(const std::uint8_t *bytes) noexcept;
+    // App data delivery: the opened plaintext wire[offset, offset + plain_len)
+    // joins the delivery chain as a retained slice of the wire buffer — zero
+    // copies.
+    void deliver_plaintext(mem::IoBuf &wire, std::size_t offset, std::size_t plain_len) noexcept;
+    // Post-handshake handshake-message reassembly across records, then
+    // dispatch per complete message (borrowed bodies).
+    void feed_handshake_fragment(const std::uint8_t *frag, std::size_t len) noexcept;
+    [[nodiscard]] bool append_fragment(std::span<const std::uint8_t> bytes) noexcept;
+    [[nodiscard]] bool materialize_message(std::size_t message_len) noexcept;
+    // 1.3 rewrites every sealed record's outer type to application_data;
+    // 1.2 preserves the payload's true type under encryption (the AAD binds
+    // it either way). Both fly at 0x0303.
+    [[nodiscard]] TlsContentType outer_record_type(TlsContentType type) const noexcept {
+        return version_ == TlsProtocolVersion::Tls13 ? TlsContentType::ApplicationData : type;
+    }
+    // Frames payload as sealed records into out_ (<=16 KiB per record; 1.3
+    // outer application_data, 1.2 type-preserved, both at 0x0303; empty
+    // payload → one zero-length record).
+    [[nodiscard]] common::IoResult<void> emit_sealed(TlsContentType type,
+                                                     std::span<const std::uint8_t> payload) noexcept;
+
+    TlsRecordCipher read_cipher_;
+    TlsRecordCipher write_cipher_;
+    mem::IoBufChain out_{};
+    mem::IoBufChain plaintext_{}; // delivered app data awaiting read()
+    mem::IoBufChain reassembly_{}; // straddling post-handshake message bytes
+    mem::IoBuf message_buf_{}; // materialized straddling message (owns the dispatched body)
+    TlsSecret own_secret_; // 1.3 write-side rekey base; empty on 1.2
+    TlsSecret peer_secret_; // 1.3 read-side rekey base; empty on 1.2
+    std::array<std::uint8_t, 256> alpn_{};
+    TlsProtocolVersion version_;
+    TlsCipherSuiteId suite_;
+    std::uint16_t alpn_len_ = 0;
+    std::uint8_t warning_alerts_ = 0; // consecutive dropped warnings (see on_alert_bytes)
+    bool rekey_pending_ = false; // peer's KeyUpdate(update_requested): owe a response before the next write
+    bool peer_closed_ = false; // the peer's close_notify latched
+    bool close_sent_ = false; // our close_notify encoded
+    bool failed_ = false; // terminal latched (ours or the peer's)
 };
 
 } // namespace fiber::tls

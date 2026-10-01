@@ -1,6 +1,6 @@
 # TLS 自研实现 · 12 已连接阶段读路径重做(连续 wire 缓冲 + 批量开记录 + TlsConnection 去 pimpl)
 
-状态:§3 拆分器(c55ab263)与 §4–§5 读路径(第 2 步)已实现;§4.3 去 pimpl 待做。范围仅 TCP 面已连接阶段(`TlsStreamFd` 读路径 +
+状态:§3 拆分器(c55ab263)、§4–§5 读路径(a4612e5d)、§4.3 去 pimpl(第 3 步)已实现;bench 待做。范围仅 TCP 面已连接阶段(`TlsStreamFd` 读路径 +
 `TlsConnection`);握手路径(`TlsHandshakeContext`/`TlsRecordReader`/
 `TlsRecordCipherChain`)与写路径不动。
 
@@ -177,7 +177,7 @@ void TlsConnection::on_records(mem::IoBuf &wire, std::span<const TlsRecordSpan> 
   `write`/`close_notify` 不再有 NoMem 的空指针返回。构造不会失败。
 - 头文件注释:framing 一节改成"glue 用 `tls_frame_records` 在一块连续 wire 缓冲上拆分,
   批量交给 `on_records()`";删除 "pimpl … pulls no OpenSSL"。
-- `sizeof(TlsConnection)` ≈ 1.8 KB。仍然是 NonMovable,`std::optional::emplace` 原地构造。
+- 实测 `sizeof(TlsConnection)` = 1776 B。仍然是 NonMovable,`std::optional::emplace` 原地构造。
 
 ## 5. TlsStreamFd
 
@@ -340,7 +340,7 @@ IoErr TlsStreamFd::install_connection(tls::TlsConnectionRole role, tls::TlsConne
 
 | | 现在 | 改后 |
 |---|---|---|
-| 每连接常驻 | 448 B + 8 B + 20200 B(另外 2 次分配,18K memset) | ≈ 2.2 KB,内联在 `TlsTransport` 里 |
+| 每连接常驻 | 448 B + 8 B + 20200 B(另外 2 次分配,18K memset) | 实测 `TlsStreamFd` 2216 B / `TlsTransport` 2264 B,一次分配 |
 | 握手完成时的分配 | 2 次 | 0 次 |
 | 每次 wire 读 | 固定 32K | clamp(size+200, 20K, 64K);H2 为 64K,recv 次数减半 |
 | 跨界 record | 拷整条进 scratch + 分配 + 拷明文(≈ 每收 1 字节多拷 1 字节) | 不存在;缓冲有余量时续读零拷贝,缓冲已满时最多拷一条不完整 record(大流量平均约半条 / 64K ≈ 12%) |
