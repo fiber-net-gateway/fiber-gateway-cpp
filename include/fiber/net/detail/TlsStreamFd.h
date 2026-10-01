@@ -10,10 +10,10 @@
 #include "../../common/IoError.h"
 #include "../../common/NonCopyable.h"
 #include "../../common/NonMovable.h"
+#include "../../common/mem/IoBuf.h"
 #include "../../common/mem/IoBufChain.h"
 #include "../../event/Poller.h"
 #include "../../tls/TlsConnection.h"
-#include "../../tls/record/TlsRecordReader.h"
 #include "../TlsParams.h"
 #include "StreamFd.h"
 
@@ -75,10 +75,11 @@ public:
     [[nodiscard]] StreamFd::WaitWritableAwaiter
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
-    // Chain-based read: appends one node (capped at a record's plaintext) of
-    // freshly decrypted bytes to out and returns them; 0 is EOF (close_notify
-    // latched). WouldBlock: wait_readable, then call again. A connected-phase
-    // read only ever blocks on readability.
+    // Chain-based read: appends up to a record's worth of freshly decrypted
+    // plaintext to out (retained views of the wire buffer it was opened in)
+    // and returns its length; 0 is EOF (close_notify latched). WouldBlock:
+    // wait_readable, then call again. A connected-phase read only ever blocks
+    // on readability. `size` also sizes the wire read (feature/tls/12 §2).
     [[nodiscard]] fiber::common::IoResult<std::size_t> try_read(std::size_t size, mem::IoBufChain &out) noexcept;
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::size_t>>
     readv(std::size_t size, mem::IoBufChain &out, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
@@ -119,27 +120,34 @@ private:
     fiber::common::IoErr handshake_step(Engine &engine, fiber::event::IoEvent &event) noexcept;
     // Reads one wire chunk for the handshake engine (EOF: ConnReset).
     fiber::common::IoErr read_handshake_chunk(mem::IoBuf &chunk, fiber::event::IoEvent &event) noexcept;
-    // HandshakeDone: builds the connection from the engine's state and frames
-    // the engine's inbound leftover through record_reader_.
+    // HandshakeDone: builds the connection from the engine's state and adopts
+    // the engine's inbound leftover as inbound_.
     fiber::common::IoErr install_connection(tls::TlsConnectionRole role, tls::TlsConnectedState &&state,
                                             mem::IoBufChain &&leftover) noexcept;
     fiber::common::IoErr shutdown_once(fiber::event::IoEvent &event) noexcept;
     // Moves the connection's output (once connected) into out_pending_ and
     // writes it out; the handshake step queues the engine's output itself.
     fiber::common::IoErr flush_output(fiber::event::IoEvent &event) noexcept;
-    // Splits complete records off the connected-phase reader and hands each
-    // to the connection (open + route happen there; a trailing partial
-    // record stays buffered in record_reader_ across feeds). Reader- and
-    // record-level violations both latch the connection's terminal — the
-    // read path surfaces it.
-    fiber::common::IoErr drain_records() noexcept;
+    // One connected-phase wire read, then process_inbound(): inbound_'s
+    // incomplete record continues in its own buffer's tailroom while it fits
+    // there; otherwise a fresh buffer sized from the caller's `hint` takes
+    // the read, with the incomplete record carried to its head. EOF without
+    // close_notify reports ConnReset.
+    fiber::common::IoErr read_wire(std::size_t hint) noexcept;
+    // Frames every complete record in inbound_ and hands them to the
+    // connection in batches (open + route happen there), leaving at most one
+    // incomplete record behind. Framing and record violations both latch the
+    // connection's terminal — the read path surfaces it.
+    void process_inbound() noexcept;
 
     StreamFd stream_fd_;
     tls::TlsConnection *conn_ = nullptr; // the connected phase
-    // Connected-phase framing buffer: fd bytes in, complete records out.
-    // Filled from the socket and from the engine's take_inbound_leftover at
-    // HandshakeDone; the connection itself never sees partial records.
-    tls::TlsRecordReader record_reader_{};
+    // Connected-phase wire bytes not framed yet: empty, or ONE incomplete
+    // record — the tail of the last wire read (a view into that read's
+    // buffer) or of the engine's take_inbound_leftover. It never holds a
+    // complete record once process_inbound() returns, so the connection only
+    // ever sees whole, contiguous records.
+    mem::IoBuf inbound_{};
     mem::IoBufChain out_pending_{}; // sealed records not yet on the wire
     mem::IoBufChain early_data_{}; // server: decrypted 0-RTT, delivered first
     // Write-side retry state: the chain whose group is sealed in out_pending_

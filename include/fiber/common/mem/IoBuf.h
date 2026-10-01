@@ -9,6 +9,11 @@ namespace fiber::mem {
 
 class IoBuf;
 
+// Bytes IoBuf::allocate() puts in front of the storage (the control block):
+// allocate(n) asks the allocator for n + this. Callers sizing a buffer to an
+// allocator size class subtract it (non-trackable buffers only).
+inline constexpr std::size_t kIoBufControlBlockSize = 16;
+
 class IoBufStorageBudget {
 public:
     IoBufStorageBudget() noexcept = default;
