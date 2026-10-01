@@ -176,7 +176,7 @@ IoBuf IoBuf::allocate(std::size_t capacity) noexcept { return allocate_impl(capa
 IoBuf IoBuf::allocate_trackable(std::size_t capacity) noexcept { return allocate_impl(capacity, true); }
 
 IoBuf IoBuf::allocate_impl(std::size_t capacity, bool trackable) noexcept {
-    static_assert(sizeof(ControlBlock) == 16);
+    static_assert(sizeof(ControlBlock) == kIoBufControlBlockSize);
     if (capacity == 0) {
         return {};
     }

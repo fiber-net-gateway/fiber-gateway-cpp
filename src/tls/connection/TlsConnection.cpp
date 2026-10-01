@@ -8,7 +8,6 @@
 #include <fiber/common/Assert.h>
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
-#include <fiber/tls/record/TlsRecordCipherChain.h>
 
 namespace fiber::tls {
 
@@ -25,12 +24,8 @@ constexpr std::size_t kMaxPostHandshakeMessage = 16u << 10;
 // 1.2 consecutive warning alerts tolerated (BoringSSL kMaxWarningAlerts).
 constexpr std::uint8_t kMaxWarningAlerts = 4;
 
-// Worst-case open workspace: one record, straddling topology (the gather
-// destination when the body is not contiguous in the record's chain).
-constexpr std::size_t kOpenScratchSize = kTlsMaxCiphertextRecordSize;
-
-// Gathers `out.size()` bytes off a chain's readable prefix into `out`
-// (straddling records can split them across nodes); nullptr when the chain
+// Gathers `out.size()` bytes off a chain's readable prefix into `out` (a
+// reassembling message's header can straddle nodes); nullptr when the chain
 // holds fewer bytes.
 const std::uint8_t *gather_small(const mem::IoBufChain &chain, std::span<std::uint8_t> out) noexcept {
     std::size_t done = 0;
@@ -70,20 +65,21 @@ struct TlsConnection::Impl {
     [[nodiscard]] common::IoResult<void> write_guard() noexcept;
 
     // ---- inbound record pipeline ----
+    // Every record is contiguous inside the glue's wire buffer (`wire`,
+    // payload at wire.readable_data() + record.offset).
 
     // Outer-type dispatch (the mode is fixed: sealed, per version).
-    void route_record(TlsRecord &&record) noexcept;
-    // Opens the sealed body in place / via the scratch and routes the inner
-    // content type. 1.2 preserves the outer type under encryption (the
-    // AAD-bound inner type IS it); 1.3 routes the decrypted trailing type.
-    void open_and_route(TlsRecord &record) noexcept;
+    void route_record(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept;
+    // Opens the sealed body in place and routes the inner content type. 1.2
+    // preserves the outer type under encryption (the AAD-bound inner type IS
+    // it); 1.3 routes the decrypted trailing type.
+    void open_and_route(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept;
     // Two decoded alert bytes (severity, description).
     void on_alert_bytes(const std::uint8_t *bytes) noexcept;
-    // App data delivery: in_chain moves the record's shrunk plaintext view
-    // into the delivery chain (zero copies); otherwise the plaintext sits
-    // in the open scratch and is copied out (the one gather the AEAD's
-    // single-input-region contract costs).
-    void deliver_plaintext(TlsRecord &record, bool in_chain, std::size_t plain_len) noexcept;
+    // App data delivery: the opened plaintext wire[offset, offset + plain_len)
+    // joins the delivery chain as a retained slice of the wire buffer — zero
+    // copies.
+    void deliver_plaintext(mem::IoBuf &wire, std::size_t offset, std::size_t plain_len) noexcept;
     // Post-handshake handshake-message reassembly across records, then
     // dispatch per complete message (borrowed bodies).
     void feed_handshake_fragment(const std::uint8_t *frag, std::size_t len) noexcept;
@@ -107,7 +103,6 @@ struct TlsConnection::Impl {
     mem::IoBufChain plaintext_{}; // delivered app data awaiting read()
     mem::IoBufChain reassembly_{}; // straddling post-handshake message bytes
     mem::IoBuf message_buf_{}; // materialized straddling message (owns the dispatched body)
-    std::array<std::uint8_t, kOpenScratchSize> open_scratch_{};
     TlsSecret own_secret_; // 1.3 write-side rekey base; empty on 1.2
     TlsSecret peer_secret_; // 1.3 read-side rekey base; empty on 1.2
     std::array<std::uint8_t, 256> alpn_{};
@@ -246,7 +241,7 @@ common::IoResult<void> TlsConnection::Impl::write_guard() noexcept {
 
 // ---- inbound record pipeline ----
 
-void TlsConnection::Impl::route_record(TlsRecord &&record) noexcept {
+void TlsConnection::Impl::route_record(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept {
     if (record.type != TlsContentType::Alert && record.type != TlsContentType::ApplicationData) {
         // The warning budget counts consecutive alerts only. A sealed record
         // (outer application_data) may be a 1.3 alert: open_and_route resets
@@ -263,21 +258,12 @@ void TlsConnection::Impl::route_record(TlsRecord &&record) noexcept {
                     latch_fatal(TlsAlertDesc::DecodeError);
                     return;
                 }
-                std::array<std::uint8_t, 2> alert{};
-                const std::uint8_t *bytes = record.contiguous_payload();
-                if (bytes == nullptr) {
-                    bytes = gather_small(record.payload, alert);
-                }
-                if (bytes == nullptr) {
-                    latch_fatal(TlsAlertDesc::DecodeError);
-                    return;
-                }
-                on_alert_bytes(bytes);
+                on_alert_bytes(wire.readable_data() + record.offset);
                 return;
             }
             // 1.2: alerts after the CCS fly sealed (RFC 5246 §6.2.3.3) —
             // open first; the inner-alert branch of open_and_route decodes.
-            open_and_route(record);
+            open_and_route(wire, record);
             return;
         }
         case TlsContentType::ChangeCipherSpec:
@@ -294,70 +280,58 @@ void TlsConnection::Impl::route_record(TlsRecord &&record) noexcept {
             }
             // 1.2 preserves the record type under encryption; the AAD-bound
             // inner type is this outer Handshake by construction.
-            open_and_route(record);
+            open_and_route(wire, record);
             return;
         case TlsContentType::ApplicationData:
-            open_and_route(record);
+            open_and_route(wire, record);
             return;
     }
     latch_fatal(TlsAlertDesc::UnexpectedMessage); // unreachable: the reader rejects unknown types
 }
 
-void TlsConnection::Impl::open_and_route(TlsRecord &record) noexcept {
+void TlsConnection::Impl::open_and_route(mem::IoBuf &wire, const TlsRecordSpan &record) noexcept {
     // Length bounds before any buffer arithmetic — no decrypt oracle, and
-    // the chain adapter's body/tag sizing below stays underflow-free (the
-    // cipher's own check would come too late for it on degenerate lengths).
+    // the in-place spans below stay underflow-free (the cipher's own check
+    // would come too late for them on degenerate lengths).
     if (record.length < read_cipher_.min_ciphertext_size() || record.length > read_cipher_.max_ciphertext_size()) {
         latch_fatal(TlsAlertDesc::BadRecordMac);
         return;
     }
-    const std::size_t dst_len = tls_record_open_dst_size(read_cipher_, record.length);
-    FIBER_ASSERT(dst_len <= open_scratch_.size());
-    const TlsRecordOpenChainResult result =
-            tls_record_open_in_place(read_cipher_, record.type, record.legacy_version, record.length, record.payload,
-                                     {open_scratch_.data(), dst_len});
-    if (result.open.status != TlsRecordCipher::Status::Ok) {
+    // In place, per TlsRecordCipher::open()'s aliasing contract: the 1.3
+    // plaintext lands at the payload's head, the 1.2 one right past the
+    // explicit nonce (8 for GCM, 0 for ChaCha).
+    std::uint8_t *payload = wire.readable_data() + record.offset;
+    const std::size_t nonce =
+            read_cipher_.kind() == TlsRecordProtectionKind::Tls12 ? read_cipher_.explicit_nonce_len() : 0;
+    std::uint8_t *plain = payload + nonce;
+    const TlsRecordCipher::OpenResult result =
+            read_cipher_.open(record.type, record.legacy_version, record.length, {payload, record.length},
+                              {plain, read_cipher_.open_output_size(record.length)});
+    if (result.status != TlsRecordCipher::Status::Ok) {
         // Overflow is only reported after authentication, so naming it is no
         // oracle. AuthFail and pre-decryption Malformed both collapse to
         // bad_record_mac — no decrypt-oracle distinction is surfaced.
-        latch_fatal(result.open.status == TlsRecordCipher::Status::Overflow ? TlsAlertDesc::RecordOverflow
-                                                                            : TlsAlertDesc::BadRecordMac);
-        return;
-    }
-    const std::uint8_t *plain = nullptr;
-    if (result.in_chain) {
-        const mem::IoBuf *front = record.payload.first_readable();
-        if (front != nullptr && front->readable() == result.open.plain_len) {
-            plain = front->readable_data();
-        } else {
-            // Defensive transcription of a non-contiguous in-chain plaintext
-            // (not produced by the 05 eligibility rules).
-            plain = gather_small(record.payload, {open_scratch_.data(), result.open.plain_len});
-        }
-    } else {
-        plain = open_scratch_.data();
-    }
-    if (plain == nullptr) {
-        latch_fatal(TlsAlertDesc::InternalError);
+        latch_fatal(result.status == TlsRecordCipher::Status::Overflow ? TlsAlertDesc::RecordOverflow
+                                                                       : TlsAlertDesc::BadRecordMac);
         return;
     }
 
-    if (result.open.inner_type != TlsContentType::Alert) {
+    if (result.inner_type != TlsContentType::Alert) {
         warning_alerts_ = 0; // a non-alert record, by its inner type
     }
-    switch (result.open.inner_type) {
+    switch (result.inner_type) {
         case TlsContentType::Alert:
-            if (result.open.plain_len != 2) {
+            if (result.plain_len != 2) {
                 latch_fatal(TlsAlertDesc::DecodeError);
                 return;
             }
             on_alert_bytes(plain);
             return;
         case TlsContentType::ApplicationData:
-            deliver_plaintext(record, result.in_chain, result.open.plain_len);
+            deliver_plaintext(wire, record.offset + nonce, result.plain_len);
             return;
         case TlsContentType::Handshake:
-            feed_handshake_fragment(plain, result.open.plain_len);
+            feed_handshake_fragment(plain, result.plain_len);
             return;
         default:
             // Inner CCS or app data outside any legal window: unexpected.
@@ -386,27 +360,12 @@ void TlsConnection::Impl::on_alert_bytes(const std::uint8_t *bytes) noexcept {
     }
 }
 
-void TlsConnection::Impl::deliver_plaintext(TlsRecord &record, bool in_chain, std::size_t plain_len) noexcept {
+void TlsConnection::Impl::deliver_plaintext(mem::IoBuf &wire, std::size_t offset, std::size_t plain_len) noexcept {
     if (plain_len == 0) {
         return; // empty inner app data (the 1.3 keep-alive form): nothing to deliver
     }
-    if (in_chain) {
-        // The in-place open already shrank the record chain's view to the
-        // plaintext — the nodes move into the delivery chain, zero copies.
-        FIBER_ASSERT(record.payload.readable_bytes() == plain_len);
-        if (!plaintext_.append_chain(std::move(record.payload))) {
-            latch_fatal(TlsAlertDesc::InternalError);
-        }
-        return;
-    }
-    mem::IoBuf fragment = mem::IoBuf::allocate(plain_len);
-    if (!fragment.valid()) {
-        latch_fatal(TlsAlertDesc::InternalError);
-        return;
-    }
-    std::memcpy(fragment.writable_data(), open_scratch_.data(), plain_len);
-    fragment.commit(plain_len);
-    if (!plaintext_.append(std::move(fragment))) {
+    // The atomic retain: delivered plaintext may leave the loop's thread.
+    if (!plaintext_.append(wire.retain_slice(offset, plain_len))) {
         latch_fatal(TlsAlertDesc::InternalError);
     }
 }
@@ -454,7 +413,7 @@ void TlsConnection::Impl::feed_handshake_fragment(const std::uint8_t *frag, std:
         }
 
         // Fast path: the whole message inside the fragment (borrowed span —
-        // the record's own bytes or the scratch, both alive for the call).
+        // the record's own opened bytes, alive for the call).
         const std::size_t avail = len - off;
         if (avail == 0) {
             return; // fragment fully consumed by whole messages
@@ -554,11 +513,17 @@ TlsConnection::TlsConnection(TlsConnectionRole role, TlsConnectedState &&state) 
 
 TlsConnection::~TlsConnection() { delete impl_; }
 
-void TlsConnection::on_record(TlsRecord &&record) noexcept {
-    if (impl_ == nullptr || impl_->failed_ || impl_->peer_closed_) {
-        return; // terminal: records drop
+void TlsConnection::on_records(mem::IoBuf &wire, std::span<const TlsRecordSpan> records) noexcept {
+    if (impl_ == nullptr) {
+        return;
     }
-    impl_->route_record(std::move(record));
+    for (const TlsRecordSpan &record: records) {
+        if (impl_->failed_ || impl_->peer_closed_) {
+            return; // terminal: the rest of the batch drops
+        }
+        FIBER_ASSERT(record.offset + record.length <= wire.readable());
+        impl_->route_record(wire, record);
+    }
 }
 
 void TlsConnection::on_framing_fatal(TlsAlertDesc alert) noexcept {

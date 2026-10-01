@@ -56,7 +56,7 @@
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
 #include <fiber/tls/record/TlsRecord.h>
 #include <fiber/tls/record/TlsRecordCipher.h>
-#include <fiber/tls/record/TlsRecordReader.h>
+#include <fiber/tls/record/TlsRecordFramer.h>
 #include "LoopTestSupport.h"
 
 namespace {
@@ -76,11 +76,13 @@ using fiber::tls::TlsConnectedState;
 using fiber::tls::TlsConnection;
 using fiber::tls::TlsConnectionRole;
 using fiber::tls::TlsContentType;
+using fiber::tls::TlsFrameResult;
 using fiber::tls::TlsHandshakeType;
 using fiber::tls::TlsPrivateKey;
 using fiber::tls::TlsProtocolVersion;
 using fiber::tls::TlsRecordCipher;
 using fiber::tls::TlsRecordProtectionKind;
+using fiber::tls::TlsRecordSpan;
 using fiber::tls::TlsSecret;
 using fiber::tls::TlsServerConfig;
 using fiber::tls::TlsServerHandshakeEngine;
@@ -392,6 +394,20 @@ std::vector<std::uint8_t> craft_hs_record(TlsConnectedState &state, std::span<co
     return wire;
 }
 
+// Seals one 1.3 record of `inner` content with the state's write cipher
+// (sequence continuity preserved by the move-out/move-back).
+std::vector<std::uint8_t> craft_13_record(TlsConnectedState &state, TlsContentType inner,
+                                          std::span<const std::uint8_t> plain) {
+    TlsRecordCipher wc = std::move(state.write_cipher);
+    std::vector<std::uint8_t> wire = seal_record(wc, inner, plain, kTypeApplicationData);
+    state.write_cipher = std::move(wc);
+    return wire;
+}
+
+void append_bytes(std::vector<std::uint8_t> &dst, const std::vector<std::uint8_t> &src) {
+    dst.insert(dst.end(), src.begin(), src.end());
+}
+
 // Seals a 1.2 record with the CLIENT-side write keys of a synthetic pair
 // (outer type preserved — 1.2 binds it into the AAD).
 std::vector<std::uint8_t> craft_12_record(TlsRecordCipher &client_write, TlsContentType inner,
@@ -439,37 +455,48 @@ std::size_t count_records(const std::vector<std::uint8_t> &wire) {
     return records;
 }
 
-// The glue's connected-phase framing (TlsStreamFd's contract): one reader
-// per inbound direction — complete records out, a partial record tail
-// buffered across feeds — each record handed to the connection.
+// The glue's connected-phase framing (TlsStreamFd's contract, feature/tls/12):
+// wire bytes accumulate in one contiguous buffer — an incomplete record is
+// carried to the head of the next one — and complete records are framed off
+// it in batches for the connection.
 struct WireFeeder {
-    fiber::tls::TlsRecordReader reader{};
+    IoBuf inbound{};
 
     bool feed(TlsConnection &conn, std::span<const std::uint8_t> wire) {
         if (wire.empty()) {
             return true;
         }
-        IoBuf buf = IoBuf::allocate(wire.size());
+        const std::size_t carry = inbound.readable();
+        IoBuf buf = IoBuf::allocate(carry + wire.size());
         if (!buf.valid()) {
             return false;
         }
-        std::memcpy(buf.writable_data(), wire.data(), wire.size());
-        buf.commit(wire.size());
-        if (!reader.feed(std::move(buf))) {
-            return false;
+        if (carry > 0) {
+            std::memcpy(buf.writable_data(), inbound.readable_data(), carry);
         }
+        std::memcpy(buf.writable_data() + carry, wire.data(), wire.size());
+        buf.commit(carry + wire.size());
+        inbound = std::move(buf);
+
+        std::array<TlsRecordSpan, fiber::tls::kTlsRecordBatchMax> batch{};
         for (;;) {
-            fiber::tls::TlsRecordReader::Result next = reader.next();
-            if (next.status == fiber::tls::TlsRecordReader::Result::Status::Fatal) {
-                conn.on_framing_fatal(next.alert);
+            const TlsFrameResult framed =
+                    fiber::tls::tls_frame_records({inbound.readable_data(), inbound.readable()}, batch);
+            if (framed.count > 0) {
+                conn.on_records(inbound, {batch.data(), framed.count});
+                inbound.consume(framed.consumed);
+            }
+            if (conn.failed() || conn.peer_closed()) {
+                inbound = IoBuf{};
+                return true; // terminal: further records drop
+            }
+            if (framed.fatal) {
+                conn.on_framing_fatal(framed.alert);
+                inbound = IoBuf{};
                 return true;
             }
-            if (next.status == fiber::tls::TlsRecordReader::Result::Status::NeedMore) {
-                return true; // partial tail stays buffered for the next feed
-            }
-            conn.on_record(std::move(next.record));
-            if (conn.failed() || conn.peer_closed()) {
-                return true; // terminal: further records drop
+            if (framed.count < batch.size()) {
+                return true; // an incomplete tail stays for the next feed
             }
         }
     }
@@ -497,8 +524,7 @@ struct Synthetic12Pair {
     TlsConnectedState server;
 };
 
-Synthetic12Pair make_synthetic_12_pair() {
-    const TlsCipherSuiteId suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256;
+Synthetic12Pair make_synthetic_12_pair(TlsCipherSuiteId suite = TlsCipherSuiteId::EcdheRsaAes128GcmSha256) {
     std::array<std::uint8_t, 48> master_bytes{};
     for (std::size_t i = 0; i < master_bytes.size(); ++i) {
         master_bytes[i] = static_cast<std::uint8_t>(i * 5 + 1);
@@ -946,6 +972,156 @@ TEST(TlsConnectionTest, EngineLeftoverFeedsConnection) {
 }
 
 // =====================================================================
+// contiguous wire buffer, batched records (feature/tls/12)
+// =====================================================================
+
+// Framing runs ahead of decryption (headers only), so a KeyUpdate and the
+// records after it share one batch: processing stays sequential, and the
+// record behind the KeyUpdate opens under the rotated read keys.
+TEST(TlsConnectionTest, KeyUpdateAndTheRecordsAroundItInOneBatch13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        const std::vector<std::uint8_t> before{'b', 'e', 'f', 'o', 'r', 'e'};
+        const std::vector<std::uint8_t> after{'a', 'f', 't', 'e', 'r'};
+        std::vector<std::uint8_t> wire = craft_13_record(states.client, TlsContentType::ApplicationData, before);
+        append_bytes(wire, craft_key_update(states.client, false));
+        append_bytes(wire, craft_13_record(states.client, TlsContentType::ApplicationData, after));
+
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire)); // one buffer, one batch
+        EXPECT_FALSE(server.failed());
+        std::vector<std::uint8_t> expected = before;
+        append_bytes(expected, after);
+        EXPECT_EQ(expected, read_all(server));
+    });
+}
+
+TEST(TlsConnectionTest, CloseNotifyMidBatchDropsTheRest13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        const std::uint8_t close_notify[2] = {1, static_cast<std::uint8_t>(TlsAlertDesc::CloseNotify)};
+        const std::vector<std::uint8_t> head{'a'};
+        const std::vector<std::uint8_t> late{'b'};
+        std::vector<std::uint8_t> wire = craft_13_record(states.client, TlsContentType::ApplicationData, head);
+        append_bytes(wire, craft_13_record(states.client, TlsContentType::Alert, close_notify));
+        append_bytes(wire, craft_13_record(states.client, TlsContentType::ApplicationData, late));
+
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire));
+        EXPECT_TRUE(server.peer_closed());
+        EXPECT_FALSE(server.failed());
+        EXPECT_EQ(head, read_all(server)); // the record past close_notify never opened
+        std::size_t n = 0;
+        std::array<std::uint8_t, 8> scratch{};
+        EXPECT_EQ(ReadStatus::PeerClosed, server.read(scratch.data(), scratch.size(), n));
+    });
+}
+
+TEST(TlsConnectionTest, PeerFatalAlertMidBatchDropsTheRest13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        const std::uint8_t fatal[2] = {2, static_cast<std::uint8_t>(TlsAlertDesc::DecodeError)};
+        const std::vector<std::uint8_t> head{'a'};
+        const std::vector<std::uint8_t> late{'b'};
+        std::vector<std::uint8_t> wire = craft_13_record(states.client, TlsContentType::ApplicationData, head);
+        append_bytes(wire, craft_13_record(states.client, TlsContentType::Alert, fatal));
+        append_bytes(wire, craft_13_record(states.client, TlsContentType::ApplicationData, late));
+
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire));
+        EXPECT_TRUE(server.failed());
+        EXPECT_TRUE(chain_bytes(server.take_output()).empty()); // the peer's fatal: nothing sent back
+        EXPECT_EQ(head, read_all(server)); // delivered plaintext drains before the terminal
+    });
+}
+
+// A framing violation behind complete records: they are processed first
+// (the per-record reader's order), then our unexpected_message latches.
+TEST(TlsConnectionTest, FramingViolationAfterGoodRecordsDeliversThemFirst13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        const std::vector<std::uint8_t> hello{'h', 'e', 'l', 'l', 'o'};
+        std::vector<std::uint8_t> wire = craft_13_record(states.client, TlsContentType::ApplicationData, hello);
+        append_bytes(wire, {0x18, 0x03, 0x03, 0x00, 0x01, 0x00}); // heartbeat: unknown content type
+
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire));
+        EXPECT_TRUE(server.failed());
+        EXPECT_FALSE(chain_bytes(server.take_output()).empty()); // our fatal alert
+        EXPECT_EQ(hello, read_all(server));
+    });
+}
+
+TEST(TlsConnectionTest, RecordsBeyondOneBatchAllDeliver13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        std::vector<std::uint8_t> expected;
+        std::vector<std::uint8_t> wire;
+        for (std::size_t i = 0; i < 3 * fiber::tls::kTlsRecordBatchMax + 5; ++i) {
+            const std::vector<std::uint8_t> piece(i % 7 + 1, static_cast<std::uint8_t>('a' + i % 26));
+            append_bytes(wire, craft_13_record(states.client, TlsContentType::ApplicationData, piece));
+            append_bytes(expected, piece);
+        }
+
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+        WireFeeder server_feeds;
+        ASSERT_TRUE(server_feeds.feed(server, wire));
+        EXPECT_FALSE(server.failed());
+        EXPECT_EQ(expected, read_all(server));
+    });
+}
+
+// The record opens in place inside the wire buffer and its plaintext is
+// delivered as a retained view of that buffer: zero copies, and the storage
+// outlives the glue's handle.
+TEST(TlsConnectionTest, DeliveredPlaintextIsAViewOfTheWireBuffer13) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material;
+        PairStates states = complete_pair(material);
+
+        std::vector<std::uint8_t> payload(5000);
+        for (std::size_t i = 0; i < payload.size(); ++i) {
+            payload[i] = static_cast<std::uint8_t>(i * 13 + 1);
+        }
+        const std::vector<std::uint8_t> wire = craft_13_record(states.client, TlsContentType::ApplicationData, payload);
+        TlsConnection server(TlsConnectionRole::Server, std::move(states.server));
+
+        IoBuf buf = IoBuf::allocate(wire.size());
+        ASSERT_TRUE(buf.valid());
+        std::memcpy(buf.writable_data(), wire.data(), wire.size());
+        buf.commit(wire.size());
+        std::array<TlsRecordSpan, fiber::tls::kTlsRecordBatchMax> batch{};
+        const TlsFrameResult framed = fiber::tls::tls_frame_records({buf.readable_data(), buf.readable()}, batch);
+        ASSERT_EQ(1u, framed.count);
+        server.on_records(buf, {batch.data(), framed.count});
+        const std::uint8_t *record_payload = buf.readable_data() + fiber::tls::kTlsRecordHeaderSize;
+        buf = IoBuf{}; // the glue lets go of the wire buffer
+
+        IoBufChain sink;
+        std::size_t n = 0;
+        ASSERT_EQ(ReadStatus::Ok, server.take(payload.size(), sink, n));
+        ASSERT_EQ(payload.size(), n);
+        ASSERT_NE(nullptr, sink.first_readable());
+        EXPECT_EQ(record_payload, sink.first_readable()->readable_data()); // 1.3: plaintext at the payload's head
+        EXPECT_EQ(payload, chain_bytes(sink));
+    });
+}
+
+// =====================================================================
 // TLS 1.2 (synthetic key-block pair)
 // =====================================================================
 
@@ -1104,6 +1280,46 @@ TEST(TlsConnectionTest, Synthetic12AppAndCloseNotifyBothWays) {
         ASSERT_TRUE(server.close_notify().has_value());
         ASSERT_TRUE(client_feeds.feed(client, chain_bytes(server.take_output())));
         EXPECT_TRUE(client.peer_closed());
+    });
+}
+
+// A 1.2 wire cut at every offset — headers included — through the carrying
+// feeder: each record reassembles contiguously and opens in place, for GCM
+// (plaintext 8 bytes into the record, past the explicit nonce) and ChaCha
+// (at its head). The synthetic pair is deterministic, so a fresh receiver
+// per cut opens the one sealed wire.
+TEST(TlsConnectionTest, WireCutAnywhereReassembles12) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        ServerMaterial material; // pool only
+        for (const TlsCipherSuiteId suite:
+             {TlsCipherSuiteId::EcdheRsaAes128GcmSha256, TlsCipherSuiteId::EcdheRsaChacha20Poly1305}) {
+            SCOPED_TRACE(static_cast<int>(suite));
+            Synthetic12Pair sender = make_synthetic_12_pair(suite);
+            TlsConnection client(TlsConnectionRole::Client, std::move(sender.client));
+            std::vector<std::uint8_t> payload(700);
+            for (std::size_t i = 0; i < payload.size(); ++i) {
+                payload[i] = static_cast<std::uint8_t>(i * 7 + 5);
+            }
+            std::vector<std::uint8_t> wire;
+            std::size_t off = 0;
+            for (const std::size_t len: {1, 300, 0, 399}) {
+                append_bytes(wire, connection_wire(client, {payload.data() + off, len}));
+                off += len;
+            }
+            ASSERT_TRUE(client.close_notify().has_value());
+            append_bytes(wire, chain_bytes(client.take_output()));
+
+            for (std::size_t cut = 0; cut <= wire.size(); ++cut) {
+                Synthetic12Pair fresh = make_synthetic_12_pair(suite);
+                TlsConnection server(TlsConnectionRole::Server, std::move(fresh.server));
+                WireFeeder server_feeds;
+                ASSERT_TRUE(server_feeds.feed(server, {wire.data(), cut}));
+                ASSERT_TRUE(server_feeds.feed(server, {wire.data() + cut, wire.size() - cut}));
+                ASSERT_FALSE(server.failed()) << "cut " << cut;
+                ASSERT_TRUE(server.peer_closed()) << "cut " << cut;
+                ASSERT_EQ(payload, read_all(server)) << "cut " << cut;
+            }
+        }
     });
 }
 

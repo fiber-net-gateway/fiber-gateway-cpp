@@ -32,7 +32,7 @@
 #include <fiber/tls/crypto/TlsSecret.h>
 #include <fiber/tls/record/TlsRecord.h>
 #include <fiber/tls/record/TlsRecordCipher.h>
-#include <fiber/tls/record/TlsRecordReader.h>
+#include <fiber/tls/record/TlsRecordFramer.h>
 
 namespace {
 
@@ -145,6 +145,42 @@ void mirror_key_update(Setup &setup, std::uint8_t inner, std::span<const std::ui
     }
 }
 
+// The glue's connected-phase framing (TlsStreamFd, feature/tls/12): the wire
+// accumulates in one contiguous buffer — an incomplete record carried to the
+// head of the next — and complete records reach the connection in batches.
+void feed_wire(TlsConnection &conn, fiber::mem::IoBuf &inbound, std::span<const std::uint8_t> wire) {
+    const std::size_t carry = inbound.readable();
+    fiber::mem::IoBuf buf = fiber::mem::IoBuf::allocate(carry + wire.size());
+    FIBER_ASSERT(buf.valid());
+    if (carry > 0) {
+        std::memcpy(buf.writable_data(), inbound.readable_data(), carry);
+    }
+    std::memcpy(buf.writable_data() + carry, wire.data(), wire.size());
+    buf.commit(carry + wire.size());
+    inbound = std::move(buf);
+
+    std::array<TlsRecordSpan, kTlsRecordBatchMax> batch{};
+    for (;;) {
+        const TlsFrameResult framed = tls_frame_records({inbound.readable_data(), inbound.readable()}, batch);
+        if (framed.count > 0) {
+            conn.on_records(inbound, {batch.data(), framed.count});
+            inbound.consume(framed.consumed);
+        }
+        if (conn.failed() || conn.peer_closed()) {
+            inbound = fiber::mem::IoBuf{};
+            return;
+        }
+        if (framed.fatal) {
+            conn.on_framing_fatal(framed.alert);
+            inbound = fiber::mem::IoBuf{};
+            return;
+        }
+        if (framed.count < batch.size()) {
+            return;
+        }
+    }
+}
+
 void drain_plaintext(TlsConnection &conn) {
     std::array<std::uint8_t, 4096> buf{};
     for (int i = 0; i < 64; ++i) {
@@ -169,7 +205,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
             return;
         }
         TlsConnection conn(server ? TlsConnectionRole::Server : TlsConnectionRole::Client, std::move(setup.state));
-        TlsRecordReader reader;
+        fiber::mem::IoBuf inbound;
         std::size_t off = 1;
         while (off + 3 <= size && !conn.failed() && !conn.peer_closed()) {
             const std::uint8_t ctl = data[off];
@@ -188,22 +224,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
                 wire = seal(setup, inner, payload);
                 mirror_key_update(setup, inner, payload);
             }
-            if (!wire.empty() && !reader.feed(fiber::fuzz::to_iobuf(wire))) {
-                break;
-            }
-            for (;;) {
-                TlsRecordReader::Result next = reader.next();
-                if (next.status == TlsRecordReader::Result::Status::Fatal) {
-                    conn.on_framing_fatal(next.alert);
-                    break;
-                }
-                if (next.status == TlsRecordReader::Result::Status::NeedMore) {
-                    break;
-                }
-                conn.on_record(std::move(next.record));
-                if (conn.failed() || conn.peer_closed()) {
-                    break;
-                }
+            if (!wire.empty()) {
+                feed_wire(conn, inbound, wire);
             }
             if ((ctl & 0xC0) != 0xC0) {
                 if ((ctl & 0x40) != 0) {

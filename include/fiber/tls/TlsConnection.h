@@ -16,18 +16,18 @@
 // We never initiate a KeyUpdate ourselves (09 §1).
 //
 // Record framing lives OUTSIDE (the 09 §3 retrofit of TlsHandshakeContext is
-// gone): the glue (TlsStreamFd) owns the TlsRecordReader that splits the
-// inbound byte stream and hands complete records to on_record(); a trailing
-// partial record stays buffered there across feeds. Per record the
-// connection opens in place — the plaintext rides the record's own nodes
-// into the delivery chain with zero copies when the topology allows, and
-// through the internal open scratch (one gather) when the body straddles
-// chain nodes. Post-handshake handshake messages (NST/KeyUpdate) reassemble
-// across records here (4 MiB per-message cap).
+// gone; feature/tls/12): the glue (TlsStreamFd) keeps the inbound byte
+// stream in one contiguous wire buffer, frames complete records off it with
+// tls_frame_records() and hands them over in batches to on_records(); an
+// incomplete trailing record stays with the glue across reads. Every record
+// is therefore contiguous: the connection opens it in place inside the wire
+// buffer and delivers app-data plaintext as retained slices of that buffer —
+// zero copies, no scratch. Post-handshake handshake messages (NST/KeyUpdate)
+// reassemble across records here (16 KiB per-message cap).
 //
 // Synchronous, memory-only plumbing — the net glue (TlsStreamFd, 09 §5)
-// owns the socket loop: fd bytes → its reader → on_record(), take_output()
-// → fd. Pure writes (write/close_notify) are fail-fast; inbound violations
+// owns the socket loop: fd bytes → its wire buffer → on_records(),
+// take_output() → fd. Pure writes (write/close_notify) are fail-fast; inbound violations
 // latch a terminal state and encode the fatal alert into the outbound chain
 // (the glue flushes it best-effort before tearing down). The peer's
 // close_notify latches PeerClosed — plaintext delivered before it stays
@@ -50,7 +50,7 @@
 
 #include "TlsConnectedState.h"
 #include "TlsTypes.h"
-#include "record/TlsRecord.h"
+#include "record/TlsRecordFramer.h"
 
 namespace fiber::tls {
 
@@ -72,14 +72,16 @@ public:
 
     // ---- inbound ----
 
-    // One complete record off the glue's TlsRecordReader (any chain
-    // topology — straddling bodies degrade to an internal gather). The
-    // record is processed immediately: opened with the read cipher (auth
-    // failure → fatal bad_record_mac), its inner content routed (app data
-    // delivered, alerts latched, post-handshake messages dispatched).
-    // Records handed to a terminal connection (ours or the peer's
-    // close_notify) drop harmlessly.
-    void on_record(TlsRecord &&record) noexcept;
+    // Complete records framed off one contiguous wire buffer
+    // (tls_frame_records), in wire order; offsets are relative to
+    // wire.readable_data(). Each record is processed immediately: opened in
+    // place inside `wire` with the read cipher (only its own bytes are
+    // written, so the storage needs no unique(); auth failure → fatal
+    // bad_record_mac), its inner content routed (app data delivered as a
+    // retained slice of `wire`, alerts latched, post-handshake messages
+    // dispatched). Processing stops at the first terminal (ours or the
+    // peer's close_notify): the rest of the batch drops.
+    void on_records(mem::IoBuf &wire, std::span<const TlsRecordSpan> records) noexcept;
 
     // Reader-level framing violation (unknown content type / oversize
     // record): latches the fatal terminal with the reader's alert.

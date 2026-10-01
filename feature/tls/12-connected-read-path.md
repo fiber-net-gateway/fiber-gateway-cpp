@@ -1,6 +1,6 @@
 # TLS 自研实现 · 12 已连接阶段读路径重做(连续 wire 缓冲 + 批量开记录 + TlsConnection 去 pimpl)
 
-状态:设计稿(2026-10-01),未实现。范围仅 TCP 面已连接阶段(`TlsStreamFd` 读路径 +
+状态:§3 拆分器(c55ab263)与 §4–§5 读路径(第 2 步)已实现;§4.3 去 pimpl 待做。范围仅 TCP 面已连接阶段(`TlsStreamFd` 读路径 +
 `TlsConnection`);握手路径(`TlsHandshakeContext`/`TlsRecordReader`/
 `TlsRecordCipherChain`)与写路径不动。
 
@@ -49,8 +49,9 @@
      `TcpTransport::try_readv` 的 `allocate(size)` 行为一致。
 3. **拆分在 glue(`TlsStreamFd`)**,纯函数拆分器每批最多 32 条,描述符是相对 wire 缓冲
    的 offset;连接用 `on_records(wire, batch)` 按序处理。
-4. **不完整的尾部 record 以 `IoBuf` 存在 `TlsStreamFd::inbound_`**(原 wire 缓冲的视图),
-   下次读时拷到新缓冲区开头,拷贝量 ≤ 一条 record。
+4. **不完整的尾部 record 以 `IoBuf` 存在 `TlsStreamFd::inbound_`**(原 wire 缓冲的视图)。
+   下次读时,若原缓冲剩余的 tailroom 还装得下这条 record,就直接读进 tailroom(不拷贝、
+   不分配);否则拷到新缓冲区开头,拷贝量 ≤ 一条 record。
 5. **`TlsRecord`/`TlsRecordReader`/`TlsRecordCipherChain` 不改**:握手路径(上下文、
    Tls12/13 握手、两个引擎)继续用。已连接阶段新增 `TlsRecordSpan` + 拆分器。
 6. **拆分器继续用统一上限** `kTlsMaxCiphertextRecordSize`(与现 reader 相同),各版本的
@@ -224,6 +225,10 @@ IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem::IoBufChain &o
 
 IoErr TlsStreamFd::read_wire(std::size_t hint) noexcept {
     const std::size_t carry = inbound_.readable(); // < one record (invariant I1)
+    if (carry > 0 && carry + inbound_.writable() >= incomplete_record_size(inbound_)) {
+        // continue the record in its own buffer's tailroom: no copy, no allocation
+        // read into inbound_.writable_data(); EOF → ConnReset; commit; process_inbound()
+    }
     mem::IoBuf wire = mem::IoBuf::allocate(
             std::clamp(hint + kInboundSlack, kInboundMinCapacity, kInboundMaxCapacity));
     if (!wire.valid()) {
@@ -274,6 +279,11 @@ IoErr TlsStreamFd::process_inbound() noexcept {
 ```
 
 要点:
+- **tailroom 续读**(实现时加入):`incomplete_record_size` 在 header 到齐时是 5 + length,
+  否则是 5。若只走"拷 carry 到新缓冲"一条路,一条 record 分多个小段到达(慢链路、读方
+  每段都被唤醒)时,每次读都要重拷不断变长的前缀——16K record 按 1448 B 一段到达约 6 倍
+  拷贝,外加每段一次 20–64K 分配,比现在还差。续读让这种情况零拷贝、零分配;只有缓冲已满
+  (大流量)时才走拷贝。tailroom 在所有已交付 slice 的视图之外,写它不碰共享字节。
 - 一次 `read_wire` 处理完缓冲里**所有**完整 record(多批循环),和现在
   `drain_records` 的"读一次排空一次"相同;`has_pending_read()` 不用改(I1)。
 - 先查终态再查 fatal:一批里先出现 close_notify、后面又是坏 header 时,不会再调
@@ -333,7 +343,7 @@ IoErr TlsStreamFd::install_connection(tls::TlsConnectionRole role, tls::TlsConne
 | 每连接常驻 | 448 B + 8 B + 20200 B(另外 2 次分配,18K memset) | ≈ 2.2 KB,内联在 `TlsTransport` 里 |
 | 握手完成时的分配 | 2 次 | 0 次 |
 | 每次 wire 读 | 固定 32K | clamp(size+200, 20K, 64K);H2 为 64K,recv 次数减半 |
-| 跨界 record | 拷整条进 scratch + 分配 + 拷明文(≈ 每收 1 字节多拷 1 字节) | 不存在;每次读最多拷一条不完整 record(大流量平均约半条 / 64K ≈ 12%) |
+| 跨界 record | 拷整条进 scratch + 分配 + 拷明文(≈ 每收 1 字节多拷 1 字节) | 不存在;缓冲有余量时续读零拷贝,缓冲已满时最多拷一条不完整 record(大流量平均约半条 / 64K ≈ 12%) |
 | 每条 record 的拆分 | take_prefix(节点分配 + 边界 retain)+ 偷看 header + consume | 12 B 描述符;app data 只有一次 `retain_slice` + 一个节点 |
 
 `TlsTransport` 在 accept 时多预留约 1.8 KB(握手期间未用)。代价可接受,远小于把 20K
@@ -369,10 +379,12 @@ scratch 内联的方案。
 - 新增:wire 句柄先释放,之后 take/read 的明文仍完整
 - 新增:1.2 ChaCha 的合成对(explicit nonce 0;现有 Synthetic12 只有 GCM 的 +8)
 
-**TlsStreamFdTest**(真实 socket)
-- 对端把 record 切成小段写出(1 字节、7 字节、record 长度 − 1)→ 走跨读 carry 路径
-- 1 MiB 由 16K record 组成的传输,分别用 4K 和 64K 的调用方 size → 字节一致
-- 握手 leftover:应用数据紧跟在 client Finished 后面(单节点 adopt 路径)
+**TlsStreamFdTest**(真实 socket,`WirePath` 中继线程控制字节怎么到达服务端)
+- `BulkReadCarriesIncompleteRecordsAcrossWireBuffers`:1 MiB,调用方 size 4K 与 64K → 走拷贝 carry
+- `TinySegmentsReassembleRecordsAcrossReads`:中继按 1–7 字节小段转发 → 走 tailroom 续读(含 header 被切开)
+- `AppDataBehindClientFinishedIsReadableAfterHandshake`:中继攒批转发,Finished 与应用数据同一次到达
+  → 单节点 leftover adopt,握手返回时 `has_pending_read()` 已为真
+- 实现时用临时探针确认过三条路径都被命中(拷贝 84 次 / 续读 328 次 / leftover 1 次),探针未提交
 
 **验证命令**
 ```bash

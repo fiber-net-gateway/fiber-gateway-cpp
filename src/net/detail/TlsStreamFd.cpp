@@ -20,6 +20,7 @@
 #include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/TlsTicketService.h>
 #include <fiber/tls/record/TlsRecord.h>
+#include <fiber/tls/record/TlsRecordFramer.h>
 #include "tls/handshake/TlsClientHandshakeEngine.h"
 #include "tls/handshake/TlsServerHandshakeEngine.h"
 
@@ -66,12 +67,31 @@ struct BusyResetGuard {
     }
 };
 
-// Wire-read chunk for the engine feeds: large enough that a full flight or
-// jumbo app record lands in one try_read, one node's worth of memory.
+// Wire-read chunk for the handshake engine feeds: large enough that a full
+// flight lands in one try_read, one node's worth of memory.
 constexpr std::size_t kReadChunk = 32 * 1024;
+// Connected-phase wire buffer (feature/tls/12 §2): sized from the caller's
+// read size plus record overhead, clamped to [min, max]. The minimum holds
+// the largest record the framer accepts, so a carried incomplete record
+// always completes in the next buffer; both bounds leave room for IoBuf's
+// control block so the allocation lands exactly on a size class.
+constexpr std::size_t kInboundMaxCapacity = 64 * 1024 - mem::kIoBufControlBlockSize;
+constexpr std::size_t kInboundMinCapacity = 20 * 1024 - mem::kIoBufControlBlockSize;
+constexpr std::size_t kInboundSlack = 200; // ~9 TLS 1.3 records' header + tag + type
+static_assert(kInboundMinCapacity >= tls::kTlsRecordHeaderSize + tls::kTlsMaxCiphertextRecordSize);
 constexpr int kMaxIov = 16;
 // One TLS record's maximum plaintext — the write-side grouping granularity.
 constexpr std::size_t kRecordPlaintextMax = tls::kTlsMaxPlaintextSize;
+
+// Total size of the incomplete record heading `buf`: header plus body once
+// the header is in (process_inbound left it validated), else just the header.
+std::size_t incomplete_record_size(const mem::IoBuf &buf) noexcept {
+    if (buf.readable() < tls::kTlsRecordHeaderSize) {
+        return tls::kTlsRecordHeaderSize;
+    }
+    const std::uint8_t *header = buf.readable_data();
+    return tls::kTlsRecordHeaderSize + ((static_cast<std::size_t>(header[3]) << 8) | header[4]);
+}
 
 bool version_bounds_ok(int min_version, int max_version) noexcept {
     const auto in_domain = [](int version) noexcept { return version == 0x0303 || version == 0x0304; };
@@ -157,7 +177,7 @@ void TlsStreamFd::close() {
     if (stream_fd_.valid()) {
         stream_fd_.close();
     }
-    record_reader_.reset();
+    inbound_ = mem::IoBuf{};
     handshake_started_ = false;
     handshake_done_ = false;
     shutdown_started_ = false;
@@ -386,9 +406,10 @@ fiber::common::IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem
     if (size == 0) {
         return std::size_t{0};
     }
-    // A read delivers at most a record's worth of fresh plaintext per call;
-    // the take moves record nodes zero-copy, so nothing is allocated unless
-    // plaintext actually arrives.
+    // The wire read is sized from what the caller asked for; delivery stays
+    // capped at a record's worth of plaintext per call (the take moves
+    // retained views, zero-copy).
+    const std::size_t wire_hint = size;
     size = std::min(size, kRecordPlaintextMax);
     for (;;) {
         if (!early_data_.empty()) {
@@ -415,26 +436,10 @@ fiber::common::IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem
             case tls::TlsConnection::ReadStatus::NeedMore:
                 break;
         }
-        // No plaintext buffered: pull a wire chunk and split its records.
-        mem::IoBuf chunk = mem::IoBuf::allocate(kReadChunk);
-        if (!chunk.valid()) {
-            return std::unexpected(fiber::common::IoErr::NoMem);
-        }
-        auto read_result = stream_fd_.try_read(chunk.writable_data(), chunk.writable());
-        if (!read_result) {
-            return std::unexpected(read_result.error()); // WouldBlock included: the socket read is the only stall
-        }
-        if (*read_result == 0) {
-            // EOF without close_notify: truncation.
-            return std::unexpected(fiber::common::IoErr::ConnReset);
-        }
-        chunk.commit(*read_result);
-        if (!record_reader_.feed(std::move(chunk))) {
-            return std::unexpected(fiber::common::IoErr::NoMem);
-        }
-        const fiber::common::IoErr drain_err = drain_records();
-        if (drain_err != fiber::common::IoErr::None) {
-            return std::unexpected(drain_err);
+        // No plaintext buffered: pull wire bytes and open their records.
+        const fiber::common::IoErr err = read_wire(wire_hint);
+        if (err != fiber::common::IoErr::None) {
+            return std::unexpected(err); // WouldBlock included: the socket read is the only stall
         }
     }
 }
@@ -527,12 +532,29 @@ fiber::common::IoErr TlsStreamFd::install_connection(tls::TlsConnectionRole role
     if (conn_ == nullptr) {
         return fiber::common::IoErr::NoMem;
     }
-    // The leftover bytes ride the glue's connected-phase reader — records
-    // past the final flight (app data piggybacked behind it) frame here.
-    if (!leftover.empty() && !record_reader_.feed(std::move(leftover))) {
-        return fiber::common::IoErr::NoMem;
+    // The leftover bytes — records past the final flight (app data
+    // piggybacked behind it) — become the first wire buffer. Usually one view
+    // of the engine's last read chunk, framed in place; otherwise gathered
+    // once so every record stays contiguous.
+    const std::size_t bytes = leftover.readable_bytes();
+    if (bytes == 0) {
+        return fiber::common::IoErr::None;
     }
-    return drain_records();
+    const mem::IoBuf *front = leftover.first_readable();
+    if (front->readable() == bytes) {
+        inbound_ = *front;
+    } else {
+        inbound_ = mem::IoBuf::allocate(bytes);
+        if (!inbound_.valid()) {
+            return fiber::common::IoErr::NoMem;
+        }
+        for (const mem::IoBufNode *node = leftover.front_node(); node != nullptr; node = node->next) {
+            std::memcpy(inbound_.writable_data(), node->buf.readable_data(), node->buf.readable());
+            inbound_.commit(node->buf.readable());
+        }
+    }
+    process_inbound();
+    return fiber::common::IoErr::None;
 }
 
 fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) noexcept {
@@ -724,22 +746,78 @@ fiber::common::IoErr TlsStreamFd::read_handshake_chunk(mem::IoBuf &chunk, fiber:
     return fiber::common::IoErr::None;
 }
 
-fiber::common::IoErr TlsStreamFd::drain_records() noexcept {
+fiber::common::IoErr TlsStreamFd::read_wire(std::size_t hint) noexcept {
+    const std::size_t carry = inbound_.readable(); // at most one incomplete record
+    if (carry > 0 && carry + inbound_.writable() >= incomplete_record_size(inbound_)) {
+        // The record still fits the buffer it started in: continue it in
+        // the tailroom — no copy, no allocation. A record trickling in over
+        // many small segments stays here instead of re-copying its growing
+        // prefix per read. The tailroom lies past every delivered slice, so
+        // writing it touches no shared bytes.
+        auto read_result = stream_fd_.try_read(inbound_.writable_data(), inbound_.writable());
+        if (!read_result) {
+            return read_result.error();
+        }
+        if (*read_result == 0) {
+            return fiber::common::IoErr::ConnReset; // EOF without close_notify: truncation
+        }
+        inbound_.commit(*read_result);
+        process_inbound();
+        return fiber::common::IoErr::None;
+    }
+    mem::IoBuf wire = mem::IoBuf::allocate(std::clamp(hint + kInboundSlack, kInboundMinCapacity, kInboundMaxCapacity));
+    if (!wire.valid()) {
+        return fiber::common::IoErr::NoMem;
+    }
+    // Read past the carry slot first: a WouldBlock costs no carry copy and
+    // leaves inbound_ as it was.
+    auto read_result = stream_fd_.try_read(wire.writable_data() + carry, wire.writable() - carry);
+    if (!read_result) {
+        return read_result.error();
+    }
+    if (*read_result == 0) {
+        // EOF without close_notify: truncation.
+        return fiber::common::IoErr::ConnReset;
+    }
+    if (carry > 0) {
+        std::memcpy(wire.writable_data(), inbound_.readable_data(), carry);
+    }
+    wire.commit(carry + *read_result);
+    // The previous buffer lives on only through plaintext already delivered.
+    inbound_ = std::move(wire);
+    process_inbound();
+    return fiber::common::IoErr::None;
+}
+
+void TlsStreamFd::process_inbound() noexcept {
     FIBER_ASSERT(conn_ != nullptr);
+    std::array<tls::TlsRecordSpan, tls::kTlsRecordBatchMax> batch;
     for (;;) {
-        tls::TlsRecordReader::Result next = record_reader_.next();
-        if (next.status == tls::TlsRecordReader::Result::Status::Fatal) {
-            conn_->on_framing_fatal(next.alert);
-            return fiber::common::IoErr::None; // the read path surfaces the latched terminal
+        const tls::TlsFrameResult framed =
+                tls::tls_frame_records({inbound_.readable_data(), inbound_.readable()}, batch);
+        if (framed.count > 0) {
+            conn_->on_records(inbound_, {batch.data(), framed.count});
+            inbound_.consume(framed.consumed);
         }
-        if (next.status == tls::TlsRecordReader::Result::Status::NeedMore) {
-            return fiber::common::IoErr::None; // partial record tail stays buffered here
-        }
-        conn_->on_record(std::move(next.record));
+        // A terminal latched by the records outranks a framing violation
+        // behind them: past the peer's close_notify nothing is read.
         if (conn_->failed() || conn_->peer_closed()) {
-            return fiber::common::IoErr::None; // terminal: further records drop
+            break; // terminal: the rest drops; the read path surfaces it
+        }
+        if (framed.fatal) {
+            conn_->on_framing_fatal(framed.alert);
+            break;
+        }
+        if (framed.count < batch.size()) {
+            // Stopped at an incomplete record (kept for the next read) or
+            // the end of the buffer (released: an idle connection pins none).
+            if (inbound_.readable() == 0) {
+                inbound_ = mem::IoBuf{};
+            }
+            return;
         }
     }
+    inbound_ = mem::IoBuf{};
 }
 
 } // namespace fiber::net::detail

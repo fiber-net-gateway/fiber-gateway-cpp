@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -14,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -1837,6 +1839,273 @@ TEST(TlsStreamFdTest, ReplacingOrClearingCredentialReleasesEarlierOwner) {
 
         group.stop();
         group.join();
+    });
+}
+
+// =====================================================================
+// connected-phase wire buffering (feature/tls/12)
+// =====================================================================
+
+// How the client→server bytes reach the server's socket.
+enum class WirePath {
+    Direct, // one socketpair
+    // Relayed in 1..7-byte pieces (plus an occasional larger one) with a
+    // pause between them: records — headers included — reach the reader
+    // across many wire reads.
+    TinyPieces,
+    // Relayed with a pause before every read: bytes the client wrote back to
+    // back (its Finished and the app data behind it) arrive in one write.
+    Gathered,
+};
+
+void relay_bytes(int src, int dst, WirePath path) {
+    static constexpr std::size_t kPieces[] = {1, 4, 2, 7, 3, 5, 6, 700};
+    std::vector<std::uint8_t> buf(64 * 1024);
+    std::size_t next_piece = 0;
+    for (;;) {
+        if (path == WirePath::Gathered) {
+            std::this_thread::sleep_for(50ms);
+        }
+        const ssize_t got = ::read(src, buf.data(), buf.size());
+        if (got <= 0) {
+            break;
+        }
+        std::size_t off = 0;
+        while (off < static_cast<std::size_t>(got)) {
+            std::size_t len = static_cast<std::size_t>(got) - off;
+            if (path == WirePath::TinyPieces) {
+                len = std::min(len, kPieces[next_piece++ % std::size(kPieces)]);
+            }
+            const ssize_t put = ::write(dst, buf.data() + off, len);
+            if (put <= 0) {
+                return;
+            }
+            off += static_cast<std::size_t>(put);
+            if (path == WirePath::TinyPieces) {
+                std::this_thread::sleep_for(20us);
+            }
+        }
+    }
+    ::shutdown(dst, SHUT_WR);
+}
+
+// The relay's two directions and its socket ends. Destruction unblocks and
+// joins the threads even when an assertion bails out early (a joinable
+// std::thread would terminate the process).
+struct WireRelay {
+    std::thread up; // client → server, along the test's WirePath
+    std::thread down; // server → client, direct
+    int fds[2] = {-1, -1}; // [0]: the server socketpair's end, [1]: the client's
+
+    WireRelay() = default;
+    WireRelay(const WireRelay &) = delete;
+    WireRelay &operator=(const WireRelay &) = delete;
+
+    ~WireRelay() {
+        for (const int fd: fds) {
+            if (fd >= 0) {
+                ::shutdown(fd, SHUT_RDWR);
+            }
+        }
+        if (up.joinable()) {
+            up.join();
+        }
+        if (down.joinable()) {
+            down.join();
+        }
+        for (const int fd: fds) {
+            if (fd >= 0) {
+                ::close(fd);
+            }
+        }
+    }
+};
+
+std::string byte_pattern(std::size_t len, std::uint8_t seed) {
+    std::string out(len, '\0');
+    for (std::size_t i = 0; i < len; ++i) {
+        out[i] = static_cast<char>(seed + i * 31 + (i >> 8));
+    }
+    return out;
+}
+
+struct StreamReadOutcome {
+    fiber::common::IoResult<std::string> data;
+    bool pending_after_handshake = false; // leftover app data opened at HandshakeDone
+};
+
+DetachedTask handshake_and_read_exact(fiber::net::detail::TlsStreamFd *stream, const fiber::net::TlsServerParam &param,
+                                      std::size_t total, std::size_t read_size, std::promise<StreamReadOutcome> *done) {
+    StreamReadOutcome outcome;
+    auto handshake_result = co_await stream->handshake(param, 5s);
+    if (!handshake_result) {
+        outcome.data = std::unexpected(handshake_result.error());
+        done->set_value(std::move(outcome));
+        co_return;
+    }
+    outcome.pending_after_handshake = stream->has_pending_read();
+    std::string &out = *outcome.data;
+    while (out.size() < total) {
+        fiber::mem::IoBufChain chain;
+        auto read_result = co_await stream->readv(read_size, chain, 10s);
+        if (!read_result || *read_result == 0) {
+            outcome.data = std::unexpected(read_result ? fiber::common::IoErr::ConnReset : read_result.error());
+            break;
+        }
+        for (const fiber::mem::IoBufNode *node = chain.front_node(); node != nullptr; node = node->next) {
+            out.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+        }
+    }
+    done->set_value(std::move(outcome));
+}
+
+DetachedTask handshake_and_write_pieces(fiber::net::detail::TlsStreamFd *stream,
+                                        const fiber::net::TlsClientParam &param, const std::vector<std::string> *pieces,
+                                        std::promise<fiber::common::IoErr> *done) {
+    auto handshake_result = co_await stream->handshake(param, 5s);
+    if (!handshake_result) {
+        done->set_value(handshake_result.error());
+        co_return;
+    }
+    for (const std::string &piece: *pieces) {
+        auto written = co_await tls_poll_write(*stream, piece.data(), piece.size());
+        if (!written) {
+            done->set_value(written.error());
+            co_return;
+        }
+    }
+    done->set_value(fiber::common::IoErr::None);
+}
+
+DetachedTask close_tls_stream(fiber::net::detail::TlsStreamFd *stream, std::promise<void> *done) {
+    stream->close();
+    delete stream;
+    done->set_value();
+    co_return;
+}
+
+// Client (loop 1) writes `pieces`, the server (loop 0) reads them back with
+// `read_size` per readv; the bytes must match exactly.
+void check_wire_transfer(TestTlsPair &tls_pair, const std::vector<std::string> &pieces, std::size_t read_size,
+                         WirePath path, bool expect_piggyback) {
+    std::string expected;
+    for (const std::string &piece: pieces) {
+        expected += piece;
+    }
+
+    int server_fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, server_fds), 0);
+    const int server_fd = server_fds[0];
+    int client_fd = server_fds[1];
+    WireRelay relay; // outlives the loop group (declared first, destroyed last)
+    if (path != WirePath::Direct) {
+        int client_fds[2] = {-1, -1};
+        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, client_fds), 0);
+        client_fd = client_fds[0];
+        relay.fds[0] = server_fds[1];
+        relay.fds[1] = client_fds[1];
+        relay.up = std::thread(relay_bytes, relay.fds[1], relay.fds[0], path);
+        relay.down = std::thread(relay_bytes, relay.fds[0], relay.fds[1], WirePath::Direct);
+    }
+
+    fiber::event::EventLoopGroup group(2);
+    group.start();
+    auto *server_stream = new fiber::net::detail::TlsStreamFd(group.at(0), server_fd);
+    auto *client_stream = new fiber::net::detail::TlsStreamFd(group.at(1), client_fd);
+
+    std::promise<StreamReadOutcome> server_promise;
+    std::promise<fiber::common::IoErr> client_promise;
+    auto server_future = server_promise.get_future();
+    auto client_future = client_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() {
+        return handshake_and_read_exact(server_stream, tls_pair.server_options, expected.size(), read_size,
+                                        &server_promise);
+    });
+    fiber::async::spawn(group.at(1), [&]() {
+        return handshake_and_write_pieces(client_stream, tls_pair.client_options, &pieces, &client_promise);
+    });
+    ASSERT_EQ(server_future.wait_for(20s), std::future_status::ready);
+    ASSERT_EQ(client_future.wait_for(20s), std::future_status::ready);
+    StreamReadOutcome server_outcome = server_future.get();
+    const fiber::common::IoErr client_err = client_future.get();
+
+    std::promise<void> server_close_promise;
+    std::promise<void> client_close_promise;
+    auto server_close_future = server_close_promise.get_future();
+    auto client_close_future = client_close_promise.get_future();
+    fiber::async::spawn(group.at(0), [&]() { return close_tls_stream(server_stream, &server_close_promise); });
+    fiber::async::spawn(group.at(1), [&]() { return close_tls_stream(client_stream, &client_close_promise); });
+    ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
+    ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
+    group.stop();
+    group.join();
+
+    EXPECT_EQ(client_err, fiber::common::IoErr::None);
+    ASSERT_TRUE(server_outcome.data) << static_cast<int>(server_outcome.data.error());
+    EXPECT_EQ(server_outcome.data->size(), expected.size());
+    EXPECT_TRUE(*server_outcome.data == expected);
+    if (expect_piggyback) {
+        EXPECT_TRUE(server_outcome.pending_after_handshake);
+    }
+}
+
+// Bulk reads fill each wire buffer and end mid-record: the incomplete tail is
+// carried into the next buffer — with a small read size (one record + a
+// partial per 20 KiB buffer) and a large one (64 KiB buffers).
+TEST(TlsStreamFdTest, BulkReadCarriesIncompleteRecordsAcrossWireBuffers) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_bulk", kSelfSignedCertPem);
+        TempFile key("key_bulk", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+
+        const std::vector<std::string> pieces{byte_pattern(1 << 20, 3)};
+        for (const std::size_t read_size: {std::size_t{4096}, std::size_t{65536}}) {
+            SCOPED_TRACE(read_size);
+            check_wire_transfer(*tls_pair, pieces, read_size, WirePath::Direct, false);
+            if (::testing::Test::HasFatalFailure()) {
+                return;
+            }
+        }
+    });
+}
+
+// Records trickle in a few bytes per read: each one continues in its wire
+// buffer's tailroom until the buffer fills, then carries into a fresh one.
+TEST(TlsStreamFdTest, TinySegmentsReassembleRecordsAcrossReads) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_tiny", kSelfSignedCertPem);
+        TempFile key("key_tiny", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+
+        const std::vector<std::string> pieces{byte_pattern(1, 1),    byte_pattern(100, 2),   byte_pattern(2000, 3),
+                                              byte_pattern(3900, 4), byte_pattern(16984, 5), byte_pattern(7000, 6)};
+        check_wire_transfer(*tls_pair, pieces, 4096, WirePath::TinyPieces, false);
+    });
+}
+
+// App data written right behind the client's Finished lands in the server's
+// last handshake read: the engine's leftover becomes the first wire buffer
+// and its record is opened at HandshakeDone, before any read.
+TEST(TlsStreamFdTest, AppDataBehindClientFinishedIsReadableAfterHandshake) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        SigpipeGuard sigpipe_guard;
+        TempFile cert("cert_piggyback", kSelfSignedCertPem);
+        TempFile key("key_piggyback", kSelfSignedKeyPem);
+        ASSERT_TRUE(cert.ok);
+        ASSERT_TRUE(key.ok);
+        auto tls_pair = create_tls_pair(cert.path, key.path);
+        ASSERT_TRUE(tls_pair);
+
+        const std::vector<std::string> pieces{byte_pattern(3000, 7)};
+        check_wire_transfer(*tls_pair, pieces, 4096, WirePath::Gathered, true);
     });
 }
 
