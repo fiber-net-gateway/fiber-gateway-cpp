@@ -87,6 +87,11 @@ public:
     [[nodiscard]] fiber::common::IoResult<size_t> try_readv(const struct iovec *iov, int iovcnt) noexcept;
     [[nodiscard]] fiber::common::IoResult<size_t> try_writev(const struct iovec *iov, int iovcnt) noexcept;
 
+    // Veto passed into every RWFd wait this adapter starts: known stream
+    // states must not park on a further readiness edge. A layered adapter
+    // (TlsStreamFd) chains its own veto ahead of this one.
+    [[nodiscard]] RWFd::StreamWaitGate stream_wait_gate() noexcept { return {&StreamFd::on_rwfd_wait_gate, this}; }
+
 private:
     // One syscall each; the fd arrives from the RWFd I/O wrapper.
     fiber::common::IoErr read_once(int socket_fd, void *buf, size_t len, size_t &out) noexcept;
@@ -107,10 +112,6 @@ private:
 
     static void on_rwfd_stream_event(void *ctx, fiber::event::IoEvent events) noexcept;
     static fiber::common::IoResult<bool> on_rwfd_wait_gate(void *ctx, fiber::event::IoEvent direction) noexcept;
-
-    // Veto passed into every RWFd wait this adapter starts: known stream
-    // states must not park on a further readiness edge.
-    [[nodiscard]] RWFd::StreamWaitGate stream_wait_gate() noexcept { return {&StreamFd::on_rwfd_wait_gate, this}; }
     static void on_deferred_terminal_notify(StreamFd *self) noexcept;
 
     RWFd rwfd_;

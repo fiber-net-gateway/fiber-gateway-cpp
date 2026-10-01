@@ -45,7 +45,10 @@ public:
     [[nodiscard]] bool has_pending_read() const noexcept;
     [[nodiscard]] bool terminal() const noexcept { return stream_fd_.terminal(); }
     [[nodiscard]] bool peer_closed() const noexcept { return stream_fd_.peer_closed(); }
-    [[nodiscard]] bool read_ready() const noexcept { return stream_fd_.read_ready(); }
+    // Buffered plaintext (or a latched read result, see has_pending_read)
+    // reads like a Ready fd: its wire bytes are already consumed, so no
+    // socket edge will announce it.
+    [[nodiscard]] bool read_ready() const noexcept { return has_pending_read() || stream_fd_.read_ready(); }
     [[nodiscard]] bool write_ready() const noexcept { return stream_fd_.write_ready(); }
     void close();
 
@@ -59,6 +62,9 @@ public:
     // without subscribing a direction callback.
     fiber::common::IoErr ensure_state_observation() noexcept { return stream_fd_.ensure_state_observation(); }
 
+    // Subscriptions follow RWFd's contract with read_ready() as the read
+    // direction's state: a read_ready() caller advances by reading — buffered
+    // plaintext is never announced by a socket edge.
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
@@ -70,6 +76,8 @@ public:
                                           std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
     [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param,
                                           std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
+    // Completes without parking while has_pending_read(), like a wait on a
+    // Ready fd (a zero timeout still reports TimedOut, as for any RWFd wait).
     [[nodiscard]] StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] StreamFd::WaitWritableAwaiter
@@ -115,6 +123,9 @@ private:
     // handshake's frame-local selection, defined in the .cpp).
     static const tls::TlsServerConfig *select_server_config(void *ctx,
                                                             const tls::TlsClientHello &client_hello) noexcept;
+    // wait_readable's veto (ctx: this): buffered plaintext proceeds at once,
+    // everything else defers to the stream's own gate.
+    static fiber::common::IoResult<bool> on_read_wait_gate(void *ctx, fiber::event::IoEvent direction) noexcept;
     // One drive pass over either engine (instantiated in the .cpp): flush its
     // flights, feed it fd bytes, and at HandshakeDone swap it for the
     // connected-phase connection. A failed engine reports Invalid once its

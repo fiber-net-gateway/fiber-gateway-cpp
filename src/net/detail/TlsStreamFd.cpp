@@ -270,6 +270,9 @@ fiber::common::IoErr TlsStreamFd::adopt_loop(fiber::event::EventLoop &loop) noex
 }
 
 fiber::common::IoErr TlsStreamFd::set_read_callback(ReadyCallback callback, void *ctx) noexcept {
+    // RWFd asserts the same of a Ready fd; here the subscription would simply
+    // never fire, the plaintext's wire edge having fired already.
+    FIBER_ASSERT(!has_pending_read());
     return stream_fd_.set_read_callback(callback, ctx);
 }
 
@@ -461,8 +464,18 @@ TlsStreamFd::HandshakeTask TlsStreamFd::handshake(const TlsServerParam &param, s
     }
 }
 
+fiber::common::IoResult<bool> TlsStreamFd::on_read_wait_gate(void *ctx, fiber::event::IoEvent direction) noexcept {
+    auto *self = static_cast<TlsStreamFd *>(ctx);
+    // Ahead of the stream's gate: like a TCP receive queue, the plaintext
+    // drains before a recorded socket error is reported.
+    if (self->has_pending_read()) {
+        return true;
+    }
+    return self->stream_fd_.stream_wait_gate()(direction);
+}
+
 StreamFd::WaitReadableAwaiter TlsStreamFd::wait_readable(std::chrono::milliseconds timeout) noexcept {
-    return stream_fd_.wait_readable(timeout);
+    return stream_fd_.rwfd().wait_readable(timeout, {&TlsStreamFd::on_read_wait_gate, this});
 }
 
 StreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {

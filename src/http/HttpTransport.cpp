@@ -236,6 +236,8 @@ TlsTransport::~TlsTransport() = default;
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::wait_readable(std::chrono::milliseconds timeout) {
     FIBER_ASSERT(handshake_done());
+    // The stream's wait gate covers this too, but a zero timeout expires
+    // before any wait looks.
     if (stream_.has_pending_read()) {
         co_return common::IoResult<void>{};
     }
@@ -271,9 +273,9 @@ common::IoErr TlsTransport::clear_terminal_callback(ReadyCallback callback, void
     return stream_.clear_terminal_callback(callback, ctx);
 }
 
-// Pending decrypted plaintext behaves like a ready fd: a read makes progress
-// without waiting, so callers must advance it instead of subscribing.
-bool TlsTransport::read_ready() const noexcept { return stream_.has_pending_read() || stream_.read_ready(); }
+// Pending decrypted plaintext counts as ready (see TlsStreamFd::read_ready):
+// callers must advance it instead of subscribing.
+bool TlsTransport::read_ready() const noexcept { return stream_.read_ready(); }
 
 bool TlsTransport::write_ready() const noexcept { return stream_.write_ready(); }
 
