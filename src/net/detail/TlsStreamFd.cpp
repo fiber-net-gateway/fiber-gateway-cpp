@@ -19,9 +19,9 @@
 #include <fiber/net/detail/TlsClientStaging.h>
 #include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/TlsTicketService.h>
-#include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
-#include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 #include <fiber/tls/record/TlsRecord.h>
+#include "tls/handshake/TlsClientHandshakeEngine.h"
+#include "tls/handshake/TlsServerHandshakeEngine.h"
 
 namespace fiber::net::detail {
 

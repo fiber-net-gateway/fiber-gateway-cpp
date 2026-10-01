@@ -126,7 +126,7 @@ PSK 恢复（selected_identity 命中）：跳过 Cert/CV；SH 的 psk index 越
 - 握手期 app_data 记录（type=23）一律 unexpected_message（客户端在 Done 前不收 app data；
   1.3 对端也不会发）。
 
-## 3. 引擎 API（`include/fiber/tls/handshake/TlsClientHandshakeEngine.h`）
+## 3. 引擎 API（`src/tls/handshake/TlsClientHandshakeEngine.h`）
 
 ```cpp
 namespace fiber::tls {

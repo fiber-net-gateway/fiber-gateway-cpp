@@ -76,17 +76,18 @@ include/fiber/tls/
 │   │                          #   alpn/server_name/signature_algorithms/supported_groups/renegotiation_info/…
 │   ├── TlsCipherSuites.h      # suite/group/sigalg 注册表 + 双版本协商选择逻辑
 │   ├── TlsTranscript.h        # 跑动哈希：1.3 按 hash 算法持有（cert_req 分叉）、1.2 handshake_messages 缓冲
-│   ├── TlsClientHandshakeEngine.h  # 客户端握手引擎（字节进/字节出；1.2/1.3 为内部子流程，非第三维
-│   │                          #   拆分；0-RTT 早数据写路径封在此内；成功产出 TlsConnectedState）
-│   ├── TlsServerHandshakeEngine.h  # 服务端握手引擎（同形状；NST 发送、0-RTT 接受与 anti-replay）
 │   └── TlsPsk.h               # 1.3 PSK/票据/0-RTT 参数推导 + binder 计算；1.2 ticket 封装
 └── detail/                    # 内部跨编译单元共享头（保持无 openssl）：TlsHandshakeContext——
                               # 双握手引擎的共享组合根（record IO 驱动/transcript/密钥调度调用/
                               # flight 组装/alert 选择/CCS 处理/协商结果落地）
 
 src/tls/                       # 与 include 同构；另外：
-└── crypto/ 中允许内部适配头（如 TlsCryptoPrimitives.h：EVP_AEAD/HKDF/HMAC/SHA/RAND 的薄封装，
-    全模块唯一触碰 openssl 头的文件），对外类型不泄漏任何 openssl 符号
+├── crypto/ 中允许内部适配头（如 TlsCryptoPrimitives.h：EVP_AEAD/HKDF/HMAC/SHA/RAND 的薄封装，
+│   全模块唯一触碰 openssl 头的文件），对外类型不泄漏任何 openssl 符号
+└── handshake/ 中的握手引擎头（库内胶水 TlsStreamFd/QuicTlsSession 使用，内部状态按值持有）：
+    ├── TlsClientHandshakeEngine.h  # 客户端握手引擎（字节进/字节出；1.2/1.3 为内部子流程，非第三维
+    │                               #   拆分；0-RTT 早数据写路径封在此内；成功产出 TlsConnectedState）
+    └── TlsServerHandshakeEngine.h  # 服务端握手引擎（同形状；NST 发送、0-RTT 接受与 anti-replay）
 
 tests/
 └── Tls*Test.cpp               # 自动收集进 fiber_tests：

@@ -9,7 +9,7 @@
 
 `TlsServerHandshakeEngine` 是服务端完整握手 FSM：吃客户端字节，吐服务端字节，
 成功时产出 `TlsConnectedState`。与 06 客户端引擎同形（01 §3.3 三相位引擎的第二相位）：
-同步、无 fd、无协程、无时钟；pimpl 藏 src 侧；公共头零 openssl。
+同步、无 fd、无协程、无时钟；引擎头在 src 侧（库内胶水使用），内部状态按值持有。
 
 **做什么**：
 
@@ -363,7 +363,7 @@ swap 全部走 06 的 swap_cipher 形态（fresh 实例 + 派生后 wipe keys）
 新文件（镜像 client 侧组织）：
 
 ```
-include/fiber/tls/handshake/TlsServerHandshakeEngine.h   # §3.1
+src/tls/handshake/TlsServerHandshakeEngine.h             # §3.1
 src/tls/handshake/TlsServerHandshakeEngine.cpp           # 外壳 + 版本判定
 src/tls/handshake/Tls13ServerHandshake.{h,cpp}           # 1.3 子流程（Mount 形态同 06）
 src/tls/handshake/Tls12ServerHandshake.{h,cpp}           # 1.2 子流程

@@ -42,6 +42,8 @@
 #include <vector>
 
 #include "TlsCertFixtures.h"
+#include "tls/handshake/TlsClientHandshakeEngine.h"
+#include "tls/handshake/TlsServerHandshakeEngine.h"
 
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
@@ -51,9 +53,7 @@
 #include <fiber/tls/TlsConnection.h>
 #include <fiber/tls/crypto/Tls12KeySchedule.h>
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
-#include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
-#include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 #include <fiber/tls/record/TlsRecord.h>
 #include <fiber/tls/record/TlsRecordCipher.h>
 #include <fiber/tls/record/TlsRecordReader.h>

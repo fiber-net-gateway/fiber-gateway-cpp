@@ -31,11 +31,11 @@
 #include <vector>
 
 #include "TlsFuzzCommon.h"
+#include "tls/handshake/TlsClientHandshakeEngine.h"
+#include "tls/handshake/TlsServerHandshakeEngine.h"
 
 #include <fiber/common/mem/IoBufChain.h>
-#include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
 #include <fiber/tls/handshake/TlsHandshakeCodec.h>
-#include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 
 namespace {
 

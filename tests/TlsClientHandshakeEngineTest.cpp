@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "TlsCertFixtures.h"
+#include "tls/handshake/TlsClientHandshakeEngine.h"
 #include "tls/handshake/TlsClientHandshakeShared.h" // src-side header (tests may include it)
 
 #include <fiber/common/IoError.h>
@@ -36,7 +37,6 @@
 #include <fiber/tls/TlsConnectedState.h>
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/handshake/TlsCipherSuites.h>
-#include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
 #include <fiber/tls/record/TlsRecord.h>
 #include "LoopTestSupport.h"

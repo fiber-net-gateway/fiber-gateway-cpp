@@ -11,6 +11,8 @@ set(FIBER_FUZZERS
 
 foreach(fuzzer IN LISTS FIBER_FUZZERS)
     add_executable(${fuzzer} "${CMAKE_CURRENT_LIST_DIR}/${fuzzer}.cpp")
+    # The handshake engines are src-side headers (src/tls/handshake).
+    target_include_directories(${fuzzer} PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(${fuzzer} PRIVATE fiber_lib)
     target_link_options(${fuzzer} PRIVATE -fsanitize=fuzzer)
     set_target_properties(${fuzzer} PROPERTIES FOLDER "fuzz")
@@ -32,5 +34,6 @@ endforeach()
 # writes real handshake streams into corpus/ (see README.md). Not a fuzzer —
 # it has its own main and links the ssl library as the peer.
 add_executable(tls_fuzz_seedgen "${CMAKE_CURRENT_LIST_DIR}/tls_fuzz_seedgen.cpp")
+target_include_directories(tls_fuzz_seedgen PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(tls_fuzz_seedgen PRIVATE fiber_lib boringssl::ssl)
 set_target_properties(tls_fuzz_seedgen PROPERTIES FOLDER "fuzz")

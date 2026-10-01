@@ -14,7 +14,7 @@
 
 #include "TlsFuzzCommon.h"
 
-#include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
+#include "tls/handshake/TlsServerHandshakeEngine.h"
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size) {
     if (size < 1) {

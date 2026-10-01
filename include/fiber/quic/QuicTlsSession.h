@@ -17,8 +17,13 @@
 #include "../net/TlsParams.h"
 #include "../tls/TlsConfig.h"
 #include "../tls/TlsTypes.h"
-#include "../tls/handshake/TlsClientHandshakeEngine.h"
-#include "../tls/handshake/TlsServerHandshakeEngine.h"
+#include "../tls/crypto/TlsSecret.h"
+
+namespace fiber::tls {
+// src-side engines (src/tls/handshake): the session holds them by pointer.
+class TlsClientHandshakeEngine;
+class TlsServerHandshakeEngine;
+} // namespace fiber::tls
 
 namespace fiber::quic {
 
