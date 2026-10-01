@@ -135,7 +135,9 @@ private:
     TlsClientHandshakeOutcome out_; // terminal channel both halves write
     bool psk_offered_ = false;
     bool ccs_sent_ = false; // the one compat CCS went out (RFC 8446 D.4)
-    std::array<std::uint8_t, kScratchCap> scratch_{}; // staged flights (sub-exclusive post-fork)
+    // Staged flights (sub-exclusive post-fork). Not zero-initialized: every
+    // encoder writes the full span it reports before anything reads it.
+    std::array<std::uint8_t, kScratchCap> scratch_;
 
     // ---- version sub-flow, mounted at the ServerHello read point ----
     std::variant<std::monostate, Tls13ClientHandshake, Tls12ClientHandshake> flow_;
