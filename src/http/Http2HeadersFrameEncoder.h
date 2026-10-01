@@ -8,7 +8,6 @@
 #include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
 #include <fiber/common/NonMovable.h>
-#include <fiber/common/mem/IoBuf.h>
 #include <fiber/http/Http2HpackEncoder.h>
 #include <fiber/http/HttpCommon.h>
 
@@ -44,20 +43,20 @@ public:
     [[nodiscard]] common::IoErr encode_field(std::string_view name, std::uint64_t name_hash,
                                              std::string_view value) noexcept;
     [[nodiscard]] common::IoErr finish() noexcept;
+    // Leaves what was already appended to the target in place: the caller
+    // rolls the target back.
     void abort() noexcept;
 
 private:
     static const Http2HpackEncoder::OutputOps kOutputOps;
 
     [[nodiscard]] common::IoErr open_frame(bool first_frame) noexcept;
-    [[nodiscard]] common::IoErr append_payload_buf(std::uint32_t payload_cap, bool reserve_frame_header) noexcept;
     [[nodiscard]] common::IoErr seal_current_frame(bool end_headers) noexcept;
     [[nodiscard]] common::IoErr validate_options() const noexcept;
-    [[nodiscard]] std::size_t current_hpack_writable() const noexcept;
     [[nodiscard]] std::size_t current_frame_hpack_remaining() const noexcept;
+    [[nodiscard]] std::size_t fresh_buf_payload_cap() const noexcept;
     [[nodiscard]] std::uint32_t first_frame_buf_payload_cap() const noexcept;
     [[nodiscard]] std::uint32_t next_buf_payload_cap() const noexcept;
-    [[nodiscard]] common::IoErr flush_current_buf() noexcept;
     void reset_state() noexcept;
     void commit_to_output(std::size_t bytes) noexcept;
 
@@ -69,7 +68,8 @@ private:
     Options options_{};
 
     Http2OutboundEncodeTarget *target_ = nullptr;
-    mem::IoBuf current_buf_storage_{};
+    // Reserved in the target by open_frame() and written by
+    // seal_current_frame() once the payload length is known.
     std::uint8_t *current_frame_header_ = nullptr;
     std::uint32_t current_frame_payload_limit_ = 0;
     std::uint32_t current_payload_written_ = 0;

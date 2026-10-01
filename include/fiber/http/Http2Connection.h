@@ -293,6 +293,9 @@ private:
     [[nodiscard]] bool is_peer_stream_id(std::uint32_t stream_id) const noexcept;
     template<typename T>
     static constexpr bool kAlwaysFalse = false;
+    // A fresh buffer for one control frame keeps room for the next few, which
+    // pack into it while it is still the in-flight chain's tail.
+    static constexpr std::size_t kControlFrameBufferCapacity = 256;
 
     template<typename Encoder>
     [[nodiscard]] static common::IoErr invoke_control_encoder(std::uint8_t *dst, std::size_t bytes,
@@ -340,21 +343,24 @@ private:
             return common::IoErr::Canceled;
         }
 
-        mem::IoBuf buf = mem::IoBuf::allocate(bytes);
-        if (!buf) {
-            return common::IoErr::NoMem;
-        }
-        common::IoErr err = invoke_control_encoder(buf.writable_data(), bytes, std::forward<Encoder>(encoder));
+        // Control frames carry no completion: they go straight to the tail of
+        // the in-flight chain, behind at most the encode watermark of DATA,
+        // and pack into its tail buffer when there is room. One appended in
+        // the middle of a stream's encode would split that stream's frames.
+        FIBER_ASSERT(!outbound_encoding_);
+        Http2OutboundEncodeTarget target(inflight_outbound_chain_);
+        std::uint8_t *dst = nullptr;
+        std::size_t room = 0;
+        common::IoErr err = target.acquire(bytes, kControlFrameBufferCapacity, dst, room);
         if (err != common::IoErr::None) {
             return err;
         }
-        buf.commit(bytes);
-        if (!control_hook_.encoded_.append(std::move(buf))) {
-            return common::IoErr::NoMem;
+        err = invoke_control_encoder(dst, bytes, std::forward<Encoder>(encoder));
+        if (err != common::IoErr::None) {
+            return err;
         }
-        if (control_hook_.state_ == Http2OutboundHook::State::Idle) {
-            enqueue_outbound_hook(control_hook_, true);
-        }
+        target.commit(bytes);
+        outbound_appended_bytes_ += bytes;
         schedule_io_pump();
         return common::IoErr::None;
     }
@@ -363,16 +369,14 @@ private:
     [[nodiscard]] bool cancel_queued_stream_send(Http2Stream &stream) noexcept;
     void cancel_stream_send(Http2Stream &stream, common::IoErr reason) noexcept;
     void on_stream_send_window_update(Http2Stream &stream) noexcept;
-    [[nodiscard]] common::IoErr try_encode_stream_outbound(Http2Stream &stream) noexcept;
-    void enqueue_connection_window_wait(Http2Stream &stream) noexcept;
-    void remove_connection_window_wait(Http2Stream &stream) noexcept;
+    [[nodiscard]] bool wait_for_send_window(Http2Stream &stream) noexcept;
+    void queue_stream_send(Http2Stream &stream) noexcept;
+    void encode_stream_batch(Http2Stream &stream) noexcept;
+    void encode_ready_streams() noexcept;
     void wake_connection_window_waiters() noexcept;
-    void enqueue_outbound_hook(Http2OutboundHook &hook, bool priority) noexcept;
-    void abandon_queued_stream_hook(Http2Stream &stream, bool restore_stream_window) noexcept;
-    void build_outbound_batch(std::size_t operation_budget, std::size_t byte_budget) noexcept;
+    void clear_window_waits() noexcept;
     void finish_written_outbound_hooks(std::size_t bytes_written) noexcept;
-    [[nodiscard]] common::IoResult<OutboundPumpResult> pump_outbound(std::size_t operation_budget,
-                                                                     std::size_t byte_budget) noexcept;
+    [[nodiscard]] common::IoResult<OutboundPumpResult> pump_outbound(std::size_t byte_budget) noexcept;
     void close_outbound() noexcept;
     void abort_outbound(common::IoErr reason) noexcept;
     void drop_outbound_hook(Http2OutboundHook &hook) noexcept;
@@ -448,13 +452,23 @@ private:
     std::uint64_t keepalive_ping_sequence_ = 0;
     bool keepalive_ping_outstanding_ = false;
     using OutboundHookList = common::IntrusiveList<Http2OutboundHook, offsetof(Http2OutboundHook, queue_hook_)>;
-    using ConnectionWindowWaitList = common::IntrusiveList<Http2Stream, offsetof(Http2Stream, conn_window_wait_hook_)>;
 
-    Http2OutboundHook control_hook_{};
-    OutboundHookList outbound_queue_{};
+    // Streams waiting to encode their next batch; nothing of theirs is
+    // encoded yet. The pump encodes them into the in-flight chain.
+    OutboundHookList outbound_ready_queue_{};
+    // Encoded batches still draining, in chain order.
     OutboundHookList inflight_outbound_hooks_{};
-    ConnectionWindowWaitList connection_window_waiters_{};
+    // DATA sends parked until the connection window opens.
+    OutboundHookList connection_window_waiters_{};
+    // Every encoded byte goes here and must reach the wire: nothing in the
+    // chain is withdrawn.
     mem::IoBufChain inflight_outbound_chain_{};
+    // Monotonic byte counts appended to and written from the in-flight chain;
+    // a batch is written once outbound_written_bytes_ reaches its inflight_end_.
+    std::uint64_t outbound_appended_bytes_ = 0;
+    std::uint64_t outbound_written_bytes_ = 0;
+    // Set while a stream encodes onto the in-flight chain.
+    bool outbound_encoding_ = false;
     InboundIoState inbound_io_{};
     common::IntrusiveList<Http2Stream, offsetof(Http2Stream, owned_hook_)> owned_stream_list_;
     event::EventLoop::DeferEntry io_pump_entry_{};

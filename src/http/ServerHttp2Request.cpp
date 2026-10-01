@@ -67,8 +67,7 @@ struct ServerHttp2Request::SendResponseHeaderOp {
         return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Headers);
     }
 
-    void on_send_done(ServerHttp2Request &request, std::uint32_t flow_controlled_bytes,
-                      bool operation_final_batch) noexcept;
+    void on_send_done(ServerHttp2Request &request, bool operation_final_batch) noexcept;
 
     common::IoErr on_encode(ServerHttp2Request &request, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
                             Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept;
@@ -96,8 +95,7 @@ struct ServerHttp2Request::SendResponseBodyAllOp {
     }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return chunk_.readable_bytes(); }
-    void on_send_done(ServerHttp2Request &request, std::uint32_t flow_controlled_bytes,
-                      bool operation_final_batch) noexcept;
+    void on_send_done(ServerHttp2Request &request, bool operation_final_batch) noexcept;
 
     common::IoErr on_encode(ServerHttp2Request &request, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
                             Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept;
@@ -125,8 +123,7 @@ struct ServerHttp2Request::SendResponseBodySomeOp {
     }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return total_bytes_; }
-    void on_send_done(ServerHttp2Request &request, std::uint32_t flow_controlled_bytes,
-                      bool operation_final_batch) noexcept;
+    void on_send_done(ServerHttp2Request &request, bool operation_final_batch) noexcept;
 
     common::IoErr on_encode(ServerHttp2Request &request, Http2Stream &stream, const Http2OutboundEncodeRequest &req,
                             Http2OutboundEncodeTarget &target, Http2OutboundEncodeResult &result) noexcept;
@@ -366,9 +363,7 @@ common::IoErr ServerHttp2Request::SendResponseHeaderOp::on_encode(ServerHttp2Req
 }
 
 void ServerHttp2Request::SendResponseHeaderOp::on_send_done(ServerHttp2Request &request,
-                                                            std::uint32_t flow_controlled_bytes,
                                                             bool operation_final_batch) noexcept {
-    FIBER_ASSERT(flow_controlled_bytes == 0);
     FIBER_ASSERT(operation_final_batch);
     if (end_stream_) {
         request.stream_.local_end_stream_ = true;
@@ -428,9 +423,7 @@ common::IoErr ServerHttp2Request::SendResponseBodyAllOp::on_encode(ServerHttp2Re
 }
 
 void ServerHttp2Request::SendResponseBodyAllOp::on_send_done(ServerHttp2Request &request,
-                                                             std::uint32_t flow_controlled_bytes,
                                                              bool operation_final_batch) noexcept {
-    request.response_body_sent_ += flow_controlled_bytes;
     if (!operation_final_batch) {
         return;
     }
@@ -513,11 +506,8 @@ common::IoErr ServerHttp2Request::SendResponseBodySomeOp::on_encode(ServerHttp2R
 }
 
 void ServerHttp2Request::SendResponseBodySomeOp::on_send_done(ServerHttp2Request &request,
-                                                              std::uint32_t flow_controlled_bytes,
                                                               bool operation_final_batch) noexcept {
     FIBER_ASSERT(operation_final_batch);
-    FIBER_ASSERT(flow_controlled_bytes == accepted_bytes_);
-    request.response_body_sent_ += flow_controlled_bytes;
     if (end_ && accepted_bytes_ == total_bytes_) {
         request.stream_.local_end_stream_ = true;
         request.response_finished_ = true;

@@ -103,7 +103,7 @@ private:
             return;
         }
 
-        awaiter->op_.on_send_done(*awaiter->owner_, result.flow_controlled_bytes, result.operation_final_batch);
+        awaiter->op_.on_send_done(*awaiter->owner_, result.operation_final_batch);
         if (result.operation_final_batch) {
             awaiter->complete(common::IoErr::None);
         }

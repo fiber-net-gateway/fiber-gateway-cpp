@@ -1,7 +1,6 @@
 #include "http/Http2DataFrameEncoder.h"
 
 #include <algorithm>
-#include <array>
 
 #include <fiber/http/Http2Outbound.h>
 #include <fiber/http/Http2Protocol.h>
@@ -10,6 +9,7 @@ namespace fiber::http {
 
 namespace {
 
+constexpr std::size_t kFrameHeaderSize = 9;
 constexpr std::uint8_t kFlagEndStream = 0x1;
 
 } // namespace
@@ -55,13 +55,15 @@ common::IoErr Http2DataFrameEncoder::validate_options() const noexcept {
 
 common::IoErr Http2DataFrameEncoder::append_frame(Http2OutboundEncodeTarget &target, mem::IoBufChain &payload,
                                                   std::uint32_t payload_bytes, bool end_stream) noexcept {
-    std::array<std::uint8_t, 9> header{};
-    encode_http2_frame_header(header.data(), payload_bytes, Http2FrameType::Data, end_stream ? kFlagEndStream : 0,
-                              options_.stream_id);
-    common::IoErr err = target.append_copy(header.data(), header.size());
+    std::uint8_t *header = nullptr;
+    std::size_t room = 0;
+    common::IoErr err = target.acquire(kFrameHeaderSize, kFrameHeaderSize, header, room);
     if (err != common::IoErr::None) {
         return err;
     }
+    encode_http2_frame_header(header, payload_bytes, Http2FrameType::Data, end_stream ? kFlagEndStream : 0,
+                              options_.stream_id);
+    target.commit(kFrameHeaderSize);
     if (payload_bytes == 0) {
         return common::IoErr::None;
     }
