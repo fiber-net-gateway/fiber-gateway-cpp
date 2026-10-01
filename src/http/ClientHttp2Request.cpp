@@ -67,11 +67,9 @@ struct ClientHttp2Request::SendRequestBodyAllOp {
     using SuccessType = std::size_t;
 
     explicit SendRequestBodyAllOp(mem::IoBufChain &&chunk) noexcept :
-        chunk_(std::move(chunk)), total_bytes_(chunk_.readable_bytes()) {}
+        chunk_(std::move(chunk)), total_bytes_(chunk_.readable_bytes()), end_(chunk_.complete()) {}
 
-    [[nodiscard]] bool should_complete_without_submit() const noexcept {
-        return chunk_.readable_bytes() == 0 && !chunk_.complete();
-    }
+    [[nodiscard]] bool should_complete_without_submit() const noexcept { return total_bytes_ == 0 && !end_; }
 
     [[nodiscard]] common::IoErr submit(ClientHttp2Request &request) noexcept {
         return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Data);
@@ -87,6 +85,9 @@ struct ClientHttp2Request::SendRequestBodyAllOp {
 
     mem::IoBufChain chunk_;
     std::size_t total_bytes_ = 0;
+    // Read once up front: encoding the last bytes moves the chain's
+    // completion marker along with them.
+    bool end_ = false;
 };
 
 struct ClientHttp2Request::SendRequestBodySomeOp {
@@ -626,7 +627,7 @@ common::IoErr ClientHttp2Request::SendRequestBodyAllOp::on_encode(ClientHttp2Req
 
     const std::size_t remaining = chunk_.readable_bytes();
     if (remaining == 0) {
-        FIBER_ASSERT(chunk_.complete());
+        FIBER_ASSERT(end_);
 
         Http2DataFrameEncoder frame_encoder({
                 .stream_id = stream.stream_id(),
@@ -648,7 +649,7 @@ common::IoErr ClientHttp2Request::SendRequestBodyAllOp::on_encode(ClientHttp2Req
     Http2DataFrameEncoder frame_encoder({
             .stream_id = stream.stream_id(),
             .max_frame_size = req.max_frame_size,
-            .end_stream = chunk_.complete() && payload_budget == remaining,
+            .end_stream = end_ && payload_budget == remaining,
     });
     common::IoErr err = frame_encoder.encode(target, chunk_, payload_budget);
     if (err != common::IoErr::None) {
@@ -666,7 +667,7 @@ void ClientHttp2Request::SendRequestBodyAllOp::on_send_done(ClientHttp2Request &
     if (!operation_final_batch) {
         return;
     }
-    if (chunk_.complete()) {
+    if (end_) {
         request.stream_.local_end_stream_ = true;
         request.request_finished_ = true;
     }

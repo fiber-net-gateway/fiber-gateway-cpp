@@ -7268,6 +7268,88 @@ TEST(Http2ConnectionTest, ConcurrentHeadersShareOneBuffer) {
     });
 }
 
+TEST(Http2ConnectionTest, ServerWriteAllWithEndFinishesTheStream) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        std::string request = std::string(kClientConnectionPreface);
+        request += make_frame(0, 0x4, 0x0, 0, {});
+        request += build_headers_frame_bytes(1,
+                                             {
+                                                     {":method", "GET"},
+                                                     {":scheme", "https"},
+                                                     {":path", "/write-all-end"},
+                                                     {":authority", "example.com"},
+                                             },
+                                             true);
+        auto context = std::make_shared<ServerRequestContext>();
+        auto local_end = std::make_shared<bool>(false);
+        auto retry_error = std::make_shared<fiber::common::IoErr>(fiber::common::IoErr::None);
+        fiber::http::HttpHandler handler =
+                [context, local_end, retry_error](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
+            auto *stream = context->connection->streams_.find(1);
+            EXPECT_NE(stream, nullptr);
+            if (!stream) {
+                co_return;
+            }
+            auto held = stream->lease();
+            const fiber::http::OutgoingHeaderBlockView header{
+                    .kind = fiber::http::OutgoingHeaderKind::Final,
+                    .status_code = 200,
+                    .end_stream = false,
+            };
+            EXPECT_TRUE((co_await exchange.send_header(header)).has_value());
+            // Data and the end of the body travel in one batch.
+            auto body = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+            EXPECT_TRUE(body.has_value());
+            *local_end = stream->local_end_stream();
+            auto retry = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("x"), 1, true);
+            *retry_error = retry ? fiber::common::IoErr::None : retry.error();
+        };
+        auto outcome = execute_server_request({std::move(request)}, std::move(handler), {}, true, context);
+        ASSERT_TRUE(outcome.result.has_value());
+        EXPECT_TRUE(*local_end);
+        EXPECT_EQ(*retry_error, fiber::common::IoErr::Already);
+        const auto frames = frames_for_stream(outcome.written, 1);
+        EXPECT_EQ(count_frames(frames, kDataFrameType), 1U) << describe_frames(frames);
+        EXPECT_EQ(count_frames(frames, kRstStreamFrameType), 0U) << describe_frames(frames);
+    });
+}
+
+TEST(Http2ConnectionTest, ClientWriteAllWithEndFinishesTheRequest) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        run_client_send_scenario(
+                {}, [](SendingHttp2Connection &connection, FakeHttpTransport &transport) -> fiber::async::Task<void> {
+                    fiber::mem::BufPool pool;
+                    fiber::http::ClientHttp2Exchange exchange(connection.gate(), pool);
+                    auto header = co_await exchange.send_request_header(
+                            {
+                                    .method = fiber::http::HttpMethod::Post,
+                                    .scheme = "https",
+                                    .authority = "example.com",
+                                    .path = "/write-all-end",
+                            },
+                            false);
+                    EXPECT_TRUE(header.has_value());
+                    fiber::http::Http2Stream *stream = exchange.stream();
+                    if (!header || stream == nullptr) {
+                        co_return;
+                    }
+
+                    // Data and the end of the body travel in one batch.
+                    auto body = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("hello"), 5, true);
+                    EXPECT_TRUE(body.has_value());
+                    EXPECT_TRUE(stream->local_end_stream());
+                    auto retry = co_await exchange.write_all(reinterpret_cast<const std::uint8_t *>("x"), 1, true);
+                    EXPECT_FALSE(retry.has_value());
+                    if (!retry) {
+                        EXPECT_EQ(retry.error(), fiber::common::IoErr::Already);
+                    }
+                    const auto frames = frames_for_stream(strip_client_initial_flight(transport.written()), 1);
+                    EXPECT_EQ(count_frames(frames, kDataFrameType), 1U) << describe_frames(frames);
+                    EXPECT_EQ(count_frames(frames, kRstStreamFrameType), 0U) << describe_frames(frames);
+                });
+    });
+}
+
 TEST(Http2ConnectionTest, DestroyingCompletedSendBeforeResumeKeepsStreamUsable) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         run_client_send_scenario(
