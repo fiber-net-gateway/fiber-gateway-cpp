@@ -35,6 +35,8 @@
 #include <vector>
 
 #include "TlsCertFixtures.h"
+#include "tls/handshake/TlsClientHandshakeEngine.h"
+#include "tls/handshake/TlsServerHandshakeEngine.h"
 
 #include <fiber/tls/TlsConfig.h>
 #include <fiber/tls/TlsConnectedState.h>
@@ -42,10 +44,8 @@
 #include <fiber/tls/TlsVersion.h>
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include <fiber/tls/crypto/TlsSecret.h>
-#include <fiber/tls/handshake/TlsClientHandshakeEngine.h>
 #include <fiber/tls/handshake/TlsHandshakeCodec.h>
 #include <fiber/tls/handshake/TlsHandshakeMessage.h>
-#include <fiber/tls/handshake/TlsServerHandshakeEngine.h>
 #include "LoopTestSupport.h"
 
 namespace {

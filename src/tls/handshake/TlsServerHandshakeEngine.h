@@ -6,9 +6,10 @@
 // feed of a complete ClientHello selects the version (supported_versions
 // carries 0x0304 → the 1.3 sub-flow; a 0x0303 legacy/offer fallback → the
 // 1.2 sub-flow) and answers with the ServerHello flight. Everything record-
-// mechanical lives in the shared TlsHandshakeContext; this class is the
-// public shell over an Impl that owns the context, the retained ClientHello
-// state, and one mounted version sub-flow.
+// mechanical lives in the shared TlsHandshakeContext; the engine owns the
+// context, the retained ClientHello state, and one mounted version sub-flow
+// by value (~72 KiB, flight scratch included — the glue holds the engine
+// where that size is paid once per handshake, e.g. a coroutine frame).
 //
 // Config/resumption/minter are all borrowed and must outlive the engine (the
 // net glue holds them). resumption/minter == nullptr: no resumption lookup,
@@ -22,18 +23,25 @@
 // borrow CALLER-owned material that must outlive the engine (net glue
 // staging), like every other input.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <variant>
 
-#include "../../common/IoError.h"
-#include "../../common/NonCopyable.h"
-#include "../../common/NonMovable.h"
-#include "../../common/mem/IoBuf.h"
-#include "../../common/mem/IoBufChain.h"
-#include "../TlsConfig.h"
-#include "../TlsConnectedState.h"
-#include "../TlsTypes.h"
+#include "../detail/TlsHandshakeContext.h"
+#include "Tls12ServerHandshake.h"
+#include "Tls13ServerHandshake.h"
+#include "TlsServerHandshakeShared.h"
+
+#include <fiber/common/IoError.h>
+#include <fiber/common/NonCopyable.h>
+#include <fiber/common/NonMovable.h>
+#include <fiber/common/mem/IoBuf.h>
+#include <fiber/common/mem/IoBufChain.h>
+#include <fiber/tls/TlsConfig.h>
+#include <fiber/tls/TlsConnectedState.h>
+#include <fiber/tls/TlsTypes.h>
 
 namespace fiber::tls {
 
@@ -43,7 +51,6 @@ public:
 
     TlsServerHandshakeEngine(const TlsServerConfig &config, const TlsResumptionLookup *resumption,
                              const TlsTicketMinter *minter, const TlsServerConfigSource *source = nullptr) noexcept;
-    ~TlsServerHandshakeEngine();
 
     // Client bytes in (any chunking). NoMem = connection-level failure;
     // feeding a terminal engine is a FIBER_ASSERT.
@@ -79,8 +86,39 @@ public:
     [[nodiscard]] mem::IoBufChain take_inbound_leftover() noexcept;
 
 private:
-    struct Impl;
-    Impl *impl_ = nullptr; // null only on allocation failure (done()/failed() report it)
+    static constexpr std::size_t kScratchCap = 32768; // server-flight staging (chains ≪ 32 KiB)
+
+    void fail_local(TlsAlertDesc alert) noexcept;
+    void fail_peer(TlsAlertDesc alert) noexcept;
+    // Digests inbound bytes to quiescence. Pre-fork this includes the
+    // version decision on the first handshake message; post-fork every
+    // Message/CCS routes to the mounted sub-flow.
+    [[nodiscard]] common::IoResult<Event> pump() noexcept;
+    // The fork point (07 §4.1): retain + decode the ClientHello, decide the
+    // version from its shape, mount the sub-flow, and hand the decoded view
+    // over — every version-specific validation rule belongs to the sub-flow
+    // that owns that version.
+    void handle_first_message(TlsHandshakeType type, std::span<const std::uint8_t> body) noexcept;
+
+    // The mounted sub-flow's destructor wipes its own secrets; the key
+    // exchange wipes itself; secrets already moved into a taken
+    // TlsConnectedState arrive moved-from (pre-wiped).
+
+    // ---- inputs (borrowed; the net glue outlives the engine) ----
+    TlsServerConfig cfg_;
+    const TlsResumptionLookup *resumption_;
+    const TlsTicketMinter *minter_;
+    const TlsServerConfigSource *source_; // optional per-CH selection (09 §4.1)
+
+    // ---- pipeline + pre-fork state ----
+    TlsHandshakeContext ctx_;
+    TlsServerHelloState hello_; // retained ClientHello + negotiation intermediates
+    mem::IoBufChain early_; // decrypted 0-RTT plaintext (P5 fills; take_early_data drains)
+    TlsServerHandshakeOutcome out_; // terminal channel both halves write
+    std::array<std::uint8_t, kScratchCap> scratch_{}; // staged flights (sub-exclusive post-fork)
+
+    // ---- version sub-flow, mounted at the ClientHello fork ----
+    std::variant<std::monostate, Tls13ServerHandshake, Tls12ServerHandshake> flow_;
 };
 
 } // namespace fiber::tls

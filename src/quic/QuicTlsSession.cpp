@@ -18,6 +18,8 @@
 #include <fiber/tls/crypto/Tls13KeySchedule.h>
 #include "quic/QuicCrypto.h"
 #include "quic/QuicTransportParamsCodec.h"
+#include "tls/handshake/TlsClientHandshakeEngine.h"
+#include "tls/handshake/TlsServerHandshakeEngine.h"
 
 namespace fiber::quic {
 

@@ -15,11 +15,20 @@
 // The engine has no version starting point: the offered supported_versions
 // carries [1.3, 1.2] and the ServerHello read point decides which sub-flow
 // runs (06 §4.1). Internal state (record pipeline, transcripts, key
-// schedule) lives behind a pimpl in src/tls — this header pulls no OpenSSL.
+// schedule, flight scratch) is held by value — ~64 KiB, so the glue holds the
+// engine where that size is paid once per handshake (e.g. a coroutine frame).
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <variant>
+
+#include "../detail/TlsHandshakeContext.h"
+#include "Tls12ClientHandshake.h"
+#include "Tls13ClientHandshake.h"
+#include "TlsClientHandshakeShared.h"
 
 #include <fiber/common/IoError.h>
 #include <fiber/common/NonCopyable.h>
@@ -46,7 +55,6 @@ public:
     // destroy the engine on the connection's loop. Construction failure
     // (entropy / allocation) lands directly in the Failed terminal state.
     TlsClientHandshakeEngine(const TlsClientConfig &config, const TlsSessionOffer *session) noexcept;
-    ~TlsClientHandshakeEngine();
 
     // Peer bytes in arbitrary chunking; the engine digests everything it can.
     // IoErr only NoMem (a connection-level failure — the glue tears down).
@@ -97,8 +105,40 @@ public:
     [[nodiscard]] mem::IoBufChain take_inbound_leftover() noexcept;
 
 private:
-    struct Impl;
-    Impl *impl_ = nullptr; // src-side state; nullptr only on ctor failure
+    static constexpr std::size_t kScratchCap = 32768; // client-flight staging (mTLS chains ≪ 32 KiB)
+
+    void fail_local(TlsAlertDesc alert) noexcept;
+    void fail_peer(TlsAlertDesc alert) noexcept;
+    // Digests inbound bytes to quiescence. Pre-fork this includes the
+    // version decision on the first handshake message; post-fork every
+    // Message/CCS routes to the mounted sub-flow.
+    [[nodiscard]] common::IoResult<Event> pump() noexcept;
+    // The fork point (06 §4.2): decode the first handshake message, decide
+    // the version from its shape, mount the sub-flow, and hand the RAW
+    // message over — every ServerHello validation rule belongs to the
+    // sub-flow that owns that version.
+    void handle_first_message(TlsHandshakeType type, std::span<const std::uint8_t> body) noexcept;
+
+    // The schedule and key exchange wipe themselves; the mounted sub-flow's
+    // destructor wipes its own secrets; secrets already moved into a taken
+    // TlsConnectedState arrive moved-from (pre-wiped).
+
+    // ---- inputs (borrowed; the net glue outlives the engine) ----
+    TlsClientConfig cfg_;
+    const TlsSessionOffer *session_;
+
+    // ---- pipeline + pre-fork flight state ----
+    TlsHandshakeContext ctx_;
+    TlsClientHelloState hello_; // retained ClientHello + its key exchange
+    std::optional<TlsKeySchedule13> sched_; // PSK binder tree (pre-fork; 1.3 continues it)
+    TlsClientEarlyWindow early_; // 0-RTT write window (outer API surface)
+    TlsClientHandshakeOutcome out_; // terminal channel both halves write
+    bool psk_offered_ = false;
+    bool ccs_sent_ = false; // the one compat CCS went out (RFC 8446 D.4)
+    std::array<std::uint8_t, kScratchCap> scratch_{}; // staged flights (sub-exclusive post-fork)
+
+    // ---- version sub-flow, mounted at the ServerHello read point ----
+    std::variant<std::monostate, Tls13ClientHandshake, Tls12ClientHandshake> flow_;
 };
 
 } // namespace fiber::tls
