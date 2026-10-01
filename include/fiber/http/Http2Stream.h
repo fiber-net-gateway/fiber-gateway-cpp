@@ -130,10 +130,15 @@ public:
     void close(common::IoErr result = common::IoErr::Canceled) noexcept;
 
 private:
-    // Binds one send operation. Rejected while an earlier send still owns the
-    // hook or the kind, even after its operation let go.
+    // Why a send cannot start now: an earlier send still owns the hook or the
+    // kind, even after its operation let go, or the stream is closed.
+    [[nodiscard]] common::IoErr outbound_idle_status() const noexcept;
+    // Binds one send operation and queues it on the connection. On failure
+    // nothing stays bound.
     [[nodiscard]] common::IoErr try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
                                                  std::size_t pending_flow_controlled_bytes) noexcept;
+    // Withdraws the bound send while none of it is encoded yet.
+    [[nodiscard]] bool cancel_queued_outbound() noexcept;
     // Unbinds an operation whose send has finished.
     void disarm_outbound(void *ctx) noexcept;
     // Unbinds an operation that is going away before its send finished. The

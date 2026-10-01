@@ -40,14 +40,11 @@ bool is_terminal_request_write_error(common::IoErr error) noexcept {
 
 struct ClientHttp2Request::SendRequestHeaderOp {
     using SuccessType = void;
+    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
 
     SendRequestHeaderOp(const Http2RequestHead &head, bool end_stream) noexcept :
         method_(head.method), scheme_(head.scheme), authority_(head.authority), path_(head.path),
         protocol_(head.protocol), headers_(head.headers), end_stream_(end_stream) {}
-
-    [[nodiscard]] common::IoErr submit(ClientHttp2Request &request) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Headers);
-    }
 
     void on_send_done(ClientHttp2Request &request, bool operation_final_batch) noexcept;
 
@@ -65,15 +62,12 @@ struct ClientHttp2Request::SendRequestHeaderOp {
 
 struct ClientHttp2Request::SendRequestBodyAllOp {
     using SuccessType = std::size_t;
+    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
 
     explicit SendRequestBodyAllOp(mem::IoBufChain &&chunk) noexcept :
         chunk_(std::move(chunk)), total_bytes_(chunk_.readable_bytes()), end_(chunk_.complete()) {}
 
     [[nodiscard]] bool should_complete_without_submit() const noexcept { return total_bytes_ == 0 && !end_; }
-
-    [[nodiscard]] common::IoErr submit(ClientHttp2Request &request) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Data);
-    }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return chunk_.readable_bytes(); }
     void on_send_done(ClientHttp2Request &request, bool operation_final_batch) noexcept;
@@ -92,6 +86,7 @@ struct ClientHttp2Request::SendRequestBodyAllOp {
 
 struct ClientHttp2Request::SendRequestBodySomeOp {
     using SuccessType = std::size_t;
+    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
     inline static constexpr bool kAllowsPartialFinalBatch = true;
 
     explicit SendRequestBodySomeOp(mem::IoBufChain &chunk) noexcept :
@@ -101,10 +96,6 @@ struct ClientHttp2Request::SendRequestBodySomeOp {
         buf_(buf), total_bytes_(len), end_stream_(end_stream) {}
 
     [[nodiscard]] bool should_complete_without_submit() const noexcept { return total_bytes_ == 0 && !end_stream_; }
-
-    [[nodiscard]] common::IoErr submit(ClientHttp2Request &request) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Data);
-    }
 
     [[nodiscard]] std::size_t pending_flow_controlled_bytes() const noexcept { return total_bytes_; }
     void on_send_done(ClientHttp2Request &request, bool operation_final_batch) noexcept;
@@ -123,12 +114,9 @@ struct ClientHttp2Request::SendRequestBodySomeOp {
 
 struct ClientHttp2Request::SendRequestTrailerOp {
     using SuccessType = void;
+    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Headers;
 
     explicit SendRequestTrailerOp(const HttpHeaders &headers) noexcept : headers_(&headers) {}
-
-    [[nodiscard]] common::IoErr submit(ClientHttp2Request &request) noexcept {
-        return request.conn_->request_stream_send(request.stream_, Http2OutboundKind::Headers);
-    }
 
     void on_send_done(ClientHttp2Request &request, bool operation_final_batch) noexcept;
 
@@ -813,13 +801,6 @@ void ClientHttp2Request::on_stream_abort(void *owner, common::IoErr reason) noex
         return;
     }
     static_cast<ClientHttp2Request *>(owner)->on_stream_aborted(reason);
-}
-
-bool ClientHttp2Request::cancel_queued_send() noexcept {
-    if (abort_reason_ != common::IoErr::None) {
-        return false;
-    }
-    return conn_ != nullptr && conn_->cancel_queued_stream_send(stream_);
 }
 
 void ClientHttp2Request::record_request_write_error(common::IoErr error) noexcept {

@@ -2169,22 +2169,20 @@ void Http2Connection::encode_ready_streams() noexcept {
     }
 }
 
-common::IoErr Http2Connection::request_stream_send(Http2Stream &stream, Http2OutboundKind kind) noexcept {
+// Called by the stream once it has bound the operation.
+common::IoErr Http2Connection::request_stream_send(Http2Stream &stream) noexcept {
+    FIBER_ASSERT(stream.conn_ == this);
+    FIBER_ASSERT(stream.outbound_operation_);
+    FIBER_ASSERT(stream.outbound_kind_ == Http2OutboundKind::None);
+    FIBER_ASSERT(stream.outbound_hook_.state_ == Http2OutboundHook::State::Idle);
     if (state_ == State::Init || state_ == State::Closed || !transport_ || !transport_->valid()) {
         return common::IoErr::Invalid;
     }
     if (stop_sending_requested_) {
         return stop_sending_reason_;
     }
-    if (kind == Http2OutboundKind::None || stream.conn_ != this || !stream.outbound_operation_) {
-        return common::IoErr::Invalid;
-    }
-    if (stream.outbound_kind_ != Http2OutboundKind::None ||
-        stream.outbound_hook_.state_ != Http2OutboundHook::State::Idle) {
-        return common::IoErr::Already;
-    }
 
-    stream.outbound_kind_ = kind;
+    stream.outbound_kind_ = stream.outbound_operation_.ops->kind;
     queue_stream_send(stream);
     return common::IoErr::None;
 }

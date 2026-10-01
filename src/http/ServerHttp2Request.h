@@ -109,7 +109,6 @@ private:
                                                       bool value_stable) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(const std::uint8_t *data, std::size_t len) noexcept;
     [[nodiscard]] std::string_view copy_to_pool(std::string_view value) noexcept;
-    [[nodiscard]] bool cancel_queued_send() noexcept;
     void on_stream_aborted(common::IoErr reason) noexcept;
     void mark_response_channel_closed() noexcept;
 

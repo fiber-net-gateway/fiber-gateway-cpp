@@ -82,6 +82,7 @@ struct Http2OutboundOperation {
                                    Http2OutboundEncodeTarget &target,
                                    Http2OutboundEncodeResult &result) noexcept = nullptr;
         void (*on_send_done)(void *ctx, const Http2OutboundSendResult &result) noexcept = nullptr;
+        Http2OutboundKind kind = Http2OutboundKind::None;
         bool allow_partial_final_batch = false;
     };
 

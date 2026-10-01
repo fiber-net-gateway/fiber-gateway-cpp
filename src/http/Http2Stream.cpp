@@ -182,27 +182,43 @@ void Http2Stream::close(common::IoErr result) noexcept {
     }
 }
 
-common::IoErr Http2Stream::try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
-                                            std::size_t pending_flow_controlled_bytes) noexcept {
+common::IoErr Http2Stream::outbound_idle_status() const noexcept {
     // An abandoned batch can still be draining with no operation bound; a new
     // operation must not inherit its completion.
     if (outbound_operation_ || outbound_hook_.state_ != Http2OutboundHook::State::Idle ||
         outbound_kind_ != Http2OutboundKind::None) {
         return common::IoErr::Already;
     }
-    if (close_reason_ != common::IoErr::None) {
-        return close_reason_;
+    return close_reason_;
+}
+
+common::IoErr Http2Stream::try_arm_outbound(const Http2OutboundOperation::Ops &ops, void *ctx,
+                                            std::size_t pending_flow_controlled_bytes) noexcept {
+    const common::IoErr status = outbound_idle_status();
+    if (status != common::IoErr::None) {
+        return status;
+    }
+    if (!conn_) {
+        return common::IoErr::Invalid;
     }
     FIBER_ASSERT(ctx != nullptr);
     FIBER_ASSERT(ops.on_encode != nullptr);
     FIBER_ASSERT(ops.on_send_done != nullptr);
+    FIBER_ASSERT(ops.kind != Http2OutboundKind::None);
     outbound_operation_ = {
             .ops = &ops,
             .ctx = ctx,
     };
     outbound_pending_flow_controlled_bytes_ = pending_flow_controlled_bytes;
-    return common::IoErr::None;
+    const common::IoErr err = conn_->request_stream_send(*this);
+    if (err != common::IoErr::None) {
+        outbound_operation_ = {};
+        outbound_pending_flow_controlled_bytes_ = 0;
+    }
+    return err;
 }
+
+bool Http2Stream::cancel_queued_outbound() noexcept { return conn_ && conn_->cancel_queued_stream_send(*this); }
 
 void Http2Stream::disarm_outbound(void *ctx) noexcept {
     if (outbound_operation_.ctx != ctx) {
