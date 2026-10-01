@@ -22,6 +22,13 @@ namespace fiber::http {
 
 class Http2Connection;
 
+namespace detail {
+
+struct Http2DataSendAllOp;
+struct Http2DataSendSomeOp;
+
+} // namespace detail
+
 class ServerHttp2Request final : public HttpExchangeIo, public common::NonCopyable, public common::NonMovable {
 public:
     [[nodiscard]] static Http2Stream::Lease create(std::uint32_t stream_id, Http2Connection &conn,
@@ -60,11 +67,9 @@ private:
     using PseudoHeaderHandler = common::IoErr (*)(ServerHttp2Request &, std::string_view value,
                                                   bool value_stable) noexcept;
     struct SendResponseHeaderOp;
-    struct SendResponseBodyAllOp;
-    struct SendResponseBodySomeOp;
     using HeaderSendAwaiter = detail::Http2SendAwaiter<SendResponseHeaderOp>;
-    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<SendResponseBodyAllOp>;
-    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<SendResponseBodySomeOp>;
+    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<detail::Http2DataSendAllOp>;
+    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<detail::Http2DataSendSomeOp>;
 
     static const Http2Stream::Ops &stream_ops() noexcept;
     static const Http2HpackDecoder::Ops &decoder_ops() noexcept;

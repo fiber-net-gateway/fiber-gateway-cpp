@@ -20,10 +20,14 @@
 namespace fiber::http {
 
 class Http2Connection;
-class Http2OutboundEncodeTarget;
 class HttpHeaders;
-struct Http2OutboundEncodeRequest;
-struct Http2OutboundEncodeResult;
+
+namespace detail {
+
+struct Http2DataSendAllOp;
+struct Http2DataSendSomeOp;
+
+} // namespace detail
 
 class ClientHttp2Request : public common::NonCopyable, public common::NonMovable {
 public:
@@ -52,12 +56,10 @@ public:
 
 private:
     struct SendRequestHeaderOp;
-    struct SendRequestBodyAllOp;
-    struct SendRequestBodySomeOp;
     struct SendRequestTrailerOp;
     using HeaderSendAwaiter = detail::Http2SendAwaiter<SendRequestHeaderOp>;
-    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<SendRequestBodyAllOp>;
-    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<SendRequestBodySomeOp>;
+    using BodyWriteAllAwaiter = detail::Http2SendAwaiter<detail::Http2DataSendAllOp>;
+    using BodyWriteSomeAwaiter = detail::Http2SendAwaiter<detail::Http2DataSendSomeOp>;
     using TrailerSendAwaiter = detail::Http2SendAwaiter<SendRequestTrailerOp>;
 
     explicit ClientHttp2Request(Http2Connection &conn, mem::BufPool &pool) noexcept;
