@@ -90,6 +90,38 @@ fiber::common::IoResult<std::uint16_t> resolve_port(int fd) {
     return local.port();
 }
 
+// A DNS server answers UDP and TCP on one port: binds `udp` to an ephemeral
+// port and `tcp` to the same port number on loopback. The kernel picks the
+// UDP port with no regard for TCP, and that TCP port may still be held — a
+// client connection's local port in TIME_WAIT (bound by connect() without
+// SO_REUSEADDR, so even our SO_REUSEADDR listener is refused). AddrInUse
+// retries with a fresh UDP port; any other failure is final.
+fiber::common::IoResult<std::uint16_t> bind_udp_tcp_same_port(fiber::net::UdpSocket &udp,
+                                                              fiber::net::TcpListener &tcp) {
+    constexpr int kAttempts = 64;
+    IoErr last = IoErr::AddrInUse;
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        auto udp_bind = udp.bind(fiber::net::SocketAddress::any_v4(), {});
+        if (!udp_bind) {
+            return std::unexpected(udp_bind.error());
+        }
+        auto port = resolve_port(udp.fd());
+        if (!port) {
+            return std::unexpected(port.error());
+        }
+        auto tcp_bind = tcp.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), *port), {});
+        if (tcp_bind) {
+            return *port;
+        }
+        last = tcp_bind.error();
+        udp.close();
+        if (last != IoErr::AddrInUse) {
+            break;
+        }
+    }
+    return std::unexpected(last);
+}
+
 std::vector<std::uint8_t> encode_dns_name(std::string_view name) {
     std::vector<std::uint8_t> out;
     std::size_t start = 0;
@@ -446,31 +478,28 @@ DetachedTask run_multi_server(fiber::event::EventLoop *loop, MultiServerMode mod
     fiber::net::UdpSocket second(*loop);
     fiber::net::TcpListener second_tcp(*loop);
     auto first_bind = first.bind(fiber::net::SocketAddress::any_v4(), {});
-    auto second_bind = second.bind(fiber::net::SocketAddress::any_v4(), {});
-    if (!first_bind || !second_bind) {
+    if (!first_bind) {
         ports_promise->set_value({0, 0});
-        outcome.err = !first_bind ? first_bind.error() : second_bind.error();
+        outcome.err = first_bind.error();
         outcome_promise->set_value(outcome);
         co_return;
     }
-
     auto first_port = resolve_port(first.fd());
-    auto second_port = resolve_port(second.fd());
+    // The second nameserver also answers TCP in the fallback mode: its UDP and
+    // TCP sockets share one port.
+    fiber::common::IoResult<std::uint16_t> second_port = std::unexpected(IoErr::Unknown);
+    if (mode == MultiServerMode::SecondTcpFallback) {
+        second_port = bind_udp_tcp_same_port(second, second_tcp);
+    } else if (auto second_bind = second.bind(fiber::net::SocketAddress::any_v4(), {}); second_bind) {
+        second_port = resolve_port(second.fd());
+    } else {
+        second_port = std::unexpected(second_bind.error());
+    }
     if (!first_port || !second_port) {
         ports_promise->set_value({0, 0});
         outcome.err = !first_port ? first_port.error() : second_port.error();
         outcome_promise->set_value(outcome);
         co_return;
-    }
-    if (mode == MultiServerMode::SecondTcpFallback) {
-        auto tcp_bind =
-                second_tcp.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), *second_port), {});
-        if (!tcp_bind) {
-            ports_promise->set_value({0, 0});
-            outcome.err = tcp_bind.error();
-            outcome_promise->set_value(outcome);
-            co_return;
-        }
     }
     ports_promise->set_value({*first_port, *second_port});
 
@@ -718,29 +747,11 @@ DetachedTask run_udp_tcp_fallback_server(fiber::event::EventLoop *loop, std::pro
                                          TcpResponseMode response_mode = TcpResponseMode::Correct) {
     ServerOutcome outcome;
     fiber::net::UdpSocket udp(*loop);
-    auto udp_bind = udp.bind(fiber::net::SocketAddress::any_v4(), {});
-    if (!udp_bind) {
-        port_promise->set_value(0);
-        outcome.err = udp_bind.error();
-        outcome_promise->set_value(std::move(outcome));
-        co_return;
-    }
-
-    auto port_result = resolve_port(udp.fd());
-    if (!port_result) {
-        port_promise->set_value(0);
-        outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
-        co_return;
-    }
-
     fiber::net::TcpListener listener(*loop);
-    fiber::net::ListenOptions listen_options{};
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), *port_result),
-                                     listen_options);
-    port_promise->set_value(bind_result ? *port_result : 0);
-    if (!bind_result) {
-        outcome.err = bind_result.error();
+    auto port_result = bind_udp_tcp_same_port(udp, listener);
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        outcome.err = port_result.error();
         outcome_promise->set_value(std::move(outcome));
         co_return;
     }
@@ -829,27 +840,11 @@ DetachedTask run_udp_tcp_cancel_server(fiber::event::EventLoop *loop, DnsClient 
                                        std::promise<ServerOutcome> *outcome_promise) {
     ServerOutcome outcome;
     fiber::net::UdpSocket udp(*loop);
-    auto udp_bind = udp.bind(fiber::net::SocketAddress::any_v4(), {});
-    if (!udp_bind) {
-        port_promise->set_value(0);
-        outcome.err = udp_bind.error();
-        outcome_promise->set_value(std::move(outcome));
-        co_return;
-    }
-
-    auto port_result = resolve_port(udp.fd());
-    if (!port_result) {
-        port_promise->set_value(0);
-        outcome.err = port_result.error();
-        outcome_promise->set_value(std::move(outcome));
-        co_return;
-    }
-
     fiber::net::TcpListener listener(*loop);
-    auto bind_result = listener.bind(fiber::net::SocketAddress(fiber::net::IpAddress::loopback_v4(), *port_result), {});
-    port_promise->set_value(bind_result ? *port_result : 0);
-    if (!bind_result) {
-        outcome.err = bind_result.error();
+    auto port_result = bind_udp_tcp_same_port(udp, listener);
+    port_promise->set_value(port_result ? *port_result : 0);
+    if (!port_result) {
+        outcome.err = port_result.error();
         outcome_promise->set_value(std::move(outcome));
         co_return;
     }
