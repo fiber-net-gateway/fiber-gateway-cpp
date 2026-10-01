@@ -95,7 +95,7 @@ inline constexpr std::size_t kMaxPskIdentityLen = 4096;
 struct TlsServerHelloState {
     static constexpr std::size_t kCap = 16384; // retained ClientHello body bytes
 
-    std::array<std::uint8_t, kCap> ch{};
+    std::array<std::uint8_t, kCap> ch; // only [0, ch_len) is ever read: no zero-init
     std::size_t ch_len = 0;
     TlsClientHello view; // decoded; spans borrow ch
     std::unique_ptr<TlsKeyExchange> kx; // the server's share (encap'd at SH build)

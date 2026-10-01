@@ -117,7 +117,7 @@ template<std::size_t N>
 struct TlsClientHelloState {
     static constexpr std::size_t kCap = 8192; // retained ClientHello bytes
 
-    std::array<std::uint8_t, kCap> ch{};
+    std::array<std::uint8_t, kCap> ch; // only [0, len) is ever read: no zero-init
     std::size_t len = 0;
     std::size_t binder_off = 0; // message-relative binder-block offset (0 = no PSK)
     std::unique_ptr<TlsKeyExchange> kx; // the share in `ch` (rebuilt at HRR / 1.2 SKE)

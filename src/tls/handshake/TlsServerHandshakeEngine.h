@@ -115,7 +115,9 @@ private:
     TlsServerHelloState hello_; // retained ClientHello + negotiation intermediates
     mem::IoBufChain early_; // decrypted 0-RTT plaintext (P5 fills; take_early_data drains)
     TlsServerHandshakeOutcome out_; // terminal channel both halves write
-    std::array<std::uint8_t, kScratchCap> scratch_{}; // staged flights (sub-exclusive post-fork)
+    // Staged flights (sub-exclusive post-fork). Not zero-initialized: every
+    // encoder writes the full span it reports before anything reads it.
+    std::array<std::uint8_t, kScratchCap> scratch_;
 
     // ---- version sub-flow, mounted at the ClientHello fork ----
     std::variant<std::monostate, Tls13ServerHandshake, Tls12ServerHandshake> flow_;

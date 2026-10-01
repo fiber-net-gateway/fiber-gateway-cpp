@@ -275,8 +275,9 @@ private:
     TlsQuicLevel quic_level_ = TlsQuicLevel::Initial; // outbound CRYPTO level
     TlsQuicLevel quic_provided_level_ = TlsQuicLevel::Initial; // inbound gate contract check
     // In-place-open / materialization scratch; also the straddle destination
-    // for tls_record_open_in_place.
-    std::array<std::uint8_t, kOpenScratchSize> open_scratch_{};
+    // for tls_record_open_in_place. Not zero-initialized: reads stay within
+    // the plaintext an open or gather just wrote.
+    std::array<std::uint8_t, kOpenScratchSize> open_scratch_;
 };
 
 } // namespace fiber::tls
