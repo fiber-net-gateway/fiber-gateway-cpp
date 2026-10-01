@@ -250,6 +250,11 @@ void TlsStreamFd::close() {
         stream_fd_.close();
     }
     inbound_ = mem::IoBuf{};
+    // Output the drain above left behind (a close_notify a gone peer refused,
+    // a batch stuck on WouldBlock) and unread 0-RTT go back to this loop's
+    // node pool now: a closed stream may then be destroyed off the loop.
+    out_pending_.clear();
+    early_data_.clear();
     handshake_started_ = false;
     handshake_done_ = false;
     shutdown_started_ = false;
