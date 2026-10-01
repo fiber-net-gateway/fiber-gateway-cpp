@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -154,6 +155,35 @@ void on_peer_stream_attached_retain(void *owner, fiber::quic::QuicStream &stream
     state->last_stream_id = stream.stream_id();
     state->lease = stream.lease();
 }
+
+// One peer stream at a time, placed in storage the test owns: destruction
+// poisons the bytes instead of freeing them, so a use of the stream after its
+// destruction reads 0xFF deterministically — no sanitizer needed.
+struct PoisonedStreamFactory {
+    alignas(fiber::quic::QuicStream) std::byte storage[sizeof(fiber::quic::QuicStream)];
+    std::uint32_t created = 0;
+    std::uint32_t destroyed = 0;
+};
+
+void destroy_poisoned_stream(void *owner, fiber::quic::QuicStream &stream) noexcept {
+    stream.~QuicStream();
+    std::memset(static_cast<void *>(&stream), 0xFF, sizeof(fiber::quic::QuicStream));
+    ++static_cast<PoisonedStreamFactory *>(owner)->destroyed;
+}
+
+fiber::quic::QuicStream::Lease create_poisoned_stream(void *owner, std::uint64_t) noexcept {
+    auto *factory = static_cast<PoisonedStreamFactory *>(owner);
+    if (factory->created != factory->destroyed) {
+        return {}; // the storage still holds a live stream
+    }
+    ++factory->created;
+    return fiber::quic::QuicStream::Lease::adopt(new (factory->storage)
+                                                         fiber::quic::QuicStream(factory, destroy_poisoned_stream));
+}
+
+// Rejects every peer stream the moment it attaches, as an HTTP/3 server
+// does while draining (H3_REQUEST_REJECTED).
+void reject_peer_stream(void *, fiber::quic::QuicStream &stream) noexcept { stream.close(0x010b); }
 
 fiber::quic::QuicConnection::Options server_options_with_factory(StreamCallbackState &state) noexcept {
     fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
@@ -2096,6 +2126,40 @@ TEST(QuicConnectionTest, ConnectionOpsCanCreateAndRetainRetiredResetStream) {
         EXPECT_FALSE(state.lease->attached_to_connection());
         EXPECT_EQ(conn.active_stream_count(), 0U);
         state.lease.reset();
+    });
+}
+
+TEST(QuicConnectionTest, PeerStreamRejectedAtAttachIsTreatedAsGone) {
+    ::fiber::test::run_in_quic_loop([&](::fiber::mem::IoBufNodePool &) {
+        PoisonedStreamFactory factory{};
+        fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+        options.role = fiber::quic::QuicConnectionRole::Server;
+        options.owner = &factory;
+        options.ops.create_stream = create_poisoned_stream;
+        options.ops.on_peer_stream_attached = reject_peer_stream;
+        fiber::quic::QuicConnection conn(fiber::test::quic_endpoint(), options);
+
+        // close() inside the attach callback retires the fresh stream (nothing
+        // to send) and drops the table's lease, its last reference: the stream
+        // is destroyed before the frame handler regains control. Every frame
+        // that implicitly opens a peer stream must then drop like a gone
+        // stream's instead of reaching through the dead pointer.
+        fiber::quic::QuicStreamFrame stream_frame{};
+        stream_frame.stream_id = 0;
+        stream_frame.fin = true;
+        EXPECT_TRUE(conn.recv_stream_frame(stream_frame, {}).has_value());
+        EXPECT_TRUE(conn.recv_reset_stream_frame({.id = 4, .error_code = 7, .final_size = 0}).has_value());
+        EXPECT_TRUE(conn.recv_stop_sending_frame({.id = 8, .error_code = 7}).has_value());
+        EXPECT_TRUE(conn.recv_max_stream_data_frame({.id = 12, .limit = 1024}).has_value());
+
+        EXPECT_EQ(factory.created, 4U);
+        EXPECT_EQ(factory.destroyed, 4U);
+        EXPECT_FALSE(conn.closing());
+        EXPECT_EQ(conn.close_error(), fiber::quic::QuicErrorCode::NoError);
+        EXPECT_EQ(conn.active_stream_count(), 0U);
+        for (std::uint64_t id: {0U, 4U, 8U, 12U}) {
+            EXPECT_EQ(conn.find_stream(id), nullptr) << id;
+        }
     });
 }
 
