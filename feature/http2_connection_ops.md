@@ -1,6 +1,6 @@
 # Http2Connection 宿主接口与关闭生命周期改造方案
 
-状态：设计，尚未实施。范围包括统一连接回调及 ctx、删除独立 closed callback、允许客户端空 peer-stream 工厂，并迁移现有调用方。
+状态：已实施（`4160c3e6`）；遗留的 `ServerHttp2Push` 在 `645899ea` 删除。范围包括统一连接回调及 ctx、删除独立 closed callback、允许客户端空 peer-stream 工厂，并迁移现有调用方。
 
 ## 1. 最终接口
 
@@ -146,6 +146,8 @@ Gate 新增一个内嵌 DeferEntry，用一个枚举表达阶段：
 
 原 `ClientHttp2Push` 只丢弃数据，PUSH_PROMISE 也未被连接显式处理，因此禁用推送是行为收紧。删除该私有类及其源项，同时删除 `ClientHttp2Request::factory_ops()` 与私有 trampoline。
 
+server 侧的 `ServerHttp2Push` 同样是全 noop 的占位流：server 不发起推送，也不会为 PUSH_PROMISE 建流，`ServerRequestFactory` 只创建 `ServerHttp2Request`。它已无调用方，与 `ServerRequestFactory.cpp` 中残留的 include 一并删除。
+
 ### 6.1 SETTINGS
 
 - client 的首个 SETTINGS 增加 ENABLE_PUSH=0，修正参数数量、payload 长度和输出缓冲大小；已有其他设置不变。server 不声明该项。
@@ -175,7 +177,7 @@ Gate 新增一个内嵌 DeferEntry，用一个枚举表达阶段：
 
 ### 6.4 HPACK 丢弃头块
 
-不能复用 `ClientHttp2Push` 现有全 noop sink：decoder 的增量索引插入依赖 sink 填出的 FieldView，noop 不提供实际 name/value；也不能给 `begin_block()` 传空 ops。
+不能复用原 `ClientHttp2Push`/`ServerHttp2Push` 的全 noop sink（两者均已删除）：decoder 的增量索引插入依赖 sink 填出的 FieldView，noop 不提供实际 name/value；也不能给 `begin_block()` 传空 ops。
 
 增加 core-private 的 HPACK discard sink，按现有 decoder Ops 实现：
 
@@ -202,6 +204,7 @@ Gate 新增一个内嵌 DeferEntry，用一个枚举表达阶段：
 | `Http2ServerConnection.h/.cpp`、`HttpServer.cpp` | 宿主转发、显式 loop、启动失败等待 |
 | `ServerRequestFactory.h/.cpp` | 新 ops 类型 |
 | `ClientHttp2Request.h/.cpp`、`src/http/ClientHttp2Push.*` | 去除内置客户端对旧 factory ops 的依赖，清理无引用私有实现 |
+| `src/http/ServerHttp2Push.*` | 删除无调用方的 server 端 noop 推送流 |
 | `src/http/Http2HpackDiscardSink.h/.cpp`（新） | 正确解码但不交付头字段的私有 sink |
 | `src/http/Http2ConnectionPoolCore.cpp` | 删除关闭补偿分支，按 Gate 完成退休/销毁 |
 | `tests/Http2TestSupport.h`、现有 HTTP/2 tests | 统一宿主 fixture 和生命周期断言 |

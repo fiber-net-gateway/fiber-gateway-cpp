@@ -41,6 +41,11 @@
 - After `connect(timeout)` succeeds, `Http2Connection::start(transport)` has already run.
 - For client role, initial preface and SETTINGS are already queued during `start()`.
 - Local streams may therefore be created immediately after `connect(timeout)` succeeds.
+- Server push is not supported. The initial SETTINGS always carries `SETTINGS_ENABLE_PUSH=0`, and a server
+  announcing `SETTINGS_ENABLE_PUSH=1` is a connection `PROTOCOL_ERROR`.
+- A PUSH_PROMISE received after that SETTINGS is acknowledged, or any server-initiated stream, is also a
+  connection `PROTOCOL_ERROR`. A promise already in flight before the ACK has its header block decoded to keep
+  the HPACK dynamic table in sync, then the promised stream is canceled with `RST_STREAM(CANCEL)`.
 
 ## Local Stream Capacity
 
