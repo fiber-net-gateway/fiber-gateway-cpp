@@ -1918,7 +1918,7 @@ const QuicStream *QuicConnection::find_stream(std::uint64_t stream_id) const noe
     return streams_.find(stream_id);
 }
 
-common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t stream_id) noexcept {
+common::IoResult<void> QuicConnection::create_peer_stream(std::uint64_t stream_id) noexcept {
     QuicStreamRecvQueue::Options recv_options{
             .buffer_limit = options_.recv_flow.stream_buffer_limit,
             .low_water = options_.recv_flow.stream_low_water,
@@ -1935,7 +1935,7 @@ common::IoResult<QuicStream *> QuicConnection::create_peer_stream(std::uint64_t 
         options_.ops.on_peer_stream_attached(options_.owner, **attached);
     }
     dispatch_capacity_change();
-    return *attached;
+    return {};
 }
 
 common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::uint64_t stream_id) noexcept {
@@ -1973,28 +1973,22 @@ common::IoResult<QuicStream *> QuicConnection::get_or_create_peer_stream(std::ui
     const std::uint64_t target_seq = stream_sequence(stream_id);
     const std::uint64_t type_bits = stream_id & 3ULL;
     const std::uint64_t lower = from_seq < target_seq ? from_seq : target_seq;
-    QuicStream *target = nullptr;
     for (std::uint64_t seq = lower; seq <= target_seq; ++seq) {
         const std::uint64_t id = (seq << 2) | type_bits;
-        if (QuicStream *existing = streams_.find(id)) {
-            if (id == stream_id) {
-                target = existing;
-            }
+        if (streams_.find(id) != nullptr) {
             continue;
         }
         auto created = create_peer_stream(id);
         if (!created) {
             return std::unexpected(created.error());
         }
-        if (id == stream_id) {
-            target = *created;
-        }
     }
 
-    if (target == nullptr) {
-        return std::unexpected(common::IoErr::Unknown);
-    }
-    return target;
+    // Look the target up again rather than keeping the attached pointer: the
+    // application may reject a stream inside on_peer_stream_attached (close()
+    // retires a stream with nothing to send, and the table's lease was its
+    // last reference). nullptr: the stream is already gone.
+    return streams_.find(stream_id);
 }
 
 common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &frame, mem::IoBuf data) noexcept {
@@ -2024,6 +2018,9 @@ common::IoResult<void> QuicConnection::recv_stream_frame(const QuicStreamFrame &
     auto stream = get_or_create_peer_stream(frame.stream_id);
     if (!stream) {
         return std::unexpected(stream.error());
+    }
+    if (*stream == nullptr) {
+        return {}; // rejected at attach: drop the data like any gone stream's
     }
 
     const std::size_t data_len = data.readable();
@@ -2105,6 +2102,9 @@ common::IoResult<void> QuicConnection::recv_reset_stream_frame(const QuicResetSt
     if (!stream) {
         return std::unexpected(stream.error());
     }
+    if (*stream == nullptr) {
+        return {}; // rejected at attach: a gone stream
+    }
 
     const std::uint64_t old_end = (*stream)->recv_queue_.received_end_offset();
     // FINAL_SIZE_ERROR: reset final size is smaller than data already received
@@ -2171,6 +2171,9 @@ common::IoResult<void> QuicConnection::recv_stop_sending_frame(const QuicStopSen
         if (!created) {
             return std::unexpected(created.error());
         }
+        if (*created == nullptr) {
+            return {}; // rejected at attach: a gone stream
+        }
         stream = *created;
     }
     auto stopped = stream->on_remote_stop_sending(frame.error_code);
@@ -2200,6 +2203,9 @@ common::IoResult<void> QuicConnection::recv_max_stream_data_frame(const QuicMaxS
             auto created = get_or_create_peer_stream(frame.id);
             if (!created) {
                 return std::unexpected(created.error());
+            }
+            if (*created == nullptr) {
+                return {}; // rejected at attach: a gone stream
             }
             stream = *created;
         } else {

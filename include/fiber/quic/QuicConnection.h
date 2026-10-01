@@ -724,6 +724,8 @@ public:
     [[nodiscard]] common::IoResult<QuicStream *>
     try_attach_local_stream(QuicStream::Lease &&stream, QuicStreamType type,
                             QuicStreamEarlyDataMode early_data_mode = QuicStreamEarlyDataMode::OneRttOnly) noexcept;
+    // nullptr value: the application rejected the stream inside
+    // on_peer_stream_attached and it is already retired (treat it as gone).
     [[nodiscard]] common::IoResult<QuicStream *> get_or_create_peer_stream(std::uint64_t stream_id) noexcept;
     [[nodiscard]] common::IoResult<void> recv_stream_frame(const QuicStreamFrame &frame, mem::IoBuf data) noexcept;
     [[nodiscard]] common::IoResult<void> recv_reset_stream_frame(const QuicResetStreamFrame &frame) noexcept;
@@ -967,8 +969,9 @@ private:
     // connection, insert it into the stream table, then notify the app. Used for
     // the target peer stream AND every implicitly-opened intermediate peer
     // stream (RFC 9000 §2.1). Precondition: create_stream is set and stream_id
-    // is a peer stream within the advertised limit.
-    [[nodiscard]] common::IoResult<QuicStream *> create_peer_stream(std::uint64_t stream_id) noexcept;
+    // is a peer stream within the advertised limit. Hands no pointer back: the
+    // notification may retire (and destroy) the stream before this returns.
+    [[nodiscard]] common::IoResult<void> create_peer_stream(std::uint64_t stream_id) noexcept;
     void on_peer_stream_retired(std::uint64_t stream_id) noexcept;
     void maybe_extend_peer_stream_limit(QuicStreamType type) noexcept;
     void retire_stream(QuicStream &stream) noexcept;
