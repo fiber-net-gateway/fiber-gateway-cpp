@@ -422,7 +422,7 @@ int main(int argc, char **argv) {
 
     fiber::http::Http2Endpoint::Options server_options{};
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = credential->get();
+    server_options.tls.configure_ctx = &*credential;
 
     ServerContext context;
     fiber::http::Server server(

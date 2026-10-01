@@ -2,7 +2,6 @@
 #define FIBER_NET_TLS_SERVER_HANDSHAKE_CONFIG_H
 
 #include <cstddef>
-#include <memory>
 #include <span>
 
 #include "../common/IoError.h"
@@ -28,23 +27,26 @@ class TlsStreamFd;
 // handshake (09 §5): it stages into a caller-held tls::TlsServerConfig whose
 // spans point at the selected credential's material for the handshake's
 // duration. It exposes neither the config nor the material. The credential is
-// either borrowed (static material the caller keeps alive) or retained by the
-// handshake through the owning add_credential overload (dynamic material that
-// may be retired while a handshake is still suspended).
+// either retained by the handshake (add_credential — dynamic material that may
+// be retired while a handshake is still suspended) or explicitly borrowed
+// (add_borrowed_credential — static material the caller keeps alive).
 class TlsServerHandshakeConfig {
 public:
-    // Drops the staged credential, releasing a retained owner.
+    // Drops the staged credential, releasing a retained reference.
     [[nodiscard]] common::IoErr clear_credentials() noexcept;
-    // The staged config borrows the credential's tls material; the credential
-    // must outlive the handshake (the documented param contract). Replaces
-    // (and releases) a credential staged earlier in the same callback.
-    [[nodiscard]] common::IoErr add_credential(const TlsCredential &credential) noexcept;
-    // The handshake retains `credential` (an aliasing pointer into a larger
-    // snapshot keeps the whole snapshot alive) until the handshake that
-    // staged it ends: success, failure, cancellation or engine teardown —
-    // the QUIC face releases it at its done-transition. Replaces (and
+    // The handshake takes its own reference to `credential` (pass an rvalue
+    // to hand one over without touching the count) and holds it until the
+    // handshake that staged it ends: success, failure, cancellation or engine
+    // teardown — the QUIC face releases it at its done-transition. The
+    // caller may drop its handles right away. Replaces (and releases) a
+    // credential staged earlier in the same callback.
+    [[nodiscard]] common::IoErr add_credential(TlsCredential credential) noexcept;
+    // Stages the credential's material without taking a reference: the
+    // caller keeps `credential` (or another handle to the same material)
+    // alive until the handshake ends — the documented param contract, for
+    // static credentials owned alongside the server options. Replaces (and
     // releases) a credential staged earlier in the same callback.
-    [[nodiscard]] common::IoErr add_credential(std::shared_ptr<const TlsCredential> credential) noexcept;
+    [[nodiscard]] common::IoErr add_borrowed_credential(const TlsCredential &credential) noexcept;
     // The staged config borrows the store's anchors; the store must outlive
     // the handshake.
     [[nodiscard]] common::IoErr set_trust_store(const TrustStore &trust_store) noexcept;
@@ -70,7 +72,7 @@ private:
     // rule, and holds `credential_owner` for as long as the engine may read
     // the staged chain/key.
     TlsServerHandshakeConfig(fiber::tls::TlsServerConfig &engine, std::size_t &credential_count,
-                             std::shared_ptr<const TlsCredential> &credential_owner) noexcept :
+                             TlsCredential &credential_owner) noexcept :
         engine_(&engine), credential_count_(&credential_count), credential_owner_(&credential_owner) {}
 
     [[nodiscard]] std::size_t credential_count() const noexcept { return *credential_count_; }
@@ -79,18 +81,19 @@ private:
 
     fiber::tls::TlsServerConfig *engine_ = nullptr;
     std::size_t *credential_count_ = nullptr;
-    std::shared_ptr<const TlsCredential> *credential_owner_ = nullptr;
+    TlsCredential *credential_owner_ = nullptr;
 };
 
-// Convenience callback for static single-certificate servers. Dynamic servers
-// can use the same callback contract to configure credentials and other SSL
-// policy from ClientHello.
+// Convenience callback for static single-certificate servers: `ctx` points at
+// a TlsCredential the param contract keeps alive, so it is borrowed. Dynamic
+// servers can use the same callback contract to configure credentials and
+// other SSL policy from ClientHello.
 inline common::IoErr configure_tls_with_credential(void *ctx, TlsServerHandshakeConfig &config,
                                                    const tls::TlsClientHelloView &) noexcept {
     if (!ctx) {
         return common::IoErr::Invalid;
     }
-    return config.add_credential(*static_cast<const TlsCredential *>(ctx));
+    return config.add_borrowed_credential(*static_cast<const TlsCredential *>(ctx));
 }
 
 } // namespace fiber::net

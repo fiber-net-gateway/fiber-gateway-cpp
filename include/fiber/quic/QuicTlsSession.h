@@ -13,6 +13,7 @@
 #include "../common/IoError.h"
 #include "../common/NonCopyable.h"
 #include "../common/NonMovable.h"
+#include "../net/TlsCredential.h"
 #include "../net/TlsParams.h"
 #include "../tls/TlsConfig.h"
 #include "../tls/TlsTypes.h"
@@ -108,10 +109,10 @@ private:
     tls::TlsTicketMinter minter_{};
     tls::TlsResumptionLookup lookup_{};
     const net::TlsServerParam *server_param_ = nullptr; // selector re-stage source
-    // A credential the configure callback handed over by shared_ptr: held
-    // until the done-transition or a terminal failure (the engine stops
+    // A credential the configure callback handed over through add_credential:
+    // held until the done-transition or a terminal failure (the engine stops
     // reading chain/key there), else released after the engine in the dtor.
-    std::shared_ptr<const net::TlsCredential> credential_owner_;
+    net::TlsCredential credential_owner_;
     common::IoErr callback_error_ = common::IoErr::None;
     std::array<std::uint8_t, 16> ip_bytes_{}; // client verify_ip backing
     tls::TlsSessionOffer offer_{}; // staged resumption offer (spans borrow members)

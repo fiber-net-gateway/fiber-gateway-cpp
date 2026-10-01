@@ -133,10 +133,18 @@ struct TempFile {
     }
 };
 
+// server_options points at server_credential, so the pair is built in place
+// and never moved.
 struct TestTlsPair {
-    std::unique_ptr<fiber::net::TlsCredential> server_credential;
-    fiber::net::TlsServerParam server_options;
-    fiber::net::TlsClientParam client_options;
+    explicit TestTlsPair(fiber::net::TlsCredential credential) : server_credential(std::move(credential)) {
+        server_options.configure_callback = &fiber::net::configure_tls_with_credential;
+        server_options.configure_ctx = &server_credential;
+    }
+    TestTlsPair(TestTlsPair &&) = delete;
+
+    fiber::net::TlsCredential server_credential;
+    fiber::net::TlsServerParam server_options{};
+    fiber::net::TlsClientParam client_options{};
 };
 
 fiber::common::IoResult<TestTlsPair> create_tls_pair(const std::string &cert_path, const std::string &key_path) {
@@ -147,11 +155,7 @@ fiber::common::IoResult<TestTlsPair> create_tls_pair(const std::string &cert_pat
     if (!server_credential) {
         return std::unexpected(server_credential.error());
     }
-    TestTlsPair pair{};
-    pair.server_credential = std::move(*server_credential);
-    pair.server_options.configure_callback = &fiber::net::configure_tls_with_credential;
-    pair.server_options.configure_ctx = pair.server_credential.get();
-    return pair;
+    return fiber::common::IoResult<TestTlsPair>(std::in_place, std::move(*server_credential));
 }
 
 struct SigpipeGuard {
@@ -1513,58 +1517,36 @@ TEST(TlsStreamFdTest, BoringsslClientResumesAcrossTicketServiceRebuild) {
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic credential ownership (issue #41): a configure callback selects an
-// identity out of a published snapshot, hands it over by shared_ptr, and the
-// publisher retires its own reference right away — the handshake alone must
-// keep the identity alive until it stops reading it.
+// Dynamic credential ownership (issue #41): a configure callback hands the
+// published identity over through add_credential and the publisher retires
+// its own handle right away — the handshake alone must keep the identity
+// alive until it stops reading it. Each test keeps a probe handle to the same
+// material and watches use_count: 2 while the handshake retains it, 1 after.
 // ---------------------------------------------------------------------------
 
-struct IdentitySnapshot {
-    std::unique_ptr<fiber::net::TlsCredential> credential;
-    std::atomic_bool *destroyed = nullptr;
-
-    ~IdentitySnapshot() {
-        if (destroyed != nullptr) {
-            destroyed->store(true, std::memory_order_release);
-        }
-    }
-};
-
-std::shared_ptr<IdentitySnapshot> make_identity_snapshot(const std::string &cert_path, const std::string &key_path,
-                                                         std::atomic_bool *destroyed) {
+fiber::net::TlsCredential make_identity(const std::string &cert_path, const std::string &key_path) {
     fiber::net::TlsCredentialOptions options{};
     options.certificate_chain = fiber::net::TlsPemSource::from_file(cert_path);
     options.private_key = fiber::net::TlsPemSource::from_file(key_path);
     auto credential = fiber::net::TlsCredential::create(options);
-    if (!credential) {
-        return nullptr;
-    }
-    auto snapshot = std::make_shared<IdentitySnapshot>();
-    snapshot->credential = std::move(*credential);
-    snapshot->destroyed = destroyed;
-    return snapshot;
+    return credential ? std::move(*credential) : fiber::net::TlsCredential{};
 }
 
-// An aliasing owner: the credential pointer keeps the whole snapshot alive.
-std::shared_ptr<const fiber::net::TlsCredential> retire_into_credential(std::shared_ptr<IdentitySnapshot> &published) {
-    std::shared_ptr<IdentitySnapshot> snapshot = std::move(published);
-    const fiber::net::TlsCredential *credential = snapshot->credential.get();
-    return {std::move(snapshot), credential};
-}
+bool retained_beyond_probe(const fiber::net::TlsCredential &probe) { return probe.use_count() > 1; }
 
 struct RotatingSelector {
     enum class Mode : std::uint8_t {
-        Owned, // hand the snapshot over and retire it
-        OwnedThenFail, // hand it over, then fail the callback
+        Owned, // hand a copy over, then retire the publisher's handle
+        OwnedThenFail, // move the handle over, then fail the callback
         Replace, // owned A → borrowed static → owned B → clear → borrowed static
     };
 
     Mode mode = Mode::Owned;
-    std::shared_ptr<IdentitySnapshot> published; // the publisher's reference
-    std::shared_ptr<IdentitySnapshot> published_second; // Replace only
+    fiber::net::TlsCredential published; // the publisher's handle
+    fiber::net::TlsCredential published_second; // Replace only
     const fiber::net::TlsCredential *static_credential = nullptr; // Replace only
-    std::atomic_bool *destroyed = nullptr;
-    std::atomic_bool *destroyed_second = nullptr;
+    const fiber::net::TlsCredential *probe = nullptr; // Replace only: the test's handle to `published`
+    const fiber::net::TlsCredential *probe_second = nullptr; // Replace only
     std::atomic_bool selected{false};
     // Replace only: what the callback observed right after each step.
     bool released_by_borrowed_replace = false;
@@ -1577,29 +1559,31 @@ fiber::common::IoErr select_and_retire(void *ctx, fiber::net::TlsServerHandshake
     auto *selector = static_cast<RotatingSelector *>(ctx);
     selector->selected.store(true, std::memory_order_release);
     switch (selector->mode) {
-        case RotatingSelector::Mode::Owned:
-            return config.add_credential(retire_into_credential(selector->published));
+        case RotatingSelector::Mode::Owned: {
+            const fiber::common::IoErr error = config.add_credential(selector->published);
+            selector->published.reset();
+            return error;
+        }
         case RotatingSelector::Mode::OwnedThenFail:
-            if (config.add_credential(retire_into_credential(selector->published)) != fiber::common::IoErr::None) {
+            if (config.add_credential(std::move(selector->published)) != fiber::common::IoErr::None) {
                 return fiber::common::IoErr::Invalid;
             }
             return fiber::common::IoErr::Permission;
         case RotatingSelector::Mode::Replace: {
-            if (config.add_credential(retire_into_credential(selector->published)) != fiber::common::IoErr::None ||
-                selector->destroyed->load(std::memory_order_acquire) ||
-                config.add_credential(*selector->static_credential) != fiber::common::IoErr::None) {
+            if (config.add_credential(std::move(selector->published)) != fiber::common::IoErr::None ||
+                !retained_beyond_probe(*selector->probe) ||
+                config.add_borrowed_credential(*selector->static_credential) != fiber::common::IoErr::None) {
                 return fiber::common::IoErr::Invalid;
             }
-            selector->released_by_borrowed_replace = selector->destroyed->load(std::memory_order_acquire);
-            if (config.add_credential(retire_into_credential(selector->published_second)) !=
-                        fiber::common::IoErr::None ||
-                selector->destroyed_second->load(std::memory_order_acquire) ||
+            selector->released_by_borrowed_replace = !retained_beyond_probe(*selector->probe);
+            if (config.add_credential(std::move(selector->published_second)) != fiber::common::IoErr::None ||
+                !retained_beyond_probe(*selector->probe_second) ||
                 config.clear_credentials() != fiber::common::IoErr::None) {
                 return fiber::common::IoErr::Invalid;
             }
-            selector->released_by_clear = selector->destroyed_second->load(std::memory_order_acquire);
+            selector->released_by_clear = !retained_beyond_probe(*selector->probe_second);
             selector->callback_ok = true;
-            return config.add_credential(*selector->static_credential);
+            return config.add_borrowed_credential(*selector->static_credential);
         }
     }
     return fiber::common::IoErr::Invalid;
@@ -1662,10 +1646,10 @@ TEST(TlsStreamFdTest, RetiredDynamicCredentialSurvivesHelloRetryRequest) {
         ASSERT_TRUE(cert.ok);
         ASSERT_TRUE(key.ok);
 
-        std::atomic_bool destroyed{false};
         RotatingSelector selector{};
-        selector.published = make_identity_snapshot(cert.path, key.path, &destroyed);
-        ASSERT_NE(selector.published, nullptr);
+        selector.published = make_identity(cert.path, key.path);
+        ASSERT_FALSE(selector.published.empty());
+        const fiber::net::TlsCredential probe = selector.published;
         fiber::net::TlsServerParam param = make_rotating_server_param(selector);
 
         int fds[2] = {-1, -1};
@@ -1686,8 +1670,8 @@ TEST(TlsStreamFdTest, RetiredDynamicCredentialSurvivesHelloRetryRequest) {
 
         ASSERT_TRUE(client_send_first_hello_and_await_hrr(*client, fds[1]));
         EXPECT_TRUE(selector.selected.load(std::memory_order_acquire));
-        EXPECT_EQ(selector.published, nullptr) << "the publisher retired its reference";
-        EXPECT_FALSE(destroyed.load(std::memory_order_acquire)) << "the parked handshake must retain the identity";
+        EXPECT_TRUE(selector.published.empty()) << "the publisher retired its handle";
+        EXPECT_EQ(probe.use_count(), 2u) << "the parked handshake must retain the identity";
 
         ASSERT_TRUE(client_finish_handshake(*client, fds[1]));
         EXPECT_EQ(SSL_used_hello_retry_request(client->ssl), 1);
@@ -1696,7 +1680,7 @@ TEST(TlsStreamFdTest, RetiredDynamicCredentialSurvivesHelloRetryRequest) {
         auto served = server_future.get();
         ASSERT_TRUE(served);
         EXPECT_EQ(*served, "ping");
-        EXPECT_TRUE(destroyed.load(std::memory_order_acquire)) << "released once the handshake ended";
+        EXPECT_EQ(probe.use_count(), 1u) << "released once the handshake ended";
 
         (void) SSL_shutdown(client->ssl);
         ::close(fds[1]);
@@ -1718,10 +1702,10 @@ TEST(TlsStreamFdTest, CanceledHandshakeReleasesRetainedCredential) {
         ASSERT_TRUE(cert.ok);
         ASSERT_TRUE(key.ok);
 
-        std::atomic_bool destroyed{false};
         RotatingSelector selector{};
-        selector.published = make_identity_snapshot(cert.path, key.path, &destroyed);
-        ASSERT_NE(selector.published, nullptr);
+        selector.published = make_identity(cert.path, key.path);
+        ASSERT_FALSE(selector.published.empty());
+        const fiber::net::TlsCredential probe = selector.published;
         fiber::net::TlsServerParam param = make_rotating_server_param(selector);
 
         int fds[2] = {-1, -1};
@@ -1743,7 +1727,7 @@ TEST(TlsStreamFdTest, CanceledHandshakeReleasesRetainedCredential) {
         // The server is parked awaiting ClientHello #2 with the identity
         // retained; closing it cancels the handshake mid-flight.
         ASSERT_TRUE(client_send_first_hello_and_await_hrr(*client, fds[1]));
-        EXPECT_FALSE(destroyed.load(std::memory_order_acquire));
+        EXPECT_EQ(probe.use_count(), 2u);
 
         std::promise<void> close_promise;
         auto close_future = close_promise.get_future();
@@ -1751,7 +1735,7 @@ TEST(TlsStreamFdTest, CanceledHandshakeReleasesRetainedCredential) {
         ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
         ASSERT_EQ(server_future.wait_for(2s), std::future_status::ready);
         EXPECT_EQ(server_future.get(), fiber::common::IoErr::Canceled);
-        EXPECT_TRUE(destroyed.load(std::memory_order_acquire));
+        EXPECT_EQ(probe.use_count(), 1u);
 
         ::close(fds[1]);
         group.stop();
@@ -1767,11 +1751,11 @@ TEST(TlsStreamFdTest, FailedConfigureCallbackReleasesRetainedCredential) {
         ASSERT_TRUE(cert.ok);
         ASSERT_TRUE(key.ok);
 
-        std::atomic_bool destroyed{false};
         RotatingSelector selector{};
         selector.mode = RotatingSelector::Mode::OwnedThenFail;
-        selector.published = make_identity_snapshot(cert.path, key.path, &destroyed);
-        ASSERT_NE(selector.published, nullptr);
+        selector.published = make_identity(cert.path, key.path);
+        ASSERT_FALSE(selector.published.empty());
+        const fiber::net::TlsCredential probe = selector.published;
         fiber::net::TlsServerParam param = make_rotating_server_param(selector);
 
         int fds[2] = {-1, -1};
@@ -1795,7 +1779,7 @@ TEST(TlsStreamFdTest, FailedConfigureCallbackReleasesRetainedCredential) {
         ASSERT_EQ(server_future.wait_for(5s), std::future_status::ready);
         EXPECT_EQ(server_future.get(), fiber::common::IoErr::Permission);
         EXPECT_TRUE(selector.selected.load(std::memory_order_acquire));
-        EXPECT_TRUE(destroyed.load(std::memory_order_acquire));
+        EXPECT_EQ(probe.use_count(), 1u);
 
         ::close(fds[1]);
         std::promise<void> close_done;
@@ -1819,17 +1803,17 @@ TEST(TlsStreamFdTest, ReplacingOrClearingCredentialReleasesEarlierOwner) {
         auto tls_pair = create_tls_pair(cert.path, key.path);
         ASSERT_TRUE(tls_pair);
 
-        std::atomic_bool destroyed_first{false};
-        std::atomic_bool destroyed_second{false};
         RotatingSelector selector{};
         selector.mode = RotatingSelector::Mode::Replace;
-        selector.published = make_identity_snapshot(cert.path, key.path, &destroyed_first);
-        selector.published_second = make_identity_snapshot(cert.path, key.path, &destroyed_second);
-        ASSERT_NE(selector.published, nullptr);
-        ASSERT_NE(selector.published_second, nullptr);
-        selector.static_credential = tls_pair->server_credential.get();
-        selector.destroyed = &destroyed_first;
-        selector.destroyed_second = &destroyed_second;
+        selector.published = make_identity(cert.path, key.path);
+        selector.published_second = make_identity(cert.path, key.path);
+        ASSERT_FALSE(selector.published.empty());
+        ASSERT_FALSE(selector.published_second.empty());
+        const fiber::net::TlsCredential probe_first = selector.published;
+        const fiber::net::TlsCredential probe_second = selector.published_second;
+        selector.static_credential = &tls_pair->server_credential;
+        selector.probe = &probe_first;
+        selector.probe_second = &probe_second;
         fiber::net::TlsServerParam param = make_rotating_server_param(selector);
 
         int fds[2] = {-1, -1};
@@ -1848,6 +1832,8 @@ TEST(TlsStreamFdTest, ReplacingOrClearingCredentialReleasesEarlierOwner) {
         EXPECT_TRUE(selector.callback_ok);
         EXPECT_TRUE(selector.released_by_borrowed_replace);
         EXPECT_TRUE(selector.released_by_clear);
+        EXPECT_EQ(probe_first.use_count(), 1u);
+        EXPECT_EQ(probe_second.use_count(), 1u);
 
         group.stop();
         group.join();

@@ -24,27 +24,29 @@ void TlsServerHandshakeConfig::stage(const TlsCredential &credential) noexcept {
     ++*credential_count_;
 }
 
-common::IoErr TlsServerHandshakeConfig::add_credential(const TlsCredential &credential) noexcept {
-    if (credential.tls_chain().empty() || credential.tls_key().empty()) {
+common::IoErr TlsServerHandshakeConfig::add_credential(TlsCredential credential) noexcept {
+    if (credential.empty()) {
         return common::IoErr::Invalid;
     }
-    // Staged by pointer: the credential must outlive the handshake (the
-    // documented param contract — server options hold their material). The
-    // single engine slot now points here, so an earlier owner is dead weight.
+    // Staged by pointer into the shared material, kept alive by the
+    // handshake's owner slot for as long as the engine may still read it (HRR
+    // defers Certificate/CertificateVerify past the callback by a full round
+    // trip). Moving the handle into the slot leaves those pointers intact.
     stage(credential);
-    credential_owner_->reset();
+    *credential_owner_ = std::move(credential);
     return common::IoErr::None;
 }
 
-common::IoErr TlsServerHandshakeConfig::add_credential(std::shared_ptr<const TlsCredential> credential) noexcept {
-    if (credential == nullptr || credential->tls_chain().empty() || credential->tls_key().empty()) {
+common::IoErr TlsServerHandshakeConfig::add_borrowed_credential(const TlsCredential &credential) noexcept {
+    if (credential.empty()) {
         return common::IoErr::Invalid;
     }
-    // Staged by pointer, kept alive by the handshake's owner slot for as long
-    // as the engine may still read it (HRR defers Certificate/CertificateVerify
-    // past the callback by a full round trip).
-    stage(*credential);
-    *credential_owner_ = std::move(credential);
+    // Staged by pointer: the caller keeps the material alive for the
+    // handshake (the documented param contract — server options hold their
+    // material). The single engine slot now points here, so an earlier owner
+    // is dead weight.
+    stage(credential);
+    credential_owner_->reset();
     return common::IoErr::None;
 }
 

@@ -64,7 +64,7 @@ struct TlsCert {
     TlsCert &operator=(const TlsCert &) = delete;
 };
 
-fiber::common::IoResult<std::unique_ptr<fiber::net::TlsCredential>> create_server_tls_credential(const TlsCert &cert) {
+fiber::common::IoResult<fiber::net::TlsCredential> create_server_tls_credential(const TlsCert &cert) {
     fiber::net::TlsCredentialOptions material{};
     material.certificate_chain = fiber::net::TlsPemSource::from_file(cert.cert_path);
     material.private_key = fiber::net::TlsPemSource::from_file(cert.key_path);
@@ -467,7 +467,7 @@ TEST(GrpcClientTest, StreamUnaryRoundTrip) {
     ASSERT_TRUE(tls_credential);
     fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = tls_credential->get();
+    server_options.tls.configure_ctx = &*tls_credential;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::Server *> server_promise;
@@ -522,7 +522,7 @@ TEST(GrpcClientTest, StreamUnaryReturnsGrpcError) {
     ASSERT_TRUE(tls_credential);
     fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = tls_credential->get();
+    server_options.tls.configure_ctx = &*tls_credential;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::Server *> server_promise;
@@ -574,7 +574,7 @@ TEST(GrpcClientTest, RepeatedUnaryCallsWorkWithoutHpackDynamicTable) {
     ASSERT_TRUE(tls_credential);
     fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = tls_credential->get();
+    server_options.tls.configure_ctx = &*tls_credential;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::Server *> server_promise;
@@ -632,7 +632,7 @@ TEST(GrpcClientTest, ImmediateShutdownReleasesAllConnectionCloseWaiters) {
     ASSERT_TRUE(tls_credential);
     fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = tls_credential->get();
+    server_options.tls.configure_ctx = &*tls_credential;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::Server *> server_promise;

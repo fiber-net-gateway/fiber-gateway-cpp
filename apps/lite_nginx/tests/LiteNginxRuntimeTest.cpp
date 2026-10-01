@@ -1346,12 +1346,12 @@ private:
             std::lock_guard lock(self->mutex_);
             self->server_name_.assign(client_hello.server_name);
         }
-        return config.add_credential(*self->tls_credential_);
+        return config.add_borrowed_credential(self->tls_credential_);
     }
 
     TestPemFile cert_;
     TestPemFile key_;
-    std::unique_ptr<fiber::net::TlsCredential> tls_credential_;
+    fiber::net::TlsCredential tls_credential_;
     fiber::event::EventLoopGroup group_{1};
     fiber::http::Server *server_ = nullptr;
     std::uint16_t port_ = 0;
@@ -3890,7 +3890,7 @@ TEST(LiteNginxRuntimeTest, GzipWriterUsesNativeHttp3StreamCompletion) {
     ASSERT_TRUE(tls_credential);
     fiber::http::Http3Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = tls_credential->get();
+    server_options.tls.configure_ctx = &*tls_credential;
 
     fiber::http::HttpHandler handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {
         static const std::vector<std::string> kTypes{"text/plain"};

@@ -213,7 +213,7 @@ int main(int argc, char **argv) {
     fiber::http::Http2Endpoint::Options server_options{};
     server_options.http1.drain_unread_body = true;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = credential->get();
+    server_options.tls.configure_ctx = &*credential;
     fiber::http::Server server(accept_loop, handle_request, &worker_group);
     fiber::net::ListenOptions listen_options{};
     fiber::net::SocketAddress address(fiber::net::IpAddress::loopback_v4(), port);

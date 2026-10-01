@@ -296,7 +296,7 @@ TEST(HttpServerTlsDynamicCertTest, SelectorCallbackCanChooseNamedIdentityUsingSn
     credential_options.private_key = fiber::net::TlsPemSource::from_file(key.path);
     auto credential = fiber::net::TlsCredential::create(credential_options);
     ASSERT_TRUE(credential);
-    SelectorState selector_state{.selected_credential = credential->get()};
+    SelectorState selector_state{.selected_credential = &*credential};
     fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &configure_alt_identity;
     server_options.tls.configure_ctx = &selector_state;
@@ -354,7 +354,7 @@ TEST(HttpServerTlsDynamicCertTest, StaticCredentialCallbackServesAnySni) {
     ASSERT_TRUE(credential);
     fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = credential->get();
+    server_options.tls.configure_ctx = &*credential;
 
     std::promise<std::uint16_t> port_promise;
     std::promise<fiber::http::Server *> server_promise;
@@ -495,7 +495,7 @@ TEST(HttpServerTlsDynamicCertTest, ChunkedResponseEchoedOverTls) {
     ASSERT_TRUE(credential);
     fiber::http::Http2Endpoint::Options server_options;
     server_options.tls.configure_callback = &fiber::net::configure_tls_with_credential;
-    server_options.tls.configure_ctx = credential->get();
+    server_options.tls.configure_ctx = &*credential;
 
     const std::string body = "Hello, TLS chunked world!"; // 25 bytes = 0x19
     auto handler = [](fiber::http::HttpExchange &exchange) -> fiber::async::Task<void> {

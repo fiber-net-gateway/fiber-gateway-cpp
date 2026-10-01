@@ -227,7 +227,7 @@ DetachedTask run_probe(fiber::event::EventLoop *loop, const Options *o, int *exi
         }
         trust = std::move(*created);
     }
-    std::unique_ptr<fiber::net::TlsCredential> credential;
+    fiber::net::TlsCredential credential;
     if (!o->cert_file.empty()) {
         fiber::net::TlsCredentialOptions copts;
         copts.certificate_chain = fiber::net::TlsPemSource::from_file(o->cert_file);
@@ -252,7 +252,7 @@ DetachedTask run_probe(fiber::event::EventLoop *loop, const Options *o, int *exi
     fiber::net::TlsClientParam param;
     param.security.trust_store = trust.get();
     param.security.verify_peer = trust != nullptr;
-    param.security.credential = credential.get();
+    param.security.credential = credential.empty() ? nullptr : &credential;
     param.min_version = o->min_version;
     param.max_version = o->max_version;
     param.alpn = alpn_views;
@@ -371,7 +371,7 @@ DetachedTask run_server(fiber::event::EventLoop *loop, const Options *o, int *ex
     std::vector<std::string_view> alpn_views(o->alpn.begin(), o->alpn.end());
     fiber::net::TlsServerParam param;
     param.configure_callback = fiber::net::configure_tls_with_credential;
-    param.configure_ctx = credential->get();
+    param.configure_ctx = &*credential;
     param.trust_store = trust.get();
     param.client_certificate_mode = trust == nullptr         ? fiber::net::TlsClientCertificateMode::None
                                     : o->require_client_cert ? fiber::net::TlsClientCertificateMode::Required

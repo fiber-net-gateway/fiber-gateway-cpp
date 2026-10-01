@@ -299,15 +299,11 @@ std::string recv_all(int fd) {
     return out;
 }
 
-std::unique_ptr<fiber::net::TlsCredential> make_credential() {
+fiber::common::IoResult<fiber::net::TlsCredential> make_credential() {
     fiber::net::TlsCredentialOptions options{};
     options.certificate_chain = fiber::net::TlsPemSource::from_content(kSelfSignedCertPem);
     options.private_key = fiber::net::TlsPemSource::from_content(kSelfSignedKeyPem);
-    auto credential = fiber::net::TlsCredential::create(options);
-    if (!credential) {
-        return nullptr;
-    }
-    return std::move(*credential);
+    return fiber::net::TlsCredential::create(options);
 }
 
 fiber::http::HttpServerTlsOptions tls_options(fiber::net::TlsCredential &credential) {
@@ -324,7 +320,7 @@ TEST(Http2EndpointTest, ServesHttp2OverTlsAlpn) {
     client_group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     std::atomic<int> handled{0};
     auto running = start_server(group, Http2Endpoint::Options{
@@ -359,7 +355,7 @@ TEST(Http2EndpointTest, NegotiatesDownToHttp1WhenAllowed) {
     client_group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     std::atomic<int> handled{0};
     auto running = start_server(group, Http2Endpoint::Options{
@@ -551,7 +547,7 @@ TEST(Http2EndpointTest, DrainClosesAnIdleSession) {
     client_group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     auto running = start_server(
             group,
@@ -600,7 +596,7 @@ TEST(Http2EndpointTest, DrainWaitsForAnInFlightStream) {
     client_group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     std::promise<void> in_handler;
     auto in_handler_future = in_handler.get_future();
@@ -659,7 +655,7 @@ TEST(Http2EndpointTest, ConnectionsSpreadOverWorkerLoops) {
     client_group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     std::mutex loops_mu;
     std::set<fiber::event::EventLoop *> seen;
@@ -752,7 +748,7 @@ TEST(Http2EndpointTest, ConcurrentTlsHandshakesAndStopReleaseEveryConnection) {
     client_group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     constexpr std::string_view kBody = "h2-stress";
     Http2Endpoint::Options options{};
@@ -995,7 +991,7 @@ TEST(Http2EndpointTest, StreamedAutoBodyThroughPipeCompletes) {
     client_group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     std::promise<fiber::http::HttpBodyPipeResult> pipe_promise;
     auto pipe_future = pipe_promise.get_future();
@@ -1171,7 +1167,7 @@ TEST(Http2EndpointTest, RejectsBadTicketKeyMaterialBeforeListening) {
     group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     std::vector<std::vector<HttpServerTlsTicketKey>> bad_sets;
     HttpServerTlsTicketKey wrong_width = ticket_key(1);
@@ -1222,7 +1218,7 @@ TEST(Http2EndpointTest, ServesResumableTicketsAcrossServerRestart) {
     group.start();
 
     auto credential = make_credential();
-    ASSERT_NE(credential, nullptr);
+    ASSERT_TRUE(credential);
 
     const std::vector<HttpServerTlsTicketKey> keys = {ticket_key(4)};
     auto tls_with_tickets = tls_options(*credential);

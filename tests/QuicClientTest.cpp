@@ -104,7 +104,7 @@ fiber::async::Task<void> close_and_wait(fiber::quic::QuicConnection &connection)
 }
 
 struct QuicTestTls {
-    std::unique_ptr<fiber::net::TlsCredential> credential;
+    fiber::net::TlsCredential credential;
     std::unique_ptr<fiber::net::TrustStore> trust_store;
 };
 
@@ -133,18 +133,18 @@ fiber::common::IoResult<QuicTestTls> create_quic_tls(std::string_view certificat
 
 fiber::net::TlsClientSecurity make_quic_client_tls(const QuicTestTls &material, bool verify_peer = true) {
     fiber::net::TlsClientSecurity options{};
-    options.credential = material.credential.get();
+    options.credential = material.credential.empty() ? nullptr : &material.credential;
     options.trust_store = material.trust_store.get();
     options.verify_peer = verify_peer;
     return options;
 }
 
 fiber::net::TlsServerParam make_quic_server_tls(
-        const QuicTestTls &material,
+        QuicTestTls &material,
         fiber::net::TlsClientCertificateMode client_certificate_mode = fiber::net::TlsClientCertificateMode::None) {
     fiber::net::TlsServerParam options{};
     options.configure_callback = &fiber::net::configure_tls_with_credential;
-    options.configure_ctx = material.credential.get();
+    options.configure_ctx = material.credential.empty() ? nullptr : &material.credential;
     options.trust_store = material.trust_store.get();
     options.client_certificate_mode = client_certificate_mode;
     options.min_version = 0x0304;
@@ -643,22 +643,12 @@ fiber::async::DetachedTask connect_loopback(fiber::quic::QuicUdpEndpoint *server
 }
 
 // Dynamic credential ownership (issue #41): the configure callback hands the
-// selected identity over by an aliasing shared_ptr and the publisher retires
-// its reference at once — the QUIC session alone keeps it alive, and must let
-// go at its done-transition rather than at connection teardown.
-struct QuicIdentitySnapshot {
-    std::unique_ptr<fiber::net::TlsCredential> credential;
-    std::atomic_bool *destroyed = nullptr;
-
-    ~QuicIdentitySnapshot() {
-        if (destroyed != nullptr) {
-            destroyed->store(true, std::memory_order_release);
-        }
-    }
-};
-
+// published identity over through add_credential and the publisher retires
+// its handle at once — the QUIC session alone keeps it alive, and must let go
+// at its done-transition rather than at connection teardown. The test watches
+// a probe handle's use_count.
 struct QuicRotatingSelector {
-    std::shared_ptr<QuicIdentitySnapshot> published;
+    fiber::net::TlsCredential published;
     bool selected = false;
 };
 
@@ -666,12 +656,10 @@ fiber::common::IoErr quic_select_and_retire(void *ctx, fiber::net::TlsServerHand
                                             const fiber::tls::TlsClientHelloView &) noexcept {
     auto *selector = static_cast<QuicRotatingSelector *>(ctx);
     selector->selected = true;
-    if (selector->published == nullptr) {
+    if (selector->published.empty()) {
         return fiber::common::IoErr::Invalid;
     }
-    std::shared_ptr<QuicIdentitySnapshot> snapshot = std::move(selector->published);
-    const fiber::net::TlsCredential *credential = snapshot->credential.get();
-    return config.add_credential(std::shared_ptr<const fiber::net::TlsCredential>(std::move(snapshot), credential));
+    return config.add_credential(std::move(selector->published));
 }
 
 struct RetainedCredentialSummary {
@@ -683,7 +671,7 @@ struct RetainedCredentialSummary {
 fiber::async::DetachedTask connect_and_observe_release(fiber::quic::QuicUdpEndpoint *server_endpoint,
                                                        fiber::quic::QuicUdpEndpoint *client_endpoint,
                                                        const fiber::net::TlsClientSecurity *security,
-                                                       const std::atomic_bool *destroyed,
+                                                       const fiber::net::TlsCredential *probe,
                                                        std::promise<RetainedCredentialSummary> *promise) {
     RetainedCredentialSummary summary{};
     auto server_started = server_endpoint->start();
@@ -711,7 +699,7 @@ fiber::async::DetachedTask connect_and_observe_release(fiber::quic::QuicUdpEndpo
             // finished, while both connections are still open.
             summary.error = confirmed.error();
         } else {
-            summary.released_while_connected = destroyed->load(std::memory_order_acquire);
+            summary.released_while_connected = probe->use_count() == 1;
             summary.server_connections_when_checked = server_endpoint->active_connection_count();
         }
         co_await close_and_wait(connection);
@@ -1398,14 +1386,11 @@ TEST(QuicClientTest, RetainedDynamicCredentialReleasesAtHandshakeDone) {
     ASSERT_TRUE(cert.valid());
     ASSERT_TRUE(key.valid());
 
-    std::atomic_bool destroyed{false};
     auto server_material = create_quic_tls(cert.path(), key.path());
     ASSERT_TRUE(server_material);
-    auto snapshot = std::make_shared<QuicIdentitySnapshot>();
-    snapshot->credential = std::move(server_material->credential);
-    snapshot->destroyed = &destroyed;
     QuicRotatingSelector selector{};
-    selector.published = std::move(snapshot);
+    selector.published = std::move(server_material->credential);
+    const fiber::net::TlsCredential probe = selector.published;
 
     fiber::net::TlsServerParam server_tls = make_quic_server_tls(*server_material);
     server_tls.configure_callback = &quic_select_and_retire;
@@ -1432,7 +1417,7 @@ TEST(QuicClientTest, RetainedDynamicCredentialReleasesAtHandshakeDone) {
     std::promise<RetainedCredentialSummary> promise;
     auto future = promise.get_future();
     fiber::async::spawn(group.at(0), [&]() {
-        return connect_and_observe_release(&server_endpoint, &client_endpoint, &client_tls, &destroyed, &promise);
+        return connect_and_observe_release(&server_endpoint, &client_endpoint, &client_tls, &probe, &promise);
     });
 
     ASSERT_EQ(future.wait_for(5s), std::future_status::ready);
@@ -1441,7 +1426,7 @@ TEST(QuicClientTest, RetainedDynamicCredentialReleasesAtHandshakeDone) {
     EXPECT_TRUE(selector.selected);
     EXPECT_EQ(summary.server_connections_when_checked, 1u) << "the server connection is still alive";
     EXPECT_TRUE(summary.released_while_connected) << "released at the done-transition, not at teardown";
-    EXPECT_TRUE(destroyed.load(std::memory_order_acquire));
+    EXPECT_EQ(probe.use_count(), 1u);
 
     group.stop();
     group.join();

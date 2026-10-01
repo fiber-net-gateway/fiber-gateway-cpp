@@ -12,6 +12,7 @@
 #include <sys/uio.h>
 
 #include <fiber/common/Assert.h>
+#include <fiber/net/TlsCredential.h>
 #include <fiber/net/TlsServerHandshakeConfig.h>
 #include <fiber/net/TrustStore.h>
 #include <fiber/net/detail/TlsClientStaging.h>
@@ -91,8 +92,8 @@ bool version_bounds_ok(int min_version, int max_version) noexcept {
 // until the handshake co_returns. select_server_config re-stages per
 // ClientHello through the param's configure callback and latches its error
 // for handshake_once to report after flushing the fatal alert. A credential
-// the callback hands over by shared_ptr lands in credential_owner and dies
-// with the staging — after the engines.
+// the callback hands over through add_credential lands in credential_owner and
+// is released with the staging — after the engines.
 // ---------------------------------------------------------------------------
 
 struct TlsStreamFd::Handshake {
@@ -111,7 +112,7 @@ struct TlsStreamFd::Handshake {
     // Retains a dynamically selected credential while the server engine may
     // still read its chain/key; destroyed after the engines (member teardown
     // follows the destructor body).
-    std::shared_ptr<const TlsCredential> credential_owner;
+    TlsCredential credential_owner;
 
     ~Handshake() {
         delete client;
