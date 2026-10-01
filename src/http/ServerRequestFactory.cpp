@@ -2,7 +2,6 @@
 
 #include <fiber/common/Assert.h>
 #include <fiber/http/Http2Connection.h>
-#include "http/ServerHttp2Push.h"
 #include "http/ServerHttp2Request.h"
 
 namespace fiber::http {
