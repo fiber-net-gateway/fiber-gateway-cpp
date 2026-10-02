@@ -1121,7 +1121,7 @@ TEST(CatClientTest, ConnectionResetDropsOnlyThePartiallyWrittenFrame) {
     ASSERT_TRUE(closed_ready);
     const auto stats = stats_future.get();
     EXPECT_GT(stats.write_would_block, 0);
-    EXPECT_GE(stats.write_failures, 1);
+    EXPECT_EQ(stats.connection_failures, 1);
     EXPECT_EQ(stats.dropped_partial_frame, 1);
     EXPECT_EQ(stats.sent_messages, 0);
 }

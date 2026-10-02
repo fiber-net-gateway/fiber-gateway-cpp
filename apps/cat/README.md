@@ -218,6 +218,18 @@ frames for `try_writev`. `WouldBlock` arms a writable callback and a write deadl
 pumping through the local callback. Frames are concatenated on the raw TCP stream. If a connection fails after writing
 only a prefix of a frame, that partial frame is dropped rather than resumed on a new collector connection.
 
+Collector connections keep read and terminal callbacks active even when the send queue is empty. EOF (including a
+peer write-half-close), read errors, and terminal events close the connection and wake the reconnect controller.
+Unsolicited collector bytes are discarded with a fixed per-turn read budget. Intentional shutdown and Router switches
+remove callbacks before closing and do not count as failures. `connection_failures` counts all established-connection
+failures; `write_failures`, `read_failures`, and `peer_closes` identify failures observed by writes, reads, and EOF
+respectively (a terminal event may arrive before either I/O callback).
+
+Reconnect backoff also applies when a collector accepts and immediately closes. A connection that survives for at least
+`reconnect_max_delay` resets the next failure's delay to `reconnect_initial_delay`; a successful Router refresh retains
+its existing behavior of allowing an immediate retry. These event subscriptions detect peer closure, not silent network
+blackholes; write deadlines still start only after `WouldBlock`.
+
 Problem/system frames may overtake normal frames that have not started. Once any frame has written a prefix, it remains
 pinned until its complete frame boundary, so priority cannot interleave bytes. A Router refresh keeps the current
 connection when its collector remains present; removal switches a partially active connection only after that frame.

@@ -125,7 +125,8 @@ private:
 CatClientCore::CatClientCore(event::EventLoop &sender_loop, CatClientConfig config, CatClientOptions options,
                              dns::AddressResolver *resolver) noexcept :
     loop_(&sender_loop), config_(std::move(config)), options_(std::move(options)), resolver_(resolver),
-    message_id_generator_(config_.ip()), collectors_(config_.bootstrap_collectors()) {
+    message_id_generator_(config_.ip()), reconnect_delay_(options_.reconnect_initial_delay),
+    collectors_(config_.bootstrap_collectors()) {
     sample_cutoff_.store(sample_cutoff(options_.initial_sample_rate), std::memory_order_relaxed);
     control_publisher_ = control_wake_.acquire_publisher();
     FIBER_ASSERT(control_publisher_.has_value());
@@ -230,6 +231,9 @@ CatClientStats CatClientCore::stats() const noexcept {
             .connect_failures = stats_.connect_failures.load(std::memory_order_relaxed),
             .write_would_block = stats_.write_would_block.load(std::memory_order_relaxed),
             .write_failures = stats_.write_failures.load(std::memory_order_relaxed),
+            .connection_failures = stats_.connection_failures.load(std::memory_order_relaxed),
+            .read_failures = stats_.read_failures.load(std::memory_order_relaxed),
+            .peer_closes = stats_.peer_closes.load(std::memory_order_relaxed),
             .message_id_failures = stats_.message_id_failures.load(std::memory_order_relaxed),
             .context_failures = stats_.context_failures.load(std::memory_order_relaxed),
             .invalid_contexts = stats_.invalid_contexts.load(std::memory_order_relaxed),
@@ -785,12 +789,12 @@ void CatClientCore::drive_write() noexcept {
                 stats_.write_would_block.fetch_add(1, std::memory_order_relaxed);
                 arm_write_wait();
             } else {
-                fail_connection(written.error());
+                fail_connection(ConnectionFailure::Write);
             }
             return;
         }
         if (*written == 0) {
-            fail_connection(common::IoErr::BrokenPipe);
+            fail_connection(ConnectionFailure::Write);
             return;
         }
         pump_bytes += *written;
@@ -843,7 +847,7 @@ void CatClientCore::arm_write_wait() noexcept {
     FIBER_ASSERT(!write_callback_armed_);
     const common::IoErr result = stream_->set_write_callback(&CatClientCore::on_write_ready, this);
     if (result != common::IoErr::None) {
-        fail_connection(result);
+        fail_connection(ConnectionFailure::Write);
         return;
     }
     write_callback_armed_ = true;
@@ -865,7 +869,7 @@ void CatClientCore::on_write_ready(void *ctx, common::IoErr error) noexcept {
     auto *client = static_cast<CatClientCore *>(ctx);
     client->clear_write_wait();
     if (error != common::IoErr::None) {
-        client->fail_connection(error);
+        client->fail_connection(ConnectionFailure::Write);
         return;
     }
     client->drive_write();
@@ -873,30 +877,104 @@ void CatClientCore::on_write_ready(void *ctx, common::IoErr error) noexcept {
 
 void CatClientCore::on_write_timeout(CatClientCore *client) noexcept {
     client->clear_write_wait();
-    client->fail_connection(common::IoErr::TimedOut);
+    client->fail_connection(ConnectionFailure::Write);
 }
 
-void CatClientCore::fail_connection(common::IoErr /*error*/) noexcept {
+void CatClientCore::drive_read() noexcept {
     FIBER_ASSERT(loop_->in_loop());
-    stats_.write_failures.fetch_add(1, std::memory_order_relaxed);
+    FIBER_ASSERT(stream_);
+    // CAT has no collector response to decode. Drain unsolicited bytes with a
+    // fixed budget so a noisy peer cannot monopolize the sender EventLoop.
+    std::array<std::uint8_t, 4096> buffer;
+    for (std::size_t calls = 0; calls < 16; ++calls) {
+        const auto result = stream_->try_read(buffer.data(), buffer.size());
+        if (!result) {
+            if (result.error() != common::IoErr::WouldBlock) {
+                fail_connection(ConnectionFailure::Read);
+            }
+            return;
+        }
+        if (*result == 0) {
+            // Half-close is unusable for this one-way CAT connection too.
+            fail_connection(ConnectionFailure::PeerClosed);
+            return;
+        }
+    }
+    loop_->post_next<CatClientCore, &CatClientCore::read_defer_entry_, &CatClientCore::on_read_deferred>(*this);
+}
+
+void CatClientCore::on_read_ready(void *ctx, common::IoErr error) noexcept {
+    auto *client = static_cast<CatClientCore *>(ctx);
+    if (error != common::IoErr::None) {
+        client->fail_connection(ConnectionFailure::Read);
+        return;
+    }
+    client->drive_read();
+}
+
+void CatClientCore::on_read_deferred(CatClientCore *client) noexcept { client->drive_read(); }
+
+void CatClientCore::on_terminal(void *ctx, common::IoErr /*error*/) noexcept {
+    static_cast<CatClientCore *>(ctx)->fail_connection(ConnectionFailure::Terminal);
+}
+
+void CatClientCore::fail_connection(ConnectionFailure reason) noexcept {
+    FIBER_ASSERT(loop_->in_loop());
+    FIBER_ASSERT(stream_);
+    stats_.connection_failures.fetch_add(1, std::memory_order_relaxed);
+    switch (reason) {
+        case ConnectionFailure::Write:
+            stats_.write_failures.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case ConnectionFailure::Read:
+            stats_.read_failures.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case ConnectionFailure::PeerClosed:
+            stats_.peer_closes.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case ConnectionFailure::Terminal:
+            break;
+    }
     if (front_frame() && front_frame()->message.readable() != front_frame()->original_size) {
         drop_front_frame(true);
     }
+    const auto now = loop_->now();
+    // A successful handshake alone must not reset backoff: a collector may
+    // accept and immediately close every connection. Reset after a stable life.
+    if (now - connected_at_ >= options_.reconnect_max_delay) {
+        reconnect_delay_ = options_.reconnect_initial_delay;
+    }
+    next_connect_at_ = now + reconnect_delay_;
+    reconnect_delay_ = grow_backoff(reconnect_delay_, options_.reconnect_max_delay);
     close_connection();
     notify_control();
 }
 
-void CatClientCore::install_connection(std::unique_ptr<net::TcpStream> stream) noexcept {
+common::IoErr CatClientCore::install_connection(std::unique_ptr<net::TcpStream> stream) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     close_connection();
     stream_ = std::move(stream);
-    connection_stale_ = false;
+    auto result = stream_->set_read_callback(&CatClientCore::on_read_ready, this);
+    if (result == common::IoErr::None) {
+        result = stream_->set_terminal_callback(&CatClientCore::on_terminal, this);
+    }
+    if (result != common::IoErr::None) {
+        close_connection();
+        return result;
+    }
+    connected_at_ = loop_->now();
     schedule_pump();
+    return common::IoErr::None;
 }
 
 void CatClientCore::close_connection() noexcept {
+    loop_->cancel<CatClientCore, &CatClientCore::read_defer_entry_>(*this);
     clear_write_wait();
     if (stream_) {
+        // close() completes subscriptions synchronously. Detach all CAT
+        // callbacks first, including on intentional router/shutdown closes.
+        (void) stream_->clear_read_callback(&CatClientCore::on_read_ready, this);
+        (void) stream_->clear_terminal_callback(&CatClientCore::on_terminal, this);
         stream_->close();
         stream_.reset();
     }
@@ -962,8 +1040,6 @@ async::DetachedTask CatClientCore::run_control() noexcept {
     FIBER_ASSERT(loop_->in_loop());
     auto wake = control_wake_.subscribe();
     std::uint64_t wake_version = wake.current().version;
-    auto reconnect_delay = options_.reconnect_initial_delay;
-    auto next_connect_at = loop_->now();
     auto next_router_at = config_.routers().empty() ? std::chrono::steady_clock::time_point::max() : loop_->now();
 
     while (state() == CatClientState::Running) {
@@ -973,22 +1049,20 @@ async::DetachedTask CatClientCore::run_control() noexcept {
             now = loop_->now();
             next_router_at = now + (refreshed ? options_.router_refresh_interval : options_.reconnect_max_delay);
             if (refreshed) {
-                reconnect_delay = options_.reconnect_initial_delay;
-                next_connect_at = now;
+                reconnect_delay_ = options_.reconnect_initial_delay;
+                next_connect_at_ = now;
             }
         }
         if (state() != CatClientState::Running) {
             break;
         }
 
-        if (!blocked_.load(std::memory_order_acquire) && !stream_ && !collectors_.empty() && now >= next_connect_at) {
+        if (!blocked_.load(std::memory_order_acquire) && !stream_ && !collectors_.empty() && now >= next_connect_at_) {
             const bool connected = co_await connect_collector();
             now = loop_->now();
-            if (connected) {
-                reconnect_delay = options_.reconnect_initial_delay;
-            } else {
-                next_connect_at = now + reconnect_delay;
-                reconnect_delay = grow_backoff(reconnect_delay, options_.reconnect_max_delay);
+            if (!connected) {
+                next_connect_at_ = now + reconnect_delay_;
+                reconnect_delay_ = grow_backoff(reconnect_delay_, options_.reconnect_max_delay);
             }
         }
         if (state() != CatClientState::Running) {
@@ -998,7 +1072,7 @@ async::DetachedTask CatClientCore::run_control() noexcept {
         now = loop_->now();
         auto next_action = next_router_at;
         if (!blocked_.load(std::memory_order_acquire) && !stream_ && !collectors_.empty()) {
-            next_action = std::min(next_action, next_connect_at);
+            next_action = std::min(next_action, next_connect_at_);
         }
         if (next_action == std::chrono::steady_clock::time_point::max()) {
             next_action = now + options_.router_refresh_interval;
@@ -1246,8 +1320,11 @@ async::Task<bool> CatClientCore::connect_collector() noexcept {
             stats_.connect_failures.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
+        if (install_connection(std::move(stream)) != common::IoErr::None) {
+            stats_.connect_failures.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
         collector_index_ = (index + 1) % count;
-        install_connection(std::move(stream));
         stats_.connect_successes.fetch_add(1, std::memory_order_relaxed);
         co_return true;
     }

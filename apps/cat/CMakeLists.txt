@@ -31,6 +31,7 @@ if (FIBER_BUILD_TESTS AND (GTest_FOUND OR TARGET GTest::gtest_main))
     add_executable(fiber_cat_tests
         "${CMAKE_CURRENT_LIST_DIR}/tests/AggregationTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/CatClientTest.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/CatTransportTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/EncoderTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MessageIdTest.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/tests/MessageTest.cpp"
