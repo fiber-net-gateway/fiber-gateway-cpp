@@ -197,20 +197,18 @@ private:
         std::chrono::steady_clock::time_point ping_sent_at{};
         std::uint32_t payload_remaining = 0;
         std::size_t payload_offset = 0;
-        event::IoEvent wait_event = event::IoEvent::None;
         ParsePhase phase = ParsePhase::FrameHeader;
-        bool ready_hint = false;
-        bool operation_pending = false;
     };
 
+    // A pump stops when its direction tests not ready (the persistent
+    // transport subscription resumes it) or when a budget runs out
+    // (needs_reschedule: no edge will announce what is left).
     struct ReadPumpResult {
-        event::IoEvent wait_event = event::IoEvent::None;
         std::size_t bytes_read = 0;
         bool needs_reschedule = false;
     };
 
     struct OutboundPumpResult {
-        event::IoEvent wait_event = event::IoEvent::None;
         std::size_t bytes_written = 0;
         bool needs_reschedule = false;
     };
@@ -381,9 +379,11 @@ private:
     void abort_outbound(common::IoErr reason) noexcept;
     void drop_outbound_hook(Http2OutboundHook &hook) noexcept;
     [[nodiscard]] bool outbound_idle() const noexcept;
-    // The transport may still hold bytes it accepted (TLS sealed records the
-    // socket has not taken): its write direction is not ready.
-    [[nodiscard]] bool transport_draining() const noexcept;
+    // The connection still reads: not past the peer's EOF, not closing.
+    [[nodiscard]] bool inbound_wanted() const noexcept;
+    // The transport's write direction is not ready: blocked, or still holding
+    // bytes it accepted (TLS sealed records the socket has not taken).
+    [[nodiscard]] bool transport_write_blocked() const noexcept;
     [[nodiscard]] common::IoResult<ReadPumpResult> pump_read(std::size_t operation_budget,
                                                              std::size_t byte_budget) noexcept;
     [[nodiscard]] common::IoErr consume_read_buffer(std::size_t &operation_budget, std::size_t &byte_budget) noexcept;
@@ -480,7 +480,6 @@ private:
     std::chrono::steady_clock::time_point write_blocked_at_{};
     FramePayloadHook frame_payload_hook_ = nullptr;
     void *frame_payload_hook_ctx_ = nullptr;
-    event::IoEvent outbound_wait_event_ = event::IoEvent::None;
     State state_ = State::Init;
     bool stop_sending_requested_ = false;
     bool physical_read_registered_ = false;
@@ -495,7 +494,6 @@ private:
     bool state_dispatch_running_ = false;
     bool state_dispatch_again_ = false;
     bool prefer_write_ = false;
-    bool outbound_ready_hint_ = false;
     bool inbound_eof_ = false;
     bool close_flush_outbound_ = false;
     bool close_finished_ = false;

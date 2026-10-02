@@ -376,38 +376,29 @@ common::IoResult<Http2Connection::ReadPumpResult> Http2Connection::pump_read(std
             return result;
         }
 
-        // read_ready() covers what no edge announces: TLS plaintext opened
-        // from a wire read already consumed.
-        if (!inbound_io_.ready_hint && !transport_->read_ready()) {
-            result.wait_event = inbound_io_.operation_pending ? inbound_io_.wait_event : event::IoEvent::Read;
+        // The transport's read state is the only gate. Ready covers TLS
+        // plaintext no edge announces; a short read or WouldBlock leaves it
+        // not ready, and the read subscription reports the next transition —
+        // so no read is spent just to learn the socket ran dry.
+        if (!transport_->read_ready()) {
             return result;
         }
 
         // try_readv appends a fresh node; WouldBlock leaves the chain
         // untouched, so a pending retry has no buffer to keep stable.
         common::IoResult<std::size_t> read_result = transport_->try_readv(read_size, inbound_io_.read_buf);
-        inbound_io_.ready_hint = false;
         --operation_budget;
         if (!read_result) {
             if (read_result.error() == common::IoErr::WouldBlock) {
-                inbound_io_.operation_pending = true;
-                inbound_io_.wait_event = event::IoEvent::Read;
-                result.wait_event = event::IoEvent::Read;
-                return result;
+                return result; // the transport now tests not ready
             }
             return std::unexpected(read_result.error());
         }
-        inbound_io_.operation_pending = false;
         if (*read_result == 0) {
             handle_read_eof();
             return result;
         }
 
-        // A readiness notification permits draining the nonblocking transport
-        // until it reports WouldBlock. This also consumes any TLS plaintext
-        // that became available from the same socket event without waiting for
-        // another physical readiness edge.
-        inbound_io_.ready_hint = true;
         result.bytes_read += *read_result;
         byte_budget -= std::min(byte_budget, *read_result);
         inbound_io_.last_inbound_at = transport_->loop().now();
@@ -431,8 +422,6 @@ void Http2Connection::handle_read_eof() noexcept {
         return;
     }
     inbound_eof_ = true;
-    inbound_io_.operation_pending = false;
-    inbound_io_.wait_event = event::IoEvent::None;
     transition_state(State::Closing);
     close_flush_outbound_ = true;
     close_outbound();
@@ -467,13 +456,9 @@ void Http2Connection::handle_transport_ready(event::IoEvent event, common::IoErr
         enter_closing(err);
         return;
     }
-    const bool wakes_inbound = event::any(inbound_io_.wait_event & event);
-    const bool wakes_outbound = event::any(outbound_wait_event_ & event);
-    inbound_io_.ready_hint = inbound_io_.ready_hint || wakes_inbound;
-    outbound_ready_hint_ = outbound_ready_hint_ || wakes_outbound;
-    if (wakes_inbound != wakes_outbound) {
-        prefer_write_ = wakes_outbound;
-    }
+    // The transport's own state says what is ready; the direction that woke
+    // goes first.
+    prefer_write_ = event == event::IoEvent::Write;
     drive_io();
 }
 
@@ -529,8 +514,7 @@ void Http2Connection::drive_io() noexcept {
     bool write_progress = false;
 
     auto pump_inbound = [&]() noexcept -> bool {
-        if (state_ != State::Start && state_ != State::Running && state_ != State::Draining) {
-            inbound_io_.wait_event = event::IoEvent::None;
+        if (!inbound_wanted()) {
             return true;
         }
         auto result = pump_read(kIoPumpOperationBudget, byte_budget);
@@ -543,20 +527,13 @@ void Http2Connection::drive_io() noexcept {
             return false;
         }
         read_result = *result;
-        inbound_io_.wait_event = read_result.wait_event;
         return state_ != State::Closed;
     };
 
     auto pump_outbound = [&]() noexcept -> bool {
         if (outbound_stopped_) {
-            outbound_wait_event_ = event::IoEvent::None;
-            outbound_ready_hint_ = false;
             return true;
         }
-        if (outbound_wait_event_ != event::IoEvent::None && !outbound_ready_hint_) {
-            return true;
-        }
-        outbound_ready_hint_ = false;
         auto result = this->pump_outbound(byte_budget);
         if (!result) {
             enter_closing(result.error());
@@ -564,7 +541,6 @@ void Http2Connection::drive_io() noexcept {
         }
         write_result = *result;
         write_progress = write_result.bytes_written != 0;
-        outbound_wait_event_ = write_result.wait_event;
         return state_ != State::Closed;
     };
 
@@ -612,44 +588,21 @@ void Http2Connection::drive_io() noexcept {
 }
 
 common::IoErr Http2Connection::sync_transport_callbacks() noexcept {
-    event::IoEvent wanted = inbound_io_.wait_event | outbound_wait_event_;
-    bool want_read = event::any(wanted & event::IoEvent::Read);
-    bool want_write = event::any(wanted & event::IoEvent::Write);
-
-    // A direction that still tests Ready must be advanced by doing I/O, not by
-    // subscribing: the subscription contract rejects a Ready direction. TLS can
-    // report WouldBlock for one logical direction while the other physical fd
-    // direction stayed Ready (e.g. SSL_read blocked on a BIO write that fully
-    // drained the socket buffer). Mirror handle_transport_ready's hint updates
-    // and let the pump retry instead of installing a subscription.
-    event::IoEvent ready_events = event::IoEvent::None;
-    if (want_read && transport_->read_ready()) {
-        ready_events |= event::IoEvent::Read;
-    }
-    if (want_write && transport_->write_ready()) {
-        ready_events |= event::IoEvent::Write;
-    }
-    if (ready_events != event::IoEvent::None) {
-        const bool wakes_inbound = event::any(inbound_io_.wait_event & ready_events);
-        const bool wakes_outbound = event::any(outbound_wait_event_ & ready_events);
-        inbound_io_.ready_hint = inbound_io_.ready_hint || wakes_inbound;
-        outbound_ready_hint_ = outbound_ready_hint_ || wakes_outbound;
-        if (wakes_inbound != wakes_outbound) {
-            prefer_write_ = wakes_outbound;
-        }
-        io_pump_again_ = true;
-        want_read = want_read && !event::any(ready_events & event::IoEvent::Read);
-        want_write = want_write && !event::any(ready_events & event::IoEvent::Write);
-    }
-
-    if (want_read && !physical_read_registered_) {
+    // Subscriptions are persistent and report each transition to Ready, so a
+    // wanted direction subscribes once — when it first tests not ready, as
+    // the contract rejects subscribing a Ready one — and keeps it until the
+    // direction is no longer wanted. A wanted direction still testing Ready
+    // here was cut short by a budget, and its pump asked for a reschedule.
+    const bool want_read = inbound_wanted();
+    const bool want_write = !outbound_stopped_;
+    if (want_read && !physical_read_registered_ && !transport_->read_ready()) {
         common::IoErr err = transport_->set_read_callback(&Http2Connection::on_transport_read_ready, this);
         if (err != common::IoErr::None) {
             return err;
         }
         physical_read_registered_ = true;
     }
-    if (want_write && !physical_write_registered_) {
+    if (want_write && !physical_write_registered_ && !transport_->write_ready()) {
         common::IoErr err = transport_->set_write_callback(&Http2Connection::on_transport_write_ready, this);
         if (err != common::IoErr::None) {
             return err;
@@ -731,7 +684,9 @@ void Http2Connection::arm_write_timer(bool made_progress) noexcept {
     }
     event::EventLoop &event_loop = transport_->loop();
     event_loop.cancel<Http2Connection, &Http2Connection::write_timer_entry_>(*this);
-    if (outbound_wait_event_ == event::IoEvent::None || options_.write_timeout == std::chrono::milliseconds::max() ||
+    // Armed while bytes wait on the transport: blocked, or accepted and still
+    // draining.
+    if (outbound_stopped_ || !transport_write_blocked() || options_.write_timeout == std::chrono::milliseconds::max() ||
         state_ == State::Closed) {
         write_blocked_at_ = {};
         return;
@@ -1005,8 +960,6 @@ void Http2Connection::close_after_connection_error(common::IoErr reason) noexcep
     local_goaway_last_stream_id_ = last_peer_stream_id_;
     stop_sending_requested_ = true;
     stop_sending_reason_ = reason;
-    inbound_io_.operation_pending = false;
-    inbound_io_.wait_event = event::IoEvent::None;
     clear_inbound_stream();
     transition_state(State::Closing);
     if (state_ == State::Closed) {
@@ -2048,11 +2001,7 @@ void Http2Connection::enter_closing(common::IoErr reason, bool report_error) noe
     if (state_ == State::Closed)
         return;
     clear_inbound_stream();
-    inbound_io_.wait_event = event::IoEvent::None;
-    inbound_io_.operation_pending = false;
-    outbound_ready_hint_ = false;
     abort_outbound(reason);
-    outbound_wait_event_ = event::IoEvent::None;
     finish_connection();
 }
 
@@ -2294,13 +2243,8 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
     while (!outbound_stopped_ && state_ != State::Closed && result.bytes_written < byte_budget) {
         encode_ready_streams();
         if (inflight_outbound_chain_.empty()) {
-            if (transport_draining()) {
-                // Bytes the transport accepted may still be draining (TLS):
-                // wait for write readiness, which reports their drain, so a
-                // close cannot cut them off and the write timeout bounds them.
-                result.wait_event = event::IoEvent::Write;
-                return result;
-            }
+            // Not idle while the transport still drains what it accepted
+            // (outbound_idle): a close cannot cut those bytes off.
             if (outbound_closed_ && outbound_idle()) {
                 outbound_stopped_ = true;
             }
@@ -2310,12 +2254,16 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
             abort_outbound(common::IoErr::Invalid);
             return std::unexpected(common::IoErr::Invalid);
         }
+        if (!transport_->write_ready()) {
+            // Blocked, or still draining bytes it accepted (TLS): a write
+            // could only fail. The write subscription resumes the pump.
+            return result;
+        }
 
         common::IoResult<std::size_t> written_result = transport_->try_writev(inflight_outbound_chain_);
         if (!written_result) {
             if (written_result.error() == common::IoErr::WouldBlock) {
-                result.wait_event = event::IoEvent::Write;
-                return result;
+                return result; // the transport now tests not ready
             }
             abort_outbound(written_result.error());
             return std::unexpected(written_result.error());
@@ -2328,13 +2276,10 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
         result.bytes_written += *written_result;
         finish_written_outbound_hooks(*written_result);
     }
-    result.needs_reschedule =
-            !outbound_stopped_ && (!inflight_outbound_chain_.empty() || !outbound_ready_queue_.empty());
-    if (!result.needs_reschedule && !outbound_stopped_ && transport_draining()) {
-        // The budget ran out as the chain emptied: wait for the drain, as above.
-        result.wait_event = event::IoEvent::Write;
-        return result;
-    }
+    // The budget ran out: continue only while the transport still takes
+    // bytes, else the write subscription resumes the pump.
+    result.needs_reschedule = !outbound_stopped_ && !transport_write_blocked() &&
+                              (!inflight_outbound_chain_.empty() || !outbound_ready_queue_.empty());
     if (outbound_closed_ && outbound_idle()) {
         outbound_stopped_ = true;
         result.needs_reschedule = false;
@@ -2344,14 +2289,18 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
 
 bool Http2Connection::outbound_idle() const noexcept {
     return outbound_ready_queue_.empty() && inflight_outbound_hooks_.empty() && inflight_outbound_chain_.empty() &&
-           connection_window_waiters_.empty() && !transport_draining();
+           connection_window_waiters_.empty() && !transport_write_blocked();
 }
 
-bool Http2Connection::transport_draining() const noexcept {
-    // Ready implies everything accepted is on the wire; not Ready also covers
-    // a socket that merely has not reported writable yet, which costs one
-    // wait for an edge that comes at once. A closed transport has dropped
-    // whatever it held.
+bool Http2Connection::inbound_wanted() const noexcept {
+    return !inbound_eof_ && (state_ == State::Start || state_ == State::Running || state_ == State::Draining);
+}
+
+bool Http2Connection::transport_write_blocked() const noexcept {
+    // Ready implies everything accepted is on the wire. Not Ready also covers
+    // a socket that has not reported writable yet, which costs one wait for
+    // an edge that comes at once. A closed transport has dropped whatever it
+    // held.
     return transport_ && transport_->valid() && !transport_->write_ready();
 }
 
