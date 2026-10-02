@@ -24,13 +24,13 @@ GcBinary *gc_new_binary(GcHeap *heap, const std::uint8_t *data, std::size_t len)
     bin->len = len;
     bin->data = nullptr;
     if (len > 0 && !data) {
-        heap->alloc.free(bin);
+        gc_free_storage(heap, bin, sizeof(GcBinary));
         return nullptr;
     }
     if (len > 0) {
         bin->data = static_cast<std::uint8_t *>(gc_alloc_extra(heap, len));
         if (!bin->data) {
-            heap->alloc.free(bin);
+            gc_free_storage(heap, bin, sizeof(GcBinary));
             return nullptr;
         }
         std::memcpy(bin->data, data, len);
@@ -53,7 +53,7 @@ GcArray *gc_new_array(GcHeap *heap, std::size_t capacity) {
     if (capacity > 0) {
         arr->elems = static_cast<JsValue *>(gc_alloc_extra(heap, array_storage_bytes(capacity)));
         if (!arr->elems) {
-            heap->alloc.free(arr);
+            gc_free_storage(heap, arr, sizeof(GcArray));
             return nullptr;
         }
         for (std::size_t i = 0; i < capacity; ++i) {

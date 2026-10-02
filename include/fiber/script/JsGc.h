@@ -18,6 +18,13 @@ namespace fiber::script {
 
 struct GcHeader;
 struct GcString;
+class GcHeap;
+
+namespace gc_detail {
+void *gc_alloc_storage(GcHeap *heap, std::size_t bytes) noexcept;
+void gc_free_storage(GcHeap *heap, void *ptr, std::size_t bytes) noexcept;
+void gc_account_add(GcHeap *heap, std::size_t bytes);
+} // namespace gc_detail
 
 enum class GcIterStep : std::uint8_t {
     Item,
@@ -72,8 +79,28 @@ constexpr bool operator!=(ValueHandle handle, std::nullptr_t) noexcept { return 
 constexpr bool operator!=(std::nullptr_t, ValueHandle handle) noexcept { return static_cast<bool>(handle); }
 
 struct GcCollectStats {
+    // Bytes remaining after collection, and bytes reclaimed by this collection.
     std::size_t total = 0;
     std::size_t freed = 0;
+};
+
+// Per-heap lifetime counters for GC objects and their backing storage, measured
+// in requested bytes. Excludes string intern buckets, root handle pools, and
+// allocator overhead. Counts memory blocks, not script objects. Successful
+// allocations later rolled back are included; failed allocations are not.
+struct GcHeapStats {
+    std::uint64_t allocated_bytes_total = 0;
+    std::uint64_t freed_bytes_total = 0;
+    std::uint64_t allocation_count = 0;
+    std::uint64_t free_count = 0;
+    // GC-accounted bytes: object headers enter accounting when linked. During
+    // construction, unlinked headers are included only in allocation counters.
+    std::size_t current_bytes = 0;
+    std::size_t peak_bytes = 0;
+    // Completed mark/sweep cycles only, including cycles reclaiming zero bytes.
+    // Deferred requests and heap destruction do not count as collections.
+    std::uint64_t gc_count = 0;
+    std::uint64_t gc_freed_bytes_total = 0;
 };
 
 class GcHeap final : public GcRootSource {
@@ -100,6 +127,8 @@ public:
     void visit_roots(fiber::script::GcRootVisitor &visitor) noexcept override;
 
     GcCollectStats collect();
+    // Read on the heap's owning thread; returns an independent value snapshot.
+    [[nodiscard]] GcHeapStats stats() const noexcept;
     void maybe_collect_for_alloc(std::size_t bytes);
     [[nodiscard]] bool no_gc_active() const noexcept { return no_gc_depth_ != 0; }
 
@@ -124,6 +153,9 @@ private:
     };
 
     friend class LocalMark;
+    friend void *gc_detail::gc_alloc_storage(GcHeap *heap, std::size_t bytes) noexcept;
+    friend void gc_detail::gc_free_storage(GcHeap *heap, void *ptr, std::size_t bytes) noexcept;
+    friend void gc_detail::gc_account_add(GcHeap *heap, std::size_t bytes);
 
     [[nodiscard]] LocalState mark_local() const noexcept;
     void restore_local(LocalState state) noexcept;
@@ -153,6 +185,14 @@ private:
     std::uint32_t no_gc_depth_ = 0;
     bool gc_pending_ = false;
     bool collecting_ = false;
+
+    std::uint64_t allocated_bytes_total_ = 0;
+    std::uint64_t freed_bytes_total_ = 0;
+    std::uint64_t allocation_count_ = 0;
+    std::uint64_t free_count_ = 0;
+    std::size_t peak_bytes_ = 0;
+    std::uint64_t gc_count_ = 0;
+    std::uint64_t gc_freed_bytes_total_ = 0;
 };
 
 class GcHeap::LocalMark {
