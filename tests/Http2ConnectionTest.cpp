@@ -50,9 +50,9 @@ constexpr std::string_view kClientConnectionPreface = "PRI * HTTP/2.0\r\n\r\nSM\
 class FakeHttpTransport final : public fiber::test::HttpTransportStub {
 public:
     explicit FakeHttpTransport(std::vector<std::string> chunks, std::vector<size_t> write_steps = {},
-                               bool block_reads = false, bool hold_eof = false, bool report_pending_read = true) :
+                               bool block_reads = false, bool hold_eof = false) :
         chunks_(std::move(chunks)), write_steps_(std::move(write_steps)), reads_blocked_(block_reads),
-        hold_eof_(hold_eof), report_pending_read_(report_pending_read) {}
+        hold_eof_(hold_eof) {}
 
     fiber::async::Task<fiber::common::IoResult<void>> shutdown(std::chrono::milliseconds) override {
         ++shutdown_count_;
@@ -68,7 +68,7 @@ public:
     }
 
     [[nodiscard]] bool read_ready() const noexcept override {
-        return report_pending_read_ && !reads_blocked_ && (!hold_eof_ || next_chunk_ < chunks_.size());
+        return !reads_blocked_ && (!hold_eof_ || next_chunk_ < chunks_.size());
     }
 
     fiber::common::IoResult<size_t> try_readv(size_t size, fiber::mem::IoBufChain &out) noexcept override {
@@ -198,7 +198,6 @@ private:
     bool closed_ = false;
     bool reads_blocked_ = false;
     bool hold_eof_ = false;
-    bool report_pending_read_ = true;
     std::size_t close_count_ = 0;
     std::size_t shutdown_count_ = 0;
     std::size_t wait_readable_call_count_ = 0;
@@ -241,15 +240,9 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
-    // A TimedOut step blocks the read direction until the connection
-    // subscribes; the next step then counts as arrived, unannounced, for the
-    // connection's next pump (its read timer) to find.
+    // A TimedOut step leaves the peer silent until the connection writes —
+    // its keepalive PING — which the peer answers with the next step.
     [[nodiscard]] bool read_ready() const noexcept override { return !read_blocked_ && next_action_ < actions_.size(); }
-
-    fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override {
-        read_blocked_ = false;
-        return HttpTransportStub::set_read_callback(callback, ctx);
-    }
 
     fiber::common::IoResult<size_t> try_readv(size_t size, fiber::mem::IoBufChain &out) noexcept override {
         ++read_into_call_count_;
@@ -297,6 +290,10 @@ public:
             out += iov[i].iov_len;
         }
         buf.consume_and_compact(out);
+        if (read_blocked_ && out > 0) {
+            read_blocked_ = false;
+            notify_read_ready();
+        }
         return out;
     }
 
@@ -2924,7 +2921,9 @@ TEST(Http2ConnectionTest, StartDrivesIoAndNotifiesClosureWithoutRunCoroutine) {
     });
 }
 
-TEST(Http2ConnectionTest, ReadinessCallbackDrainsTransportUntilWouldBlock) {
+// A readiness callback drains the transport until it tests not ready: no
+// further read is spent to learn it ran dry.
+TEST(Http2ConnectionTest, ReadinessCallbackDrainsTransportUntilNotReady) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         fiber::event::EventLoopGroup group(1);
         auto promise = std::make_shared<std::promise<RunOutcome>>();
@@ -2937,8 +2936,7 @@ TEST(Http2ConnectionTest, ReadinessCallbackDrainsTransportUntilWouldBlock) {
                     make_frame(3, 0xA, 0x0, 1, "one"),
                     make_frame(3, 0xA, 0x0, 1, "two"),
             };
-            auto transport =
-                    std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, true, true, false);
+            auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks), std::vector<size_t>{}, true, true);
             FakeHttpTransport *transport_impl = transport.get();
             RecordingHttp2Connection connection(std::move(transport), options);
 
@@ -2961,7 +2959,7 @@ TEST(Http2ConnectionTest, ReadinessCallbackDrainsTransportUntilWouldBlock) {
         ASSERT_EQ(outcome.chunks.size(), 2U);
         EXPECT_EQ(iobuf_to_string(outcome.chunks[0].payload), "one");
         EXPECT_EQ(iobuf_to_string(outcome.chunks[1].payload), "two");
-        EXPECT_EQ(outcome.read_into_call_count, 3U);
+        EXPECT_EQ(outcome.read_into_call_count, 2U);
     });
 }
 
