@@ -39,8 +39,6 @@ public:
     // as Ready.
     [[nodiscard]] bool read_ready() const noexcept;
     [[nodiscard]] bool write_ready() const noexcept;
-    // Accepted output still draining, see detail::TlsStreamFd.
-    [[nodiscard]] bool has_pending_write() const noexcept;
     [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
     void close();
 

@@ -66,15 +66,15 @@ public:
         notify_write_ready();
     }
     // Accepted output the transport still holds, like TLS records the socket
-    // has not taken: try_writev reports it, has_pending_write() keeps it until
-    // the release, which then announces write readiness.
+    // has not taken: try_writev reports it, and the write direction stays not
+    // ready until the release, which then announces write readiness.
     void release_held() {
         hold_writes = false;
         written.append(held);
         held.clear();
         notify_write_ready();
     }
-    bool has_pending_write() const noexcept override { return !held.empty(); }
+    bool write_ready() const noexcept override { return !block_write && held.empty(); }
     common::IoResult<std::size_t> try_readv(std::size_t size, mem::IoBufChain &out) noexcept override {
         if (incoming.empty() && !eof) {
             return std::unexpected(IoErr::WouldBlock);

@@ -45,9 +45,11 @@ public:
     // installing a readiness subscription for it violates the subscription
     // contract. Read readiness includes what no fd edge announces (TLS
     // plaintext opened from a wire read already consumed), so a reader
-    // drains until WouldBlock or until this turns false.
+    // drains until WouldBlock or until this turns false. Write readiness
+    // excludes accepted bytes still held (TLS sealed records the socket has
+    // not taken): Ready implies everything accepted is on the wire.
     [[nodiscard]] virtual bool read_ready() const noexcept = 0;
-    [[nodiscard]] virtual bool write_ready() const noexcept { return false; }
+    [[nodiscard]] virtual bool write_ready() const noexcept = 0;
 
     // Loop handover, see net::detail::RWFd. detach runs on the current loop
     // and requires no active I/O, subscriptions or pending buffers; adopt runs
@@ -71,17 +73,13 @@ public:
     // Writes consume from the front of `buf` and may complete partially; loop
     // until readable_bytes() == 0. No transport keeps a reference to the
     // chain past the call. Bytes try_writev reports may still sit in the
-    // transport (TLS: sealed records the socket has not taken, see
-    // has_pending_write); they drain on their own, and the write direction
-    // turns ready only once they have. writev returns once its bytes are on
-    // the wire.
+    // transport (TLS: sealed records the socket has not taken); they drain on
+    // their own, and the write direction turns ready only once they have.
+    // close() drops them, so a graceful closer waits for write readiness
+    // first. writev returns once its bytes are on the wire.
     [[nodiscard]] virtual common::IoResult<size_t> try_writev(mem::IoBufChain &buf) noexcept = 0;
     virtual fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                                 std::chrono::milliseconds timeout) = 0;
-    // Accepted bytes the transport has not handed to the socket yet. close()
-    // drops them: a graceful closer waits for write readiness until this
-    // clears.
-    [[nodiscard]] virtual bool has_pending_write() const noexcept { return false; }
     virtual void close() = 0;
     [[nodiscard]] virtual bool valid() const noexcept = 0;
     [[nodiscard]] virtual bool terminal() const noexcept = 0;
@@ -165,7 +163,6 @@ public:
     [[nodiscard]] common::IoResult<size_t> try_writev(mem::IoBufChain &buf) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                         std::chrono::milliseconds timeout) override;
-    [[nodiscard]] bool has_pending_write() const noexcept override;
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
     [[nodiscard]] bool terminal() const noexcept override;

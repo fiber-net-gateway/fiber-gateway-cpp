@@ -381,6 +381,9 @@ private:
     void abort_outbound(common::IoErr reason) noexcept;
     void drop_outbound_hook(Http2OutboundHook &hook) noexcept;
     [[nodiscard]] bool outbound_idle() const noexcept;
+    // The transport may still hold bytes it accepted (TLS sealed records the
+    // socket has not taken): its write direction is not ready.
+    [[nodiscard]] bool transport_draining() const noexcept;
     [[nodiscard]] common::IoResult<ReadPumpResult> pump_read(std::size_t operation_budget,
                                                              std::size_t byte_budget) noexcept;
     [[nodiscard]] common::IoErr consume_read_buffer(std::size_t &operation_budget, std::size_t &byte_budget) noexcept;

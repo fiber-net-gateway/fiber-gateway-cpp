@@ -162,6 +162,7 @@ public:
     // Later writes take at most `bytes` in total, then report WouldBlock until
     // release_writes() lifts the cap and signals write readiness.
     void limit_writes(size_t bytes) noexcept { write_limit_ = bytes; }
+    [[nodiscard]] bool write_ready() const noexcept override { return !write_limit_ || *write_limit_ > 0; }
     void release_writes() noexcept {
         write_limit_.reset();
         notify_write_ready();

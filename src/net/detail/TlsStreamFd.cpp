@@ -381,9 +381,11 @@ void TlsStreamFd::handle_stream_writable() noexcept {
         unsubscribe_stream_write();
         return;
     }
-    // Drained (or failed: the subscriber's next write reports it). Last: the
-    // subscriber may write, re-subscribe or clear from here, and the transport
-    // contract keeps this object alive until dispatch returns.
+    // Drained (or failed: the subscriber's next write reports it), and the
+    // socket stayed Ready. Last: the subscriber may write, re-subscribe or
+    // clear from here, and the transport contract keeps this object alive
+    // until dispatch returns.
+    FIBER_ASSERT(write_ready());
     write_callback_(write_callback_ctx_, fiber::common::IoErr::None);
 }
 
@@ -398,11 +400,10 @@ fiber::common::IoErr TlsStreamFd::flush_connected() noexcept {
     fiber::common::IoErr err = flush_output(event);
     if (err == fiber::common::IoErr::None) {
         if (draining_) {
-            // A direct flush (poll_shutdown) finished a drain in flight.
+            // A direct flush (poll_shutdown, which runs without a write
+            // subscriber) finished a drain in flight.
             draining_ = false;
-            if (write_callback_ == nullptr) {
-                unsubscribe_stream_write();
-            }
+            unsubscribe_stream_write();
         }
         return err;
     }
@@ -860,6 +861,10 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
     if (!stream_fd_.valid()) {
         return fiber::common::IoErr::BadFd;
     }
+    // A shutdown waits for writability on its own (wait_writable between
+    // calls). Its flush may finish a drain inline, leaving the socket Ready:
+    // no edge follows, so a standing write subscriber would never hear of it.
+    FIBER_ASSERT(write_callback_ == nullptr);
     if (!handshake_done_ || !conn_) {
         // Nothing to close gracefully (never started / mid-handshake).
         return fiber::common::IoErr::None;

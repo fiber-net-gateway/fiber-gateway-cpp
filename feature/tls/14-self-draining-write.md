@@ -136,3 +136,22 @@ utime+stime ÷ 成功请求数。before = HEAD（b34e2b0d），after = 本实现
 - h2 get64k 和 get1m 的 CPU 有约 +1% 的倾向（成对比较 6/8 更高），低于 8 个样本能分辨的 ±3%，
   没有确认。可能的来源：出站 chain 清空而 transport 还有未写完的数据时，H2 现在要等一次写就绪，
   drain 完成后多一轮 `drive_io`。如果以后需要压这 1%，可以只在关闭阶段才等 drain。
+
+## 8. 后续：只用 write_ready() 对外（2026-10-02）
+
+`write_ready() = write_error_ || (out_pending_.empty() && fd Ready)`，锁存错误时 `fail_write` 已清空
+`out_pending_`，所以 Ready 必然意味着已接受的字节都上了线。`!write_ready()` 是原 `has_pending_write()`
+的保守超集，多出来的只有"fd 还没报告过可写（Unknown）且没有积压"这一种情况：订阅后 ET 会立即给一个
+边沿，多一次唤醒，不会卡住；H2 连接一开始就写 preface/SETTINGS，也不做 handover，实际碰不到。
+（Blocked 只来自 WouldBlock，而 WouldBlock 时 TLS 的 `out_pending_`、TCP 上 H2 的 inflight chain
+都一定非空。）
+
+因此：
+- 删除 `HttpTransport`/`TlsTransport`/`TlsTcpStream`/`TlsStreamFd` 的 `has_pending_write()`；
+  `HttpTransport::write_ready()` 改为纯虚——H2 的空闲判断依赖它，不能默认 false。
+- H2 的三处改用 `transport_draining() = transport_ && transport_->valid() && !write_ready()`；
+  `valid()` 排除已关闭的 transport（close 已丢弃积压，不能再去订阅）。
+- `shutdown_once` 断言没有 TLS 层写订阅者：它自己的 flush 可能就地写完 drain，socket 停在 Ready，
+  不会再有边沿，常驻订阅者永远收不到通知。目前只有 H1 调 transport 的 shutdown，H1 不挂常驻回调；
+  `TlsTransport::shutdown` 两次 `poll_shutdown` 之间用的 `WaitWritableAwaiter` 在恢复前已注销。
+- `handle_stream_writable` 通知订阅者前断言 `write_ready()`（drain 写完时 fd 必为 Ready，失败时错误已锁存）。
