@@ -19,8 +19,6 @@ std::string_view TlsTcpStream::selected_alpn() const noexcept { return stream_.s
 
 bool TlsTcpStream::handshake_done() const noexcept { return stream_.handshake_done(); }
 
-bool TlsTcpStream::has_pending_read() const noexcept { return stream_.has_pending_read(); }
-
 bool TlsTcpStream::terminal() const noexcept { return stream_.terminal(); }
 bool TlsTcpStream::peer_closed() const noexcept { return stream_.peer_closed(); }
 bool TlsTcpStream::read_ready() const noexcept { return stream_.read_ready(); }

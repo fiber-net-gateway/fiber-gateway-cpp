@@ -236,9 +236,10 @@ TlsTransport::~TlsTransport() = default;
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::wait_readable(std::chrono::milliseconds timeout) {
     FIBER_ASSERT(handshake_done());
-    // The stream's wait gate covers this too, but a zero timeout expires
-    // before any wait looks.
-    if (stream_.has_pending_read()) {
+    // A Ready stream (buffered plaintext included) completes at once. The
+    // stream's wait gate covers this too, but a zero timeout expires before
+    // any wait looks.
+    if (stream_.read_ready()) {
         co_return common::IoResult<void>{};
     }
 
@@ -341,8 +342,6 @@ bool TlsTransport::valid() const noexcept { return stream_.valid(); }
 
 bool TlsTransport::terminal() const noexcept { return stream_.terminal(); }
 bool TlsTransport::peer_closed() const noexcept { return stream_.peer_closed(); }
-
-bool TlsTransport::has_pending_read() const noexcept { return stream_.has_pending_read(); }
 
 int TlsTransport::fd() const noexcept { return stream_.fd(); }
 

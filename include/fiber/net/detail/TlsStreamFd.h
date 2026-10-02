@@ -77,12 +77,11 @@ public:
     // The negotiated protocol (stable until close() or destruction).
     [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
-    [[nodiscard]] bool has_pending_read() const noexcept;
     [[nodiscard]] bool terminal() const noexcept { return stream_fd_.terminal(); }
     [[nodiscard]] bool peer_closed() const noexcept { return stream_fd_.peer_closed(); }
     // Buffered plaintext (or a latched read result, see has_pending_read)
     // reads like a Ready fd: its wire bytes are already consumed, so no
-    // socket edge will announce it.
+    // socket edge will announce it. Callers see TLS buffering only here.
     [[nodiscard]] bool read_ready() const noexcept { return has_pending_read() || stream_fd_.read_ready(); }
     // Sealed output still draining makes the write direction not ready; a
     // latched write error makes it ready (the next write reports it).
@@ -121,8 +120,9 @@ public:
                                           std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
     [[nodiscard]] HandshakeTask handshake(const TlsServerParam &param,
                                           std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
-    // Completes without parking while has_pending_read(), like a wait on a
-    // Ready fd (a zero timeout still reports TimedOut, as for any RWFd wait).
+    // Completes without parking while a read result is buffered (plaintext
+    // or a latched terminal), like a wait on a Ready fd (a zero timeout still
+    // reports TimedOut, as for any RWFd wait).
     [[nodiscard]] StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     [[nodiscard]] WaitWritableAwaiter
@@ -156,6 +156,10 @@ public:
     writev(mem::IoBufChain &buf, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
 
 private:
+    // Decrypted plaintext (0-RTT included) or a latched read terminal — a
+    // read result no socket edge will announce. Folded into read_ready().
+    [[nodiscard]] bool has_pending_read() const noexcept;
+
     // Each handshake() is its own coroutine owning its staging and engine as
     // frame locals, dying with the frame at co_return or unwind. Staged
     // configs borrow the caller's param material under the documented param

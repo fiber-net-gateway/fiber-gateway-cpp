@@ -28,7 +28,6 @@ public:
 
     virtual fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) = 0;
     virtual fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) = 0;
-    [[nodiscard]] virtual bool has_pending_read() const noexcept { return false; }
 
     // Readiness callbacks are persistent and run on loop(). close() completes
     // registered callbacks with Canceled. Callers may update registration from
@@ -42,10 +41,12 @@ public:
     virtual common::IoErr clear_write_callback(ReadyCallback callback, void *ctx) noexcept = 0;
     virtual common::IoErr clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept = 0;
 
-    // Direction readiness of the underlying fd. A Ready direction must be
-    // advanced by doing I/O; installing a readiness subscription for it
-    // violates the subscription contract.
-    [[nodiscard]] virtual bool read_ready() const noexcept { return false; }
+    // Direction readiness. A Ready direction must be advanced by doing I/O;
+    // installing a readiness subscription for it violates the subscription
+    // contract. Read readiness includes what no fd edge announces (TLS
+    // plaintext opened from a wire read already consumed), so a reader
+    // drains until WouldBlock or until this turns false.
+    [[nodiscard]] virtual bool read_ready() const noexcept = 0;
     [[nodiscard]] virtual bool write_ready() const noexcept { return false; }
 
     // Loop handover, see net::detail::RWFd. detach runs on the current loop
@@ -101,7 +102,6 @@ public:
 
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
-    [[nodiscard]] bool has_pending_read() const noexcept override { return false; }
     common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;
@@ -148,7 +148,6 @@ public:
     handshake(const net::TlsServerParam &param, std::chrono::milliseconds timeout = net::kDefaultTlsHandshakeTimeout);
     fiber::async::Task<common::IoResult<void>> shutdown(std::chrono::milliseconds timeout) override;
     fiber::async::Task<common::IoResult<void>> wait_readable(std::chrono::milliseconds timeout) override;
-    [[nodiscard]] bool has_pending_read() const noexcept override;
     common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept override;
     common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept override;

@@ -46,6 +46,10 @@ public:
 
     [[nodiscard]] bool terminal() const noexcept override { return terminal_; }
 
+    // Fakes announce reads through notify_read_ready; one holding data it
+    // reads without an announcement reports it here.
+    [[nodiscard]] bool read_ready() const noexcept override { return false; }
+
     // Fakes are synchronous: one try_* operation per call, never WouldBlock.
     [[nodiscard]] common::IoResult<size_t> try_readv(size_t, mem::IoBufChain &) noexcept override {
         return std::unexpected(common::IoErr::NotSupported);

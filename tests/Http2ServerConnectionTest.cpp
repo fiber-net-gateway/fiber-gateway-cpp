@@ -52,7 +52,7 @@ std::uint32_t u32(const char *data) {
 // Growable strings are test wire captures, outside production request paths.
 class WireTransport final : public test::HttpTransportStub {
 public:
-    bool has_pending_read() const noexcept override { return !incoming.empty() || eof; }
+    bool read_ready() const noexcept override { return !incoming.empty() || eof; }
     void feed(std::string_view bytes) {
         incoming.append(bytes);
         notify_read_ready();

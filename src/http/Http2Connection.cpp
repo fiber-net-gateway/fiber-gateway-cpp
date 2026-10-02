@@ -376,8 +376,9 @@ common::IoResult<Http2Connection::ReadPumpResult> Http2Connection::pump_read(std
             return result;
         }
 
-        const bool buffered_read_ready = transport_->has_pending_read();
-        if (!inbound_io_.ready_hint && !buffered_read_ready) {
+        // read_ready() covers what no edge announces: TLS plaintext opened
+        // from a wire read already consumed.
+        if (!inbound_io_.ready_hint && !transport_->read_ready()) {
             result.wait_event = inbound_io_.operation_pending ? inbound_io_.wait_event : event::IoEvent::Read;
             return result;
         }
