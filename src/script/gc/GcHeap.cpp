@@ -17,6 +17,19 @@ GcHeap::GcHeap() : pool_(&owned_pool_) {}
 
 GcHeap::GcHeap(fiber::mem::BufPool &pool) : pool_(&pool) {}
 
+GcHeapStats GcHeap::stats() const noexcept {
+    return {
+            .allocated_bytes_total = allocated_bytes_total_,
+            .freed_bytes_total = freed_bytes_total_,
+            .allocation_count = allocation_count_,
+            .free_count = free_count_,
+            .current_bytes = bytes,
+            .peak_bytes = peak_bytes_,
+            .gc_count = gc_count_,
+            .gc_freed_bytes_total = gc_freed_bytes_total_,
+    };
+}
+
 GcHeap::~GcHeap() {
     while (head) {
         GcHeader *obj = head;
@@ -128,6 +141,8 @@ GcCollectStats GcHeap::collect() {
     gc_sweep_unmarked(this);
     threshold = next_threshold(bytes);
     collecting_ = false;
+    gc_count_ += 1;
+    gc_freed_bytes_total_ += before - bytes;
     return {bytes, before - bytes};
 }
 

@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <fiber/script/gc/GcInternal.h>
 
@@ -28,6 +30,7 @@ using fiber::script::JsValue;
 using fiber::script::ValueHandle;
 
 static_assert(noexcept(fiber::script::gc_new_string(nullptr, nullptr, 0)));
+static_assert(noexcept(std::declval<const GcHeap &>().stats()));
 
 std::string to_utf8(const GcString *str) {
     std::string out;
@@ -47,6 +50,168 @@ bool copy_utf16_units(char16_t *dst, std::size_t len, void *ctx) noexcept {
         std::memcpy(dst, ctx, len * sizeof(char16_t));
     }
     return true;
+}
+
+TEST(JsGcTest, StatsStartEmptyAndExcludeRootHandleStorage) {
+    GcHeap heap;
+    const auto initial = heap.stats();
+    EXPECT_EQ(initial.allocated_bytes_total, 0u);
+    EXPECT_EQ(initial.freed_bytes_total, 0u);
+    EXPECT_EQ(initial.allocation_count, 0u);
+    EXPECT_EQ(initial.free_count, 0u);
+    EXPECT_EQ(initial.current_bytes, 0u);
+    EXPECT_EQ(initial.peak_bytes, 0u);
+    EXPECT_EQ(initial.gc_count, 0u);
+    EXPECT_EQ(initial.gc_freed_bytes_total, 0u);
+
+    {
+        GcHeap::LocalMark mark(heap);
+        for (int i = 0; i < 16; ++i) {
+            ASSERT_TRUE(heap.local_value());
+            ASSERT_TRUE(heap.global_value());
+        }
+    }
+    heap.collect();
+    const auto after = heap.stats();
+    EXPECT_EQ(after.allocated_bytes_total, 0u);
+    EXPECT_EQ(after.freed_bytes_total, 0u);
+    EXPECT_EQ(after.allocation_count, 0u);
+    EXPECT_EQ(after.free_count, 0u);
+    EXPECT_EQ(after.current_bytes, 0u);
+    EXPECT_EQ(after.peak_bytes, 0u);
+    EXPECT_EQ(after.gc_count, 1u);
+    EXPECT_EQ(after.gc_freed_bytes_total, 0u);
+    EXPECT_EQ(initial.gc_count, 0u);
+}
+
+TEST(JsGcTest, StatsCountObjectStorageAndCompletedCollections) {
+    GcHeap heap;
+    constexpr std::uint8_t payload[] = {1, 2, 3};
+    const std::size_t expected_bytes = sizeof(GcString) + 4 + sizeof(fiber::script::GcBinary) + sizeof(payload) +
+                                       sizeof(GcArray) + 4 * sizeof(JsValue) + sizeof(GcObject) +
+                                       2 * sizeof(fiber::script::GcObjectEntry) + 8 * sizeof(std::int32_t);
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        ASSERT_NE(fiber::script::gc_new_string(&heap, "abc", 3), nullptr);
+        ASSERT_NE(fiber::script::gc_new_binary(&heap, payload, sizeof(payload)), nullptr);
+        ASSERT_NE(fiber::script::gc_new_array(&heap, 4), nullptr);
+        ASSERT_NE(fiber::script::gc_new_object(&heap, 2), nullptr);
+    }
+    const auto allocated = heap.stats();
+    EXPECT_EQ(allocated.allocated_bytes_total, expected_bytes);
+    EXPECT_EQ(allocated.freed_bytes_total, 0u);
+    EXPECT_EQ(allocated.allocation_count, 8u);
+    EXPECT_EQ(allocated.free_count, 0u);
+    EXPECT_EQ(allocated.current_bytes, expected_bytes);
+    EXPECT_EQ(allocated.current_bytes, heap.bytes);
+    EXPECT_EQ(allocated.peak_bytes, expected_bytes);
+    EXPECT_EQ(allocated.gc_count, 0u);
+    EXPECT_EQ(allocated.gc_freed_bytes_total, 0u);
+    ASSERT_NE(heap.string_intern_buckets, nullptr);
+
+    // Newly linked objects survive their first collection even without roots.
+    EXPECT_EQ(heap.collect().freed, 0u);
+    EXPECT_EQ(heap.stats().gc_count, 1u);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0u);
+    const auto collected = heap.collect();
+    EXPECT_EQ(collected.total, 0u);
+    EXPECT_EQ(collected.freed, expected_bytes);
+    const auto after = heap.stats();
+    EXPECT_EQ(after.allocated_bytes_total, expected_bytes);
+    EXPECT_EQ(after.freed_bytes_total, expected_bytes);
+    EXPECT_EQ(after.allocation_count, 8u);
+    EXPECT_EQ(after.free_count, 8u);
+    EXPECT_EQ(after.current_bytes, 0u);
+    EXPECT_EQ(after.peak_bytes, expected_bytes);
+    EXPECT_EQ(after.gc_count, 2u);
+    EXPECT_EQ(after.gc_freed_bytes_total, expected_bytes);
+    EXPECT_EQ(heap.string_intern_buckets, nullptr);
+}
+
+TEST(JsGcTest, StatsSeparateArrayGrowthReleasesFromGcReclamation) {
+    GcHeap heap;
+    const std::size_t old_storage = sizeof(JsValue);
+    const std::size_t new_storage = 8 * sizeof(JsValue);
+    const std::size_t allocated_bytes = sizeof(GcArray) + old_storage + new_storage;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        auto *array = fiber::script::gc_new_array(&heap, 1);
+        ASSERT_NE(array, nullptr);
+        ASSERT_TRUE(fiber::script::gc_array_reserve(&heap, array, 8));
+    }
+    const auto grown = heap.stats();
+    EXPECT_EQ(grown.allocated_bytes_total, allocated_bytes);
+    EXPECT_EQ(grown.freed_bytes_total, old_storage);
+    EXPECT_EQ(grown.allocation_count, 3u);
+    EXPECT_EQ(grown.free_count, 1u);
+    EXPECT_EQ(grown.current_bytes, sizeof(GcArray) + new_storage);
+    // Both old and new storage are present before reserve releases the old one.
+    EXPECT_EQ(grown.peak_bytes, allocated_bytes);
+    EXPECT_EQ(grown.gc_count, 0u);
+    EXPECT_EQ(grown.gc_freed_bytes_total, 0u);
+
+    heap.collect();
+    heap.collect();
+    const auto after = heap.stats();
+    EXPECT_EQ(after.allocated_bytes_total, allocated_bytes);
+    EXPECT_EQ(after.freed_bytes_total, allocated_bytes);
+    EXPECT_EQ(after.free_count, 3u);
+    EXPECT_EQ(after.current_bytes, 0u);
+    EXPECT_EQ(after.peak_bytes, grown.peak_bytes);
+    EXPECT_EQ(after.gc_freed_bytes_total, grown.current_bytes);
+}
+
+TEST(JsGcTest, StatsIncludeConstructionRollbackBeforeLinking) {
+    GcHeap heap;
+    GcHeap::NoGcScope no_gc(heap);
+    // Binary construction allocates its header before rejecting missing data.
+    ASSERT_EQ(fiber::script::gc_new_binary(&heap, nullptr, 1), nullptr);
+    // Rejected string sizes never allocate storage.
+    ASSERT_EQ(fiber::script::gc_new_string_wtf8_uninit(&heap, std::numeric_limits<std::uint32_t>::max(), 1, true),
+              nullptr);
+    const auto after = heap.stats();
+    EXPECT_EQ(after.allocated_bytes_total, sizeof(fiber::script::GcBinary));
+    EXPECT_EQ(after.freed_bytes_total, sizeof(fiber::script::GcBinary));
+    EXPECT_EQ(after.allocation_count, 1u);
+    EXPECT_EQ(after.free_count, 1u);
+    EXPECT_EQ(after.current_bytes, 0u);
+    EXPECT_EQ(after.peak_bytes, 0u);
+    EXPECT_EQ(after.gc_count, 0u);
+    EXPECT_EQ(after.gc_freed_bytes_total, 0u);
+    EXPECT_EQ(heap.head, nullptr);
+}
+
+TEST(JsGcTest, StatsDistinguishInternHitsFromDuplicateStorageReleases) {
+    GcHeap heap;
+    const std::size_t string_bytes = sizeof(GcString) + 4;
+    {
+        GcHeap::NoGcScope no_gc(heap);
+        auto *first = fiber::script::gc_new_string(&heap, "abc", 3);
+        ASSERT_NE(first, nullptr);
+        ASSERT_EQ(fiber::script::gc_new_string(&heap, "abc", 3), first);
+        EXPECT_EQ(heap.stats().allocation_count, 1u);
+        EXPECT_EQ(heap.stats().allocated_bytes_total, string_bytes);
+
+        auto *duplicate = fiber::script::gc_new_string_wtf8_uninit(&heap, 3, 3, true);
+        ASSERT_NE(duplicate, nullptr);
+        std::memcpy(fiber::script::gc_string_wtf8_data(duplicate), "abc", 3);
+        ASSERT_EQ(fiber::script::gc_detail::gc_string_intern_final(&heap, duplicate), first);
+    }
+    const auto deduplicated = heap.stats();
+    EXPECT_EQ(deduplicated.allocated_bytes_total, 2 * string_bytes);
+    EXPECT_EQ(deduplicated.freed_bytes_total, string_bytes);
+    EXPECT_EQ(deduplicated.allocation_count, 2u);
+    EXPECT_EQ(deduplicated.free_count, 1u);
+    EXPECT_EQ(deduplicated.current_bytes, string_bytes);
+    EXPECT_EQ(deduplicated.peak_bytes, 2 * string_bytes);
+    EXPECT_EQ(deduplicated.gc_count, 0u);
+    EXPECT_EQ(deduplicated.gc_freed_bytes_total, 0u);
+
+    heap.collect();
+    heap.collect();
+    EXPECT_EQ(heap.stats().freed_bytes_total, 2 * string_bytes);
+    EXPECT_EQ(heap.stats().free_count, 2u);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, string_bytes);
 }
 
 TEST(JsGcTest, BytesAccountForTailStringStorage) {
@@ -356,6 +521,7 @@ TEST(JsGcTest, NestedNoGcScopeCollectsOnlyAfterOuterExit) {
         ASSERT_NE(garbage, nullptr);
     }
     heap.collect();
+    ASSERT_EQ(heap.stats().gc_count, 1u);
     std::size_t old_bytes = heap.bytes;
     ASSERT_GT(old_bytes, 0u);
 
@@ -369,11 +535,14 @@ TEST(JsGcTest, NestedNoGcScopeCollectsOnlyAfterOuterExit) {
             ASSERT_NE(fresh, nullptr);
         }
         EXPECT_TRUE(heap.no_gc_active());
+        EXPECT_EQ(heap.stats().gc_count, 1u);
         after_inner_exit = heap.bytes;
         EXPECT_GT(after_inner_exit, old_bytes);
     }
 
     EXPECT_FALSE(heap.no_gc_active());
+    EXPECT_EQ(heap.stats().gc_count, 2u);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, old_bytes);
     EXPECT_LT(heap.bytes, after_inner_exit);
     EXPECT_GT(heap.bytes, 0u);
 }
@@ -387,6 +556,7 @@ TEST(JsGcTest, NoGcScopeDefersExplicitCollectUntilExit) {
         ASSERT_NE(garbage, nullptr);
     }
     heap.collect();
+    ASSERT_EQ(heap.stats().gc_count, 1u);
     std::size_t before_scope = heap.bytes;
     ASSERT_GT(before_scope, 0u);
 
@@ -396,9 +566,15 @@ TEST(JsGcTest, NoGcScopeDefersExplicitCollectUntilExit) {
         EXPECT_EQ(stats.total, before_scope);
         EXPECT_EQ(stats.freed, 0u);
         EXPECT_EQ(heap.bytes, before_scope);
+        EXPECT_EQ(heap.stats().gc_count, 1u);
+        EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0u);
+        heap.collect();
+        EXPECT_EQ(heap.stats().gc_count, 1u);
     }
 
     EXPECT_EQ(heap.bytes, 0u);
+    EXPECT_EQ(heap.stats().gc_count, 2u);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, before_scope);
 }
 
 TEST(JsGcTest, NoGcScopeDeferCollectSkipsExitCollection) {
@@ -420,11 +596,15 @@ TEST(JsGcTest, NoGcScopeDeferCollectSkipsExitCollection) {
     EXPECT_FALSE(heap.no_gc_active());
     EXPECT_EQ(heap.threshold, 1u);
     EXPECT_EQ(heap.bytes, bytes_in_scope);
+    EXPECT_EQ(heap.stats().gc_count, 0u);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0u);
 
     // The dropped request does not linger: a later explicit collect still runs
     // and raises the threshold.
     heap.collect();
     EXPECT_GE(heap.threshold, 1u << 20);
+    EXPECT_EQ(heap.stats().gc_count, 1u);
+    EXPECT_EQ(heap.stats().gc_freed_bytes_total, 0u);
 }
 
 TEST(JsGcTest, ValueApiBuildsObjectWithNativeKeyUnderLowThreshold) {

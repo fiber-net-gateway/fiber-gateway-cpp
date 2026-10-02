@@ -35,7 +35,7 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
     if (capacity > 0) {
         obj->entries = static_cast<GcObjectEntry *>(gc_alloc_extra(heap, entry_storage_bytes(capacity)));
         if (!obj->entries) {
-            heap->alloc.free(obj);
+            gc_free_storage(heap, obj, sizeof(GcObject));
             return nullptr;
         }
         for (std::size_t i = 0; i < capacity; ++i) {
@@ -54,7 +54,7 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
                 std::destroy_at(&obj->entries[i].value);
             }
             gc_free_extra(heap, obj->entries, entry_storage_bytes(capacity));
-            heap->alloc.free(obj);
+            gc_free_storage(heap, obj, sizeof(GcObject));
             return nullptr;
         }
         obj->buckets = static_cast<std::int32_t *>(gc_alloc_extra(heap, bucket_storage_bytes(obj->bucket_count)));
@@ -63,7 +63,7 @@ GcObject *gc_new_object(GcHeap *heap, std::size_t capacity) {
                 std::destroy_at(&obj->entries[i].value);
             }
             gc_free_extra(heap, obj->entries, entry_storage_bytes(capacity));
-            heap->alloc.free(obj);
+            gc_free_storage(heap, obj, sizeof(GcObject));
             return nullptr;
         }
         for (std::size_t i = 0; i < obj->bucket_count; ++i) {

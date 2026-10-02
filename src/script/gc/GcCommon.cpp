@@ -285,11 +285,33 @@ std::size_t entry_storage_bytes(std::size_t capacity) { return sizeof(GcObjectEn
 
 std::size_t bucket_storage_bytes(std::size_t bucket_count) { return sizeof(std::int32_t) * bucket_count; }
 
+void *gc_alloc_storage(GcHeap *heap, std::size_t bytes) noexcept {
+    if (bytes == 0) {
+        return nullptr;
+    }
+    void *mem = heap->alloc.alloc(bytes);
+    if (mem) {
+        heap->allocated_bytes_total_ += bytes;
+        heap->allocation_count_ += 1;
+    }
+    return mem;
+}
+
+void gc_free_storage(GcHeap *heap, void *ptr, std::size_t bytes) noexcept {
+    if (!ptr) {
+        return;
+    }
+    heap->alloc.free(ptr);
+    heap->freed_bytes_total_ += bytes;
+    heap->free_count_ += 1;
+}
+
 void gc_account_add(GcHeap *heap, std::size_t bytes) {
     if (bytes == 0) {
         return;
     }
     heap->bytes = saturating_add(heap->bytes, bytes);
+    heap->peak_bytes_ = std::max(heap->peak_bytes_, heap->bytes);
 }
 
 void gc_account_sub(GcHeap *heap, std::size_t bytes) {
@@ -305,7 +327,7 @@ void *gc_alloc_extra(GcHeap *heap, std::size_t bytes) {
     }
     FIBER_ASSERT(heap->no_gc_active());
     heap->maybe_collect_for_alloc(bytes);
-    void *mem = heap->alloc.alloc(bytes);
+    void *mem = gc_alloc_storage(heap, bytes);
     if (!mem) {
         return nullptr;
     }
@@ -317,7 +339,7 @@ void gc_free_extra(GcHeap *heap, void *ptr, std::size_t bytes) {
     if (!ptr) {
         return;
     }
-    heap->alloc.free(ptr);
+    gc_free_storage(heap, ptr, bytes);
     gc_account_sub(heap, bytes);
 }
 
@@ -437,7 +459,7 @@ GcHeader *gc_alloc_raw(GcHeap *heap, std::size_t size, GcHeapKind kind) {
         return nullptr;
     }
     heap->maybe_collect_for_alloc(size);
-    void *mem = heap->alloc.alloc(size);
+    void *mem = gc_alloc_storage(heap, size);
     if (!mem) {
         return nullptr;
     }
@@ -586,7 +608,7 @@ void gc_free_obj(GcHeap *heap, GcHeader *obj) {
         }
     }
     gc_account_sub(heap, obj->size_);
-    heap->alloc.free(obj);
+    gc_free_storage(heap, obj, obj->size_);
 }
 
 void gc_sweep_unmarked(GcHeap *heap) {
