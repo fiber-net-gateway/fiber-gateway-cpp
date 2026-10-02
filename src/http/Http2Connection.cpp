@@ -183,7 +183,6 @@ common::IoErr Http2Connection::start(std::unique_ptr<HttpTransport> transport) n
     transport_ = std::move(transport);
     inbound_io_.phase = options_.role == ConnectionRole::Server ? ParsePhase::Preface : ParsePhase::FrameHeader;
     inbound_io_.last_inbound_at = transport_->loop().now();
-    prefer_write_ = options_.role == ConnectionRole::Client;
     const common::IoErr start_err =
             options_.role == ConnectionRole::Client ? start_client_session() : start_server_session();
     if (start_err != common::IoErr::None) {
@@ -427,16 +426,10 @@ void Http2Connection::handle_read_eof() noexcept {
     close_outbound();
 }
 
-void Http2Connection::on_transport_read_ready(void *ctx, common::IoErr err) noexcept {
+void Http2Connection::on_transport_ready(void *ctx, common::IoErr err) noexcept {
     auto *connection = static_cast<Http2Connection *>(ctx);
     FIBER_ASSERT(connection != nullptr);
-    connection->handle_transport_ready(event::IoEvent::Read, err);
-}
-
-void Http2Connection::on_transport_write_ready(void *ctx, common::IoErr err) noexcept {
-    auto *connection = static_cast<Http2Connection *>(ctx);
-    FIBER_ASSERT(connection != nullptr);
-    connection->handle_transport_ready(event::IoEvent::Write, err);
+    connection->handle_transport_ready(err);
 }
 
 void Http2Connection::on_io_pump(Http2Connection *connection) noexcept {
@@ -445,7 +438,7 @@ void Http2Connection::on_io_pump(Http2Connection *connection) noexcept {
     connection->drive_io();
 }
 
-void Http2Connection::handle_transport_ready(event::IoEvent event, common::IoErr err) noexcept {
+void Http2Connection::handle_transport_ready(common::IoErr err) noexcept {
     if (state_ == State::Closed) {
         return;
     }
@@ -456,9 +449,6 @@ void Http2Connection::handle_transport_ready(event::IoEvent event, common::IoErr
         enter_closing(err);
         return;
     }
-    // The transport's own state says what is ready; the direction that woke
-    // goes first.
-    prefer_write_ = event == event::IoEvent::Write;
     drive_io();
 }
 
@@ -544,18 +534,13 @@ void Http2Connection::drive_io() noexcept {
         return state_ != State::Closed;
     };
 
-    if (prefer_write_) {
+    // Inbound first: what it parses queues its replies (SETTINGS ACK,
+    // WINDOW_UPDATE, responses) for the outbound pass right behind it. A
+    // client's preface is queued at start, ahead of anything a read produces.
+    (void) pump_inbound();
+    if (state_ != State::Closed) {
         (void) pump_outbound();
-        if (state_ != State::Closed) {
-            (void) pump_inbound();
-        }
-    } else {
-        (void) pump_inbound();
-        if (state_ != State::Closed) {
-            (void) pump_outbound();
-        }
     }
-    prefer_write_ = !prefer_write_;
 
     if (state_ != State::Closed) {
         common::IoErr callback_err = sync_transport_callbacks();
@@ -596,28 +581,28 @@ common::IoErr Http2Connection::sync_transport_callbacks() noexcept {
     const bool want_read = inbound_wanted();
     const bool want_write = !outbound_stopped_;
     if (want_read && !physical_read_registered_ && !transport_->read_ready()) {
-        common::IoErr err = transport_->set_read_callback(&Http2Connection::on_transport_read_ready, this);
+        common::IoErr err = transport_->set_read_callback(&Http2Connection::on_transport_ready, this);
         if (err != common::IoErr::None) {
             return err;
         }
         physical_read_registered_ = true;
     }
     if (want_write && !physical_write_registered_ && !transport_->write_ready()) {
-        common::IoErr err = transport_->set_write_callback(&Http2Connection::on_transport_write_ready, this);
+        common::IoErr err = transport_->set_write_callback(&Http2Connection::on_transport_ready, this);
         if (err != common::IoErr::None) {
             return err;
         }
         physical_write_registered_ = true;
     }
     if (!want_read && physical_read_registered_) {
-        common::IoErr err = transport_->clear_read_callback(&Http2Connection::on_transport_read_ready, this);
+        common::IoErr err = transport_->clear_read_callback(&Http2Connection::on_transport_ready, this);
         if (err != common::IoErr::None) {
             return err;
         }
         physical_read_registered_ = false;
     }
     if (!want_write && physical_write_registered_) {
-        common::IoErr err = transport_->clear_write_callback(&Http2Connection::on_transport_write_ready, this);
+        common::IoErr err = transport_->clear_write_callback(&Http2Connection::on_transport_ready, this);
         if (err != common::IoErr::None) {
             return err;
         }
@@ -631,11 +616,11 @@ void Http2Connection::clear_transport_callbacks() noexcept {
         return;
     }
     if (physical_read_registered_) {
-        (void) transport_->clear_read_callback(&Http2Connection::on_transport_read_ready, this);
+        (void) transport_->clear_read_callback(&Http2Connection::on_transport_ready, this);
         physical_read_registered_ = false;
     }
     if (physical_write_registered_) {
-        (void) transport_->clear_write_callback(&Http2Connection::on_transport_write_ready, this);
+        (void) transport_->clear_write_callback(&Http2Connection::on_transport_ready, this);
         physical_write_registered_ = false;
     }
 }
