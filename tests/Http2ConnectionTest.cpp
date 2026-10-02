@@ -67,7 +67,7 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
-    [[nodiscard]] bool has_pending_read() const noexcept override {
+    [[nodiscard]] bool read_ready() const noexcept override {
         return report_pending_read_ && !reads_blocked_ && (!hold_eof_ || next_chunk_ < chunks_.size());
     }
 
@@ -240,7 +240,15 @@ public:
         co_return fiber::common::IoResult<void>{};
     }
 
-    [[nodiscard]] bool has_pending_read() const noexcept override { return next_action_ < actions_.size(); }
+    // A TimedOut step blocks the read direction until the connection
+    // subscribes; the next step then counts as arrived, unannounced, for the
+    // connection's next pump (its read timer) to find.
+    [[nodiscard]] bool read_ready() const noexcept override { return !read_blocked_ && next_action_ < actions_.size(); }
+
+    fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept override {
+        read_blocked_ = false;
+        return HttpTransportStub::set_read_callback(callback, ctx);
+    }
 
     fiber::common::IoResult<size_t> try_readv(size_t size, fiber::mem::IoBufChain &out) noexcept override {
         ++read_into_call_count_;
@@ -267,6 +275,7 @@ public:
                 return take;
             }
             case ReadActionKind::TimedOut:
+                read_blocked_ = true;
                 return std::unexpected(fiber::common::IoErr::WouldBlock);
             case ReadActionKind::Eof:
                 return static_cast<size_t>(0);
@@ -326,6 +335,7 @@ public:
 private:
     std::vector<ReadAction> actions_;
     size_t next_action_ = 0;
+    bool read_blocked_ = false;
     bool closed_ = false;
     std::size_t close_count_ = 0;
     std::size_t shutdown_count_ = 0;

@@ -1739,7 +1739,7 @@ std::string byte_pattern(std::size_t len, std::uint8_t seed) {
 
 struct StreamReadOutcome {
     fiber::common::IoResult<std::string> data;
-    bool pending_after_handshake = false; // leftover app data opened at HandshakeDone
+    bool ready_after_handshake = false; // leftover app data opened at HandshakeDone
 };
 
 DetachedTask handshake_and_read_exact(fiber::net::detail::TlsStreamFd *stream, const fiber::net::TlsServerParam &param,
@@ -1751,7 +1751,7 @@ DetachedTask handshake_and_read_exact(fiber::net::detail::TlsStreamFd *stream, c
         done->set_value(std::move(outcome));
         co_return;
     }
-    outcome.pending_after_handshake = stream->has_pending_read();
+    outcome.ready_after_handshake = stream->read_ready();
     std::string &out = *outcome.data;
     while (out.size() < total) {
         fiber::mem::IoBufChain chain;
@@ -1853,7 +1853,7 @@ void check_wire_transfer(TestTlsPair &tls_pair, const std::vector<std::string> &
     EXPECT_EQ(server_outcome.data->size(), expected.size());
     EXPECT_TRUE(*server_outcome.data == expected);
     if (expect_piggyback) {
-        EXPECT_TRUE(server_outcome.pending_after_handshake);
+        EXPECT_TRUE(server_outcome.ready_after_handshake);
     }
 }
 
@@ -1931,7 +1931,6 @@ enum class PendingPlaintextProbe {
 // once it is read out.
 struct PendingPlaintextOutcome {
     fiber::common::IoErr err = fiber::common::IoErr::Unknown;
-    bool pending = false;
     bool ready = false;
     fiber::common::IoErr wait = fiber::common::IoErr::Unknown;
     bool drained_ready = true;
@@ -1968,7 +1967,6 @@ DetachedTask probe_pending_plaintext(fiber::net::detail::TlsStreamFd *stream, co
         err = co_await read_append(*stream, total / 4, outcome->received);
     }
     if (err == fiber::common::IoErr::None) {
-        outcome->pending = stream->has_pending_read();
         outcome->ready = stream->read_ready();
         if (probe == PendingPlaintextProbe::Subscribe) {
             (void) stream->set_read_callback(&ignore_ready, nullptr);
@@ -2048,7 +2046,6 @@ TEST(TlsStreamFdTest, BufferedPlaintextIsReadReadiness) {
 
     EXPECT_EQ(client_err, fiber::common::IoErr::None);
     ASSERT_EQ(outcome.err, fiber::common::IoErr::None);
-    EXPECT_TRUE(outcome.pending);
     EXPECT_TRUE(outcome.ready);
     EXPECT_EQ(outcome.wait, fiber::common::IoErr::None);
     EXPECT_FALSE(outcome.drained_ready);

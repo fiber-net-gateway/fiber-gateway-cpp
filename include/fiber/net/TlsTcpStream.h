@@ -33,9 +33,10 @@ public:
     [[nodiscard]] const SocketAddress &remote_addr() const noexcept;
     [[nodiscard]] std::string_view selected_alpn() const noexcept;
     [[nodiscard]] bool handshake_done() const noexcept;
-    [[nodiscard]] bool has_pending_read() const noexcept;
     [[nodiscard]] bool terminal() const noexcept;
     [[nodiscard]] bool peer_closed() const noexcept;
+    // Direction readiness, see detail::TlsStreamFd: buffered plaintext reads
+    // as Ready.
     [[nodiscard]] bool read_ready() const noexcept;
     [[nodiscard]] bool write_ready() const noexcept;
     // Accepted output still draining, see detail::TlsStreamFd.
