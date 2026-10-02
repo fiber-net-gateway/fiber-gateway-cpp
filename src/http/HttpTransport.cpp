@@ -334,8 +334,6 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
     co_return co_await stream_.writev(buf, timeout);
 }
 
-bool TlsTransport::has_pending_write() const noexcept { return stream_.has_pending_write(); }
-
 void TlsTransport::close() { stream_.close(); }
 
 bool TlsTransport::valid() const noexcept { return stream_.valid(); }

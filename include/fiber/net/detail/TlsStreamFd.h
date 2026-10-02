@@ -88,8 +88,6 @@ public:
     [[nodiscard]] bool write_ready() const noexcept {
         return write_error_ != fiber::common::IoErr::None || (out_pending_.empty() && stream_fd_.write_ready());
     }
-    // Accepted (sealed) output the socket has not taken yet.
-    [[nodiscard]] bool has_pending_write() const noexcept { return !out_pending_.empty(); }
     void close();
 
     // Loop handover, see StreamFd. Requires no in-flight operation, pending

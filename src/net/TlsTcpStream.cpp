@@ -23,7 +23,6 @@ bool TlsTcpStream::terminal() const noexcept { return stream_.terminal(); }
 bool TlsTcpStream::peer_closed() const noexcept { return stream_.peer_closed(); }
 bool TlsTcpStream::read_ready() const noexcept { return stream_.read_ready(); }
 bool TlsTcpStream::write_ready() const noexcept { return stream_.write_ready(); }
-bool TlsTcpStream::has_pending_write() const noexcept { return stream_.has_pending_write(); }
 
 fiber::common::IoErr TlsTcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
     return detail::apply_tcp_socket_options(fd(), options);

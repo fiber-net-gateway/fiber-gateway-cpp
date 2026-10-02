@@ -2214,7 +2214,6 @@ struct WriteReadyProbe {
     fiber::net::detail::TlsStreamFd *stream = nullptr;
     int calls = 0;
     fiber::common::IoErr err = fiber::common::IoErr::Unknown;
-    bool pending = true;
     bool ready = false;
 };
 
@@ -2223,7 +2222,6 @@ void on_write_ready_probe(void *ctx, fiber::common::IoErr err) noexcept {
     ++probe->calls;
     probe->err = err;
     if (err == fiber::common::IoErr::None) {
-        probe->pending = probe->stream->has_pending_write();
         probe->ready = probe->stream->write_ready();
     }
 }
@@ -2256,12 +2254,10 @@ using TlsStreamFdDrainDeathTest = TlsStreamFdDrainTest;
 TEST_F(TlsStreamFdDrainTest, TryWriteAcceptsTheSealedBatchAndDrainsItAlone) {
     fiber::common::IoResult<std::size_t> first = std::unexpected(fiber::common::IoErr::Unknown);
     std::size_t left_in_chain = 0;
-    bool pending = false;
     bool ready = true;
     fiber::common::IoErr same_chain = fiber::common::IoErr::None;
     fiber::common::IoErr other_chain = fiber::common::IoErr::None;
     bool drained = false;
-    bool ready_after = false;
     std::string expected;
     std::string received;
     fiber::common::IoErr read_err = fiber::common::IoErr::Unknown;
@@ -2270,7 +2266,6 @@ TEST_F(TlsStreamFdDrainTest, TryWriteAcceptsTheSealedBatchAndDrainsItAlone) {
         fiber::mem::IoBufChain chain;
         first = write_blocked_batch(stream, chain, expected);
         left_in_chain = chain.readable_bytes();
-        pending = stream.has_pending_write();
         ready = stream.write_ready();
         auto again = stream.try_write(chain);
         same_chain = again ? fiber::common::IoErr::None : again.error();
@@ -2278,8 +2273,7 @@ TEST_F(TlsStreamFdDrainTest, TryWriteAcceptsTheSealedBatchAndDrainsItAlone) {
         auto empty = stream.try_write(other);
         other_chain = empty ? fiber::common::IoErr::None : empty.error();
         // No further call: the batch must drain while this side only waits.
-        drained = co_await poll_until([&] { return !stream.has_pending_write(); }, 5s);
-        ready_after = stream.write_ready();
+        drained = co_await poll_until([&] { return stream.write_ready(); }, 5s);
     };
     const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
         read_err = co_await read_exact(stream, kDrainBatch, received);
@@ -2293,12 +2287,10 @@ TEST_F(TlsStreamFdDrainTest, TryWriteAcceptsTheSealedBatchAndDrainsItAlone) {
     ASSERT_TRUE(first);
     EXPECT_EQ(*first, kDrainBatch);
     EXPECT_EQ(left_in_chain, 64U * 4096U - kDrainBatch);
-    EXPECT_TRUE(pending);
     EXPECT_FALSE(ready);
     EXPECT_EQ(same_chain, fiber::common::IoErr::WouldBlock);
     EXPECT_EQ(other_chain, fiber::common::IoErr::WouldBlock);
     EXPECT_TRUE(drained);
-    EXPECT_TRUE(ready_after);
     EXPECT_EQ(read_err, fiber::common::IoErr::None);
     EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
 }
@@ -2337,7 +2329,6 @@ TEST_F(TlsStreamFdDrainTest, WriteCallbackFiresOnlyOnceTheDrainIsDone) {
     EXPECT_TRUE(notified);
     EXPECT_EQ(probe.calls, 1);
     EXPECT_EQ(probe.err, fiber::common::IoErr::None);
-    EXPECT_FALSE(probe.pending);
     EXPECT_TRUE(probe.ready);
     EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
 }
@@ -2346,18 +2337,16 @@ TEST_F(TlsStreamFdDrainTest, WriteCallbackFiresOnlyOnceTheDrainIsDone) {
 // write subscriber once, with Canceled.
 TEST_F(TlsStreamFdDrainTest, CloseDuringTheDrainCancelsTheWriteSubscriber) {
     WriteReadyProbe probe;
-    bool pending_before = false;
-    bool pending_after = true;
+    bool ready_before = true;
     std::string expected;
 
     const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
         fiber::mem::IoBufChain chain;
         (void) write_blocked_batch(stream, chain, expected);
-        pending_before = stream.has_pending_write();
+        ready_before = stream.write_ready();
         probe.stream = &stream;
         (void) stream.set_write_callback(&on_write_ready_probe, &probe);
         stream.close();
-        pending_after = stream.has_pending_write();
         co_return;
     };
     const StreamBody server = [](fiber::net::detail::TlsStreamFd &) -> fiber::async::Task<void> { co_return; };
@@ -2366,8 +2355,7 @@ TEST_F(TlsStreamFdDrainTest, CloseDuringTheDrainCancelsTheWriteSubscriber) {
     ASSERT_FALSE(::testing::Test::HasFatalFailure());
 
     ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
-    EXPECT_TRUE(pending_before);
-    EXPECT_FALSE(pending_after);
+    EXPECT_FALSE(ready_before);
     EXPECT_EQ(probe.calls, 1);
     EXPECT_EQ(probe.err, fiber::common::IoErr::Canceled);
 }
@@ -2376,7 +2364,7 @@ TEST_F(TlsStreamFdDrainTest, CloseDuringTheDrainCancelsTheWriteSubscriber) {
 // never leaves sealed output behind.
 TEST_F(TlsStreamFdDrainTest, WritevReturnsOnlyOnceItsBatchLeft) {
     std::vector<std::size_t> returns;
-    bool pending_after_any = false;
+    bool blocked_after_any = false;
     fiber::common::IoErr write_err = fiber::common::IoErr::None;
     std::string expected;
     std::string received;
@@ -2392,7 +2380,7 @@ TEST_F(TlsStreamFdDrainTest, WritevReturnsOnlyOnceItsBatchLeft) {
                 co_return;
             }
             returns.push_back(*written);
-            pending_after_any = pending_after_any || stream.has_pending_write();
+            blocked_after_any = blocked_after_any || !stream.write_ready();
         }
     };
     const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
@@ -2406,7 +2394,7 @@ TEST_F(TlsStreamFdDrainTest, WritevReturnsOnlyOnceItsBatchLeft) {
     ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
     EXPECT_EQ(write_err, fiber::common::IoErr::None);
     EXPECT_EQ(returns, std::vector<std::size_t>(4, kDrainBatch));
-    EXPECT_FALSE(pending_after_any);
+    EXPECT_FALSE(blocked_after_any);
     EXPECT_TRUE(received == expected);
 }
 
@@ -2418,7 +2406,7 @@ TEST_F(TlsStreamFdDrainTest, WaitWritableWaitsForTheDrainAndUnsubscribesWhenAban
     fiber::common::IoErr wrapped_timeout = fiber::common::IoErr::None;
     fiber::common::IoErr resubscribed = fiber::common::IoErr::Unknown;
     fiber::common::IoErr drained_wait = fiber::common::IoErr::Unknown;
-    bool pending_after = true;
+    bool ready_after = false;
     bool may_read = false;
     std::string expected;
     std::string received;
@@ -2437,7 +2425,7 @@ TEST_F(TlsStreamFdDrainTest, WaitWritableWaitsForTheDrainAndUnsubscribesWhenAban
         may_read = true;
         auto drained = co_await stream.wait_writable(5s);
         drained_wait = drained ? fiber::common::IoErr::None : drained.error();
-        pending_after = stream.has_pending_write();
+        ready_after = stream.write_ready();
     };
     const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
         (void) co_await poll_until([&] { return may_read; }, 5s);
@@ -2452,7 +2440,7 @@ TEST_F(TlsStreamFdDrainTest, WaitWritableWaitsForTheDrainAndUnsubscribesWhenAban
     EXPECT_EQ(wrapped_timeout, fiber::common::IoErr::TimedOut);
     EXPECT_EQ(resubscribed, fiber::common::IoErr::None);
     EXPECT_EQ(drained_wait, fiber::common::IoErr::None);
-    EXPECT_FALSE(pending_after);
+    EXPECT_TRUE(ready_after);
     EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
 }
 
@@ -2530,6 +2518,29 @@ TEST_F(TlsStreamFdDrainDeathTest, HandoverWithUndrainedOutputAsserts) {
                 run_drain_pair(*tls_pair_, server, client, run);
             },
             "FIBER_ASSERT failed: out_pending_");
+}
+
+// A shutdown's own flush can finish the drain with the socket left Ready, so
+// no edge would ever reach a standing write subscriber: the two are exclusive.
+TEST_F(TlsStreamFdDrainDeathTest, PollShutdownWithWriteSubscriberAsserts) {
+    const StreamBody client = [](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        fiber::mem::IoBufChain chain;
+        std::string expected;
+        (void) write_blocked_batch(stream, chain, expected);
+        WriteReadyProbe probe;
+        probe.stream = &stream;
+        (void) stream.set_write_callback(&on_write_ready_probe, &probe);
+        fiber::event::IoEvent event = fiber::event::IoEvent::None;
+        (void) stream.poll_shutdown(event);
+        co_return;
+    };
+    const StreamBody server = [](fiber::net::detail::TlsStreamFd &) -> fiber::async::Task<void> { co_return; };
+    EXPECT_DEATH(
+            {
+                DrainPairRun run;
+                run_drain_pair(*tls_pair_, server, client, run);
+            },
+            "FIBER_ASSERT failed: write_callback_ == nullptr");
 }
 
 // =====================================================================
