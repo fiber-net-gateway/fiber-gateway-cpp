@@ -10,6 +10,7 @@
 #include <span>
 #include <sys/uio.h>
 #include <type_traits>
+#include <utility>
 
 #include <fiber/common/Assert.h>
 #include <fiber/net/TlsCredential.h>
@@ -242,13 +243,14 @@ void TlsStreamFd::close() {
         }
         conn_.reset();
     }
-    // A mid-handshake close touches no handshake state here: the fd close
-    // below wakes the suspended handshake with Canceled (inline resume), it
-    // unwinds, and its frame-local staging — the engine included — dies with
-    // the coroutine frame on this loop.
-    if (stream_fd_.valid()) {
-        stream_fd_.close();
-    }
+    // The write side detaches before the fd closes: the drain stops here, and
+    // the TLS-level write subscriber completes last, from locals — the
+    // completions inside stream_fd_.close() may destroy this object, so
+    // every member is reset ahead of it.
+    unsubscribe_stream_write();
+    draining_ = false;
+    const ReadyCallback write_callback = std::exchange(write_callback_, nullptr);
+    void *const write_callback_ctx = std::exchange(write_callback_ctx_, nullptr);
     inbound_ = mem::IoBuf{};
     // Output the drain above left behind (a close_notify a gone peer refused,
     // a batch stuck on WouldBlock) and unread 0-RTT go back to this loop's
@@ -259,14 +261,25 @@ void TlsStreamFd::close() {
     handshake_done_ = false;
     shutdown_started_ = false;
     busy_ = false;
-    pending_write_chain_ = nullptr;
-    pending_write_len_ = 0;
     write_error_ = fiber::common::IoErr::None;
+    // A mid-handshake close touches no handshake state here: the fd close
+    // below wakes the suspended handshake with Canceled (inline resume), it
+    // unwinds, and its frame-local staging — the engine included — dies with
+    // the coroutine frame on this loop.
+    if (stream_fd_.valid()) {
+        stream_fd_.close();
+    }
+    if (write_callback != nullptr) {
+        write_callback(write_callback_ctx, fiber::common::IoErr::Canceled);
+    }
 }
 
 fiber::common::IoErr TlsStreamFd::detach_for_handover() noexcept {
     FIBER_ASSERT(!busy_);
-    FIBER_ASSERT(pending_write_chain_ == nullptr); // no active write group awaiting retry
+    // Only writev users hand over (the H1 pools), and writev returns once its
+    // batch is on the wire: nothing may still be draining.
+    FIBER_ASSERT(out_pending_.empty());
+    FIBER_ASSERT(write_callback_ == nullptr && !write_subscribed_);
     return stream_fd_.detach_for_handover();
 }
 
@@ -282,7 +295,24 @@ fiber::common::IoErr TlsStreamFd::set_read_callback(ReadyCallback callback, void
 }
 
 fiber::common::IoErr TlsStreamFd::set_write_callback(ReadyCallback callback, void *ctx) noexcept {
-    return stream_fd_.set_write_callback(callback, ctx);
+    FIBER_ASSERT(loop().in_loop());
+    if (!callback) {
+        return fiber::common::IoErr::Invalid;
+    }
+    // RWFd's contract on the TLS write direction: a write_ready() caller
+    // advances by writing. Not ready means a drain in flight (already
+    // subscribed) or a socket that is not Ready (accepts the subscription).
+    FIBER_ASSERT(!write_ready());
+    if (write_callback_ != nullptr) {
+        return fiber::common::IoErr::Busy;
+    }
+    const fiber::common::IoErr err = subscribe_stream_write();
+    if (err != fiber::common::IoErr::None) {
+        return err;
+    }
+    write_callback_ = callback;
+    write_callback_ctx_ = ctx;
+    return fiber::common::IoErr::None;
 }
 
 fiber::common::IoErr TlsStreamFd::set_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
@@ -294,7 +324,102 @@ fiber::common::IoErr TlsStreamFd::clear_read_callback(ReadyCallback callback, vo
 }
 
 fiber::common::IoErr TlsStreamFd::clear_write_callback(ReadyCallback callback, void *ctx) noexcept {
-    return stream_fd_.clear_write_callback(callback, ctx);
+    FIBER_ASSERT(loop().in_loop());
+    if (!callback) {
+        return fiber::common::IoErr::Invalid;
+    }
+    if (write_callback_ != callback || write_callback_ctx_ != ctx) {
+        return fiber::common::IoErr::None;
+    }
+    write_callback_ = nullptr;
+    write_callback_ctx_ = nullptr;
+    if (!draining_) {
+        unsubscribe_stream_write(); // a drain in flight keeps its subscription
+    }
+    return fiber::common::IoErr::None;
+}
+
+fiber::common::IoErr TlsStreamFd::subscribe_stream_write() noexcept {
+    if (write_subscribed_) {
+        return fiber::common::IoErr::None;
+    }
+    const fiber::common::IoErr err = stream_fd_.set_write_callback(&TlsStreamFd::on_stream_writable, this);
+    if (err == fiber::common::IoErr::None) {
+        write_subscribed_ = true;
+    }
+    return err;
+}
+
+void TlsStreamFd::unsubscribe_stream_write() noexcept {
+    if (!write_subscribed_) {
+        return;
+    }
+    (void) stream_fd_.clear_write_callback(&TlsStreamFd::on_stream_writable, this);
+    write_subscribed_ = false;
+}
+
+void TlsStreamFd::on_stream_writable(void *ctx, fiber::common::IoErr err) noexcept {
+    // close() unsubscribes before it closes the fd, and a handover requires
+    // no subscription: only a readiness transition arrives here.
+    FIBER_ASSERT(err == fiber::common::IoErr::None);
+    static_cast<TlsStreamFd *>(ctx)->handle_stream_writable();
+}
+
+void TlsStreamFd::handle_stream_writable() noexcept {
+    if (draining_) {
+        fiber::event::IoEvent event = fiber::event::IoEvent::None;
+        const fiber::common::IoErr err = flush_output(event);
+        if (err == fiber::common::IoErr::WouldBlock) {
+            return; // still subscribed: the next transition continues the drain
+        }
+        draining_ = false;
+        if (err != fiber::common::IoErr::None) {
+            fail_write(err);
+        }
+    }
+    if (write_callback_ == nullptr) {
+        unsubscribe_stream_write();
+        return;
+    }
+    // Drained (or failed: the subscriber's next write reports it). Last: the
+    // subscriber may write, re-subscribe or clear from here, and the transport
+    // contract keeps this object alive until dispatch returns.
+    write_callback_(write_callback_ctx_, fiber::common::IoErr::None);
+}
+
+void TlsStreamFd::fail_write(fiber::common::IoErr err) noexcept {
+    write_error_ = err;
+    draining_ = false;
+    out_pending_.clear();
+}
+
+fiber::common::IoErr TlsStreamFd::flush_connected() noexcept {
+    fiber::event::IoEvent event = fiber::event::IoEvent::None;
+    fiber::common::IoErr err = flush_output(event);
+    if (err == fiber::common::IoErr::None) {
+        if (draining_) {
+            // A direct flush (poll_shutdown) finished a drain in flight.
+            draining_ = false;
+            if (write_callback_ == nullptr) {
+                unsubscribe_stream_write();
+            }
+        }
+        return err;
+    }
+    if (err == fiber::common::IoErr::WouldBlock) {
+        // The socket just went Blocked, so the StreamFd takes the
+        // subscription; the drain owns the rest from here.
+        err = subscribe_stream_write();
+        if (err == fiber::common::IoErr::None) {
+            draining_ = true;
+            return fiber::common::IoErr::WouldBlock;
+        }
+    }
+    fail_write(err);
+    if (write_callback_ == nullptr) {
+        unsubscribe_stream_write();
+    }
+    return err;
 }
 
 fiber::common::IoErr TlsStreamFd::clear_terminal_callback(ReadyCallback callback, void *ctx) noexcept {
@@ -483,8 +608,96 @@ StreamFd::WaitReadableAwaiter TlsStreamFd::wait_readable(std::chrono::millisecon
     return stream_fd_.rwfd().wait_readable(timeout, {&TlsStreamFd::on_read_wait_gate, this});
 }
 
-StreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
-    return stream_fd_.wait_writable(timeout);
+TlsStreamFd::WaitWritableAwaiter TlsStreamFd::wait_writable(std::chrono::milliseconds timeout) noexcept {
+    return WaitWritableAwaiter(*this, timeout);
+}
+
+TlsStreamFd::WaitWritableAwaiter::WaitWritableAwaiter(TlsStreamFd &stream, std::chrono::milliseconds timeout) noexcept :
+    stream_(&stream), timeout_(timeout) {}
+
+TlsStreamFd::WaitWritableAwaiter::~WaitWritableAwaiter() {
+    cancel_timer();
+    if (waiting_) {
+        // Abandoned while suspended (timeout_for, frame destruction): drop the
+        // subscription, never resume from here.
+        waiting_ = false;
+        (void) stream_->clear_write_callback(&WaitWritableAwaiter::on_ready, this);
+    }
+}
+
+bool TlsStreamFd::WaitWritableAwaiter::await_ready() noexcept {
+    if (timeout_ > std::chrono::milliseconds::zero()) {
+        return false;
+    }
+    err_ = fiber::common::IoErr::TimedOut;
+    return true;
+}
+
+bool TlsStreamFd::WaitWritableAwaiter::await_suspend(std::coroutine_handle<> handle) noexcept {
+    FIBER_ASSERT(stream_->loop().in_loop());
+    loop_ = &stream_->loop();
+    coro_ = handle;
+    // The stream's veto first: a terminal fd completes the wait with its error.
+    const auto gated = stream_->stream_fd_.stream_wait_gate()(fiber::event::IoEvent::Write);
+    if (!gated) {
+        err_ = gated.error();
+        return false;
+    }
+    if (*gated || stream_->write_ready()) {
+        // Ready (a latched write error included): write instead of waiting.
+        err_ = fiber::common::IoErr::None;
+        return false;
+    }
+    const fiber::common::IoErr installed = stream_->set_write_callback(&WaitWritableAwaiter::on_ready, this);
+    if (installed != fiber::common::IoErr::None) {
+        err_ = installed;
+        return false;
+    }
+    waiting_ = true;
+    if (timeout_ != std::chrono::milliseconds::max()) {
+        loop_->post_at<WaitWritableAwaiter, &WaitWritableAwaiter::timer_entry_, &WaitWritableAwaiter::on_timeout>(
+                loop_->now() + timeout_, *this);
+    }
+    return true;
+}
+
+fiber::common::IoResult<void> TlsStreamFd::WaitWritableAwaiter::await_resume() noexcept {
+    waiting_ = false;
+    cancel_timer();
+    if (err_ == fiber::common::IoErr::None) {
+        return {};
+    }
+    return std::unexpected(err_);
+}
+
+void TlsStreamFd::WaitWritableAwaiter::on_ready(void *ctx, fiber::common::IoErr err) noexcept {
+    auto *awaiter = static_cast<WaitWritableAwaiter *>(ctx);
+    FIBER_ASSERT(awaiter->waiting_);
+    awaiter->waiting_ = false;
+    if (err != fiber::common::IoErr::Canceled) {
+        // One-shot over a persistent slot: unsubscribe before resuming.
+        // Canceled comes from close(), which has emptied the slot already.
+        (void) awaiter->stream_->clear_write_callback(&WaitWritableAwaiter::on_ready, awaiter);
+    }
+    awaiter->err_ = err;
+    awaiter->cancel_timer();
+    awaiter->coro_.resume();
+}
+
+void TlsStreamFd::WaitWritableAwaiter::on_timeout(WaitWritableAwaiter *awaiter) noexcept {
+    FIBER_ASSERT(awaiter->waiting_);
+    awaiter->waiting_ = false;
+    awaiter->err_ = fiber::common::IoErr::TimedOut;
+    (void) awaiter->stream_->clear_write_callback(&WaitWritableAwaiter::on_ready, awaiter);
+    awaiter->coro_.resume();
+}
+
+void TlsStreamFd::WaitWritableAwaiter::cancel_timer() noexcept {
+    if (!timer_entry_.is_in_heap()) {
+        return;
+    }
+    FIBER_ASSERT(loop_ != nullptr && loop_->in_loop());
+    loop_->cancel<WaitWritableAwaiter, &WaitWritableAwaiter::timer_entry_>(*this);
 }
 
 fiber::common::IoErr TlsStreamFd::poll_shutdown(fiber::event::IoEvent &event) noexcept { return shutdown_once(event); }
@@ -662,9 +875,15 @@ fiber::common::IoErr TlsStreamFd::shutdown_once(fiber::event::IoEvent &event) no
         }
         shutdown_started_ = true;
     }
-    // Send our close_notify and be done: waiting for the peer's echo is the
-    // reader's business (read_once surfaces PeerClosed), not the closer's.
-    return flush_output(event);
+    // Send our close_notify — behind any output still draining — and be
+    // done: waiting for the peer's echo is the reader's business (read_once
+    // surfaces PeerClosed), not the closer's. WouldBlock: the drain sends the
+    // rest, and write readiness reports when it has.
+    const fiber::common::IoErr err = flush_connected();
+    if (err == fiber::common::IoErr::WouldBlock) {
+        event = fiber::event::IoEvent::Write;
+    }
+    return err;
 }
 
 // TLS writes seal a contiguous input buffer into records. Unlike sendmsg,
@@ -726,73 +945,58 @@ fiber::common::IoResult<std::size_t> TlsStreamFd::try_write(mem::IoBufChain &buf
     if (write_error_ != fiber::common::IoErr::None) {
         return std::unexpected(write_error_);
     }
-    if (buf.readable_bytes() == 0 && pending_write_chain_ == nullptr) {
-        return std::size_t{0};
+    if (!out_pending_.empty()) {
+        // An earlier batch is draining: the socket is its until it is out,
+        // and write readiness reports when that is.
+        return std::unexpected(fiber::common::IoErr::WouldBlock);
     }
-    if (!out_pending_.empty() && pending_write_chain_ != &buf) {
-        // A sealed batch is still flushing: only its own chain may resume it
-        // (the BoringSSL WANT_WRITE same-buffer contract, chain-shaped).
-        return std::unexpected(fiber::common::IoErr::Busy);
+    if (buf.readable_bytes() == 0) {
+        return std::size_t{0};
     }
 
     std::size_t batch_len = 0;
-    if (out_pending_.empty()) {
-        const fiber::common::IoErr err = seal_write_batch(buf, batch_len);
-        if (err != fiber::common::IoErr::None) {
-            // The batch never completed sealing: no retry state to keep.
-            pending_write_chain_ = nullptr;
-            pending_write_len_ = 0;
-            return std::unexpected(err); // terminal/closed (Invalid) or NoMem
-        }
-        pending_write_chain_ = &buf;
-        pending_write_len_ = batch_len;
-    } else {
-        batch_len = pending_write_len_; // resume: the plaintext is already sealed
-    }
-
-    fiber::event::IoEvent event = fiber::event::IoEvent::None;
-    const fiber::common::IoErr err = flush_output(event);
+    fiber::common::IoErr err = seal_write_batch(buf, batch_len);
     if (err != fiber::common::IoErr::None) {
-        if (err != fiber::common::IoErr::WouldBlock) {
-            // The batch is dead (no resume after a hard error): drop its
-            // identity; the sealed remainder lingers until close, and a
-            // write on any chain reports Busy meanwhile.
-            abandon_pending_write();
-        }
-        return std::unexpected(err);
+        return std::unexpected(err); // terminal/closed (Invalid) or NoMem (latched)
     }
+    err = flush_connected();
+    if (err != fiber::common::IoErr::None && err != fiber::common::IoErr::WouldBlock) {
+        return std::unexpected(err); // latched; the chain stays as it was
+    }
+    // Sealed is accepted: a remainder the socket did not take drains on its own.
     buf.consume_and_compact(batch_len);
-    pending_write_chain_ = nullptr;
-    pending_write_len_ = 0;
     return batch_len;
-}
-
-void TlsStreamFd::abandon_pending_write() noexcept {
-    pending_write_chain_ = nullptr;
-    pending_write_len_ = 0;
 }
 
 fiber::async::Task<fiber::common::IoResult<std::size_t>> TlsStreamFd::writev(mem::IoBufChain &buf,
                                                                              std::chrono::milliseconds timeout) {
     Deadline deadline = make_deadline(timeout);
+    std::optional<std::size_t> accepted;
     for (;;) {
-        if (buf.readable_bytes() == 0) {
-            co_return std::size_t{0};
+        if (!accepted) {
+            auto written = try_write(buf);
+            if (written) {
+                accepted = *written; // one batch per call — the caller drives the loop
+            } else if (written.error() != fiber::common::IoErr::WouldBlock) {
+                co_return std::unexpected(written.error());
+            }
         }
-        auto written = try_write(buf);
-        if (written) {
-            // One record group per call — the caller drives the loop.
-            co_return written;
-        }
-        if (written.error() != fiber::common::IoErr::WouldBlock) {
-            co_return std::unexpected(written.error());
+        if (accepted) {
+            // Reported once on the wire; a drain that failed after acceptance
+            // fails the call.
+            if (write_error_ != fiber::common::IoErr::None) {
+                co_return std::unexpected(write_error_);
+            }
+            if (out_pending_.empty()) {
+                co_return *accepted;
+            }
         }
         // A connected-phase write only ever blocks on writability.
         auto remaining = remaining_timeout(deadline);
         if (!remaining) {
             co_return std::unexpected(remaining.error());
         }
-        auto wait_result = co_await stream_fd_.wait_writable(*remaining);
+        auto wait_result = co_await wait_writable(*remaining);
         if (!wait_result) {
             co_return std::unexpected(wait_result.error());
         }

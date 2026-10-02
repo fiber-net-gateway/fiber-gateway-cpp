@@ -408,8 +408,7 @@ void Http1ClientConnection::fail_active_exchange(common::IoErr reason) noexcept 
 
     IoAwaiter *reader = reader_;
     IoAwaiter *writer = writer_;
-    HttpTransport *transport = transport_.get();
-    FIBER_ASSERT(transport != nullptr);
+    FIBER_ASSERT(transport_ != nullptr);
 
     mark_unusable();
 
@@ -421,7 +420,6 @@ void Http1ClientConnection::fail_active_exchange(common::IoErr reason) noexcept 
     if (writer != nullptr) {
         writer->prepare_cancel(reason);
     }
-    transport->abandon_pending_io();
 
     // Resume after the failure call returns so cancellation cannot re-enter it.
     if (reader != nullptr) {

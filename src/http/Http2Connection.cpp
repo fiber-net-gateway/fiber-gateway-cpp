@@ -2293,6 +2293,13 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
     while (!outbound_stopped_ && state_ != State::Closed && result.bytes_written < byte_budget) {
         encode_ready_streams();
         if (inflight_outbound_chain_.empty()) {
+            if (transport_ && transport_->has_pending_write()) {
+                // Bytes the transport accepted are still draining (TLS): wait
+                // for write readiness, which reports their drain, so a close
+                // cannot cut them off and the write timeout bounds them.
+                result.wait_event = event::IoEvent::Write;
+                return result;
+            }
             if (outbound_closed_ && outbound_idle()) {
                 outbound_stopped_ = true;
             }
@@ -2322,6 +2329,11 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
     }
     result.needs_reschedule =
             !outbound_stopped_ && (!inflight_outbound_chain_.empty() || !outbound_ready_queue_.empty());
+    if (!result.needs_reschedule && !outbound_stopped_ && transport_ && transport_->has_pending_write()) {
+        // The budget ran out as the chain emptied: wait for the drain, as above.
+        result.wait_event = event::IoEvent::Write;
+        return result;
+    }
     if (outbound_closed_ && outbound_idle()) {
         outbound_stopped_ = true;
         result.needs_reschedule = false;
@@ -2331,7 +2343,7 @@ common::IoResult<Http2Connection::OutboundPumpResult> Http2Connection::pump_outb
 
 bool Http2Connection::outbound_idle() const noexcept {
     return outbound_ready_queue_.empty() && inflight_outbound_hooks_.empty() && inflight_outbound_chain_.empty() &&
-           connection_window_waiters_.empty();
+           connection_window_waiters_.empty() && !(transport_ && transport_->has_pending_write());
 }
 
 void Http2Connection::close_outbound() noexcept {
@@ -2353,8 +2365,8 @@ void Http2Connection::abort_outbound(common::IoErr reason) noexcept {
     outbound_stop_reason_ = reason != common::IoErr::None ? reason : common::IoErr::Canceled;
     outbound_closed_ = true;
 
-    // TLS transports may retain pointers into this exact chain after
-    // WouldBlock. Close the transport before releasing any in-flight buffers.
+    // Frames may be partly on the wire (a TCP short write, or a TLS batch cut
+    // mid-frame): close the transport rather than leave the peer a torn frame.
     if (!inflight_outbound_chain_.empty() && transport_ && transport_->valid()) {
         transport_->close();
     }

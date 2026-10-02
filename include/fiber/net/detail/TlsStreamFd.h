@@ -2,6 +2,7 @@
 #define FIBER_NET_DETAIL_TLS_STREAM_FD_H
 
 #include <chrono>
+#include <coroutine>
 #include <cstddef>
 #include <optional>
 #include <string_view>
@@ -28,10 +29,44 @@ namespace fiber::net::detail {
 // handshake engines run the FSM, TlsConnection seals/opens everything after.
 // The socket loop is this class's alone — fd bytes → engine feed, engine
 // take_output → fd — over the private per-connection node pool.
+//
+// Write side (feature/tls/14): sealed is accepted. A write that seals a batch
+// reports it at once; whatever the socket did not take stays in out_pending_
+// and drains on its own through this object's write subscription on the
+// StreamFd. Until it is out the write direction is not ready: try_write
+// reports WouldBlock, and the TLS-level write subscriber (set_write_callback
+// or wait_writable) is notified only once the drain is done.
 class TlsStreamFd : public common::NonCopyable, public common::NonMovable {
 public:
     using HandshakeTask = fiber::async::Task<fiber::common::IoResult<void>>;
     using ReadyCallback = StreamFd::ReadyCallback;
+
+    // Waits for write_ready(), local to the stream's loop. It is installed as
+    // the TLS-level write subscription, so it shares that slot with
+    // set_write_callback, and like RWFd's awaiter it unsubscribes when
+    // destroyed while suspended (how timeout_for abandons it).
+    class WaitWritableAwaiter : public common::NonCopyable, public common::NonMovable {
+    public:
+        WaitWritableAwaiter(TlsStreamFd &stream, std::chrono::milliseconds timeout) noexcept;
+        ~WaitWritableAwaiter();
+
+        bool await_ready() noexcept;
+        bool await_suspend(std::coroutine_handle<> handle) noexcept;
+        fiber::common::IoResult<void> await_resume() noexcept;
+
+    private:
+        static void on_ready(void *ctx, fiber::common::IoErr err) noexcept;
+        static void on_timeout(WaitWritableAwaiter *awaiter) noexcept;
+        void cancel_timer() noexcept;
+
+        TlsStreamFd *stream_;
+        std::chrono::milliseconds timeout_;
+        fiber::event::EventLoop *loop_ = nullptr;
+        fiber::event::EventLoop::TimerEntry timer_entry_{};
+        std::coroutine_handle<> coro_{};
+        fiber::common::IoErr err_ = fiber::common::IoErr::None;
+        bool waiting_ = false;
+    };
 
     TlsStreamFd(fiber::event::EventLoop &loop, int fd);
     ~TlsStreamFd();
@@ -49,12 +84,20 @@ public:
     // reads like a Ready fd: its wire bytes are already consumed, so no
     // socket edge will announce it.
     [[nodiscard]] bool read_ready() const noexcept { return has_pending_read() || stream_fd_.read_ready(); }
-    [[nodiscard]] bool write_ready() const noexcept { return stream_fd_.write_ready(); }
+    // Sealed output still draining makes the write direction not ready; a
+    // latched write error makes it ready (the next write reports it).
+    [[nodiscard]] bool write_ready() const noexcept {
+        return write_error_ != fiber::common::IoErr::None || (out_pending_.empty() && stream_fd_.write_ready());
+    }
+    // Accepted (sealed) output the socket has not taken yet.
+    [[nodiscard]] bool has_pending_write() const noexcept { return !out_pending_.empty(); }
     void close();
 
-    // Loop handover, see StreamFd. Requires no in-flight operation or pending
-    // subscriptions; TLS state (engines, connection, pool) travels with the
-    // object — the node pool is a loop-independent freelist.
+    // Loop handover, see StreamFd. Requires no in-flight operation, pending
+    // subscriptions or undrained output (writev users — the handed-over H1
+    // pool connections — never leave any); TLS state (engines, connection,
+    // pool) travels with the object — the node pool is a loop-independent
+    // freelist.
     fiber::common::IoErr detach_for_handover() noexcept;
     fiber::common::IoErr adopt_loop(fiber::event::EventLoop &loop) noexcept;
 
@@ -62,9 +105,11 @@ public:
     // without subscribing a direction callback.
     fiber::common::IoErr ensure_state_observation() noexcept { return stream_fd_.ensure_state_observation(); }
 
-    // Subscriptions follow RWFd's contract with read_ready() as the read
-    // direction's state: a read_ready() caller advances by reading — buffered
-    // plaintext is never announced by a socket edge.
+    // Subscriptions follow RWFd's contract with read_ready()/write_ready() as
+    // the directions' state: a ready caller advances by doing I/O — buffered
+    // plaintext is never announced by a socket edge, and the write subscriber
+    // is notified only once the sealed output has drained. Write callbacks
+    // run on this object's own StreamFd subscription, after its drain step.
     fiber::common::IoErr set_read_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_write_callback(ReadyCallback callback, void *ctx) noexcept;
     fiber::common::IoErr set_terminal_callback(ReadyCallback callback, void *ctx) noexcept;
@@ -80,7 +125,7 @@ public:
     // Ready fd (a zero timeout still reports TimedOut, as for any RWFd wait).
     [[nodiscard]] StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
-    [[nodiscard]] StreamFd::WaitWritableAwaiter
+    [[nodiscard]] WaitWritableAwaiter
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
     // Chain-based read: appends up to a record's worth of freshly decrypted
@@ -94,19 +139,19 @@ public:
     // Chain-based write: seals a batch of record groups from the chain (a
     // node holding whole records passes through zero-copy, smaller runs
     // coalesce into a scratch record) until ~64 KiB of plaintext, flushes
-    // them in one go, then consumes the batch from the chain and returns its
-    // length (feature/tls/13). WouldBlock: the sealed remainder is retained —
-    // retry with the same chain after wait_writable; any other chain (empty
-    // included) reports Busy until the batch completes. NoMem while sealing
-    // is connection-fatal and latched: every later write and poll_shutdown
-    // report it, and close() sends nothing more.
+    // them in one go (feature/tls/13), consumes the batch from the chain and
+    // returns its length — even when the socket did not take all of it: the
+    // rest drains on its own (feature/tls/14). WouldBlock: an earlier batch is
+    // still draining; wait for write readiness, then call again with any
+    // chain. A failed flush or NoMem while sealing is connection-fatal and
+    // latched: every later write and poll_shutdown report it, and close()
+    // sends nothing more.
     [[nodiscard]] fiber::common::IoResult<std::size_t> try_write(mem::IoBufChain &buf) noexcept;
+    // One try_write batch per call, returned once it is on the wire: unlike
+    // try_write, the coroutine also waits out the drain (an empty chain just
+    // waits for it), so a writev user never leaves sealed output behind.
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::size_t>>
     writev(mem::IoBufChain &buf, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
-    // Drops an in-flight write group's chain identity (post-WouldBlock
-    // abandon): the sealed records stay until close, and any write on
-    // another chain reports Busy while they linger.
-    void abandon_pending_write() noexcept;
 
 private:
     // Each handshake() is its own coroutine owning its staging and engine as
@@ -147,6 +192,21 @@ private:
     // Moves the connection's output (once connected) into out_pending_ and
     // writes it out; the handshake step queues the engine's output itself.
     fiber::common::IoErr flush_output(fiber::event::IoEvent &event) noexcept;
+    // Connected-phase flush: None once everything is on the wire; WouldBlock
+    // once the rest is handed to the drain; anything else is latched by
+    // fail_write.
+    fiber::common::IoErr flush_connected() noexcept;
+    // Latches a write error: the stream's integrity is gone, and the output
+    // that never made it out is dropped with the drain.
+    void fail_write(fiber::common::IoErr err) noexcept;
+    // This object's StreamFd write subscription, held while a drain is in
+    // flight or a TLS-level write subscriber exists.
+    fiber::common::IoErr subscribe_stream_write() noexcept;
+    void unsubscribe_stream_write() noexcept;
+    // The StreamFd write subscription (ctx: this): continues the drain, then
+    // notifies the TLS-level subscriber once nothing is left.
+    static void on_stream_writable(void *ctx, fiber::common::IoErr err) noexcept;
+    void handle_stream_writable() noexcept;
     // One connected-phase wire read, then process_inbound(): inbound_'s
     // incomplete record continues in its own buffer's tailroom while it fits
     // there; otherwise a fresh buffer sized from the caller's `hint` takes
@@ -171,12 +231,16 @@ private:
     mem::IoBuf inbound_{};
     mem::IoBufChain out_pending_{}; // sealed records not yet on the wire
     mem::IoBufChain early_data_{}; // server: decrypted 0-RTT, delivered first
-    // Write-side retry state: the chain whose batch is sealed in out_pending_
-    // (null once abandoned) and its plaintext length.
-    mem::IoBufChain *pending_write_chain_ = nullptr;
-    size_t pending_write_len_ = 0;
-    // NoMem while sealing a batch: records may sit sealed but unreported, so
-    // the stream's integrity is gone — latched until close().
+    // The TLS-level write subscriber (a callback, or a WaitWritableAwaiter).
+    ReadyCallback write_callback_ = nullptr;
+    void *write_callback_ctx_ = nullptr;
+    // A connected-phase flush left out_pending_ to the drain; once connected,
+    // out_pending_ is non-empty exactly while this is set.
+    bool draining_ = false;
+    // on_stream_writable is installed on stream_fd_'s write direction.
+    bool write_subscribed_ = false;
+    // NoMem while sealing a batch (records may sit sealed but unreported) or
+    // a failed flush: the stream's integrity is gone — latched until close().
     fiber::common::IoErr write_error_ = fiber::common::IoErr::None;
     bool handshake_started_ = false;
     bool handshake_done_ = false;

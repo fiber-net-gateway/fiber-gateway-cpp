@@ -65,6 +65,16 @@ public:
         block_write = false;
         notify_write_ready();
     }
+    // Accepted output the transport still holds, like TLS records the socket
+    // has not taken: try_writev reports it, has_pending_write() keeps it until
+    // the release, which then announces write readiness.
+    void release_held() {
+        hold_writes = false;
+        written.append(held);
+        held.clear();
+        notify_write_ready();
+    }
+    bool has_pending_write() const noexcept override { return !held.empty(); }
     common::IoResult<std::size_t> try_readv(std::size_t size, mem::IoBufChain &out) noexcept override {
         if (incoming.empty() && !eof) {
             return std::unexpected(IoErr::WouldBlock);
@@ -97,7 +107,7 @@ public:
                 buf.drop_empty_front();
                 continue;
             }
-            written.append(reinterpret_cast<const char *>(front->readable_data()), length);
+            (hold_writes ? held : written).append(reinterpret_cast<const char *>(front->readable_data()), length);
             out += length;
             buf.consume_and_compact(length);
         }
@@ -111,6 +121,7 @@ public:
     }
     void close() override {
         closed = true;
+        held_at_close = held.size();
         notify_read_ready(IoErr::Canceled);
         notify_write_ready(IoErr::Canceled);
         notify_terminal(IoErr::Canceled);
@@ -148,6 +159,9 @@ public:
     }
     std::string incoming;
     std::string written;
+    std::string held;
+    std::size_t held_at_close = 0;
+    bool hold_writes = false;
     std::chrono::steady_clock::time_point last_read{};
     bool closed = false;
     bool block_write = false;
@@ -436,6 +450,41 @@ TEST(Http2ServerConnectionTest, BlockedGoawayIsBoundedByWriteTimeout) {
             EXPECT_EQ(closed.error(), IoErr::TimedOut);
         EXPECT_TRUE(s.wire->closed);
         EXPECT_FALSE(s.connection.idle_timer_entry_.is_in_heap());
+    });
+}
+
+// The GOAWAY the transport accepted but still holds keeps the connection
+// open: a graceful close waits for write readiness, which the release brings.
+TEST(Http2ServerConnectionTest, GracefulCloseWaitsForOutputTheTransportHolds) {
+    run([]() -> async::Task<void> {
+        Session s(5s);
+        s.preface();
+        EXPECT_TRUE(co_await until([&] { return s.wire->frame_count(Type::Settings) == 2; }));
+        s.wire->hold_writes = true;
+        s.connection.cancel_idle_timer();
+        http::Http2ServerConnection::on_idle_timer(&s.connection);
+        EXPECT_TRUE(co_await until([&] { return !s.wire->held.empty(); }));
+        co_await async::sleep(20ms);
+        EXPECT_FALSE(s.wire->closed);
+        EXPECT_NE(s.connection.http2().state(), State::Closed);
+        s.wire->release_held();
+        co_await s.finish();
+        EXPECT_EQ(s.wire->held_at_close, 0u);
+    });
+}
+
+TEST(Http2ServerConnectionTest, HeldTransportOutputIsBoundedByWriteTimeout) {
+    run([]() -> async::Task<void> {
+        Session s(kIdle, io_options(kUnlimited, 50ms));
+        s.preface();
+        EXPECT_TRUE(co_await until([&] { return s.wire->frame_count(Type::Settings) == 2; }));
+        s.wire->hold_writes = true;
+        auto closed = co_await s.join();
+        EXPECT_FALSE(closed);
+        if (!closed)
+            EXPECT_EQ(closed.error(), IoErr::TimedOut);
+        EXPECT_TRUE(s.wire->closed);
+        EXPECT_FALSE(s.wire->held.empty());
     });
 }
 

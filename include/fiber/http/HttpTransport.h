@@ -68,15 +68,19 @@ public:
                                                                std::chrono::milliseconds timeout) = 0;
 
     // Writes consume from the front of `buf` and may complete partially; loop
-    // until readable_bytes() == 0. A TLS transport retains pointers into the
-    // caller's chain after WouldBlock: retry try_writev with the same chain
-    // (Busy otherwise) or close the transport before releasing the chain.
+    // until readable_bytes() == 0. No transport keeps a reference to the
+    // chain past the call. Bytes try_writev reports may still sit in the
+    // transport (TLS: sealed records the socket has not taken, see
+    // has_pending_write); they drain on their own, and the write direction
+    // turns ready only once they have. writev returns once its bytes are on
+    // the wire.
     [[nodiscard]] virtual common::IoResult<size_t> try_writev(mem::IoBufChain &buf) noexcept = 0;
     virtual fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                                 std::chrono::milliseconds timeout) = 0;
-    // Drops transport-owned references to buffers from an abandoned operation.
-    // All active I/O tasks must be canceled first. This does not close the fd.
-    virtual void abandon_pending_io() noexcept {}
+    // Accepted bytes the transport has not handed to the socket yet. close()
+    // drops them: a graceful closer waits for write readiness until this
+    // clears.
+    [[nodiscard]] virtual bool has_pending_write() const noexcept { return false; }
     virtual void close() = 0;
     [[nodiscard]] virtual bool valid() const noexcept = 0;
     [[nodiscard]] virtual bool terminal() const noexcept = 0;
@@ -162,7 +166,7 @@ public:
     [[nodiscard]] common::IoResult<size_t> try_writev(mem::IoBufChain &buf) noexcept override;
     fiber::async::Task<common::IoResult<size_t>> writev(mem::IoBufChain &buf,
                                                         std::chrono::milliseconds timeout) override;
-    void abandon_pending_io() noexcept override;
+    [[nodiscard]] bool has_pending_write() const noexcept override;
     void close() override;
     [[nodiscard]] bool valid() const noexcept override;
     [[nodiscard]] bool terminal() const noexcept override;

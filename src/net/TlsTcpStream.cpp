@@ -25,6 +25,7 @@ bool TlsTcpStream::terminal() const noexcept { return stream_.terminal(); }
 bool TlsTcpStream::peer_closed() const noexcept { return stream_.peer_closed(); }
 bool TlsTcpStream::read_ready() const noexcept { return stream_.read_ready(); }
 bool TlsTcpStream::write_ready() const noexcept { return stream_.write_ready(); }
+bool TlsTcpStream::has_pending_write() const noexcept { return stream_.has_pending_write(); }
 
 fiber::common::IoErr TlsTcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
     return detail::apply_tcp_socket_options(fd(), options);
@@ -76,7 +77,7 @@ detail::StreamFd::WaitReadableAwaiter TlsTcpStream::wait_readable(std::chrono::m
     return stream_.wait_readable(timeout);
 }
 
-detail::StreamFd::WaitWritableAwaiter TlsTcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
+detail::TlsStreamFd::WaitWritableAwaiter TlsTcpStream::wait_writable(std::chrono::milliseconds timeout) noexcept {
     return stream_.wait_writable(timeout);
 }
 
@@ -101,7 +102,5 @@ fiber::async::Task<fiber::common::IoResult<size_t>> TlsTcpStream::writev(mem::Io
                                                                          std::chrono::milliseconds timeout) {
     return stream_.writev(buf, timeout);
 }
-
-void TlsTcpStream::abandon_pending_write() noexcept { stream_.abandon_pending_write(); }
 
 } // namespace fiber::net
