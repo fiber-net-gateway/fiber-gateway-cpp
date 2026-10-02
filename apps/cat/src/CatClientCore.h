@@ -130,6 +130,13 @@ private:
         Full,
     };
 
+    enum class ConnectionFailure : std::uint8_t {
+        Write,
+        Read,
+        PeerClosed,
+        Terminal,
+    };
+
     struct AtomicStats {
         std::atomic<std::uint64_t> submitted_messages{0};
         std::atomic<std::uint64_t> sent_messages{0};
@@ -145,6 +152,9 @@ private:
         std::atomic<std::uint64_t> connect_failures{0};
         std::atomic<std::uint64_t> write_would_block{0};
         std::atomic<std::uint64_t> write_failures{0};
+        std::atomic<std::uint64_t> connection_failures{0};
+        std::atomic<std::uint64_t> read_failures{0};
+        std::atomic<std::uint64_t> peer_closes{0};
         std::atomic<std::uint64_t> message_id_failures{0};
         std::atomic<std::uint64_t> context_failures{0};
         std::atomic<std::uint64_t> invalid_contexts{0};
@@ -213,8 +223,12 @@ private:
     void clear_write_wait() noexcept;
     static void on_write_ready(void *ctx, common::IoErr error) noexcept;
     static void on_write_timeout(CatClientCore *client) noexcept;
-    void fail_connection(common::IoErr error) noexcept;
-    void install_connection(std::unique_ptr<net::TcpStream> stream) noexcept;
+    void drive_read() noexcept;
+    static void on_read_ready(void *ctx, common::IoErr error) noexcept;
+    static void on_read_deferred(CatClientCore *client) noexcept;
+    static void on_terminal(void *ctx, common::IoErr error) noexcept;
+    void fail_connection(ConnectionFailure reason) noexcept;
+    [[nodiscard]] common::IoErr install_connection(std::unique_ptr<net::TcpStream> stream) noexcept;
     void close_connection() noexcept;
     void drop_detached_frame(OutboundFrame *frame) noexcept;
     void drop_front_frame(bool partial) noexcept;
@@ -257,6 +271,10 @@ private:
 
     std::unique_ptr<net::TcpStream> stream_;
     event::EventLoop::TimerEntry write_timer_{};
+    event::EventLoop::DeferEntry read_defer_entry_{};
+    std::chrono::milliseconds reconnect_delay_;
+    std::chrono::steady_clock::time_point next_connect_at_{};
+    std::chrono::steady_clock::time_point connected_at_{};
     bool write_callback_armed_ = false;
     bool connection_stale_ = false;
 

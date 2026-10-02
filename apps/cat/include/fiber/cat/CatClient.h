@@ -69,6 +69,10 @@ struct CatClientStats {
     std::uint64_t connect_failures = 0;
     std::uint64_t write_would_block = 0;
     std::uint64_t write_failures = 0;
+    // All failed established connections, including write/read errors, EOF and terminal events.
+    std::uint64_t connection_failures = 0;
+    std::uint64_t read_failures = 0;
+    std::uint64_t peer_closes = 0;
     std::uint64_t message_id_failures = 0;
     std::uint64_t context_failures = 0;
     std::uint64_t invalid_contexts = 0;

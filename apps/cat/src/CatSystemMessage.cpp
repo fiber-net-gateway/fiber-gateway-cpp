@@ -251,6 +251,9 @@ std::expected<mem::IoBuf, EncodeError> encode_heartbeat_nt1(const ClientEncodeCo
         !writer.detail("drop.partial.frame", stats.dropped_partial_frame) ||
         !writer.detail("fail.encode", stats.encode_failures) || !writer.detail("fail.router", stats.router_failures) ||
         !writer.detail("fail.connect", stats.connect_failures) || !writer.detail("fail.write", stats.write_failures) ||
+        !writer.detail("fail.connection", stats.connection_failures) ||
+        !writer.detail("fail.read", stats.read_failures) ||
+        !writer.detail("connection.peer.closes", stats.peer_closes) ||
         !writer.detail("trees.sampled", stats.sampled_trees) ||
         !writer.detail("trees.aggregated", stats.aggregated_trees) ||
         !writer.detail("aggregate.overflow", stats.aggregation_overflow) ||

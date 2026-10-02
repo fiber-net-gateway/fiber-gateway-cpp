@@ -250,6 +250,9 @@ TEST(CatEncoderTest, EncodesOfficialAndProcessHeartbeatStatistics) {
                 .ip = "1.2.3.4",
                 .system_stats = &system,
         };
+        info.stats.connection_failures = 7;
+        info.stats.read_failures = 2;
+        info.stats.peer_closes = 3;
         auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 96, 16 * 1024);
         ASSERT_TRUE(encoded);
         const auto bytes = encoded_bytes(*encoded);
@@ -257,6 +260,9 @@ TEST(CatEncoderTest, EncodesOfficialAndProcessHeartbeatStatistics) {
             return std::search(bytes.begin(), bytes.end(), value.begin(), value.end()) != bytes.end();
         };
         EXPECT_TRUE(contains("extension id=\"system.process\""));
+        EXPECT_TRUE(contains("id=\"fail.connection\" value=\"7\""));
+        EXPECT_TRUE(contains("id=\"fail.read\" value=\"2\""));
+        EXPECT_TRUE(contains("id=\"connection.peer.closes\" value=\"3\""));
         EXPECT_TRUE(contains("id=\"cpu.user.percent\" value=\"10.00\""));
         EXPECT_TRUE(contains("id=\"mem.memtotal\" value=\"1024\""));
         EXPECT_TRUE(contains("id=\"process.rss.bytes\" value=\"2048\""));
@@ -300,7 +306,7 @@ TEST(CatEncoderTest, OmitsOptionalSystemStatisticsWhenFieldBudgetIsExhausted) {
                 .ip = "1.2.3.4",
                 .system_stats = &system,
         };
-        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 26, 16 * 1024);
+        auto encoded = fiber::cat::detail::encode_heartbeat_nt1(full_context(), "message", info, 29, 16 * 1024);
         ASSERT_TRUE(encoded);
         const auto bytes = encoded_bytes(*encoded);
         const auto contains = [&](std::string_view value) {
