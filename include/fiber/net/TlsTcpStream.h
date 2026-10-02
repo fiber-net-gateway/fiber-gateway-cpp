@@ -38,11 +38,13 @@ public:
     [[nodiscard]] bool peer_closed() const noexcept;
     [[nodiscard]] bool read_ready() const noexcept;
     [[nodiscard]] bool write_ready() const noexcept;
+    // Accepted output still draining, see detail::TlsStreamFd.
+    [[nodiscard]] bool has_pending_write() const noexcept;
     [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
     void close();
 
-    // Loop handover, see detail::RWFd. Requires no in-flight SSL call or
-    // pending subscriptions.
+    // Loop handover, see detail::TlsStreamFd. Requires no in-flight
+    // operation, pending subscriptions or undrained output.
     fiber::common::IoErr detach_for_handover() noexcept;
     fiber::common::IoErr adopt_loop(fiber::event::EventLoop &loop) noexcept;
     // Idle-pool observation, see detail::TlsStreamFd.
@@ -61,19 +63,18 @@ public:
                                           std::chrono::milliseconds timeout = kDefaultTlsHandshakeTimeout);
     [[nodiscard]] detail::StreamFd::WaitReadableAwaiter
     wait_readable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
-    [[nodiscard]] detail::StreamFd::WaitWritableAwaiter
+    [[nodiscard]] detail::TlsStreamFd::WaitWritableAwaiter
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
     // Chain-based read/write, see detail::TlsStreamFd: WouldBlock waits on
-    // the operation's own direction; the suspending variants drive that loop.
+    // the operation's own direction; the suspending variants drive that loop
+    // (writev also waits out the drain of what it wrote).
     [[nodiscard]] fiber::common::IoResult<size_t> try_read(size_t size, mem::IoBufChain &out) noexcept;
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<size_t>>
     readv(size_t size, mem::IoBufChain &out, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
     [[nodiscard]] fiber::common::IoResult<size_t> try_write(mem::IoBufChain &buf) noexcept;
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<size_t>>
     writev(mem::IoBufChain &buf, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
-    // Drops an in-flight write group's chain identity, see detail::TlsStreamFd.
-    void abandon_pending_write() noexcept;
 
 private:
     detail::TlsStreamFd stream_;

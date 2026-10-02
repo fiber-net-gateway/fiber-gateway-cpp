@@ -9,8 +9,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <signal.h>
 #include <string>
 #include <string_view>
@@ -22,6 +24,7 @@
 #include <fiber/async/Sleep.h>
 #include <fiber/async/Spawn.h>
 #include <fiber/async/Task.h>
+#include <fiber/async/Timeout.h>
 #include <fiber/common/IoError.h>
 #include <fiber/common/mem/IoBuf.h>
 #include <fiber/common/mem/IoBufChain.h>
@@ -566,60 +569,6 @@ struct PollWriteStats {
     std::vector<std::size_t> calls; // what each successful try_writev reported
 };
 
-struct AbandonPendingWriteStats {
-    bool different_chain_busy_before = false;
-    bool empty_chain_ready_after = false;
-};
-
-DetachedTask hold_tls_transport_after_handshake(fiber::http::TlsTransport *transport,
-                                                const fiber::net::TlsServerParam &param,
-                                                std::promise<fiber::common::IoResult<void>> *done) {
-    auto handshake_result = co_await transport->handshake(param, 5s);
-    if (!handshake_result) {
-        done->set_value(std::unexpected(handshake_result.error()));
-        co_return;
-    }
-
-    co_await fiber::async::sleep(200ms);
-    done->set_value(fiber::common::IoResult<void>{});
-    co_return;
-}
-
-DetachedTask abandon_blocked_tls_write(fiber::http::TlsTransport *transport, const fiber::net::TlsClientParam &param,
-                                       fiber::mem::IoBufChain chain,
-                                       std::promise<fiber::common::IoResult<AbandonPendingWriteStats>> *done) {
-    auto handshake_result = co_await transport->handshake(param, 5s);
-    if (!handshake_result) {
-        done->set_value(std::unexpected(handshake_result.error()));
-        co_return;
-    }
-
-    while (chain.readable_bytes() > 0) {
-        auto result = transport->try_writev(chain);
-        if (!result) {
-            if (result.error() == fiber::common::IoErr::WouldBlock) {
-                fiber::mem::IoBufChain empty_chain;
-                AbandonPendingWriteStats stats;
-                stats.different_chain_busy_before =
-                        transport->try_writev(empty_chain).error() == fiber::common::IoErr::Busy;
-                transport->abandon_pending_io();
-                stats.empty_chain_ready_after = static_cast<bool>(transport->try_writev(empty_chain));
-                done->set_value(stats);
-                co_return;
-            }
-            done->set_value(std::unexpected(result.error()));
-            co_return;
-        }
-        if (*result == 0) {
-            done->set_value(std::unexpected(fiber::common::IoErr::ConnReset));
-            co_return;
-        }
-    }
-
-    done->set_value(std::unexpected(fiber::common::IoErr::Unknown));
-    co_return;
-}
-
 DetachedTask run_poll_transport_server(fiber::http::TlsTransport *transport, const fiber::net::TlsServerParam &param,
                                        std::size_t expected_size,
                                        std::promise<fiber::common::IoResult<std::string>> *done) {
@@ -629,8 +578,8 @@ DetachedTask run_poll_transport_server(fiber::http::TlsTransport *transport, con
         co_return;
     }
 
-    // Let the client fill its small send buffer so poll_writev must retain and
-    // retry a coalesced TLS group after WouldBlock.
+    // Let the client fill its small send buffer: its try_writev then backs
+    // off with WouldBlock while the sealed batch drains.
     co_await fiber::async::sleep(50ms);
 
     std::string received;
@@ -1032,7 +981,10 @@ DetachedTask write_chain_recording_records(fiber::http::TlsTransport *transport,
     co_return;
 }
 
-TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBlock) {
+// A polling writer (no write subscription) on a small send buffer: each
+// try_writev reports its whole sealed batch, backs off with WouldBlock while
+// that batch drains on its own, and every byte arrives in order.
+TEST(TlsStreamFdTest, TlsTransportTryWritevBacksOffWhileTheSealedBatchDrains) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
         SigpipeGuard sigpipe_guard;
         TempFile cert("cert", kSelfSignedCertPem);
@@ -1102,77 +1054,6 @@ TEST(TlsStreamFdTest, TlsTransportPollWritevRetainsCoalescedGroupAcrossWouldBloc
         EXPECT_EQ(client_result->written, expected.size());
         EXPECT_GT(client_result->would_block_count, 0U);
         EXPECT_EQ(*server_result, expected);
-    });
-}
-
-TEST(TlsStreamFdTest, TlsTransportAbandonPendingWriteDropsChainReference) {
-    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &pool) {
-        SigpipeGuard sigpipe_guard;
-        TempFile cert("cert", kSelfSignedCertPem);
-        TempFile key("key", kSelfSignedKeyPem);
-        ASSERT_TRUE(cert.ok);
-        ASSERT_TRUE(key.ok);
-
-        auto tls_pair = create_tls_pair(cert.path, key.path);
-        ASSERT_TRUE(tls_pair);
-
-        int fds[2] = {-1, -1};
-        ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds), 0);
-        int send_buffer_size = 4096;
-        ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)), 0);
-
-        fiber::event::EventLoopGroup group(2);
-        group.start();
-
-        fiber::net::SocketAddress peer(fiber::net::IpAddress::loopback_v4(), 0);
-        auto server_transport_result =
-                fiber::http::TlsTransport::create(group.at(0), fiber::net::AcceptResult(fds[0], peer));
-        auto client_transport_result =
-                fiber::http::TlsTransport::create(group.at(1), fiber::net::AcceptResult(fds[1], peer));
-        ASSERT_TRUE(server_transport_result);
-        ASSERT_TRUE(client_transport_result);
-        auto *server_transport = server_transport_result->release();
-        auto *client_transport = client_transport_result->release();
-
-
-        fiber::mem::IoBufChain chain;
-        std::vector<std::size_t> sizes(64, 4096);
-        (void) build_distinct_chain(pool, chain, sizes);
-
-        std::promise<fiber::common::IoResult<void>> server_promise;
-        std::promise<fiber::common::IoResult<AbandonPendingWriteStats>> client_promise;
-        auto server_future = server_promise.get_future();
-        auto client_future = client_promise.get_future();
-
-        fiber::async::spawn(group.at(0), [&]() {
-            return hold_tls_transport_after_handshake(server_transport, tls_pair->server_options, &server_promise);
-        });
-        fiber::async::spawn(group.at(1), [&]() {
-            return abandon_blocked_tls_write(client_transport, tls_pair->client_options, std::move(chain),
-                                             &client_promise);
-        });
-
-        ASSERT_EQ(client_future.wait_for(10s), std::future_status::ready);
-        ASSERT_EQ(server_future.wait_for(10s), std::future_status::ready);
-        auto client_result = client_future.get();
-        auto server_result = server_future.get();
-
-        std::promise<void> server_close_promise;
-        std::promise<void> client_close_promise;
-        auto server_close_future = server_close_promise.get_future();
-        auto client_close_future = client_close_promise.get_future();
-        fiber::async::spawn(group.at(0), [&]() { return close_transport(server_transport, &server_close_promise); });
-        fiber::async::spawn(group.at(1), [&]() { return close_transport(client_transport, &client_close_promise); });
-        ASSERT_EQ(server_close_future.wait_for(2s), std::future_status::ready);
-        ASSERT_EQ(client_close_future.wait_for(2s), std::future_status::ready);
-
-        group.stop();
-        group.join();
-
-        ASSERT_TRUE(server_result);
-        ASSERT_TRUE(client_result);
-        EXPECT_TRUE(client_result->different_chain_busy_before);
-        EXPECT_TRUE(client_result->empty_chain_ready_after);
     });
 }
 
@@ -2239,6 +2120,420 @@ TEST(TlsStreamFdTest, CloseReleasesUnflushedOutput) {
     EXPECT_EQ(server_err, fiber::common::IoErr::None);
     EXPECT_EQ(client_err, fiber::common::IoErr::None);
 }
+
+// =====================================================================
+// sealed is accepted: the self-draining write side (feature/tls/14)
+// =====================================================================
+
+using StreamBody = std::function<fiber::async::Task<void>(fiber::net::detail::TlsStreamFd &)>;
+
+struct DrainPairRun {
+    fiber::common::IoErr server_handshake = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr client_handshake = fiber::common::IoErr::Unknown;
+    int finished = 0;
+};
+
+template<class Param>
+DetachedTask handshake_then(fiber::net::detail::TlsStreamFd *stream, const Param *param, const StreamBody *body,
+                            fiber::common::IoErr *handshake_err, int *finished) {
+    auto handshake_result = co_await stream->handshake(*param, 5s);
+    *handshake_err = handshake_result ? fiber::common::IoErr::None : handshake_result.error();
+    if (handshake_result) {
+        co_await (*body)(*stream);
+    }
+    ++*finished;
+}
+
+DetachedTask close_pair_when_done(fiber::net::detail::TlsStreamFd *server, fiber::net::detail::TlsStreamFd *client,
+                                  const int *finished) {
+    const auto deadline = fiber::event::EventLoop::current().now() + 10s;
+    while (*finished < 2 && fiber::event::EventLoop::current().now() < deadline) {
+        co_await fiber::async::sleep(1ms);
+    }
+    client->close();
+    server->close();
+    fiber::event::EventLoop::current().stop();
+}
+
+// Both ends on one loop; each body runs once its own handshake is done. The
+// client's send buffer is tiny, so a 64 KiB batch cannot leave in one write
+// while the server is not reading. Both streams are closed on the loop and
+// destroyed after it stopped.
+void run_drain_pair(TestTlsPair &tls_pair, const StreamBody &server_body, const StreamBody &client_body,
+                    DrainPairRun &run) {
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
+    int send_buffer_size = 4096;
+    ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)), 0);
+    fiber::event::EventLoop loop;
+    fiber::net::detail::TlsStreamFd server(loop, fds[0]);
+    fiber::net::detail::TlsStreamFd client(loop, fds[1]);
+    fiber::async::spawn(loop, [&]() {
+        return handshake_then(&server, &tls_pair.server_options, &server_body, &run.server_handshake, &run.finished);
+    });
+    fiber::async::spawn(loop, [&]() {
+        return handshake_then(&client, &tls_pair.client_options, &client_body, &run.client_handshake, &run.finished);
+    });
+    fiber::async::spawn(loop, [&]() { return close_pair_when_done(&server, &client, &run.finished); });
+    loop.run();
+}
+
+template<class Predicate>
+fiber::async::Task<bool> poll_until(Predicate predicate, std::chrono::milliseconds timeout) {
+    const auto deadline = fiber::event::EventLoop::current().now() + timeout;
+    while (!predicate()) {
+        if (fiber::event::EventLoop::current().now() >= deadline) {
+            co_return false;
+        }
+        co_await fiber::async::sleep(1ms);
+    }
+    co_return true;
+}
+
+fiber::async::Task<fiber::common::IoErr> read_exact(fiber::net::detail::TlsStreamFd &stream, std::size_t total,
+                                                    std::string &out) {
+    while (out.size() < total) {
+        const fiber::common::IoErr err = co_await read_append(stream, total - out.size(), out);
+        if (err != fiber::common::IoErr::None) {
+            co_return err;
+        }
+    }
+    co_return fiber::common::IoErr::None;
+}
+
+constexpr std::size_t kDrainBatch = 64 * 1024; // TlsStreamFd's write batch, sealed from 4 KiB nodes
+
+// The client's first write: one batch out of 64 x 4 KiB, which the tiny send
+// buffer cannot take whole.
+fiber::common::IoResult<std::size_t> write_blocked_batch(fiber::net::detail::TlsStreamFd &stream,
+                                                         fiber::mem::IoBufChain &chain, std::string &expected) {
+    expected = build_distinct_chain(fiber::event::EventLoop::current().io_buf_node_pool(), chain,
+                                    std::vector<std::size_t>(64, 4096));
+    return stream.try_write(chain);
+}
+
+struct WriteReadyProbe {
+    fiber::net::detail::TlsStreamFd *stream = nullptr;
+    int calls = 0;
+    fiber::common::IoErr err = fiber::common::IoErr::Unknown;
+    bool pending = true;
+    bool ready = false;
+};
+
+void on_write_ready_probe(void *ctx, fiber::common::IoErr err) noexcept {
+    auto *probe = static_cast<WriteReadyProbe *>(ctx);
+    ++probe->calls;
+    probe->err = err;
+    if (err == fiber::common::IoErr::None) {
+        probe->pending = probe->stream->has_pending_write();
+        probe->ready = probe->stream->write_ready();
+    }
+}
+
+// Credential files and the pair built from them; setup failures skip the test.
+class TlsStreamFdDrainTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(cert_.ok);
+        ASSERT_TRUE(key_.ok);
+        fiber::net::TlsCredentialOptions options{};
+        options.certificate_chain = fiber::net::TlsPemSource::from_file(cert_.path);
+        options.private_key = fiber::net::TlsPemSource::from_file(key_.path);
+        auto credential = fiber::net::TlsCredential::create(options);
+        ASSERT_TRUE(credential);
+        tls_pair_.emplace(std::move(*credential));
+    }
+
+    SigpipeGuard sigpipe_guard_;
+    TempFile cert_{"cert_drain", kSelfSignedCertPem};
+    TempFile key_{"key_drain", kSelfSignedKeyPem};
+    std::optional<TestTlsPair> tls_pair_;
+};
+
+using TlsStreamFdDrainDeathTest = TlsStreamFdDrainTest;
+
+// try_write reports the sealed batch and consumes it although the socket took
+// only part of it; until the rest is out every write backs off, and it gets
+// out with no further call.
+TEST_F(TlsStreamFdDrainTest, TryWriteAcceptsTheSealedBatchAndDrainsItAlone) {
+    fiber::common::IoResult<std::size_t> first = std::unexpected(fiber::common::IoErr::Unknown);
+    std::size_t left_in_chain = 0;
+    bool pending = false;
+    bool ready = true;
+    fiber::common::IoErr same_chain = fiber::common::IoErr::None;
+    fiber::common::IoErr other_chain = fiber::common::IoErr::None;
+    bool drained = false;
+    bool ready_after = false;
+    std::string expected;
+    std::string received;
+    fiber::common::IoErr read_err = fiber::common::IoErr::Unknown;
+
+    const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        fiber::mem::IoBufChain chain;
+        first = write_blocked_batch(stream, chain, expected);
+        left_in_chain = chain.readable_bytes();
+        pending = stream.has_pending_write();
+        ready = stream.write_ready();
+        auto again = stream.try_write(chain);
+        same_chain = again ? fiber::common::IoErr::None : again.error();
+        fiber::mem::IoBufChain other;
+        auto empty = stream.try_write(other);
+        other_chain = empty ? fiber::common::IoErr::None : empty.error();
+        // No further call: the batch must drain while this side only waits.
+        drained = co_await poll_until([&] { return !stream.has_pending_write(); }, 5s);
+        ready_after = stream.write_ready();
+    };
+    const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        read_err = co_await read_exact(stream, kDrainBatch, received);
+    };
+    DrainPairRun run;
+    run_drain_pair(*tls_pair_, server, client, run);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+
+    ASSERT_EQ(run.server_handshake, fiber::common::IoErr::None);
+    ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(*first, kDrainBatch);
+    EXPECT_EQ(left_in_chain, 64U * 4096U - kDrainBatch);
+    EXPECT_TRUE(pending);
+    EXPECT_FALSE(ready);
+    EXPECT_EQ(same_chain, fiber::common::IoErr::WouldBlock);
+    EXPECT_EQ(other_chain, fiber::common::IoErr::WouldBlock);
+    EXPECT_TRUE(drained);
+    EXPECT_TRUE(ready_after);
+    EXPECT_EQ(read_err, fiber::common::IoErr::None);
+    EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
+}
+
+// The TLS-level write subscriber is notified once, after the drain: never
+// inline from the setter, never while sealed output is still pending.
+TEST_F(TlsStreamFdDrainTest, WriteCallbackFiresOnlyOnceTheDrainIsDone) {
+    WriteReadyProbe probe;
+    fiber::common::IoErr subscribed = fiber::common::IoErr::Unknown;
+    int calls_after_subscribe = -1;
+    bool notified = false;
+    std::string expected;
+    std::string received;
+
+    const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        fiber::mem::IoBufChain chain;
+        (void) write_blocked_batch(stream, chain, expected);
+        probe.stream = &stream;
+        subscribed = stream.set_write_callback(&on_write_ready_probe, &probe);
+        calls_after_subscribe = probe.calls;
+        notified = co_await poll_until([&] { return probe.calls > 0; }, 5s);
+        co_await fiber::async::sleep(20ms); // no second notification without a new block
+        (void) stream.clear_write_callback(&on_write_ready_probe, &probe);
+    };
+    const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        co_await fiber::async::sleep(20ms);
+        (void) co_await read_exact(stream, kDrainBatch, received);
+    };
+    DrainPairRun run;
+    run_drain_pair(*tls_pair_, server, client, run);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+
+    ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
+    EXPECT_EQ(subscribed, fiber::common::IoErr::None);
+    EXPECT_EQ(calls_after_subscribe, 0);
+    EXPECT_TRUE(notified);
+    EXPECT_EQ(probe.calls, 1);
+    EXPECT_EQ(probe.err, fiber::common::IoErr::None);
+    EXPECT_FALSE(probe.pending);
+    EXPECT_TRUE(probe.ready);
+    EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
+}
+
+// close() mid-drain drops the sealed output and completes the TLS-level
+// write subscriber once, with Canceled.
+TEST_F(TlsStreamFdDrainTest, CloseDuringTheDrainCancelsTheWriteSubscriber) {
+    WriteReadyProbe probe;
+    bool pending_before = false;
+    bool pending_after = true;
+    std::string expected;
+
+    const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        fiber::mem::IoBufChain chain;
+        (void) write_blocked_batch(stream, chain, expected);
+        pending_before = stream.has_pending_write();
+        probe.stream = &stream;
+        (void) stream.set_write_callback(&on_write_ready_probe, &probe);
+        stream.close();
+        pending_after = stream.has_pending_write();
+        co_return;
+    };
+    const StreamBody server = [](fiber::net::detail::TlsStreamFd &) -> fiber::async::Task<void> { co_return; };
+    DrainPairRun run;
+    run_drain_pair(*tls_pair_, server, client, run);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+
+    ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
+    EXPECT_TRUE(pending_before);
+    EXPECT_FALSE(pending_after);
+    EXPECT_EQ(probe.calls, 1);
+    EXPECT_EQ(probe.err, fiber::common::IoErr::Canceled);
+}
+
+// writev returns each batch only once it is on the wire, so a writev user
+// never leaves sealed output behind.
+TEST_F(TlsStreamFdDrainTest, WritevReturnsOnlyOnceItsBatchLeft) {
+    std::vector<std::size_t> returns;
+    bool pending_after_any = false;
+    fiber::common::IoErr write_err = fiber::common::IoErr::None;
+    std::string expected;
+    std::string received;
+
+    const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        fiber::mem::IoBufChain chain;
+        expected = build_distinct_chain(fiber::event::EventLoop::current().io_buf_node_pool(), chain,
+                                        std::vector<std::size_t>(64, 4096));
+        while (chain.readable_bytes() > 0) {
+            auto written = co_await stream.writev(chain, 5s);
+            if (!written) {
+                write_err = written.error();
+                co_return;
+            }
+            returns.push_back(*written);
+            pending_after_any = pending_after_any || stream.has_pending_write();
+        }
+    };
+    const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        co_await fiber::async::sleep(20ms);
+        (void) co_await read_exact(stream, 64 * 4096, received);
+    };
+    DrainPairRun run;
+    run_drain_pair(*tls_pair_, server, client, run);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+
+    ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
+    EXPECT_EQ(write_err, fiber::common::IoErr::None);
+    EXPECT_EQ(returns, std::vector<std::size_t>(4, kDrainBatch));
+    EXPECT_FALSE(pending_after_any);
+    EXPECT_TRUE(received == expected);
+}
+
+// wait_writable waits for the drain, not the socket: it times out while the
+// peer reads nothing, an abandoned wait (timeout_for) frees the slot, and it
+// completes once the drain is done.
+TEST_F(TlsStreamFdDrainTest, WaitWritableWaitsForTheDrainAndUnsubscribesWhenAbandoned) {
+    fiber::common::IoErr own_timeout = fiber::common::IoErr::None;
+    fiber::common::IoErr wrapped_timeout = fiber::common::IoErr::None;
+    fiber::common::IoErr resubscribed = fiber::common::IoErr::Unknown;
+    fiber::common::IoErr drained_wait = fiber::common::IoErr::Unknown;
+    bool pending_after = true;
+    bool may_read = false;
+    std::string expected;
+    std::string received;
+
+    const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        fiber::mem::IoBufChain chain;
+        (void) write_blocked_batch(stream, chain, expected);
+        auto waited = co_await stream.wait_writable(20ms);
+        own_timeout = waited ? fiber::common::IoErr::None : waited.error();
+        auto wrapped = co_await fiber::async::timeout_for([&]() { return stream.wait_writable(); }, 20ms);
+        wrapped_timeout = wrapped ? fiber::common::IoErr::None : wrapped.error();
+        WriteReadyProbe probe;
+        probe.stream = &stream;
+        resubscribed = stream.set_write_callback(&on_write_ready_probe, &probe);
+        (void) stream.clear_write_callback(&on_write_ready_probe, &probe);
+        may_read = true;
+        auto drained = co_await stream.wait_writable(5s);
+        drained_wait = drained ? fiber::common::IoErr::None : drained.error();
+        pending_after = stream.has_pending_write();
+    };
+    const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        (void) co_await poll_until([&] { return may_read; }, 5s);
+        (void) co_await read_exact(stream, kDrainBatch, received);
+    };
+    DrainPairRun run;
+    run_drain_pair(*tls_pair_, server, client, run);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+
+    ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
+    EXPECT_EQ(own_timeout, fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(wrapped_timeout, fiber::common::IoErr::TimedOut);
+    EXPECT_EQ(resubscribed, fiber::common::IoErr::None);
+    EXPECT_EQ(drained_wait, fiber::common::IoErr::None);
+    EXPECT_FALSE(pending_after);
+    EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
+}
+
+// A graceful shutdown queues close_notify behind the batch still draining:
+// the peer reads the whole batch, then EOF.
+TEST_F(TlsStreamFdDrainTest, PollShutdownSendsCloseNotifyBehindTheDrain) {
+    fiber::common::IoErr shutdown_err = fiber::common::IoErr::Unknown;
+    bool blocked_on_write = false;
+    bool eof = false;
+    fiber::common::IoErr read_err = fiber::common::IoErr::None;
+    std::string expected;
+    std::string received;
+
+    const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        fiber::mem::IoBufChain chain;
+        (void) write_blocked_batch(stream, chain, expected);
+        for (;;) {
+            fiber::event::IoEvent event = fiber::event::IoEvent::None;
+            shutdown_err = stream.poll_shutdown(event);
+            if (shutdown_err != fiber::common::IoErr::WouldBlock) {
+                break;
+            }
+            blocked_on_write = event == fiber::event::IoEvent::Write;
+            auto waited = co_await stream.wait_writable(5s);
+            if (!waited) {
+                shutdown_err = waited.error();
+                break;
+            }
+        }
+    };
+    const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        co_await fiber::async::sleep(20ms);
+        for (;;) {
+            fiber::mem::IoBufChain chain;
+            auto read_result = co_await stream.readv(kDrainBatch, chain, 5s);
+            if (!read_result) {
+                read_err = read_result.error();
+                co_return;
+            }
+            if (*read_result == 0) {
+                eof = true;
+                co_return;
+            }
+            for (const fiber::mem::IoBufNode *node = chain.front_node(); node != nullptr; node = node->next) {
+                received.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+            }
+        }
+    };
+    DrainPairRun run;
+    run_drain_pair(*tls_pair_, server, client, run);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+
+    ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
+    EXPECT_EQ(shutdown_err, fiber::common::IoErr::None);
+    EXPECT_TRUE(blocked_on_write);
+    EXPECT_EQ(read_err, fiber::common::IoErr::None);
+    EXPECT_TRUE(eof);
+    EXPECT_TRUE(received == expected.substr(0, kDrainBatch));
+}
+
+// Handover is for writev users, whose output is always out by then: a stream
+// still draining must not move loops.
+TEST_F(TlsStreamFdDrainDeathTest, HandoverWithUndrainedOutputAsserts) {
+    const StreamBody client = [](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        fiber::mem::IoBufChain chain;
+        std::string expected;
+        (void) write_blocked_batch(stream, chain, expected);
+        (void) stream.detach_for_handover();
+        co_return;
+    };
+    const StreamBody server = [](fiber::net::detail::TlsStreamFd &) -> fiber::async::Task<void> { co_return; };
+    EXPECT_DEATH(
+            {
+                DrainPairRun run;
+                run_drain_pair(*tls_pair_, server, client, run);
+            },
+            "FIBER_ASSERT failed: out_pending_");
+}
+
 
 // =====================================================================
 // batched write flush (feature/tls/13)

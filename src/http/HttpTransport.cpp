@@ -295,13 +295,11 @@ bool TlsTransport::handshake_done() const noexcept { return stream_.handshake_do
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(const net::TlsClientParam &param,
                                                                    std::chrono::milliseconds timeout) {
-    stream_.abandon_pending_write();
     return stream_.handshake(param, timeout);
 }
 
 fiber::async::Task<common::IoResult<void>> TlsTransport::handshake(const net::TlsServerParam &param,
                                                                    std::chrono::milliseconds timeout) {
-    stream_.abandon_pending_write();
     return stream_.handshake(param, timeout);
 }
 
@@ -335,7 +333,7 @@ fiber::async::Task<common::IoResult<size_t>> TlsTransport::writev(mem::IoBufChai
     co_return co_await stream_.writev(buf, timeout);
 }
 
-void TlsTransport::abandon_pending_io() noexcept { stream_.abandon_pending_write(); }
+bool TlsTransport::has_pending_write() const noexcept { return stream_.has_pending_write(); }
 
 void TlsTransport::close() { stream_.close(); }
 
