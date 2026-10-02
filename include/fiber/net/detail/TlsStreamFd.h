@@ -128,11 +128,13 @@ public:
     [[nodiscard]] WaitWritableAwaiter
     wait_writable(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::common::IoErr poll_shutdown(fiber::event::IoEvent &event) noexcept;
-    // Chain-based read: appends up to a record's worth of freshly decrypted
-    // plaintext to out (retained views of the wire buffer it was opened in)
-    // and returns its length; 0 is EOF (close_notify latched). WouldBlock:
+    // Chain-based read: appends up to `size` bytes of decrypted plaintext to
+    // out — whatever is buffered, possibly several records' worth (retained
+    // views of the wire buffer it was opened in) — and returns its length; 0
+    // is EOF (close_notify latched). The wire is read only while nothing is
+    // buffered, and `size` sizes that read (feature/tls/12 §2). WouldBlock:
     // wait_readable, then call again. A connected-phase read only ever blocks
-    // on readability. `size` also sizes the wire read (feature/tls/12 §2).
+    // on readability.
     [[nodiscard]] fiber::common::IoResult<std::size_t> try_read(std::size_t size, mem::IoBufChain &out) noexcept;
     [[nodiscard]] fiber::async::Task<fiber::common::IoResult<std::size_t>>
     readv(std::size_t size, mem::IoBufChain &out, std::chrono::milliseconds timeout = std::chrono::milliseconds::max());

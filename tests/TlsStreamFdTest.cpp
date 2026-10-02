@@ -2156,15 +2156,16 @@ DetachedTask close_pair_when_done(fiber::net::detail::TlsStreamFd *server, fiber
 }
 
 // Both ends on one loop; each body runs once its own handshake is done. The
-// client's send buffer is tiny, so a 64 KiB batch cannot leave in one write
-// while the server is not reading. Both streams are closed on the loop and
-// destroyed after it stopped.
+// client's send buffer is tiny by default, so a 64 KiB batch cannot leave in
+// one write while the server is not reading; 0 keeps the system default. Both
+// streams are closed on the loop and destroyed after it stopped.
 void run_drain_pair(TestTlsPair &tls_pair, const StreamBody &server_body, const StreamBody &client_body,
-                    DrainPairRun &run) {
+                    DrainPairRun &run, int client_send_buffer = 4096) {
     int fds[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds), 0);
-    int send_buffer_size = 4096;
-    ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)), 0);
+    if (client_send_buffer > 0) {
+        ASSERT_EQ(::setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &client_send_buffer, sizeof(client_send_buffer)), 0);
+    }
     fiber::event::EventLoop loop;
     fiber::net::detail::TlsStreamFd server(loop, fds[0]);
     fiber::net::detail::TlsStreamFd client(loop, fds[1]);
@@ -2532,6 +2533,53 @@ TEST_F(TlsStreamFdDrainDeathTest, HandoverWithUndrainedOutputAsserts) {
                 run_drain_pair(*tls_pair_, server, client, run);
             },
             "FIBER_ASSERT failed: out_pending_");
+}
+
+// =====================================================================
+// reads deliver everything buffered
+// =====================================================================
+
+using TlsStreamFdReadTest = TlsStreamFdDrainTest;
+
+// A read takes everything one wire buffer opened, several records' worth,
+// not one record per call: the client's three full records arrive in a
+// single write, behind a server already parked on its read.
+TEST_F(TlsStreamFdReadTest, ReadDeliversSeveralRecordsInOneCall) {
+    constexpr std::size_t kRecordPlaintext = 16 * 1024;
+    const std::string payload = byte_pattern(3 * kRecordPlaintext, 13);
+    bool server_reading = false;
+    fiber::common::IoErr write_err = fiber::common::IoErr::Unknown;
+    fiber::common::IoResult<std::size_t> first_read = std::unexpected(fiber::common::IoErr::Unknown);
+    std::string received;
+
+    const StreamBody server = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        server_reading = true;
+        fiber::mem::IoBufChain chain;
+        first_read = co_await stream.readv(64 * 1024, chain, 5s);
+        for (const fiber::mem::IoBufNode *node = chain.front_node(); node != nullptr; node = node->next) {
+            received.append(reinterpret_cast<const char *>(node->buf.readable_data()), node->buf.readable());
+        }
+    };
+    const StreamBody client = [&](fiber::net::detail::TlsStreamFd &stream) -> fiber::async::Task<void> {
+        // Nothing may ride behind the client's Finished: write only once the
+        // server reads from an empty socket.
+        if (!co_await poll_until([&] { return server_reading; }, 5s)) {
+            write_err = fiber::common::IoErr::TimedOut;
+            co_return;
+        }
+        auto written = co_await tls_poll_write(stream, payload.data(), payload.size());
+        write_err = written ? fiber::common::IoErr::None : written.error();
+    };
+    DrainPairRun run;
+    run_drain_pair(*tls_pair_, server, client, run, 0);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+
+    ASSERT_EQ(run.server_handshake, fiber::common::IoErr::None);
+    ASSERT_EQ(run.client_handshake, fiber::common::IoErr::None);
+    EXPECT_EQ(write_err, fiber::common::IoErr::None);
+    ASSERT_TRUE(first_read) << static_cast<int>(first_read.error());
+    EXPECT_EQ(*first_read, payload.size());
+    EXPECT_TRUE(received == payload);
 }
 
 

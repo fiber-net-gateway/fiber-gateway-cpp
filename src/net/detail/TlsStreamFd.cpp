@@ -709,11 +709,10 @@ fiber::common::IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem
     if (size == 0) {
         return std::size_t{0};
     }
-    // The wire read is sized from what the caller asked for; delivery stays
-    // capped at a record's worth of plaintext per call (the take moves
-    // retained views, zero-copy).
-    const std::size_t wire_hint = size;
-    size = std::min(size, kRecordPlaintextMax);
+    // Buffered plaintext goes out first, up to `size` across as many records
+    // as it spans (the take moves retained views, zero-copy) — a short read
+    // when less is buffered. The wire is read only once nothing is: `size`
+    // then sizes that read, so one wire buffer's records come out in one call.
     for (;;) {
         if (!early_data_.empty()) {
             // Server 0-RTT: decrypted early data delivers before anything
@@ -740,7 +739,7 @@ fiber::common::IoResult<std::size_t> TlsStreamFd::try_read(std::size_t size, mem
                 break;
         }
         // No plaintext buffered: pull wire bytes and open their records.
-        const fiber::common::IoErr err = read_wire(wire_hint);
+        const fiber::common::IoErr err = read_wire(size);
         if (err != fiber::common::IoErr::None) {
             return std::unexpected(err); // WouldBlock included: the socket read is the only stall
         }
@@ -753,7 +752,7 @@ fiber::async::Task<fiber::common::IoResult<std::size_t>> TlsStreamFd::readv(std:
     for (;;) {
         auto read = try_read(size, out);
         if (read) {
-            // One node of plaintext per call — the caller drives the loop.
+            // One delivery per call — the caller drives the loop.
             co_return read;
         }
         if (read.error() != fiber::common::IoErr::WouldBlock) {
