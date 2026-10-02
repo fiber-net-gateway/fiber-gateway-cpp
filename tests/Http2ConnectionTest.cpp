@@ -1739,7 +1739,10 @@ run_client_response_read_after_rst_stream(std::shared_ptr<std::promise<ClientRes
     std::string rst_payload(4, '\0');
     response += make_frame(4, 0x3, 0x0, 1, rst_payload);
 
-    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{std::move(response)});
+    // The peer answers only once the request is on the wire: it cannot reset
+    // a stream it has not seen.
+    auto fake_transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{std::move(response)},
+                                                              std::vector<size_t>{}, true);
     auto *fake_transport_ptr = fake_transport.get();
 
     fiber::http::Http2Connection::Options options;
@@ -1758,6 +1761,7 @@ run_client_response_read_after_rst_stream(std::shared_ptr<std::promise<ClientRes
             true);
     outcome.stream_id = exchange.stream_id();
     if (outcome.header_result) {
+        fake_transport_ptr->release_reads();
         outcome.run_result = co_await connection.close_gate().join();
         outcome.read_header_result = co_await exchange.read_header();
         outcome.read_body_result = co_await exchange.read_body(64);
@@ -6518,7 +6522,12 @@ WireOutcome execute_wire(fiber::http::Http2Connection::Options options, std::str
         TestHttp2Connection connection(options, &test_http2_stream_factory(), TestHttp2StreamFactory::ops());
         fiber::http::Http2CloseGate gate(fiber::event::EventLoop::current(), connection);
         connection.observe_close_gate(gate);
-        auto transport = std::make_unique<FakeHttpTransport>(std::vector<std::string>{std::move(input)});
+        // No input is a peer that closes at once (EOF), not an empty read.
+        std::vector<std::string> chunks;
+        if (!input.empty()) {
+            chunks.push_back(std::move(input));
+        }
+        auto transport = std::make_unique<FakeHttpTransport>(std::move(chunks));
         auto *fake = transport.get();
         EXPECT_EQ(connection.start(std::move(transport)), fiber::common::IoErr::None);
         auto result = co_await gate.join();

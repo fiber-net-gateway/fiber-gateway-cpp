@@ -394,12 +394,13 @@ private:
     common::IoErr start_client_session() noexcept;
     common::IoErr start_server_session() noexcept;
     void on_stream_outbound_idle(Http2Stream &stream) noexcept;
-    static void on_transport_read_ready(void *ctx, common::IoErr err) noexcept;
-    static void on_transport_write_ready(void *ctx, common::IoErr err) noexcept;
+    // Both directions' subscriptions: the transport's state says which is
+    // ready, so either one just drives the pump.
+    static void on_transport_ready(void *ctx, common::IoErr err) noexcept;
     static void on_io_pump(Http2Connection *connection) noexcept;
     static void on_read_timer(Http2Connection *connection) noexcept;
     static void on_write_timer(Http2Connection *connection) noexcept;
-    void handle_transport_ready(event::IoEvent event, common::IoErr err) noexcept;
+    void handle_transport_ready(common::IoErr err) noexcept;
     void schedule_io_pump(bool next_turn = false) noexcept;
     void drive_io() noexcept;
     [[nodiscard]] common::IoErr sync_transport_callbacks() noexcept;
@@ -493,7 +494,6 @@ private:
     bool capacity_dispatch_again_ = false;
     bool state_dispatch_running_ = false;
     bool state_dispatch_again_ = false;
-    bool prefer_write_ = false;
     bool inbound_eof_ = false;
     bool close_flush_outbound_ = false;
     bool close_finished_ = false;
