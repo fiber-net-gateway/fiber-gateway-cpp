@@ -18,14 +18,14 @@ class Poller {
 public:
     enum class Event : std::uint32_t {
         None = 0,
-        Read = 1u << 0,
-        Write = 1u << 1,
+        Read = 1U << 0,
+        Write = 1U << 1,
         // EPOLLERR/EPOLLHUP only. Deliberately excludes EPOLLRDHUP so a peer
         // that half-closes its write side can continue receiving data.
-        Terminal = 1u << 2,
-        ReadHangup = 1u << 3,
+        Terminal = 1U << 2,
+        ReadHangup = 1U << 3,
     };
-    enum class Mode : std::uint32_t { None = 0, Edge = 1u << 0, OneShot = 1u << 1 };
+    enum class Mode : std::uint32_t { None = 0, Edge = 1U << 0, OneShot = 1U << 1 };
 
     // Registered items are addressed directly through epoll_event::data.ptr.
     // An item must stay alive until del() returns; del() also blanks any entry
@@ -88,7 +88,7 @@ private:
     int wait_timer_fd(epoll_event *events, int max_events, std::chrono::steady_clock::time_point deadline);
     int wait_epoll(epoll_event *events, int max_events, int timeout_ms);
     int sync_timer_fd(std::chrono::steady_clock::time_point deadline, std::chrono::steady_clock::time_point now);
-    int drain_timer_fd();
+    int drain_timer_fd() const;
 
     int epoll_fd_ = -1;
     int timer_fd_ = -1;
@@ -105,6 +105,8 @@ private:
 
 constexpr Poller::Event operator|(Poller::Event left, Poller::Event right) noexcept {
     using U = std::underlying_type_t<Poller::Event>;
+    // Event is a bitmask enum; OR-combined values are outside the enumerator range by design.
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
     return static_cast<Poller::Event>(static_cast<U>(left) | static_cast<U>(right));
 }
 
