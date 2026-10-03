@@ -11,6 +11,8 @@
 #   cppcoreguidelines-* (pro-bounds/pro-type-ownership conflict with perf-first design)
 #   readability-identifier-naming (needs a naming-spec project of its own)
 #   modernize-use-std-print (cold-path cosmetic churn, format-string conversion risk)
+#   modernize-use-ranges (its std::lower_bound->ranges::lower_bound fix emits code
+#     libc++ 20 rejects — no matching __lower_bound call, breaks the build)
 #
 # Baseline-triaged disables (rationale + counts in feature/clang-tidy-rollout.md):
 #   performance-enum-size — enum widths are wire/ABI-deliberate (IoErr:u16, TLS suites)
@@ -37,6 +39,7 @@ Checks: >
   -modernize-use-default-member-init,
   -modernize-macro-to-enum,
   -modernize-use-std-print,
+  -modernize-use-ranges,
   readability-*,
   -readability-function-cognitive-complexity,
   -readability-magic-numbers,
