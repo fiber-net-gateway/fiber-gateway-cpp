@@ -113,7 +113,7 @@ common::IoResult<DecodedName> decode_name(const std::uint8_t *packet, std::size_
             if (!jumped) {
                 next_offset = pos + 1;
             }
-            return DecodedName{std::string_view(storage, out_len), next_offset};
+            return DecodedName{.name = std::string_view(storage, out_len), .next_offset = next_offset};
         }
 
         if ((byte & 0xc0U) == 0xc0U) {

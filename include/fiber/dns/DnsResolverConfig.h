@@ -16,7 +16,7 @@ namespace fiber::dns {
 inline constexpr std::uint8_t kMaxDnsNameservers = 3;
 inline constexpr std::uint8_t kMaxDnsSearchDomains = 6;
 inline constexpr std::size_t kMaxDnsSearchBytes = 256;
-inline constexpr std::size_t kMaxResolverConfigFileSize = 64U * 1024U;
+inline constexpr std::size_t kMaxResolverConfigFileSize = static_cast<const std::size_t>(64U * 1024U);
 
 // Fixed-capacity list preserving insertion order. The parser reports TooManyNameservers
 // instead of truncating a configuration that exceeds kMaxDnsNameservers.
@@ -28,9 +28,7 @@ public:
     [[nodiscard]] std::uint8_t size() const noexcept { return count_; }
     [[nodiscard]] bool empty() const noexcept { return count_ == 0; }
     [[nodiscard]] const net::SocketAddress &operator[](std::size_t index) const noexcept;
-    [[nodiscard]] std::span<const net::SocketAddress> view() const noexcept {
-        return std::span<const net::SocketAddress>(entries_.data(), count_);
-    }
+    [[nodiscard]] std::span<const net::SocketAddress> view() const noexcept { return {entries_.data(), count_}; }
 
 private:
     std::array<net::SocketAddress, kMaxDnsNameservers> entries_{};
