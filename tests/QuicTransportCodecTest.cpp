@@ -165,6 +165,44 @@ std::vector<std::uint8_t> long_header_with(std::uint8_t first_byte, std::uint32_
 
 } // namespace
 
+TEST(QuicTransportCodecTest, ParsedShortHeaderCidHasCachedHash) {
+    const std::array<std::uint8_t, 6> datagram{fiber::quic::kPacketFlagFixed, 1, 2, 3, 4, 0x7a};
+    const auto expected = cid_from({1, 2, 3, 4});
+    auto packet = fiber::quic::quic_parse_packet_header(datagram.data(), datagram.size(), 4);
+    ASSERT_TRUE(packet.has_value());
+    EXPECT_EQ(packet->dcid.size(), expected.size());
+    EXPECT_EQ(std::memcmp(packet->dcid.data(), expected.data(), expected.size()), 0);
+    EXPECT_EQ(packet->dcid.hash(), expected.hash());
+    EXPECT_EQ(packet->protected_pn, datagram.data() + 5);
+    EXPECT_EQ(packet->ciphertext_len, 1U);
+}
+
+TEST(QuicTransportCodecTest, ParsedLongHeaderCidsHaveCachedHashes) {
+    const auto datagram = long_header_with(fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
+                                                   fiber::quic::kLongPacketTypeHandshake,
+                                           fiber::quic::kQuicVersion1, {0x05, 0, 0, 0, 0, 0});
+    const auto dcid = cid_from({1, 2, 3, 4});
+    const auto scid = cid_from({0x11, 0x22});
+    auto packet = fiber::quic::quic_parse_packet_header(datagram.data(), datagram.size(), 0);
+    ASSERT_TRUE(packet.has_value());
+    EXPECT_EQ(packet->dcid.size(), dcid.size());
+    EXPECT_EQ(std::memcmp(packet->dcid.data(), dcid.data(), dcid.size()), 0);
+    EXPECT_EQ(packet->dcid.hash(), dcid.hash());
+    EXPECT_EQ(packet->scid.hash(), scid.hash());
+    EXPECT_EQ(packet->packet_len, datagram.size());
+}
+
+TEST(QuicTransportCodecTest, RejectsTruncatedAndOversizedWireCids) {
+    const std::array<std::uint8_t, 4> short_datagram{fiber::quic::kPacketFlagFixed, 1, 2, 3};
+    EXPECT_FALSE(fiber::quic::quic_parse_packet_header(short_datagram.data(), short_datagram.size(), 4).has_value());
+    auto long_datagram = long_header_with(fiber::quic::kPacketFlagLong, 0x6b3343cfU, {});
+    long_datagram.resize(9);
+    EXPECT_FALSE(fiber::quic::quic_parse_packet_header(long_datagram.data(), long_datagram.size(), 0).has_value());
+    long_datagram.resize(64);
+    long_datagram[5] = fiber::quic::kMaxConnectionIdLength + 1;
+    EXPECT_FALSE(fiber::quic::quic_parse_packet_header(long_datagram.data(), long_datagram.size(), 0).has_value());
+}
+
 // RFC 9000 §17.2.1: the bit that is the Fixed Bit in v1 is Unused in Version
 // Negotiation, and clients MUST ignore it. Found by fuzz/quic_client_fuzzer.
 TEST(QuicTransportCodecTest, ParsesVersionNegotiationWithoutFixedBit) {

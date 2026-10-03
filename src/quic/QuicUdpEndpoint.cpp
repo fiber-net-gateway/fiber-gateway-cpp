@@ -702,14 +702,6 @@ bool QuicUdpEndpoint::valid() const noexcept { return socket_ && socket_->valid(
 
 const net::SocketAddress &QuicUdpEndpoint::local_addr() const noexcept { return socket_->local_addr(); }
 
-QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid) noexcept {
-    return find_connection(dcid, hash_connection_id(dcid));
-}
-
-const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid) const noexcept {
-    return find_connection(dcid, hash_connection_id(dcid));
-}
-
 common::IoResult<void> QuicUdpEndpoint::remove_connection(const QuicConnectionId &dcid) noexcept {
     QuicConnection *connection = find_connection(dcid);
     if (connection == nullptr) {
@@ -1097,18 +1089,7 @@ void QuicUdpEndpoint::on_io_pump(QuicUdpEndpoint *endpoint) noexcept {
 
 bool QuicUdpEndpoint::QuicConnectionDcidLess::operator()(const QuicConnectionIdIndex *left,
                                                          const QuicConnectionIdIndex *right) const noexcept {
-    return compare_dcid_key(left->cid_hash, left->cid_key, right->cid_hash, right->cid_key) < 0;
-}
-
-std::uint64_t QuicUdpEndpoint::hash_connection_id(const QuicConnectionId &id) noexcept {
-    std::uint64_t hash = kFnvOffset;
-    for (std::size_t i = 0; i < id.size(); ++i) {
-        hash ^= id.bytes[i];
-        hash *= kFnvPrime;
-    }
-    hash ^= id.size();
-    hash *= kFnvPrime;
-    return hash;
+    return compare_dcid_key(left->cid_key, right->cid_key) < 0;
 }
 
 std::uint64_t
@@ -1152,10 +1133,9 @@ int QuicUdpEndpoint::compare_connection_id(const QuicConnectionId &left, const Q
     return left.size() < right.size() ? -1 : 1;
 }
 
-int QuicUdpEndpoint::compare_dcid_key(std::uint64_t left_hash, const QuicConnectionId &left, std::uint64_t right_hash,
-                                      const QuicConnectionId &right) noexcept {
-    if (left_hash != right_hash) {
-        return left_hash < right_hash ? -1 : 1;
+int QuicUdpEndpoint::compare_dcid_key(const QuicConnectionId &left, const QuicConnectionId &right) noexcept {
+    if (left.hash() != right.hash()) {
+        return left.hash() < right.hash() ? -1 : 1;
     }
     return compare_connection_id(left, right);
 }
@@ -1176,10 +1156,10 @@ const QuicConnectionIdIndex *QuicUdpEndpoint::index_from_dcid_hook(const common:
                                                            offsetof(QuicConnectionIdIndex, cid_hook));
 }
 
-QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid, std::uint64_t hash) noexcept {
+QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid) noexcept {
     QuicConnectionIdIndex *node = dcid_tree_.root();
     while (node != nullptr) {
-        const int cmp = compare_dcid_key(hash, dcid, node->cid_hash, node->cid_key);
+        const int cmp = compare_dcid_key(dcid, node->cid_key);
         if (cmp == 0) {
             return node->connection;
         }
@@ -1188,11 +1168,10 @@ QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid, s
     return nullptr;
 }
 
-const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid,
-                                                       std::uint64_t hash) const noexcept {
+const QuicConnection *QuicUdpEndpoint::find_connection(const QuicConnectionId &dcid) const noexcept {
     const QuicConnectionIdIndex *node = dcid_tree_.root();
     while (node != nullptr) {
-        const int cmp = compare_dcid_key(hash, dcid, node->cid_hash, node->cid_key);
+        const int cmp = compare_dcid_key(dcid, node->cid_key);
         if (cmp == 0) {
             return node->connection;
         }
@@ -1258,14 +1237,12 @@ common::IoResult<void> QuicUdpEndpoint::register_connection_id(QuicConnection &c
     if (index.cid_hook.linked()) {
         return std::unexpected(common::IoErr::Already);
     }
-    const std::uint64_t cid_hash = hash_connection_id(cid);
-    if (find_connection(cid, cid_hash) != nullptr) {
+    if (find_connection(cid) != nullptr) {
         return std::unexpected(common::IoErr::Already);
     }
 
     index.connection = &connection;
     index.cid_key = cid;
-    index.cid_hash = cid_hash;
     dcid_tree_.insert(index);
     return {};
 }
@@ -1276,7 +1253,6 @@ void QuicUdpEndpoint::unregister_connection_id(QuicConnectionIdIndex &index) noe
     }
     index.connection = nullptr;
     index.cid_key = {};
-    index.cid_hash = 0;
 }
 
 void QuicUdpEndpoint::register_stateless_reset_token(QuicConnection &connection,
@@ -1355,7 +1331,7 @@ QuicUdpEndpoint::create_stateless_reset_token(const QuicConnectionId &cid,
     }
 
     std::uint8_t message[1 + kMaxConnectionIdLength]{};
-    message[0] = cid.length;
+    message[0] = cid.size();
     if (!cid.empty()) {
         std::memcpy(message + 1, cid.data(), cid.size());
     }
@@ -1676,8 +1652,7 @@ QuicUdpEndpoint::create_connection(const QuicPacketHeader &packet, const QuicRec
     if (!server_admission_enabled_ || options_.create_connection == nullptr) {
         return std::unexpected(common::IoErr::NotSupported);
     }
-    const std::uint64_t dcid_hash = hash_connection_id(packet.dcid);
-    if (find_connection(packet.dcid, dcid_hash) != nullptr) {
+    if (find_connection(packet.dcid) != nullptr) {
         return std::unexpected(common::IoErr::Already);
     }
     if (active_connection_count_ >= options_.max_connections) {
@@ -1760,10 +1735,10 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
         ++dropped_datagram_count_;
         return std::unexpected(recv.truncated ? common::IoErr::MessageTooLarge : common::IoErr::Invalid);
     }
-    auto dcid = quic_get_packet_dcid(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
-    if (!dcid) {
+    auto packet = quic_parse_packet_header(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
+    if (!packet) {
         ++dropped_datagram_count_;
-        return std::unexpected(dcid.error());
+        return std::unexpected(packet.error());
     }
 
     QuicReceivedDatagram datagram{};
@@ -1774,27 +1749,23 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
     datagram.ecn = recv.ecn;
     datagram.received_at = now;
 
-    const std::uint64_t dcid_hash = hash_connection_id(*dcid);
-    QuicConnection *connection = find_connection(*dcid, dcid_hash);
+    QuicConnection *connection = find_connection(packet->dcid);
     bool created = false;
     if (connection == nullptr) {
-        auto unknown_packet =
-                quic_parse_packet_header(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
-        if (unknown_packet && !unknown_packet->long_header && handle_peer_stateless_reset(data, recv.size)) {
+        if (!packet->long_header && handle_peer_stateless_reset(data, recv.size)) {
             return std::unexpected(common::IoErr::WouldBlock);
         }
         if (!server_admission_enabled_) {
             ++dropped_datagram_count_;
             return std::unexpected(common::IoErr::NotFound);
         }
-        auto packet = quic_parse_packet_header(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
         // RFC 9000 §10.3 / nginx ngx_quic_send_stateless_reset: a short-header
         // (1-RTT) packet addressed to a DCID we no longer recognize means this
         // endpoint has lost state. Send a stateless reset so the peer can tear
         // the dead connection down instead of waiting for a timeout. Long
         // headers (Initial/Handshake/0-RTT/Retry/VN) are NOT reset triggers and
         // keep their existing handling below.
-        if (packet && !packet->long_header) {
+        if (!packet->long_header) {
             if (packet->packet_len > kQuicStatelessResetMinTriggerSize) {
                 if (!allow_stateless_response(QuicStatelessResponseKind::StatelessReset, datagram.peer, now)) {
                     ++dropped_datagram_count_;
@@ -1814,7 +1785,7 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
             ++dropped_datagram_count_;
             return std::unexpected(common::IoErr::Invalid);
         }
-        if (packet && packet->type == QuicPacketType::UnsupportedVersion) {
+        if (packet->type == QuicPacketType::UnsupportedVersion) {
             // RFC 9000 §5.2.2: an unsupported-version datagram that is too
             // small to initiate a connection in any supported version MUST be
             // dropped. This endpoint currently supports QUIC v1, whose minimum
@@ -1849,10 +1820,10 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
             }
             return std::unexpected(common::IoErr::WouldBlock);
         }
-        if (!packet || !packet->long_header || packet->type != QuicPacketType::Initial ||
-            packet->version != kQuicVersion1 || recv.size < kMinInitialDatagramSize) {
+        if (!packet->long_header || packet->type != QuicPacketType::Initial || packet->version != kQuicVersion1 ||
+            recv.size < kMinInitialDatagramSize) {
             ++dropped_datagram_count_;
-            return std::unexpected(packet ? common::IoErr::Invalid : packet.error());
+            return std::unexpected(common::IoErr::Invalid);
         }
 
         auto validation = validate_initial_address(*packet, datagram);
@@ -1942,10 +1913,9 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
         created = true;
     }
 
-    if (!created && connection->role() == QuicConnectionRole::Client && quic_is_long_packet(data[0])) {
-        auto control = quic_parse_packet_header(data, recv.size, static_cast<std::uint8_t>(kQuicConnectionIdLength));
-        if (control && control->type == QuicPacketType::Retry) {
-            auto accepted = connection->handle_retry(*control, datagram);
+    if (!created && connection->role() == QuicConnectionRole::Client && packet->long_header) {
+        if (packet->type == QuicPacketType::Retry) {
+            auto accepted = connection->handle_retry(*packet, datagram);
             if (!accepted) {
                 connection->fail_client_connect(accepted.error());
                 ++dropped_datagram_count_;
@@ -1962,13 +1932,14 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
             out.packet.send_output = true;
             return out;
         }
-        if (control && control->type == QuicPacketType::VersionNegotiation) {
-            (void) connection->handle_version_negotiation(*control);
+        if (packet->type == QuicPacketType::VersionNegotiation) {
+            (void) connection->handle_version_negotiation(*packet);
             return std::unexpected(common::IoErr::WouldBlock);
         }
     }
 
-    auto result = quic_process_datagram(*connection, datagram, static_cast<std::uint8_t>(kQuicConnectionIdLength));
+    auto result =
+            quic_process_datagram(*connection, datagram, *packet, static_cast<std::uint8_t>(kQuicConnectionIdLength));
     if (!result) {
         ++dropped_datagram_count_;
         if (created) {

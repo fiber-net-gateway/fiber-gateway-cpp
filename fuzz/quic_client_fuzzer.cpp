@@ -209,9 +209,9 @@ fiber::async::Task<void> run(const std::uint8_t *data, std::size_t size) {
                     const QuicConnectionId scid = conn->original_destination_connection_id();
                     (void) writer.write_u8(static_cast<std::uint8_t>(kPacketFlagLong | (flags & 0x7f)));
                     (void) writer.write_be32(0);
-                    (void) writer.write_u8(dcid.length);
+                    (void) writer.write_u8(dcid.size());
                     (void) writer.write_bytes(dcid.data(), dcid.size());
-                    (void) writer.write_u8(scid.length);
+                    (void) writer.write_u8(scid.size());
                     (void) writer.write_bytes(scid.data(), scid.size());
                     (void) writer.write_bytes(payload.data(), std::min(payload.size(), writer.remaining()));
                     len = writer.offset();

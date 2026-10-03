@@ -201,7 +201,6 @@ public:
     [[nodiscard]] std::size_t rate_limited_stateless_response_count() const noexcept {
         return rate_limited_stateless_response_count_;
     }
-    [[nodiscard]] mem::IoBufNodePool &recv_extent_pool() noexcept { return loop_.io_buf_node_pool(); }
 
     [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid) noexcept;
     [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid) const noexcept;
@@ -283,21 +282,16 @@ private:
         bool needs_reschedule = false;
     };
 
-    [[nodiscard]] static std::uint64_t hash_connection_id(const QuicConnectionId &id) noexcept;
     [[nodiscard]] static std::uint64_t
     hash_stateless_reset_token(const std::uint8_t token[kStatelessResetTokenLength]) noexcept;
     [[nodiscard]] static std::uint64_t hash_stateless_peer(const net::SocketAddress &peer) noexcept;
     [[nodiscard]] static int compare_connection_id(const QuicConnectionId &left,
                                                    const QuicConnectionId &right) noexcept;
-    [[nodiscard]] static int compare_dcid_key(std::uint64_t left_hash, const QuicConnectionId &left,
-                                              std::uint64_t right_hash, const QuicConnectionId &right) noexcept;
+    [[nodiscard]] static int compare_dcid_key(const QuicConnectionId &left, const QuicConnectionId &right) noexcept;
     [[nodiscard]] static QuicConnectionIdIndex *index_from_dcid_hook(common::IntrusiveRbTreeHook *hook) noexcept;
     [[nodiscard]] static const QuicConnectionIdIndex *
     index_from_dcid_hook(const common::IntrusiveRbTreeHook *hook) noexcept;
 
-    [[nodiscard]] QuicConnection *find_connection(const QuicConnectionId &dcid, std::uint64_t hash) noexcept;
-    [[nodiscard]] const QuicConnection *find_connection(const QuicConnectionId &dcid,
-                                                        std::uint64_t hash) const noexcept;
     void detach_connection(QuicConnection &connection) noexcept;
     void force_detach_connection(QuicConnection &connection) noexcept;
     [[nodiscard]] common::IoResult<QuicConnectionId> generate_connection_id() noexcept;

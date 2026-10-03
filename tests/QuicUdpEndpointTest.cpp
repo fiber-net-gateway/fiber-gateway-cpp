@@ -2024,12 +2024,12 @@ fiber::quic::QuicConnectionId cid_from_new_connection_id(const fiber::quic::Quic
 }
 
 // Replicates QuicUdpEndpoint::create_stateless_reset_token exactly:
-// HMAC-SHA256(secret, [1 byte cid.length | cid bytes]) truncated to 16 bytes.
+// HMAC-SHA256(secret, [1 byte cid.size() | cid bytes]) truncated to 16 bytes.
 void compute_expected_stateless_reset_token(
         const std::array<std::uint8_t, fiber::quic::kQuicStatelessResetSecretLength> &secret,
         const fiber::quic::QuicConnectionId &cid, std::uint8_t out[fiber::quic::kStatelessResetTokenLength]) {
     std::uint8_t message[1 + fiber::quic::kMaxConnectionIdLength]{};
-    message[0] = cid.length;
+    message[0] = cid.size();
     if (!cid.empty()) {
         std::memcpy(message + 1, cid.data(), cid.size());
     }
