@@ -311,17 +311,30 @@ run_check() {
     fi
 }
 
+# Diagnostics printed as "error:" but ending in "[check,-warnings-as-errors]"
+# are lint findings promoted by the WarningsAsErrors policy — findings, not
+# environment problems. Only other ": error:" lines are frontend errors.
+count_escalated() {
+    (grep ': error: ' "$1" | grep -c -- ',-warnings-as-errors]$' || true)
+}
+
+count_frontend_errors() {
+    (grep ': error: ' "$1" | grep -vc -- ',-warnings-as-errors]$' || true)
+}
+
 summarize() {
     local log="$1"
-    local warnings errors
+    local warnings escalated errors
     warnings="$( (grep -cE ': warning: ' "${log}" || true) )"
-    errors="$( (grep -cE ': error: ' "${log}" || true) )"
-    echo "==== clang-tidy summary: ${warnings} warning(s), ${errors} error(s) ===="
-    if (( warnings > 0 )); then
+    escalated="$(count_escalated "${log}")"
+    errors="$(count_frontend_errors "${log}")"
+    echo "==== clang-tidy summary: $((warnings + escalated)) finding(s) (${escalated} promoted to error), ${errors} frontend error(s) ===="
+    if (( warnings + escalated > 0 )); then
         echo "-- per check --"
-        grep -E ': warning: .* \[[^]]+\]$' "${log}" | grep -oE '\[[^]]+\]$' | tr -d '[]' | sort | uniq -c | sort -rn | head -25 || true
+        grep -E ': (warning|error): .* \[[^]]+\]$' "${log}" | sed 's/,-warnings-as-errors\]$/]/' |
+            grep -oE '\[[^]]+\]$' | tr -d '[]' | sort | uniq -c | sort -rn | head -25 || true
         echo "-- top files --"
-        grep -E ': warning: ' "${log}" | cut -d: -f1 | sort | uniq -c | sort -rn | head -10 || true
+        grep -E ': (warning|error): ' "${log}" | cut -d: -f1 | sort | uniq -c | sort -rn | head -10 || true
     fi
     echo "full log: ${log}"
 }
@@ -349,7 +362,8 @@ if (( FORMAT_AND_FIX == 1 )); then
         fix_rc=0
         set -e
     fi
-    if (( fix_rc != 0 )); then
+    fix_frontend="$(count_frontend_errors "${FIX_LOG}")"
+    if (( fix_rc != 0 && fix_frontend > 0 )); then
         summarize "${FIX_LOG}"
         echo "run_tidy.sh: fix pass failed (environment/config error)" >&2
         exit 2
@@ -364,17 +378,18 @@ set -e
 
 summarize "${LOG}"
 
-if (( check_rc != 0 )); then
+final_errors="$(count_frontend_errors "${LOG}")"
+final_warnings="$( (grep -cE ': warning: ' "${LOG}" || true) )"
+final_escalated="$(count_escalated "${LOG}")"
+if (( check_rc != 0 && final_errors == 0 && final_warnings == 0 && final_escalated == 0 )); then
     echo "run_tidy.sh: clang-tidy invocation failed (environment/config error)" >&2
     exit 2
 fi
-final_errors="$( (grep -cE ': error: ' "${LOG}" || true) )"
-final_warnings="$( (grep -cE ': warning: ' "${LOG}" || true) )"
 if (( final_errors > 0 )); then
     echo "run_tidy.sh: frontend errors present — fix the environment/config before trusting the counts" >&2
     exit 2
 fi
-if (( final_warnings > 0 )); then
+if (( final_warnings + final_escalated > 0 )); then
     exit 1
 fi
 exit 0
