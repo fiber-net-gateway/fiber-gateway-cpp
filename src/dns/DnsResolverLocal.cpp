@@ -573,7 +573,7 @@ async::Task<common::IoResult<ResolveStatus>> DnsResolverLocal::resolve(const Que
     bool expect_cache_hit = false;
     for (;;) {
         DnsCacheOut cached;
-        const DnsCacheKey cache_key{current_name, dns_cache_hash(current_name)};
+        const DnsCacheKey cache_key{.normalized_name = current_name, .hash = dns_cache_hash(current_name)};
         const common::IoErr cache_err = cache_->lookup(cache_key, loop_->now(), cached);
         if (cache_err != common::IoErr::None) {
             co_return std::unexpected(cache_err);
@@ -747,7 +747,7 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
             return std::unexpected(authority.error());
         }
         if (authority->has_soa_ttl) {
-            const DnsCacheKey key{qname, dns_cache_hash(qname)};
+            const DnsCacheKey key{.normalized_name = qname, .hash = dns_cache_hash(qname)};
             err = cache_->upsert_nxdomain(
                     key, now,
                     ttl_deadline(now, authority->soa_ttl, options_.min_negative_ttl, options_.max_negative_ttl));
@@ -802,7 +802,7 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
             return std::unexpected(authority.error());
         }
         if (authority->has_soa_ttl) {
-            const DnsCacheKey key{qname, dns_cache_hash(qname)};
+            const DnsCacheKey key{.normalized_name = qname, .hash = dns_cache_hash(qname)};
             const net::IpFamily family =
                     qtype == static_cast<std::uint16_t>(RecordType::A) ? net::IpFamily::V4 : net::IpFamily::V6;
             err = cache_->upsert_address_set(
@@ -837,7 +837,7 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
             if (applied_cname_hops >= response_cname_hops) {
                 return std::unexpected(common::IoErr::Invalid);
             }
-            const DnsCacheKey key{chain_owner, dns_cache_hash(chain_owner)};
+            const DnsCacheKey key{.normalized_name = chain_owner, .hash = dns_cache_hash(chain_owner)};
             err = cache_->upsert_cname(
                     key, now, answer_set.cname_target,
                     ttl_deadline(now, answer_set.ttl, options_.min_positive_ttl, options_.max_positive_ttl));
@@ -895,7 +895,7 @@ DnsResolverLocal::handle_response(std::string_view qname, std::uint16_t qtype, s
 
             const auto expire_at =
                     ttl_deadline(now, answer_set.ttl, options_.min_positive_ttl, options_.max_positive_ttl);
-            const DnsCacheKey key{chain_owner, dns_cache_hash(chain_owner)};
+            const DnsCacheKey key{.normalized_name = chain_owner, .hash = dns_cache_hash(chain_owner)};
             const net::IpFamily family =
                     qtype == static_cast<std::uint16_t>(RecordType::A) ? net::IpFamily::V4 : net::IpFamily::V6;
             err = cache_->upsert_address_set(key, now, family, temp_records.data(), count, expire_at);

@@ -492,6 +492,11 @@ void DnsClient::drain_udp_reads(UdpTransport &transport) noexcept {
     FIBER_ASSERT(loop_->in_loop());
     FIBER_ASSERT(transport.owner == this);
     FIBER_ASSERT(transport.socket && transport.socket->valid());
+    // The guard pairs &invalidated_ with the owner's observer; the dtor — or
+    // the invalidater, which nulls the owner's observer itself — always
+    // unpairs them before this frame returns. The analyzer cannot see that
+    // interprocedural invariant.
+    // NOLINTBEGIN(clang-analyzer-core.StackAddressEscape)
     UdpReadDispatchGuard dispatch(*this);
 
     for (;;) {
@@ -504,6 +509,7 @@ void DnsClient::drain_udp_reads(UdpTransport &transport) noexcept {
             return;
         }
     }
+    // NOLINTEND(clang-analyzer-core.StackAddressEscape)
 }
 
 void DnsClient::invalidate_udp_read_dispatch() noexcept {
@@ -634,7 +640,7 @@ async::Task<common::IoResult<std::size_t>> DnsClient::query_tcp(std::uint16_t sl
 
 bool DnsClient::init_storage() noexcept {
     slots_ = std::make_unique<InflightSlot[]>(options_.max_inflight);
-    id_to_slot_ = std::make_unique<std::uint16_t[]>(std::numeric_limits<std::uint16_t>::max() + 1u);
+    id_to_slot_ = std::make_unique<std::uint16_t[]>(std::numeric_limits<std::uint16_t>::max() + 1U);
     request_buffers_ = std::make_unique<std::uint8_t[]>(static_cast<std::size_t>(options_.max_inflight) *
                                                         options_.max_udp_packet_size);
     recv_buffer_ = std::make_unique<std::uint8_t[]>(options_.max_udp_packet_size);

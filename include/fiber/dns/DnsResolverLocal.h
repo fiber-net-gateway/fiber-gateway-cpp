@@ -37,9 +37,7 @@ public:
 
     void clear() noexcept;
 
-    [[nodiscard]] std::string_view canonical_name() const noexcept {
-        return std::string_view(canonical_name_, canonical_name_len_);
-    }
+    [[nodiscard]] std::string_view canonical_name() const noexcept { return {canonical_name_, canonical_name_len_}; }
     [[nodiscard]] const DnsAddressSet &address_set() const noexcept { return addresses_; }
     [[nodiscard]] const net::IpAddress *records() const noexcept { return addresses_.records; }
     [[nodiscard]] std::uint16_t record_count() const noexcept { return addresses_.count; }
