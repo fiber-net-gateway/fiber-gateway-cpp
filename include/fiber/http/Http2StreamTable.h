@@ -27,7 +27,7 @@ public:
     [[nodiscard]] Http2Stream *find(std::uint32_t stream_id) noexcept;
     [[nodiscard]] const Http2Stream *find(std::uint32_t stream_id) const noexcept;
 
-    [[nodiscard]] bool insert(Http2Stream::Lease &&stream) noexcept;
+    [[nodiscard]] bool insert(Http2Stream::Lease &&lease) noexcept;
     [[nodiscard]] Http2Stream::Lease erase(std::uint32_t stream_id) noexcept;
 
     [[nodiscard]] std::size_t size() const noexcept { return size_; }

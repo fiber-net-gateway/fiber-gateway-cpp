@@ -66,7 +66,7 @@ public:
 
     struct Options {
         ConnectionRole role = ConnectionRole::Server;
-        std::size_t read_buffer_size = 64 * 1024;
+        std::size_t read_buffer_size = static_cast<std::size_t>(64 * 1024);
         // Inbound-idle deadline: while running, expiry sends a keepalive PING and
         // the peer then has keepalive grace (one third of this, floored at 10s,
         // scaled down for shorter timeouts) to answer with any inbound bytes

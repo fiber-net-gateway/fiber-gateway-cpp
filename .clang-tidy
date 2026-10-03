@@ -93,3 +93,9 @@ CheckOptions:
   # check (redundant !!, comparisons against bool literals, etc.) stays on.
   - key: readability-simplify-boolean-expr.SimplifyDeMorgan
     value: 'false'
+  # (void)expr; is the house intent-marker for best-effort discards on
+  # abort/close paths (alert sends, notify-on-teardown); honor it instead of
+  # demanding [[nodiscard]] capture tricks. Unlike cert-err33-c this check
+  # defaults AllowCastToVoid to false.
+  - key: bugprone-unused-return-value.AllowCastToVoid
+    value: 'true'

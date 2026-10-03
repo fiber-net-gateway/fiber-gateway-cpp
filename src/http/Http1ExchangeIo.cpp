@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -20,7 +21,7 @@ namespace fiber::http {
 
 namespace {
 
-constexpr std::size_t kMaxDirectBodyRead = 64 * 1024;
+constexpr std::size_t kMaxDirectBodyRead = static_cast<const std::size_t>(64 * 1024);
 constexpr std::size_t kInlineFirstWriteBodyLimit = 128;
 constexpr std::size_t kHttpStatusDigits = 3;
 constexpr std::size_t kMaxContentLengthDigits = 20;
@@ -133,8 +134,7 @@ common::IoResult<void> append_encoded_header_fields_size(const HttpHeaders *head
         return common::IoResult<void>{};
     }
 
-    for (auto it = headers->begin(); it != headers->end(); ++it) {
-        const auto &field = *it;
+    for (const auto &field: *headers) {
         if (field.name_len == 0) {
             continue;
         }
@@ -153,8 +153,7 @@ void encode_header_fields(char *&dst, const HttpHeaders *headers) noexcept {
         return;
     }
 
-    for (auto it = headers->begin(); it != headers->end(); ++it) {
-        const auto &field = *it;
+    for (const auto &field: *headers) {
         if (field.name_len == 0) {
             continue;
         }
@@ -298,7 +297,7 @@ common::IoErr Http1ExchangeIo::clear_response_channel_closed_callback(ResponseCh
     return common::IoErr::None;
 }
 
-void Http1ExchangeIo::on_transport_terminal(void *ctx, common::IoErr) noexcept {
+void Http1ExchangeIo::on_transport_terminal(void *ctx, common::IoErr /*unused*/) noexcept {
     auto *io = static_cast<Http1ExchangeIo *>(ctx);
     FIBER_ASSERT(io != nullptr);
     FIBER_ASSERT(io->transport_terminal_callback_registered_);
@@ -1572,11 +1571,11 @@ fiber::async::Task<common::IoResult<size_t>> Http1ExchangeIo::write(HttpExchange
     co_return *written;
 }
 
-bool Http1ExchangeIo::should_keep_alive(const HttpExchange &) const noexcept {
+bool Http1ExchangeIo::should_keep_alive(const HttpExchange & /*unused*/) const noexcept {
     return response_phase_ == ResponsePhase::Finished && !response_body_spec_.is_stream() && !close_after_response_;
 }
 
-common::IoResult<void> Http1ExchangeIo::abort(HttpExchange &exchange, common::IoErr) noexcept {
+common::IoResult<void> Http1ExchangeIo::abort(HttpExchange &exchange, common::IoErr /*reason*/) noexcept {
     if (!connection_ || exchange.io_ != this) {
         return std::unexpected(common::IoErr::Invalid);
     }

@@ -74,9 +74,9 @@ common::IoResult<std::unique_ptr<TcpTransport>> TcpTransport::create(event::Even
 }
 
 TcpTransport::TcpTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr) :
-    stream_(loop, fd, std::move(remote_addr)) {}
+    stream_(loop, fd, remote_addr) {}
 
-fiber::async::Task<common::IoResult<void>> TcpTransport::shutdown(std::chrono::milliseconds) {
+fiber::async::Task<common::IoResult<void>> TcpTransport::shutdown(std::chrono::milliseconds /*timeout*/) {
     co_return common::IoResult<void>{};
 }
 
@@ -230,7 +230,7 @@ common::IoResult<std::unique_ptr<TlsTransport>> TlsTransport::create(event::Even
 }
 
 TlsTransport::TlsTransport(event::EventLoop &loop, int fd, net::SocketAddress remote_addr) :
-    stream_(loop, fd, std::move(remote_addr)) {}
+    stream_(loop, fd, remote_addr) {}
 
 TlsTransport::~TlsTransport() = default;
 

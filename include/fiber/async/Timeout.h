@@ -46,13 +46,13 @@ public:
     template<typename Factory>
         requires(std::invocable<Factory &> &&
                  std::same_as<std::remove_cvref_t<std::invoke_result_t<Factory &>>, InnerAwaiter>)
-    TimeoutAwaiter(std::in_place_t, Factory &&factory, Duration timeout) :
+    TimeoutAwaiter(std::in_place_t /*unused*/, Factory &&factory, Duration timeout) :
         awaiter_(std::invoke(std::forward<Factory>(factory))), timeout_(timeout) {}
 
     template<typename Factory>
         requires(std::invocable<Factory &> &&
                  !std::same_as<std::remove_cvref_t<std::invoke_result_t<Factory &>>, InnerAwaiter>)
-    TimeoutAwaiter(std::in_place_t, Factory &&factory, Duration timeout) :
+    TimeoutAwaiter(std::in_place_t /*unused*/, Factory &&factory, Duration timeout) :
         awaiter_(detail::get_awaiter(std::invoke(std::forward<Factory>(factory)))), timeout_(timeout) {}
 
     TimeoutAwaiter(const TimeoutAwaiter &) = delete;
@@ -110,9 +110,7 @@ public:
             loop_->cancel<TimeoutAwaiter, &TimeoutAwaiter::timer_entry_>(*this);
         }
 
-        if constexpr (detail::kIsIoResult<InnerResult>) {
-            return awaiter_.await_resume();
-        } else if constexpr (std::is_void_v<std::remove_cvref_t<InnerResult>>) {
+        if constexpr (std::is_void_v<std::remove_cvref_t<InnerResult>>) {
             awaiter_.await_resume();
             return {};
         } else {

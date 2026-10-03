@@ -171,7 +171,7 @@ private:
         return timeout_.count() > 0 && timeout_ != std::chrono::milliseconds::max();
     }
 
-    inline static constexpr Http2OutboundOperation::Ops kOutboundOps{
+    static constexpr Http2OutboundOperation::Ops kOutboundOps{
             .on_encode = &Http2SendAwaiter::on_encode,
             .on_send_done = &Http2SendAwaiter::on_send_done,
             .kind = Op::kOutboundKind,

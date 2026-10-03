@@ -99,7 +99,8 @@ quic::QuicConnection::Options Http3ClientConnection::own_quic_options(const quic
     return options;
 }
 
-quic::QuicStream::Lease Http3ClientConnection::create_peer_stream(void *, std::uint64_t) noexcept {
+quic::QuicStream::Lease Http3ClientConnection::create_peer_stream(void * /*unused*/,
+                                                                  std::uint64_t /*unused*/) noexcept {
     return Http3ControlStreams::create_stream();
 }
 
@@ -112,11 +113,11 @@ void Http3ClientConnection::on_peer_stream_attached(void *owner, quic::QuicStrea
     self.control_.accept_peer_stream(stream);
 }
 
-void Http3ClientConnection::on_quic_state_change(void *owner, quic::QuicConnection &) noexcept {
+void Http3ClientConnection::on_quic_state_change(void *owner, quic::QuicConnection & /*unused*/) noexcept {
     static_cast<Http3ClientConnection *>(owner)->local_stream_gate_.on_state_change();
 }
 
-void Http3ClientConnection::on_quic_capacity_change(void *owner, quic::QuicConnection &) noexcept {
+void Http3ClientConnection::on_quic_capacity_change(void *owner, quic::QuicConnection & /*unused*/) noexcept {
     static_cast<Http3ClientConnection *>(owner)->local_stream_gate_.on_capacity_change();
 }
 
@@ -140,7 +141,7 @@ bool Http3ClientConnection::on_new_tls_session(void *owner, quic::QuicConnection
     return cache.store_session(cache.owner, self.cache_key(), std::move(session), quic.peer_transport().params);
 }
 
-void Http3ClientConnection::on_new_token(void *owner, quic::QuicConnection &, const std::uint8_t *token,
+void Http3ClientConnection::on_new_token(void *owner, quic::QuicConnection & /*unused*/, const std::uint8_t *token,
                                          std::size_t token_len) noexcept {
     auto &self = *static_cast<Http3ClientConnection *>(owner);
     const quic::QuicClientCacheOps &cache = self.client_.options().cache;
@@ -210,7 +211,7 @@ async::Task<Http3ClientConnectResult> Http3ClientConnection::connect() noexcept 
                 self.abort_connect(Http3ErrorCode::RequestCancelled);
             }
         }
-    } scope{*this};
+    } scope{.self = *this};
     auto fail = [&scope, this](Http3ClientConnectError error, Http3ErrorCode close_code) noexcept {
         scope.settled = true;
         return fail_connect(error, close_code);
@@ -288,7 +289,7 @@ async::Task<common::IoResult<void>> Http3ClientConnection::start() noexcept {
             }
             self.start_tasks_.done();
         }
-    } scope{*this};
+    } scope{.self = *this};
     auto result = co_await control_.start();
     if (!result) {
         close(Http3ErrorCode::InternalError);
@@ -299,9 +300,7 @@ async::Task<common::IoResult<void>> Http3ClientConnection::start() noexcept {
     co_return result;
 }
 
-ClientHttp3Exchange Http3ClientConnection::open_exchange(mem::BufPool &pool) noexcept {
-    return ClientHttp3Exchange(*this, pool);
-}
+ClientHttp3Exchange Http3ClientConnection::open_exchange(mem::BufPool &pool) noexcept { return {*this, pool}; }
 
 void Http3ClientConnection::shutdown(Http3ErrorCode error) noexcept { close(error); }
 

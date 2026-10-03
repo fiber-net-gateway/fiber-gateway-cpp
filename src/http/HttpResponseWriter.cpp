@@ -32,7 +32,7 @@ async::Task<common::IoResult<std::size_t>> exchange_write_bytes(void *ctx, const
     co_return co_await static_cast<HttpExchange *>(ctx)->write(buf, len, end, timeout);
 }
 
-async::Task<common::IoResult<void>> exchange_flush(void *, std::chrono::milliseconds) noexcept {
+async::Task<common::IoResult<void>> exchange_flush(void * /*unused*/, std::chrono::milliseconds /*unused*/) noexcept {
     co_return common::IoResult<void>{};
 }
 
@@ -41,8 +41,13 @@ common::IoResult<void> exchange_abort(void *ctx, common::IoErr reason) noexcept 
 }
 
 const HttpResponseWriter::Ops kExchangeWriterOps{
-        &exchange_send_header, &exchange_write_all_chain, &exchange_write_all_bytes, &exchange_write_chain,
-        &exchange_write_bytes, &exchange_flush,           &exchange_abort,
+        .send_header = &exchange_send_header,
+        .write_all_chain = &exchange_write_all_chain,
+        .write_all_bytes = &exchange_write_all_bytes,
+        .write_chain = &exchange_write_chain,
+        .write_bytes = &exchange_write_bytes,
+        .flush = &exchange_flush,
+        .abort = &exchange_abort,
 };
 
 } // namespace

@@ -7,13 +7,13 @@ namespace fiber::http {
 
 namespace detail {
 
-static constexpr uint32_t kUsual[8] = {0x00000000u, 0x7fff37d6u,
+static constexpr uint32_t kUsual[8] = {0x00000000U, 0x7fff37d6U,
 #if defined(_WIN32)
                                        0xefffffffu,
 #else
-                                       0xffffffffu,
+                                       0xffffffffU,
 #endif
-                                       0x7fffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
+                                       0x7fffffffU, 0xffffffffU, 0xffffffffU, 0xffffffffU, 0xffffffffU};
 
 static const unsigned char kLowcase[] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
                                         "\0\0\0\0\0\0\0\0\0\0\0\0\0-\0\0"
@@ -302,6 +302,9 @@ ParseCode RequestLineParser::execute(mem::IoBuf *buffer) {
                 if ((ch >= '0' && ch <= '9') || ch == '.' || ch == '-') {
                     break;
                 }
+                // Defensive: HostEnd assigns state on every path today; the
+                // store keeps this fallthrough sound under future edits.
+                // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
                 state = State::HostEnd;
                 [[fallthrough]];
 
@@ -1383,7 +1386,7 @@ int fiber_http1_header_line_on_value(fiber_http1_header_line_t *parser, const un
 }
 
 int fiber_http1_header_line_on_name_end(fiber_http1_header_line_t *parser, const unsigned char *p,
-                                        const unsigned char *) {
+                                        const unsigned char * /*unused*/) {
     auto *line = static_cast<fiber::http::HeaderLineParser::HeaderLineState *>(parser->data);
     FIBER_ASSERT(line != nullptr);
     line->header_name_end = reinterpret_cast<std::uint8_t *>(const_cast<unsigned char *>(p));
@@ -1391,7 +1394,7 @@ int fiber_http1_header_line_on_name_end(fiber_http1_header_line_t *parser, const
 }
 
 int fiber_http1_header_line_on_empty_value(fiber_http1_header_line_t *parser, const unsigned char *p,
-                                           const unsigned char *) {
+                                           const unsigned char * /*unused*/) {
     auto *line = static_cast<fiber::http::HeaderLineParser::HeaderLineState *>(parser->data);
     FIBER_ASSERT(line != nullptr);
     auto *position = reinterpret_cast<std::uint8_t *>(const_cast<unsigned char *>(p));
@@ -1401,7 +1404,7 @@ int fiber_http1_header_line_on_empty_value(fiber_http1_header_line_t *parser, co
 }
 
 int fiber_http1_header_line_on_header_end(fiber_http1_header_line_t *parser, const unsigned char *p,
-                                          const unsigned char *) {
+                                          const unsigned char * /*unused*/) {
     auto *line = static_cast<fiber::http::HeaderLineParser::HeaderLineState *>(parser->data);
     FIBER_ASSERT(line != nullptr);
     line->header_end = reinterpret_cast<std::uint8_t *>(const_cast<unsigned char *>(p));

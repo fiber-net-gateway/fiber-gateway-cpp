@@ -53,7 +53,7 @@ const HeaderMap<RequestHeaderRefKind> &request_header_ref_map() noexcept {
 } // namespace
 
 HttpExchange::HttpExchange(net::SocketAddress remote_addr) :
-    request_headers_(pool_), request_trailers_(pool_), remote_addr_(std::move(remote_addr)) {}
+    request_headers_(pool_), request_trailers_(pool_), remote_addr_(remote_addr) {}
 
 HttpExchange::~HttpExchange() { FIBER_ASSERT(response_channel_waiter_ == nullptr); }
 

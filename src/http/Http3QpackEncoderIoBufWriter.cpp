@@ -9,8 +9,8 @@
 namespace fiber::http {
 
 const Http3QpackEncoder::OutputOps Http3QpackEncoderIoBufWriter::kOutputOps{
-        &Http3QpackEncoderIoBufWriter::acquire_output,
-        &Http3QpackEncoderIoBufWriter::commit_output,
+        .acquire = &Http3QpackEncoderIoBufWriter::acquire_output,
+        .commit = &Http3QpackEncoderIoBufWriter::commit_output,
 };
 
 Http3QpackEncoderIoBufWriter::Http3QpackEncoderIoBufWriter(std::size_t chunk_size) noexcept :

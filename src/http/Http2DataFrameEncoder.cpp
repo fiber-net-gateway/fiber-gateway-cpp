@@ -54,7 +54,7 @@ common::IoErr Http2DataFrameEncoder::validate_options() const noexcept {
 }
 
 common::IoErr Http2DataFrameEncoder::append_frame(Http2OutboundEncodeTarget &target, mem::IoBufChain &payload,
-                                                  std::uint32_t payload_bytes, bool end_stream) noexcept {
+                                                  std::uint32_t payload_bytes, bool end_stream) const noexcept {
     std::uint8_t *header = nullptr;
     std::size_t room = 0;
     common::IoErr err = target.acquire(kFrameHeaderSize, kFrameHeaderSize, header, room);

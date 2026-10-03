@@ -1,5 +1,6 @@
 #include <fiber/http/HttpConnectionBucketIndex.h>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <new>
@@ -183,9 +184,7 @@ bool HttpConnectionBucketIndex::rehash(std::size_t new_slot_capacity) noexcept {
     if ((new_slot_capacity & (new_slot_capacity - 1U)) != 0) {
         new_slot_capacity = next_pow2(new_slot_capacity);
     }
-    if (new_slot_capacity < kMinSlotCapacity) {
-        new_slot_capacity = kMinSlotCapacity;
-    }
+    new_slot_capacity = std::max(new_slot_capacity, kMinSlotCapacity);
     if (size_ > new_slot_capacity / 2U) {
         return false;
     }

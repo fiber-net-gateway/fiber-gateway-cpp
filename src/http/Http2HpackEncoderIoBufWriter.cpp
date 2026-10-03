@@ -7,8 +7,8 @@
 namespace fiber::http {
 
 const Http2HpackEncoder::OutputOps Http2HpackEncoderIoBufWriter::kOutputOps{
-        &Http2HpackEncoderIoBufWriter::acquire_output,
-        &Http2HpackEncoderIoBufWriter::commit_output,
+        .acquire = &Http2HpackEncoderIoBufWriter::acquire_output,
+        .commit = &Http2HpackEncoderIoBufWriter::commit_output,
 };
 
 Http2HpackEncoderIoBufWriter::Http2HpackEncoderIoBufWriter(Http2HpackEncoder &encoder, std::size_t chunk_size) noexcept

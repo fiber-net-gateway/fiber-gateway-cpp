@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <system_error>
@@ -28,7 +29,7 @@ constexpr std::string_view kChunkedFinal = "0\r\n\r\n";
 constexpr std::string_view kChunkedLastPrefix = "0\r\n";
 constexpr std::size_t kMaxContentLengthDigits = 20;
 constexpr std::size_t kMaxChunkSizeHexDigits = sizeof(std::size_t) * 2;
-constexpr std::size_t kMaxDirectBodyRead = 64 * 1024;
+constexpr std::size_t kMaxDirectBodyRead = static_cast<const std::size_t>(64 * 1024);
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -170,6 +171,10 @@ HttpVersion to_http_version(int version) noexcept {
         case 3000:
             return HttpVersion::HTTP_3_0;
         default:
+            // HttpVersion has no fixed underlying type, so every int is a
+            // valid bit pattern; out-of-list values are the deliberate
+            // "unknown version" channel for comparisons downstream.
+            // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
             return static_cast<HttpVersion>(version);
     }
 }
@@ -468,7 +473,7 @@ ClientHttp1Exchange::write_chunk_suffix(HttpTransport *transport, bool end_strea
 
 ClientHttp1Exchange::ClientHttp1Exchange(Http1ClientConnection &conn, mem::BufPool &pool,
                                          Http1ClientExchangeOptions options) noexcept :
-    conn_(conn), pool_(pool), options_(std::move(options)), response_trailers_(pool) {
+    conn_(conn), pool_(pool), options_(options), response_trailers_(pool) {
     active_ = conn.acquire_exchange();
 }
 
@@ -1247,6 +1252,9 @@ ClientHttp1Exchange::write(mem::IoBufChain &chunk, std::chrono::milliseconds tim
                 continue;
             }
             const std::size_t payload_written = *written - prefix_remaining;
+            // Documents "prefix fully drained"; every later path leaves the
+            // loop via break/co_return, so the store is never read.
+            // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
             prefix_remaining = 0;
             if (payload_written == 0) {
                 break;
@@ -1639,6 +1647,9 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
             } else {
                 header_node->head.reason = {};
             }
+            // Kept as loop-exit documentation; the break below never re-tests
+            // the while condition, so the store is never read.
+            // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
             have_status_line = true;
             break;
         }
@@ -1688,8 +1699,8 @@ ClientHttp1Exchange::read_header(std::chrono::milliseconds timeout) noexcept {
             if (!field) {
                 co_return fail_exchange(common::IoErr::NoMem);
             }
-            if (auto *handler = response_header_handler_map().get(std::string_view(lowercase, name_len),
-                                                                  static_cast<std::uint32_t>(hash))) {
+            if (const auto *handler = response_header_handler_map().get(std::string_view(lowercase, name_len),
+                                                                        static_cast<std::uint32_t>(hash))) {
                 if (!(*handler)(header_parse_state, *field)) {
                     co_return fail_exchange(common::IoErr::Invalid);
                 }

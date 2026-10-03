@@ -100,7 +100,7 @@ inline common::IoResult<QuicSlice> QuicReadCursor::read_slice(std::size_t len) n
     if (remaining() < len) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    QuicSlice slice{pos_, len};
+    QuicSlice slice{.data = pos_, .len = len};
     pos_ += len;
     return slice;
 }

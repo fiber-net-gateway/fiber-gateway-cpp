@@ -169,11 +169,11 @@ bool HttpHeaders::contains(std::string_view lowcase_name, uint64_t hash) const n
 }
 
 HttpHeaders::MatchRange HttpHeaders::get_all(std::string_view lowcase_key, uint64_t hash) const noexcept {
-    return MatchRange(this, lowcase_key, hash, MatchMode::Lowcase);
+    return {this, lowcase_key, hash, MatchMode::Lowcase};
 }
 
 HttpHeaders::MatchRange HttpHeaders::get_all(std::string_view name) const noexcept {
-    return MatchRange(this, name, http_header_name_hash(name), MatchMode::CaseInsensitive);
+    return {this, name, http_header_name_hash(name), MatchMode::CaseInsensitive};
 }
 
 size_t HttpHeaders::remove(std::string_view name) noexcept {
@@ -260,11 +260,11 @@ HttpHeaders::ConstIterator HttpHeaders::erase(ConstIterator it) noexcept {
 
 HttpHeaders::MatchIterator HttpHeaders::erase(MatchIterator it) noexcept {
     if (it.headers_ != this || it.node_ == nullptr) {
-        return MatchIterator(this, it.key_, it.hash_, it.mode_, nullptr);
+        return {this, it.key_, it.hash_, it.mode_, nullptr};
     }
     const HeaderField *next = next_match_node(it.node_, it.key_, it.hash_, it.mode_);
     unlink_field(const_cast<HeaderField *>(it.node_));
-    return MatchIterator(this, it.key_, it.hash_, it.mode_, next);
+    return {this, it.key_, it.hash_, it.mode_, next};
 }
 
 HttpHeaders::ConstIterator HttpHeaders::begin() const noexcept { return ConstIterator(all_head_); }

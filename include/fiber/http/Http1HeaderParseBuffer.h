@@ -13,8 +13,8 @@
 namespace fiber::http {
 
 struct Http1HeaderParseBufferOptions {
-    std::size_t init_size = 8 * 1024;
-    std::size_t large_size = 32 * 1024;
+    std::size_t init_size = static_cast<std::size_t>(8 * 1024);
+    std::size_t large_size = static_cast<std::size_t>(32 * 1024);
     std::size_t large_num = 4;
 };
 

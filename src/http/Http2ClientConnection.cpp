@@ -25,11 +25,13 @@ Http2Connection::Options Http2ClientConnection::normalize_h2_options(Http2Connec
 }
 
 Http2ClientConnection::Http2ClientConnection(event::EventLoop &loop, Http2Connection::Options h2) noexcept :
-    loop_(&loop), conn_(normalize_h2_options(std::move(h2)), this, connection_ops()), stream_gate_(conn_),
+    loop_(&loop), conn_(normalize_h2_options(h2), this, connection_ops()), stream_gate_(conn_),
     close_gate_(loop, conn_) {}
 
 const Http2Connection::Ops &Http2ClientConnection::connection_ops() noexcept {
-    static const Http2Connection::Ops ops{nullptr, &on_state_change, &on_capacity_change};
+    static const Http2Connection::Ops ops{.create_peer_stream = nullptr,
+                                          .on_state_change = &on_state_change,
+                                          .on_capacity_change = &on_capacity_change};
     return ops;
 }
 
@@ -41,7 +43,7 @@ void Http2ClientConnection::on_state_change(void *ctx, Http2Connection &connecti
     }
 }
 
-void Http2ClientConnection::on_capacity_change(void *ctx, Http2Connection &) noexcept {
+void Http2ClientConnection::on_capacity_change(void *ctx, Http2Connection & /*unused*/) noexcept {
     static_cast<Http2ClientConnection *>(ctx)->stream_gate_.on_capacity_change();
 }
 
@@ -134,9 +136,7 @@ fiber::async::Task<Http2Connection::CloseResult> Http2ClientConnection::wait_clo
     co_return co_await close_gate_.join();
 }
 
-ClientHttp2Exchange Http2ClientConnection::open_exchange(mem::BufPool &pool) noexcept {
-    return ClientHttp2Exchange(*this, pool);
-}
+ClientHttp2Exchange Http2ClientConnection::open_exchange(mem::BufPool &pool) noexcept { return {*this, pool}; }
 
 void Http2ClientConnection::shutdown(common::IoErr reason) noexcept { conn_.shutdown(reason); }
 

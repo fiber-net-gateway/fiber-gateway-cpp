@@ -216,7 +216,7 @@ const ServerHttp3Request *ServerHttp3Request::from_stream(const quic::QuicStream
     if (stream.destroy_callback() != &ServerHttp3Request::destroy_owner) {
         return nullptr;
     }
-    auto *request = static_cast<const ServerHttp3Request *>(stream.owner());
+    const auto *request = static_cast<const ServerHttp3Request *>(stream.owner());
     if (request == nullptr || &request->stream_ != &stream) {
         return nullptr;
     }
@@ -243,7 +243,7 @@ ServerHttp3Request::~ServerHttp3Request() {
     }
 }
 
-void ServerHttp3Request::destroy_owner(void *owner, quic::QuicStream &) noexcept {
+void ServerHttp3Request::destroy_owner(void *owner, quic::QuicStream & /*unused*/) noexcept {
     delete static_cast<ServerHttp3Request *>(owner);
 }
 
@@ -329,9 +329,12 @@ private:
 
 const Http3QpackDecoder::Ops &ServerHttp3Request::HeaderBlockParser::decoder_ops() noexcept {
     static const Http3QpackDecoder::Ops kOps{
-            &HeaderBlockParser::on_indexed_field, &HeaderBlockParser::on_indexed_name,
-            &HeaderBlockParser::on_name_raw,      &HeaderBlockParser::on_name_huffman,
-            &HeaderBlockParser::on_value_raw,     &HeaderBlockParser::on_value_huffman,
+            .on_indexed_field = &HeaderBlockParser::on_indexed_field,
+            .on_indexed_name = &HeaderBlockParser::on_indexed_name,
+            .on_name_raw = &HeaderBlockParser::on_name_raw,
+            .on_name_huffman = &HeaderBlockParser::on_name_huffman,
+            .on_value_raw = &HeaderBlockParser::on_value_raw,
+            .on_value_huffman = &HeaderBlockParser::on_value_huffman,
     };
     return kOps;
 }
@@ -340,11 +343,15 @@ const HeaderMap<ServerHttp3Request::HeaderBlockParser::PseudoHeaderRule> &
 ServerHttp3Request::HeaderBlockParser::pseudo_header_map() noexcept {
     static HeaderMap<PseudoHeaderRule> handlers = []() {
         HeaderMap<PseudoHeaderRule>::Builder builder(5);
-        builder.insert(":method", PseudoHeaderRule{MethodSeen, &HeaderBlockParser::handle_method});
-        builder.insert(":path", PseudoHeaderRule{PathSeen, &HeaderBlockParser::handle_path});
-        builder.insert(":scheme", PseudoHeaderRule{SchemeSeen, &HeaderBlockParser::handle_scheme});
-        builder.insert(":authority", PseudoHeaderRule{AuthoritySeen, &HeaderBlockParser::handle_authority});
-        builder.insert(":protocol", PseudoHeaderRule{ProtocolSeen, &HeaderBlockParser::handle_protocol});
+        builder.insert(":method",
+                       PseudoHeaderRule{.seen_bit = MethodSeen, .handler = &HeaderBlockParser::handle_method});
+        builder.insert(":path", PseudoHeaderRule{.seen_bit = PathSeen, .handler = &HeaderBlockParser::handle_path});
+        builder.insert(":scheme",
+                       PseudoHeaderRule{.seen_bit = SchemeSeen, .handler = &HeaderBlockParser::handle_scheme});
+        builder.insert(":authority",
+                       PseudoHeaderRule{.seen_bit = AuthoritySeen, .handler = &HeaderBlockParser::handle_authority});
+        builder.insert(":protocol",
+                       PseudoHeaderRule{.seen_bit = ProtocolSeen, .handler = &HeaderBlockParser::handle_protocol});
         return std::move(builder).build();
     }();
     return handlers;
@@ -675,7 +682,7 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::commit_regular_header(std::
 common::IoErr ServerHttp3Request::HeaderBlockParser::apply_regular_header_policy(std::string_view name,
                                                                                  std::uint64_t name_hash,
                                                                                  std::string_view value) noexcept {
-    auto *handler = regular_header_handler_map().get(name, name_hash);
+    const auto *handler = regular_header_handler_map().get(name, name_hash);
     if (handler == nullptr) {
         return common::IoErr::None;
     }
@@ -684,7 +691,7 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::apply_regular_header_policy
 
 common::IoErr ServerHttp3Request::HeaderBlockParser::handle_pseudo_header(std::string_view name,
                                                                           std::string_view value) noexcept {
-    auto *rule = pseudo_header_map().get(name);
+    const auto *rule = pseudo_header_map().get(name);
     if (rule == nullptr || rule->handler == nullptr) {
         return fail(Http3ErrorCode::MessageError);
     }
@@ -763,7 +770,8 @@ common::IoErr ServerHttp3Request::HeaderBlockParser::handle_content_length(std::
     return common::IoErr::None;
 }
 
-common::IoErr ServerHttp3Request::HeaderBlockParser::handle_forbidden_regular_header(std::string_view) noexcept {
+common::IoErr
+ServerHttp3Request::HeaderBlockParser::handle_forbidden_regular_header(std::string_view /*unused*/) noexcept {
     return fail(Http3ErrorCode::MessageError);
 }
 
@@ -785,7 +793,7 @@ std::string_view ServerHttp3Request::HeaderBlockParser::copy_to_pool(const std::
         return {};
     }
     std::memcpy(mem, data, len);
-    return std::string_view(mem, len);
+    return {mem, len};
 }
 
 async::DetachedTask ServerHttp3Request::run_read_loop(quic::QuicStream::Lease lease) noexcept {
@@ -1107,8 +1115,7 @@ ServerHttp3Request::read_body(HttpExchange &exchange, std::size_t max_bytes,
                     continue;
                 }
 
-                const std::size_t take =
-                        std::min<std::size_t>(max_bytes, std::min<std::uint64_t>(readable, frame_payload_remaining_));
+                const std::size_t take = std::min<std::size_t>({max_bytes, readable, frame_payload_remaining_});
                 auto taken = take_body_payload(out, take);
                 if (!taken) {
                     co_return std::unexpected(taken.error());
@@ -1273,8 +1280,7 @@ async::Task<common::IoResult<void>> ServerHttp3Request::send_header(HttpExchange
     }
 
     if (header.headers != nullptr) {
-        for (auto it = header.headers->begin(); it != header.headers->end(); ++it) {
-            const auto &field = *it;
+        for (const auto &field: *header.headers) {
             if (field.name_len == 0) {
                 continue;
             }
@@ -1603,7 +1609,7 @@ async::Task<common::IoResult<std::size_t>> ServerHttp3Request::write(HttpExchang
     co_return *written;
 }
 
-common::IoResult<void> ServerHttp3Request::abort(HttpExchange &exchange, common::IoErr) noexcept {
+common::IoResult<void> ServerHttp3Request::abort(HttpExchange &exchange, common::IoErr /*reason*/) noexcept {
     if (&exchange != &exchange_ || !handler_started_) {
         return std::unexpected(common::IoErr::Invalid);
     }
