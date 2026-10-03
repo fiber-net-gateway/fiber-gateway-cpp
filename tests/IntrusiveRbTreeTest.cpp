@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <random>
+#include <type_traits>
 #include <vector>
 
 #include <fiber/common/IntrusiveRbTree.h>
@@ -20,6 +24,11 @@ struct TestNodeLess {
 };
 
 using TestTree = fiber::common::IntrusiveRbTree<TestNode, offsetof(TestNode, hook), TestNodeLess>;
+
+static_assert(!std::is_copy_constructible_v<TestNode>);
+static_assert(!std::is_copy_assignable_v<TestNode>);
+static_assert(!std::is_move_constructible_v<TestNode>);
+static_assert(!std::is_move_assignable_v<TestNode>);
 
 TestNode *owner_from_hook(fiber::common::IntrusiveRbTreeHook *hook) noexcept {
     if (!hook || !hook->in_tree) {
@@ -84,9 +93,15 @@ void validate_tree(TestTree &tree, const std::vector<TestNode *> &linked_nodes) 
     }
 
     ASSERT_NE(root, nullptr);
-    EXPECT_EQ(root->hook.parent, nullptr);
+    const auto *sentinel = root->hook.parent;
+    ASSERT_NE(sentinel, nullptr);
+    EXPECT_FALSE(sentinel->linked());
+    EXPECT_EQ(sentinel->parent, &root->hook);
+    EXPECT_EQ(sentinel->left, sentinel);
+    EXPECT_EQ(sentinel->right, sentinel);
+    EXPECT_EQ(sentinel->color, fiber::common::IntrusiveRbTreeColor::Black);
     EXPECT_EQ(root->hook.color, fiber::common::IntrusiveRbTreeColor::Black);
-    validate_node(root, nullptr);
+    validate_node(root, sentinel);
 
     std::vector<int> actual = keys_in_order(tree);
     std::vector<int> expected;
@@ -130,9 +145,9 @@ TEST(IntrusiveRbTreeTest, SingleInsertAndErase) {
 
 TEST(IntrusiveRbTreeTest, TraversesInKeyOrder) {
     TestTree tree;
-    std::vector<TestNode> nodes{{.key = 8, .id = 0}, {.key = 3, .id = 1}, {.key = 10, .id = 2},
-                                {.key = 1, .id = 3}, {.key = 6, .id = 4}, {.key = 14, .id = 5},
-                                {.key = 4, .id = 6}, {.key = 7, .id = 7}, {.key = 13, .id = 8}};
+    TestNode nodes[]{{.key = 8, .id = 0}, {.key = 3, .id = 1}, {.key = 10, .id = 2},
+                     {.key = 1, .id = 3}, {.key = 6, .id = 4}, {.key = 14, .id = 5},
+                     {.key = 4, .id = 6}, {.key = 7, .id = 7}, {.key = 13, .id = 8}};
     std::vector<TestNode *> linked;
 
     for (TestNode &node: nodes) {
@@ -146,8 +161,8 @@ TEST(IntrusiveRbTreeTest, TraversesInKeyOrder) {
 
 TEST(IntrusiveRbTreeTest, AllowsDuplicateKeys) {
     TestTree tree;
-    std::vector<TestNode> nodes{{.key = 5, .id = 0}, {.key = 5, .id = 1}, {.key = 5, .id = 2},
-                                {.key = 3, .id = 3}, {.key = 7, .id = 4}, {.key = 5, .id = 5}};
+    TestNode nodes[]{{.key = 5, .id = 0}, {.key = 5, .id = 1}, {.key = 5, .id = 2},
+                     {.key = 3, .id = 3}, {.key = 7, .id = 4}, {.key = 5, .id = 5}};
     std::vector<TestNode *> linked;
 
     for (TestNode &node: nodes) {
@@ -161,9 +176,9 @@ TEST(IntrusiveRbTreeTest, AllowsDuplicateKeys) {
 
 TEST(IntrusiveRbTreeTest, DeletesLeafOneChildTwoChildrenAndRoot) {
     TestTree tree;
-    std::vector<TestNode> nodes{{.key = 20, .id = 0}, {.key = 10, .id = 1}, {.key = 30, .id = 2},
-                                {.key = 5, .id = 3},  {.key = 15, .id = 4}, {.key = 25, .id = 5},
-                                {.key = 40, .id = 6}, {.key = 12, .id = 7}, {.key = 17, .id = 8}};
+    TestNode nodes[]{{.key = 20, .id = 0}, {.key = 10, .id = 1}, {.key = 30, .id = 2},
+                     {.key = 5, .id = 3},  {.key = 15, .id = 4}, {.key = 25, .id = 5},
+                     {.key = 40, .id = 6}, {.key = 12, .id = 7}, {.key = 17, .id = 8}};
     std::vector<TestNode *> linked;
 
     for (TestNode &node: nodes) {
@@ -197,9 +212,9 @@ TEST(IntrusiveRbTreeTest, DeletesLeafOneChildTwoChildrenAndRoot) {
 
 TEST(IntrusiveRbTreeTest, MixedInsertDeleteUntilEmpty) {
     TestTree tree;
-    std::vector<TestNode> nodes{{.key = 16, .id = 0}, {.key = 8, .id = 1},  {.key = 24, .id = 2}, {.key = 4, .id = 3},
-                                {.key = 12, .id = 4}, {.key = 20, .id = 5}, {.key = 28, .id = 6}, {.key = 2, .id = 7},
-                                {.key = 6, .id = 8},  {.key = 10, .id = 9}, {.key = 14, .id = 10}};
+    TestNode nodes[]{{.key = 16, .id = 0}, {.key = 8, .id = 1},  {.key = 24, .id = 2}, {.key = 4, .id = 3},
+                     {.key = 12, .id = 4}, {.key = 20, .id = 5}, {.key = 28, .id = 6}, {.key = 2, .id = 7},
+                     {.key = 6, .id = 8},  {.key = 10, .id = 9}, {.key = 14, .id = 10}};
     std::vector<TestNode *> linked;
 
     for (TestNode &node: nodes) {
@@ -229,4 +244,135 @@ TEST(IntrusiveRbTreeTest, EraseUnlinkedNodeIsNoop) {
 
     validate_tree(tree, {&linked});
     EXPECT_FALSE(unlinked.hook.linked());
+}
+
+TEST(IntrusiveRbTreeTest, ScopedNodeDestructionUnlinksAndTreeCanBeReused) {
+    TestTree tree;
+    TestNode survivor{.key = 10};
+    tree.insert(survivor);
+    {
+        TestNode nodes[]{{.key = 4}, {.key = 12}, {.key = 2}, {.key = 6}, {.key = 11}, {.key = 14}};
+        for (TestNode &node: nodes) {
+            tree.insert(node);
+        }
+        EXPECT_EQ(keys_in_order(tree), (std::vector<int>{2, 4, 6, 10, 11, 12, 14}));
+    }
+    validate_tree(tree, {&survivor});
+
+    survivor.hook.unlink_self();
+    survivor.hook.unlink_self();
+    validate_tree(tree, {});
+    EXPECT_EQ(survivor.hook.left, nullptr);
+    EXPECT_EQ(survivor.hook.right, nullptr);
+    EXPECT_EQ(survivor.hook.parent, nullptr);
+
+    {
+        TestNode only{.key = 3};
+        tree.insert(only);
+        validate_tree(tree, {&only});
+    }
+    validate_tree(tree, {});
+    tree.insert(survivor);
+    validate_tree(tree, {&survivor});
+}
+
+TEST(IntrusiveRbTreeTest, UnlinkedNodeMayOutliveTreeAndJoinAnotherTree) {
+    TestNode node{.key = 5};
+    {
+        TestTree tree;
+        tree.insert(node);
+        node.hook.unlink_self();
+        validate_tree(tree, {});
+    }
+    {
+        TestTree tree;
+        tree.insert(node);
+        validate_tree(tree, {&node});
+        tree.erase(node);
+    }
+}
+
+TEST(IntrusiveRbTreeTest, DestroyRootRepeatedlyPreservesTree) {
+    TestTree tree;
+    std::array<std::optional<TestNode>, 32> nodes{};
+    std::vector<TestNode *> linked;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        TestNode &node = nodes[i].emplace();
+        node.key = static_cast<int>(i);
+        node.id = static_cast<int>(i);
+        tree.insert(node);
+        linked.push_back(&node);
+    }
+    while (!tree.empty()) {
+        TestNode *root = tree.root();
+        const int id = root->id;
+        linked.erase(std::remove(linked.begin(), linked.end(), root), linked.end());
+        nodes[id].reset();
+        validate_tree(tree, linked);
+    }
+}
+
+TEST(IntrusiveRbTreeTest, RandomInsertEraseUnlinkAndDestructionPreserveInvariants) {
+    TestTree tree;
+    std::array<std::optional<TestNode>, 64> nodes{};
+    std::array<bool, 64> expected_linked{};
+    std::mt19937 random(0x5eed);
+    for (int step = 0; step < 4000; ++step) {
+        SCOPED_TRACE(step);
+        const std::size_t index = random() % nodes.size();
+        auto &slot = nodes[index];
+        if (!slot) {
+            slot.emplace().key = static_cast<int>(random() % 16);
+            tree.insert(*slot);
+            expected_linked[index] = true;
+        } else {
+            switch (random() % 4) {
+                case 0:
+                    tree.erase(*slot);
+                    expected_linked[index] = false;
+                    break;
+                case 1:
+                    slot->hook.unlink_self();
+                    expected_linked[index] = false;
+                    break;
+                case 2:
+                    slot.reset();
+                    expected_linked[index] = false;
+                    break;
+                case 3:
+                    if (!expected_linked[index]) {
+                        tree.insert(*slot);
+                        expected_linked[index] = true;
+                    }
+                    break;
+            }
+        }
+
+        std::vector<TestNode *> linked;
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            auto &node = nodes[i];
+            EXPECT_EQ(node && node->hook.linked(), expected_linked[i]);
+            if (expected_linked[i]) {
+                ASSERT_TRUE(node.has_value());
+                linked.push_back(&*node);
+            }
+        }
+        validate_tree(tree, linked);
+        const TestTree &const_tree = tree;
+        EXPECT_EQ(const_tree.root(), tree.root());
+        EXPECT_EQ(const_tree.minimum(), tree.minimum());
+        for (TestNode *node: linked) {
+            EXPECT_EQ(const_tree.next_of(*node), tree.next_of(*node));
+        }
+    }
+}
+
+TEST(IntrusiveRbTreeDeathTest, TreeMustOutliveLinkedNodes) {
+    EXPECT_DEATH(
+            {
+                TestNode node{.key = 1};
+                TestTree tree;
+                tree.insert(node);
+            },
+            "FIBER_ASSERT failed: empty\\(\\)");
 }
