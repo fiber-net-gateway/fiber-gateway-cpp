@@ -18,8 +18,8 @@ struct NacosRpcOptions {
     std::chrono::milliseconds heartbeat_interval{10000};
     std::chrono::milliseconds reconnect_initial_delay{1000};
     std::chrono::milliseconds reconnect_max_delay{60000};
-    std::size_t max_inbound_message_bytes = 10 * 1024 * 1024;
-    std::size_t max_push_response_bytes = 1024 * 1024;
+    std::size_t max_inbound_message_bytes = static_cast<std::size_t>(10 * 1024 * 1024);
+    std::size_t max_push_response_bytes = static_cast<std::size_t>(1024 * 1024);
     std::string client_ip_override;
 };
 

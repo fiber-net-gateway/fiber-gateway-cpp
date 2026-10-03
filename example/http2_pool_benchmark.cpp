@@ -3,6 +3,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -195,7 +196,7 @@ struct Histogram {
             mantissa >>= 1;
             ++exponent;
         }
-        const auto index = exponent ? (exponent + 1) * 32 + mantissa - 32 : mantissa;
+        const auto index = exponent ? ((exponent + 1) * 32) + mantissa - 32 : mantissa;
         ++buckets[std::min(index, buckets.size() - 1)];
     }
     std::uint64_t percentile(unsigned permille) const noexcept {
@@ -208,7 +209,7 @@ struct Histogram {
             if (sum >= target) {
                 if (i < 64)
                     return i;
-                const auto shift = i / 32 - 1;
+                const auto shift = (i / 32) - 1;
                 return ((32 + i % 32 + 1) << shift) - 1;
             }
         }
@@ -260,18 +261,21 @@ struct Shard {
     std::size_t live_requests = 0, live_lanes = 0, pending = 0;
     std::size_t fifo_started = 0, fifo_done = 0, fifo_next = 0, fifo_timed_out = 0;
     std::uint64_t sequence = 0;
-    static Task<common::IoResult<void>> dial(void *, http::Http2ClientConnection &, const Key &) noexcept;
-    static void count_changed(void *, const Key &, std::size_t, std::size_t) noexcept;
-    static void dial_failed(void *, const Key &, IoErr, std::size_t, Ms) noexcept;
-    static void on_closed(void *, http::Http2Connection &, IoErr) noexcept;
+    static Task<common::IoResult<void>> dial(void * /*ctx*/, http::Http2ClientConnection & /*connection*/,
+                                             const Key & /*key*/) noexcept;
+    static void count_changed(void * /*ctx*/, const Key & /*key*/, std::size_t /*total*/,
+                              std::size_t /*ready*/) noexcept;
+    static void dial_failed(void * /*ctx*/, const Key & /*unused*/, IoErr /*unused*/, std::size_t /*count*/,
+                            Ms /*retry*/) noexcept;
+    static void on_closed(void * /*ctx*/, http::Http2Connection & /*connection*/, IoErr /*reason*/) noexcept;
     void check(bool condition, const char *message) noexcept;
     IoErr request_error(IoErr error, const char *phase, std::uint64_t id, std::uint64_t generation = 0,
-                        std::uint32_t stream = 0) noexcept;
-    ConnectionState &connection_state(http::Http2ClientConnection &connection) noexcept;
+                        std::uint32_t stream = 0) const noexcept;
+    ConnectionState &connection_state(http::Http2ClientConnection &connection) const noexcept;
     std::size_t key_index(const Key &key) noexcept;
     void emit(const char *kind) noexcept;
     void check_drained() noexcept;
-    Task<IoErr> request(mem::BufPool &, std::size_t key_id, std::uint64_t id, std::uint64_t random,
+    Task<IoErr> request(mem::BufPool & /*buffers*/, std::size_t key_id, std::uint64_t id, std::uint64_t random,
                         bool holder = false) noexcept;
     DetachedTask lane(std::size_t lane_index) noexcept;
     DetachedTask monitor() noexcept;
@@ -350,6 +354,9 @@ Shard::Shard(Benchmark &b, std::size_t i, const Options &o) :
     keys.reserve(o.keys);
     // Distinct names pinned to one address give `keys` separate pool groups over the same server.
     for (std::size_t k = 0; k < o.keys; ++k)
+        // "groupN.bench" is a short well-formed DNS name pinned to a known address,
+        // so Key::make cannot fail for it.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         keys.push_back(*Key::make("group" + std::to_string(k) + ".bench", o.port,
                                   o.tls ? Key::Scheme::Https : Key::Scheme::Http, b.address.ip()));
 }
@@ -385,7 +392,7 @@ void Shard::count_changed(void *ctx, const Key &key, std::size_t total, std::siz
     s.stats.max_group = std::max<std::uint64_t>(s.stats.max_group, total);
 }
 
-void Shard::dial_failed(void *ctx, const Key &, IoErr, std::size_t count, Ms retry) noexcept {
+void Shard::dial_failed(void *ctx, const Key & /*unused*/, IoErr /*unused*/, std::size_t count, Ms retry) noexcept {
     auto &s = *static_cast<Shard *>(ctx);
     ++s.stats.dial_failed_callbacks;
     Ms expected = s.bench.options.pool.dial_retry_backoff;
@@ -406,7 +413,7 @@ void Shard::on_closed(void *ctx, http::Http2Connection &connection, IoErr reason
 }
 
 IoErr Shard::request_error(IoErr error, const char *phase, std::uint64_t id, std::uint64_t generation,
-                           std::uint32_t stream) noexcept {
+                           std::uint32_t stream) const noexcept {
     if (stats.errors < 8) {
         const auto name = common::io_err_name(error);
         std::fprintf(stderr, "loop=%zu request=%llu connection=%llu stream=%u phase=%s error=%.*s\n", index,
@@ -416,7 +423,7 @@ IoErr Shard::request_error(IoErr error, const char *phase, std::uint64_t id, std
     return error;
 }
 
-ConnectionState &Shard::connection_state(http::Http2ClientConnection &connection) noexcept {
+ConnectionState &Shard::connection_state(http::Http2ClientConnection &connection) const noexcept {
     for (std::size_t i = 0; i < bench.options.pool.max_connections_total; ++i) {
         if (connections[i].connection == &connection && !connections[i].closed)
             return connections[i];
@@ -448,7 +455,7 @@ Task<common::IoResult<void>> Shard::dial(void *ctx, http::Http2ClientConnection 
             if (!completed)
                 ++s.stats.dial_canceled;
         }
-    } guard{s, g};
+    } guard{.s = s, .g = g};
     if (b.options.lifecycle && id == 1) {
         ++b.blocked_entered;
         co_await async::sleep(60s);
@@ -529,7 +536,7 @@ Task<IoErr> Shard::request(mem::BufPool &buffers, std::size_t key_id, std::uint6
             --record.leases;
             ++s.stats.released;
         }
-    } lease_guard{*this, record};
+    } lease_guard{.s = *this, .record = record};
     http::Http2PooledExchange exchange(std::move(*lease), buffers);
     if (o.hold_ms)
         co_await async::sleep(std::min(Ms(o.hold_ms), remaining(deadline)));
@@ -541,8 +548,14 @@ Task<IoErr> Shard::request(mem::BufPool &buffers, std::size_t key_id, std::uint6
     if (!headers.add_view("x-bench-id", {request_id, static_cast<std::size_t>(id_size)}))
         co_return IoErr::NoMem;
     std::string_view path = hold ? "/slow.bin" : std::string_view(o.path);
-    if (o.mixed && !hold)
-        path = random % 100 == 0 ? "/slow.bin" : random % 100 < 10 ? "/medium.bin" : "/small.bin";
+    if (o.mixed && !hold) {
+        if (random % 100 == 0)
+            path = "/slow.bin";
+        else if (random % 100 < 10)
+            path = "/medium.bin";
+        else
+            path = "/small.bin";
+    }
     auto sent = co_await exchange->send_request_header({.method = http::HttpMethod::Get,
                                                         .scheme = o.tls ? "https" : "http",
                                                         .authority = "localhost",
@@ -582,13 +595,17 @@ Task<IoErr> Shard::request(mem::BufPool &buffers, std::size_t key_id, std::uint6
     if (cancel && random % 2 == 0)
         co_return IoErr::Canceled;
     std::size_t bytes = 0;
-    const std::size_t expected = path == "/small.bin" ? 1024 : path == "/medium.bin" ? 65536 : 1048576;
+    std::size_t expected = 1048576;
+    if (path == "/small.bin")
+        expected = 1024;
+    else if (path == "/medium.bin")
+        expected = 65536;
     bool first = true;
     for (;;) {
         if (first && o.read_delay_ms)
             co_await async::sleep(std::min(Ms(o.read_delay_ms), remaining(deadline)));
         first = false;
-        auto body = co_await exchange->read_body(64 * 1024, remaining(deadline));
+        auto body = co_await exchange->read_body(static_cast<std::size_t>(64 * 1024), remaining(deadline));
         if (!body)
             co_return request_error(body.error(), "read_body", id, record.generation, exchange->stream_id());
         const bool complete = body->complete();
@@ -792,7 +809,7 @@ Task<void> Benchmark::lifecycle() noexcept {
         while (pending_entered.load() != 9 * workers || blocked_entered.load() != workers)
             co_await async::sleep(1ms);
         const bool shutdown = round == options.rounds;
-        const unsigned callers = shutdown ? workers * 2 + 1 : 1;
+        const unsigned callers = shutdown ? (workers * 2) + 1 : 1;
         for (unsigned i = 0; i < callers; ++i)
             async::spawn(group.at(i % workers), [this, shutdown, i]() { return admin(shutdown && i != 0); });
         while (admin_started.load() != callers)
@@ -943,9 +960,12 @@ bool Benchmark::summary() noexcept {
     auto number = [](const char *key, std::uint64_t value) {
         std::printf(",\"%s\":%llu", key, static_cast<unsigned long long>(value));
     };
-    std::printf("{\"type\":\"summary\",\"scenario\":\"%s\"", options.lifecycle ? "lifecycle"
-                                                             : options.fifo    ? "fifo"
-                                                                               : "load");
+    const char *scenario = "load";
+    if (options.lifecycle)
+        scenario = "lifecycle";
+    else if (options.fifo)
+        scenario = "fifo";
+    std::printf(R"({"type":"summary","scenario":"%s")", scenario);
     number("loops", options.loops);
     number("concurrency_per_loop", options.concurrency);
     number("duration_ms", options.duration_ms);
@@ -984,7 +1004,8 @@ bool Benchmark::summary() noexcept {
     number("success_p99_us", sum.successful_latency.percentile(990));
     number("acquire_p99_us", sum.acquire_latency.percentile(990));
     number("admin_max_us", admin_latency.max_us);
-    std::printf(",\"measured_rps\":%.2f,\"error_codes\":{", sum.measured_success * 1000.0 / options.duration_ms);
+    std::printf(R"(,"measured_rps":%.2f,"error_codes":{)",
+                static_cast<double>(sum.measured_success) * 1000.0 / static_cast<double>(options.duration_ms));
     bool first = true;
     for (std::size_t i = 0; i < kErrorCount; ++i) {
         if (!sum.error_codes[i])
@@ -1043,7 +1064,7 @@ int main(int argc, char **argv) {
     const auto watchdog =
             Clock::now() +
             (bench.options.lifecycle || bench.options.fifo
-                     ? Ms(30000 + bench.options.rounds * 2000)
+                     ? Ms(30000 + (bench.options.rounds * 2000))
                      : Ms(bench.options.duration_ms + bench.options.warmup_ms + bench.options.timeout_ms + 30000));
     while (!bench.done.load()) {
         if (Clock::now() > watchdog) {
