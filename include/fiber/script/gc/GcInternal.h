@@ -22,8 +22,8 @@ struct GcHeader {
     std::uint32_t size_ = 0;
 };
 
-inline constexpr std::uint8_t kGcStringHashValid = 1u << 0;
-inline constexpr std::uint8_t kGcStringWellFormed = 1u << 1;
+inline constexpr std::uint8_t kGcStringHashValid = 1U << 0;
+inline constexpr std::uint8_t kGcStringWellFormed = 1U << 1;
 
 // Canonical WTF-8 bytes plus a trailing NUL follow the fixed header. hdr.size_
 // covers both regions, so the byte length is derivable without a data pointer.

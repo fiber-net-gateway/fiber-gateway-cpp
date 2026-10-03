@@ -36,7 +36,7 @@ JsValue make_heap_value(GcHeader *hdr, GcHeapKind kind) {
 
 } // namespace
 
-JsValue JsValue::make_undefined() { return JsValue(); }
+JsValue JsValue::make_undefined() { return {}; }
 
 JsValue JsValue::make_null() {
     JsValue value;
@@ -47,7 +47,7 @@ JsValue JsValue::make_null() {
 JsValue JsValue::make_boolean(bool value) {
     JsValue result;
     result.tag = to_u8(JsTag::Boolean);
-    result.payload = value ? 1u : 0u;
+    result.payload = value ? 1U : 0U;
     return result;
 }
 

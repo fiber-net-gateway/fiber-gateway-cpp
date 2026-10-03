@@ -55,7 +55,7 @@ bool is_truthy(const fiber::script::JsValue &value) noexcept {
             if (fiber::script::js_value_is_borrowed_string(value)) {
                 return fiber::script::js_value_native_string(value).len > 0;
             }
-            if (auto *str = as_heap_string(value)) {
+            if (const auto *str = as_heap_string(value)) {
                 return str->utf16_len > 0;
             }
             return false;

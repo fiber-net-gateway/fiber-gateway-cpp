@@ -15,8 +15,8 @@
 
 namespace fiber::script::gc_detail {
 
-constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
-constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
+constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMinBucketCount = 8;
 constexpr std::size_t kStringInternInitialBucketCount = 64;
 constexpr std::size_t kStringInternMaxLoad = 2;
@@ -93,7 +93,7 @@ GcMark flip_mark(GcMark mark) { return (mark == GcMark::GcMark_0) ? GcMark::GcMa
                 cursor = next;
             }
         }
-        heap->alloc.free(heap->string_intern_buckets);
+        heap->alloc.free(static_cast<void *>(heap->string_intern_buckets));
     }
 
     heap->string_intern_buckets = new_buckets;
@@ -227,7 +227,7 @@ void gc_string_intern_free_table(GcHeap *heap) noexcept {
     if (!heap || !heap->string_intern_buckets) {
         return;
     }
-    heap->alloc.free(heap->string_intern_buckets);
+    heap->alloc.free(static_cast<void *>(heap->string_intern_buckets));
     heap->string_intern_buckets = nullptr;
     heap->string_intern_bucket_count = 0;
     heap->string_intern_size = 0;
@@ -273,9 +273,7 @@ std::size_t bucket_count_for_entries(std::size_t entry_capacity) {
         return 0;
     }
     std::size_t needed = (entry_capacity * kMaxLoadDenominator + kMaxLoadNumerator - 1) / kMaxLoadNumerator;
-    if (needed < kMinBucketCount) {
-        needed = kMinBucketCount;
-    }
+    needed = std::max(needed, kMinBucketCount);
     return next_pow2(needed);
 }
 
@@ -418,7 +416,7 @@ bool grow_entries(GcHeap *heap, GcObject *obj, std::size_t new_capacity) {
         new_entries[i].next_order = obj->entries[i].next_order;
         new_entries[i].next_free = obj->entries[i].next_free;
         new_entries[i].occupied = obj->entries[i].occupied;
-        new_entries[i].value = std::move(obj->entries[i].value);
+        new_entries[i].value = obj->entries[i].value;
     }
     if (obj->entries) {
         for (std::size_t i = 0; i < obj->entry_capacity; ++i) {
@@ -482,7 +480,6 @@ void gc_link(GcHeap *heap, GcHeader *hdr) {
     gc_account_add(heap, hdr->size_);
 }
 
-void gc_mark_obj(GcHeap *heap, GcHeader *obj);
 
 void gc_mark_value(GcHeap *heap, const JsValue &value) {
     const GcHeader *hdr = js_value_heap_header(value);
@@ -493,8 +490,8 @@ void gc_mark_value(GcHeap *heap, const JsValue &value) {
 
 void gc_trace_children(GcHeap *heap, GcHeader *obj) {
     switch (obj->kind) {
+        // Leaf kinds carry no children to trace.
         case GcHeapKind::String:
-            break;
         case GcHeapKind::Binary:
             break;
         case GcHeapKind::Array: {

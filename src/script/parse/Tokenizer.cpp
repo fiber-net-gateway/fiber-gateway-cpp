@@ -101,7 +101,7 @@ std::expected<void, ParseError> Tokenizer::process() {
                 if (pos_ + 1 < max_ && input_[pos_ + 1] == '[') {
                     push_pair_token(TokenKind::Select);
                 } else {
-                    return std::unexpected(ParseError{"missing character after '^'", pos_});
+                    return std::unexpected(ParseError{.message = "missing character after '^'", .position = pos_});
                 }
                 break;
             case '~':
@@ -129,14 +129,14 @@ std::expected<void, ParseError> Tokenizer::process() {
                 if (pos_ + 1 < max_ && input_[pos_ + 1] == '&') {
                     push_pair_token(TokenKind::SymbolicAnd);
                 } else {
-                    return std::unexpected(ParseError{"missing character after '&'", pos_});
+                    return std::unexpected(ParseError{.message = "missing character after '&'", .position = pos_});
                 }
                 break;
             case '|':
                 if (pos_ + 1 < max_ && input_[pos_ + 1] == '|') {
                     push_pair_token(TokenKind::SymbolicOr);
                 } else {
-                    return std::unexpected(ParseError{"missing character after '|'", pos_});
+                    return std::unexpected(ParseError{.message = "missing character after '|'", .position = pos_});
                 }
                 break;
             case '?':
@@ -194,9 +194,9 @@ std::expected<void, ParseError> Tokenizer::process() {
                 break;
             }
             case '\\':
-                return std::unexpected(ParseError{"unexpected escape char", pos_});
+                return std::unexpected(ParseError{.message = "unexpected escape char", .position = pos_});
             default:
-                return std::unexpected(ParseError{"unexpected character", pos_});
+                return std::unexpected(ParseError{.message = "unexpected character", .position = pos_});
         }
     }
     return {};
@@ -248,7 +248,7 @@ std::expected<bool, ParseError> Tokenizer::skip_comment() {
                 ++p;
             }
             if (!closed) {
-                return std::unexpected(ParseError{"unterminated comment", pos_});
+                return std::unexpected(ParseError{.message = "unterminated comment", .position = pos_});
             }
             pos_ = p + 2;
             return true;
@@ -269,7 +269,7 @@ std::expected<void, ParseError> Tokenizer::scan_string() {
             return {};
         }
         if (js_line_terminator_length(pos_) != 0) {
-            return std::unexpected(ParseError{"unterminated string literal", pos_});
+            return std::unexpected(ParseError{.message = "unterminated string literal", .position = pos_});
         }
         if (chr == '\\') {
             ++pos_;
@@ -282,7 +282,7 @@ std::expected<void, ParseError> Tokenizer::scan_string() {
         }
         ++pos_;
     }
-    return std::unexpected(ParseError{"unterminated string literal", start});
+    return std::unexpected(ParseError{.message = "unterminated string literal", .position = start});
 }
 
 std::expected<void, ParseError> Tokenizer::scan_template_literal() {
@@ -298,7 +298,8 @@ std::expected<void, ParseError> Tokenizer::scan_template_literal() {
 
 std::expected<std::size_t, ParseError> Tokenizer::skip_template_literal(std::size_t pos, std::size_t depth) const {
     if (depth >= max_depth_) {
-        return std::unexpected(ParseError{"maximum template literal nesting depth exceeded", pos});
+        return std::unexpected(
+                ParseError{.message = "maximum template literal nesting depth exceeded", .position = pos});
     }
     std::size_t p = pos + 1;
     while (p < max_) {
@@ -309,7 +310,7 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_literal(std::siz
         if (chr == '\\') {
             ++p;
             if (p >= max_) {
-                return std::unexpected(ParseError{"unexpected escape", p});
+                return std::unexpected(ParseError{.message = "unexpected escape", .position = p});
             }
             std::size_t eol_len = js_line_terminator_length(p);
             p += eol_len != 0 ? eol_len : 1;
@@ -325,7 +326,7 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_literal(std::siz
         }
         ++p;
     }
-    return std::unexpected(ParseError{"unterminated template literal", pos});
+    return std::unexpected(ParseError{.message = "unterminated template literal", .position = pos});
 }
 
 std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::size_t pos, std::size_t depth) const {
@@ -342,12 +343,12 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::
                     break;
                 }
                 if (js_line_terminator_length(p) != 0) {
-                    return std::unexpected(ParseError{"unterminated string literal", p});
+                    return std::unexpected(ParseError{.message = "unterminated string literal", .position = p});
                 }
                 if (input_[p] == '\\') {
                     ++p;
                     if (p >= max_) {
-                        return std::unexpected(ParseError{"unexpected escape", p});
+                        return std::unexpected(ParseError{.message = "unexpected escape", .position = p});
                     }
                     std::size_t eol_len = js_line_terminator_length(p);
                     p += eol_len != 0 ? eol_len : 1;
@@ -356,7 +357,7 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::
                 ++p;
             }
             if (p >= max_) {
-                return std::unexpected(ParseError{"unterminated string literal", p});
+                return std::unexpected(ParseError{.message = "unterminated string literal", .position = p});
             }
             continue;
         }
@@ -382,7 +383,7 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::
                     ++p;
                 }
                 if (p + 1 >= max_) {
-                    return std::unexpected(ParseError{"unterminated comment", p});
+                    return std::unexpected(ParseError{.message = "unterminated comment", .position = p});
                 }
                 p += 2;
                 continue;
@@ -390,7 +391,8 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::
         }
         if (chr == '{') {
             if (curly_depth >= max_depth_) {
-                return std::unexpected(ParseError{"maximum template expression nesting depth exceeded", p});
+                return std::unexpected(
+                        ParseError{.message = "maximum template expression nesting depth exceeded", .position = p});
             }
             ++curly_depth;
             ++p;
@@ -406,18 +408,21 @@ std::expected<std::size_t, ParseError> Tokenizer::skip_template_expression(std::
         }
         ++p;
     }
-    return std::unexpected(ParseError{"unterminated template expression", pos});
+    return std::unexpected(ParseError{.message = "unterminated template expression", .position = pos});
 }
 
-std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
+std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char /*quote*/) {
     if (pos_ >= max_) {
-        return std::unexpected(ParseError{"unexpected escape", pos_});
+        return std::unexpected(ParseError{.message = "unexpected escape", .position = pos_});
     }
     std::size_t eol_len = js_line_terminator_length(pos_);
     if (eol_len != 0) {
         return eol_len;
     }
     char chr = input_[pos_];
+    // Every switch path assigns p before the scan loop reads it; the
+    // initializer stays as the boundary default.
+    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
     std::size_t p = pos_;
     int length = 0;
     int base = 0;
@@ -467,7 +472,7 @@ std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
             base = 16;
             break;
         default:
-            return std::unexpected(ParseError{"unexpected escape", pos_});
+            return std::unexpected(ParseError{.message = "unexpected escape", .position = pos_});
     }
 
     int l = length;
@@ -481,14 +486,14 @@ std::expected<std::size_t, ParseError> Tokenizer::scan_escape(char quote) {
         } else if (c >= 'A' && c <= 'F') {
             digit = c - 'A' + 10;
         } else {
-            return std::unexpected(ParseError{"unexpected escape", p});
+            return std::unexpected(ParseError{.message = "unexpected escape", .position = p});
         }
         if (digit >= base) {
-            return std::unexpected(ParseError{"unexpected escape", p});
+            return std::unexpected(ParseError{.message = "unexpected escape", .position = p});
         }
     }
     if (l != 0) {
-        return std::unexpected(ParseError{"unexpected escape", p});
+        return std::unexpected(ParseError{.message = "unexpected escape", .position = p});
     }
     return p - pos_;
 }
@@ -506,7 +511,7 @@ std::expected<void, ParseError> Tokenizer::lex_numeric_literal(bool first_char_z
         } while (pos_ < max_ && is_hex_digit(input_[pos_]));
         std::size_t end = pos_;
         if (end <= start + 2) {
-            return std::unexpected(ParseError{"invalid hex literal", start});
+            return std::unexpected(ParseError{.message = "invalid hex literal", .position = start});
         }
         std::string digits = input_.substr(start + 2, end - (start + 2));
         bool is_long = is_char('L', 'l');
@@ -545,7 +550,7 @@ std::expected<void, ParseError> Tokenizer::lex_numeric_literal(bool first_char_z
 
     if (is_char('L', 'l')) {
         if (is_real) {
-            return std::unexpected(ParseError{"real cannot be long", start});
+            return std::unexpected(ParseError{.message = "real cannot be long", .position = start});
         }
         push_token(TokenKind::LiteralLong, start, end_of_number, input_.substr(start, end_of_number - start));
         ++pos_;
@@ -553,6 +558,9 @@ std::expected<void, ParseError> Tokenizer::lex_numeric_literal(bool first_char_z
     }
 
     if (is_exponent_char(input_[pos_])) {
+        // Redundant with the later digit-scan store; kept to mark the token
+        // kind decision at this branch.
+        // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
         is_real = true;
         ++pos_;
         if (pos_ < max_ && is_sign(input_[pos_])) {

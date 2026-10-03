@@ -70,9 +70,9 @@ bool to_int64(const fiber::script::JsValue &value, std::int64_t &out) noexcept {
 // the GLIBC_2.2.5 symbol. Iteration count is bounded by the binary exponent
 // gap between the operands.
 double float_mod(double lhs, double rhs) noexcept {
-    constexpr std::uint64_t kExpMask = 0x7ff0'0000'0000'0000ull;
-    constexpr std::uint64_t kFracMask = 0x000f'ffff'ffff'ffffull;
-    constexpr std::uint64_t kSignMask = 0x8000'0000'0000'0000ull;
+    constexpr std::uint64_t kExpMask = 0x7ff0'0000'0000'0000ULL;
+    constexpr std::uint64_t kFracMask = 0x000f'ffff'ffff'ffffULL;
+    constexpr std::uint64_t kSignMask = 0x8000'0000'0000'0000ULL;
     constexpr int kBias = 1023;
 
     const std::uint64_t xi = std::bit_cast<std::uint64_t>(lhs);
@@ -97,7 +97,7 @@ double float_mod(double lhs, double rhs) noexcept {
         const int biased = static_cast<int>((bits & kExpMask) >> 52);
         mantissa = bits & kFracMask;
         if (biased != 0) {
-            mantissa |= 1ull << 52;
+            mantissa |= 1ULL << 52;
             exp = biased - kBias - 52;
         } else {
             exp = 1 - kBias - 52;
@@ -163,7 +163,7 @@ bool build_string_source(const fiber::script::JsValue &value, StringSource &out)
         return false;
     }
     if (!fiber::script::js_value_is_borrowed_string(value)) {
-        auto *str = as_heap_string(value);
+        const auto *str = as_heap_string(value);
         if (!str) {
             return false;
         }
@@ -303,6 +303,8 @@ CallResult concat_strings(fiber::script::GcHeap &heap, const StringSource &lhs, 
         const std::size_t rhs_copy = rhs.byte_len - 3;
         if (rhs_copy > 0) {
             std::memcpy(dst + offset, rhs.data + 3, rhs_copy);
+            // Final-iteration cursor bump; keeps the append protocol uniform.
+            // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
             offset += rhs_copy;
         }
         if (!initially_well_formed && fiber::script::gc_detail::wtf8_is_well_formed(dst, byte_len)) {

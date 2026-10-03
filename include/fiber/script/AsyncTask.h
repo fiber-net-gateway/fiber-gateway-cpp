@@ -48,7 +48,7 @@ public:
 
         FinalAwaiter final_suspend() noexcept { return {}; }
 
-        void return_value(const AbiResult &result) noexcept {
+        void return_value(const AbiResult &result) const noexcept {
             if (completion_.complete) {
                 completion_.complete(completion_.ctx, result);
             }

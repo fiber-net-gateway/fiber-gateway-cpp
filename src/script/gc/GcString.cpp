@@ -154,7 +154,7 @@ GcString *gc_new_string_substring_utf16(GcHeap *heap, const GcString *source, st
 
     std::size_t byte_len = plan.copy_end - plan.copy_begin;
     const std::size_t boundary_bytes =
-            (plan.leading_low_surrogate ? 3u : 0u) + (plan.trailing_high_surrogate ? 3u : 0u);
+            (plan.leading_low_surrogate ? 3U : 0U) + (plan.trailing_high_surrogate ? 3U : 0U);
     if (byte_len > std::numeric_limits<std::size_t>::max() - boundary_bytes) {
         return nullptr;
     }
