@@ -28,7 +28,7 @@ ctest --test-dir build
 # Format code (requires clang-format on PATH)
 ./format_code.sh
 
-# TLS fuzzers (separate build tree, Clang + libstdc++; see fuzz/README.md)
+# TLS/QUIC fuzzers (separate build tree, Clang + libstdc++; see fuzz/README.md)
 cmake -S . -B build-fuzz -DFIBER_BUILD_FUZZERS=ON -DFIBER_USE_LIBCXX=OFF -DFIBER_BUILD_TESTS=OFF
 cmake --build build-fuzz -j && ./build-fuzz/fuzz/tls_server_engine_fuzzer -runs=0 fuzz/corpus/tls_server_engine_fuzzer
 ```
