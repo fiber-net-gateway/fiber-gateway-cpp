@@ -1100,6 +1100,28 @@ TEST(TlsQuicHandshake, GarbageFirstMessageAlerts) {
     });
 }
 
+// A ServerHello without supported_versions negotiates TLS 1.2, which QUIC
+// forbids (RFC 9001 §4.2): protocol_version, not a process abort. The server
+// Initial carrying it is protected only by keys anyone can derive from the
+// client's DCID. Found by fuzz/quic_client_fuzzer.
+TEST(TlsQuicHandshake, ClientRejectsServerHelloWithoutSupportedVersions) {
+    ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
+        QuicMaterial material;
+        EngineQuicSink sink;
+        TlsClientHandshakeEngine engine(material.client_cfg(sink), nullptr);
+        ASSERT_FALSE(engine.failed());
+        // ServerHello: legacy 0x0303, random, empty session id (QUIC sends
+        // none), TLS_AES_128_GCM_SHA256, null compression, no extensions.
+        std::vector<std::uint8_t> sh{0x02, 0x00, 0x00, 0x26, 0x03, 0x03};
+        sh.resize(sh.size() + 32, 0x5a);
+        sh.insert(sh.end(), {0x00, 0x13, 0x01, 0x00, 0x00, 0x00});
+        const auto event = engine.feed_quic(TlsQuicLevel::Initial, sh);
+        ASSERT_TRUE(event.has_value());
+        EXPECT_EQ(TlsClientHandshakeEngine::Event::Failed, *event);
+        EXPECT_EQ(TlsAlertDesc::ProtocolVersion, engine.failure_alert());
+    });
+}
+
 TEST(TlsQuicHandshake, MessageCapPartialAndPing) {
     ::fiber::test::run_in_loop([&](::fiber::mem::IoBufNodePool &) {
         QuicMaterial material;

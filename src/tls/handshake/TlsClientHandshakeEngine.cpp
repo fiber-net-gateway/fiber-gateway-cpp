@@ -314,12 +314,14 @@ void TlsClientHandshakeEngine::handle_first_message(TlsHandshakeType type,
         // negotiates 1.2 — fatal protocol_version when the config floor is
         // above it. (With the default window the CH offered both, so a
         // conforming peer lands here by choice; the gate only bites when the
-        // operator narrowed the floor.)
-        FIBER_ASSERT(cfg_.quic == nullptr); // QUIC pins 1.3 — the gate below fired
+        // operator narrowed the floor.) A QUIC peer reaches this too: the
+        // ServerHello is peer-controlled, and QUIC's pinned 1.3 floor makes
+        // the gate fire (RFC 9001 §4.2).
         if (cfg_.min_version > kTlsVersionTls12) {
             fail_local(TlsAlertDesc::ProtocolVersion);
             return;
         }
+        FIBER_ASSERT(cfg_.quic == nullptr); // QUIC pins 1.3 — the gate above fired
         // A 1.2 negotiation kills any PSK/0-RTT offer at the read point;
         // the 1.2 sub-flow never sees the early window.
         early_.closed = true;
