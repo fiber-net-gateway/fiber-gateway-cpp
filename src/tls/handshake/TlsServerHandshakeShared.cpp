@@ -4,6 +4,8 @@
 
 #include <fiber/tls/handshake/TlsCipherSuites.h>
 
+#include <utility>
+
 namespace fiber::tls {
 
 bool tls_server_list_contains(std::span<const std::uint8_t> raw_list, std::uint16_t value) noexcept {
@@ -98,7 +100,7 @@ TlsServerAlpnResult tls_server_alpn_select(const TlsServerConfig &cfg, const Tls
         const std::uint8_t *const end = p + ch.alpn_list.size();
         while (p < end) {
             const std::uint16_t name_len = *p++;
-            if (static_cast<std::size_t>(name_len) > static_cast<std::size_t>(end - p)) {
+            if (std::cmp_greater(name_len, end - p)) {
                 return TlsServerAlpnResult::None; // malformed list — treat as not offered
             }
             if (name_len == want.size() && std::string_view{reinterpret_cast<const char *>(p), name_len} == want) {
@@ -123,7 +125,7 @@ bool tls_ch_offers_alpn(const TlsClientHello &ch, std::string_view proto) noexce
     const std::uint8_t *const end = p + ch.alpn_list.size();
     while (p < end) {
         const std::uint16_t name_len = *p++;
-        if (static_cast<std::size_t>(name_len) > static_cast<std::size_t>(end - p)) {
+        if (std::cmp_greater(name_len, end - p)) {
             return false;
         }
         if (name_len == proto.size() && std::string_view{reinterpret_cast<const char *>(p), name_len} == proto) {

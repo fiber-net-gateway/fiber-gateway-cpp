@@ -314,7 +314,7 @@ bool TlsTicketService::random_key(std::uint32_t id, std::int64_t created_ms, Tls
 TlsTicketMinter TlsTicketService::minter() const noexcept {
     // The hook ABI is a void* ctx; the service is immutable, so the const is
     // only re-added inside the thunk.
-    return TlsTicketMinter{&mint_thunk, const_cast<TlsTicketService *>(this)};
+    return TlsTicketMinter{.mint = &mint_thunk, .ctx = const_cast<TlsTicketService *>(this)};
 }
 
 std::size_t TlsTicketService::key_count() const noexcept { return key_count_; }
@@ -424,7 +424,7 @@ TlsTicketService::OpenStatus TlsTicketService::open(std::span<const std::uint8_t
         return OpenStatus::Rejected; // tamper, wrong name, wrong key — no distinction
     }
 
-    Reader r{{plain.data(), plain_len}};
+    Reader r{.data = {plain.data(), plain_len}};
     std::uint8_t kind = 0;
     std::uint8_t secret_len = 0;
     if (!r.u8(kind) || !r.u8(secret_len) || secret_len == 0 || secret_len > TlsSecret::kMaxLen) {
@@ -495,7 +495,7 @@ TlsTicketService::OpenStatus TlsTicketService::open(std::span<const std::uint8_t
 // =====================================================================
 
 TlsResumptionLookup TlsTicketService::lookup() const noexcept {
-    return TlsResumptionLookup{&lookup_thunk, const_cast<TlsTicketService *>(this)};
+    return TlsResumptionLookup{.lookup = &lookup_thunk, .ctx = const_cast<TlsTicketService *>(this)};
 }
 
 // The returned spans must outlive the hook's frame — the engine reads them

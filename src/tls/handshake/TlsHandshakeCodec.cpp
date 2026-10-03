@@ -208,7 +208,7 @@ parse_alpn_list(std::span<const std::uint8_t> data) noexcept {
                 }
                 break;
             case TlsExtensionType::SupportedVersions: {
-                if (view.data.size() < 1) {
+                if (view.data.empty()) {
                     return std::unexpected(common::IoErr::Invalid);
                 }
                 const std::uint8_t list_len = view.data[0];
@@ -671,7 +671,7 @@ template<typename Certs>
 // offered_versions span keeps the engine-fixed default.
 inline constexpr std::uint16_t kClientOfferedVersions[] = {0x0304, 0x0303};
 
-inline constexpr std::span<const std::uint16_t> effective_offered_versions(const TlsClientHelloInput &in) noexcept {
+constexpr std::span<const std::uint16_t> effective_offered_versions(const TlsClientHelloInput &in) noexcept {
     return in.offered_versions.empty() ? std::span<const std::uint16_t>{kClientOfferedVersions} : in.offered_versions;
 }
 
@@ -1071,7 +1071,7 @@ common::IoResult<std::size_t> tls_client_hello_size(const TlsClientHelloInput &i
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    std::size_t size = kTlsHandshakeHeaderSize + 2 + 32 + 1 + in.session_id.size() + 2 + 2 * in.cipher_suites.size() +
+    std::size_t size = kTlsHandshakeHeaderSize + 2 + 32 + 1 + in.session_id.size() + 2 + (2 * in.cipher_suites.size()) +
                        1 + 1 + 2; // header, fixed fields, compression [null], ext-block len
     if (!in.sni_host.empty()) {
         size += 4 + 2 + 1 + 2 + in.sni_host.size();
@@ -1213,7 +1213,7 @@ common::IoResult<TlsClientHelloEncoded> tls_encode_client_hello(const TlsClientH
             return std::unexpected(common::IoErr::Invalid);
         }
     }
-    if (!w.ext(TlsExtensionType::SupportedGroups, 2 + 2 * in.supported_groups.size()) ||
+    if (!w.ext(TlsExtensionType::SupportedGroups, 2 + (2 * in.supported_groups.size())) ||
         !w.be16(static_cast<std::uint16_t>(2 * in.supported_groups.size()))) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -1222,7 +1222,7 @@ common::IoResult<TlsClientHelloEncoded> tls_encode_client_hello(const TlsClientH
             return std::unexpected(common::IoErr::Invalid);
         }
     }
-    if (!w.ext(TlsExtensionType::SignatureAlgorithms, 2 + 2 * in.signature_algorithms.size()) ||
+    if (!w.ext(TlsExtensionType::SignatureAlgorithms, 2 + (2 * in.signature_algorithms.size())) ||
         !w.be16(static_cast<std::uint16_t>(2 * in.signature_algorithms.size()))) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -1232,7 +1232,7 @@ common::IoResult<TlsClientHelloEncoded> tls_encode_client_hello(const TlsClientH
         }
     }
     const std::span<const std::uint16_t> versions = effective_offered_versions(in);
-    if (!w.ext(TlsExtensionType::SupportedVersions, 1 + 2 * versions.size()) ||
+    if (!w.ext(TlsExtensionType::SupportedVersions, 1 + (2 * versions.size())) ||
         !w.u8(static_cast<std::uint8_t>(2 * versions.size()))) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -1301,7 +1301,7 @@ common::IoResult<std::size_t> tls_encode_certificate_13(std::span<const std::uin
     }
     std::size_t list_len = 0;
     for (const auto cert: certs) {
-        if (cert.size() < 1) {
+        if (cert.empty()) {
             return std::unexpected(common::IoErr::Invalid);
         }
         list_len += 3 + cert.size() + 2;
@@ -1332,7 +1332,7 @@ common::IoResult<std::size_t> tls_encode_certificate_12(std::span<const std::spa
     }
     std::size_t list_len = 0;
     for (const auto cert: certs) {
-        if (cert.size() < 1) {
+        if (cert.empty()) {
             return std::unexpected(common::IoErr::Invalid);
         }
         list_len += 3 + cert.size();
@@ -1358,7 +1358,7 @@ common::IoResult<std::size_t> tls_encode_certificate_12(std::span<const std::spa
 common::IoResult<std::size_t> tls_encode_certificate_verify(std::uint16_t scheme,
                                                             std::span<const std::uint8_t> signature,
                                                             std::span<std::uint8_t> scratch) noexcept {
-    if (signature.size() < 1 || signature.size() > 0xFFFF) {
+    if (signature.empty() || signature.size() > 0xFFFF) {
         return std::unexpected(common::IoErr::Invalid);
     }
     const std::size_t body_len = 2 + 2 + signature.size();
@@ -1376,7 +1376,7 @@ common::IoResult<std::size_t> tls_encode_certificate_verify(std::uint16_t scheme
 
 common::IoResult<std::size_t> tls_encode_finished(std::span<const std::uint8_t> verify_data,
                                                   std::span<std::uint8_t> scratch) noexcept {
-    if (verify_data.size() < 1 || verify_data.size() > kTlsMaxHandshakeMessageSize ||
+    if (verify_data.empty() || verify_data.size() > kTlsMaxHandshakeMessageSize ||
         scratch.size() < kTlsHandshakeHeaderSize + verify_data.size()) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -1390,7 +1390,7 @@ common::IoResult<std::size_t> tls_encode_finished(std::span<const std::uint8_t> 
 
 common::IoResult<std::size_t> tls_encode_client_key_exchange(std::span<const std::uint8_t> point,
                                                              std::span<std::uint8_t> scratch) noexcept {
-    if (point.size() < 1 || point.size() > 255 || scratch.size() < kTlsHandshakeHeaderSize + 1 + point.size()) {
+    if (point.empty() || point.size() > 255 || scratch.size() < kTlsHandshakeHeaderSize + 1 + point.size()) {
         return std::unexpected(common::IoErr::Invalid);
     }
     TlsWriteCursor w(scratch);
@@ -1574,7 +1574,7 @@ common::IoResult<std::size_t> tls_encode_certificate_request_13(std::span<const 
     if (signature_algorithms.empty() || 2 + 2 * signature_algorithms.size() > 0xFFFF) {
         return std::unexpected(common::IoErr::Invalid);
     }
-    const std::size_t ext_len = 4 + 2 + 2 * signature_algorithms.size();
+    const std::size_t ext_len = 4 + 2 + (2 * signature_algorithms.size());
     const std::size_t body_len = 1 + 2 + ext_len;
     if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
         return std::unexpected(common::IoErr::Invalid);
@@ -1583,7 +1583,7 @@ common::IoResult<std::size_t> tls_encode_certificate_request_13(std::span<const 
     TlsWriteCursor w(scratch);
     if (!w.u8(static_cast<std::uint8_t>(TlsHandshakeType::CertificateRequest)) ||
         !w.be24(static_cast<std::uint32_t>(body_len)) || !w.u8(0) || !w.be16(static_cast<std::uint16_t>(ext_len)) ||
-        !w.ext(TlsExtensionType::SignatureAlgorithms, 2 + 2 * signature_algorithms.size()) ||
+        !w.ext(TlsExtensionType::SignatureAlgorithms, 2 + (2 * signature_algorithms.size())) ||
         !w.be16(static_cast<std::uint16_t>(2 * signature_algorithms.size()))) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -1601,7 +1601,7 @@ common::IoResult<std::size_t> tls_encode_certificate_request_12(std::span<const 
         return std::unexpected(common::IoErr::Invalid);
     }
     // types{rsa_sign(1), ecdsa_sign(64)} + sigalgs vector + EMPTY authorities.
-    const std::size_t body_len = 1 + 2 + 2 + 2 * signature_algorithms.size() + 2;
+    const std::size_t body_len = 1 + 2 + 2 + (2 * signature_algorithms.size()) + 2;
     if (scratch.size() < kTlsHandshakeHeaderSize + body_len) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -1625,8 +1625,7 @@ common::IoResult<std::size_t> tls_encode_certificate_request_12(std::span<const 
 
 common::IoResult<std::size_t> tls_encode_server_key_exchange(const TlsServerKeyExchangeInput &in,
                                                              std::span<std::uint8_t> scratch) noexcept {
-    if (in.public_key.size() < 1 || in.public_key.size() > 255 || in.signature.empty() ||
-        in.signature.size() > 0xFFFF) {
+    if (in.public_key.empty() || in.public_key.size() > 255 || in.signature.empty() || in.signature.size() > 0xFFFF) {
         return std::unexpected(common::IoErr::Invalid);
     }
     const std::size_t body_len = 1 + 2 + 1 + in.public_key.size() + 2 + 2 + in.signature.size();

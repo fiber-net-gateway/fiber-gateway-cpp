@@ -246,9 +246,9 @@ Tls13ServerHandshake::PskOutcome Tls13ServerHandshake::try_accept_psk(const TlsC
                                              ? static_cast<std::uint64_t>(cfg_.now_unix_ms - resumed.ticket_issued_ms)
                                              : 0;
     const std::int64_t delta = static_cast<std::int64_t>(client_age) -
-                               static_cast<std::int64_t>(std::min<std::uint64_t>(server_age, 0xFFFFFFFFu));
+                               static_cast<std::int64_t>(std::min<std::uint64_t>(server_age, 0xFFFFFFFFU));
     const std::int64_t skew = delta < 0 ? -delta : delta;
-    if (skew > static_cast<std::int64_t>(kMaxTicketAgeSkewMs)) {
+    if (std::cmp_greater(skew, kMaxTicketAgeSkewMs)) {
         return PskOutcome::Reject;
     }
 
@@ -532,6 +532,8 @@ void Tls13ServerHandshake::send_server_flight(const TlsClientHello &ch, std::spa
     // (the flight below is sealed); the read swap waits until the end — its
     // direction depends on the 0-RTT decision, which needs the ALPN result ----
     snapshot13();
+    // The 1.3 flow constructs the schedule before first use; the state machine guarantees it here.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     if (!sched_->handshake_secrets(z, {hash_buf_.data(), hash_len()}, client_hs_, server_hs_)) {
         fail(TlsAlertDesc::InternalError);
         return;
@@ -934,6 +936,8 @@ void Tls13ServerHandshake::finish_1_3() noexcept {
     // read side swaps to a fresh client_app0 instance; the hs instance dies
     // with the flight.
     snapshot13();
+    // The 1.3 flow constructs the schedule before first use; the state machine guarantees it here.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto resumption = sched_->resumption_master_secret({hash_buf_.data(), hash_len()});
     if (!resumption.has_value()) {
         fail(TlsAlertDesc::InternalError);
@@ -970,9 +974,11 @@ void Tls13ServerHandshake::finish_1_3() noexcept {
         request.ticket_age_add = age_add_v;
         // QUIC tickets carry the 0xffffffff sentinel, not a byte budget
         // (RFC 9001 §4.6.1 — initial_max_data governs volume there).
-        request.max_early_data = !cfg_.enable_early_data
-                                         ? 0
-                                         : (cfg_.quic != nullptr ? kQuicMaxEarlyDataSentinel : kMaxEarlyDataAccepted);
+        if (cfg_.enable_early_data) {
+            request.max_early_data = cfg_.quic != nullptr ? kQuicMaxEarlyDataSentinel : kMaxEarlyDataAccepted;
+        } else {
+            request.max_early_data = 0;
+        }
         request.timeout_s = cfg_.session_timeout_s;
         request.now_unix_ms = cfg_.now_unix_ms;
         request.version = TlsProtocolVersion::Tls13;

@@ -50,7 +50,7 @@ public:
 
 private:
     [[nodiscard]] common::IoResult<void> write_header(TlsContentType type, std::size_t length,
-                                                      mem::IoBufChain &out) noexcept;
+                                                      mem::IoBufChain &out) const noexcept;
 
     std::uint16_t legacy_version_ = kTlsRecordVersionTls12;
 };

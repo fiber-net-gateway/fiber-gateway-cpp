@@ -34,10 +34,10 @@ enum class TlsCertPurpose : std::uint8_t {
 class TlsCertificateChain;
 class TlsTrustStore;
 struct TlsCertVerification;
-[[nodiscard]] common::IoResult<TlsCertVerification> tls_verify_chain(const TlsCertificateChain &, const TlsTrustStore &,
-                                                                     TlsCertPurpose, std::string_view,
-                                                                     std::span<const std::uint8_t>,
-                                                                     std::int64_t) noexcept;
+[[nodiscard]] common::IoResult<TlsCertVerification>
+tls_verify_chain(const TlsCertificateChain & /*chain*/, const TlsTrustStore & /*anchors*/, TlsCertPurpose /*purpose*/,
+                 std::string_view /*host*/, std::span<const std::uint8_t> /*ip*/,
+                 std::int64_t /*now_unix_ms*/) noexcept;
 
 // A single parsed certificate. Owns both the X509 and the CRYPTO_BUFFER
 // holding the original DER (X509_parse_from_buffer takes its own buffer
@@ -88,9 +88,11 @@ public:
     [[nodiscard]] common::IoResult<std::size_t> issuer_line(std::span<char> out) const noexcept;
 
 private:
-    friend common::IoResult<TlsCertVerification> tls_verify_chain(const TlsCertificateChain &, const TlsTrustStore &,
-                                                                  TlsCertPurpose, std::string_view,
-                                                                  std::span<const std::uint8_t>, std::int64_t) noexcept;
+    friend common::IoResult<TlsCertVerification> tls_verify_chain(const TlsCertificateChain & /*chain*/,
+                                                                  const TlsTrustStore & /*anchors*/,
+                                                                  TlsCertPurpose /*purpose*/, std::string_view /*host*/,
+                                                                  std::span<const std::uint8_t> /*ip*/,
+                                                                  std::int64_t /*now_unix_ms*/) noexcept;
 
     void *x509_ = nullptr; // X509*, owning reference
     void *der_buf_ = nullptr; // CRYPTO_BUFFER*, owning reference (x509_ holds another)
@@ -160,9 +162,11 @@ public:
     [[nodiscard]] void *x509_store_handle() const noexcept { return store_; }
 
 private:
-    friend common::IoResult<TlsCertVerification> tls_verify_chain(const TlsCertificateChain &, const TlsTrustStore &,
-                                                                  TlsCertPurpose, std::string_view,
-                                                                  std::span<const std::uint8_t>, std::int64_t) noexcept;
+    friend common::IoResult<TlsCertVerification> tls_verify_chain(const TlsCertificateChain & /*chain*/,
+                                                                  const TlsTrustStore & /*anchors*/,
+                                                                  TlsCertPurpose /*purpose*/, std::string_view /*host*/,
+                                                                  std::span<const std::uint8_t> /*ip*/,
+                                                                  std::int64_t /*now_unix_ms*/) noexcept;
 
     void *store_ = nullptr; // X509_STORE*
 };
