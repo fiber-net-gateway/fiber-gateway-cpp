@@ -50,7 +50,7 @@ struct QuicPacketNumberSpace {
     // before shifting the ranges array, and ngx_quic_send_ack_range for too-old packets).
     // After a forced ACK on overflow, pending_ack is cleared if it was not updated
     // by the current packet (matching nginx's prev_pending == ctx->pending_ack check).
-    void on_packet_received(std::uint64_t packet_number, QuicTime received_time, bool ack_eliciting,
+    void on_packet_received(std::uint64_t pn, QuicTime received_time, bool ack_eliciting,
                             net::UdpEcn ecn = net::UdpEcn::Unspecified) noexcept;
 
     // Record an acked packet number (largest acked by peer).
@@ -62,7 +62,7 @@ struct QuicPacketNumberSpace {
     // Called when an ACK frame we previously sent is itself acknowledged.
     void drop_ack_ranges(std::uint64_t largest_acknowledged) noexcept;
 
-    [[nodiscard]] QuicOutputFrame *alloc_frame() noexcept;
+    [[nodiscard]] QuicOutputFrame *alloc_frame() const noexcept;
     void release_frame(QuicOutputFrame &frame) noexcept;
 
     QuicEncryptionLevel level;

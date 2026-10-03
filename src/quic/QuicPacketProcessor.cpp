@@ -33,7 +33,7 @@ namespace {
     if (lhs.size() != rhs.size()) {
         return false;
     }
-    if (lhs.size() == 0) {
+    if (lhs.empty()) {
         return true;
     }
     return std::equal(lhs.data(), lhs.data() + lhs.size(), rhs.data());
@@ -422,7 +422,7 @@ process_decoded_packet(QuicConnection &conn, const QuicReceivedDatagram &datagra
                 // STREAM_STATE_ERROR (nginx
                 // ngx_quic_handle_stream_data_blocked_frame).
                 if (conn.is_local_stream(frame.u.stream_data_blocked.id) &&
-                    conn.is_unidirectional_stream(frame.u.stream_data_blocked.id)) {
+                    fiber::quic::QuicConnection::is_unidirectional_stream(frame.u.stream_data_blocked.id)) {
                     conn.close(QuicErrorCode::StreamStateError,
                                static_cast<std::uint64_t>(QuicFrameType::StreamDataBlocked));
                     return std::unexpected(common::IoErr::Busy);

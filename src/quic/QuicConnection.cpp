@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <coroutine>
+#include <cstddef>
 #include <cstring>
 #include <expected>
 #include <limits>
@@ -51,7 +52,7 @@ constexpr std::chrono::milliseconds kQuicCloseFrameMinInterval{1000};
     if (left.size() != right.size()) {
         return false;
     }
-    if (left.size() == 0) {
+    if (left.empty()) {
         return true;
     }
     return std::memcmp(left.data(), right.data(), left.size()) == 0;
@@ -133,23 +134,23 @@ void QuicApplicationCryptoBlock::reset() noexcept {
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::current_read() noexcept {
-    return {&read_keys[current_read_index], &read_header};
+    return {.packet = &read_keys[current_read_index], .header = &read_header};
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::next_read() noexcept {
-    return {&read_keys[next_read_index], &read_header};
+    return {.packet = &read_keys[next_read_index], .header = &read_header};
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::previous_read() noexcept {
-    return {&read_keys[previous_read_index], &read_header};
+    return {.packet = &read_keys[previous_read_index], .header = &read_header};
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::current_write() noexcept {
-    return {&write_keys[current_write_index], &write_header};
+    return {.packet = &write_keys[current_write_index], .header = &write_header};
 }
 
 QuicPacketProtectionKeyView QuicApplicationCryptoBlock::next_write() noexcept {
-    return {&write_keys[next_write_index], &write_header};
+    return {.packet = &write_keys[next_write_index], .header = &write_header};
 }
 
 void QuicApplicationCryptoBlock::promote() noexcept {
@@ -1902,9 +1903,7 @@ common::IoResult<void> QuicConnection::record_peer_stream_id(std::uint64_t strea
     const QuicStreamType type = stream_type(stream_id);
     PeerStreamLimitWindow &window = peer_stream_window(type);
     const std::uint64_t opened = stream_sequence(stream_id) + 1;
-    if (opened > window.opened_count) {
-        window.opened_count = opened;
-    }
+    window.opened_count = std::max(opened, window.opened_count);
     return {};
 }
 
@@ -2289,7 +2288,7 @@ common::IoResult<void> QuicConnection::reinit_initial_crypto(const QuicConnectio
 }
 
 common::IoResult<void> QuicConnection::set_initial_token(const std::uint8_t *token, std::size_t token_len) noexcept {
-    constexpr std::size_t kMaxInitialTokenLength = 16 * 1024;
+    constexpr std::size_t kMaxInitialTokenLength = static_cast<const std::size_t>(16 * 1024);
     if ((token == nullptr && token_len != 0) || token_len > kMaxInitialTokenLength) {
         return std::unexpected(common::IoErr::Invalid);
     }
@@ -2308,7 +2307,7 @@ common::IoResult<void> QuicConnection::set_initial_token(const std::uint8_t *tok
 }
 
 common::IoResult<void> QuicConnection::recv_new_token_frame(const QuicInputFrame &frame) noexcept {
-    constexpr std::size_t kMaxNewTokenLength = 16 * 1024;
+    constexpr std::size_t kMaxNewTokenLength = static_cast<const std::size_t>(16 * 1024);
     if (role() != QuicConnectionRole::Client || frame.type != QuicFrameType::NewToken || frame.data.data == nullptr ||
         frame.data.len == 0 || frame.data.len > kMaxNewTokenLength) {
         return std::unexpected(common::IoErr::Invalid);
@@ -2396,7 +2395,7 @@ void QuicConnection::reset_after_retry() noexcept {
 
 common::IoResult<bool> QuicConnection::handle_retry(const QuicPacketHeader &packet,
                                                     const QuicReceivedDatagram &datagram) noexcept {
-    constexpr std::size_t kMaxRetryTokenLength = 16 * 1024;
+    constexpr std::size_t kMaxRetryTokenLength = static_cast<const std::size_t>(16 * 1024);
     if (role() != QuicConnectionRole::Client || state_ != QuicConnectionState::Handshaking || retry_processed_ ||
         has_authenticated_server_packet_ || packet.type != QuicPacketType::Retry || packet.version != kQuicVersion1 ||
         packet.scid.empty() || packet.token.len == 0 || packet.token.len > kMaxRetryTokenLength ||
@@ -2533,7 +2532,7 @@ common::IoResult<void> QuicConnection::apply_peer_transport_params(const QuicTra
                                                               : options_.remote_connection_id;
     if ((options_.role == QuicConnectionRole::Client && !has_server_initial_source_connection_id_) ||
         params.initial_source_connection_id.size() != expected_initial_source.size() ||
-        (params.initial_source_connection_id.size() != 0 &&
+        (!params.initial_source_connection_id.empty() &&
          std::memcmp(params.initial_source_connection_id.data(), expected_initial_source.data(),
                      params.initial_source_connection_id.size()) != 0)) {
         return std::unexpected(common::IoErr::Invalid);
@@ -3057,9 +3056,7 @@ common::IoResult<bool> QuicConnection::recv_new_connection_id_frame(const QuicNe
         slot->in_use = true;
         slot->used = false;
         install_remote_stateless_reset_token(*slot, frame.stateless_reset_token);
-        if (frame.sequence_number > largest_seen_remote_seq_) {
-            largest_seen_remote_seq_ = frame.sequence_number;
-        }
+        largest_seen_remote_seq_ = std::max(frame.sequence_number, largest_seen_remote_seq_);
     }
 
     if (frame.retire_prior_to > max_retired_remote_seq_) {
