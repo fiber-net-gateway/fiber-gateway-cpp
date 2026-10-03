@@ -11,6 +11,8 @@ namespace {
 
 fiber::script::AbiResult native_string(std::string_view value) noexcept {
     if (value.empty()) {
+        // Normalize to a non-null data pointer for make_native_string.
+        // NOLINTNEXTLINE(bugprone-string-constructor)
         value = std::string_view("", 0);
     }
     return fiber::script::AbiResult::success(fiber::script::JsValue::make_native_string(value.data(), value.size()));

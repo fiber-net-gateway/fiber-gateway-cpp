@@ -59,7 +59,7 @@ RouteScriptExtension::resolve_directive_def_op(void *ctx, std::string_view type,
 }
 
 RouteScriptExtension::DirectiveDef *
-RouteScriptExtension::resolve_directive_def(std::string_view type, std::string_view name,
+RouteScriptExtension::resolve_directive_def(std::string_view type, std::string_view /*name*/,
                                             const std::vector<fiber::script::JsValue> &literals) {
     if (!allow_http_directives_) {
         return nullptr;
@@ -88,7 +88,7 @@ const RouteScriptExtension::HostCallable *RouteScriptExtension::resolve_constant
     if (namespace_name == "$path") {
         // Compile-time existence check: the name must be a path variable captured by this
         // location's route pattern.
-        if (current_path_var_names_.find(std::string(key)) == current_path_var_names_.end()) {
+        if (!current_path_var_names_.contains(std::string(key))) {
             return nullptr;
         }
         return const_builder_->add_constant(ConstType::Path, key);
