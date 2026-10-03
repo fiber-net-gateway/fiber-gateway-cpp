@@ -1274,7 +1274,9 @@ void QuicUdpEndpoint::unregister_connection_id(QuicConnectionIdIndex &index) noe
     if (index.cid_hook.linked()) {
         dcid_tree_.erase(index);
     }
-    index = QuicConnectionIdIndex{};
+    index.connection = nullptr;
+    index.cid_key = {};
+    index.cid_hash = 0;
 }
 
 void QuicUdpEndpoint::register_stateless_reset_token(QuicConnection &connection,
@@ -1517,14 +1519,18 @@ common::IoResult<bool> QuicUdpEndpoint::fill_local_connection_ids(QuicConnection
         auto token_created = create_stateless_reset_token(slot->endpoint_index.cid_key, token);
         if (!token_created) {
             unregister_connection_id(slot->endpoint_index);
-            *slot = QuicLocalConnectionIdSlot{};
+            slot->sequence_number = 0;
+            slot->used = false;
+            slot->advertised = false;
             return std::unexpected(token_created.error());
         }
 
         auto frame_queued = connection.queue_new_connection_id_frame(*slot, token);
         if (!frame_queued) {
             unregister_connection_id(slot->endpoint_index);
-            *slot = QuicLocalConnectionIdSlot{};
+            slot->sequence_number = 0;
+            slot->used = false;
+            slot->advertised = false;
             return std::unexpected(frame_queued.error());
         }
 
@@ -1556,7 +1562,9 @@ QuicUdpEndpoint::retire_local_connection_id_and_resend(QuicConnection &connectio
     }
 
     unregister_connection_id(slot->endpoint_index);
-    *slot = QuicLocalConnectionIdSlot{};
+    slot->sequence_number = 0;
+    slot->used = false;
+    slot->advertised = false;
     auto filled = fill_local_connection_ids(connection);
     if (!filled) {
         connection.close(QuicErrorCode::InternalError);

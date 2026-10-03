@@ -14,7 +14,18 @@ enum class IntrusiveRbTreeColor : std::uint8_t {
     Red = 1,
 };
 
+// Linked nodes lead through parent pointers to the unlinked sentinel. The
+// sentinel owns the root in parent; its left/right remain self-linked NIL leaves.
+// This lets a node erase itself without an owner pointer or a comparator.
 struct IntrusiveRbTreeHook {
+    IntrusiveRbTreeHook() noexcept = default;
+    ~IntrusiveRbTreeHook() { unlink_self(); }
+
+    IntrusiveRbTreeHook(const IntrusiveRbTreeHook &) = delete;
+    IntrusiveRbTreeHook &operator=(const IntrusiveRbTreeHook &) = delete;
+    IntrusiveRbTreeHook(IntrusiveRbTreeHook &&) = delete;
+    IntrusiveRbTreeHook &operator=(IntrusiveRbTreeHook &&) = delete;
+
     IntrusiveRbTreeHook *left = nullptr;
     IntrusiveRbTreeHook *right = nullptr;
     IntrusiveRbTreeHook *parent = nullptr;
@@ -22,133 +33,93 @@ struct IntrusiveRbTreeHook {
     bool in_tree = false;
 
     [[nodiscard]] bool linked() const noexcept { return in_tree; }
-};
 
-template<typename T, std::size_t Offset, typename Compare>
-class IntrusiveRbTree {
-    // Non-polymorphic rather than standard-layout, for the reasons spelled out on
-    // IntrusiveList's identical assert in IntrusiveList.h.
-    static_assert(!std::is_polymorphic_v<T>,
-                  "IntrusiveRbTree owner type must be non-polymorphic because Offset is used for container_of.");
-
-public:
-    IntrusiveRbTree() noexcept { init_sentinel(); }
-
-    explicit IntrusiveRbTree(Compare compare) noexcept : compare_(compare) { init_sentinel(); }
-
-    IntrusiveRbTree(const IntrusiveRbTree &) = delete;
-    IntrusiveRbTree &operator=(const IntrusiveRbTree &) = delete;
-    IntrusiveRbTree(IntrusiveRbTree &&) = delete;
-    IntrusiveRbTree &operator=(IntrusiveRbTree &&) = delete;
-
-    [[nodiscard]] bool empty() const noexcept { return root_ == sentinel(); }
-
-    [[nodiscard]] T *root() noexcept { return owner_from_tree_hook(root_); }
-
-    [[nodiscard]] const T *root() const noexcept { return owner_from_tree_hook(root_); }
-
-    [[nodiscard]] T *minimum() noexcept {
-        if (empty()) {
-            return nullptr;
-        }
-        return owner_from_hook(min_hook(root_));
-    }
-
-    [[nodiscard]] const T *minimum() const noexcept {
-        if (empty()) {
-            return nullptr;
-        }
-        return owner_from_hook(min_hook(root_));
-    }
-
-    [[nodiscard]] T *next_of(T &owner) noexcept {
-        IntrusiveRbTreeHook &hook = hook_of(owner);
-        if (!hook.in_tree) {
-            return nullptr;
-        }
-        return owner_from_tree_hook(next_hook(&hook));
-    }
-
-    [[nodiscard]] const T *next_of(const T &owner) const noexcept {
-        const IntrusiveRbTreeHook &hook = hook_of(owner);
-        if (!hook.in_tree) {
-            return nullptr;
-        }
-        return owner_from_tree_hook(next_hook(&hook));
-    }
-
-    void insert(T &owner) noexcept {
-        IntrusiveRbTreeHook &hook = hook_of(owner);
-        FIBER_ASSERT(!hook.in_tree);
-
-        IntrusiveRbTreeHook **root = &root_;
-        IntrusiveRbTreeHook *sentinel_node = sentinel();
-
-        if (*root == sentinel_node) {
-            hook.parent = nullptr;
-            hook.left = sentinel_node;
-            hook.right = sentinel_node;
-            black(&hook);
-            hook.in_tree = true;
-            *root = &hook;
+    void unlink_self() noexcept {
+        if (!linked()) {
             return;
         }
-
-        insert_value(*root, &hook);
-
-        IntrusiveRbTreeHook *node = &hook;
-        while (node != *root && is_red(node->parent)) {
-            if (node->parent == node->parent->parent->left) {
-                IntrusiveRbTreeHook *temp = node->parent->parent->right;
-
-                if (is_red(temp)) {
-                    black(node->parent);
-                    black(temp);
-                    red(node->parent->parent);
-                    node = node->parent->parent;
-                } else {
-                    if (node == node->parent->right) {
-                        node = node->parent;
-                        left_rotate(root, node);
-                    }
-
-                    black(node->parent);
-                    red(node->parent->parent);
-                    right_rotate(root, node->parent->parent);
-                }
-            } else {
-                IntrusiveRbTreeHook *temp = node->parent->parent->left;
-
-                if (is_red(temp)) {
-                    black(node->parent);
-                    black(temp);
-                    red(node->parent->parent);
-                    node = node->parent->parent;
-                } else {
-                    if (node == node->parent->left) {
-                        node = node->parent;
-                        right_rotate(root, node);
-                    }
-
-                    black(node->parent);
-                    red(node->parent->parent);
-                    left_rotate(root, node->parent->parent);
-                }
-            }
+        IntrusiveRbTreeHook *sentinel_node = parent;
+        while (sentinel_node->linked()) {
+            sentinel_node = sentinel_node->parent;
         }
-
-        black(*root);
-        (*root)->parent = nullptr;
+        unlink_from(sentinel_node);
     }
 
-    void erase(T &owner) noexcept {
-        IntrusiveRbTreeHook *node = &hook_of(owner);
-        if (!node->in_tree) {
-            return;
+private:
+    template<typename T, std::size_t Offset, typename Compare>
+    friend class IntrusiveRbTree;
+
+    [[nodiscard]] static bool is_red(const IntrusiveRbTreeHook *hook) noexcept {
+        return hook->color == IntrusiveRbTreeColor::Red;
+    }
+
+    [[nodiscard]] static bool is_black(const IntrusiveRbTreeHook *hook) noexcept { return !is_red(hook); }
+
+    static void red(IntrusiveRbTreeHook *hook) noexcept { hook->color = IntrusiveRbTreeColor::Red; }
+
+    static void black(IntrusiveRbTreeHook *hook) noexcept { hook->color = IntrusiveRbTreeColor::Black; }
+
+    static void copy_color(IntrusiveRbTreeHook *dst, const IntrusiveRbTreeHook *src) noexcept {
+        dst->color = src->color;
+    }
+
+    static void clear_hook(IntrusiveRbTreeHook &hook) noexcept {
+        hook.left = nullptr;
+        hook.right = nullptr;
+        hook.parent = nullptr;
+        hook.color = IntrusiveRbTreeColor::Black;
+        hook.in_tree = false;
+    }
+
+    static void left_rotate(IntrusiveRbTreeHook *sentinel_node, IntrusiveRbTreeHook *node) noexcept {
+        IntrusiveRbTreeHook **root = &sentinel_node->parent;
+        IntrusiveRbTreeHook *temp = node->right;
+        node->right = temp->left;
+
+        if (temp->left != sentinel_node) {
+            temp->left->parent = node;
         }
 
-        IntrusiveRbTreeHook **root = &root_;
-        IntrusiveRbTreeHook *sentinel_node = sentinel();
+        temp->parent = node->parent;
+
+        if (node == *root) {
+            *root = temp;
+        } else if (node == node->parent->left) {
+            node->parent->left = temp;
+        } else {
+            node->parent->right = temp;
+        }
+
+        temp->left = node;
+        node->parent = temp;
+    }
+
+    static void right_rotate(IntrusiveRbTreeHook *sentinel_node, IntrusiveRbTreeHook *node) noexcept {
+        IntrusiveRbTreeHook **root = &sentinel_node->parent;
+        IntrusiveRbTreeHook *temp = node->left;
+        node->left = temp->right;
+
+        if (temp->right != sentinel_node) {
+            temp->right->parent = node;
+        }
+
+        temp->parent = node->parent;
+
+        if (node == *root) {
+            *root = temp;
+        } else if (node == node->parent->right) {
+            node->parent->right = temp;
+        } else {
+            node->parent->left = temp;
+        }
+
+        temp->right = node;
+        node->parent = temp;
+    }
+
+    void unlink_from(IntrusiveRbTreeHook *sentinel_node) noexcept {
+        IntrusiveRbTreeHook *node = this;
+        IntrusiveRbTreeHook **root = &sentinel_node->parent;
         IntrusiveRbTreeHook *subst;
         IntrusiveRbTreeHook *temp;
 
@@ -159,7 +130,10 @@ public:
             temp = node->left;
             subst = node;
         } else {
-            subst = min_hook(node->right);
+            subst = node->right;
+            while (subst->left != sentinel_node) {
+                subst = subst->left;
+            }
             temp = subst->right;
         }
 
@@ -167,9 +141,7 @@ public:
             *root = temp;
             black(temp);
             if (temp != sentinel_node) {
-                temp->parent = nullptr;
-            } else {
-                sentinel_node->parent = nullptr;
+                temp->parent = sentinel_node;
             }
             clear_hook(*node);
             return;
@@ -183,13 +155,15 @@ public:
             subst->parent->right = temp;
         }
 
+        // The sentinel owns the root; never use its parent as deletion scratch space.
+        IntrusiveRbTreeHook *temp_parent;
         if (subst == node) {
-            temp->parent = subst->parent;
+            temp_parent = subst->parent;
         } else {
             if (subst->parent == node) {
-                temp->parent = subst;
+                temp_parent = subst;
             } else {
-                temp->parent = subst->parent;
+                temp_parent = subst->parent;
             }
 
             subst->left = node->left;
@@ -214,109 +188,223 @@ public:
             }
         }
 
+        if (temp != sentinel_node) {
+            temp->parent = temp_parent;
+        }
         clear_hook(*node);
 
         if (subst_red) {
-            if (*root != sentinel_node) {
-                (*root)->parent = nullptr;
-            }
             return;
         }
 
         while (temp != *root && is_black(temp)) {
             IntrusiveRbTreeHook *w;
 
-            if (temp == temp->parent->left) {
-                w = temp->parent->right;
+            if (temp == temp_parent->left) {
+                w = temp_parent->right;
 
                 if (is_red(w)) {
                     black(w);
-                    red(temp->parent);
-                    left_rotate(root, temp->parent);
-                    w = temp->parent->right;
+                    red(temp_parent);
+                    left_rotate(sentinel_node, temp_parent);
+                    w = temp_parent->right;
                 }
 
                 if (is_black(w->left) && is_black(w->right)) {
                     red(w);
-                    temp = temp->parent;
+                    temp = temp_parent;
+                    temp_parent = temp->parent;
                 } else {
                     if (is_black(w->right)) {
                         black(w->left);
                         red(w);
-                        right_rotate(root, w);
-                        w = temp->parent->right;
+                        right_rotate(sentinel_node, w);
+                        w = temp_parent->right;
                     }
 
-                    copy_color(w, temp->parent);
-                    black(temp->parent);
+                    copy_color(w, temp_parent);
+                    black(temp_parent);
                     black(w->right);
-                    left_rotate(root, temp->parent);
+                    left_rotate(sentinel_node, temp_parent);
                     temp = *root;
                 }
             } else {
-                w = temp->parent->left;
+                w = temp_parent->left;
 
                 if (is_red(w)) {
                     black(w);
-                    red(temp->parent);
-                    right_rotate(root, temp->parent);
-                    w = temp->parent->left;
+                    red(temp_parent);
+                    right_rotate(sentinel_node, temp_parent);
+                    w = temp_parent->left;
                 }
 
                 if (is_black(w->left) && is_black(w->right)) {
                     red(w);
-                    temp = temp->parent;
+                    temp = temp_parent;
+                    temp_parent = temp->parent;
                 } else {
                     if (is_black(w->left)) {
                         black(w->right);
                         red(w);
-                        left_rotate(root, w);
-                        w = temp->parent->left;
+                        left_rotate(sentinel_node, w);
+                        w = temp_parent->left;
                     }
 
-                    copy_color(w, temp->parent);
-                    black(temp->parent);
+                    copy_color(w, temp_parent);
+                    black(temp_parent);
                     black(w->left);
-                    right_rotate(root, temp->parent);
+                    right_rotate(sentinel_node, temp_parent);
                     temp = *root;
                 }
             }
         }
 
         black(temp);
-        if (*root != sentinel_node) {
-            (*root)->parent = nullptr;
-        }
         black(sentinel_node);
+    }
+};
+
+template<typename T, std::size_t Offset, typename Compare>
+class IntrusiveRbTree {
+    // Non-polymorphic rather than standard-layout, for the reasons spelled out on
+    // IntrusiveList's identical assert in IntrusiveList.h.
+    static_assert(!std::is_polymorphic_v<T>,
+                  "IntrusiveRbTree owner type must be non-polymorphic because Offset is used for container_of.");
+
+public:
+    IntrusiveRbTree() noexcept { init_sentinel(); }
+
+    explicit IntrusiveRbTree(Compare compare) noexcept : compare_(compare) { init_sentinel(); }
+
+    ~IntrusiveRbTree() {
+        // Nodes must unlink before their sentinel is destroyed.
+        FIBER_ASSERT(empty());
+    }
+
+    IntrusiveRbTree(const IntrusiveRbTree &) = delete;
+    IntrusiveRbTree &operator=(const IntrusiveRbTree &) = delete;
+    IntrusiveRbTree(IntrusiveRbTree &&) = delete;
+    IntrusiveRbTree &operator=(IntrusiveRbTree &&) = delete;
+
+    [[nodiscard]] bool empty() const noexcept { return sentinel_.parent == sentinel(); }
+
+    [[nodiscard]] T *root() noexcept { return owner_from_tree_hook(sentinel_.parent); }
+
+    [[nodiscard]] const T *root() const noexcept { return owner_from_tree_hook(sentinel_.parent); }
+
+    [[nodiscard]] T *minimum() noexcept {
+        if (empty()) {
+            return nullptr;
+        }
+        return owner_from_hook(min_hook(sentinel_.parent));
+    }
+
+    [[nodiscard]] const T *minimum() const noexcept {
+        if (empty()) {
+            return nullptr;
+        }
+        return owner_from_hook(min_hook(sentinel_.parent));
+    }
+
+    [[nodiscard]] T *next_of(T &owner) noexcept {
+        IntrusiveRbTreeHook &hook = hook_of(owner);
+        if (!hook.in_tree) {
+            return nullptr;
+        }
+        return owner_from_tree_hook(next_hook(&hook));
+    }
+
+    [[nodiscard]] const T *next_of(const T &owner) const noexcept {
+        const IntrusiveRbTreeHook &hook = hook_of(owner);
+        if (!hook.in_tree) {
+            return nullptr;
+        }
+        return owner_from_tree_hook(next_hook(&hook));
+    }
+
+    void insert(T &owner) noexcept {
+        IntrusiveRbTreeHook &hook = hook_of(owner);
+        FIBER_ASSERT(!hook.in_tree);
+
+        IntrusiveRbTreeHook **root = &sentinel_.parent;
+        IntrusiveRbTreeHook *sentinel_node = sentinel();
+
+        if (*root == sentinel_node) {
+            hook.parent = sentinel_node;
+            hook.left = sentinel_node;
+            hook.right = sentinel_node;
+            IntrusiveRbTreeHook::black(&hook);
+            hook.in_tree = true;
+            *root = &hook;
+            return;
+        }
+
+        insert_value(*root, &hook);
+
+        IntrusiveRbTreeHook *node = &hook;
+        while (node != *root && IntrusiveRbTreeHook::is_red(node->parent)) {
+            if (node->parent == node->parent->parent->left) {
+                IntrusiveRbTreeHook *temp = node->parent->parent->right;
+
+                if (IntrusiveRbTreeHook::is_red(temp)) {
+                    IntrusiveRbTreeHook::black(node->parent);
+                    IntrusiveRbTreeHook::black(temp);
+                    IntrusiveRbTreeHook::red(node->parent->parent);
+                    node = node->parent->parent;
+                } else {
+                    if (node == node->parent->right) {
+                        node = node->parent;
+                        IntrusiveRbTreeHook::left_rotate(sentinel_node, node);
+                    }
+
+                    IntrusiveRbTreeHook::black(node->parent);
+                    IntrusiveRbTreeHook::red(node->parent->parent);
+                    IntrusiveRbTreeHook::right_rotate(sentinel_node, node->parent->parent);
+                }
+            } else {
+                IntrusiveRbTreeHook *temp = node->parent->parent->left;
+
+                if (IntrusiveRbTreeHook::is_red(temp)) {
+                    IntrusiveRbTreeHook::black(node->parent);
+                    IntrusiveRbTreeHook::black(temp);
+                    IntrusiveRbTreeHook::red(node->parent->parent);
+                    node = node->parent->parent;
+                } else {
+                    if (node == node->parent->left) {
+                        node = node->parent;
+                        IntrusiveRbTreeHook::right_rotate(sentinel_node, node);
+                    }
+
+                    IntrusiveRbTreeHook::black(node->parent);
+                    IntrusiveRbTreeHook::red(node->parent->parent);
+                    IntrusiveRbTreeHook::left_rotate(sentinel_node, node->parent->parent);
+                }
+            }
+        }
+
+        IntrusiveRbTreeHook::black(*root);
+        (*root)->parent = sentinel_node;
+    }
+
+    void erase(T &owner) noexcept {
+        IntrusiveRbTreeHook &hook = hook_of(owner);
+        if (hook.linked()) {
+            hook.unlink_from(sentinel());
+        }
     }
 
 private:
     void init_sentinel() noexcept {
         sentinel_.left = &sentinel_;
         sentinel_.right = &sentinel_;
-        sentinel_.parent = nullptr;
+        sentinel_.parent = &sentinel_;
         sentinel_.color = IntrusiveRbTreeColor::Black;
         sentinel_.in_tree = false;
-        root_ = &sentinel_;
     }
 
     [[nodiscard]] IntrusiveRbTreeHook *sentinel() noexcept { return &sentinel_; }
 
     [[nodiscard]] const IntrusiveRbTreeHook *sentinel() const noexcept { return &sentinel_; }
-
-    [[nodiscard]] static bool is_red(const IntrusiveRbTreeHook *hook) noexcept {
-        return hook->color == IntrusiveRbTreeColor::Red;
-    }
-
-    [[nodiscard]] static bool is_black(const IntrusiveRbTreeHook *hook) noexcept { return !is_red(hook); }
-
-    static void red(IntrusiveRbTreeHook *hook) noexcept { hook->color = IntrusiveRbTreeColor::Red; }
-
-    static void black(IntrusiveRbTreeHook *hook) noexcept { hook->color = IntrusiveRbTreeColor::Black; }
-
-    static void copy_color(IntrusiveRbTreeHook *dst, const IntrusiveRbTreeHook *src) noexcept {
-        dst->color = src->color;
-    }
 
     void insert_value(IntrusiveRbTreeHook *temp, IntrusiveRbTreeHook *node) noexcept {
         IntrusiveRbTreeHook **slot;
@@ -335,60 +423,8 @@ private:
         node->parent = temp;
         node->left = sentinel();
         node->right = sentinel();
-        red(node);
+        IntrusiveRbTreeHook::red(node);
         node->in_tree = true;
-    }
-
-    static void clear_hook(IntrusiveRbTreeHook &hook) noexcept {
-        hook.left = nullptr;
-        hook.right = nullptr;
-        hook.parent = nullptr;
-        hook.color = IntrusiveRbTreeColor::Black;
-        hook.in_tree = false;
-    }
-
-    void left_rotate(IntrusiveRbTreeHook **root, IntrusiveRbTreeHook *node) noexcept {
-        IntrusiveRbTreeHook *temp = node->right;
-        node->right = temp->left;
-
-        if (temp->left != sentinel()) {
-            temp->left->parent = node;
-        }
-
-        temp->parent = node->parent;
-
-        if (node == *root) {
-            *root = temp;
-        } else if (node == node->parent->left) {
-            node->parent->left = temp;
-        } else {
-            node->parent->right = temp;
-        }
-
-        temp->left = node;
-        node->parent = temp;
-    }
-
-    void right_rotate(IntrusiveRbTreeHook **root, IntrusiveRbTreeHook *node) noexcept {
-        IntrusiveRbTreeHook *temp = node->left;
-        node->left = temp->right;
-
-        if (temp->right != sentinel()) {
-            temp->right->parent = node;
-        }
-
-        temp->parent = node->parent;
-
-        if (node == *root) {
-            *root = temp;
-        } else if (node == node->parent->right) {
-            node->parent->right = temp;
-        } else {
-            node->parent->left = temp;
-        }
-
-        temp->right = node;
-        node->parent = temp;
     }
 
     [[nodiscard]] IntrusiveRbTreeHook *min_hook(IntrusiveRbTreeHook *node) noexcept {
@@ -413,7 +449,7 @@ private:
         for (;;) {
             IntrusiveRbTreeHook *parent = node->parent;
 
-            if (node == root_) {
+            if (node == sentinel_.parent) {
                 return sentinel();
             }
 
@@ -433,7 +469,7 @@ private:
         for (;;) {
             const IntrusiveRbTreeHook *parent = node->parent;
 
-            if (node == root_) {
+            if (node == sentinel_.parent) {
                 return sentinel();
             }
 
@@ -470,7 +506,6 @@ private:
     }
 
     IntrusiveRbTreeHook sentinel_{};
-    IntrusiveRbTreeHook *root_ = &sentinel_;
     Compare compare_{};
 };
 
