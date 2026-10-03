@@ -130,11 +130,6 @@ constexpr std::array<std::uint8_t, static_cast<std::size_t>(kLastFrameType + 1)>
 
 [[nodiscard]] common::IoResult<QuicPacketHeader>
 parse_long_header(const std::uint8_t *datagram, std::size_t datagram_len, std::uint8_t flags) noexcept {
-    auto fixed = ensure_fixed_bit(flags);
-    if (!fixed) {
-        return std::unexpected(fixed.error());
-    }
-
     QuicReadCursor in(datagram + 1, datagram_len - 1);
     auto version = in.read_be32();
     if (!version) {
@@ -181,6 +176,13 @@ parse_long_header(const std::uint8_t *datagram, std::size_t datagram_len, std::u
         packet.type = QuicPacketType::UnsupportedVersion;
         packet.packet_len = datagram_len;
         return packet;
+    }
+    // The Fixed Bit is a v1 field. In Version Negotiation it is Unused, which
+    // clients MUST ignore (RFC 9000 §17.2.1), and other versions define the
+    // first byte their own way (RFC 8999 §5.1): only v1 headers are checked.
+    auto fixed = ensure_fixed_bit(flags);
+    if (!fixed) {
+        return std::unexpected(fixed.error());
     }
 
     const std::uint8_t long_type = flags & kPacketFlagLongTypeMask;
