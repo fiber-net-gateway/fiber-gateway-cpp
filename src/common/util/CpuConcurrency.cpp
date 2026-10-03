@@ -12,6 +12,7 @@
 #include <limits>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #ifdef __linux__
 #include <sched.h>
@@ -120,7 +121,8 @@ bool decode_mount_path(std::string_view encoded, char *output, std::size_t capac
         char ch = encoded[i];
         if (ch == '\\' && i + 3 < encoded.size() && encoded[i + 1] >= '0' && encoded[i + 1] <= '7' &&
             encoded[i + 2] >= '0' && encoded[i + 2] <= '7' && encoded[i + 3] >= '0' && encoded[i + 3] <= '7') {
-            ch = static_cast<char>((encoded[i + 1] - '0') * 64 + (encoded[i + 2] - '0') * 8 + (encoded[i + 3] - '0'));
+            ch = static_cast<char>(((encoded[i + 1] - '0') * 64) + ((encoded[i + 2] - '0') * 8) +
+                                   (encoded[i + 3] - '0'));
             i += 3;
         }
         if (output_size + 1 >= capacity) {
@@ -310,9 +312,11 @@ bool build_cgroup_path(const CgroupMembership &membership, const CgroupMount &mo
                     ? std::snprintf(output, capacity, "%.*s", static_cast<int>(mount_point.size()), mount_point.data())
                     : std::snprintf(output, capacity, "%.*s/%.*s", static_cast<int>(mount_point.size()),
                                     mount_point.data(), static_cast<int>(relative.size()), relative.data());
-    return written >= 0 && static_cast<std::size_t>(written) < capacity;
+    return written >= 0 && std::cmp_less(written, capacity);
 }
 
+// std::from_chars/trim are factually non-throwing but not marked noexcept.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 bool parse_v2_cpu_max(std::string_view input, CpuQuota &quota, bool &limited) noexcept {
     input = trim(input);
     const std::size_t separator = input.find_first_of(" \t");

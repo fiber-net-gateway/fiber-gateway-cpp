@@ -49,6 +49,8 @@ IoErr io_err_from_errno(int err) noexcept {
         case EMSGSIZE:
             return IoErr::MessageTooLarge;
 #ifdef ENOTSUP
+        // Distinct errnos mapping to one IoErr; kept as separate case labels for portability guards.
+        // NOLINTNEXTLINE(bugprone-branch-clone)
         case ENOTSUP:
             return IoErr::NotSupported;
 #endif

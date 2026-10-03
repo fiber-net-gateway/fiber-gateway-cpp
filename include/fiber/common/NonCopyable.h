@@ -6,12 +6,14 @@
 namespace fiber::common {
 
 struct NonCopyable {
+    // Deleted ops stay public (modernize-use-equals-delete): callers get a
+    // clear "deleted function" error instead of a protected-access one.
+    NonCopyable(const NonCopyable &) = delete;
+    NonCopyable &operator=(const NonCopyable &) = delete;
+
 protected:
     constexpr NonCopyable() = default;
     ~NonCopyable() = default;
-
-    NonCopyable(const NonCopyable &) = delete;
-    NonCopyable &operator=(const NonCopyable &) = delete;
 
     NonCopyable(NonCopyable &&) = default;
     NonCopyable &operator=(NonCopyable &&) = default;

@@ -22,7 +22,7 @@ public:
     Crc32() noexcept = default;
 
     // Restart the computation from the initial state.
-    void reset() noexcept { crc_ = 0xFFFFFFFFu; }
+    void reset() noexcept { crc_ = 0xFFFFFFFFU; }
 
     // Continue the CRC with `data`. Safe on empty input.
     void update(std::span<const std::uint8_t> data) noexcept;
@@ -31,14 +31,14 @@ public:
     }
 
     // Current CRC-32 of everything updated so far.
-    [[nodiscard]] std::uint32_t value() const noexcept { return crc_ ^ 0xFFFFFFFFu; }
+    [[nodiscard]] std::uint32_t value() const noexcept { return crc_ ^ 0xFFFFFFFFU; }
 
     // One-shot CRC-32 of `data`.
     static std::uint32_t compute(std::span<const std::uint8_t> data) noexcept;
     static std::uint32_t compute(std::string_view data) noexcept;
 
 private:
-    std::uint32_t crc_ = 0xFFFFFFFFu;
+    std::uint32_t crc_ = 0xFFFFFFFFU;
 };
 
 } // namespace fiber::util

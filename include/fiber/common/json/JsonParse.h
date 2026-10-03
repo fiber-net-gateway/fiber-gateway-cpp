@@ -134,7 +134,7 @@ public:
             tail_ = chunk;
         }
 
-        std::memcpy(tail_->storage + tail_->size * sizeof(T), &value, sizeof(T));
+        std::memcpy(tail_->storage + (tail_->size * sizeof(T)), &value, sizeof(T));
         tail_->size += 1;
         size_ += 1;
         return true;
@@ -158,7 +158,7 @@ public:
         std::size_t offset = 0;
         for (const Chunk *chunk = head_; chunk; chunk = chunk->next) {
             const std::size_t bytes = chunk->size * sizeof(T);
-            std::memcpy(result_data + offset * sizeof(T), chunk->values(), bytes);
+            std::memcpy(result_data + (offset * sizeof(T)), chunk->values(), bytes);
             offset += chunk->size;
         }
 
