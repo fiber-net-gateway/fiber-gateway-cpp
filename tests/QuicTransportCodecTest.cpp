@@ -141,6 +141,63 @@ TEST(QuicTransportCodecTest, ParsesUnsupportedVersionLongHeaderCids) {
     EXPECT_EQ(packet->packet_len, datagram.size());
 }
 
+namespace {
+
+// [first byte][version][dcid len][dcid][scid len][scid][tail]
+std::vector<std::uint8_t> long_header_with(std::uint8_t first_byte, std::uint32_t version,
+                                           std::vector<std::uint8_t> tail) {
+    std::vector<std::uint8_t> datagram{first_byte,
+                                       static_cast<std::uint8_t>(version >> 24U),
+                                       static_cast<std::uint8_t>(version >> 16U),
+                                       static_cast<std::uint8_t>(version >> 8U),
+                                       static_cast<std::uint8_t>(version),
+                                       4,
+                                       0x01,
+                                       0x02,
+                                       0x03,
+                                       0x04,
+                                       2,
+                                       0x11,
+                                       0x22};
+    datagram.insert(datagram.end(), tail.begin(), tail.end());
+    return datagram;
+}
+
+} // namespace
+
+// RFC 9000 §17.2.1: the bit that is the Fixed Bit in v1 is Unused in Version
+// Negotiation, and clients MUST ignore it. Found by fuzz/quic_client_fuzzer.
+TEST(QuicTransportCodecTest, ParsesVersionNegotiationWithoutFixedBit) {
+    const auto datagram = long_header_with(fiber::quic::kPacketFlagLong | 0x15, 0, {0x1a, 0x2a, 0x3a, 0x4a});
+
+    auto packet = fiber::quic::quic_parse_packet_header(datagram.data(), datagram.size(), 0);
+
+    ASSERT_TRUE(packet.has_value());
+    EXPECT_EQ(packet->type, fiber::quic::QuicPacketType::VersionNegotiation);
+    EXPECT_EQ(packet->version_list.len, 4U);
+}
+
+// RFC 8999 §5.1: only the long-header bit is version independent, so a
+// server still recognizes another version (and can answer it with Version
+// Negotiation) whatever the rest of the first byte holds.
+TEST(QuicTransportCodecTest, ParsesUnsupportedVersionWithoutFixedBit) {
+    auto datagram = long_header_with(fiber::quic::kPacketFlagLong, 0x6b3343cfU, {});
+    datagram.resize(64, 0);
+
+    auto packet = fiber::quic::quic_parse_packet_header(datagram.data(), datagram.size(), 0);
+
+    ASSERT_TRUE(packet.has_value());
+    EXPECT_EQ(packet->type, fiber::quic::QuicPacketType::UnsupportedVersion);
+    EXPECT_EQ(packet->scid.size(), 2U);
+}
+
+TEST(QuicTransportCodecTest, RejectsVersion1LongHeaderWithoutFixedBit) {
+    const auto datagram = long_header_with(fiber::quic::kPacketFlagLong | fiber::quic::kLongPacketTypeHandshake,
+                                           fiber::quic::kQuicVersion1, {0x05, 0, 0, 0, 0, 0});
+
+    EXPECT_FALSE(fiber::quic::quic_parse_packet_header(datagram.data(), datagram.size(), 0).has_value());
+}
+
 TEST(QuicTransportCodecTest, CreatesLongHeaderWithPacketNumberPointer) {
     fiber::quic::QuicPacketHeader packet{};
     packet.long_header = true;
