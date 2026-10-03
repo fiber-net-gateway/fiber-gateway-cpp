@@ -322,7 +322,7 @@ ConsoleAppender::ConsoleAppender(AppenderId id, ConsoleAppenderOptions options) 
     Appender(id, std::move(options.name), options.min_level, options.max_level),
     fd_(options.stream == ConsoleStream::Stdout ? STDOUT_FILENO : STDERR_FILENO) {}
 
-void ConsoleAppender::append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point) noexcept {
+void ConsoleAppender::append(const FormattedLogRecord &record, std::chrono::steady_clock::time_point /*now*/) noexcept {
     const std::size_t written = write_record_bytes(fd_, record.cursor());
     if (written != record.size()) {
         if (written > 0) {
@@ -375,7 +375,7 @@ bool FileAppender::open_file(int &system_error) noexcept {
     fd_ = candidate;
     active_bytes_ = active_bytes;
     set_active_file_bytes(active_bytes_);
-    if (rotation_ && !initialize_rotation(system_error)) {
+    if (rotation_ && !initialize_rotation(*rotation_, system_error)) {
         return false;
     }
     system_error = 0;
@@ -441,7 +441,7 @@ bool FileAppender::recover_incomplete_tail(int fd, std::uint64_t file_size, std:
         const std::size_t take = static_cast<std::size_t>(std::min<std::uint64_t>(cursor, buffer.size()));
         cursor -= take;
         const ssize_t read = ::pread(fd, buffer.data(), take, static_cast<off_t>(cursor));
-        if (read != static_cast<ssize_t>(take)) {
+        if (std::cmp_not_equal(read, take)) {
             system_error = read < 0 ? errno : EIO;
             return false;
         }
@@ -462,7 +462,7 @@ bool FileAppender::recover_incomplete_tail(int fd, std::uint64_t file_size, std:
     return true;
 }
 
-bool FileAppender::initialize_rotation(int &system_error) noexcept {
+bool FileAppender::initialize_rotation(const FileRotationOptions &rotation, int &system_error) noexcept {
     const std::size_t slash = path_.find_last_of('/');
     if (slash == std::string::npos) {
         directory_path_ = ".";
@@ -479,7 +479,7 @@ bool FileAppender::initialize_rotation(int &system_error) noexcept {
     }
 
     archives_.clear();
-    archives_.reserve(static_cast<std::size_t>(rotation_->max_archives) + 1);
+    archives_.reserve(static_cast<std::size_t>(rotation.max_archives) + 1);
     std::uint64_t max_sequence = 0;
     int scan_error = 0;
     for (;;) {
@@ -490,10 +490,13 @@ bool FileAppender::initialize_rotation(int &system_error) noexcept {
             break;
         }
         std::uint64_t sequence = 0;
-        if (!match_archive_name(rotation_->archive_name, entry->d_name, base_name_, sequence)) {
+        if (!match_archive_name(rotation.archive_name, entry->d_name, base_name_, sequence)) {
             continue;
         }
         struct stat archive_stat{};
+        // dirfd() on a live DIR* cannot fail; the analyzer's range model for
+        // dirfd treats its result as a possibly-invalid descriptor.
+        // NOLINTNEXTLINE(clang-analyzer-unix.StdCLibraryFunctions)
         if (::fstatat(::dirfd(directory), entry->d_name, &archive_stat, AT_SYMLINK_NOFOLLOW) < 0 ||
             !S_ISREG(archive_stat.st_mode)) {
             continue;
@@ -502,6 +505,7 @@ bool FileAppender::initialize_rotation(int &system_error) noexcept {
         max_sequence = std::max(max_sequence, sequence);
         std::string archive_path = make_child_path(directory_path_, entry->d_name);
         if (archive_stat.st_size == 0) {
+            // NOLINTNEXTLINE(clang-analyzer-unix.StdCLibraryFunctions)
             if (::unlinkat(::dirfd(directory), entry->d_name, 0) == 0 || errno == ENOENT) {
                 continue;
             }
@@ -522,7 +526,7 @@ bool FileAppender::initialize_rotation(int &system_error) noexcept {
 
     std::sort(archives_.begin(), archives_.end(),
               [](const ArchiveEntry &lhs, const ArchiveEntry &rhs) { return lhs.sequence < rhs.sequence; });
-    for (std::size_t index = 0; archives_.size() > rotation_->max_archives && index < archives_.size();) {
+    for (std::size_t index = 0; archives_.size() > rotation.max_archives && index < archives_.size();) {
         if (::unlink(archives_[index].path.c_str()) == 0 || errno == ENOENT) {
             archives_.erase(archives_.begin() + static_cast<std::ptrdiff_t>(index));
         } else {
