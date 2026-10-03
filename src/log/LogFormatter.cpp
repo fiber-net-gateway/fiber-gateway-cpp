@@ -75,7 +75,7 @@ bool LogFormatter::append(char value) noexcept {
 bool LogFormatter::append_six_digits(std::uint32_t value) noexcept {
     char buffer[6];
     for (std::size_t i = sizeof(buffer); i > 0; --i) {
-        buffer[i - 1] = static_cast<char>('0' + value % 10);
+        buffer[i - 1] = static_cast<char>('0' + (value % 10));
         value /= 10;
     }
     return append(std::string_view(buffer, sizeof(buffer)));

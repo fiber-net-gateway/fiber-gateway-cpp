@@ -92,7 +92,7 @@ private:
 class NullLogLine {
 public:
     template<typename T>
-    constexpr const NullLogLine &operator<<(T &&) const noexcept {
+    constexpr const NullLogLine &operator<<(T && /*value*/) const noexcept {
         return *this;
     }
 };
