@@ -7,6 +7,12 @@ set(FIBER_FUZZERS
     tls_server_engine_fuzzer
     tls_client_engine_fuzzer
     tls_connection_fuzzer
+    quic_codec_fuzzer
+    quic_reassembly_fuzzer
+    quic_connection_fuzzer
+    quic_endpoint_fuzzer
+    quic_client_fuzzer
+    quic_network_fuzzer
 )
 
 foreach(fuzzer IN LISTS FIBER_FUZZERS)
@@ -29,6 +35,13 @@ foreach(fuzzer IN LISTS FIBER_FUZZERS)
         add_test(NAME ${fuzzer}_replay COMMAND ${fuzzer} -runs=0 ${replay_dirs})
     endif()
 endforeach()
+
+# QUIC seed generator: builds the QUIC harness seeds with the in-tree
+# encoders and lifts a real ClientHello from the in-tree QUIC client.
+add_executable(quic_fuzz_seedgen "${CMAKE_CURRENT_LIST_DIR}/quic_fuzz_seedgen.cpp")
+target_include_directories(quic_fuzz_seedgen PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(quic_fuzz_seedgen PRIVATE fiber_lib)
+set_target_properties(quic_fuzz_seedgen PROPERTIES FOLDER "fuzz")
 
 # Seed generator: drives the in-tree engines against BoringSSL peers and
 # writes real handshake streams into corpus/ (see README.md). Not a fuzzer —
