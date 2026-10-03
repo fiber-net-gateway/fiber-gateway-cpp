@@ -820,6 +820,9 @@ public:
     void arm_loss_detection_timer() noexcept;
     void cancel_loss_detection_timer() noexcept;
     void reset_congestion_for_path(QuicTime now) noexcept;
+    // After a congestion reset: re-add the bytes of tracked packets that a
+    // later ACK or loss will subtract.
+    void recount_in_flight_after_reset() noexcept;
 
     [[nodiscard]] QuicPathManager &paths() noexcept { return path_manager_; }
     [[nodiscard]] const QuicPathManager &paths() const noexcept { return path_manager_; }
