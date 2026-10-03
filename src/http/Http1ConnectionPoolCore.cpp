@@ -12,7 +12,7 @@ Http1ConnectionPoolCore::Lease::Lease(Http1ConnectionPoolCore &pool, Http1Connec
     pool_(&pool), entry_(entry), key_(key), hit_(hit) {}
 
 Http1ConnectionPoolCore::Lease::Lease(Lease &&other) noexcept :
-    pool_(other.pool_), entry_(other.entry_), key_(std::move(other.key_)), hit_(other.hit_) {
+    pool_(other.pool_), entry_(other.entry_), key_(other.key_), hit_(other.hit_) {
     other.pool_ = nullptr;
     other.entry_ = nullptr;
     other.key_.reset();
@@ -26,7 +26,7 @@ Http1ConnectionPoolCore::Lease &Http1ConnectionPoolCore::Lease::operator=(Lease 
     reset();
     pool_ = other.pool_;
     entry_ = other.entry_;
-    key_ = std::move(other.key_);
+    key_ = other.key_;
     hit_ = other.hit_;
     other.pool_ = nullptr;
     other.entry_ = nullptr;
@@ -124,9 +124,9 @@ Http1ConnectionPoolCore::Lease Http1ConnectionPoolCore::acquire(const HttpConnec
     }
     Http1ConnectionPoolEntry *entry = try_steal_idle_entry(key);
     if (entry) {
-        return Lease(*this, entry, key, true);
+        return {*this, entry, key, true};
     }
-    return Lease(*this, nullptr, key, false);
+    return {*this, nullptr, key, false};
 }
 
 Http1ConnectionPoolEntry *Http1ConnectionPoolCore::try_steal_idle_entry(const HttpConnectionGroupKey &key) noexcept {
@@ -175,7 +175,9 @@ void Http1ConnectionPoolCore::accept_returned_entry(Http1ConnectionPoolEntry &en
     // protocol): re-bind the fd here first, so every later path — park or
     // recycle — tears a transport down on this loop.
     if (entry.has_connection() && entry.connection()->loop_detached()) {
-        entry.connection()->adopt_loop(*loop_);
+        // Best-effort re-bind; a failure surfaces through the later park or
+        // recycle teardown rather than being fatal here.
+        (void) entry.connection()->adopt_loop(*loop_);
     }
     if (shutdown_effective()) {
         recycle_entry(&entry);

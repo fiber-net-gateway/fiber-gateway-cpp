@@ -1,6 +1,7 @@
 #include <fiber/http/GzipResponseWriter.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -16,8 +17,8 @@ namespace fiber::http {
 
 namespace {
 
-constexpr std::size_t kOutputBufferSize = 16 * 1024;
-constexpr std::size_t kCompressionInputBudget = 256 * 1024;
+constexpr std::size_t kOutputBufferSize = static_cast<const std::size_t>(16 * 1024);
+constexpr std::size_t kCompressionInputBudget = static_cast<const std::size_t>(256 * 1024);
 
 std::string_view trim_ows(std::string_view value) noexcept {
     while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
@@ -90,7 +91,7 @@ int parse_quality(std::string_view value) noexcept {
         fraction += (ch - '0') * scale;
         scale /= 10;
     }
-    return whole * 1000 + fraction;
+    return (whole * 1000) + fraction;
 }
 
 int coding_quality(std::string_view item) noexcept {
@@ -222,10 +223,13 @@ GzipResponseWriter::~GzipResponseWriter() noexcept {
 
 const HttpResponseWriter::Ops &GzipResponseWriter::writer_ops() noexcept {
     static const HttpResponseWriter::Ops kOps{
-            &GzipResponseWriter::on_send_header,     &GzipResponseWriter::on_write_all_chain,
-            &GzipResponseWriter::on_write_all_bytes, &GzipResponseWriter::on_write_chain,
-            &GzipResponseWriter::on_write_bytes,     &GzipResponseWriter::on_flush,
-            &GzipResponseWriter::on_abort,
+            .send_header = &GzipResponseWriter::on_send_header,
+            .write_all_chain = &GzipResponseWriter::on_write_all_chain,
+            .write_all_bytes = &GzipResponseWriter::on_write_all_bytes,
+            .write_chain = &GzipResponseWriter::on_write_chain,
+            .write_bytes = &GzipResponseWriter::on_write_bytes,
+            .flush = &GzipResponseWriter::on_flush,
+            .abort = &GzipResponseWriter::on_abort,
     };
     return kOps;
 }

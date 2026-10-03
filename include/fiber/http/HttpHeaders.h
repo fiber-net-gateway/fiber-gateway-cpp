@@ -66,7 +66,7 @@ public:
     std::string_view get(std::string_view lowcase_name, uint64_t hash) const noexcept;
     bool contains(std::string_view lowcase_name, uint64_t hash) const noexcept;
     size_t remove(std::string_view name) noexcept;
-    size_t remove(std::string_view lowcase_name, uint64_t hash) noexcept;
+    size_t remove(std::string_view lowcase_key, uint64_t hash) noexcept;
     bool remove(const HeaderField &field) noexcept;
 
     class MatchIterator {
@@ -125,9 +125,9 @@ public:
             }
             const HeaderField *node = mode_ == MatchMode::Lowcase ? headers_->find_first_node_lowcase(key_, hash_)
                                                                   : headers_->find_first_node_ci(key_, hash_);
-            return MatchIterator(headers_, key_, hash_, mode_, node);
+            return {headers_, key_, hash_, mode_, node};
         }
-        MatchIterator end() const noexcept { return MatchIterator(headers_, key_, hash_, mode_, nullptr); }
+        MatchIterator end() const noexcept { return {headers_, key_, hash_, mode_, nullptr}; }
 
     private:
         friend class HttpHeaders;

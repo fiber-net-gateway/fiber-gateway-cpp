@@ -5,8 +5,7 @@
 
 namespace fiber::http {
 
-Http1HeaderParseBuffer::Http1HeaderParseBuffer(Http1HeaderParseBufferOptions options) noexcept :
-    options_(std::move(options)) {}
+Http1HeaderParseBuffer::Http1HeaderParseBuffer(Http1HeaderParseBufferOptions options) noexcept : options_(options) {}
 
 common::IoResult<void> Http1HeaderParseBuffer::ensure_init() noexcept {
     if (buf_) {

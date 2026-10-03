@@ -15,7 +15,7 @@ namespace fiber::http::detail {
 
 // Sends the whole chain, in as many batches as flow control needs.
 struct Http2DataSendAllOp {
-    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
+    static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
 
     explicit Http2DataSendAllOp(mem::IoBufChain &&chunk) noexcept : chunk_(std::move(chunk)), end_(chunk_.complete()) {}
 
@@ -33,8 +33,8 @@ struct Http2DataSendAllOp {
 
 // Sends what one batch's budget allows from a borrowed chain or buffer.
 struct Http2DataSendSomeOp {
-    inline static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
-    inline static constexpr bool kAllowsPartialFinalBatch = true;
+    static constexpr Http2OutboundKind kOutboundKind = Http2OutboundKind::Data;
+    static constexpr bool kAllowsPartialFinalBatch = true;
 
     explicit Http2DataSendSomeOp(mem::IoBufChain &chunk) noexcept :
         chunk_(&chunk), total_bytes_(chunk.readable_bytes()), end_(chunk.complete()) {}
@@ -46,7 +46,7 @@ struct Http2DataSendSomeOp {
     [[nodiscard]] bool end_stream() const noexcept { return end_; }
 
     common::IoErr on_encode(const Http2OutboundEncodeRequest &req, Http2OutboundEncodeTarget &target,
-                            Http2OutboundEncodeResult &result) noexcept;
+                            Http2OutboundEncodeResult &result) const noexcept;
 
     mem::IoBufChain *chunk_ = nullptr;
     const std::uint8_t *buf_ = nullptr;

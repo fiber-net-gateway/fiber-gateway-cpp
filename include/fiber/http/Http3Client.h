@@ -30,7 +30,7 @@ public:
         Http3Settings local_settings{};
         std::chrono::milliseconds drain_timeout = std::chrono::seconds(3);
         std::uint32_t max_qpack_string_size = 64 * 1024;
-        std::size_t max_field_section_size = 128 * 1024;
+        std::size_t max_field_section_size = static_cast<std::size_t>(128 * 1024);
     };
 
     // Credential and trust-store pointers are borrowed; their material, the

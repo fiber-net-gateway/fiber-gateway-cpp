@@ -18,8 +18,10 @@ namespace fiber::quic {
 class QuicStream;
 struct QuicStreamRecvQueueTestAccess;
 
-inline constexpr std::size_t kQuicStreamRecvDefaultBufferLimit = 64 * 1024;
-inline constexpr std::size_t kQuicStreamRecvDefaultLowWater = 16 * 1024;
+inline constexpr std::size_t kQuicStreamRecvDefaultBufferLimit =
+        static_cast<const std::size_t>(static_cast<const std::size_t>(static_cast<const std::size_t>(64 * 1024)));
+inline constexpr std::size_t kQuicStreamRecvDefaultLowWater =
+        static_cast<const std::size_t>(static_cast<const std::size_t>(static_cast<const std::size_t>(16 * 1024)));
 inline constexpr std::size_t kQuicStreamRecvMaxActiveExtents = 4096;
 
 class QuicStreamRecvQueue : public common::NonCopyable, public common::NonMovable {

@@ -15,8 +15,8 @@ struct Http1ServerOptions {
     std::chrono::seconds header_timeout{10};
     std::chrono::seconds write_timeout{30};
     // Request-header arena sizing (see Http1HeaderParseBufferOptions).
-    std::size_t header_init_size = 8 * 1024;
-    std::size_t header_large_size = 32 * 1024;
+    std::size_t header_init_size = static_cast<std::size_t>(8 * 1024);
+    std::size_t header_large_size = static_cast<std::size_t>(32 * 1024);
     std::size_t header_large_num = 4;
     // Read and discard an unread request body so the connection can be reused
     // instead of closed.

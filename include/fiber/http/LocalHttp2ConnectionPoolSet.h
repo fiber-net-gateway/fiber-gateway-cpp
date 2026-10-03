@@ -34,7 +34,7 @@ public:
     [[nodiscard]] async::Task<common::IoResult<Lease>>
     acquire(HttpConnectionGroupKey key, Connector connector,
             std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept {
-        return current_core().acquire(std::move(key), connector, timeout);
+        return current_core().acquire(key, connector, timeout);
     }
     [[nodiscard]] std::optional<Lease> try_acquire(const HttpConnectionGroupKey &key) noexcept {
         return current_core().try_acquire(key);

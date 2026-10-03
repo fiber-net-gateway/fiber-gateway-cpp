@@ -53,7 +53,7 @@ public:
     fiber::async::Task<common::IoResult<const Http1ResponseHead *>>
     read_header(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::async::Task<common::IoResult<mem::IoBufChain>>
-    read_body(std::size_t max_bytes = 64 * 1024,
+    read_body(std::size_t max_bytes = static_cast<std::size_t>(64 * 1024),
               std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
     fiber::async::Task<common::IoResult<void>>
     discard_response_body(std::chrono::milliseconds timeout = std::chrono::milliseconds::max()) noexcept;
@@ -83,7 +83,7 @@ private:
         static void *operator new(std::size_t size, mem::BufPool &pool) noexcept {
             return pool.alloc(size, alignof(ResponseHeaderNode));
         }
-        static void operator delete(void *ptr, mem::BufPool &) noexcept {}
+        static void operator delete(void *ptr, mem::BufPool & /*unused*/) noexcept {}
         static void operator delete(void *ptr) noexcept {}
 
         Http1ResponseHead head;

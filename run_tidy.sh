@@ -33,6 +33,9 @@ TU_PATHS=(
     ":(glob,exclude)**/vendor/**"
     ":(glob,exclude)**/external/**"
     ":(glob,exclude)**/deps/**"
+    # Generated sources carry a directory .clang-tidy with Checks: '-*', which
+    # makes clang-tidy hard-error ("no checks enabled"); they are not linted.
+    ":(glob,exclude)**/generated/**"
 )
 HDR_PATHS=(
     "*.h"
@@ -44,6 +47,7 @@ HDR_PATHS=(
     ":(glob,exclude)**/vendor/**"
     ":(glob,exclude)**/external/**"
     ":(glob,exclude)**/deps/**"
+    ":(glob,exclude)**/generated/**"
 )
 
 usage() {
@@ -155,9 +159,12 @@ is_tu() {
     esac
 }
 
+# Excluded from linting: vendored trees, and generated sources (their
+# directory .clang-tidy with Checks: '-*' makes clang-tidy hard-error with
+# "no checks enabled").
 is_third_party() {
     case "$1" in
-        */third_party/*|*/3rdparty/*|*/vendor/*|*/external/*|*/deps/*) return 0 ;;
+        */third_party/*|*/3rdparty/*|*/vendor/*|*/external/*|*/deps/*|*/generated/*) return 0 ;;
         *) return 1 ;;
     esac
 }

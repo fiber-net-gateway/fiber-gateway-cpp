@@ -276,3 +276,17 @@ TEST(Http2HpackDecoderTest, RejectsIndexedNameLongerThanConfiguredLimit) {
     const std::uint8_t block[] = {0x01, 0x01, 'x'};
     EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::Invalid);
 }
+
+TEST(Http2HpackDecoderTest, RejectsFifthIntegerContinuationByte) {
+    fiber::http::Http2HpackDecoder decoder;
+    ASSERT_TRUE(decoder.init());
+
+    DecoderRecorder recorder;
+    decoder.begin_block(&recorder, &DecoderRecorder::ops());
+
+    // Indexed field, prefix 1 plus five zero-payload continuations (shifts
+    // 0/7/14/21/28). The fifth continuation rides at shift 28; accepting it
+    // would compute 0u << 35 on the terminator — UB even for a zero payload.
+    const std::uint8_t block[] = {0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00};
+    EXPECT_EQ(decoder.decode(block, sizeof(block), true), fiber::common::IoErr::Invalid);
+}

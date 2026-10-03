@@ -45,7 +45,7 @@ int hex_digit(char c) noexcept {
 
 TcpEndpointBase::TcpEndpointBase(net::SocketAddress address, net::ListenOptions listen, net::TcpSocketOptions tcp,
                                  HttpServerTlsOptions tls) noexcept :
-    address_(std::move(address)), listen_(listen), tcp_(tcp), tls_(tls) {}
+    address_(address), listen_(listen), tcp_(tcp), tls_(std::move(std::move(tls))) {}
 
 void TcpEndpointWorkerBase::attach(TcpEndpointBase &endpoint, std::size_t index) noexcept {
     endpoint_ = &endpoint;
@@ -78,7 +78,7 @@ common::IoResult<void> TcpEndpointBase::build_ticket_service() noexcept {
         }
         for (std::size_t j = 0; j < material[i].bytes.size(); ++j) {
             const int high = hex_digit(hex[2 * j]);
-            const int low = hex_digit(hex[2 * j + 1]);
+            const int low = hex_digit(hex[(2 * j) + 1]);
             if (high < 0 || low < 0) {
                 return std::unexpected(common::IoErr::Invalid);
             }

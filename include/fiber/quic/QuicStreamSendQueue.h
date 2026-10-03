@@ -15,7 +15,8 @@ class QuicStream;
 struct QuicStreamSendQueueFrameTestAccess;
 struct QuicStreamSendQueueTestAccess;
 
-inline constexpr std::size_t kQuicStreamSendDefaultBufferLimit = 64 * 1024;
+inline constexpr std::size_t kQuicStreamSendDefaultBufferLimit =
+        static_cast<const std::size_t>(static_cast<const std::size_t>(static_cast<const std::size_t>(64 * 1024)));
 
 enum class QuicSendExtentState : std::uint8_t {
     Ready = 0,

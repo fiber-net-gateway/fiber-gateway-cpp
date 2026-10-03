@@ -122,7 +122,7 @@ enum class QuicErrorCode : std::uint64_t {
 // 0x0100–0x01FF. nginx models this as NGX_QUIC_ERR_CRYPTO(alert). Special
 // alerts such as no_application_protocol (120) and missing_extension (109) are
 // encoded correctly by the general 0x0100 | alert mapping — no special-casing.
-inline constexpr std::uint64_t kQuicCryptoErrorBase = 0x0100u;
+inline constexpr std::uint64_t kQuicCryptoErrorBase = 0x0100U;
 
 [[nodiscard]] constexpr std::uint64_t quic_crypto_error_code(std::uint8_t alert) noexcept {
     return kQuicCryptoErrorBase | static_cast<std::uint64_t>(alert);
@@ -253,7 +253,7 @@ struct QuicProtectionKeySlot : public common::NonCopyable, public common::NonMov
         header.reset();
     }
 
-    [[nodiscard]] QuicPacketProtectionKeyView view() noexcept { return {&packet, &header}; }
+    [[nodiscard]] QuicPacketProtectionKeyView view() noexcept { return {.packet = &packet, .header = &header}; }
 
     QuicPacketProtectionKeys packet{};
     QuicHeaderProtectionKeys header{};

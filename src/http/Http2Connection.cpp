@@ -1,6 +1,7 @@
 #include <fiber/http/Http2Connection.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <new>
 #include <string_view>
@@ -41,22 +42,22 @@ constexpr std::uint32_t kMaxStreamId = 0x7fffffffU;
 constexpr std::int64_t kMaxFlowControlWindow = 0x7fffffffLL;
 constexpr std::int32_t kInitialFlowControlWindow = 65535;
 constexpr std::size_t kIoPumpOperationBudget = 64;
-constexpr std::size_t kIoPumpByteBudget = 256 * 1024;
+constexpr std::size_t kIoPumpByteBudget = static_cast<const std::size_t>(256 * 1024);
 // Bytes one connection may move per event-loop turn before its pump yields
 // with post_next (nginx sendfile_max_chunk-like). Continuations under this
 // cap stay in the same turn so a connection is not throttled to one batch
 // per poll.
-constexpr std::size_t kIoPumpTurnByteBudget = 2 * 1024 * 1024;
+constexpr std::size_t kIoPumpTurnByteBudget = static_cast<const std::size_t>(2 * 1024 * 1024);
 // Flow-controlled payload one stream may encode per outbound batch. A batch
 // is split into DATA frames of the peer's max frame size; bounding it keeps
 // streams interleaving on the connection without forcing one loop
 // round-trip per frame.
-constexpr std::size_t kStreamOutboundBatchBytes = 64 * 1024;
+constexpr std::size_t kStreamOutboundBatchBytes = static_cast<const std::size_t>(64 * 1024);
 // Ready streams are encoded only while the in-flight chain holds less than
 // this, so control frames appended to its tail wait behind at most this plus
 // one stream batch. It covers about one writev's worth (16 iovecs of DATA
 // frames, or one TLS record group); anything more is just lookahead.
-constexpr std::size_t kOutboundEncodeWatermark = 64 * 1024;
+constexpr std::size_t kOutboundEncodeWatermark = static_cast<const std::size_t>(64 * 1024);
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
@@ -143,8 +144,7 @@ common::IoErr coalesce_chain_head(mem::IoBufChain &chain, std::size_t want) noex
 
 } // namespace
 
-Http2Connection::Http2Connection(Options options, void *ctx, const Ops &ops) :
-    options_(std::move(options)), ctx_(ctx), ops_(ops) {
+Http2Connection::Http2Connection(Options options, void *ctx, const Ops &ops) : options_(options), ctx_(ctx), ops_(ops) {
     // Servers must be able to create peer-initiated streams; clients must not.
     // Server push is unsupported, so a client has nothing to create a peer
     // stream for and announces ENABLE_PUSH=0 on that basis.
@@ -791,7 +791,7 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
             if (is_idle_stream(fhr.stream_id)) {
                 return common::IoErr::Invalid;
             }
-            if (conn_recv_window_remaining_ < static_cast<std::int32_t>(fhr.length)) {
+            if (std::cmp_less(conn_recv_window_remaining_, fhr.length)) {
                 return common::IoErr::Invalid;
             }
             conn_recv_window_remaining_ -= static_cast<std::int32_t>(fhr.length);
@@ -810,12 +810,12 @@ common::IoErr Http2Connection::handle_data_payload(const FrameHeader &fhr, const
                 return common::IoErr::Invalid;
             }
             pad_length = buf.readable_data()[0];
-            if (fhr.length < static_cast<std::uint32_t>(1 + pad_length)) {
+            if (std::cmp_less(fhr.length, 1 + pad_length)) {
                 return common::IoErr::Invalid;
             }
         }
 
-        if (conn_recv_window_remaining_ < static_cast<std::int32_t>(fhr.length)) {
+        if (std::cmp_less(conn_recv_window_remaining_, fhr.length)) {
             return common::IoErr::Invalid;
         }
         conn_recv_window_remaining_ -= static_cast<std::int32_t>(fhr.length);
@@ -1548,11 +1548,11 @@ common::IoErr Http2Connection::send_goaway(std::uint32_t last_stream_id, Http2Er
 }
 
 common::IoErr Http2Connection::maybe_replenish_connection_recv_window() noexcept {
-    if (conn_recv_window_remaining_ > static_cast<std::int32_t>(options_.connection_recv_window_low_watermark)) {
+    if (std::cmp_greater(conn_recv_window_remaining_, options_.connection_recv_window_low_watermark)) {
         return common::IoErr::None;
     }
 
-    if (conn_recv_window_remaining_ >= static_cast<std::int32_t>(conn_recv_window_target_)) {
+    if (std::cmp_greater_equal(conn_recv_window_remaining_, conn_recv_window_target_)) {
         return common::IoErr::None;
     }
 
@@ -1648,6 +1648,9 @@ common::IoResult<Http2Stream::Lease> Http2Connection::try_attach_local_stream(Ht
 
     Http2Stream::Lease lease = Http2Stream::Lease::adopt(&stream);
     if (!streams_.insert(std::move(lease))) {
+        // insert() only takes the lease on success; on failure the moved-from
+        // Lease still carries nothing and release_raw() is defensive.
+        // NOLINTNEXTLINE(bugprone-use-after-move)
         (void) lease.release_raw();
         stream.attached_to_connection_ = false;
         stream.conn_ = nullptr;

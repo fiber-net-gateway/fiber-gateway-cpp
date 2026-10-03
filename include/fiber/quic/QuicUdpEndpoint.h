@@ -33,7 +33,8 @@ inline constexpr std::size_t kQuicUdpDefaultReadBufferSize = 65536;
 inline constexpr std::size_t kQuicUdpDefaultRecvBatchSize = 16;
 inline constexpr std::size_t kQuicUdpDefaultPlaintextBufferSize = 65536;
 inline constexpr std::size_t kQuicUdpDefaultMaxRecvDatagramsPerWakeup = 64;
-inline constexpr std::size_t kQuicUdpDefaultMaxRecvBytesPerWakeup = 256 * 1024;
+inline constexpr std::size_t kQuicUdpDefaultMaxRecvBytesPerWakeup =
+        static_cast<const std::size_t>(static_cast<const std::size_t>(256 * 1024));
 inline constexpr std::size_t kQuicStatelessResetSecretLength = 32;
 // Stateless reset packet sizing, matching nginx (ngx_event_quic_output.c):
 // NGX_QUIC_MIN_PKT_LEN (41 = 21 + 20-byte server CID) is the smallest short
@@ -76,10 +77,11 @@ public:
     };
 
     struct StatelessResponseLimits {
-        StatelessResponseLimit stateless_reset{kQuicStatelessResetRateLimitCapacity, 3};
-        StatelessResponseLimit version_negotiation{256, 4};
-        StatelessResponseLimit retry{4096, 8};
-        StatelessResponseLimit invalid_token_close{128, 2};
+        StatelessResponseLimit stateless_reset{.endpoint_per_second = kQuicStatelessResetRateLimitCapacity,
+                                               .peer_per_second = 3};
+        StatelessResponseLimit version_negotiation{.endpoint_per_second = 256, .peer_per_second = 4};
+        StatelessResponseLimit retry{.endpoint_per_second = 4096, .peer_per_second = 8};
+        StatelessResponseLimit invalid_token_close{.endpoint_per_second = 128, .peer_per_second = 2};
     };
 
     struct EndpointOptions {

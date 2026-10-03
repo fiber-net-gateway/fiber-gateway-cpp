@@ -18,7 +18,7 @@ namespace fiber::http::proxy_core {
 
 constexpr std::string_view kBadGatewayBody = "502 Bad Gateway\n";
 constexpr std::string_view kGatewayTimeoutBody = "504 Gateway Timeout\n";
-constexpr std::size_t kBodyChunkSize = 64 * 1024;
+constexpr std::size_t kBodyChunkSize = static_cast<const std::size_t>(64 * 1024);
 constexpr std::uint8_t kSkipHeaderValue = 1;
 
 inline bool parse_decimal(std::string_view text, std::size_t &value) {
