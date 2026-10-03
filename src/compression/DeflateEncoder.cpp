@@ -11,7 +11,9 @@
 
 #include "DeflateEncoder.h"
 
+#include <algorithm>
 #include <cstring>
+#include <utility>
 
 #include <fiber/common/Assert.h>
 
@@ -35,16 +37,16 @@ struct DeflateConfig {
 };
 
 inline constexpr DeflateConfig kConfigTable[10] = {
-        {0, 0, 0, 0}, // level 0 (stored driver, unused)
-        {4, 4, 8, 4}, // 1: max speed, no lazy matches
-        {4, 5, 16, 8}, // 2
-        {4, 6, 32, 32}, // 3
-        {4, 4, 16, 16}, // 4: lazy matches
-        {8, 16, 32, 32}, // 5
-        {8, 16, 128, 128}, // 6: zlib default
-        {8, 32, 128, 256}, // 7
-        {32, 128, 258, 1024}, // 8
-        {32, 258, 258, 4096}, // 9: max compression
+        {.good_length = 0, .max_lazy = 0, .nice_length = 0, .max_chain = 0}, // level 0 (stored driver, unused)
+        {.good_length = 4, .max_lazy = 4, .nice_length = 8, .max_chain = 4}, // 1: max speed, no lazy matches
+        {.good_length = 4, .max_lazy = 5, .nice_length = 16, .max_chain = 8}, // 2
+        {.good_length = 4, .max_lazy = 6, .nice_length = 32, .max_chain = 32}, // 3
+        {.good_length = 4, .max_lazy = 4, .nice_length = 16, .max_chain = 16}, // 4: lazy matches
+        {.good_length = 8, .max_lazy = 16, .nice_length = 32, .max_chain = 32}, // 5
+        {.good_length = 8, .max_lazy = 16, .nice_length = 128, .max_chain = 128}, // 6: zlib default
+        {.good_length = 8, .max_lazy = 32, .nice_length = 128, .max_chain = 256}, // 7
+        {.good_length = 32, .max_lazy = 128, .nice_length = 258, .max_chain = 1024}, // 8
+        {.good_length = 32, .max_lazy = 258, .nice_length = 258, .max_chain = 4096}, // 9: max compression
 };
 
 // Input/output cursors standing in for z_stream fields. `total` accumulates
@@ -65,7 +67,7 @@ enum class BlockState { NeedMore, BlockDone, FinishStarted, FinishDone };
 
 enum class RunResult { Ok, NothingToDo, StreamEnd };
 
-inline void update_hash(DeflateState &s, std::uint32_t &h, std::uint8_t c) noexcept {
+inline void update_hash(DeflateState & /*s*/, std::uint32_t &h, std::uint8_t c) noexcept {
     h = ((h << kDeflateHashShift) ^ c) & kDeflateHashMask;
 }
 
@@ -108,10 +110,7 @@ void slide_hash(DeflateState &s) noexcept {
 
 // Copy from the caller's input into `buf`, at most `size` bytes.
 unsigned read_buf(DeflateState & /*s*/, DeflateIn &in, std::uint8_t *buf, unsigned size) noexcept {
-    unsigned len = static_cast<unsigned>(in.avail);
-    if (len > size) {
-        len = size;
-    }
+    unsigned len = std::min(static_cast<unsigned>(in.avail), size);
     if (len == 0) {
         return 0;
     }
@@ -177,9 +176,7 @@ void fill_window(DeflateState &s, DeflateIn &in) noexcept {
             s.match_start -= kDeflateWSize;
             s.strstart -= kDeflateWSize; // we now have strstart >= MAX_DIST
             s.block_start -= static_cast<std::int32_t>(kDeflateWSize);
-            if (s.insert > s.strstart) {
-                s.insert = s.strstart;
-            }
+            s.insert = std::min(s.insert, s.strstart);
             slide_hash(s);
             more += kDeflateWSize;
         }
@@ -222,9 +219,7 @@ void fill_window(DeflateState &s, DeflateIn &in) noexcept {
             // Previous high water mark below current data -- zero WIN_INIT
             // bytes or up to end of window, whichever is less.
             init = static_cast<std::uint32_t>(kDeflateWindowSize) - curr;
-            if (init > kDeflateWinInit) {
-                init = kDeflateWinInit;
-            }
+            init = std::min(init, kDeflateWinInit);
             std::memset(s.window + curr, 0, init);
             s.high_water = curr + init;
         } else if (s.high_water < curr + kDeflateWinInit) {
@@ -232,9 +227,7 @@ void fill_window(DeflateState &s, DeflateIn &in) noexcept {
             // data plus WIN_INIT -- zero out to current data plus WIN_INIT,
             // or up to end of window, whichever is less.
             init = curr + kDeflateWinInit - s.high_water;
-            if (init > kDeflateWindowSize - s.high_water) {
-                init = kDeflateWindowSize - s.high_water;
-            }
+            init = std::min(init, static_cast<std::uint32_t>(kDeflateWindowSize) - s.high_water);
             std::memset(s.window + s.high_water, 0, init);
             s.high_water += init;
         }
@@ -267,7 +260,7 @@ std::uint32_t longest_match(DeflateState &s, DeflateIPos cur_match) noexcept {
     }
     // Do not look for matches beyond the end of the input. This is necessary
     // to make deflate deterministic.
-    if (static_cast<unsigned>(nice_match) > s.lookahead) {
+    if (std::cmp_greater(nice_match, s.lookahead)) {
         nice_match = static_cast<int>(s.lookahead);
     }
 
@@ -279,6 +272,7 @@ std::uint32_t longest_match(DeflateState &s, DeflateIPos cur_match) noexcept {
         // insufficient lookahead only occur occasionally for performance
         // reasons. The length of the match is limited to the lookahead, so
         // the output is not affected by reads past it.
+        // NOLINTNEXTLINE(bugprone-inc-dec-in-conditions)
         if (match[best_len] != scan_end || match[best_len - 1] != scan_end1 || *match != *scan || *++match != scan[1]) {
             continue;
         }
@@ -292,10 +286,12 @@ std::uint32_t longest_match(DeflateState &s, DeflateIPos cur_match) noexcept {
 
         // We check for insufficient lookahead only every 8th comparison; the
         // 256th check will be made at strstart + 258.
+        // NOLINTBEGIN(bugprone-inc-dec-in-conditions)
         do {
         } while (*++scan == *++match && *++scan == *++match && *++scan == *++match && *++scan == *++match &&
                  *++scan == *++match && *++scan == *++match && *++scan == *++match && *++scan == *++match &&
                  scan < strend);
+        // NOLINTEND(bugprone-inc-dec-in-conditions)
 
         len = static_cast<int>(kDeflateMaxMatch) - static_cast<int>(strend - scan);
         scan = strend - kDeflateMaxMatch;
@@ -311,7 +307,7 @@ std::uint32_t longest_match(DeflateState &s, DeflateIPos cur_match) noexcept {
         }
     } while ((cur_match = prev[cur_match & wmask]) > limit && --chain_length != 0);
 
-    if (static_cast<unsigned>(best_len) <= s.lookahead) {
+    if (std::cmp_less_equal(best_len, s.lookahead)) {
         return static_cast<std::uint32_t>(best_len);
     }
     return s.lookahead;
@@ -366,6 +362,10 @@ BlockState deflate_fast(DeflateState &s, DeflateIn &in, DeflateOut &out, int flu
                 s.match_length--; // string at strstart already in table
                 do {
                     s.strstart++;
+                    // zlib port: the loop's final insert_string() result is
+                    // intentionally dropped; the store keeps the body identical
+                    // to upstream deflate.c.
+                    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
                     hash_head = insert_string(s, s.strstart);
                     // strstart never exceeds WSIZE-MAX_MATCH, so there are
                     // always MIN_MATCH bytes ahead.
@@ -441,6 +441,9 @@ BlockState deflate_slow(DeflateState &s, DeflateIn &in, DeflateOut &out, int flu
             s.match_length = longest_match(s, hash_head);
             // longest_match() sets match_start
 
+            // zlib port keeps the redundant `<= 5` guard verbatim; the
+            // equality test against MIN_MATCH (== 3) already implies it.
+            // NOLINTNEXTLINE(misc-redundant-expression)
             if (s.match_length <= 5 && s.match_length == kDeflateMinMatch &&
                 s.strstart - s.match_start > kDeflateTooFar) {
                 // If prev_match is also MIN_MATCH, match_start is garbage but
@@ -465,6 +468,8 @@ BlockState deflate_slow(DeflateState &s, DeflateIn &in, DeflateOut &out, int flu
             s.prev_length -= 2;
             do {
                 if (++s.strstart <= max_insert) {
+                    // Same dropped-final-store idiom as the lazy-match loop.
+                    // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
                     hash_head = insert_string(s, s.strstart);
                 }
             } while (--s.prev_length != 0);
@@ -624,8 +629,8 @@ EncodeStep DeflateEncoder::write(DeflateState &state, std::span<const std::uint8
                                  std::span<std::uint8_t> output) noexcept {
     FIBER_ASSERT(!state.finish_started());
 
-    DeflateIn in{input.data(), input.size()};
-    DeflateOut out{output.data(), output.size()};
+    DeflateIn in{.next = input.data(), .avail = input.size()};
+    DeflateOut out{.next = output.data(), .avail = output.size()};
 
     if (in.avail == 0) {
         // An empty write must not touch the stream state (upstream would
@@ -633,21 +638,24 @@ EncodeStep DeflateEncoder::write(DeflateState &state, std::span<const std::uint8
         if (state.pending != 0) {
             flush_pending(state, out);
         }
-        return EncodeStep{0, out.total, state.pending != 0 ? EncodeStatus::NeedOutput : EncodeStatus::NeedInput};
+        return EncodeStep{.consumed = 0,
+                          .written = out.total,
+                          .status = state.pending != 0 ? EncodeStatus::NeedOutput : EncodeStatus::NeedInput};
     }
 
     const RunResult result = deflate_run(state, in, out, kFlushNone);
     FIBER_ASSERT(result == RunResult::Ok);
 
-    return EncodeStep{input.size() - in.avail, out.total,
-                      in.avail != 0 ? EncodeStatus::NeedOutput : EncodeStatus::NeedInput};
+    return EncodeStep{.consumed = input.size() - in.avail,
+                      .written = out.total,
+                      .status = in.avail != 0 ? EncodeStatus::NeedOutput : EncodeStatus::NeedInput};
 }
 
 EncodeStep DeflateEncoder::flush(DeflateState &state, std::span<std::uint8_t> output) noexcept {
     FIBER_ASSERT(!state.finish_started());
 
-    DeflateIn in{nullptr, 0};
-    DeflateOut out{output.data(), output.size()};
+    DeflateIn in{.next = nullptr, .avail = 0};
+    DeflateOut out{.next = output.data(), .avail = output.size()};
 
     if (!state.sync_flush_active) {
         state.sync_flush_active = true;
@@ -671,8 +679,8 @@ EncodeStep DeflateEncoder::flush(DeflateState &state, std::span<std::uint8_t> ou
 }
 
 EncodeStep DeflateEncoder::finish(DeflateState &state, std::span<std::uint8_t> output) noexcept {
-    DeflateIn in{nullptr, 0};
-    DeflateOut out{output.data(), output.size()};
+    DeflateIn in{.next = nullptr, .avail = 0};
+    DeflateOut out{.next = output.data(), .avail = output.size()};
 
     const RunResult result = deflate_run(state, in, out, kFlushFinish);
 
