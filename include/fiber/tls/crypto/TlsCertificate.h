@@ -45,7 +45,7 @@ struct TlsCertVerification;
 // the exact bytes that were parsed — what the wire re-sends. Move-only.
 class TlsCertificate {
 public:
-    static constexpr std::size_t kMaxDerLen = 1u << 20; // 1 MiB sanity bound
+    static constexpr std::size_t kMaxDerLen = 1U << 20; // 1 MiB sanity bound
 
     TlsCertificate() noexcept = default;
     TlsCertificate(const TlsCertificate &) = delete;

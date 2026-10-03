@@ -117,7 +117,7 @@ enum class TlsEcCurve : std::uint8_t { P256, P384 };
     return curve == TlsEcCurve::P256 ? 32 : 48;
 }
 [[nodiscard]] constexpr std::size_t tls_ec_point_len(TlsEcCurve curve) noexcept {
-    return 1 + 2 * tls_ec_field_len(curve);
+    return 1 + (2 * tls_ec_field_len(curve));
 }
 
 struct TlsEcKey {

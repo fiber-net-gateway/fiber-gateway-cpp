@@ -75,6 +75,8 @@ public:
     TlsAlpnList(std::initializer_list<std::string_view> protocols) { assign(protocols); }
     TlsAlpnList(std::span<const std::string_view> protocols) { assign(protocols); }
     TlsAlpnList(const TlsAlpnList &other) { assign(other.view()); }
+    // rebind_views() allocates; allocation failure is fatal by house policy (no-exceptions).
+    // NOLINTNEXTLINE(bugprone-exception-escape)
     TlsAlpnList(TlsAlpnList &&other) noexcept : owned_(std::move(other.owned_)) {
         other.owned_.clear();
         rebind_views();
@@ -85,6 +87,8 @@ public:
         }
         return *this;
     }
+    // Same rebind_views() allocation under noexcept as the move constructor.
+    // NOLINTNEXTLINE(bugprone-exception-escape)
     TlsAlpnList &operator=(TlsAlpnList &&other) noexcept {
         if (this != &other) {
             owned_ = std::move(other.owned_);

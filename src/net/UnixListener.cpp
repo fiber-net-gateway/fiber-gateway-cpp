@@ -8,7 +8,7 @@ namespace fiber::net {
 
 UnixListener::UnixListener(fiber::event::EventLoop &loop) : acceptor_(loop) {}
 
-UnixListener::~UnixListener() {}
+UnixListener::~UnixListener() = default;
 
 fiber::common::IoResult<void> UnixListener::bind(const UnixAddress &addr, const UnixListenOptions &options) {
     return acceptor_.bind(addr, options);

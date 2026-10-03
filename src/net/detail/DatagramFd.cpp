@@ -506,7 +506,7 @@ fiber::common::IoResult<UdpRecvResult> DatagramFd::try_recv_from(void *buf, size
     if (!packet_result) {
         return std::unexpected(packet_result.error());
     }
-    return UdpRecvResult{packet_result->size, packet_result->peer};
+    return UdpRecvResult{.size = packet_result->size, .peer = packet_result->peer};
 }
 
 fiber::common::IoResult<size_t> DatagramFd::try_send_to(const void *buf, size_t len,

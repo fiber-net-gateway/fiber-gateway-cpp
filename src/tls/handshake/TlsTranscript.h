@@ -58,8 +58,8 @@ private:
 // value and never copies it.
 class TlsTranscript12 {
 public:
-    static constexpr std::size_t kInitialBuffer = 16 * 1024;
-    static constexpr std::size_t kMaxBuffer = 9u << 20;
+    static constexpr std::size_t kInitialBuffer = static_cast<const std::size_t>(16 * 1024);
+    static constexpr std::size_t kMaxBuffer = 9U << 20;
 
     TlsTranscript12() noexcept = default;
     TlsTranscript12(const TlsTranscript12 &) noexcept = delete;

@@ -51,7 +51,7 @@ UnixStream::UnixStream(fiber::event::EventLoop &loop, int fd, UnixAddress peer) 
 UnixStream::UnixStream(ConnectInfant &&infant) :
     stream_(infant.loop(), infant.release_fd()), remote_addr_(infant.take_peer()) {}
 
-UnixStream::~UnixStream() {}
+UnixStream::~UnixStream() = default;
 
 bool UnixStream::valid() const noexcept { return stream_.valid(); }
 

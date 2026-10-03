@@ -13,6 +13,8 @@ namespace {
 // Reads a File-kind PEM bundle (bounded sanity check; at least one readable
 // byte required — the tls parser then demands at least one CERTIFICATE
 // block, matching the old loader's loaded_any rule).
+// std::string growth may throw bad_alloc; fatal by house policy (no-exceptions).
+// NOLINTNEXTLINE(bugprone-exception-escape)
 common::IoErr read_file_bundle(const std::string &path, std::string &out) noexcept {
     if (path.empty()) {
         return common::IoErr::Invalid;
@@ -23,13 +25,17 @@ common::IoErr read_file_bundle(const std::string &path, std::string &out) noexce
     }
     char chunk[4096];
     std::size_t got = 0;
+    // Read-all loop; the checker's loop-state modeling imagines a re-entry
+    // after EOF that the loop condition prevents.
+    // NOLINTBEGIN(clang-analyzer-unix.Stream)
     while ((got = std::fread(chunk, 1, sizeof chunk, file)) > 0) {
         out.append(chunk, got);
-        if (out.size() > (1u << 22)) {
+        if (out.size() > (1U << 22)) {
             break;
         }
     }
-    const bool ok = std::ferror(file) == 0 && !out.empty() && out.size() <= (1u << 22);
+    const bool ok = std::ferror(file) == 0 && !out.empty() && out.size() <= (1U << 22);
+    // NOLINTEND(clang-analyzer-unix.Stream)
     std::fclose(file);
     return ok ? common::IoErr::None : common::IoErr::Invalid;
 }
@@ -73,7 +79,7 @@ common::IoResult<std::unique_ptr<TrustStore>> TrustStore::create(const TrustStor
             return result;
         }
         case TrustStoreSourceKind::Content: {
-            if (options.value.empty() || options.value.size() > (1u << 22)) {
+            if (options.value.empty() || options.value.size() > (1U << 22)) {
                 return std::unexpected(common::IoErr::Invalid);
             }
             auto store = tls::TlsTrustStore::from_pem_bundle({options.value.data(), options.value.size()});
@@ -87,11 +93,13 @@ common::IoResult<std::unique_ptr<TrustStore>> TrustStore::create(const TrustStor
     return std::unexpected(common::IoErr::Invalid);
 }
 
+// Static-init lambda builds std::strings that may throw bad_alloc; fatal by house policy.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 const std::string &TrustStore::system_ca_bundle_path() noexcept {
     static const std::string cached = []() -> std::string {
         if (const char *env = std::getenv("SSL_CERT_FILE")) {
             if (env[0] != '\0' && ::access(env, R_OK) == 0) {
-                return std::string(env);
+                return {env};
             }
         }
         static constexpr const char *kCandidates[] = {
@@ -101,7 +109,7 @@ const std::string &TrustStore::system_ca_bundle_path() noexcept {
         };
         for (const char *candidate: kCandidates) {
             if (::access(candidate, R_OK) == 0) {
-                return std::string(candidate);
+                return {candidate};
             }
         }
         return {};

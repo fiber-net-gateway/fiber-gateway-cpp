@@ -27,7 +27,6 @@ inline constexpr std::uint16_t kTlsVersionTls13 = 0x0304;
         case TlsProtocolVersion::Tls13:
             return true;
         case TlsProtocolVersion::Ssl30:
-            return false;
         default:
             return false;
     }
