@@ -15,7 +15,7 @@ ThreadGroup::Thread &ThreadGroup::Thread::current() {
 
 void ThreadGroup::Thread::start(const RunFn &fn) {
     FIBER_ASSERT(fn);
-    thread_ = std::jthread([this, fn](std::stop_token) {
+    thread_ = std::jthread([this, fn] {
         current_thread_ = this;
         fn(*this);
         current_thread_ = nullptr;
@@ -43,7 +43,7 @@ ThreadGroup::~ThreadGroup() {
     join();
 }
 
-void ThreadGroup::start(RunFn fn) {
+void ThreadGroup::start(const RunFn &fn) {
     FIBER_ASSERT(fn);
     bool expected = false;
     FIBER_ASSERT_MSG(started_.compare_exchange_strong(expected, true), "ThreadGroup already started");
