@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -97,7 +98,13 @@ std::string unescape(std::string_view in) {
     for (std::size_t i = 0; i < in.size(); ++i) {
         if (in[i] == '\\' && i + 1 < in.size()) {
             const char c = in[++i];
-            out.push_back(c == 'r' ? '\r' : c == 'n' ? '\n' : c);
+            char decoded = c;
+            if (c == 'r') {
+                decoded = '\r';
+            } else if (c == 'n') {
+                decoded = '\n';
+            }
+            out.push_back(decoded);
         } else {
             out.push_back(in[i]);
         }
@@ -290,7 +297,7 @@ DetachedTask run_probe(fiber::event::EventLoop *loop, const Options *o, int *exi
     bool then_pending = !o->then.empty() && !o->then_after.empty();
     for (;;) {
         fiber::mem::IoBufChain in;
-        auto got = co_await stream.readv(64 * 1024, in, o->timeout);
+        auto got = co_await stream.readv(static_cast<std::size_t>(64 * 1024), in, o->timeout);
         if (!got) {
             close = got.error() == IoErr::TimedOut
                             ? "timeout"
@@ -366,16 +373,20 @@ DetachedTask run_server(fiber::event::EventLoop *loop, const Options *o, int *ex
         fail_setup("bind failed");
         co_return;
     }
-    std::cerr << "SERVE listening port=" << o->port << std::endl;
+    std::cerr << "SERVE listening port=" << o->port << '\n';
 
     std::vector<std::string_view> alpn_views(o->alpn.begin(), o->alpn.end());
     fiber::net::TlsServerParam param;
     param.configure_callback = fiber::net::configure_tls_with_credential;
     param.configure_ctx = &*credential;
     param.trust_store = trust.get();
-    param.client_certificate_mode = trust == nullptr         ? fiber::net::TlsClientCertificateMode::None
-                                    : o->require_client_cert ? fiber::net::TlsClientCertificateMode::Required
-                                                             : fiber::net::TlsClientCertificateMode::Optional;
+    if (trust == nullptr) {
+        param.client_certificate_mode = fiber::net::TlsClientCertificateMode::None;
+    } else if (o->require_client_cert) {
+        param.client_certificate_mode = fiber::net::TlsClientCertificateMode::Required;
+    } else {
+        param.client_certificate_mode = fiber::net::TlsClientCertificateMode::Optional;
+    }
     param.alpn = alpn_views;
     param.min_version = o->min_version;
     param.max_version = o->max_version;
@@ -391,13 +402,13 @@ DetachedTask run_server(fiber::event::EventLoop *loop, const Options *o, int *ex
         fiber::net::TlsTcpStream stream(*loop, accept.release_fd(), accept.take_peer());
         auto handshake = co_await stream.handshake(param, o->timeout);
         if (!handshake) {
-            std::cerr << "SERVE handshake=fail err=" << fiber::common::io_err_name(handshake.error()) << std::endl;
+            std::cerr << "SERVE handshake=fail err=" << fiber::common::io_err_name(handshake.error()) << '\n';
             *exit_code = 2;
             continue;
         }
         const std::string_view alpn = stream.selected_alpn();
         fiber::mem::IoBufChain in;
-        auto got = co_await stream.readv(64 * 1024, in, o->timeout);
+        auto got = co_await stream.readv(static_cast<std::size_t>(64 * 1024), in, o->timeout);
         std::string reply = "PROBE-ECHO ";
         std::size_t bytes = got ? *got : 0;
         while (const fiber::mem::IoBuf *front = in.first_readable()) {
@@ -414,7 +425,7 @@ DetachedTask run_server(fiber::event::EventLoop *loop, const Options *o, int *ex
                 break;
             }
         }
-        std::cerr << "SERVE handshake=ok alpn=" << (alpn.empty() ? "-" : alpn) << " bytes=" << bytes << std::endl;
+        std::cerr << "SERVE handshake=ok alpn=" << (alpn.empty() ? "-" : alpn) << " bytes=" << bytes << '\n';
         stream.close(); // close_notify, then the fd
     }
     loop->stop();

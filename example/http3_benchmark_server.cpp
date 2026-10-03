@@ -1,9 +1,10 @@
 #include <array>
+#include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
-#include <signal.h>
 #include <string_view>
 #include <utility>
 
@@ -25,8 +26,8 @@ namespace {
 
 constexpr std::size_t kBody128Size = 128;
 constexpr std::size_t kBody1kSize = 1024;
-constexpr std::size_t kBody64kSize = 64 * 1024;
-constexpr std::size_t kBody1mSize = 1024 * 1024;
+constexpr std::size_t kBody64kSize = static_cast<std::size_t>(64 * 1024);
+constexpr std::size_t kBody1mSize = static_cast<std::size_t>(1024 * 1024);
 
 const std::array<std::uint8_t, kBody128Size> kBody128 = [] {
     std::array<std::uint8_t, kBody128Size> body{};
@@ -102,9 +103,9 @@ fiber::async::Task<void> echo_body(fiber::http::HttpExchange &exchange) {
     }
 
     for (;;) {
-        auto read_result = co_await exchange.read_body(64 * 1024);
+        auto read_result = co_await exchange.read_body(static_cast<std::size_t>(64 * 1024));
         if (!read_result) {
-            exchange.abort(read_result.error());
+            (void) exchange.abort(read_result.error());
             co_return;
         }
         const bool complete = read_result->complete();

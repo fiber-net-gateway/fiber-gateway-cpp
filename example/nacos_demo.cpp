@@ -363,7 +363,7 @@ nacos::Instance make_instance(const CliOptions &cli, std::uint16_t port) {
     instance.enabled = true;
     instance.ephemeral = true;
     instance.cluster_name = "DEFAULT";
-    instance.metadata = {{"version", "1.0"}, {"region", "demo"}};
+    instance.metadata = {{.key = "version", .value = "1.0"}, {.key = "region", .value = "demo"}};
     return instance;
 }
 
