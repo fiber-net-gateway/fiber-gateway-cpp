@@ -31,7 +31,7 @@ using net::detail::system_now_unix_ms;
 // Post-handshake CRYPTO is a raw handshake-message stream (10 §7). One bound
 // covers the buffered tail and each message: NSTs are the only legal content
 // and real tickets are a few hundred bytes.
-constexpr std::size_t kMaxPostHandshakeBytes = 64 * 1024;
+constexpr std::size_t kMaxPostHandshakeBytes = static_cast<const std::size_t>(64 * 1024);
 constexpr std::size_t kTlsHandshakeHeaderSize = 4;
 
 [[nodiscard]] tls::TlsQuicLevel tls_level_from_encryption(QuicEncryptionLevel level) noexcept {
@@ -221,7 +221,7 @@ const tls::TlsTicketService *default_ticket_service() noexcept {
         if (!tls::TlsTicketService::random_key(1, system_now_unix_ms(), keys[0])) {
             return nullptr;
         }
-        constexpr std::uint32_t kTenYears = 10u * 365u * 86400u;
+        constexpr std::uint32_t kTenYears = 10U * 365U * 86400U;
         const tls::TlsTicketKeyPolicy policy{.key_lifetime_s = kTenYears, .key_retention_s = kTenYears};
         return new (std::nothrow) tls::TlsTicketService(keys, policy);
     };
@@ -798,7 +798,6 @@ common::IoResult<void> QuicTlsSession::pump_post_handshake() noexcept {
                 // RFC 9001 §6: key update is packet-layer only (the key_phase
                 // bit); the TLS message is prohibited on QUIC connections —
                 // fatal, exactly like BoringSSL's dispatcher (10 定谳 4).
-                return fatal(static_cast<std::uint8_t>(tls::TlsAlertDesc::UnexpectedMessage));
             default:
                 return fatal(static_cast<std::uint8_t>(tls::TlsAlertDesc::UnexpectedMessage));
         }
@@ -883,13 +882,13 @@ tls::TlsServerHandshakeEngine &QuicTlsSession::server() noexcept {
 }
 
 const tls::TlsClientHandshakeEngine &QuicTlsSession::client() const noexcept {
-    auto *engine = std::get_if<std::unique_ptr<tls::TlsClientHandshakeEngine>>(&engine_);
+    const auto *engine = std::get_if<std::unique_ptr<tls::TlsClientHandshakeEngine>>(&engine_);
     FIBER_ASSERT(engine != nullptr && *engine);
     return **engine;
 }
 
 const tls::TlsServerHandshakeEngine &QuicTlsSession::server() const noexcept {
-    auto *engine = std::get_if<std::unique_ptr<tls::TlsServerHandshakeEngine>>(&engine_);
+    const auto *engine = std::get_if<std::unique_ptr<tls::TlsServerHandshakeEngine>>(&engine_);
     FIBER_ASSERT(engine != nullptr && *engine);
     return **engine;
 }

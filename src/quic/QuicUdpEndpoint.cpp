@@ -225,7 +225,7 @@ enum class QuicSplitFrameResult : std::uint8_t {
     std::size_t hi = payload_len;
     std::size_t best = 0;
     while (lo <= hi) {
-        const std::size_t mid = lo + (hi - lo) / 2;
+        const std::size_t mid = lo + ((hi - lo) / 2);
         if (crypto_frame_len(offset, mid) <= available) {
             best = mid;
             lo = mid + 1;
@@ -1543,7 +1543,7 @@ QuicUdpEndpoint::retire_local_connection_id_and_resend(QuicConnection &connectio
 
 common::IoResult<QuicUdpEndpoint::QuicInitialValidation>
 QuicUdpEndpoint::validate_initial_address(const QuicPacketHeader &packet,
-                                          const QuicReceivedDatagram &datagram) noexcept {
+                                          const QuicReceivedDatagram &datagram) const noexcept {
     QuicInitialValidation validation{};
     validation.original_destination_connection_id = packet.dcid;
 
@@ -1606,7 +1606,7 @@ QuicUdpEndpoint::validate_initial_address(const QuicPacketHeader &packet,
     return std::unexpected(common::IoErr::Invalid);
 }
 
-common::IoResult<void> QuicUdpEndpoint::queue_new_token(QuicConnection &connection, QuicPath &path) noexcept {
+common::IoResult<void> QuicUdpEndpoint::queue_new_token(QuicConnection &connection, QuicPath &path) const noexcept {
     if (!options_.issue_new_token) {
         return {};
     }
@@ -1881,7 +1881,8 @@ QuicUdpEndpoint::process_datagram(std::uint8_t *data, net::UdpPacketRecvResult r
                 return std::unexpected(common::IoErr::Invalid);
             }
             std::array<std::uint8_t, kQuicStatelessResponseBufferSize> out{};
-            QuicPacketPlaintext plaintext{send_plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
+            QuicPacketPlaintext plaintext{.data = send_plaintext_buffer_.get(),
+                                          .capacity = kQuicUdpDefaultPlaintextBufferSize};
             auto written = encode_invalid_token_close_packet(*this, *packet, datagram, validation->close_reason,
                                                              out.data(), out.size(), plaintext);
             if (!written) {
@@ -2115,7 +2116,8 @@ QuicUdpEndpoint::build_path_control_datagram(QuicConnection &connection, QuicSen
         spec.min_packet_len = min_packet_len;
         spec.max_packet_len = allowed;
 
-        QuicPacketPlaintext plaintext{send_plaintext_buffer_.get(), kQuicUdpDefaultPlaintextBufferSize};
+        QuicPacketPlaintext plaintext{.data = send_plaintext_buffer_.get(),
+                                      .capacity = kQuicUdpDefaultPlaintextBufferSize};
         auto encoded = quic_encode_packet(connection, spec, plaintext, datagram.data, datagram.capacity);
         if (!encoded) {
             candidate.pending_frames.push_front(*frame);
@@ -2276,7 +2278,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         }
         if (connection.role() == QuicConnectionRole::Client && level == QuicEncryptionLevel::Initial) {
             const mem::IoBuf &token = connection.initial_token();
-            header.token = {token.readable_data(), token.readable()};
+            header.token = {.data = token.readable_data(), .len = token.readable()};
         }
 
         const std::size_t min_payload = std::max(quic_packet_payload_capacity(header, min_packet_len),
@@ -2415,7 +2417,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         spec.scid = connection.local_connection_id();
         if (connection.role() == QuicConnectionRole::Client && level == QuicEncryptionLevel::Initial) {
             const mem::IoBuf &token = connection.initial_token();
-            spec.token = {token.readable_data(), token.readable()};
+            spec.token = {.data = token.readable_data(), .len = token.readable()};
         }
         spec.payload = packet_payload;
         spec.payload_len = payload_len;
@@ -2424,7 +2426,7 @@ common::IoResult<QuicBuildSendResult> QuicUdpEndpoint::build_send_datagram(QuicC
         spec.min_packet_len = min_packet_len;
         spec.max_packet_len = max_packet_len;
 
-        QuicPacketPlaintext plaintext{packet_payload, packet_payload_cap};
+        QuicPacketPlaintext plaintext{.data = packet_payload, .capacity = packet_payload_cap};
         auto encoded = quic_encode_packet(connection, spec, plaintext, datagram.data + datagram.length,
                                           datagram.capacity - datagram.length);
         if (!encoded) {

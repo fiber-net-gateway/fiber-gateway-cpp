@@ -1,5 +1,6 @@
 #include <fiber/quic/QuicStreamTable.h>
 
+#include <algorithm>
 #include <limits>
 #include <new>
 
@@ -178,9 +179,7 @@ bool QuicStreamTable::rehash(std::size_t new_bucket_count) noexcept {
     if ((new_bucket_count & (new_bucket_count - 1U)) != 0) {
         new_bucket_count = next_pow2(new_bucket_count);
     }
-    if (new_bucket_count < kMinBucketCount) {
-        new_bucket_count = kMinBucketCount;
-    }
+    new_bucket_count = std::max(new_bucket_count, kMinBucketCount);
     if (size_ > new_bucket_count / 2U) {
         return false;
     }

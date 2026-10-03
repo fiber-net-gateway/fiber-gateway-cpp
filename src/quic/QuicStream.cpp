@@ -581,9 +581,7 @@ void QuicStream::mark_send_aborted() noexcept {
 }
 
 void QuicStream::on_max_stream_data(std::uint64_t limit) noexcept {
-    if (limit > max_stream_data_) {
-        max_stream_data_ = limit;
-    }
+    max_stream_data_ = std::max(limit, max_stream_data_);
     notify_write_waiter();
     if (conn_ != nullptr && has_send_work()) {
         (void) conn_->queue_stream_frame(*this);

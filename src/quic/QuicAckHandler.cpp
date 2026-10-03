@@ -201,9 +201,12 @@ void validate_ecn_feedback(QuicConnection &connection, QuicPacketNumberSpace &sp
         QuicOutputFrame *next = space.sent_frames.next_of(*frame);
         if (frame->packet_len != 0) {
             record_acked_ecn_packet(*frame, ecn_stats);
-            const bool unblocked = quic_congestion_on_ack(
-                    connection.congestion(), QuicAckSample{frame->packet_len, frame->packet_number, frame->send_time},
-                    connection.reset_packet_number(), now, quic_oldest_sent_time(connection));
+            const bool unblocked =
+                    quic_congestion_on_ack(connection.congestion(),
+                                           QuicAckSample{.packet_len = frame->packet_len,
+                                                         .packet_number = frame->packet_number,
+                                                         .send_time = frame->send_time},
+                                           connection.reset_packet_number(), now, quic_oldest_sent_time(connection));
             result.unblocked = result.unblocked || unblocked;
         }
 

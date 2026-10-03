@@ -299,7 +299,7 @@ private:
     [[nodiscard]] common::IoResult<void> register_connection_id(QuicConnection &connection,
                                                                 QuicConnectionIdIndex &index,
                                                                 const QuicConnectionId &cid) noexcept;
-    [[nodiscard]] common::IoResult<void> attach_client_connection(QuicConnection::Lease connection) noexcept;
+    [[nodiscard]] common::IoResult<void> attach_client_connection(QuicConnection::Lease lease) noexcept;
     void register_stateless_reset_token(QuicConnection &connection, QuicRemoteConnectionIdSlot &slot) noexcept;
     void unregister_stateless_reset_token(QuicRemoteConnectionIdSlot &slot) noexcept;
     [[nodiscard]] bool handle_peer_stateless_reset(const std::uint8_t *packet_data, std::size_t packet_len) noexcept;
@@ -312,7 +312,7 @@ private:
     retire_local_connection_id_and_resend(QuicConnection &connection, std::uint64_t sequence_number,
                                           const QuicConnectionId &packet_dcid) noexcept;
     [[nodiscard]] common::IoResult<QuicInitialValidation>
-    validate_initial_address(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram) noexcept;
+    validate_initial_address(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram) const noexcept;
     [[nodiscard]] common::IoResult<void> send_direct_datagram(const std::uint8_t *data, std::size_t len,
                                                               const QuicReceivedDatagram &datagram) noexcept;
     [[nodiscard]] bool allow_stateless_response(QuicStatelessResponseKind kind, const net::SocketAddress &peer,
@@ -321,7 +321,7 @@ private:
     [[nodiscard]] common::IoResult<void> send_stateless_reset(const QuicPacketHeader &packet, std::uint8_t *out,
                                                               std::size_t out_cap,
                                                               const QuicReceivedDatagram &datagram) noexcept;
-    [[nodiscard]] common::IoResult<void> queue_new_token(QuicConnection &connection, QuicPath &path) noexcept;
+    [[nodiscard]] common::IoResult<void> queue_new_token(QuicConnection &connection, QuicPath &path) const noexcept;
     [[nodiscard]] common::IoResult<QuicConnection *>
     create_connection(const QuicPacketHeader &packet, const QuicReceivedDatagram &datagram,
                       const QuicInitialValidation &validation) noexcept;

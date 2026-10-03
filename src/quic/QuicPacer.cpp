@@ -32,7 +32,7 @@ inline constexpr std::int64_t kMaxPacingRttMs = 60000;
     if (denominator == 0) {
         return std::numeric_limits<std::uint64_t>::max();
     }
-    return numerator / denominator + static_cast<std::uint64_t>(numerator % denominator != 0);
+    return (numerator / denominator) + static_cast<std::uint64_t>(numerator % denominator != 0);
 }
 
 [[nodiscard]] std::uint64_t pacing_rate(const QuicPacingOptions &options, const QuicCongestionState &congestion,
@@ -84,7 +84,7 @@ void refill_budget(QuicPacerState &state, std::chrono::steady_clock::time_point 
 
     std::uint64_t added = saturating_mul(elapsed_whole, state.rate_bytes_per_second);
     added = saturating_add(added, saturating_mul(elapsed_remainder, rate_whole));
-    const std::uint64_t fractional = elapsed_remainder * rate_remainder + state.refill_remainder;
+    const std::uint64_t fractional = (elapsed_remainder * rate_remainder) + state.refill_remainder;
     added = saturating_add(added, fractional / kNanosPerSecond);
 
     const std::size_t needed = state.capacity_bytes - state.budget_bytes;
@@ -118,7 +118,7 @@ QuicPacingDecision quic_pacer_check(QuicPacerState &state, const QuicPacingOptio
                                     const QuicCongestionState &congestion, const QuicRttState &rtt,
                                     std::size_t path_mtu, std::chrono::steady_clock::time_point now) noexcept {
     if (!options.enabled) {
-        return QuicPacingDecision{true, now};
+        return QuicPacingDecision{.ready = true, .deadline = now};
     }
 
     const std::size_t mtu = std::max<std::size_t>(path_mtu, 1);
@@ -139,7 +139,7 @@ QuicPacingDecision quic_pacer_check(QuicPacerState &state, const QuicPacingOptio
     }
 
     if (state.budget_bytes >= mtu) {
-        return QuicPacingDecision{true, now};
+        return QuicPacingDecision{.ready = true, .deadline = now};
     }
 
     const std::uint64_t deficit = mtu - state.budget_bytes;
@@ -154,7 +154,8 @@ QuicPacingDecision quic_pacer_check(QuicPacerState &state, const QuicPacingOptio
     wait_ns = round_wait(wait_ns, options.timer_granularity);
     const std::uint64_t max_duration = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
     wait_ns = std::min(wait_ns, max_duration);
-    return QuicPacingDecision{false, now + std::chrono::nanoseconds{static_cast<std::int64_t>(wait_ns)}};
+    return QuicPacingDecision{.ready = false,
+                              .deadline = now + std::chrono::nanoseconds{static_cast<std::int64_t>(wait_ns)}};
 }
 
 void quic_pacer_on_datagram_sent(QuicPacerState &state, std::size_t wire_bytes) noexcept {

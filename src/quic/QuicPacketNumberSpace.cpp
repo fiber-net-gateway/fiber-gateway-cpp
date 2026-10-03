@@ -62,7 +62,7 @@ void QuicPacketNumberSpace::reset(QuicEncryptionLevel space_level) noexcept {
     send_ack = false;
 }
 
-QuicOutputFrame *QuicPacketNumberSpace::alloc_frame() noexcept {
+QuicOutputFrame *QuicPacketNumberSpace::alloc_frame() const noexcept {
     return frame_pool != nullptr ? frame_pool->alloc() : new (std::nothrow) QuicOutputFrame{};
 }
 
@@ -295,7 +295,7 @@ void QuicPacketNumberSpace::on_packet_received(std::uint64_t pn, QuicTime receiv
             ++ack_range_count;
         }
         if (ack_range_count > 1) {
-            std::memmove(&ack_ranges[1], &ack_ranges[0], sizeof(QuicAckRange) * (ack_range_count - 1));
+            std::memmove(&ack_ranges[1], ack_ranges.data(), sizeof(QuicAckRange) * (ack_range_count - 1));
         }
         ack_ranges[0].gap = gap;
         ack_ranges[0].range = range;

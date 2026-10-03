@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <expected>
+#include <utility>
 
 namespace fiber::quic {
 
@@ -165,7 +166,7 @@ parse_long_header(const std::uint8_t *datagram, std::size_t datagram_len, std::u
             return std::unexpected(common::IoErr::Invalid);
         }
         packet.type = QuicPacketType::VersionNegotiation;
-        packet.version_list = {in.pos(), in.remaining()};
+        packet.version_list = {.data = in.pos(), .len = in.remaining()};
         packet.packet_len = datagram_len;
         return packet;
     }
@@ -189,7 +190,7 @@ parse_long_header(const std::uint8_t *datagram, std::size_t datagram_len, std::u
         }
         packet.type = QuicPacketType::Retry;
         packet.level = QuicEncryptionLevel::Initial;
-        packet.token = {in.pos(), in.remaining() - kAeadTagLength};
+        packet.token = {.data = in.pos(), .len = in.remaining() - kAeadTagLength};
         packet.packet_len = datagram_len;
         return packet;
     }
@@ -519,7 +520,7 @@ common::IoResult<void> quic_read_packet_number(QuicPacketHeader &packet, const Q
 
     const std::uint8_t pn_len = static_cast<std::uint8_t>((packet.flags & kPacketFlagPnLengthMask) + 1);
     const std::uint8_t *packet_end = packet.packet_data + packet.packet_len;
-    if (packet.protected_pn > packet_end || static_cast<std::size_t>(packet_end - packet.protected_pn) < pn_len) {
+    if (packet.protected_pn > packet_end || std::cmp_less(packet_end - packet.protected_pn, pn_len)) {
         return std::unexpected(common::IoErr::Invalid);
     }
 
@@ -714,7 +715,7 @@ common::IoResult<QuicInputFrameParseResult> quic_parse_frame_for_receiver(QuicCo
                 }
             }
             frame.u.ack.ranges_length = static_cast<std::uint64_t>(payload.pos() - ranges);
-            frame.data = {ranges, static_cast<std::size_t>(frame.u.ack.ranges_length)};
+            frame.data = {.data = ranges, .len = static_cast<std::size_t>(frame.u.ack.ranges_length)};
 
             if (frame.type == QuicFrameType::AckEcn) {
                 auto ect0 = quic_parse_varint(payload);
