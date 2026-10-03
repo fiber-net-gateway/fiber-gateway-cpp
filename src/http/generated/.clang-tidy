@@ -1,0 +1,4 @@
+# Machine-generated output of scripts/http/generate_header_line_parser.ts.
+# Lint findings here belong to the generator, not to this file — keep this
+# directory fully unchecked (see feature/clang-tidy-rollout.md).
+Checks: '-*'

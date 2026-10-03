@@ -28,6 +28,13 @@ ctest --test-dir build
 # Format code (requires clang-format on PATH)
 ./format_code.sh
 
+# Lint changed files with clang-tidy (requires clang-tidy >= 17 and a configured
+# build tree for compile_commands.json — plain `cmake -S . -B build` provides it)
+./run_tidy.sh
+
+# Lint and auto-fix everything under src/ (reformats automatically afterwards)
+./run_tidy.sh -f $(git ls-files 'src/*.cpp')
+
 # TLS/QUIC fuzzers (separate build tree, Clang + libstdc++; see fuzz/README.md)
 cmake -S . -B build-fuzz -DFIBER_BUILD_FUZZERS=ON -DFIBER_USE_LIBCXX=OFF -DFIBER_BUILD_TESTS=OFF
 cmake --build build-fuzz -j && ./build-fuzz/fuzz/tls_server_engine_fuzzer -runs=0 fuzz/corpus/tls_server_engine_fuzzer
@@ -149,6 +156,14 @@ Design state and member variables to be minimal and explicit. Establish required
 - Local includes with relative paths: `#include "../event/EventLoop.h"`
 - Namespaces under `fiber::...` (`fiber::async`, `fiber::event`, `fiber::net`, `fiber::http`, `fiber::quic`, `fiber::dns`, `fiber::script`, `fiber::json`, `fiber::common`, `fiber::mem`)
 - Tests: `tests/*Test.cpp`, auto-discovered by CMake into `fiber_tests` target
+
+### Linting (clang-tidy)
+
+- Check set and the rationale for every disable live in `.clang-tidy` and `feature/clang-tidy-rollout.md`; do not remove a disable without re-running the baseline documented there
+- Headers are checked via the translation units that include them; a header-only change fans out to the including `.cpp` files
+- `NOLINT` sparingly and always with a trailing reason comment
+- Coroutine parameters that are by-value on purpose (the object must live in the coroutine frame across `co_await` suspension) get `// NOLINT(performance-unnecessary-value-param)` — do not "fix" them to references, that is a lifetime bug
+- `./run_tidy.sh` exit codes: 0 clean / 1 findings / 2 environment error (CI-ready as-is)
 
 ## Project Structure
 
