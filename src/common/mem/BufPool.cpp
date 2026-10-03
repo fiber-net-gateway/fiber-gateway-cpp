@@ -101,9 +101,7 @@ void *BufPool::alloc(size_t size, size_t align) noexcept {
     if (size == 0) {
         return nullptr;
     }
-    if (align < alignof(std::max_align_t)) {
-        align = alignof(std::max_align_t);
-    }
+    align = std::max(align, alignof(std::max_align_t));
     if (size <= psz) {
         return alloc_from_blocks(size, align);
     }

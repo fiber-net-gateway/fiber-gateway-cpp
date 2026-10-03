@@ -31,7 +31,7 @@ using Crc32Word = std::uint32_t;
 #endif
 
 inline constexpr std::size_t kCrc32Braids = 5;
-inline constexpr std::uint32_t kCrc32Poly = 0xedb88320u;
+inline constexpr std::uint32_t kCrc32Poly = 0xedb88320U;
 
 // Byte-wise table: CRC of each possible byte, poly 0xedb88320 reflected.
 struct Crc32ByteTable {
@@ -41,7 +41,7 @@ struct Crc32ByteTable {
         for (std::uint32_t i = 0; i < 256; ++i) {
             std::uint32_t c = i;
             for (int k = 0; k < 8; ++k) {
-                c = (c & 1u) != 0u ? kCrc32Poly ^ (c >> 1) : c >> 1;
+                c = (c & 1U) != 0U ? kCrc32Poly ^ (c >> 1) : c >> 1;
             }
             entries[i] = c;
         }

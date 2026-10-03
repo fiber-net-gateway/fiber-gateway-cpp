@@ -58,6 +58,8 @@ std::string base64_encode(const std::uint8_t *data, std::size_t len) {
     return out;
 }
 
+// Allocation failure is fatal by house policy (no-exceptions; bad_alloc would terminate).
+// NOLINTNEXTLINE(bugprone-exception-escape)
 bool base64_decode(std::string_view in, std::string &out) noexcept {
     out.clear();
     if (in.empty()) {
