@@ -233,6 +233,48 @@ TEST(QuicAckHandlerTest, AckedSentFrameUpdatesCongestionAndRtt) {
     EXPECT_EQ(connection.rtt().latest_rtt, fiber::quic::QuicTime{80});
 }
 
+// A path reset (migration) during the handshake zeroes bytes in flight but
+// sets reset_packet_number from the Application space only. Handshake
+// packets still in flight whose numbers clear that threshold are subtracted
+// when acked: the reset must keep them counted, or the ACK underflows the
+// counter (a peer could abort the process by rebinding mid-handshake). Found
+// by fuzz/quic_network_fuzzer.
+TEST(QuicAckHandlerTest, PathResetKeepsOtherSpacesInFlightForTheirAcks) {
+    fiber::quic::QuicConnection::Options options = fiber::test::quic_options();
+    options.role = fiber::quic::QuicConnectionRole::Server;
+    fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), options);
+    auto &handshake = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Handshake);
+    for (std::uint64_t pn = 0; pn < 6; ++pn) {
+        fiber::quic::QuicOutputFrame *frame = handshake.alloc_frame();
+        ASSERT_NE(frame, nullptr);
+        frame->type = fiber::quic::QuicFrameType::Ping;
+        frame->packet_number = pn;
+        frame->packet_len = 100;
+        frame->send_time = fiber::quic::QuicTime{10};
+        frame->packet_ack_eliciting = true;
+        handshake.sent_frames.push_back(*frame);
+        fiber::quic::quic_congestion_on_packet_sent(connection.congestion(), 100, true, false);
+    }
+    handshake.next_packet_number = 6;
+    connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).next_packet_number = 4;
+
+    connection.reset_congestion_for_path(fiber::quic::QuicTime{20});
+    ASSERT_EQ(connection.reset_packet_number(), 4U);
+    // Handshake 4 and 5 clear the threshold and stay counted; 0..3 do not.
+    EXPECT_EQ(connection.congestion().in_flight, 200U);
+
+    fiber::quic::QuicInputFrame ack{};
+    ack.type = fiber::quic::QuicFrameType::Ack;
+    ack.level = fiber::quic::QuicEncryptionLevel::Handshake;
+    ack.u.ack.largest = 5;
+    ack.u.ack.first_range = 5;
+    auto result = fiber::quic::quic_handle_ack_frame(connection, fiber::quic::QuicEncryptionLevel::Handshake, ack,
+                                                     fiber::quic::QuicTime{30});
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+    EXPECT_TRUE(handshake.sent_frames.empty());
+    EXPECT_EQ(connection.congestion().in_flight, 0U);
+}
+
 TEST(QuicAckHandlerTest, AckOfAckDropsRangesThroughSentAckLargest) {
     fiber::quic::QuicConnection connection(fiber::test::quic_endpoint(), fiber::test::quic_options());
     auto &space = connection.packet_number_space(fiber::quic::QuicEncryptionLevel::Initial);

@@ -2394,6 +2394,7 @@ void QuicConnection::reset_after_retry() noexcept {
 
     const QuicTime now = active_timer_loop() != nullptr ? quic_time_ms(loop_.now()) : QuicTime{0};
     quic_congestion_reset_for_path(congestion_, rtt_, now);
+    recount_in_flight_after_reset();
     quic_pacer_reset(pacer_);
     cancel_pacing_timer();
 }
@@ -2738,6 +2739,7 @@ void QuicConnection::on_early_data_rejected() noexcept {
     crypto_.discard_level(QuicEncryptionLevel::EarlyData);
     const QuicTime now = active_timer_loop() != nullptr ? quic_time_ms(loop_.now()) : QuicTime{0};
     quic_congestion_reset_for_path(congestion_, rtt_, now);
+    recount_in_flight_after_reset();
     quic_pacer_reset(pacer_);
     if (options_.ops.on_early_data_rejected != nullptr) {
         options_.ops.on_early_data_rejected(options_.owner);
@@ -3090,10 +3092,30 @@ common::IoResult<bool> QuicConnection::recv_new_connection_id_frame(const QuicNe
     return send_output;
 }
 
+void QuicConnection::recount_in_flight_after_reset() noexcept {
+    // A congestion reset zeroes bytes in flight, but the packets still
+    // tracked in sent_frames are subtracted again when acked or declared
+    // lost -- unless older than reset_packet_number_, a single threshold
+    // compared against every space's numbers. Count exactly what those
+    // paths will subtract, or a later ACK underflows the counter: e.g. a
+    // migration during the handshake leaves Handshake packets in flight
+    // whose numbers clear the Application-space threshold.
+    for (const QuicEncryptionLevel level:
+         {QuicEncryptionLevel::Initial, QuicEncryptionLevel::Handshake, QuicEncryptionLevel::Application}) {
+        const QuicOutputFrameQueue &sent = packet_number_space(level).sent_frames;
+        for (const QuicOutputFrame *frame = sent.front(); frame != nullptr; frame = sent.next_of(*frame)) {
+            if (frame->packet_len != 0 && frame->packet_number >= reset_packet_number_) {
+                congestion_.in_flight += frame->packet_len;
+            }
+        }
+    }
+}
+
 void QuicConnection::reset_congestion_for_path(QuicTime now) noexcept {
     auto &space = packet_number_space(QuicEncryptionLevel::Application);
     reset_packet_number_ = space.next_packet_number;
     quic_congestion_reset_for_path(congestion_, rtt_, now);
+    recount_in_flight_after_reset();
     quic_pacer_reset(pacer_);
     if (active_timer_loop() != nullptr) {
         cancel_pacing_timer();
