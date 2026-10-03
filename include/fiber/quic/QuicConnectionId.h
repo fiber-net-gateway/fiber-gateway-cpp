@@ -22,21 +22,28 @@ inline constexpr std::size_t kQuicLocalConnectionIdSlotCount = 3;
 // NGX_QUIC_MAX_SERVER_IDS = 8). We advertise 4 and reserve 8 slots.
 inline constexpr std::size_t kQuicRemoteConnectionIdSlotCount = 8;
 
-struct QuicConnectionId {
-    std::array<std::uint8_t, kMaxConnectionIdLength> bytes{};
-    std::uint8_t length = 0;
-
-    [[nodiscard]] bool empty() const noexcept { return length == 0; }
-    [[nodiscard]] const std::uint8_t *data() const noexcept { return bytes.data(); }
-    [[nodiscard]] std::size_t size() const noexcept { return length; }
+class QuicConnectionId {
+public:
+    [[nodiscard]] bool empty() const noexcept { return length_ == 0; }
+    [[nodiscard]] const std::uint8_t *data() const noexcept { return bytes_.data(); }
+    [[nodiscard]] std::size_t size() const noexcept { return length_; }
+    [[nodiscard]] std::uint64_t hash() const noexcept { return hash_; }
 
     static common::IoResult<QuicConnectionId> from_bytes(const std::uint8_t *data, std::size_t len) noexcept;
+
+private:
+    static constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
+    static constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+
+    std::array<std::uint8_t, kMaxConnectionIdLength> bytes_{};
+    std::uint8_t length_ = 0;
+    // Include the length, including for the default empty CID.
+    std::uint64_t hash_ = kFnvOffset * kFnvPrime;
 };
 
 struct QuicConnectionIdIndex {
     QuicConnection *connection = nullptr;
     QuicConnectionId cid_key{};
-    std::uint64_t cid_hash = 0;
     common::IntrusiveRbTreeHook cid_hook{};
 };
 

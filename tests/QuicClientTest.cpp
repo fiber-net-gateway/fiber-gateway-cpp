@@ -390,7 +390,7 @@ bool create_reset_token(const std::array<std::uint8_t, fiber::quic::kQuicStatele
                         const fiber::quic::QuicConnectionId &cid,
                         std::uint8_t out[fiber::quic::kStatelessResetTokenLength]) noexcept {
     std::uint8_t message[1 + fiber::quic::kMaxConnectionIdLength]{};
-    message[0] = cid.length;
+    message[0] = cid.size();
     std::memcpy(message + 1, cid.data(), cid.size());
     std::uint8_t digest[32]{};
     unsigned int digest_len = 0;

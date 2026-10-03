@@ -728,6 +728,22 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
         return std::unexpected(conn.closed() ? common::IoErr::Canceled : common::IoErr::Invalid);
     }
 
+    auto first_packet = quic_parse_packet_header(datagram.data, datagram.len, short_dcid_len);
+    if (!first_packet) {
+        return std::unexpected(first_packet.error());
+    }
+    return quic_process_datagram(conn, datagram, *first_packet, short_dcid_len);
+}
+
+common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &conn,
+                                                                const QuicReceivedDatagram &datagram,
+                                                                const QuicPacketHeader &first_packet,
+                                                                std::uint8_t short_dcid_len) noexcept {
+    if (datagram.data == nullptr || datagram.len == 0 || conn.closed()) {
+        return std::unexpected(conn.closed() ? common::IoErr::Canceled : common::IoErr::Invalid);
+    }
+    FIBER_ASSERT(first_packet.packet_data == datagram.data);
+
     QuicPacketProcessResult aggregate{};
     bool has_good_packet = false;
     bool recorded_datagram_bytes = false;
@@ -736,7 +752,8 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
     while (offset < datagram.len) {
         std::uint8_t *packet_data = datagram.data + offset;
         const std::size_t remaining = datagram.len - offset;
-        auto packet = quic_parse_packet_header(packet_data, remaining, short_dcid_len);
+        auto packet = offset == 0 ? common::IoResult<QuicPacketHeader>(first_packet)
+                                  : quic_parse_packet_header(packet_data, remaining, short_dcid_len);
         if (!packet) {
             if (has_good_packet) {
                 return aggregate;
@@ -779,7 +796,7 @@ common::IoResult<QuicPacketProcessResult> quic_process_datagram(QuicConnection &
 
         QuicPacketNumberSpace &space = conn.packet_number_space(packet->level);
         const std::uint64_t previous_largest_received = space.largest_received_packet_number;
-        auto decoded = quic_decode_packet(conn, packet_data, packet->packet_len, short_dcid_len);
+        auto decoded = quic_decode_packet(conn, packet_data, *packet);
         if (!decoded) {
             if (decoded.error() == common::IoErr::NotFound) {
                 offset += packet->packet_len;

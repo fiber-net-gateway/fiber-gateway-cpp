@@ -431,8 +431,11 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
                                                        datagram.data(), datagram.size());
         ASSERT_TRUE(encoded.has_value()) << static_cast<int>(encoded.error());
         auto received = received_datagram(datagram.data(), encoded->packet_len);
-        auto result =
-                fiber::quic::quic_process_datagram(server, received, static_cast<std::uint8_t>(server_cid.size()));
+        auto first_packet = fiber::quic::quic_parse_packet_header(received.data, received.len,
+                                                                  static_cast<std::uint8_t>(server_cid.size()));
+        ASSERT_TRUE(first_packet.has_value());
+        auto result = fiber::quic::quic_process_datagram(server, received, *first_packet,
+                                                         static_cast<std::uint8_t>(server_cid.size()));
 
         ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
         EXPECT_EQ(result->packet_type, fiber::quic::QuicPacketType::Short);
@@ -442,6 +445,48 @@ TEST(QuicPacketProcessorTest, ProcessesApplicationPingPacket) {
         EXPECT_TRUE(result->ack_eliciting);
         EXPECT_TRUE(result->send_ack);
         EXPECT_EQ(server.packet_number_space(fiber::quic::QuicEncryptionLevel::Application).pending_ack, 0U);
+    });
+}
+
+TEST(QuicPacketProcessorTest, ParsesNextPacketAfterSkippingPreparsedHandshakeWithoutKeys) {
+    ::fiber::test::run_in_quic_loop([&](::fiber::mem::IoBufNodePool &) {
+        ApplicationPacketTestContext context;
+        ASSERT_TRUE(context.init_keys());
+        const std::array<std::uint8_t, 1> payload{0x01};
+        auto encoded = context.encode(payload.data(), payload.size(), 1);
+        ASSERT_TRUE(encoded.has_value());
+
+        // A Handshake packet with no available read keys precedes the valid
+        // application packet. Its header must only be reused at offset zero.
+        const std::array<std::uint8_t, 12> handshake{fiber::quic::kPacketFlagLong | fiber::quic::kPacketFlagFixed |
+                                                             fiber::quic::kLongPacketTypeHandshake,
+                                                     0,
+                                                     0,
+                                                     0,
+                                                     1,
+                                                     0,
+                                                     0,
+                                                     4,
+                                                     0,
+                                                     0,
+                                                     0,
+                                                     0};
+        std::array<std::uint8_t, 512> coalesced{};
+        std::memcpy(coalesced.data(), handshake.data(), handshake.size());
+        std::memcpy(coalesced.data() + handshake.size(), context.datagram.data(), encoded->packet_len);
+        auto received = received_datagram(coalesced.data(), handshake.size() + encoded->packet_len);
+        const auto cid_len = static_cast<std::uint8_t>(context.server_cid.size());
+        auto first_packet = fiber::quic::quic_parse_packet_header(received.data, received.len, cid_len);
+        ASSERT_TRUE(first_packet.has_value());
+        ASSERT_EQ(first_packet->packet_len, handshake.size());
+
+        auto result = fiber::quic::quic_process_datagram(context.server, received, *first_packet, cid_len);
+
+        ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error());
+        EXPECT_EQ(result->packet_count, 1U);
+        EXPECT_EQ(result->packet_type, fiber::quic::QuicPacketType::Short);
+        EXPECT_EQ(result->packet_number, 0U);
+        EXPECT_TRUE(result->ack_eliciting);
     });
 }
 

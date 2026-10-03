@@ -108,7 +108,7 @@ write_preferred_address(QuicWriteCursor *out, const QuicPreferredAddress &prefer
         wrote = out->write_be16(preferred.ipv6.ip().is_v6() ? preferred.ipv6.port() : 0);
     }
     if (wrote) {
-        wrote = out->write_u8(preferred.connection_id.length);
+        wrote = out->write_u8(preferred.connection_id.size());
     }
     if (wrote) {
         wrote = out->write_bytes(preferred.connection_id.data(), preferred.connection_id.size());

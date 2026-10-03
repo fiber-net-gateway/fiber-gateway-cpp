@@ -288,7 +288,7 @@ common::IoResult<void> quic_create_retry_integrity_tag(const QuicConnectionId &o
         return std::unexpected(common::IoErr::MessageTooLarge);
     }
     std::size_t offset = 0;
-    pseudo_packet[offset++] = original_dcid.length;
+    pseudo_packet[offset++] = original_dcid.size();
     if (!original_dcid.empty()) {
         std::memcpy(pseudo_packet + offset, original_dcid.data(), original_dcid.size());
         offset += original_dcid.size();

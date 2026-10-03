@@ -54,6 +54,12 @@ quic_process_initial_datagram(QuicConnection &conn, const QuicReceivedDatagram &
 quic_process_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram,
                       std::uint8_t short_dcid_len = kQuicConnectionIdLength) noexcept;
 
+// first_packet must be freshly parsed from datagram.data, before removing
+// protection. Subsequent coalesced packets are parsed by the processor.
+[[nodiscard]] common::IoResult<QuicPacketProcessResult>
+quic_process_datagram(QuicConnection &conn, const QuicReceivedDatagram &datagram, const QuicPacketHeader &first_packet,
+                      std::uint8_t short_dcid_len = kQuicConnectionIdLength) noexcept;
+
 } // namespace fiber::quic
 
 #endif // FIBER_QUIC_QUIC_PACKET_PROCESSOR_H

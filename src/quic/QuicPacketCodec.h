@@ -75,6 +75,11 @@ quic_encode_packet(QuicConnection &connection, const QuicPacketEncodeSpec &spec,
                                                                           std::size_t datagram_len,
                                                                           std::uint8_t short_dcid_len) noexcept;
 
+// The header must be freshly parsed from datagram, before removing protection.
+// Reuse it to avoid parsing and hashing the connection IDs again.
+[[nodiscard]] common::IoResult<QuicPacketDecodeResult>
+quic_decode_packet(QuicConnection &connection, std::uint8_t *datagram, QuicPacketHeader packet) noexcept;
+
 } // namespace fiber::quic
 
 #endif // FIBER_QUIC_QUIC_PACKET_CODEC_H

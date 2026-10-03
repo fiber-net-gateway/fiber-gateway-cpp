@@ -74,9 +74,6 @@ constexpr std::array<std::uint8_t, static_cast<std::size_t>(kLastFrameType + 1)>
 }
 
 [[nodiscard]] common::IoResult<void> write_connection_id(QuicWriteCursor &out, const QuicConnectionId &cid) noexcept {
-    if (cid.length > kMaxConnectionIdLength) {
-        return std::unexpected(common::IoErr::Invalid);
-    }
     return out.write_bytes(cid.data(), cid.size());
 }
 
@@ -408,7 +405,7 @@ common::IoResult<std::size_t> quic_create_packet_header(QuicWriteCursor &out, co
         if (!wrote) {
             return std::unexpected(wrote.error());
         }
-        wrote = out.write_u8(packet.dcid.length);
+        wrote = out.write_u8(packet.dcid.size());
         if (!wrote) {
             return std::unexpected(wrote.error());
         }
@@ -416,7 +413,7 @@ common::IoResult<std::size_t> quic_create_packet_header(QuicWriteCursor &out, co
         if (!wrote) {
             return std::unexpected(wrote.error());
         }
-        wrote = out.write_u8(packet.scid.length);
+        wrote = out.write_u8(packet.scid.size());
         if (!wrote) {
             return std::unexpected(wrote.error());
         }
