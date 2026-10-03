@@ -1,0 +1,59 @@
+# clang-tidy configuration for fiber-gateway-cpp.
+# Run via ./run_tidy.sh (see that script for build-tree requirements).
+# Check-set rationale and baseline counts for every disable live in
+# feature/clang-tidy-rollout.md; do not remove a disable without re-running
+# the baseline documented there.
+#
+# Deliberately NOT enabled (tier-2 candidates, see rollout doc):
+#   misc-include-cleaner (massive churn vs. the deliberate relative-include style)
+#   misc-header-include-cycle, misc-no-recursion
+#   misc-non-private-member-variables-in-classes (perf-first code uses public-member structs)
+#   cppcoreguidelines-* (pro-bounds/pro-type-ownership conflict with perf-first design)
+#   readability-identifier-naming (needs a naming-spec project of its own)
+Checks: >
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  performance-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  -modernize-use-auto,
+  -modernize-use-nodiscard,
+  -modernize-use-default-member-init,
+  -modernize-macro-to-enum,
+  readability-*,
+  -readability-function-cognitive-complexity,
+  -readability-magic-numbers,
+  -readability-identifier-naming,
+  -readability-identifier-length,
+  -readability-implicit-bool-conversion,
+  -readability-else-after-return,
+  -readability-isolate-declaration,
+  -readability-convert-member-functions-to-static,
+  -readability-braces-around-statements,
+  -readability-suspicious-call-argument,
+  -readability-use-anyofallof,
+  misc-definitions-in-headers,
+  misc-unused-parameters,
+  misc-static-assert,
+  misc-confusable-identifiers,
+  misc-redundant-expression,
+  misc-unconventional-assign-operator,
+  misc-throw-by-value-catch-by-reference,
+  clang-analyzer-*,
+  -clang-analyzer-osx.*,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-optin.cplusplus.UninitializedObject,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
+# Header paths containing a top-ish segment literally named src/ or include/
+# (the compile db's -I dirs are absolute, so header diagnostics print as
+# absolute paths; this also matches repo-relative forms).
+HeaderFilterRegex: '(^|/)(src|include)/'
+# Exclusion wins over HeaderFilterRegex: fetched deps (temp/_deps boringssl/
+# googletest/protobuf include dirs), libc++/system headers under /usr, and
+# build-tree generated headers (build*/, cmake-build-debug).
+ExcludeHeaderFilterRegex: '_deps|(^|/)(temp|build[^/]*)/|(^|/)usr/|cmake-build'
+# During -fix runs clang-tidy formats only the code it replaces, using the
+# repo .clang-format (found by upward search from each source file).
+FormatStyle: file
