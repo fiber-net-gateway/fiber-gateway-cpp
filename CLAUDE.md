@@ -161,6 +161,8 @@ Design state and member variables to be minimal and explicit. Establish required
 
 - Check set and the rationale for every disable live in `.clang-tidy` and `feature/clang-tidy-rollout.md`; do not remove a disable without re-running the baseline documented there
 - Headers are checked via the translation units that include them; a header-only change fans out to the including `.cpp` files
+- `src/`, `include/`, `example/` are at zero warnings and enforced via `WarningsAsErrors: '*'`; `apps/`, `tests/`, `fuzz/` are not yet cleaned (deferred by nested `.clang-tidy` files — see the rollout doc)
+- After a `-f` auto-fix run, rebuild and scan for autofix damage before trusting tests (clang-tidy 20 fix patterns; checklist in `feature/clang-tidy-rollout.md` §7)
 - `NOLINT` sparingly and always with a trailing reason comment
 - Coroutine parameters that are by-value on purpose (the object must live in the coroutine frame across `co_await` suspension) get `// NOLINT(performance-unnecessary-value-param)` — do not "fix" them to references, that is a lifetime bug
 - `./run_tidy.sh` exit codes: 0 clean / 1 findings / 2 environment error (CI-ready as-is)

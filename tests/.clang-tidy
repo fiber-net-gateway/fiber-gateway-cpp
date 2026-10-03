@@ -1,0 +1,10 @@
+# Batch-3 territory (see feature/clang-tidy-rollout.md): not yet brought to
+# zero warnings (GoogleTest macro expansion is the dominant source). Inherits
+# the root check set but keeps warnings non-fatal so ordinary edits here are
+# not blocked; delete this file when the tests/ batch lands.
+#
+# InheritParentConfig APPENDS scalar options, so an empty WarningsAsErrors
+# here would leave the root's '*' in force; the '-*' glob is appended after
+# it ('*,-*') and, as in Checks globs, the last match wins.
+InheritParentConfig: true
+WarningsAsErrors: '-*'

@@ -32,6 +32,13 @@
 #     '__ptr_' internals (analyzer mis-modeling), not real leaks
 #   clang-analyzer-security.PointerSub — intrusive-entry handle_offset idiom
 #     ((char*)&entry - (char*)&handle) is deliberate container_of-style offset math
+# Every tier-1 module (src/*, include/*, example/*) has been brought to zero
+# warnings (commit series in feature/clang-tidy-rollout.md); this holds them
+# there. Batch-2/3 directories (apps/, tests/, fuzz/) are not yet at zero and
+# carry local .clang-tidy overrides that keep their warnings non-fatal until
+# their batch lands.
+WarningsAsErrors: '*'
+
 Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
