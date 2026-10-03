@@ -51,8 +51,9 @@ public:
     static common::IoResult<GzipEncoder *> create(mem::BufPool &pool, GzipEncoderOptions options) noexcept;
 
     // Return the encoder's memory to the pool. Pool allocations do not run
-    // destructors, so this is what actually destroys the internal state.
-    ~GzipEncoder() noexcept;
+    // destructors; the state is trivially destructible, so the defaulted
+    // destructor is all there is.
+    ~GzipEncoder() noexcept = default;
 
     // Append input. The gzip header is emitted with the first producing
     // operation. Any input not accepted in one call (output span full) is

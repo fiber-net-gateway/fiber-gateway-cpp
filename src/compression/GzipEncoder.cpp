@@ -98,10 +98,6 @@ common::IoResult<GzipEncoder *> GzipEncoder::create(mem::BufPool &pool, GzipEnco
 
 GzipEncoder::GzipEncoder(State &state) noexcept : state_(&state) {}
 
-// The state is trivially destructible and the memory belongs to the pool; the
-// destructor is intentionally a no-op.
-GzipEncoder::~GzipEncoder() noexcept = default;
-
 common::IoResult<EncodeStep> GzipEncoder::write(std::span<const std::uint8_t> input,
                                                 std::span<std::uint8_t> output) noexcept {
     State &s = *state_;
@@ -126,7 +122,7 @@ common::IoResult<EncodeStep> GzipEncoder::write(std::span<const std::uint8_t> in
     if (s.header_pos != 0 || !input.empty()) {
         written += emit_fixed(s.header, kGzipHeaderSize, s.header_pos, out, room);
         if (s.header_pos < kGzipHeaderSize) {
-            return EncodeStep{0, written, EncodeStatus::NeedOutput};
+            return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::NeedOutput};
         }
     }
 
@@ -134,7 +130,7 @@ common::IoResult<EncodeStep> GzipEncoder::write(std::span<const std::uint8_t> in
     s.crc.update(std::span<const std::uint8_t>{input.data(), core.consumed});
     s.total_in += core.consumed;
 
-    return EncodeStep{core.consumed, written + core.written, core.status};
+    return EncodeStep{.consumed = core.consumed, .written = written + core.written, .status = core.status};
 }
 
 common::IoResult<EncodeStep> GzipEncoder::flush(std::span<std::uint8_t> output) noexcept {
@@ -156,15 +152,15 @@ common::IoResult<EncodeStep> GzipEncoder::flush(std::span<std::uint8_t> output) 
     // header still needs to complete.
     if (s.total_in == 0) {
         if (s.header_pos == 0) {
-            return EncodeStep{0, 0, EncodeStatus::Flushed};
+            return EncodeStep{.consumed = 0, .written = 0, .status = EncodeStatus::Flushed};
         }
         std::uint8_t *out = output.data();
         std::size_t room = output.size();
         const std::size_t written = emit_fixed(s.header, kGzipHeaderSize, s.header_pos, out, room);
         if (s.header_pos < kGzipHeaderSize) {
-            return EncodeStep{0, written, EncodeStatus::NeedOutput};
+            return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::NeedOutput};
         }
-        return EncodeStep{0, written, EncodeStatus::Flushed};
+        return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::Flushed};
     }
 
     s.phase = State::Phase::Flushing;
@@ -175,16 +171,16 @@ common::IoResult<EncodeStep> GzipEncoder::flush(std::span<std::uint8_t> output) 
 
     written += emit_fixed(s.header, kGzipHeaderSize, s.header_pos, out, room);
     if (s.header_pos < kGzipHeaderSize) {
-        return EncodeStep{0, written, EncodeStatus::NeedOutput};
+        return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::NeedOutput};
     }
 
     const EncodeStep core = DeflateEncoder::flush(s.deflate, std::span{out, room});
     written += core.written;
     if (core.status == EncodeStatus::Flushed) {
         s.phase = State::Phase::Active;
-        return EncodeStep{0, written, EncodeStatus::Flushed};
+        return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::Flushed};
     }
-    return EncodeStep{0, written, EncodeStatus::NeedOutput};
+    return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::NeedOutput};
 }
 
 common::IoResult<EncodeStep> GzipEncoder::finish(std::span<std::uint8_t> output) noexcept {
@@ -198,7 +194,7 @@ common::IoResult<EncodeStep> GzipEncoder::finish(std::span<std::uint8_t> output)
         case State::Phase::Finishing:
             break;
         case State::Phase::Finished:
-            return EncodeStep{0, 0, EncodeStatus::Finished};
+            return EncodeStep{.consumed = 0, .written = 0, .status = EncodeStatus::Finished};
         case State::Phase::Aborted:
             return std::unexpected(common::IoErr::Canceled);
     }
@@ -211,7 +207,7 @@ common::IoResult<EncodeStep> GzipEncoder::finish(std::span<std::uint8_t> output)
     // (empty) block, trailer.
     written += emit_fixed(s.header, kGzipHeaderSize, s.header_pos, out, room);
     if (s.header_pos < kGzipHeaderSize) {
-        return EncodeStep{0, written, EncodeStatus::NeedOutput};
+        return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::NeedOutput};
     }
 
     // Drive the core to the end of the raw stream. On the first completion,
@@ -224,7 +220,7 @@ common::IoResult<EncodeStep> GzipEncoder::finish(std::span<std::uint8_t> output)
     out += core.written;
     room -= core.written;
     if (core.status != EncodeStatus::Finished) {
-        return EncodeStep{0, written, EncodeStatus::NeedOutput};
+        return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::NeedOutput};
     }
     if (s.trailer_pos == 0) {
         const std::uint32_t crc = s.crc.value();
@@ -237,11 +233,11 @@ common::IoResult<EncodeStep> GzipEncoder::finish(std::span<std::uint8_t> output)
 
     written += emit_fixed(s.trailer, kGzipTrailerSize, s.trailer_pos, out, room);
     if (s.trailer_pos < kGzipTrailerSize) {
-        return EncodeStep{0, written, EncodeStatus::NeedOutput};
+        return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::NeedOutput};
     }
 
     s.phase = State::Phase::Finished;
-    return EncodeStep{0, written, EncodeStatus::Finished};
+    return EncodeStep{.consumed = 0, .written = written, .status = EncodeStatus::Finished};
 }
 
 void GzipEncoder::abort() noexcept { state_->phase = State::Phase::Aborted; }
