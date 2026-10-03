@@ -140,6 +140,9 @@ private:
     bool session_resumed_ = false;
     bool early_data_accepted_ = false;
     bool result_taken_ = false; // the done-transition ran
+    // Highest level CRYPTO data was fed to the engine at; the engine never
+    // goes back a level (RFC 9001 §4.1.3), so provide_crypto_data gates on it.
+    tls::TlsQuicLevel provided_level_ = tls::TlsQuicLevel::Initial;
     bool verify_failed_ = false; // a certificate alert ended the handshake
 
     // Post-handshake consumer (10 §7): app-level CRYPTO bytes after the

@@ -547,6 +547,22 @@ common::IoResult<void> QuicTlsSession::provide_crypto_data(QuicEncryptionLevel l
         }
         return {};
     }
+    // RFC 9001 §4.1.3: the engine consumes CRYPTO data level by level and
+    // never returns to a lower one. A conforming peer cannot produce new
+    // bytes below the highest level already fed -- each level's keys follow
+    // from the data before it -- so they come from a misbehaving peer (e.g.
+    // a 1-RTT CRYPTO frame ahead of the client Finished): unexpected_message.
+    if (static_cast<std::uint8_t>(tls_level) < static_cast<std::uint8_t>(provided_level_)) {
+        if (len == 0) {
+            return {};
+        }
+        record_alert(static_cast<std::uint8_t>(tls::TlsAlertDesc::UnexpectedMessage));
+        if (auto alert = take_pending_alert(); alert.has_value() && connection_ != nullptr) {
+            connection_->close_crypto_error(*alert);
+        }
+        return std::unexpected(common::IoErr::Invalid);
+    }
+    provided_level_ = tls_level;
     if (client_mode_) {
         auto fed = client().feed_quic(tls_level, {data, len});
         if (!fed) {
