@@ -18,7 +18,7 @@ constexpr std::uint8_t kAlertLevelWarning = 1;
 // Post-handshake handshake-message cap: NSTs can straddle records;
 // KeyUpdate is 4+1 bytes. 16 KiB = BoringSSL's kMaxMessageLen — either peer
 // can send these at any time, so the bound caps pinned reassembly memory.
-constexpr std::size_t kMaxPostHandshakeMessage = 16u << 10;
+constexpr std::size_t kMaxPostHandshakeMessage = 16U << 10;
 
 // 1.2 consecutive warning alerts tolerated (BoringSSL kMaxWarningAlerts).
 constexpr std::uint8_t kMaxWarningAlerts = 4;
@@ -151,6 +151,8 @@ void TlsConnection::latch_fatal(TlsAlertDesc alert) noexcept {
     }
     failed_ = true;
     const std::uint8_t alert_bytes[] = {kAlertLevelFatal, static_cast<std::uint8_t>(alert)};
+    // Best-effort fatal alert on an already-failed connection; the send outcome must not mask it.
+    // NOLINTNEXTLINE(bugprone-unused-return-value)
     (void) emit_sealed(TlsContentType::Alert, alert_bytes);
 }
 

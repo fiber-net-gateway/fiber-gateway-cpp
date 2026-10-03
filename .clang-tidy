@@ -15,6 +15,13 @@
 #     libc++ 20 rejects — no matching __lower_bound call, breaks the build)
 #
 # Baseline-triaged disables (rationale + counts in feature/clang-tidy-rollout.md):
+#   bugprone-exception-escape — 100% policy false positives here (60+ sampled across
+#     common/net/tls): (a) bad_alloc under noexcept boundaries is fatal by house
+#     policy, (b) guarded expected/optional ::value() — the check is not
+#     path-sensitive, and libc++ throws via __throw_bad_expected_access whose type
+#     IgnoredExceptions cannot match (all 4 spellings verified ineffective).
+#     Reopen when the check grows path sensitivity or matches libc++ throw helpers.
+#     Existing per-site NOLINTs stay as documentation.
 #   performance-enum-size — enum widths are wire/ABI-deliberate (IoErr:u16, TLS suites)
 #   performance-no-int-to-ptr — only fired in generated Http1HeaderLineParser + deliberate
 #     tagged-pointer roundtrips elsewhere; generated/ is silenced by its own .clang-tidy
@@ -28,6 +35,7 @@
 Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
   performance-*,
   -performance-enum-size,
   -performance-no-int-to-ptr,
@@ -79,3 +87,9 @@ ExcludeHeaderFilterRegex: '_deps|(^|/)(temp|build[^/]*)/|(^|/)usr/|(^|/)generate
 # During -fix runs clang-tidy formats only the code it replaces, using the
 # repo .clang-format (found by upward search from each source file).
 FormatStyle: file
+CheckOptions:
+  # DeMorgan rewrites (!a && !b -> !(a || b)) fight the house idiom of
+  # positive-form compound FIBER_ASSERT invariants; every other facet of the
+  # check (redundant !!, comparisons against bool literals, etc.) stays on.
+  - key: readability-simplify-boolean-expr.SimplifyDeMorgan
+    value: 'false'

@@ -1,6 +1,7 @@
 #include <fiber/tls/record/TlsRecordCipher.h>
 
 #include <cstring>
+#include <utility>
 
 namespace fiber::tls {
 
@@ -37,8 +38,10 @@ struct SuiteSpec {
     // RFC 7905 §2: 1.2 ChaCha20 derives the whole 12-byte nonce implicitly
     // (fixed IV XOR sequence) — nothing on the wire, unlike GCM's 4+8 split.
     const bool chacha = info->aead == TlsAeadAlgorithm::Chacha20Poly1305;
-    return {aead, info->key_len, static_cast<std::size_t>(info->is_tls13 || chacha ? 12 : 4),
-            static_cast<std::size_t>(!info->is_tls13 && !chacha ? 8 : 0)};
+    return {.aead = aead,
+            .key_len = info->key_len,
+            .iv_len = static_cast<std::size_t>(info->is_tls13 || chacha ? 12 : 4),
+            .explicit_nonce_len = static_cast<std::size_t>(!info->is_tls13 && !chacha ? 8 : 0)};
 }
 
 void store_be64(std::uint8_t *dst, std::uint64_t value) noexcept {
@@ -68,22 +71,30 @@ void store_be64(std::uint8_t *dst, std::uint64_t value) noexcept {
 // sequence number on Ok. The whole TLSInnerPlaintext, padding included, is
 // capped at 2^14 + 1 (RFC 8446 §5.4) — the ciphertext bound alone admits
 // up to 2^14 + 239.
-[[nodiscard]] TlsRecordCipher::OpenResult finish_tls13_inner(std::uint8_t *dst, std::size_t written) noexcept {
+[[nodiscard]] TlsRecordCipher::OpenResult finish_tls13_inner(const std::uint8_t *dst, std::size_t written) noexcept {
     if (written > kTlsMaxPlaintextSize + 1) {
-        return {TlsRecordCipher::Status::Overflow, TlsContentType::ApplicationData, 0};
+        return {.status = TlsRecordCipher::Status::Overflow,
+                .inner_type = TlsContentType::ApplicationData,
+                .plain_len = 0};
     }
     std::size_t end = written;
     while (end > 0 && dst[end - 1] == 0) {
         --end;
     }
     if (end == 0) {
-        return {TlsRecordCipher::Status::Malformed, TlsContentType::ApplicationData, 0};
+        return {.status = TlsRecordCipher::Status::Malformed,
+                .inner_type = TlsContentType::ApplicationData,
+                .plain_len = 0};
     }
     const std::uint8_t type = dst[end - 1];
     if (type < 20 || type > 23) {
-        return {TlsRecordCipher::Status::Malformed, TlsContentType::ApplicationData, 0};
+        return {.status = TlsRecordCipher::Status::Malformed,
+                .inner_type = TlsContentType::ApplicationData,
+                .plain_len = 0};
     }
-    return {TlsRecordCipher::Status::Ok, static_cast<TlsContentType>(type), end - 1};
+    return {.status = TlsRecordCipher::Status::Ok,
+            .inner_type = static_cast<TlsContentType>(type),
+            .plain_len = end - 1};
 }
 
 } // namespace
@@ -192,7 +203,7 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
 
         if (EVP_AEAD_CTX_seal(&aead_ctx_, dst.data(), &written, dst.size(), nonce.data(), iv_len, dst.data(),
                               plaintext.size() + 1, aad.data(), aad_len) != 1) {
-            return {Status::AuthFail, 0};
+            return {.status = Status::AuthFail, .out_len = 0};
         }
     } else if (explicit_nonce_len_ == 0) {
         // RFC 7905 §2: nonce = 12-byte implicit IV XOR sequence — the 1.3
@@ -214,7 +225,7 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
 
         if (EVP_AEAD_CTX_seal(&aead_ctx_, dst.data(), &written, dst.size(), nonce.data(), 12, plaintext.data(),
                               plaintext.size(), aad.data(), aad_len) != 1) {
-            return {Status::AuthFail, 0};
+            return {.status = Status::AuthFail, .out_len = 0};
         }
     } else {
         if (regions_overlap(dst.data(), dst.size(), plaintext.data(), plaintext.size())) {
@@ -235,7 +246,7 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
 
         if (EVP_AEAD_CTX_seal(&aead_ctx_, dst.data() + 8, &written, dst.size() - 8, nonce.data(), 12, plaintext.data(),
                               plaintext.size(), aad.data(), aad_len) != 1) {
-            return {Status::AuthFail, 0};
+            return {.status = Status::AuthFail, .out_len = 0};
         }
     }
 
@@ -243,7 +254,7 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal(TlsContentType inner_type, std
     // output excludes the 8-byte nonce prefix written at dst's head.
     FIBER_ASSERT(written == out_len - explicit_nonce_len_);
     ++seq_;
-    return {Status::Ok, out_len};
+    return {.status = Status::Ok, .out_len = out_len};
 }
 
 TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std::uint16_t legacy_version,
@@ -255,7 +266,7 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
     // crypto: no decrypt oracle, and out-of-range lengths are protocol data,
     // not caller bugs.
     if (length < min_ciphertext_size() || length > max_ciphertext_size()) {
-        return {Status::Malformed, TlsContentType::ApplicationData, 0};
+        return {.status = Status::Malformed, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
     }
     FIBER_ASSERT(ciphertext.size() >= length);
 
@@ -267,7 +278,7 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
 
     if (kind_ == TlsRecordProtectionKind::Tls13) {
         if (outer_type != TlsContentType::ApplicationData) {
-            return {Status::Malformed, TlsContentType::ApplicationData, 0};
+            return {.status = Status::Malformed, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
         }
         FIBER_ASSERT(dst.size() >= open_output_size(length));
         if (regions_overlap(dst.data(), dst.size(), ciphertext.data(), ciphertext.size())) {
@@ -281,9 +292,9 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
 
         if (EVP_AEAD_CTX_open(&aead_ctx_, dst.data(), &written, dst.size(), nonce.data(), iv_len, ciphertext.data(),
                               length, aad.data(), aad_len) != 1) {
-            return {Status::AuthFail, TlsContentType::ApplicationData, 0};
+            return {.status = Status::AuthFail, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
         }
-        FIBER_ASSERT(written == length - 16);
+        FIBER_ASSERT(std::cmp_equal(written, length - 16));
 
         // Strip zero padding; the last non-zero byte is the content type.
         OpenResult result = finish_tls13_inner(dst.data(), written);
@@ -314,15 +325,17 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
 
         if (EVP_AEAD_CTX_open(&aead_ctx_, dst.data(), &written, dst.size(), nonce.data(), 12, ciphertext.data(), length,
                               aad.data(), aad_len) != 1) {
-            return {Status::AuthFail, TlsContentType::ApplicationData, 0};
+            return {.status = Status::AuthFail, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
         }
         FIBER_ASSERT(written == plain_len);
         if (written > kTlsMaxPlaintextSize) {
-            return {Status::Overflow, TlsContentType::ApplicationData, 0}; // RFC 5246 §6.2.1
+            return {.status = Status::Overflow,
+                    .inner_type = TlsContentType::ApplicationData,
+                    .plain_len = 0}; // RFC 5246 §6.2.1
         }
 
         ++seq_;
-        return {Status::Ok, outer_type, written};
+        return {.status = Status::Ok, .inner_type = outer_type, .plain_len = written};
     }
 
     if (regions_overlap(dst.data(), dst.size(), ciphertext.data(), ciphertext.size())) {
@@ -345,15 +358,17 @@ TlsRecordCipher::OpenResult TlsRecordCipher::open(TlsContentType outer_type, std
     // prefix); the AAD still carries the plaintext-only length.
     if (EVP_AEAD_CTX_open(&aead_ctx_, dst.data(), &written, dst.size(), nonce.data(), 12, ciphertext.data() + 8,
                           length - 8, aad.data(), aad_len) != 1) {
-        return {Status::AuthFail, TlsContentType::ApplicationData, 0};
+        return {.status = Status::AuthFail, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
     }
     FIBER_ASSERT(written == plain_len);
     if (written > kTlsMaxPlaintextSize) {
-        return {Status::Overflow, TlsContentType::ApplicationData, 0}; // RFC 5246 §6.2.1
+        return {.status = Status::Overflow,
+                .inner_type = TlsContentType::ApplicationData,
+                .plain_len = 0}; // RFC 5246 §6.2.1
     }
 
     ++seq_;
-    return {Status::Ok, outer_type, written};
+    return {.status = Status::Ok, .inner_type = outer_type, .plain_len = written};
 }
 
 TlsRecordCipher::SealResult TlsRecordCipher::seal_scatter(TlsContentType inner_type,
@@ -428,12 +443,12 @@ TlsRecordCipher::SealResult TlsRecordCipher::seal_scatter(TlsContentType inner_t
     if (EVP_AEAD_CTX_seal_scatter(&aead_ctx_, dst_ct.data(), dst_tag.data(), &tag_written, dst_tag.size(), nonce.data(),
                                   12, plaintext.data(), plaintext.size(), extra_in, extra_in_len, aad.data(),
                                   aad_len) != 1) {
-        return {Status::AuthFail, 0};
+        return {.status = Status::AuthFail, .out_len = 0};
     }
-    FIBER_ASSERT(tag_written == (kind_ == TlsRecordProtectionKind::Tls13 ? 17 : 16));
+    FIBER_ASSERT(std::cmp_equal(tag_written, (kind_ == TlsRecordProtectionKind::Tls13 ? 17 : 16)));
 
     ++seq_;
-    return {Status::Ok, out_len};
+    return {.status = Status::Ok, .out_len = out_len};
 }
 
 TlsRecordCipher::OpenResult
@@ -444,7 +459,7 @@ TlsRecordCipher::open_scatter(TlsContentType outer_type, std::uint16_t legacy_ve
     // Protocol bounds first — before any buffer contract and any crypto (no
     // decrypt oracle; out-of-range lengths are peer data, not caller bugs).
     if (length < min_ciphertext_size() || length > max_ciphertext_size()) {
-        return {Status::Malformed, TlsContentType::ApplicationData, 0};
+        return {.status = Status::Malformed, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
     }
 
     const std::size_t iv_len = kind_ == TlsRecordProtectionKind::Tls13 ? 12 : 4;
@@ -454,7 +469,7 @@ TlsRecordCipher::open_scatter(TlsContentType outer_type, std::uint16_t legacy_ve
 
     if (kind_ == TlsRecordProtectionKind::Tls13) {
         if (outer_type != TlsContentType::ApplicationData) {
-            return {Status::Malformed, TlsContentType::ApplicationData, 0};
+            return {.status = Status::Malformed, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
         }
         FIBER_ASSERT(explicit_nonce.empty());
         FIBER_ASSERT(body.size() >= length - 16);
@@ -472,7 +487,7 @@ TlsRecordCipher::open_scatter(TlsContentType outer_type, std::uint16_t legacy_ve
         // open_gather has no out_len: it writes exactly in_len bytes to dst.
         if (EVP_AEAD_CTX_open_gather(&aead_ctx_, dst.data(), nonce.data(), iv_len, body.data(), length - 16, tag.data(),
                                      16, aad.data(), aad_len) != 1) {
-            return {Status::AuthFail, TlsContentType::ApplicationData, 0};
+            return {.status = Status::AuthFail, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
         }
 
         OpenResult result = finish_tls13_inner(dst.data(), length - 16);
@@ -510,14 +525,16 @@ TlsRecordCipher::open_scatter(TlsContentType outer_type, std::uint16_t legacy_ve
 
     if (EVP_AEAD_CTX_open_gather(&aead_ctx_, dst.data(), nonce.data(), 12, body.data(), plain_len, tag.data(), 16,
                                  aad.data(), aad_len) != 1) {
-        return {Status::AuthFail, TlsContentType::ApplicationData, 0};
+        return {.status = Status::AuthFail, .inner_type = TlsContentType::ApplicationData, .plain_len = 0};
     }
     if (plain_len > kTlsMaxPlaintextSize) {
-        return {Status::Overflow, TlsContentType::ApplicationData, 0}; // RFC 5246 §6.2.1
+        return {.status = Status::Overflow,
+                .inner_type = TlsContentType::ApplicationData,
+                .plain_len = 0}; // RFC 5246 §6.2.1
     }
 
     ++seq_;
-    return {Status::Ok, outer_type, plain_len};
+    return {.status = Status::Ok, .inner_type = outer_type, .plain_len = plain_len};
 }
 
 } // namespace fiber::tls

@@ -19,6 +19,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -172,7 +173,7 @@ common::IoResult<RawCert> parse_raw(std::span<const std::uint8_t> der) noexcept 
         CRYPTO_BUFFER_free(buf);
         return std::unexpected(common::IoErr::Invalid);
     }
-    return RawCert{x509, buf};
+    return RawCert{.x509 = x509, .buf = buf};
 }
 
 void raw_cert_free(RawCert &raw) noexcept {
@@ -461,7 +462,7 @@ std::unique_ptr<char[]> read_system_bundle(const char *path, std::size_t &out_le
         return nullptr;
     }
     const long size = std::ftell(file);
-    if (size <= 0 || static_cast<unsigned long>(size) > (1u << 22) || std::fseek(file, 0, SEEK_SET) != 0) {
+    if (size <= 0 || std::cmp_greater(size, (1U << 22)) || std::fseek(file, 0, SEEK_SET) != 0) {
         std::fclose(file);
         return nullptr;
     }
@@ -532,12 +533,14 @@ common::IoResult<TlsCertVerification> tls_verify_chain(const TlsCertificateChain
     // building (§6.4) and reports the same error code the param-based path
     // would have produced.
     if (!host.empty() && !chain.leaf().matches_host(host)) {
-        return TlsCertVerification{TlsCertVerification::Status::NotTrusted, TlsAlertDesc::BadCertificate,
-                                   X509_V_ERR_HOSTNAME_MISMATCH};
+        return TlsCertVerification{.status = TlsCertVerification::Status::NotTrusted,
+                                   .alert = TlsAlertDesc::BadCertificate,
+                                   .verify_error = X509_V_ERR_HOSTNAME_MISMATCH};
     }
     if (!ip.empty() && !chain.leaf().matches_ip(ip)) {
-        return TlsCertVerification{TlsCertVerification::Status::NotTrusted, TlsAlertDesc::BadCertificate,
-                                   X509_V_ERR_IP_ADDRESS_MISMATCH};
+        return TlsCertVerification{.status = TlsCertVerification::Status::NotTrusted,
+                                   .alert = TlsAlertDesc::BadCertificate,
+                                   .verify_error = X509_V_ERR_IP_ADDRESS_MISMATCH};
     }
 
     // Untrusted intermediates: borrowed X509 pointers into the chain; the

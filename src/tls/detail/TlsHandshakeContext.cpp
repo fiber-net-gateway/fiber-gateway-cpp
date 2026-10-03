@@ -614,6 +614,8 @@ void TlsHandshakeContext::fail(TlsAlertDesc desc) noexcept {
         return;
     }
     const std::uint8_t alert[] = {kAlertLevelFatal, static_cast<std::uint8_t>(desc)};
+    // Best-effort fatal alert on an already-failed connection; the send outcome must not mask it.
+    // NOLINTNEXTLINE(bugprone-unused-return-value)
     (void) emit(TlsContentType::Alert, alert, nullptr);
 }
 

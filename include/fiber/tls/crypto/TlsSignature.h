@@ -47,8 +47,10 @@ public:
 
 private:
     friend class TlsCertificate;
-    friend common::IoResult<bool> tls_verify(TlsSignatureScheme, TlsProtocolVersion, const TlsPublicKeyView &,
-                                             std::span<const std::uint8_t>, std::span<const std::uint8_t>) noexcept;
+    friend common::IoResult<bool> tls_verify(TlsSignatureScheme /*scheme*/, TlsProtocolVersion /*version*/,
+                                             const TlsPublicKeyView & /*public_key*/,
+                                             std::span<const std::uint8_t> /*content*/,
+                                             std::span<const std::uint8_t> /*signature*/) noexcept;
     explicit TlsPublicKeyView(const void *impl) noexcept : impl_(impl) {}
 
     const void *impl_ = nullptr; // const EVP_PKEY*

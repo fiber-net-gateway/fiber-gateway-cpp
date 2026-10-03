@@ -550,11 +550,8 @@ bool Tls13ClientHandshake::send_client_certificate_13() noexcept {
         // decides whether that ends the handshake.
         const auto cert_len =
                 tls_encode_certificate_13({cr_context_.data(), cr_ctx_len_}, {}, {scratch_.data(), scratch_.size()});
-        if (!cert_len.has_value() || !t13_.update({scratch_.data(), cert_len.value()}) ||
-            !emit_message({scratch_.data(), cert_len.value()})) {
-            return false;
-        }
-        return true;
+        return !(!cert_len.has_value() || !t13_.update({scratch_.data(), cert_len.value()}) ||
+                 !emit_message({scratch_.data(), cert_len.value()}));
     }
 
     const TlsCertificateChain &chain = *cfg_.client_chain;
@@ -603,11 +600,8 @@ bool Tls13ClientHandshake::send_client_certificate_13() noexcept {
     }
     const auto cv_len = tls_encode_certificate_verify(
             static_cast<std::uint16_t>(*chosen), {sig.data(), sig_len.value()}, {scratch_.data(), scratch_.size()});
-    if (!cv_len.has_value() || !t13_.update({scratch_.data(), cv_len.value()}) ||
-        !emit_message({scratch_.data(), cv_len.value()})) {
-        return false;
-    }
-    return true;
+    return !(!cv_len.has_value() || !t13_.update({scratch_.data(), cv_len.value()}) ||
+             !emit_message({scratch_.data(), cv_len.value()}));
 }
 
 void Tls13ClientHandshake::finish_1_3() noexcept {
@@ -621,6 +615,8 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
     // §4.5: "encrypted under keys derived from the
     // client_early_traffic_secret").
     snapshot13();
+    // The 1.3 flow constructs the schedule before first use; the state machine guarantees it here.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     if (!sched_->application_secrets({hash_buf_.data(), hash_len()}, client_app0_, server_app0_).has_value()) {
         fail(TlsAlertDesc::InternalError);
         return;
@@ -693,6 +689,8 @@ void Tls13ClientHandshake::finish_1_3() noexcept {
     // Resumption base over Hash(CH..client Fin) — after feeding it — then the
     // write side swaps to client_app0; the hs instance dies with the flight.
     snapshot13();
+    // The 1.3 flow constructs the schedule before first use; the state machine guarantees it here.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     auto resumption = sched_->resumption_master_secret({hash_buf_.data(), hash_len()});
     if (!resumption.has_value()) {
         fail(TlsAlertDesc::InternalError);

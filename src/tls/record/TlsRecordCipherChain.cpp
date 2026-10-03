@@ -58,7 +58,9 @@ void chain_copy_region(const mem::IoBufChain &chain, std::size_t offset, std::si
 }
 
 [[nodiscard]] TlsRecordCipher::OpenResult malformed() noexcept {
-    return {TlsRecordCipher::Status::Malformed, TlsContentType::ApplicationData, 0};
+    return {.status = TlsRecordCipher::Status::Malformed,
+            .inner_type = TlsContentType::ApplicationData,
+            .plain_len = 0};
 }
 
 } // namespace
@@ -120,7 +122,7 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
     FIBER_ASSERT(payload.readable_bytes() == length);
     FIBER_ASSERT(dst.size() >= tls_record_open_dst_size(cipher, length));
     if (!length_in_bounds(cipher, length)) {
-        return {malformed(), false};
+        return {.open = malformed(), .in_chain = false};
     }
 
     const std::size_t expl = cipher.kind() == TlsRecordProtectionKind::Tls12 ? cipher.explicit_nonce_len() : 0;
@@ -131,7 +133,8 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
     const std::uint8_t *tag = nullptr;
     if (!chain_contiguous(payload, body_off, body_len, &body) ||
         !chain_contiguous(payload, body_off + body_len, 16, &tag)) {
-        return {tls_record_open_transcribe(cipher, outer_type, legacy_version, length, payload, dst), false};
+        return {.open = tls_record_open_transcribe(cipher, outer_type, legacy_version, length, payload, dst),
+                .in_chain = false};
     }
 
     // In place over the record's own bytes — the only mutation of the chain.
@@ -147,7 +150,7 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
                                      {body_mut, body_len});
     }
     if (result.status != TlsRecordCipher::Status::Ok) {
-        return {result, false}; // touched bytes zeroed by the AEAD; view untouched
+        return {.open = result, .in_chain = false}; // touched bytes zeroed by the AEAD; view untouched
     }
     // Shrink the view: drop the tag plus the 1.2-GCM nonce prefix / the 1.3
     // inner type and padding.
@@ -159,7 +162,7 @@ TlsRecordOpenChainResult tls_record_open_in_place(TlsRecordCipher &cipher, TlsCo
     } else {
         payload.trim_end(length - result.plain_len);
     }
-    return {result, true};
+    return {.open = result, .in_chain = true};
 }
 
 TlsRecordCipher::SealResult tls_record_seal_transcribe(TlsRecordCipher &cipher, TlsContentType inner_type,
@@ -197,7 +200,7 @@ TlsRecordSealChainResult tls_record_seal_in_place(TlsRecordCipher &cipher, TlsCo
 
     const std::uint8_t *pt = nullptr;
     if (!chain_contiguous(plaintext, 0, plain, &pt)) {
-        return {tls_record_seal_transcribe(cipher, inner_type, plaintext, dst), false};
+        return {.seal = tls_record_seal_transcribe(cipher, inner_type, plaintext, dst), .in_chain = false};
     }
     // In place over the plaintext nodes — the only mutation of the chain; no
     // headroom/tailroom is touched, so shared node storage needs no unique().
@@ -207,7 +210,7 @@ TlsRecordSealChainResult tls_record_seal_in_place(TlsRecordCipher &cipher, TlsCo
     auto *pt_mut = const_cast<std::uint8_t *>(pt);
     TlsRecordCipher::SealResult result =
             cipher.seal_scatter(inner_type, {pt, plain}, {pt_mut, plain}, dst_header, dst_tailer);
-    return {result, result.status == TlsRecordCipher::Status::Ok};
+    return {.seal = result, .in_chain = result.status == TlsRecordCipher::Status::Ok};
 }
 
 } // namespace fiber::tls
