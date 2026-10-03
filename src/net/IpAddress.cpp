@@ -121,7 +121,7 @@ std::string IpAddress::to_string() const {
     if (!result) {
         return {};
     }
-    return std::string(result);
+    return {result};
 }
 
 } // namespace fiber::net

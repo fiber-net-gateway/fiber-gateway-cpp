@@ -89,7 +89,7 @@ private:
 // servers can use the same callback contract to configure credentials and
 // other SSL policy from ClientHello.
 inline common::IoErr configure_tls_with_credential(void *ctx, TlsServerHandshakeConfig &config,
-                                                   const tls::TlsClientHelloView &) noexcept {
+                                                   const tls::TlsClientHelloView & /*unused*/) noexcept {
     if (!ctx) {
         return common::IoErr::Invalid;
     }

@@ -80,15 +80,15 @@ public:
     // CertificateRequest may carry a long certificate_authorities list —
     // BoringSSL's client allows max_cert_list for every in-handshake
     // message).
-    static constexpr std::size_t kMaxHandshakeMessage = 16u << 10;
-    static constexpr std::size_t kMaxCertificateMessage = 100u << 10;
+    static constexpr std::size_t kMaxHandshakeMessage = 16U << 10;
+    static constexpr std::size_t kMaxCertificateMessage = 100U << 10;
     // Consecutive warning alerts tolerated before 1.3 is settled (BoringSSL
     // kMaxWarningAlerts; any non-alert record resets the count).
     static constexpr std::uint8_t kMaxWarningAlerts = 4;
     static constexpr std::size_t kOpenScratchSize = kTlsMaxCiphertextRecordSize;
 
     TlsHandshakeContext() noexcept;
-    ~TlsHandshakeContext();
+    ~TlsHandshakeContext() noexcept;
 
     // ---- inbound ----
 

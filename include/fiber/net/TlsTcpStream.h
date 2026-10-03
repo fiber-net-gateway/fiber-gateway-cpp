@@ -39,7 +39,7 @@ public:
     // as Ready.
     [[nodiscard]] bool read_ready() const noexcept;
     [[nodiscard]] bool write_ready() const noexcept;
-    [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) noexcept;
+    [[nodiscard]] fiber::common::IoErr apply_socket_options(const TcpSocketOptions &options) const noexcept;
     void close();
 
     // Loop handover, see detail::TlsStreamFd. Requires no in-flight

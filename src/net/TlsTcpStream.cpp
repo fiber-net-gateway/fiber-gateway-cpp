@@ -3,9 +3,9 @@
 namespace fiber::net {
 
 TlsTcpStream::TlsTcpStream(fiber::event::EventLoop &loop, int fd, SocketAddress remote_addr) :
-    stream_(loop, fd), remote_addr_(std::move(remote_addr)) {}
+    stream_(loop, fd), remote_addr_(remote_addr) {}
 
-TlsTcpStream::~TlsTcpStream() {}
+TlsTcpStream::~TlsTcpStream() = default;
 
 bool TlsTcpStream::valid() const noexcept { return stream_.valid(); }
 
@@ -24,7 +24,7 @@ bool TlsTcpStream::peer_closed() const noexcept { return stream_.peer_closed(); 
 bool TlsTcpStream::read_ready() const noexcept { return stream_.read_ready(); }
 bool TlsTcpStream::write_ready() const noexcept { return stream_.write_ready(); }
 
-fiber::common::IoErr TlsTcpStream::apply_socket_options(const TcpSocketOptions &options) noexcept {
+fiber::common::IoErr TlsTcpStream::apply_socket_options(const TcpSocketOptions &options) const noexcept {
     return detail::apply_tcp_socket_options(fd(), options);
 }
 
