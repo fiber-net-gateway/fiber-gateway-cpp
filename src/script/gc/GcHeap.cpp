@@ -128,7 +128,7 @@ void gc_mark_protected_new_objects(GcHeap *heap) noexcept {
 GcCollectStats GcHeap::collect() {
     if (no_gc_depth_ != 0 || collecting_) {
         gc_pending_ = true;
-        return {bytes, 0};
+        return {.total = bytes, .freed = 0};
     }
 
     std::size_t before = bytes;
@@ -143,7 +143,7 @@ GcCollectStats GcHeap::collect() {
     collecting_ = false;
     gc_count_ += 1;
     gc_freed_bytes_total_ += before - bytes;
-    return {bytes, before - bytes};
+    return {.total = bytes, .freed = before - bytes};
 }
 
 void GcHeap::maybe_collect_for_alloc(std::size_t alloc_bytes) {
@@ -157,7 +157,9 @@ void GcHeap::maybe_collect_for_alloc(std::size_t alloc_bytes) {
     collect();
 }
 
-GcHeap::LocalState GcHeap::mark_local() const noexcept { return LocalState{local_current_, local_top_}; }
+GcHeap::LocalState GcHeap::mark_local() const noexcept {
+    return LocalState{.block = local_current_, .top = local_top_};
+}
 
 void GcHeap::restore_local(LocalState state) noexcept {
     if (!state.block) {

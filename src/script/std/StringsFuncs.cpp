@@ -9,6 +9,7 @@
 #include <fiber/script/Library.h>
 #include <fiber/script/gc/GcInternal.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -16,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace fiber::script::std_lib {
 
@@ -534,7 +536,7 @@ AbiResult last_index_any_fn(void * /*userdata*/, const Library::HostCallFrame & 
     std::uint32_t cp = 0;
     while (pos < chars.size() && fiber::json::utf8_next_codepoint(chars.data(), chars.size(), pos, cp)) {
         std::size_t li = last_u16_index_of_cp(text, cp);
-        if (li != static_cast<std::size_t>(-1)) {
+        if (std::cmp_not_equal(li, -1)) {
             return AbiResult::success(JsValue::make_integer(static_cast<std::int64_t>(li)));
         }
     }
@@ -545,7 +547,7 @@ AbiResult last_index_any_fn(void * /*userdata*/, const Library::HostCallFrame & 
 
 // Cap total output to avoid pathological repeat counts dragging the process
 // down (and to stay clear of std::string's throwing reserve under OOM). 16 MiB.
-constexpr std::uint64_t kMaxRepeatBytes = 1ull << 24;
+constexpr std::uint64_t kMaxRepeatBytes = 1ULL << 24;
 
 AbiResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Library::Arguments args) noexcept {
     std::string_view text;
@@ -585,7 +587,7 @@ AbiResult repeat_fn(void * /*userdata*/, const Library::HostCallFrame &frame, Li
     std::string out;
     out.reserve(static_cast<std::size_t>(i) * len);
     for (std::int32_t j = 0; j < i; ++j) {
-        out.append(text.data(), len);
+        out.append(text);
     }
     return make_string_result(&frame.runtime, std::string_view(out));
 }
@@ -600,17 +602,15 @@ AbiResult substring_fn(void * /*userdata*/, const Library::HostCallFrame &frame,
     }
     std::size_t u16len = utf16_len(text);
     std::int64_t i = (args.argc >= 2) ? as_int(args.args[1]) : 0; // start, default 0
-    if (i >= static_cast<std::int64_t>(u16len)) {
+    if (std::cmp_greater_equal(i, u16len)) {
         return AbiResult::success(empty_string());
     }
-    if (i < 0) {
-        i = 0;
-    }
+    i = std::max<int64_t>(i, 0);
     std::int64_t j = (args.argc >= 3) ? as_int(args.args[2]) : 2147483647; // end, default INT32_MAX
     if (j <= i) {
         return AbiResult::success(empty_string());
     }
-    if (j >= static_cast<std::int64_t>(u16len)) {
+    if (std::cmp_greater_equal(j, u16len)) {
         if (i == 0) {
             return AbiResult::success(args.args[0]); // Java returns the original text node
         }

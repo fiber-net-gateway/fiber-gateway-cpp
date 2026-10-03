@@ -136,7 +136,7 @@ AbiResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*
 
     // No keys -> random bucket, as in Java (non-deterministic).
     if (args.argc == 1) {
-        bool hit = static_cast<std::int64_t>(next_bounded(100)) < ratio;
+        bool hit = next_bounded(100) < ratio;
         return AbiResult::success(JsValue::make_boolean(hit));
     }
 
@@ -153,7 +153,7 @@ AbiResult canary_fn(void * /*userdata*/, const Library::HostCallFrame & /*frame*
         crc.update(text);
     }
     const std::uint32_t crc_value = crc.value();
-    bool hit = (static_cast<std::uint64_t>(crc_value) % 100u) < static_cast<std::uint64_t>(ratio);
+    bool hit = (static_cast<std::uint64_t>(crc_value) % 100U) < static_cast<std::uint64_t>(ratio);
     return AbiResult::success(JsValue::make_boolean(hit));
 }
 

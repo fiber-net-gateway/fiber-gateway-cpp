@@ -4,11 +4,13 @@
 #include <fiber/script/gc/GcInternal.h>
 #include "script/gc/Wtf8.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace fiber::script::run {
 
@@ -65,7 +67,7 @@ bool is_truthy(const fiber::script::JsValue &value) noexcept {
             if (fiber::script::js_value_is_borrowed_string(value)) {
                 return fiber::script::js_value_native_string(value).len > 0;
             }
-            if (auto *str = as_heap_string(value)) {
+            if (const auto *str = as_heap_string(value)) {
                 return str->utf16_len > 0;
             }
             return false;
@@ -464,9 +466,7 @@ bool parse_hex_number(UnitReader &reader, double sign, double &out) noexcept {
         while (has_unit && ascii_is_digit(unit)) {
             if (exponent < 100000) {
                 exponent = exponent * 10 + static_cast<int>(unit - '0');
-                if (exponent > 100000) {
-                    exponent = 100000;
-                }
+                exponent = std::min(exponent, 100000);
             }
             if (!read_next(reader, unit, has_unit)) {
                 return false;
@@ -496,7 +496,7 @@ bool parse_hex_number(UnitReader &reader, double sign, double &out) noexcept {
 
 bool string_cursor_to_number(StringCursor cursor, double &out) noexcept {
     constexpr int kMaxSignificantDigits = 18;
-    UnitReader reader{cursor};
+    UnitReader reader{.cursor = cursor};
     char16_t unit = 0;
     bool has_unit = false;
     do {
@@ -602,9 +602,7 @@ bool string_cursor_to_number(StringCursor cursor, double &out) noexcept {
         while (has_unit && ascii_is_digit(unit)) {
             if (exponent < 100000) {
                 exponent = exponent * 10 + static_cast<int>(unit - '0');
-                if (exponent > 100000) {
-                    exponent = 100000;
-                }
+                exponent = std::min(exponent, 100000);
             }
             if (!read_next(reader, unit, has_unit)) {
                 return false;
@@ -674,8 +672,8 @@ bool compare_strings(const fiber::script::JsValue &lhs, const fiber::script::JsV
     if (!fiber::script::js_value_is_borrowed_string(lhs) && !fiber::script::js_value_is_borrowed_string(rhs) &&
         fiber::script::js_value_type(lhs) == fiber::script::JsNodeType::String &&
         fiber::script::js_value_type(rhs) == fiber::script::JsNodeType::String) {
-        auto *lhs_str = as_heap_string(lhs);
-        auto *rhs_str = as_heap_string(rhs);
+        const auto *lhs_str = as_heap_string(lhs);
+        const auto *rhs_str = as_heap_string(rhs);
         if (!lhs_str || !rhs_str) {
             return false;
         }
@@ -914,21 +912,21 @@ bool Compares::in(ConstValueHandle a, ConstValueHandle b) noexcept {
         if (fiber::script::js_value_type(*a) != fiber::script::JsNodeType::Integer) {
             return false;
         }
-        auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*b);
+        const auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(*b);
         std::int64_t index = fiber::script::js_value_int64(*a);
         if (!arr || index < 0) {
             return false;
         }
-        return static_cast<std::size_t>(index) < arr->size;
+        return std::cmp_less(index, arr->size);
     }
     if (fiber::script::js_value_type(*b) == fiber::script::JsNodeType::Object) {
-        auto *obj = fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*b);
+        const auto *obj = fiber::script::js_value_heap_ptr<const fiber::script::GcObject>(*b);
         if (!obj) {
             return false;
         }
         if (fiber::script::js_value_type(*a) == fiber::script::JsNodeType::String &&
             !fiber::script::js_value_is_borrowed_string(*a)) {
-            auto *key_str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*a);
+            const auto *key_str = fiber::script::js_value_heap_ptr<const fiber::script::GcString>(*a);
             const fiber::script::JsValue *found = fiber::script::gc_object_get(obj, key_str);
             return found != nullptr;
         }

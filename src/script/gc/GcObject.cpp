@@ -94,11 +94,9 @@ bool gc_object_reserve(GcHeap *heap, GcObject *obj, std::size_t expected) {
         }
     }
     std::size_t desired_bucket_count = bucket_count_for_entries(std::max(expected, obj->size));
-    if (desired_bucket_count > obj->bucket_count) {
-        if (!rehash_buckets(heap, obj, desired_bucket_count)) {
-            return false;
-        }
-    } else if (obj->bucket_count == 0 && desired_bucket_count > 0) {
+    // The empty-table predicate is subsumed by the first when it holds
+    // (desired > 0 == bucket_count); kept explicit for readability.
+    if (desired_bucket_count > obj->bucket_count || (obj->bucket_count == 0 && desired_bucket_count > 0)) {
         if (!rehash_buckets(heap, obj, desired_bucket_count)) {
             return false;
         }
@@ -114,7 +112,7 @@ bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value) {
     std::uint64_t hash = string_hash(key);
     int32_t existing = find_entry_index(obj, key, hash);
     if (existing != -1) {
-        obj->entries[existing].value = std::move(value);
+        obj->entries[existing].value = value;
         return true;
     }
     if (!gc_object_reserve(heap, obj, obj->size + 1)) {
@@ -129,7 +127,7 @@ bool gc_object_set(GcHeap *heap, GcObject *obj, GcString *key, JsValue value) {
     }
     GcObjectEntry &entry = obj->entries[idx];
     entry.key = key;
-    entry.value = std::move(value);
+    entry.value = value;
     entry.hash = hash;
     entry.occupied = true;
     entry.next_free = -1;

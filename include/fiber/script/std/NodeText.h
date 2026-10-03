@@ -167,7 +167,7 @@ inline void hex_encode(const std::uint8_t *bytes, std::size_t len, char *buf) no
     static constexpr char kHex[] = "0123456789abcdef";
     for (std::size_t i = 0; i < len; ++i) {
         buf[i * 2] = kHex[(bytes[i] >> 4) & 0x0F];
-        buf[i * 2 + 1] = kHex[bytes[i] & 0x0F];
+        buf[(i * 2) + 1] = kHex[bytes[i] & 0x0F];
     }
 }
 

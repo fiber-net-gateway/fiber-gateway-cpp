@@ -63,7 +63,7 @@ struct ScriptStatus {
     static ScriptStatus abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
         ScriptStatus status;
         status.kind = AbiResultKind::Abort;
-        status.abort_payload = ScriptAbort{reason, position};
+        status.abort_payload = ScriptAbort{.reason = reason, .position = position};
         return status;
     }
 
@@ -135,7 +135,7 @@ struct alignas(16) AbiResult {
     static AbiResult abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
         AbiResult result;
         result.kind = AbiResultKind::Abort;
-        result.payload.abort = ScriptAbort{reason, position};
+        result.payload.abort = ScriptAbort{.reason = reason, .position = position};
         return result;
     }
 
@@ -234,7 +234,7 @@ struct alignas(16) ScriptResult {
     static ScriptResult abort(ScriptAbortReason reason, std::int64_t position = -1) noexcept {
         ScriptResult result;
         result.kind = ScriptResultKind::Abort;
-        result.payload.abort = ScriptAbort{reason, position};
+        result.payload.abort = ScriptAbort{.reason = reason, .position = position};
         return result;
     }
 
@@ -301,7 +301,7 @@ inline CallResult set_exception(ResultPayload &result, fiber::script::ExceptionK
 }
 
 inline CallResult set_abort(ResultPayload &result, ScriptAbortReason reason) noexcept {
-    result.abort = ScriptAbort{reason, -1};
+    result.abort = ScriptAbort{.reason = reason, .position = -1};
     return CallResult::Abort;
 }
 

@@ -34,7 +34,7 @@ bool opcode_is_async_call(std::uint8_t op) {
 }
 
 ConstValueHandle const_handle(const fiber::script::JsValue &value) noexcept {
-    return ConstValueHandle(const_cast<fiber::script::JsValue *>(&value));
+    return {const_cast<fiber::script::JsValue *>(&value)};
 }
 
 std::int64_t position_at(const ir::Compiled &compiled, std::size_t pc) noexcept {
@@ -55,7 +55,7 @@ InterpreterVm::InterpreterVm(const ir::Compiled &compiled, const fiber::script::
         slots_.reset(new (std::nothrow) fiber::script::JsValue[total]);
         if (!slots_) {
             state_ = State::Abort;
-            result_.abort = ScriptAbort{ScriptAbortReason::OutOfMemory, -1};
+            result_.abort = ScriptAbort{.reason = ScriptAbortReason::OutOfMemory, .position = -1};
             return;
         }
         stack_ = slots_.get();
@@ -135,12 +135,12 @@ void InterpreterVm::iterate() {
     while (pc_ < code_size) {
         std::int32_t instr = codes[pc_++];
         std::uint32_t raw = static_cast<std::uint32_t>(instr);
-        std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFu);
+        std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFU);
         switch (op) {
             case ir::Code::NOOP:
                 break;
             case ir::Code::LOAD_CONST: {
-                std::uint32_t idx = raw >> 8u;
+                std::uint32_t idx = raw >> 8U;
                 stack_[sp_++] = compile_.constant(idx);
                 break;
             }
@@ -157,10 +157,10 @@ void InterpreterVm::iterate() {
                 }
                 break;
             case ir::Code::LOAD_VAR:
-                stack_[sp_++] = vars_[static_cast<std::size_t>(raw >> 8u)];
+                stack_[sp_++] = vars_[static_cast<std::size_t>(raw >> 8U)];
                 break;
             case ir::Code::STORE_VAR:
-                vars_[static_cast<std::size_t>(raw >> 8u)] = stack_[--sp_];
+                vars_[static_cast<std::size_t>(raw >> 8U)] = stack_[--sp_];
                 break;
             case ir::Code::BOP_PLUS:
                 if (!apply_binary(&Binaries::plus, pc_ - 1)) {
@@ -332,7 +332,7 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::PROP_GET: {
-                std::uint32_t idx = raw >> 8u;
+                std::uint32_t idx = raw >> 8U;
                 ConstValueHandle key = const_handle(compile_.constant(idx));
                 fiber::script::JsValue *parent = &stack_[sp_ - 1];
                 CallResult status = Access::prop_get(frame_.runtime, parent, key, result_);
@@ -343,7 +343,7 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::PROP_SET: {
-                std::uint32_t idx = raw >> 8u;
+                std::uint32_t idx = raw >> 8U;
                 ConstValueHandle key = const_handle(compile_.constant(idx));
                 FIBER_ASSERT(sp_ >= 2);
                 fiber::script::JsValue *parent = &stack_[sp_ - 2];
@@ -359,7 +359,7 @@ void InterpreterVm::iterate() {
                 break;
             }
             case ir::Code::PROP_SET_1: {
-                std::uint32_t idx = raw >> 8u;
+                std::uint32_t idx = raw >> 8U;
                 ConstValueHandle key = const_handle(compile_.constant(idx));
                 FIBER_ASSERT(sp_ >= 2);
                 fiber::script::JsValue *parent = &stack_[sp_ - 2];
@@ -380,20 +380,20 @@ void InterpreterVm::iterate() {
             case ir::Code::CALL_ASYNC_FUNC_SPREAD:
             case ir::Code::CALL_CONST:
             case ir::Code::CALL_ASYNC_CONST: {
-                std::uint32_t func_index = opcode_is_function_call(op) ? (raw >> 16u) : (raw >> 8u);
-                std::uint32_t argc = opcode_is_function_call(op) ? ((raw >> 8u) & 0xFFu) : 0;
+                std::uint32_t func_index = opcode_is_function_call(op) ? (raw >> 16U) : (raw >> 8U);
+                std::uint32_t argc = opcode_is_function_call(op) ? ((raw >> 8U) & 0xFFU) : 0;
                 if (!dispatch_func_const(op, compile_.func_const(func_index), argc)) {
                     return;
                 }
                 break;
             }
             case ir::Code::JUMP:
-                pc_ = static_cast<std::size_t>(raw >> 8u);
+                pc_ = static_cast<std::size_t>(raw >> 8U);
                 break;
             case ir::Code::JUMP_IF_FALSE: {
                 fiber::script::JsValue *cond = &stack_[sp_ - 1];
                 if (!Compares::logic(cond)) {
-                    pc_ = static_cast<std::size_t>(raw >> 8u);
+                    pc_ = static_cast<std::size_t>(raw >> 8U);
                 }
                 --sp_;
                 break;
@@ -401,7 +401,7 @@ void InterpreterVm::iterate() {
             case ir::Code::JUMP_IF_TRUE: {
                 fiber::script::JsValue *cond = &stack_[sp_ - 1];
                 if (Compares::logic(cond)) {
-                    pc_ = static_cast<std::size_t>(raw >> 8u);
+                    pc_ = static_cast<std::size_t>(raw >> 8U);
                 }
                 --sp_;
                 break;
@@ -542,18 +542,19 @@ Library::Arguments InterpreterVm::make_call_arguments(std::uint8_t op, std::uint
         if (fiber::script::js_value_type(args) != fiber::script::JsNodeType::Array) {
             return {};
         }
-        auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(args);
+        const auto *arr = fiber::script::js_value_heap_ptr<const fiber::script::GcArray>(args);
         if (!arr || arr->size == 0) {
             return {};
         }
-        return Library::Arguments{fiber::script::ConstValueHandle(arr->elems), static_cast<std::uint32_t>(arr->size)};
+        return Library::Arguments{.args = fiber::script::ConstValueHandle(arr->elems),
+                                  .argc = static_cast<std::uint32_t>(arr->size)};
     }
     if (opcode_is_function_call(op) && encoded_argc > 0) {
         FIBER_ASSERT(sp_ >= encoded_argc);
         arg_base = sp_ - encoded_argc;
-        return Library::Arguments{fiber::script::ConstValueHandle(stack_ + arg_base), encoded_argc};
+        return Library::Arguments{.args = fiber::script::ConstValueHandle(stack_ + arg_base), .argc = encoded_argc};
     }
-    return Library::Arguments{nullptr, encoded_argc};
+    return Library::Arguments{.args = nullptr, .argc = encoded_argc};
 }
 
 bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::FuncConst &func_const,
@@ -584,7 +585,7 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
                                                                                 : ScriptAbortReason::InvalidState),
                                     epc);
             }
-            async_.set_completion({&InterpreterVm::async_complete, this});
+            async_.set_completion({.complete = &InterpreterVm::async_complete, .ctx = this});
             state_ = State::Suspend;
             return false;
         }
@@ -600,10 +601,14 @@ bool InterpreterVm::dispatch_func_const(std::uint8_t op, const ir::Compiled::Fun
                                                                                 : ScriptAbortReason::InvalidState),
                                     epc);
             }
-            async_.set_completion({&InterpreterVm::async_complete, this});
+            async_.set_completion({.complete = &InterpreterVm::async_complete, .ctx = this});
             state_ = State::Suspend;
             return false;
         }
+        default:
+            // dispatch_func_const is routed only for CALL_* opcodes.
+            FIBER_ASSERT(false);
+            break;
     }
     return true;
 }
@@ -676,7 +681,7 @@ bool InterpreterVm::handle_error(AbiResult error, std::size_t epc) {
     }
     std::int64_t position = position_at(compile_, epc);
     if (error.is_abort() && error.abort().position < 0 && position >= 0) {
-        result_.abort = ScriptAbort{error.abort().reason, position};
+        result_.abort = ScriptAbort{.reason = error.abort().reason, .position = position};
     } else {
         result_.abort = error.abort();
     }
@@ -694,14 +699,14 @@ bool InterpreterVm::apply_async_result() {
 
     const std::size_t epc = pc_ - 1;
     const std::uint32_t raw = static_cast<std::uint32_t>(compile_.codes()[epc]);
-    const std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFu);
+    const std::uint8_t op = static_cast<std::uint8_t>(raw & 0xFFU);
     if (!opcode_is_async_call(op)) {
         async_.reset();
         state_ = State::Running;
         return handle_error(AbiResult::abort(ScriptAbortReason::InvalidOpcode), epc);
     }
 
-    const std::uint32_t argc = opcode_is_function_call(op) ? ((raw >> 8u) & 0xFFu) : 0;
+    const std::uint32_t argc = opcode_is_function_call(op) ? ((raw >> 8U) & 0xFFU) : 0;
     AbiResult result;
     switch (state_) {
         case State::AsyncRetSuc:

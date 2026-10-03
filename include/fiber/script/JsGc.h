@@ -59,7 +59,7 @@ public:
     [[nodiscard]] fiber::script::JsValue *operator->() const noexcept { return value_; }
     [[nodiscard]] fiber::script::JsValue &operator[](std::size_t index) const noexcept { return value_[index]; }
     [[nodiscard]] constexpr explicit operator bool() const noexcept { return value_ != nullptr; }
-    [[nodiscard]] ConstValueHandle as_constant() const noexcept { return ConstValueHandle(value_); }
+    [[nodiscard]] ConstValueHandle as_constant() const noexcept { return {value_}; }
     [[nodiscard]] operator ConstValueHandle() const noexcept { return as_constant(); }
 
 private:
