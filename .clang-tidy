@@ -10,10 +10,25 @@
 #   misc-non-private-member-variables-in-classes (perf-first code uses public-member structs)
 #   cppcoreguidelines-* (pro-bounds/pro-type-ownership conflict with perf-first design)
 #   readability-identifier-naming (needs a naming-spec project of its own)
+#   modernize-use-std-print (cold-path cosmetic churn, format-string conversion risk)
+#
+# Baseline-triaged disables (rationale + counts in feature/clang-tidy-rollout.md):
+#   performance-enum-size — enum widths are wire/ABI-deliberate (IoErr:u16, TLS suites)
+#   performance-no-int-to-ptr — only fired in generated Http1HeaderLineParser + deliberate
+#     tagged-pointer roundtrips elsewhere; generated/ is silenced by its own .clang-tidy
+#   readability-redundant-member-init — house style mandates explicit member init at
+#     construction boundaries; the check strips ctor-init repeats of NSDMI (IntrusiveList/
+#     EventLoop/IoBufChain cores)
+#   clang-analyzer-cplusplus.NewDeleteLeaks — all sampled findings are libc++ unique_ptr
+#     '__ptr_' internals (analyzer mis-modeling), not real leaks
+#   clang-analyzer-security.PointerSub — intrusive-entry handle_offset idiom
+#     ((char*)&entry - (char*)&handle) is deliberate container_of-style offset math
 Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
   performance-*,
+  -performance-enum-size,
+  -performance-no-int-to-ptr,
   modernize-*,
   -modernize-use-trailing-return-type,
   -modernize-avoid-c-arrays,
@@ -21,6 +36,7 @@ Checks: >
   -modernize-use-nodiscard,
   -modernize-use-default-member-init,
   -modernize-macro-to-enum,
+  -modernize-use-std-print,
   readability-*,
   -readability-function-cognitive-complexity,
   -readability-magic-numbers,
@@ -33,6 +49,7 @@ Checks: >
   -readability-braces-around-statements,
   -readability-suspicious-call-argument,
   -readability-use-anyofallof,
+  -readability-redundant-member-init,
   misc-definitions-in-headers,
   misc-unused-parameters,
   misc-static-assert,
@@ -44,6 +61,8 @@ Checks: >
   -clang-analyzer-osx.*,
   -clang-analyzer-optin.performance.Padding,
   -clang-analyzer-optin.cplusplus.UninitializedObject,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
+  -clang-analyzer-security.PointerSub,
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
 
 # Header paths containing a top-ish segment literally named src/ or include/
@@ -53,7 +72,7 @@ HeaderFilterRegex: '(^|/)(src|include)/'
 # Exclusion wins over HeaderFilterRegex: fetched deps (temp/_deps boringssl/
 # googletest/protobuf include dirs), libc++/system headers under /usr, and
 # build-tree generated headers (build*/, cmake-build-debug).
-ExcludeHeaderFilterRegex: '_deps|(^|/)(temp|build[^/]*)/|(^|/)usr/|cmake-build'
+ExcludeHeaderFilterRegex: '_deps|(^|/)(temp|build[^/]*)/|(^|/)usr/|(^|/)generated/|cmake-build'
 # During -fix runs clang-tidy formats only the code it replaces, using the
 # repo .clang-format (found by upward search from each source file).
 FormatStyle: file
