@@ -63,7 +63,7 @@ QuicUdpEndpoint &client_endpoint() {
     return *endpoint;
 }
 
-void destroy_connection(void *, QuicConnection &connection) noexcept { delete &connection; }
+void destroy_connection(void * /*unused*/, QuicConnection &connection) noexcept { delete &connection; }
 
 fiber::net::SocketAddress server_address(std::uint8_t flags) {
     switch (flags & 0x03) {
@@ -191,7 +191,7 @@ fiber::async::Task<void> run(const std::uint8_t *data, std::size_t size) {
                     spec.original_dcid = conn->original_destination_connection_id();
                     spec.dcid = conn->local_connection_id();
                     spec.scid = fiber::fuzz::make_cid(payload.empty() ? 0x33 : payload[0], 8);
-                    spec.token = {payload.data(), std::min<std::size_t>(payload.size(), 1024)};
+                    spec.token = {.data = payload.data(), .len = std::min<std::size_t>(payload.size(), 1024)};
                     QuicWriteCursor writer(datagram.data(), datagram.size());
                     auto built = quic_create_retry_packet(spec, writer);
                     if (built) {

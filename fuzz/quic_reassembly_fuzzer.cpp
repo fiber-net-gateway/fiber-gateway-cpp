@@ -72,7 +72,7 @@ constexpr std::uint64_t kFarOffset = (1ULL << 62U) - 0x10000;
 std::uint8_t wire_byte(std::uint64_t offset, std::uint8_t variant) {
     std::uint64_t x = offset * 0x9E3779B97F4A7C15ULL;
     x ^= x >> 29U;
-    return static_cast<std::uint8_t>(x ^ (variant * 0x5bU));
+    return static_cast<std::uint8_t>(x ^ (std::uint64_t{variant} * 0x5bU));
 }
 
 // Received byte ranges [start, end) with the variant that won each byte.
@@ -96,7 +96,7 @@ public:
                 }
             }
             const std::uint64_t hole_end = it != extents_.end() ? std::min(end, it->first) : end;
-            extents_.emplace(start, Extent{hole_end, variant});
+            extents_.emplace(start, Extent{.end = hole_end, .variant = variant});
             start = hole_end;
         }
     }
@@ -142,7 +142,7 @@ fiber::mem::IoBuf make_data(const Config &config, std::uint64_t offset, std::siz
         return {};
     }
     const std::size_t head = config.sliced ? slack : 0;
-    const std::size_t cap = config.sliced ? head + len + slack * 3 : len;
+    const std::size_t cap = config.sliced ? head + len + (slack * 3) : len;
     fiber::mem::IoBuf buf =
             config.budget ? fiber::mem::IoBuf::allocate_trackable(cap) : fiber::mem::IoBuf::allocate(cap);
     FIBER_ASSERT(buf.valid());
@@ -202,7 +202,7 @@ DataOp read_data_op(std::uint8_t kind, FuzzInput &in) {
 }
 
 void run_reassembler(const Config &config, FuzzInput &in) {
-    fiber::mem::IoBufStorageBudget budget(config.buffer_limit * 8 + 4096);
+    fiber::mem::IoBufStorageBudget budget((config.buffer_limit * 8) + 4096);
     {
         QuicDataReassembler reassembler(fiber::fuzz::quic_loop().io_buf_node_pool(),
                                         {.buffer_limit = config.buffer_limit,
@@ -256,7 +256,7 @@ void run_reassembler(const Config &config, FuzzInput &in) {
 }
 
 void run_stream(const Config &config, FuzzInput &in) {
-    fiber::mem::IoBufStorageBudget budget(config.buffer_limit * 8 + 4096);
+    fiber::mem::IoBufStorageBudget budget((config.buffer_limit * 8) + 4096);
     {
         QuicStreamRecvQueue queue(fiber::fuzz::quic_loop().io_buf_node_pool(),
                                   {.buffer_limit = config.buffer_limit,
@@ -377,7 +377,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     }
     FuzzInput in(data, size);
     const std::uint8_t config_byte = in.u8();
-    static constexpr std::size_t kLimits[] = {64 * 1024, 4096, 512, 64};
+    static constexpr std::size_t kLimits[] = {std::size_t{64} * 1024, 4096, 512, 64};
     static constexpr std::size_t kExtents[] = {kQuicCryptoRecvMaxActiveExtents, 16, 4, 1};
     Config config{};
     config.stream = (config_byte & 0x01) != 0;
