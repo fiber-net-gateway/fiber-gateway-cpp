@@ -50,7 +50,9 @@ struct ShardData {
 
     [[nodiscard]] bool allocate(std::size_t word_count) noexcept;
     void reset() noexcept;
-    [[nodiscard]] std::uint64_t *words() noexcept { return reinterpret_cast<std::uint64_t *>(storage); }
+    // Const-ness deliberately does not propagate through the interior
+    // pointer: metric counters are written through words() on live shards.
+    [[nodiscard]] std::uint64_t *words() const noexcept { return reinterpret_cast<std::uint64_t *>(storage); }
 };
 
 struct SnapshotRequest {
