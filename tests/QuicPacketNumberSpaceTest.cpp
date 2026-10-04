@@ -50,8 +50,6 @@ TEST(QuicPacketNumberSpaceTest, PreparesAckEcnFrameWhenCountersArePresent) {
     auto encoded_len = fiber::quic::quic_output_frame_encoded_len(frame);
     ASSERT_TRUE(encoded_len.has_value());
     EXPECT_GT(*encoded_len, 0U);
-
-    fiber::quic::quic_output_frame_release_data(frame);
 }
 
 TEST(QuicPacketNumberSpaceTest, PreparesPlainAckFrameWhenCountersAreEmpty) {

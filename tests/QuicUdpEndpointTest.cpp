@@ -107,6 +107,8 @@ struct SplitFramePacketSummary {
     bool pending_owned = false;
     bool sending_empty = false;
     std::size_t in_flight = 0;
+    bool shares_storage = false;
+    bool payload_matches = false;
 };
 
 struct AckOnlyPacketSummary {
@@ -1409,11 +1411,17 @@ recv_split_handshake_crypto_frame(fiber::event::EventLoop *loop, fiber::quic::Qu
     const fiber::quic::QuicOutputFrame *pending = space.pending_frames.front();
     done_promise->set_value(SplitFramePacketSummary{
             decoded_summary->frame_count,
-            sent != nullptr && sent->u.crypto.data != nullptr ? sent->u.crypto.data->readable() : 0,
-            pending != nullptr && pending->u.crypto.data != nullptr ? pending->u.crypto.data->readable() : 0,
-            pending != nullptr && pending->u.crypto.data != nullptr,
+            sent != nullptr && sent->data ? sent->data.readable() : 0,
+            pending != nullptr && pending->data ? pending->data.readable() : 0,
+            pending != nullptr && pending->data,
             space.sending_frames.empty(),
             server.congestion().in_flight,
+            sent != nullptr && pending != nullptr && sent->data.same_storage(pending->data),
+            sent != nullptr && pending != nullptr &&
+                    sent->data.readable() + pending->data.readable() == crypto_data.size() &&
+                    std::memcmp(sent->data.readable_data(), crypto_data.data(), sent->data.readable()) == 0 &&
+                    std::memcmp(pending->data.readable_data(), crypto_data.data() + sent->data.readable(),
+                                pending->data.readable()) == 0,
     });
     client.close();
 }
@@ -3408,6 +3416,8 @@ TEST(QuicUdpEndpointTest, SplitsHandshakeCryptoFrameWhenPacketPayloadIsFull) {
     EXPECT_GT(response->pending_crypto_len, 0U);
     EXPECT_EQ(response->sent_crypto_len + response->pending_crypto_len, 1800U);
     EXPECT_TRUE(response->pending_owned);
+    EXPECT_TRUE(response->shares_storage);
+    EXPECT_TRUE(response->payload_matches);
     EXPECT_TRUE(response->sending_empty);
     EXPECT_GE(response->in_flight, fiber::quic::kQuicCongestionMinInitialSize);
 

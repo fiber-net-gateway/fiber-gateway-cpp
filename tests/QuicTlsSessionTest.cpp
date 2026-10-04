@@ -49,9 +49,8 @@ std::vector<std::uint8_t> queued_crypto(fiber::quic::QuicConnection &connection,
     auto &space = connection.packet_number_space(level);
     for (const fiber::quic::QuicOutputFrame *frame = space.pending_frames.front(); frame != nullptr;
          frame = space.pending_frames.next_of(*frame)) {
-        if (frame->type == fiber::quic::QuicFrameType::Crypto && frame->u.crypto.data != nullptr &&
-            frame->u.crypto.offset == out.size()) {
-            const fiber::mem::IoBuf &data = *frame->u.crypto.data;
+        if (frame->type == fiber::quic::QuicFrameType::Crypto && frame->data && frame->u.crypto.offset == out.size()) {
+            const fiber::mem::IoBuf &data = frame->data;
             out.insert(out.end(), data.readable_data(), data.readable_data() + data.readable());
         }
     }

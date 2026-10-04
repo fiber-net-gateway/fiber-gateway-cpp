@@ -3,6 +3,7 @@
 #include <cstring>
 #include <expected>
 #include <new>
+#include <utility>
 
 namespace fiber::quic {
 
@@ -144,7 +145,6 @@ void QuicOutputFramePool::release(QuicOutputFrame *frame) noexcept {
         return;
     }
 
-    quic_output_frame_release_data(*frame);
     *frame = QuicOutputFrame{};
     if (cached_count_ < kQuicOutputFramePoolMaxCached) {
         frame->next = free_head_;
@@ -173,142 +173,35 @@ common::IoResult<void> quic_output_frame_set_owned_data(QuicOutputFrame &frame, 
         return std::unexpected(common::IoErr::Invalid);
     }
 
-    if (frame.type == QuicFrameType::Crypto) {
-        if (frame.u.crypto.data != nullptr) {
-            return std::unexpected(common::IoErr::Invalid);
-        }
-        if (len == 0) {
-            return {};
-        }
-
-        auto *buf = new (std::nothrow) mem::IoBuf(mem::IoBuf::allocate(len));
-        if (buf == nullptr || !*buf) {
-            delete buf;
-            return std::unexpected(common::IoErr::NoMem);
-        }
-        std::memcpy(buf->writable_data(), data, len);
-        buf->commit(len);
-        frame.u.crypto.data = buf;
-        return {};
-    }
-
-    QuicOutputFrameDataBlock **target = nullptr;
-    const std::uint8_t **target_data = nullptr;
-    std::uint32_t *target_len = nullptr;
     switch (frame.type) {
         case QuicFrameType::Ack:
         case QuicFrameType::AckEcn:
-            target = &frame.u.ack.owned_ranges;
-            target_data = &frame.u.ack.ranges;
-            target_len = &frame.u.ack.ranges_length;
-            break;
+        case QuicFrameType::Crypto:
         case QuicFrameType::NewToken:
-            target = &frame.u.new_token.owned;
-            target_data = &frame.u.new_token.data;
-            target_len = &frame.u.new_token.length;
-            break;
         case QuicFrameType::ConnectionClose:
         case QuicFrameType::ConnectionCloseApp:
-            target = &frame.u.close.owned_reason;
-            target_data = &frame.u.close.reason;
-            target_len = &frame.u.close.reason_length;
             break;
         default:
             return std::unexpected(common::IoErr::Invalid);
     }
 
-    if (*target != nullptr) {
+    if (frame.data) {
         return std::unexpected(common::IoErr::Invalid);
     }
     if (len == 0) {
-        *target_data = nullptr;
-        *target_len = 0;
+        frame.encoded_len = 0;
         return {};
     }
 
-    auto *block = new (std::nothrow) QuicOutputFrameDataBlock{};
-    if (block == nullptr) {
+    mem::IoBuf buf = mem::IoBuf::allocate(len);
+    if (!buf) {
         return std::unexpected(common::IoErr::NoMem);
     }
-
-    block->data = new (std::nothrow) std::uint8_t[len];
-    if (block->data == nullptr) {
-        delete block;
-        return std::unexpected(common::IoErr::NoMem);
-    }
-
-    std::memcpy(block->data, data, len);
-    block->len = len;
-    block->refs = 1;
-    *target = block;
-    *target_data = block->data;
-    *target_len = static_cast<std::uint32_t>(len);
+    std::memcpy(buf.writable_data(), data, len);
+    buf.commit(len);
+    frame.data = std::move(buf);
+    frame.encoded_len = 0;
     return {};
-}
-
-void quic_output_frame_retain_data(QuicOutputFrame &frame) noexcept {
-    QuicOutputFrameDataBlock *block = nullptr;
-    switch (frame.type) {
-        case QuicFrameType::Ack:
-        case QuicFrameType::AckEcn:
-            block = frame.u.ack.owned_ranges;
-            break;
-        case QuicFrameType::NewToken:
-            block = frame.u.new_token.owned;
-            break;
-        case QuicFrameType::ConnectionClose:
-        case QuicFrameType::ConnectionCloseApp:
-            block = frame.u.close.owned_reason;
-            break;
-        default:
-            break;
-    }
-    if (block != nullptr) {
-        ++block->refs;
-    }
-}
-
-void quic_output_frame_release_data(QuicOutputFrame &frame) noexcept {
-    QuicOutputFrameDataBlock *block = nullptr;
-    switch (frame.type) {
-        case QuicFrameType::Ack:
-        case QuicFrameType::AckEcn:
-            block = frame.u.ack.owned_ranges;
-            frame.u.ack.owned_ranges = nullptr;
-            frame.u.ack.ranges = nullptr;
-            frame.u.ack.ranges_length = 0;
-            break;
-        case QuicFrameType::Crypto:
-            delete frame.u.crypto.data;
-            frame.u.crypto.data = nullptr;
-            return;
-        case QuicFrameType::NewToken:
-            block = frame.u.new_token.owned;
-            frame.u.new_token.owned = nullptr;
-            frame.u.new_token.data = nullptr;
-            frame.u.new_token.length = 0;
-            break;
-        case QuicFrameType::ConnectionClose:
-        case QuicFrameType::ConnectionCloseApp:
-            block = frame.u.close.owned_reason;
-            frame.u.close.owned_reason = nullptr;
-            frame.u.close.reason = nullptr;
-            frame.u.close.reason_length = 0;
-            break;
-        default:
-            break;
-    }
-    if (block == nullptr) {
-        return;
-    }
-
-    if (block->refs > 1) {
-        --block->refs;
-        return;
-    }
-
-    delete[] block->data;
-    delete block;
 }
 
 bool quic_output_frame_ack_eliciting(QuicFrameType type) noexcept {

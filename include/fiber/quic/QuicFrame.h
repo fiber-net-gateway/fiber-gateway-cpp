@@ -69,12 +69,6 @@ struct QuicSlice {
     [[nodiscard]] bool empty() const noexcept { return len == 0; }
 };
 
-struct QuicOutputFrameDataBlock {
-    std::uint8_t *data = nullptr;
-    std::size_t len = 0;
-    std::uint32_t refs = 1;
-};
-
 struct QuicPaddingFrame {
     std::uint64_t length = 1;
 };
@@ -119,9 +113,6 @@ struct QuicOutputAckFrame {
     std::uint64_t delay = 0;
     std::uint64_t range_count = 0;
     std::uint64_t first_range = 0;
-    const std::uint8_t *ranges = nullptr;
-    std::uint32_t ranges_length = 0;
-    QuicOutputFrameDataBlock *owned_ranges = nullptr;
     std::uint64_t ect0 = 0;
     std::uint64_t ect1 = 0;
     std::uint64_t ce = 0;
@@ -129,13 +120,6 @@ struct QuicOutputAckFrame {
 
 struct QuicOutputCryptoFrame {
     std::uint64_t offset = 0;
-    mem::IoBuf *data = nullptr;
-};
-
-struct QuicOutputNewTokenFrame {
-    const std::uint8_t *data = nullptr;
-    std::uint32_t length = 0;
-    QuicOutputFrameDataBlock *owned = nullptr;
 };
 
 struct QuicOutputStreamFrame {
@@ -149,9 +133,6 @@ struct QuicOutputStreamFrame {
 struct QuicOutputCloseFrame {
     std::uint64_t error_code = 0;
     std::uint64_t frame_type = 0;
-    const std::uint8_t *reason = nullptr;
-    std::uint32_t reason_length = 0;
-    QuicOutputFrameDataBlock *owned_reason = nullptr;
 };
 
 struct QuicOutputMaxStreamsFrame {
@@ -271,7 +252,6 @@ struct QuicOutputFrame {
         QuicPaddingFrame padding;
         QuicOutputAckFrame ack;
         QuicOutputCryptoFrame crypto;
-        QuicOutputNewTokenFrame new_token;
         QuicOutputStreamFrame stream;
         QuicOutputCloseFrame close;
         QuicResetStreamFrame reset_stream;
@@ -287,6 +267,10 @@ struct QuicOutputFrame {
         QuicPathChallengeFrame path_challenge;
         QuicPathChallengeFrame path_response;
     } u;
+
+    // Owned ACK ranges, CRYPTO bytes, NEW_TOKEN bytes, or CONNECTION_CLOSE reason.
+    // STREAM payload remains in the stream send buffer.
+    mem::IoBuf data{};
 
     QuicOutputFrame *next = nullptr;
     QuicOutputFrame *prev = nullptr;
@@ -349,8 +333,6 @@ struct QuicInputFrameParseResult {
 
 [[nodiscard]] common::IoResult<void> quic_output_frame_set_owned_data(QuicOutputFrame &frame, const std::uint8_t *data,
                                                                       std::size_t len) noexcept;
-void quic_output_frame_retain_data(QuicOutputFrame &frame) noexcept;
-void quic_output_frame_release_data(QuicOutputFrame &frame) noexcept;
 [[nodiscard]] bool quic_output_frame_ack_eliciting(QuicFrameType type) noexcept;
 [[nodiscard]] bool quic_output_frame_retransmittable_on_loss(QuicFrameType type) noexcept;
 
